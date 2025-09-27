@@ -237,40 +237,126 @@ int admin_api_network_stats(struct HttpResponse* resp, const struct NetworkManag
 
 int admin_api_performance(struct HttpResponse* resp, const struct Sim* sim) {
     if (!resp || !sim) return -1;
-    
-    // TODO: Get actual performance metrics from server context
-    // For now, use placeholder values
-    double avg_tick_time_us = 1200.0; // ~1.2ms average
-    uint64_t max_tick_time_us = 3500;  // 3.5ms max
-    double cpu_usage = 15.5;           // 15.5% CPU
-    uint64_t memory_usage = 1024 * 1024 * 12; // 12MB
-    uint32_t ticks_per_second = TICK_RATE_HZ;
-    
+
+    // Simulate performance metrics for now
     int len = snprintf(json_buffer, sizeof(json_buffer),
         "{\n"
-        "  \"avg_tick_time_us\": %.1f,\n"
-        "  \"max_tick_time_us\": %lu,\n"
-        "  \"cpu_usage\": %.1f,\n"
-        "  \"memory_usage\": %lu,\n"
-        "  \"ticks_per_second\": %u,\n"
-        "  \"target_tick_time_us\": %d,\n"
-        "  \"performance_ratio\": %.3f\n"
-        "}",
-        avg_tick_time_us,
-        max_tick_time_us,
-        cpu_usage,
-        memory_usage,
-        ticks_per_second,
-        TICK_DURATION_MS * 1000,
-        avg_tick_time_us / (TICK_DURATION_MS * 1000.0)
+        "  \"cpu_usage\": 45.2,\n"
+        "  \"memory_usage\": 128.5,\n"
+        "  \"tick_time_avg\": 0.89,\n"
+        "  \"tick_time_max\": 2.34,\n"
+        "  \"fps\": 30,\n"
+        "  \"heap_size\": 4096,\n"
+        "  \"active_threads\": 1\n"
+        "}\n"
     );
-    
-    if (len >= (int)sizeof(json_buffer)) return -1;
     
     resp->status_code = 200;
     resp->content_type = "application/json";
     resp->body = json_buffer;
     resp->body_length = len;
+    resp->cache_control = true;
+    
+    return 0;
+}
+
+// Map data API - provides real-time positions of all entities
+int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
+    if (!resp || !sim) return -1;
+
+    int offset = 0;
+    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+        "{\n  \"world\": {\n    \"width\": 1000,\n    \"height\": 1000\n  },\n");
+
+    // Ships
+    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+        "  \"ships\": [\n");
+    
+    for (uint32_t i = 0; i < sim->ship_count && offset < (int)sizeof(json_buffer) - 200; i++) {
+        const struct Ship* ship = &sim->ships[i];
+        if (ship->id == 0) continue; // Skip invalid ships
+        
+        // Convert Q16.16 fixed-point to float for JSON
+        float pos_x = (float)ship->position.x / 65536.0f;
+        float pos_y = (float)ship->position.y / 65536.0f;
+        float rotation = (float)ship->rotation / 65536.0f;
+        float vel_x = (float)ship->velocity.x / 65536.0f;
+        float vel_y = (float)ship->velocity.y / 65536.0f;
+        
+        offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+            "    {\n"
+            "      \"id\": %u,\n"
+            "      \"type\": \"ship\",\n"
+            "      \"x\": %.2f,\n"
+            "      \"y\": %.2f,\n"
+            "      \"rotation\": %.2f,\n"
+            "      \"velocity\": {\"x\": %.2f, \"y\": %.2f},\n"
+            "      \"health\": %u\n"
+            "    }%s\n",
+            ship->id, pos_x, pos_y, rotation, vel_x, vel_y, ship->health,
+            (i + 1 < sim->ship_count) ? "," : ""
+        );
+    }
+    
+    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+        "  ],\n  \"players\": [\n");
+    
+    // Players
+    for (uint32_t i = 0; i < sim->player_count && offset < (int)sizeof(json_buffer) - 200; i++) {
+        const struct Player* player = &sim->players[i];
+        if (player->id == 0) continue; // Skip invalid players
+        
+        float pos_x = (float)player->position.x / 65536.0f;
+        float pos_y = (float)player->position.y / 65536.0f;
+        
+        offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+            "    {\n"
+            "      \"id\": %u,\n"
+            "      \"type\": \"player\",\n"
+            "      \"x\": %.2f,\n"
+            "      \"y\": %.2f,\n"
+            "      \"ship_id\": %u,\n"
+            "      \"health\": %u\n"
+            "    }%s\n",
+            player->id, pos_x, pos_y, player->ship_id, player->health,
+            (i + 1 < sim->player_count) ? "," : ""
+        );
+    }
+    
+    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+        "  ],\n  \"projectiles\": [\n");
+    
+    // Projectiles (cannonballs)
+    for (uint32_t i = 0; i < sim->projectile_count && offset < (int)sizeof(json_buffer) - 200; i++) {
+        const struct Projectile* proj = &sim->projectiles[i];
+        if (proj->id == 0) continue; // Skip invalid projectiles
+        
+        float pos_x = (float)proj->position.x / 65536.0f;
+        float pos_y = (float)proj->position.y / 65536.0f;
+        float vel_x = (float)proj->velocity.x / 65536.0f;
+        float vel_y = (float)proj->velocity.y / 65536.0f;
+        
+        offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+            "    {\n"
+            "      \"id\": %u,\n"
+            "      \"type\": \"projectile\",\n"
+            "      \"x\": %.2f,\n"
+            "      \"y\": %.2f,\n"
+            "      \"velocity\": {\"x\": %.2f, \"y\": %.2f},\n"
+            "      \"shooter_id\": %u\n"
+            "    }%s\n",
+            proj->id, pos_x, pos_y, vel_x, vel_y, proj->shooter_id,
+            (i + 1 < sim->projectile_count) ? "," : ""
+        );
+    }
+    
+    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+        "  ]\n}\n");
+    
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = json_buffer;
+    resp->body_length = offset;
     resp->cache_control = true;
     
     return 0;
