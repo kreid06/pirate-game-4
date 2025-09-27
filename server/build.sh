@@ -18,15 +18,15 @@ CFLAGS_COMMON="-Wall -Wextra -Werror -std=c11 -I${INCLUDE_DIR} -I${SRC_DIR}"
 case "$BUILD_TYPE" in
     debug)
         CFLAGS="${CFLAGS_COMMON} -g -O0 -DDEBUG -fsanitize=address -fsanitize=undefined"
-        LDFLAGS="-fsanitize=address -fsanitize=undefined -lm -lpthread"
+        LDFLAGS="-fsanitize=address -fsanitize=undefined -lm -lpthread -lssl -lcrypto"
         ;;
     release)
         CFLAGS="${CFLAGS_COMMON} -O3 -DNDEBUG -march=native -fno-fast-math -ffp-contract=off"
-        LDFLAGS="-lm -lpthread"
+        LDFLAGS="-lm -lpthread -lssl -lcrypto"
         ;;
     test)
         CFLAGS="${CFLAGS_COMMON} -g -O1 -DTEST"
-        LDFLAGS="-lm"
+        LDFLAGS="-lm -lssl -lcrypto"
         ;;
     *)
         echo "Usage: $0 [debug|release|test]"
@@ -55,6 +55,7 @@ SIM_SOURCES="
 NET_SOURCES="
     src/net/protocol.c
     src/net/network_simple.c
+    src/net/websocket_server.c
 "
 
 AOI_SOURCES="
