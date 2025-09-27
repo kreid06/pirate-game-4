@@ -54,7 +54,7 @@ SIM_SOURCES="
 
 NET_SOURCES="
     src/net/protocol.c
-    src/net/network_stubs.c
+    src/net/network_simple.c
 "
 
 AOI_SOURCES="
