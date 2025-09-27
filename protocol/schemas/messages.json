@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Game Protocol Messages",
+  "oneOf": [
+    {
+      "$ref": "#/definitions/ClientMessage"
+    },
+    {
+      "$ref": "#/definitions/ServerMessage"
+    }
+  ],
+  "definitions": {
+    "ClientMessage": {
+      "type": "object",
+      "required": ["type", "timestamp"],
+      "properties": {
+        "type": {
+          "enum": ["JOIN_GAME", "INPUT_UPDATE", "PING"]
+        },
+        "timestamp": {
+          "type": "number"
+        },
+        "data": {
+          "type": "object"
+        }
+      }
+    },
+    "ServerMessage": {
+      "type": "object",
+      "required": ["type", "timestamp"],
+      "properties": {
+        "type": {
+          "enum": ["GAME_STATE", "STATE_UPDATE", "PLAYER_JOINED", "PLAYER_LEFT", "PONG"]
+        },
+        "timestamp": {
+          "type": "number"
+        },
+        "data": {
+          "type": "object"
+        }
+      }
+    },
+    "Vec2": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" }
+      }
+    },
+    "PlayerState": {
+      "type": "object",
+      "required": ["id", "position", "rotation", "velocity"],
+      "properties": {
+        "id": { "type": "string" },
+        "position": { "$ref": "#/definitions/Vec2" },
+        "rotation": { "type": "number" },
+        "velocity": { "$ref": "#/definitions/Vec2" },
+        "health": { "type": "number" }
+      }
+    }
+  }
+}
