@@ -12,7 +12,7 @@ import { RenderSystem } from './gfx/RenderSystem.js';
 import { Camera } from './gfx/Camera.js';
 
 // Network System  
-import { NetworkManager } from '../net/NetworkManager.js';
+import { UDPNetworkManager, ConnectionState } from '../net/UDPNetworkManager.js';
 import { PredictionEngine } from '../net/PredictionEngine.js';
 
 // Gameplay Systems
@@ -51,7 +51,7 @@ export class ClientApplication {
   
   // Core Systems
   private renderSystem!: RenderSystem;
-  private networkManager!: NetworkManager;
+  private networkManager!: UDPNetworkManager;
   private predictionEngine!: PredictionEngine;
   private inputManager!: InputManager;
   private uiManager!: UIManager;
@@ -101,9 +101,9 @@ export class ClientApplication {
       await this.renderSystem.initialize();
       
       // Initialize Network System
-      this.networkManager = new NetworkManager(this.config.network);
-      this.networkManager.onWorldStateReceived = this.onServerWorldState.bind(this);
-      this.networkManager.onConnectionStateChanged = this.onConnectionStateChanged.bind(this);
+      this.networkManager = new UDPNetworkManager(this.config.network);
+      this.networkManager.setWorldStateHandler(this.onServerWorldState.bind(this));
+      this.networkManager.setConnectionStateHandler(this.onConnectionStateChanged.bind(this));
       
       // Initialize Prediction Engine
       this.predictionEngine = new PredictionEngine(this.config.prediction);
@@ -148,7 +148,7 @@ export class ClientApplication {
       
       // Connect to server
       this.state = ClientState.CONNECTING;
-      await this.networkManager.connect();
+      await this.networkManager.connect('Player'); // Default player name
       
       // Start game loop
       this.running = true;
@@ -278,7 +278,7 @@ export class ClientApplication {
         worldState: worldToRender,
         camera: this.camera,
         fps: this.currentFPS,
-        networkStats: this.networkManager.getNetworkStats(),
+        networkStats: this.networkManager.getStats(),
         config: this.config
       });
     }
@@ -324,15 +324,18 @@ export class ClientApplication {
   /**
    * Handle connection state changes
    */
-  private onConnectionStateChanged(connected: boolean): void {
-    if (connected) {
+  private onConnectionStateChanged(state: ConnectionState): void {
+    if (state === ConnectionState.CONNECTED) {
       this.state = ClientState.CONNECTED;
       console.log('🌐 Connected to server');
-    } else {
+    } else if (state === ConnectionState.DISCONNECTED || state === ConnectionState.ERROR) {
       this.state = ClientState.DISCONNECTED;
-      console.log('🔌 Disconnected from server');
+      console.log('🔌 Disconnected from server:', state);
       
       // TODO: Handle reconnection logic
+    } else if (state === ConnectionState.CONNECTING) {
+      this.state = ClientState.CONNECTING;
+      console.log('🔄 Connecting to server...');
     }
   }
   

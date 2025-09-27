@@ -26,7 +26,7 @@ This is a multiplayer pirate ship physics game split into client and server comp
 [✅] Customize the Project - Migrated all client code from pirate-game-3 to new structure
 [ ] Install Required Extensions
 [✅] Compile the Project - Client builds successfully, development server running on http://localhost:5173/
-[ ] Create and Run Task
+[✅] Create and Run Task - UDP Network Manager created for C server communication
 [ ] Launch the Project
 [ ] Ensure Documentation is Complete
 [ ] Create and Run Task
