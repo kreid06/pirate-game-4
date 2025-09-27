@@ -15,6 +15,7 @@ struct RewindBuffer;
 struct AntiCheat;
 struct MetricsCollector;
 struct ReplayRecorder;
+struct AdminServer;
 
 // Configuration constants
 #define MAX_PLAYERS 100
@@ -23,7 +24,7 @@ struct ReplayRecorder;
 #define TICK_RATE_HZ 30
 #define TICK_DURATION_MS (1000 / TICK_RATE_HZ)
 #define TICK_DURATION_US (TICK_DURATION_MS * 1000)
-#define FIXED_DT_Q16 0x88888889  // 33.333ms in Q16.16 format
+// FIXED_DT_Q16 is defined in sim/types.h
 
 // Server initialization and lifecycle
 int server_init(struct ServerContext** ctx);

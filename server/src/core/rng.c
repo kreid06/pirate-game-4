@@ -1,5 +1,7 @@
 #include "core/rng.h"
 #include <string.h>
+#include <math.h>
+#include <stdbool.h>
 
 // xorshift64* algorithm - fast and good quality for games
 void rng_seed(struct RNGState* rng, uint32_t seed) {

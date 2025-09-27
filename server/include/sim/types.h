@@ -6,6 +6,16 @@
 #include "core/math.h"
 #include "core/rng.h"
 
+// Maximum entity counts
+#define MAX_SHIPS 50
+#define MAX_PLAYERS 100
+#define MAX_PROJECTILES 500
+
+// Simulation constants
+#define TICK_RATE_HZ 30
+#define TICK_DURATION_MS (1000 / TICK_RATE_HZ)
+#define FIXED_DT_Q16 Q16_FROM_FLOAT(1.0f / TICK_RATE_HZ)  // Fixed timestep in Q16.16
+
 // Entity ID type
 typedef uint16_t entity_id;
 #define INVALID_ENTITY_ID 0

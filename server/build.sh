@@ -54,10 +54,16 @@ SIM_SOURCES="
 
 NET_SOURCES="
     src/net/protocol.c
+    src/net/network_stubs.c
 "
 
 AOI_SOURCES="
     src/aoi/grid.c
+"
+
+ADMIN_SOURCES="
+    src/admin/admin_server.c
+    src/admin/admin_api.c
 "
 
 UTIL_SOURCES="
@@ -67,7 +73,7 @@ UTIL_SOURCES="
 
 # Check which source files exist
 EXISTING_SOURCES=""
-for src in $CORE_SOURCES $SIM_SOURCES $NET_SOURCES $AOI_SOURCES $UTIL_SOURCES src/server.c src/main.c; do
+for src in $CORE_SOURCES $SIM_SOURCES $NET_SOURCES $AOI_SOURCES $ADMIN_SOURCES $UTIL_SOURCES src/core/server.c src/main.c; do
     if [[ -f "$src" ]]; then
         EXISTING_SOURCES="$EXISTING_SOURCES $src"
     else
@@ -76,12 +82,12 @@ for src in $CORE_SOURCES $SIM_SOURCES $NET_SOURCES $AOI_SOURCES $UTIL_SOURCES sr
 done
 
 # Build main server (if we have enough sources)
-if [[ -f "src/main.c" && -f "src/server.c" ]]; then
+if [[ -f "src/main.c" && -f "src/core/server.c" ]]; then
     echo "Building pirate-server..."
     $CC $CFLAGS $EXISTING_SOURCES -o "$BUILD_DIR/pirate-server" $LDFLAGS
     echo "✓ Built $BUILD_DIR/pirate-server"
 else
-    echo "⚠ Missing main.c or server.c, skipping main binary"
+    echo "⚠ Missing main.c or core/server.c, skipping main binary"
 fi
 
 # Build tests if in test mode

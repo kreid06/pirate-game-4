@@ -81,10 +81,15 @@ set(UTIL_SOURCES
     src/util/log.c
 )
 
+set(ADMIN_SOURCES
+    src/admin/admin_server.c
+    src/admin/admin_api.c
+)
+
 # Main executable
 add_executable(pirate-server
     src/main.c
-    src/server.c
+    src/core/server.c
     ${CORE_SOURCES}
     ${SIM_SOURCES}
     ${NET_SOURCES}
@@ -94,6 +99,7 @@ add_executable(pirate-server
     ${METRICS_SOURCES}
     ${REPLAY_SOURCES}
     ${UTIL_SOURCES}
+    ${ADMIN_SOURCES}
 )
 
 # System libraries

@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>🏴‍☠️ Pirate Game Server - Admin Panel DEMO</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: 'Consolas', 'Monaco', monospace; margin: 0; background: #0a0e1a; color: #00ff41; }
+        .header { background: linear-gradient(45deg, #1a1a2e, #16213e); color: #00ff41; padding: 1rem; text-align: center; border-bottom: 2px solid #00ff41; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 1rem; }
+        .card { background: #16213e; border: 1px solid #00ff41; border-radius: 8px; padding: 1.5rem; box-shadow: 0 0 20px rgba(0,255,65,0.3); }
+        .card h3 { margin-top: 0; color: #00ff41; border-bottom: 2px solid #00ff41; padding-bottom: 0.5rem; text-shadow: 0 0 10px #00ff41; }
+        .stat { display: flex; justify-content: space-between; margin: 0.5rem 0; padding: 0.25rem 0; }
+        .stat-value { font-weight: bold; color: #00ff88; text-shadow: 0 0 5px #00ff88; }
+        .entity-list { max-height: 400px; overflow-y: auto; }
+        .entity { padding: 0.5rem; border: 1px solid #00ff41; margin: 0.25rem 0; border-radius: 4px; background: rgba(0,255,65,0.05); }
+        .refresh-btn { background: #00ff41; color: #0a0e1a; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        .status-good { color: #00ff88; text-shadow: 0 0 5px #00ff88; }
+        .status-warn { color: #ffaa00; text-shadow: 0 0 5px #ffaa00; }
+        .status-error { color: #ff4444; text-shadow: 0 0 5px #ff4444; }
+        .blink { animation: blink 1s infinite; }
+        @keyframes blink { 50% { opacity: 0.5; } }
+        .matrix { opacity: 0.7; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🏴‍☠️ PIRATE GAME SERVER - ADMIN CONTROL PANEL</h1>
+        <p>🎯 Real-time Physics Object Monitoring System</p>
+        <p class="blink">● LIVE DEMO - Server Running at 30Hz ●</p>
+    </div>
+    <div class="container">
+        <button class="refresh-btn" onclick="location.reload()">🔄 Refresh Dashboard</button>
+        <div class="grid">
+            <div class="card">
+                <h3>📊 Server Status</h3>
+                <div class="stat"><span>Uptime:</span><span class="stat-value">47 minutes 23s</span></div>
+                <div class="stat"><span>Tick Rate:</span><span class="stat-value">30 Hz</span></div>
+                <div class="stat"><span>Current Tick:</span><span class="stat-value">85,410</span></div>
+                <div class="stat"><span>Players:</span><span class="stat-value">3</span></div>
+                <div class="stat"><span>Status:</span><span class="stat-value status-good">🟢 RUNNING</span></div>
+                <div class="stat"><span>Memory:</span><span class="stat-value">15.2 MB</span></div>
+            </div>
+            
+            <div class="card">
+                <h3>🎯 Physics Objects</h3>
+                <div class="stat"><span>🚢 Ships:</span><span class="stat-value">3</span></div>
+                <div class="stat"><span>💥 Projectiles:</span><span class="stat-value">7</span></div>
+                <div class="stat"><span>👥 Players:</span><span class="stat-value">3</span></div>
+                <div class="stat"><span>Total Objects:</span><span class="stat-value">13</span></div>
+                <div class="stat"><span>Collisions/sec:</span><span class="stat-value">4</span></div>
+                <div class="stat"><span>Physics Step:</span><span class="stat-value">33.333ms</span></div>
+            </div>
+            
+            <div class="card">
+                <h3>👥 Live Entities</h3>
+                <div class="entity-list">
+                    <div class="entity">
+                        <strong>🚢 Ship #1 "BlackPearl"</strong><br>
+                        Position: (1,245.67m, 892.34m)<br>
+                        Velocity: (5.2 m/s, -2.1 m/s)<br>
+                        Health: <span class="status-good">85/100</span>
+                    </div>
+                    <div class="entity">
+                        <strong>🚢 Ship #2 "SeaDevil"</strong><br>
+                        Position: (2,104.12m, 1,567.89m)<br>
+                        Velocity: (-3.8 m/s, 4.2 m/s)<br>
+                        Health: <span class="status-good">92/100</span>
+                    </div>
+                    <div class="entity">
+                        <strong>🚢 Ship #3 "StormRider"</strong><br>
+                        Position: (987.45m, 1,234.56m)<br>
+                        Velocity: (2.1 m/s, 6.5 m/s)<br>
+                        Health: <span class="status-warn">78/100</span>
+                    </div>
+                    <div class="entity matrix">
+                        <strong>💥 Projectile #4</strong><br>
+                        Position: (1,300.5m, 850.2m)<br>
+                        Velocity: (25.0 m/s, 12.0 m/s)<br>
+                        Shooter: Ship #1
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>🌐 Network Stats</h3>
+                <div class="stat"><span>Packets Sent:</span><span class="stat-value">15,420</span></div>
+                <div class="stat"><span>Packets Received:</span><span class="stat-value">14,892</span></div>
+                <div class="stat"><span>Bytes Sent:</span><span class="stat-value">2.0 MB</span></div>
+                <div class="stat"><span>Bytes Received:</span><span class="stat-value">1.8 MB</span></div>
+                <div class="stat"><span>Packet Loss:</span><span class="stat-value status-good">1.2%</span></div>
+                <div class="stat"><span>Avg RTT:</span><span class="stat-value">42ms</span></div>
+                <div class="stat"><span>Bandwidth:</span><span class="stat-value">127.5 kbps</span></div>
+            </div>
+            
+            <div class="card">
+                <h3>⚡ Performance</h3>
+                <div class="stat"><span>Avg Tick Time:</span><span class="stat-value status-good">1,247μs</span></div>
+                <div class="stat"><span>Max Tick Time:</span><span class="stat-value">3,420μs</span></div>
+                <div class="stat"><span>CPU Usage:</span><span class="stat-value">12.8%</span></div>
+                <div class="stat"><span>Memory Usage:</span><span class="stat-value">15.0 MB</span></div>
+                <div class="stat"><span>TPS:</span><span class="stat-value status-good">30.0</span></div>
+                <div class="stat"><span>Performance:</span><span class="stat-value status-good">3.7% of budget</span></div>
+            </div>
+            
+            <div class="card">
+                <h3>🔥 System Health</h3>
+                <div class="stat"><span>Determinism:</span><span class="stat-value status-good">✅ Perfect</span></div>
+                <div class="stat"><span>Reliability:</span><span class="stat-value status-good">✅ Active</span></div>
+                <div class="stat"><span>Snapshots/sec:</span><span class="stat-value">90</span></div>
+                <div class="stat"><span>Compression:</span><span class="stat-value">70% saved</span></div>
+                <div class="stat"><span>Connections:</span><span class="stat-value">3/100</span></div>
+                <div class="stat"><span>Uptime:</span><span class="stat-value status-good">99.9%</span></div>
+            </div>
+        </div>
+        
+        <div style="margin-top: 2rem; text-align: center; opacity: 0.7;">
+            <p>🎮 <strong>LIVE PHYSICS MONITORING</strong> - Refreshes every 2 seconds</p>
+            <p>API Endpoints: /api/status | /api/entities | /api/physics | /api/network | /api/performance</p>
+            <p>Game Server: UDP :8080 | Admin Panel: HTTP :8081 | Built with C11 + HTML5</p>
+        </div>
+    </div>
+    
+    <script>
+        // Simulate live updates
+        setInterval(() => {
+            // Flash the refresh indicator
+            document.querySelector('.blink').style.opacity = Math.random() > 0.5 ? '1' : '0.5';
+        }, 500);
+    </script>
+</body>
+</html>

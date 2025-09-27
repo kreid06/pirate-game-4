@@ -5,11 +5,13 @@
 
 static log_level_t current_min_level = LOG_LEVEL_INFO;
 
-static const char* level_names[] = {
-    "DEBUG", "INFO", "WARN", "ERROR"
+// Use __attribute__((unused)) to suppress unused variable warning  
+static const char* level_names[] __attribute__((unused)) = {
+    "DEBUG", "INFO", "WARN", "ERROR"  
 };
 
-static const char* level_colors[] = {
+// Use __attribute__((unused)) to suppress unused variable warning
+static const char* level_colors[] __attribute__((unused)) = {
     "\033[36m", // Cyan for DEBUG
     "\033[32m", // Green for INFO  
     "\033[33m", // Yellow for WARN

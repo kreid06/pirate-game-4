@@ -1,4 +1,5 @@
 #include "sim/simulation.h"
+#include "net/protocol.h"
 #include "core/hash.h"
 #include "util/log.h"
 #include <string.h>
@@ -461,10 +462,124 @@ static entity_id allocate_entity_id(struct Sim* sim) {
     // Simple incremental ID allocation
     static entity_id next_id = 1;
     
+    (void)sim; // Unused parameter
+    
     if (next_id == INVALID_ENTITY_ID) {
         log_error("Entity ID overflow");
         return INVALID_ENTITY_ID;
     }
     
     return next_id++;
+}
+
+// Network integration functions
+entity_id simulation_create_player_entity(struct Sim* sim, const char* player_name) {
+    if (!sim || !player_name) return INVALID_ENTITY_ID;
+    
+    // Create player at default spawn location
+    Vec2Q16 spawn_pos = {Q16_FROM_INT(100), Q16_FROM_INT(100)};
+    
+    // First create a ship for the player
+    entity_id ship_id = sim_create_ship(sim, spawn_pos, Q16_FROM_INT(0));
+    if (ship_id == INVALID_ENTITY_ID) return INVALID_ENTITY_ID;
+    
+    // Then create the player entity linked to the ship
+    entity_id player_id = sim_create_player(sim, spawn_pos, ship_id);
+    if (player_id == INVALID_ENTITY_ID) {
+        // Failed to create player - clean up ship
+        sim_destroy_entity(sim, ship_id);
+        return INVALID_ENTITY_ID;
+    }
+    
+    // Store player name (if we had storage for it)
+    log_info("Created player entity %u (%s) with ship %u", player_id, player_name, ship_id);
+    
+    return player_id;
+}
+
+bool simulation_has_entity(const struct Sim* sim, entity_id entity_id) {
+    if (!sim || entity_id == INVALID_ENTITY_ID) return false;
+    
+    // Check if entity exists in any of our arrays
+    for (uint32_t i = 0; i < sim->player_count; i++) {
+        if (sim->players[i].id == entity_id) return true;
+    }
+    
+    for (uint32_t i = 0; i < sim->ship_count; i++) {
+        if (sim->ships[i].id == entity_id) return true;
+    }
+    
+    for (uint32_t i = 0; i < sim->projectile_count; i++) {
+        if (sim->projectiles[i].id == entity_id) return true;
+    }
+    
+    return false;
+}
+
+int simulation_process_player_input(struct Sim* sim, entity_id player_id, const struct CmdPacket* cmd) {
+    if (!sim || !cmd || player_id == INVALID_ENTITY_ID) return -1;
+    
+    // Find the player
+    struct Player* player = sim_get_player(sim, player_id);
+    if (!player) {
+        log_warn("Player %u not found for input processing", player_id);
+        return -1;
+    }
+    
+    // Convert network command to input command and process
+    struct InputCmd input_cmd = {0};
+    input_cmd.player_id = player_id;
+    input_cmd.sequence = cmd->seq;
+    input_cmd.client_time = cmd->client_time;
+    input_cmd.thrust = cmd->thrust;
+    input_cmd.turn = cmd->turn;
+    input_cmd.actions = cmd->actions;
+    input_cmd.dt_ms = cmd->dt_ms;
+    
+    sim_process_input(sim, &input_cmd);
+    
+    return 0;
+}
+
+// Missing entity management function
+bool sim_destroy_entity(struct Sim* sim, entity_id id) {
+    if (!sim || id == INVALID_ENTITY_ID) return false;
+    
+    // Remove from ships
+    for (uint32_t i = 0; i < sim->ship_count; i++) {
+        if (sim->ships[i].id == id) {
+            // Move last ship to this position
+            if (i + 1 < sim->ship_count) {
+                sim->ships[i] = sim->ships[sim->ship_count - 1];
+            }
+            sim->ship_count--;
+            return true;
+        }
+    }
+    
+    // Remove from players
+    for (uint32_t i = 0; i < sim->player_count; i++) {
+        if (sim->players[i].id == id) {
+            // Move last player to this position
+            if (i + 1 < sim->player_count) {
+                sim->players[i] = sim->players[sim->player_count - 1];
+            }
+            sim->player_count--;
+            return true;
+        }
+    }
+    
+    // Remove from projectiles
+    for (uint32_t i = 0; i < sim->projectile_count; i++) {
+        if (sim->projectiles[i].id == id) {
+            // Move last projectile to this position
+            if (i + 1 < sim->projectile_count) {
+                sim->projectiles[i] = sim->projectiles[sim->projectile_count - 1];
+            }
+            sim->projectile_count--;
+            return true;
+        }
+    }
+    
+    return false; // Entity not found
 }

@@ -1,6 +1,11 @@
+#define _USE_MATH_DEFINES
 #include "core/math.h"
 #include <math.h>
 #include <string.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 // Constants
 const Vec2Q16 VEC2_ZERO = {0, 0};

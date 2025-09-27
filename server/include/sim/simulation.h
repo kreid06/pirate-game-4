@@ -5,6 +5,9 @@
 #include "core/math.h"
 #include "core/rng.h"
 
+// Forward declarations
+struct CmdPacket;
+
 // Simulation initialization and lifecycle
 int sim_init(struct Sim* sim, const struct SimConfig* config);
 void sim_cleanup(struct Sim* sim);
@@ -29,6 +32,16 @@ struct Projectile* sim_get_projectile(struct Sim* sim, entity_id id);
 
 // Input processing
 void sim_process_input(struct Sim* sim, const struct InputCmd* cmd);
+
+// Network integration functions
+entity_id simulation_create_player_entity(struct Sim* sim, const char* player_name);
+bool simulation_has_entity(const struct Sim* sim, entity_id entity_id);
+int simulation_process_player_input(struct Sim* sim, entity_id player_id, const struct CmdPacket* cmd);
+
+// Compatibility aliases for network integration
+#define simulation_init sim_init
+#define simulation_cleanup sim_cleanup  
+#define simulation_step(sim) sim_step(sim, FIXED_DT_Q16)
 
 // Physics subsystems
 void sim_update_ships(struct Sim* sim, q16_t dt);

@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 199309L
 #include "util/time.h"
 #include <time.h>
 #include <errno.h>
@@ -92,7 +93,6 @@ uint64_t tick_timer_sleep_until_next(struct TickTimer* timer) {
     if (!timer) return 0;
     
     uint64_t current_time = get_time_us();
-    uint64_t sleep_start = current_time;
     
     if (timer->next_tick_time > current_time) {
         sleep_until_time(timer->next_tick_time);

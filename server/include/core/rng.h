@@ -2,6 +2,7 @@
 #define CORE_RNG_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 // Deterministic RNG state for replay consistency
 struct RNGState {

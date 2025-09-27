@@ -4,6 +4,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
+// Forward declarations
+struct Sim;
+
 // State hashing for determinism validation
 // Uses xxHash64 if available, otherwise falls back to FNV-1a
 

@@ -269,7 +269,7 @@ static void process_network_input(struct ServerContext* ctx) {
                 break;
                 
             case PACKET_CLIENT_INPUT:
-                if (bytes_received >= sizeof(struct CmdPacket)) {
+                if (bytes_received >= (ssize_t)sizeof(struct CmdPacket)) {
                     // TODO: Process input command
                     // struct CmdPacket* cmd = (struct CmdPacket*)ctx->recv_buffer;
                 }

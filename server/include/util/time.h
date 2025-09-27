@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <time.h>
+#include <stdbool.h>
 
 // High-resolution time utilities for deterministic server timing
 void time_init(void);
