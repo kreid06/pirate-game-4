@@ -2,8 +2,8 @@
   "compilerOptions": {
     "target": "ES2020",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "module": "ESNext",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "skipLibCheck": true,
 
     /* Bundler mode */
@@ -23,10 +23,17 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"],
-      "@common/*": ["src/common/*"],
-      "@client/*": ["src/client/*"],
+      "@engine/*": ["src/engine/*"],
       "@sim/*": ["src/sim/*"],
-      "@net/*": ["src/net/*"]
+      "@net/*": ["src/net/*"],
+      "@common/*": ["src/common/*"],
+      "@tools/*": ["src/tools/*"],
+      "@client/*": ["src/client/*"],
+      "@client/gfx/*": ["src/client/gfx/*"],
+      "@client/net/*": ["src/client/net/*"],
+      "@client/ui/*": ["src/client/ui/*"],
+      "@client/gameplay/*": ["src/client/gameplay/*"],
+      "@client/audio/*": ["src/client/audio/*"]
     }
   },
   "include": ["src"]

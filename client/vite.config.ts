@@ -1,23 +1,19 @@
 import { defineConfig } from 'vite'
+import path from 'path'
 
 export default defineConfig({
-  root: '.',
-  publicDir: 'public',
-  build: {
-    outDir: 'dist',
-    emptyOutDir: true
-  },
-  server: {
-    port: 3000,
-    host: true
-  },
   resolve: {
     alias: {
-      '@': '/src',
-      '@common': '/src/common',
-      '@client': '/src/client',
-      '@sim': '/src/sim',
-      '@net': '/src/net'
-    }
-  }
+      '@': path.resolve(process.cwd(), 'src'),
+      '@engine': path.resolve(process.cwd(), 'src/engine'),
+      '@sim': path.resolve(process.cwd(), 'src/sim'),
+      '@net': path.resolve(process.cwd(), 'src/net'),
+      '@common': path.resolve(process.cwd(), 'src/common'),
+      '@tools': path.resolve(process.cwd(), 'src/tools'),
+    },
+  },
+  test: {
+    globals: true,
+    environment: 'jsdom',
+  },
 })

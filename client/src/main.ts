@@ -1,5 +1,5 @@
-// Main entry point for the pirate game client
-console.log('Pirate Game Client starting...');
+// Main entry point for Pirate Game Client
+import { main } from './client/main.js';
 
-// This will be expanded with your existing game client code
-export {};
+// Start the client application
+main();
