@@ -12,8 +12,4 @@ export default defineConfig({
       '@tools': path.resolve(process.cwd(), 'src/tools'),
     },
   },
-  test: {
-    globals: true,
-    environment: 'jsdom',
-  },
 })

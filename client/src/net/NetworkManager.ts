@@ -230,7 +230,7 @@ export class NetworkManager {
   private setupSocketHandlers(): void {
     if (!this.socket) return;
     
-    this.socket.onopen = (event) => {
+    this.socket.onopen = (_event) => {
       console.log('🔗 WebSocket opened');
     };
     

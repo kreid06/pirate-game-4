@@ -44,7 +44,6 @@ interface UIElement {
  * Main UI manager
  */
 export class UIManager {
-  private canvas: HTMLCanvasElement;
   private config: ClientConfig;
   
   // UI Elements
@@ -55,8 +54,7 @@ export class UIManager {
   private showNetworkStats = false;
   private showControlHints = true;
   
-  constructor(canvas: HTMLCanvasElement, config: ClientConfig) {
-    this.canvas = canvas;
+  constructor(_canvas: HTMLCanvasElement, config: ClientConfig) {
     this.config = config;
     
     this.initializeUIElements();
@@ -66,7 +64,7 @@ export class UIManager {
   /**
    * Update UI manager
    */
-  update(deltaTime: number): void {
+  update(_deltaTime: number): void {
     // Update any animated UI elements
     // For now, most UI is static
     
@@ -301,7 +299,7 @@ class ControlHintsElement implements UIElement {
   type = UIElementType.CONTROL_HINTS;
   visible = true;
   
-  render(ctx: CanvasRenderingContext2D, context: UIRenderContext): void {
+  render(ctx: CanvasRenderingContext2D, _context: UIRenderContext): void {
     // Position in bottom-left corner
     ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.fillRect(10, ctx.canvas.height - 120, 300, 110);

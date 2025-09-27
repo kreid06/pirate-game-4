@@ -6,9 +6,8 @@
  */
 
 import { PredictionConfig } from '../client/ClientConfig.js';
-import { WorldState, InputFrame, Player } from '../sim/Types.js';
+import { WorldState, InputFrame } from '../sim/Types.js';
 import { simulate } from '../sim/Physics.js';
-import { Vec2 } from '../common/Vec2.js';
 
 /**
  * Prediction state entry
@@ -33,7 +32,6 @@ export class PredictionEngine {
   
   // Timing
   private clientTick = 0;
-  private clientTickDuration: number; // milliseconds
   
   // Rollback and correction
   private needsRollback = false;
@@ -41,7 +39,6 @@ export class PredictionEngine {
   
   constructor(config: PredictionConfig) {
     this.config = config;
-    this.clientTickDuration = 1000 / config.clientTickRate;
   }
   
   /**
@@ -93,13 +90,13 @@ export class PredictionEngine {
   /**
    * Get interpolated state for rendering
    */
-  getInterpolatedState(currentTime: number): WorldState | null {
+  getInterpolatedState(_currentTime: number): WorldState | null {
     if (!this.config.enableInterpolation || !this.authoritativeState) {
       return this.authoritativeState;
     }
     
     // Find two states to interpolate between
-    const bufferTime = currentTime - this.config.interpolationBuffer;
+    // const bufferTime = currentTime - this.config.interpolationBuffer;
     
     // For now, return the latest authoritative state
     // TODO: Implement proper interpolation between server states

@@ -29,3 +29,6 @@ This is a multiplayer pirate ship physics game split into client and server comp
 [ ] Create and Run Task
 [ ] Launch the Project
 [ ] Ensure Documentation is Complete
+[ ] Create and Run Task
+[ ] Launch the Project
+[ ] Ensure Documentation is Complete

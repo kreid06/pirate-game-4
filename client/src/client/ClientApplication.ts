@@ -10,7 +10,6 @@ import { ClientConfig } from './ClientConfig.js';
 // Graphics System
 import { RenderSystem } from './gfx/RenderSystem.js';
 import { Camera } from './gfx/Camera.js';
-import { ParticleSystem } from './gfx/ParticleSystem.js';
 
 // Network System  
 import { NetworkManager } from '../net/NetworkManager.js';
@@ -28,7 +27,6 @@ import { AudioManager } from './audio/AudioManager.js';
 
 // Core Simulation Types
 import { WorldState, InputFrame } from '../sim/Types.js';
-import { simulate } from '../sim/Physics.js';
 import { Vec2 } from '../common/Vec2.js';
 
 /**
