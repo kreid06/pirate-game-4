@@ -47,6 +47,21 @@ sequenceDiagram
 - **Ordering**: Sequence numbers for critical messages
 - **Reliability**: Custom ACK system for important packets
 
+### WebSocket Bridge (Port 8082) - **NEW**
+- **Protocol**: WebSocket over TCP for browser compatibility
+- **Purpose**: Real-time game connection for web clients
+- **Features**:
+  - Full WebSocket handshake implementation
+  - Text-based protocol commands (PING/PONG, JOIN, STATE)
+  - Binary protocol bridge for game packets
+  - Automatic protocol translation (WebSocket ↔ UDP)
+  - Support for up to 100 concurrent browser clients
+- **Supported Commands**:
+  - `PING` → `PONG` - Connection keepalive and latency measurement
+  - `JOIN:PlayerName` → `{"type":"WELCOME","player_id":N}` - Join game session
+  - `STATE` → `{"type":"GAME_STATE","tick":N,...}` - Request current game state
+  - Custom messages echoed back for testing
+
 ### HTTP Admin Interface (Port 8081)
 - **Protocol**: HTTP/1.1 
 - **Purpose**: Server monitoring and administration
@@ -276,10 +291,14 @@ struct StateUpdatePayload {
 - Lock-free queues for thread safety
 
 ### Client (TypeScript/Browser)
-- WebRTC DataChannel or WebSocket fallback
+- WebSocket connection for browser compatibility (auto-fallback from WebRTC)
 - JavaScript Float64 converted to/from fixed-point
 - Prediction engine with rollback capability
 - Interpolation using cubic splines
+- **Dual Protocol Support**:
+  - Text-based commands for basic server interaction
+  - Binary protocol for real-time game data
+  - Automatic protocol detection and translation
 
 ### Testing
 - Packet loss simulation via `tc` (Linux traffic control)

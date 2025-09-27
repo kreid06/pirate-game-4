@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pirate Game - Protocol Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #ffffff;
+        }
+        
+        .test-section {
+            background: #2d2d2d;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            border-left: 4px solid #4CAF50;
+        }
+        
+        .test-section h2 {
+            margin-top: 0;
+            color: #4CAF50;
+        }
+        
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+            font-size: 14px;
+        }
+        
+        button:hover {
+            background: #45a049;
+        }
+        
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+        
+        .log {
+            background: #000;
+            color: #00ff00;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            margin: 10px 0;
+        }
+        
+        .server-info {
+            background: #333;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        
+        .status {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        
+        .status.connected {
+            background: #4CAF50;
+            color: white;
+        }
+        
+        .status.disconnected {
+            background: #f44336;
+            color: white;
+        }
+        
+        .status.connecting {
+            background: #ff9800;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <h1>🏴‍☠️ Pirate Game - Protocol Test Suite</h1>
+    
+    <div class="server-info">
+        <h3>Server Configuration</h3>
+        <p><strong>Host:</strong> 192.168.56.10</p>
+        <p><strong>Port:</strong> 8080</p>
+        <p><strong>Status:</strong> <span id="serverStatus" class="status disconnected">Not Connected</span></p>
+        <p><strong>Protocol:</strong> WebSocket Bridge to UDP</p>
+    </div>
+
+    <div class="test-section">
+        <h2>📝 Text Protocol Tests</h2>
+        <p>Tests basic server commands similar to the reference test_protocol.js</p>
+        <button onclick="runTextTests()">Run Text Protocol Tests</button>
+        <button onclick="sendPing()">Send PING</button>
+        <button onclick="sendJoin()">Send JOIN</button>
+        <button onclick="sendState()">Send STATE</button>
+        <button onclick="sendEcho()">Send ECHO</button>
+        <div id="textLog" class="log">Ready to test text protocol...\n</div>
+    </div>
+
+    <div class="test-section">
+        <h2>🔧 Binary Protocol Tests</h2>
+        <p>Tests the real-time game protocol with binary packets</p>
+        <button onclick="runBinaryTests()">Run Binary Protocol Tests</button>
+        <button onclick="connectBinary()">Connect Binary</button>
+        <button onclick="sendInput()">Send Input</button>
+        <button onclick="disconnectBinary()">Disconnect</button>
+        <div id="binaryLog" class="log">Ready to test binary protocol...\n</div>
+    </div>
+
+    <div class="test-section">
+        <h2>🧪 Complete Test Suite</h2>
+        <p>Runs all tests sequentially (like the Node.js reference test)</p>
+        <button onclick="runAllTests()" id="runAllBtn">Run All Tests</button>
+        <button onclick="clearLogs()">Clear Logs</button>
+        <div id="allTestsLog" class="log">Ready to run complete test suite...\n</div>
+    </div>
+
+    <script type="module">
+        import { testUDPConnection, PirateClientTester } from './src/net/test_udp.js';
+        import { UDPNetworkManager, ConnectionState } from './src/net/UDPNetworkManager.js';
+        import { Vec2 } from './src/common/Vec2.js';
+
+        // Make functions available globally
+        window.testUDPConnection = testUDPConnection;
+        window.UDPNetworkManager = UDPNetworkManager;
+        window.ConnectionState = ConnectionState;
+        window.Vec2 = Vec2;
+        window.PirateClientTester = PirateClientTester;
+
+        let currentNetworkManager = null;
+        
+        // Logging helpers
+        function logToElement(elementId, message) {
+            const element = document.getElementById(elementId);
+            element.textContent += message + '\n';
+            element.scrollTop = element.scrollHeight;
+        }
+        
+        function clearLog(elementId) {
+            document.getElementById(elementId).textContent = '';
+        }
+
+        // Text protocol functions - expose to global scope
+        async function runTextTests() {
+            clearLog('textLog');
+            logToElement('textLog', '🚀 Starting text protocol tests...');
+            
+            try {
+                const ws = new WebSocket('ws://192.168.56.10:8080');
+                
+                ws.onopen = () => {
+                    logToElement('textLog', '✅ WebSocket connected');
+                    document.getElementById('serverStatus').textContent = 'Connected';
+                    document.getElementById('serverStatus').className = 'status connected';
+                };
+                
+                ws.onmessage = (event) => {
+                    logToElement('textLog', `📥 Received: ${event.data}`);
+                };
+                
+                ws.onclose = () => {
+                    logToElement('textLog', '🔌 WebSocket disconnected');
+                    document.getElementById('serverStatus').textContent = 'Disconnected';
+                    document.getElementById('serverStatus').className = 'status disconnected';
+                };
+                
+                ws.onerror = (error) => {
+                    logToElement('textLog', `❌ WebSocket error: ${error}`);
+                };
+                
+                window.currentWS = ws;
+                
+            } catch (error) {
+                logToElement('textLog', `❌ Failed to create WebSocket: ${error}`);
+            }
+        }
+
+        function sendPing() {
+            if (window.currentWS && window.currentWS.readyState === WebSocket.OPEN) {
+                const startTime = Date.now();
+                window.currentWS.send('PING');
+                logToElement('textLog', '📤 Sent: PING');
+                window.lastPingTime = startTime;
+            } else {
+                logToElement('textLog', '❌ WebSocket not connected');
+            }
+        }
+
+        function sendJoin() {
+            if (window.currentWS && window.currentWS.readyState === WebSocket.OPEN) {
+                window.currentWS.send('JOIN:WebTestPlayer');
+                logToElement('textLog', '📤 Sent: JOIN:WebTestPlayer');
+            } else {
+                logToElement('textLog', '❌ WebSocket not connected');
+            }
+        }
+
+        function sendState() {
+            if (window.currentWS && window.currentWS.readyState === WebSocket.OPEN) {
+                window.currentWS.send('STATE');
+                logToElement('textLog', '📤 Sent: STATE');
+            } else {
+                logToElement('textLog', '❌ WebSocket not connected');
+            }
+        }
+
+        function sendEcho() {
+            if (window.currentWS && window.currentWS.readyState === WebSocket.OPEN) {
+                const testMessage = 'HELLO_BROWSER_' + Date.now();
+                window.currentWS.send(testMessage);
+                logToElement('textLog', `📤 Sent: ${testMessage}`);
+            } else {
+                logToElement('textLog', '❌ WebSocket not connected');
+            }
+        }
+
+        // Binary protocol functions
+        async function runBinaryTests() {
+            clearLog('binaryLog');
+            logToElement('binaryLog', '🚀 Starting binary protocol tests...');
+            await connectBinary();
+        }
+
+        async function connectBinary() {
+            if (currentNetworkManager) {
+                currentNetworkManager.disconnect();
+            }
+
+            const config = {
+                serverUrl: 'ws://192.168.56.10:8080',
+                maxReconnectAttempts: 3,
+                reconnectDelay: 2000,
+                heartbeatInterval: 5000,
+                timeoutDuration: 10000,
+                protocol: 'websocket',
+                fallbackToWebSocket: true
+            };
+
+            currentNetworkManager = new UDPNetworkManager(config);
+
+            currentNetworkManager.setConnectionStateHandler((state) => {
+                logToElement('binaryLog', `📡 Connection state: ${state}`);
+                document.getElementById('serverStatus').textContent = state;
+                document.getElementById('serverStatus').className = `status ${state === 'connected' ? 'connected' : state === 'connecting' ? 'connecting' : 'disconnected'}`;
+            });
+
+            currentNetworkManager.setWorldStateHandler((worldState) => {
+                logToElement('binaryLog', `🌍 World state: tick=${worldState.tick}, ships=${worldState.ships.length}, cannonballs=${worldState.cannonballs.length}`);
+            });
+
+            currentNetworkManager.setTextMessageHandler((message) => {
+                logToElement('binaryLog', `📝 Text message: ${message}`);
+            });
+
+            try {
+                await currentNetworkManager.connect('BinaryWebPlayer');
+                logToElement('binaryLog', '✅ Binary protocol connection established');
+            } catch (error) {
+                logToElement('binaryLog', `❌ Binary connection failed: ${error.message}`);
+            }
+        }
+
+        function sendInput() {
+            if (currentNetworkManager) {
+                const input = {
+                    tick: Date.now(),
+                    movement: new Vec2(0.5, 0.8),
+                    actions: 1
+                };
+                currentNetworkManager.sendInput(input);
+                logToElement('binaryLog', '📤 Sent input packet');
+            } else {
+                logToElement('binaryLog', '❌ No network manager connected');
+            }
+        }
+
+        function disconnectBinary() {
+            if (currentNetworkManager) {
+                currentNetworkManager.disconnect();
+                currentNetworkManager = null;
+                logToElement('binaryLog', '🔌 Disconnected from server');
+            }
+        }
+
+        // Complete test suite
+        async function runAllTests() {
+            const btn = document.getElementById('runAllBtn');
+            btn.disabled = true;
+            btn.textContent = 'Running Tests...';
+            
+            clearLog('allTestsLog');
+            logToElement('allTestsLog', '🏴‍☠️ Starting complete protocol test suite...');
+            
+            try {
+                const tester = new PirateClientTester();
+                
+                // Redirect console.log to our log element for the duration of the test
+                const originalLog = console.log;
+                console.log = (...args) => {
+                    logToElement('allTestsLog', args.join(' '));
+                    originalLog(...args);
+                };
+
+                await tester.runAllTests();
+                
+                // Restore console.log
+                console.log = originalLog;
+                
+                logToElement('allTestsLog', '✅ Test suite completed!');
+            } catch (error) {
+                logToElement('allTestsLog', `❌ Test suite error: ${error}`);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Run All Tests';
+            }
+        }
+
+        function clearLogs() {
+            clearLog('textLog');
+            clearLog('binaryLog');
+            clearLog('allTestsLog');
+        }
+
+        // Expose all functions to global scope for onclick handlers
+        window.runTextTests = runTextTests;
+        window.sendPing = sendPing;
+        window.sendJoin = sendJoin;
+        window.sendState = sendState;
+        window.sendEcho = sendEcho;
+        window.runBinaryTests = runBinaryTests;
+        window.connectBinary = connectBinary;
+        window.sendInput = sendInput;
+        window.disconnectBinary = disconnectBinary;
+        window.runAllTests = runAllTests;
+        window.clearLogs = clearLogs;
+
+        // Initialize
+        logToElement('textLog', 'Protocol test page loaded. WebSocket and binary protocols ready for testing.');
+        logToElement('binaryLog', 'Binary protocol ready. Click "Connect Binary" to establish connection.');
+        logToElement('allTestsLog', 'Complete test suite ready. This will run all protocol tests sequentially.');
+    </script>
+</body>
+</html>

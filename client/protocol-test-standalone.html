@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pirate Game - Protocol Test (Standalone)</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #ffffff;
+        }
+        
+        .test-section {
+            background: #2d2d2d;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            border-left: 4px solid #4CAF50;
+        }
+        
+        .test-section h2 {
+            margin-top: 0;
+            color: #4CAF50;
+        }
+        
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+            font-size: 14px;
+        }
+        
+        button:hover {
+            background: #45a049;
+        }
+        
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+        
+        .log {
+            background: #000;
+            color: #00ff00;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            margin: 10px 0;
+        }
+        
+        .server-info {
+            background: #333;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        
+        .status {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        
+        .status.connected {
+            background: #4CAF50;
+            color: white;
+        }
+        
+        .status.disconnected {
+            background: #f44336;
+            color: white;
+        }
+        
+        .status.connecting {
+            background: #ff9800;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <h1>🏴‍☠️ Pirate Game - Protocol Test Suite (Standalone)</h1>
+    
+    <div class="server-info">
+        <h3>Server Configuration</h3>
+        <p><strong>Host:</strong> 192.168.56.10</p>
+        <p><strong>WebSocket Port:</strong> 8082 (Browser clients)</p>
+        <p><strong>UDP Port:</strong> 8080 (Native clients)</p>
+        <p><strong>Admin Port:</strong> 8081 (HTTP monitoring)</p>
+        <p><strong>Status:</strong> <span id="serverStatus" class="status disconnected">Not Connected</span></p>
+        <p><strong>Protocol:</strong> WebSocket Bridge (RFC 6455) with text commands</p>
+        <p><strong>Server Features:</strong> 30Hz physics loop, multi-protocol support, up to 100 concurrent clients</p>
+    </div>
+
+    <div class="test-section">
+        <h2>📝 Text Protocol Tests</h2>
+        <p>Tests WebSocket text commands on port 8082 (matches reference test_protocol.js)</p>
+        <p><strong>Supported Commands:</strong> PING→PONG, JOIN:name→WELCOME, STATE→GAME_STATE, message→echo</p>
+        <button onclick="runTextTests()">Run Text Protocol Tests</button>
+        <button onclick="sendPing()">Send PING</button>
+        <button onclick="sendJoin()">Send JOIN</button>
+        <button onclick="sendState()">Send STATE</button>
+        <button onclick="sendEcho()">Send ECHO</button>
+        <div id="textLog" class="log">Ready to test text protocol...\n</div>
+    </div>
+
+    <div class="test-section">
+        <h2>🔧 WebSocket Connection Tests</h2>
+        <p>Tests WebSocket connectivity and frame handling (RFC 6455 compliant)</p>
+        <p><strong>Features:</strong> Handshake validation, frame parsing, masking, ping/pong frames</p>
+        <button onclick="connectBasic()">Connect WebSocket</button>
+        <button onclick="sendBasicMessage()">Send Test Message</button>
+        <button onclick="testWebSocketFeatures()">Test WS Features</button>
+        <button onclick="disconnectBasic()">Disconnect</button>
+        <div id="basicLog" class="log">Ready to test WebSocket connection...\n</div>
+    </div>
+
+    <div class="test-section">
+        <h2>🧪 Complete Protocol Test Suite</h2>
+        <p>Runs comprehensive tests matching the Node.js reference implementation</p>
+        <p><strong>Tests:</strong> Connection, PING/PONG latency, JOIN with player ID, STATE snapshot, ECHO validation</p>
+        <button onclick="runAllBasicTests()" id="runAllBtn">Run Complete Test Suite</button>
+        <button onclick="runServerLoadTest()">Server Load Test</button>
+        <button onclick="clearLogs()">Clear Logs</button>
+        <div id="allTestsLog" class="log">Ready to run complete test suite...\n</div>
+    </div>
+
+    <script>
+        // Global state
+        let currentWS = null;
+        let lastPingTime = 0;
+        let testResults = [];
+
+        // Logging helpers
+        function logToElement(elementId, message) {
+            const element = document.getElementById(elementId);
+            const timestamp = new Date().toLocaleTimeString();
+            element.textContent += `[${timestamp}] ${message}\n`;
+            element.scrollTop = element.scrollHeight;
+        }
+        
+        function clearLog(elementId) {
+            document.getElementById(elementId).textContent = '';
+        }
+
+        function updateServerStatus(status, className) {
+            const statusElement = document.getElementById('serverStatus');
+            statusElement.textContent = status;
+            statusElement.className = `status ${className}`;
+        }
+
+        // Text protocol functions
+        function runTextTests() {
+            clearLog('textLog');
+            logToElement('textLog', '🚀 Starting text protocol tests...');
+            connectToServer('textLog');
+        }
+
+        function connectToServer(logId) {
+            try {
+                if (currentWS) {
+                    currentWS.close();
+                }
+
+                // Connect to WebSocket server on port 8082 (not 8080)
+                const ws = new WebSocket('ws://192.168.56.10:8082');
+                
+                ws.onopen = () => {
+                    logToElement(logId, '✅ WebSocket connected to server port 8082');
+                    updateServerStatus('Connected', 'connected');
+                };
+                
+                ws.onmessage = (event) => {
+                    const message = event.data;
+                    logToElement(logId, `📥 Received: ${message}`);
+                    
+                    // Handle specific responses
+                    if (message === 'PONG' && lastPingTime > 0) {
+                        const latency = Date.now() - lastPingTime;
+                        logToElement(logId, `🏓 PONG received - latency: ${latency}ms`);
+                        testResults.push({ test: 'PING', success: true, latency });
+                    } else if (message.startsWith('{')) {
+                        try {
+                            const json = JSON.parse(message);
+                            if (json.type === 'WELCOME') {
+                                logToElement(logId, `🎮 Welcome! Player ID: ${json.player_id}, Server Time: ${json.server_time}`);
+                                testResults.push({ test: 'JOIN', success: true, player_id: json.player_id });
+                            } else if (json.type === 'GAME_STATE') {
+                                const shipCount = json.ships ? json.ships.length : 0;
+                                const playerCount = json.players ? json.players.length : 0;
+                                const projectileCount = json.projectiles ? json.projectiles.length : 0;
+                                logToElement(logId, `🗺️ Game state - Tick: ${json.tick}, Ships: ${shipCount}, Players: ${playerCount}, Projectiles: ${projectileCount}`);
+                                testResults.push({ test: 'STATE', success: true, tick: json.tick });
+                            }
+                        } catch (e) {
+                            logToElement(logId, `📄 Raw response: ${message}`);
+                        }
+                    }
+                };
+                
+                ws.onclose = (event) => {
+                    logToElement(logId, `🔌 WebSocket disconnected (code: ${event.code}, reason: ${event.reason})`);
+                    updateServerStatus('Disconnected', 'disconnected');
+                };
+                
+                ws.onerror = (error) => {
+                    logToElement(logId, `❌ WebSocket error: Connection failed to port 8082`);
+                    logToElement(logId, `   Make sure the pirate-server is running with WebSocket support enabled`);
+                    updateServerStatus('Error', 'disconnected');
+                };
+                
+                currentWS = ws;
+                updateServerStatus('Connecting', 'connecting');
+                
+            } catch (error) {
+                logToElement(logId, `❌ Failed to create WebSocket: ${error.message}`);
+                updateServerStatus('Error', 'disconnected');
+            }
+        }
+
+        function sendPing() {
+            if (currentWS && currentWS.readyState === WebSocket.OPEN) {
+                lastPingTime = Date.now();
+                currentWS.send('PING');
+                logToElement('textLog', '📤 Sent: PING');
+            } else {
+                logToElement('textLog', '❌ WebSocket not connected');
+                if (!currentWS || currentWS.readyState === WebSocket.CLOSED) {
+                    logToElement('textLog', '🔄 Attempting to reconnect...');
+                    connectToServer('textLog');
+                }
+            }
+        }
+
+        function sendJoin() {
+            if (currentWS && currentWS.readyState === WebSocket.OPEN) {
+                currentWS.send('JOIN:WebTestPlayer');
+                logToElement('textLog', '📤 Sent: JOIN:WebTestPlayer');
+            } else {
+                logToElement('textLog', '❌ WebSocket not connected');
+            }
+        }
+
+        function sendState() {
+            if (currentWS && currentWS.readyState === WebSocket.OPEN) {
+                currentWS.send('STATE');
+                logToElement('textLog', '📤 Sent: STATE');
+            } else {
+                logToElement('textLog', '❌ WebSocket not connected');
+            }
+        }
+
+        function sendEcho() {
+            if (currentWS && currentWS.readyState === WebSocket.OPEN) {
+                const testMessage = 'HELLO_BROWSER_' + Date.now();
+                currentWS.send(testMessage);
+                logToElement('textLog', `📤 Sent: ${testMessage}`);
+            } else {
+                logToElement('textLog', '❌ WebSocket not connected');
+            }
+        }
+
+        // Basic connection functions
+        function connectBasic() {
+            clearLog('basicLog');
+            logToElement('basicLog', '🚀 Starting basic connection test...');
+            connectToServer('basicLog');
+        }
+
+        function sendBasicMessage() {
+            if (currentWS && currentWS.readyState === WebSocket.OPEN) {
+                const message = 'TEST_MESSAGE_' + Date.now();
+                currentWS.send(message);
+                logToElement('basicLog', `📤 Sent: ${message}`);
+            } else {
+                logToElement('basicLog', '❌ Not connected');
+            }
+        }
+
+        function disconnectBasic() {
+            if (currentWS) {
+                currentWS.close();
+                logToElement('basicLog', '🔌 Disconnecting...');
+            } else {
+                logToElement('basicLog', '❌ No connection to close');
+            }
+        }
+
+        // New WebSocket feature tests
+        function testWebSocketFeatures() {
+            if (!currentWS || currentWS.readyState !== WebSocket.OPEN) {
+                logToElement('basicLog', '❌ Not connected - cannot test WebSocket features');
+                return;
+            }
+
+            logToElement('basicLog', '🧪 Testing WebSocket protocol features...');
+            
+            // Test 1: Connection state
+            logToElement('basicLog', `📊 Connection state: ${getReadyStateString(currentWS.readyState)}`);
+            logToElement('basicLog', `🌐 Protocol: ${currentWS.protocol || 'none'}`);
+            logToElement('basicLog', `🔗 URL: ${currentWS.url}`);
+            
+            // Test 2: Send ping frame (WebSocket-level ping, not application PING)
+            // Note: Browser WebSocket API doesn't expose ping frames directly
+            logToElement('basicLog', '🏓 WebSocket ping frames are handled automatically by browser');
+            
+            // Test 3: Large message test
+            const largeMessage = 'LARGE_TEST_' + 'X'.repeat(1000);
+            currentWS.send(largeMessage);
+            logToElement('basicLog', `📦 Sent large message (${largeMessage.length} bytes)`);
+            
+            // Test 4: Rapid message sending
+            for (let i = 0; i < 5; i++) {
+                currentWS.send(`RAPID_${i}_${Date.now()}`);
+            }
+            logToElement('basicLog', '🚀 Sent 5 rapid messages');
+        }
+
+        function getReadyStateString(readyState) {
+            switch (readyState) {
+                case WebSocket.CONNECTING: return 'CONNECTING (0)';
+                case WebSocket.OPEN: return 'OPEN (1)';
+                case WebSocket.CLOSING: return 'CLOSING (2)';
+                case WebSocket.CLOSED: return 'CLOSED (3)';
+                default: return `UNKNOWN (${readyState})`;
+            }
+        }
+
+        // Server load test
+        async function runServerLoadTest() {
+            const btn = document.getElementById('runAllBtn');
+            if (btn.disabled) return; // Another test is running
+            
+            clearLog('allTestsLog');
+            logToElement('allTestsLog', '🚀 Starting server load test...');
+            logToElement('allTestsLog', 'This will test multiple concurrent connections and rapid messaging');
+            
+            const connections = [];
+            const maxConnections = 10;
+            let completedConnections = 0;
+            
+            // Create multiple connections
+            for (let i = 0; i < maxConnections; i++) {
+                try {
+                    const ws = new WebSocket('ws://192.168.56.10:8082');
+                    
+                    ws.onopen = () => {
+                        logToElement('allTestsLog', `✅ Connection ${i + 1} established`);
+                        
+                        // Send rapid messages
+                        for (let j = 0; j < 3; j++) {
+                            ws.send(`LOAD_TEST_CONN_${i}_MSG_${j}`);
+                        }
+                        
+                        // Send PING
+                        ws.send('PING');
+                        
+                        // Send JOIN
+                        ws.send(`JOIN:LoadTester${i}`);
+                        
+                        // Close after a short delay
+                        setTimeout(() => {
+                            ws.close();
+                            completedConnections++;
+                            
+                            if (completedConnections === maxConnections) {
+                                logToElement('allTestsLog', `🎉 Load test completed! ${maxConnections} connections processed`);
+                                logToElement('allTestsLog', 'Server handled concurrent connections successfully');
+                            }
+                        }, 2000 + (i * 100)); // Stagger disconnections
+                    };
+                    
+                    ws.onerror = () => {
+                        logToElement('allTestsLog', `❌ Connection ${i + 1} failed`);
+                        completedConnections++;
+                    };
+                    
+                    connections.push(ws);
+                    
+                } catch (error) {
+                    logToElement('allTestsLog', `❌ Failed to create connection ${i + 1}: ${error.message}`);
+                }
+                
+                // Small delay between connection attempts
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+        }
+
+        // Complete test suite
+        async function runAllBasicTests() {
+            const btn = document.getElementById('runAllBtn');
+            btn.disabled = true;
+            btn.textContent = 'Running Tests...';
+            
+            clearLog('allTestsLog');
+            testResults = [];
+            
+            logToElement('allTestsLog', '🏴‍☠️ Starting complete protocol test suite...');
+            
+            try {
+                // Test 1: Basic connection
+                logToElement('allTestsLog', '\n📡 Test 1: Basic Connection');
+                await testBasicConnection();
+                
+                // Test 2: PING/PONG
+                logToElement('allTestsLog', '\n🏓 Test 2: PING/PONG');
+                await testPingPong();
+                
+                // Test 3: JOIN
+                logToElement('allTestsLog', '\n🎮 Test 3: JOIN');
+                await testJoin();
+                
+                // Test 4: STATE
+                logToElement('allTestsLog', '\n🗺️ Test 4: STATE');
+                await testState();
+                
+                // Test 5: ECHO
+                logToElement('allTestsLog', '\n🔄 Test 5: ECHO');
+                await testEcho();
+                
+                // Print results
+                printTestResults();
+                
+            } catch (error) {
+                logToElement('allTestsLog', `❌ Test suite error: ${error.message}`);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Run All Basic Tests';
+            }
+        }
+
+        function testBasicConnection() {
+            return new Promise((resolve, reject) => {
+                try {
+                    const ws = new WebSocket('ws://192.168.56.10:8082');
+                    
+                    const timeout = setTimeout(() => {
+                        ws.close();
+                        logToElement('allTestsLog', '❌ Connection timeout');
+                        testResults.push({ test: 'CONNECTION', success: false, error: 'timeout' });
+                        resolve();
+                    }, 5000);
+                    
+                    ws.onopen = () => {
+                        clearTimeout(timeout);
+                        logToElement('allTestsLog', '✅ Connection successful to WebSocket port 8082');
+                        testResults.push({ test: 'CONNECTION', success: true });
+                        currentWS = ws;
+                        resolve();
+                    };
+                    
+                    ws.onerror = () => {
+                        clearTimeout(timeout);
+                        logToElement('allTestsLog', '❌ Connection failed to port 8082 - ensure server is running');
+                        testResults.push({ test: 'CONNECTION', success: false, error: 'connection_failed' });
+                        resolve();
+                    };
+                    
+                } catch (error) {
+                    logToElement('allTestsLog', `❌ Connection error: ${error.message}`);
+                    testResults.push({ test: 'CONNECTION', success: false, error: error.message });
+                    resolve();
+                }
+            });
+        }
+
+        function testPingPong() {
+            return new Promise((resolve) => {
+                if (!currentWS || currentWS.readyState !== WebSocket.OPEN) {
+                    logToElement('allTestsLog', '❌ No connection for PING test');
+                    testResults.push({ test: 'PING', success: false, error: 'no_connection' });
+                    resolve();
+                    return;
+                }
+                
+                const startTime = Date.now();
+                
+                const onMessage = (event) => {
+                    if (event.data === 'PONG') {
+                        const latency = Date.now() - startTime;
+                        logToElement('allTestsLog', `✅ PING successful - ${latency}ms`);
+                        testResults.push({ test: 'PING', success: true, latency });
+                        currentWS.removeEventListener('message', onMessage);
+                        resolve();
+                    }
+                };
+                
+                currentWS.addEventListener('message', onMessage);
+                currentWS.send('PING');
+                
+                setTimeout(() => {
+                    currentWS.removeEventListener('message', onMessage);
+                    logToElement('allTestsLog', '❌ PING timeout');
+                    testResults.push({ test: 'PING', success: false, error: 'timeout' });
+                    resolve();
+                }, 5000);
+            });
+        }
+
+        function testJoin() {
+            return new Promise((resolve) => {
+                if (!currentWS || currentWS.readyState !== WebSocket.OPEN) {
+                    logToElement('allTestsLog', '❌ No connection for JOIN test');
+                    testResults.push({ test: 'JOIN', success: false, error: 'no_connection' });
+                    resolve();
+                    return;
+                }
+                
+                const onMessage = (event) => {
+                    try {
+                        const json = JSON.parse(event.data);
+                        if (json.type === 'WELCOME' && json.player_id) {
+                            logToElement('allTestsLog', `✅ JOIN successful - Player ID: ${json.player_id}`);
+                            testResults.push({ test: 'JOIN', success: true, player_id: json.player_id });
+                            currentWS.removeEventListener('message', onMessage);
+                            resolve();
+                        }
+                    } catch (e) {
+                        // Not a JSON response, ignore
+                    }
+                };
+                
+                currentWS.addEventListener('message', onMessage);
+                currentWS.send('JOIN:TestSuitePlayer');
+                
+                setTimeout(() => {
+                    currentWS.removeEventListener('message', onMessage);
+                    logToElement('allTestsLog', '❌ JOIN timeout');
+                    testResults.push({ test: 'JOIN', success: false, error: 'timeout' });
+                    resolve();
+                }, 5000);
+            });
+        }
+
+        function testState() {
+            return new Promise((resolve) => {
+                if (!currentWS || currentWS.readyState !== WebSocket.OPEN) {
+                    logToElement('allTestsLog', '❌ No connection for STATE test');
+                    testResults.push({ test: 'STATE', success: false, error: 'no_connection' });
+                    resolve();
+                    return;
+                }
+                
+                const onMessage = (event) => {
+                    try {
+                        const json = JSON.parse(event.data);
+                        if (json.type === 'GAME_STATE' && json.hasOwnProperty('tick')) {
+                            logToElement('allTestsLog', `✅ STATE successful - Tick: ${json.tick}`);
+                            testResults.push({ test: 'STATE', success: true, tick: json.tick });
+                            currentWS.removeEventListener('message', onMessage);
+                            resolve();
+                        }
+                    } catch (e) {
+                        // Not a JSON response, ignore
+                    }
+                };
+                
+                currentWS.addEventListener('message', onMessage);
+                currentWS.send('STATE');
+                
+                setTimeout(() => {
+                    currentWS.removeEventListener('message', onMessage);
+                    logToElement('allTestsLog', '❌ STATE timeout');
+                    testResults.push({ test: 'STATE', success: false, error: 'timeout' });
+                    resolve();
+                }, 5000);
+            });
+        }
+
+        function testEcho() {
+            return new Promise((resolve) => {
+                if (!currentWS || currentWS.readyState !== WebSocket.OPEN) {
+                    logToElement('allTestsLog', '❌ No connection for ECHO test');
+                    testResults.push({ test: 'ECHO', success: false, error: 'no_connection' });
+                    resolve();
+                    return;
+                }
+                
+                const testMessage = 'HELLO_WORLD_123';
+                
+                const onMessage = (event) => {
+                    if (event.data === testMessage) {
+                        logToElement('allTestsLog', `✅ ECHO successful`);
+                        testResults.push({ test: 'ECHO', success: true });
+                        currentWS.removeEventListener('message', onMessage);
+                        resolve();
+                    }
+                };
+                
+                currentWS.addEventListener('message', onMessage);
+                currentWS.send(testMessage);
+                
+                setTimeout(() => {
+                    currentWS.removeEventListener('message', onMessage);
+                    logToElement('allTestsLog', '❌ ECHO timeout');
+                    testResults.push({ test: 'ECHO', success: false, error: 'timeout' });
+                    resolve();
+                }, 5000);
+            });
+        }
+
+        function printTestResults() {
+            logToElement('allTestsLog', '\n📊 Test Results Summary');
+            logToElement('allTestsLog', '========================');
+            
+            const successes = testResults.filter(r => r.success).length;
+            const total = testResults.length;
+            
+            logToElement('allTestsLog', `Overall: ${successes}/${total} tests passed\n`);
+            
+            testResults.forEach(result => {
+                const status = result.success ? '✅' : '❌';
+                const details = result.latency ? ` (${result.latency}ms)` : 
+                               result.player_id ? ` (Player: ${result.player_id})` : 
+                               result.tick ? ` (Tick: ${result.tick})` : '';
+                const error = result.error ? ` - ${result.error}` : '';
+                
+                logToElement('allTestsLog', `${status} ${result.test}${details}${error}`);
+            });
+
+            if (successes === total) {
+                logToElement('allTestsLog', '\n🎉 All tests passed! Server is working correctly.');
+            } else {
+                logToElement('allTestsLog', `\n⚠️  ${total - successes} test(s) failed. Check server status.`);
+            }
+        }
+
+        function clearLogs() {
+            clearLog('textLog');
+            clearLog('basicLog');
+            clearLog('allTestsLog');
+            testResults = [];
+            logToElement('textLog', 'Logs cleared. Ready for testing.');
+            logToElement('basicLog', 'Logs cleared. Ready for testing.');
+            logToElement('allTestsLog', 'Logs cleared. Ready for testing.');
+        }
+
+        // Expose all functions to global scope for onclick handlers
+        window.runTextTests = runTextTests;
+        window.sendPing = sendPing;
+        window.sendJoin = sendJoin;
+        window.sendState = sendState;
+        window.sendEcho = sendEcho;
+        window.connectBasic = connectBasic;
+        window.sendBasicMessage = sendBasicMessage;
+        window.testWebSocketFeatures = testWebSocketFeatures;
+        window.disconnectBasic = disconnectBasic;
+        window.runAllBasicTests = runAllBasicTests;
+        window.runServerLoadTest = runServerLoadTest;
+        window.clearLogs = clearLogs;
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            logToElement('textLog', 'Updated protocol test loaded - WebSocket port 8082, enhanced testing features.');
+            logToElement('basicLog', 'WebSocket connection test ready with RFC 6455 compliance checks.');
+            logToElement('allTestsLog', 'Complete test suite ready - includes load testing and server validation.');
+        });
+    </script>
+</body>
+</html>

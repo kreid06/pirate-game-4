@@ -61,6 +61,7 @@ export class ClientApplication {
   // Game State
   private authoritativeWorldState: WorldState | null = null;
   private predictedWorldState: WorldState | null = null;
+  private demoWorldState: WorldState | null = null;
   private camera!: Camera;
   
   // Timing
@@ -146,11 +147,21 @@ export class ClientApplication {
     try {
       console.log('🚀 Starting client application...');
       
-      // Connect to server
+      // Try to connect to server, but continue even if it fails
       this.state = ClientState.CONNECTING;
-      await this.networkManager.connect('Player'); // Default player name
+      try {
+        await this.networkManager.connect('Player'); // Default player name
+        console.log('✅ Connected to physics server');
+      } catch (serverError) {
+        console.warn('⚠️ Could not connect to physics server:', serverError);
+        console.log('🎮 Running in offline mode - UI and local systems will work');
+        this.state = ClientState.DISCONNECTED;
+        // Create demo world state for offline testing
+        this.createDemoWorldState();
+        // Continue execution - we can still show UI and test locally
+      }
       
-      // Start game loop
+      // Start game loop regardless of server connection
       this.running = true;
       this.lastFrameTime = performance.now();
       requestAnimationFrame(this.gameLoop.bind(this));
@@ -264,7 +275,7 @@ export class ClientApplication {
    */
   private renderFrame(alpha: number): void {
     // Use predicted world state for rendering (most responsive)
-    const worldToRender = this.predictedWorldState || this.authoritativeWorldState;
+    const worldToRender = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
     
     if (!worldToRender) {
       // Render loading/connection screen
@@ -404,5 +415,32 @@ export class ClientApplication {
     this.inputManager.updateConfig(this.config.input);
     
     console.log('⚙️ Client configuration updated');
+  }
+
+  /**
+   * Create demo world state for offline mode
+   */
+  private createDemoWorldState(): any {
+    return {
+      players: [
+        {
+          id: 'demo-player',
+          position: { x: 0, y: 0 },
+          velocity: { x: 0, y: 0 },
+          rotation: 0,
+          health: 100,
+          ship: {
+            modules: [
+              { type: 'core', position: { x: 0, y: 0 } },
+              { type: 'cannon', position: { x: -1, y: 0 } },
+              { type: 'cannon', position: { x: 1, y: 0 } }
+            ]
+          }
+        }
+      ],
+      projectiles: [],
+      particles: [],
+      tick: 0
+    };
   }
 }

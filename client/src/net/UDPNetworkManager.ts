@@ -1,8 +1,11 @@
 /**
- * UDP Network Manager - Binary Protocol Client
+ * UDP Network Manager - Dual Protocol Client
  * 
- * Handles communication with the C-based physics server using the binary UDP protocol.
- * Since browsers don't support raw UDP, this uses WebRTC DataChannels or WebSocket
+ * Handles communication with the C-based physics server using both:
+ * 1. Text-based protocol for basic commands (PING, JOIN, STATE, ECHO)
+ * 2. Binary protocol for real-time game data (inputs, snapshots)
+ * 
+ * Since browsers don't support raw UDP, this uses WebSocket
  * with a UDP bridge on the server side.
  */
 
@@ -65,42 +68,43 @@ interface ServerHandshakePacket {
   checksum: number;
 }
 
-// Client input packet
+// Client input packet - matches server CmdPacket struct
 interface ClientInputPacket {
   type: PacketType.CLIENT_INPUT;
   version: number;
   sequence: number;
-  deltaTime: number;
-  thrust: number;    // Q0.15 fixed-point [-1.0, 1.0]
-  turn: number;      // Q0.15 fixed-point [-1.0, 1.0] 
-  actions: number;   // Bitfield
-  clientTime: number;
-  checksum: number;
+  deltaTime: number;  // dt_ms - delta time echo for RTT
+  thrust: number;     // Q0.15 fixed-point [-1.0, 1.0]
+  turn: number;       // Q0.15 fixed-point [-1.0, 1.0] 
+  actions: number;    // Bitfield actions
+  clientTime: number; // Client timestamp (ms)
+  checksum: number;   // Simple checksum for corruption detection
 }
 
-// Server snapshot header
+// Server snapshot header - matches server SnapHeader struct
 interface ServerSnapshotPacket {
   type: PacketType.SERVER_SNAPSHOT;
   version: number;
-  serverTime: number;
-  baseId: number;
-  snapId: number;
-  aoiCell: number;
-  entityCount: number;
-  flags: number;
-  checksum: number;
+  serverTime: number;   // Server tick timestamp
+  baseId: number;       // Baseline snapshot ID for delta compression
+  snapId: number;       // This snapshot ID
+  aoiCell: number;      // AOI cell ID for validation
+  entityCount: number;  // Number of entities in this snapshot
+  flags: number;        // Compression flags, priority tier
+  checksum: number;     // Packet integrity
   entities: EntityUpdate[];
 }
 
-// Entity update structure
+// Entity update structure - matches server EntityUpdate struct
 interface EntityUpdate {
-  entityId: number;
-  posX: number;     // Quantized position
-  posY: number;
-  velX: number;     // Quantized velocity
-  velY: number;
-  rotation: number; // Quantized rotation
-  stateFlags: number;
+  entityId: number;      // Entity identifier
+  posX: number;          // Position X * 512 (1/512m precision)
+  posY: number;          // Position Y * 512
+  velX: number;          // Velocity X * 256 (1/256 m/s precision)
+  velY: number;          // Velocity Y * 256
+  rotation: number;      // Rotation * 1024/2π (1/1024 radian precision)
+  stateFlags: number;    // Health, actions, module states
+  reserved: number;      // Padding for alignment
 }
 
 /**
@@ -140,10 +144,24 @@ export class UDPNetworkManager {
   // Event handlers
   private onWorldStateUpdate: ((worldState: WorldState) => void) | null = null;
   private onConnectionStateChange: ((state: ConnectionState) => void) | null = null;
+  private onTextMessage: ((message: string) => void) | null = null; // For text protocol responses
   
   constructor(config: NetworkConfig) {
     this.config = config;
     this.clientId = Math.floor(Math.random() * 0xFFFFFFFF);
+  }
+  
+  /**
+   * Send text-based protocol command (PING, JOIN, STATE, ECHO)
+   */
+  sendTextCommand(command: string): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      console.warn('Cannot send text command - not connected');
+      return;
+    }
+    
+    this.socket.send(command);
+    console.log(`📤 Sent text command: ${command}`);
   }
   
   /**
@@ -159,6 +177,7 @@ export class UDPNetworkManager {
     try {
       // For browsers, we use WebSocket with a UDP bridge on the server
       const wsUrl = this.config.serverUrl.replace('udp://', 'ws://');
+      console.log(`🔌 Attempting to connect to: ${wsUrl}/game`);
       this.socket = new WebSocket(`${wsUrl}/game`);
       this.socket.binaryType = 'arraybuffer';
       
@@ -172,7 +191,8 @@ export class UDPNetworkManager {
       
     } catch (error) {
       this.setConnectionState(ConnectionState.ERROR);
-      throw error;
+      console.error('🚫 Connection failed:', error);
+      throw new Error(`Failed to connect to server at ${this.config.serverUrl}: ${error}`);
     }
   }
   
@@ -196,7 +216,18 @@ export class UDPNetworkManager {
       checksum: 0
     };
     
-    this.sendBinaryPacket(packet);
+    // Calculate checksum after serialization
+    const buffer = this.serializePacket(packet);
+    const checksumValue = this.calculateChecksum(buffer, buffer.byteLength - 2); // Exclude checksum field
+    const view = new DataView(buffer);
+    view.setUint16(buffer.byteLength - 2, checksumValue, true); // Update checksum
+    
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(buffer);
+      this.stats.bytesSent += buffer.byteLength;
+      this.stats.packetsSent++;
+      this.stats.messagesSent++;
+    }
   }
   
   /**
@@ -211,6 +242,13 @@ export class UDPNetworkManager {
    */
   setConnectionStateHandler(handler: (state: ConnectionState) => void): void {
     this.onConnectionStateChange = handler;
+  }
+  
+  /**
+   * Set text message handler for text protocol responses
+   */
+  setTextMessageHandler(handler: (message: string) => void): void {
+    this.onTextMessage = handler;
   }
   
   /**
@@ -243,10 +281,18 @@ export class UDPNetworkManager {
     
     this.socket.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
+        // Binary protocol message
         this.handleBinaryMessage(event.data);
         this.stats.bytesReceived += event.data.byteLength;
         this.stats.packetsReceived++;
         this.stats.messagesReceived++; // Compatibility alias
+      } else if (typeof event.data === 'string') {
+        // Text protocol message
+        console.log(`📥 Received text message: ${event.data}`);
+        this.handleTextMessage(event.data);
+        this.stats.bytesReceived += event.data.length;
+        this.stats.packetsReceived++;
+        this.stats.messagesReceived++;
       }
     };
     
@@ -274,7 +320,7 @@ export class UDPNetworkManager {
       }
       
       const timeout = setTimeout(() => {
-        reject(new Error('Connection timeout'));
+        reject(new Error(`Connection timeout after 10 seconds. Is the server running at ${this.config.serverUrl}?`));
       }, 10000);
       
       this.socket.addEventListener('open', () => {
@@ -282,9 +328,9 @@ export class UDPNetworkManager {
         resolve();
       }, { once: true });
       
-      this.socket.addEventListener('error', () => {
+      this.socket.addEventListener('error', (event) => {
         clearTimeout(timeout);
-        reject(new Error('Connection failed'));
+        reject(new Error(`WebSocket connection failed. Server may not be running or accessible at ${this.config.serverUrl}`));
       }, { once: true });
     });
   }
@@ -298,7 +344,18 @@ export class UDPNetworkManager {
       checksum: 0
     };
     
-    this.sendBinaryPacket(packet);
+    // Calculate checksum after serialization
+    const buffer = this.serializePacket(packet);
+    const checksumValue = this.calculateChecksum(buffer, buffer.byteLength - 2); // Exclude checksum field
+    const view = new DataView(buffer);
+    view.setUint16(buffer.byteLength - 2, checksumValue, true); // Update checksum
+    
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(buffer);
+      this.stats.bytesSent += buffer.byteLength;
+      this.stats.packetsSent++;
+      this.stats.messagesSent++;
+    }
     
     // Wait for server handshake response
     await this.waitForHandshakeResponse();
@@ -340,21 +397,70 @@ export class UDPNetworkManager {
         this.handleHeartbeat(view);
         break;
       default:
-        console.warn('Unknown packet type:', type);
+        console.warn('Unknown binary packet type:', type);
+    }
+  }
+  
+  private handleTextMessage(message: string): void {
+    // Handle text protocol responses (PONG, WELCOME, GAME_STATE, ECHO)
+    console.log(`📝 Processing text message: ${message}`);
+    
+    // Try to parse as JSON first
+    try {
+      const json = JSON.parse(message);
+      if (json.type === 'WELCOME') {
+        // Handle JOIN response
+        console.log(`🎮 Welcome message received for player ${json.player_id}`);
+        this.playerId = json.player_id;
+        if (this.connectionState === ConnectionState.CONNECTING) {
+          this.setConnectionState(ConnectionState.CONNECTED);
+        }
+      } else if (json.type === 'GAME_STATE') {
+        // Handle STATE response - convert to WorldState if needed
+        console.log(`🗺️ Game state received: tick ${json.tick}`);
+        // Could convert this to a WorldState and call onWorldStateUpdate if needed
+      }
+    } catch (error) {
+      // Not JSON, handle simple text responses
+      if (message === 'PONG') {
+        console.log('🏓 PONG received');
+      } else {
+        console.log(`📨 Text response: ${message}`);
+      }
+    }
+    
+    // Forward to text message handler if set
+    if (this.onTextMessage) {
+      this.onTextMessage(message);
     }
   }
   
   private handleServerHandshake(view: DataView): void {
+    // Validate packet checksum first
+    const packetSize = 10; // ServerHandshake size: type(1) + version(1) + playerId(2) + serverTime(4) + checksum(2)
+    const receivedChecksum = view.getUint16(8, true);
+    const buffer = new ArrayBuffer(packetSize);
+    const tempView = new DataView(buffer);
+    for (let i = 0; i < packetSize; i++) {
+      tempView.setUint8(i, view.getUint8(i));
+    }
+    const calculatedChecksum = this.calculateChecksum(buffer, packetSize - 2);
+    
+    if (receivedChecksum !== calculatedChecksum) {
+      console.warn('🚨 Server handshake checksum mismatch');
+      // Continue anyway for now, but log the issue
+    }
+    
     const packet: ServerHandshakePacket = {
       type: view.getUint8(0),
       version: view.getUint8(1),
       playerId: view.getUint16(2, true), // little-endian
       serverTime: view.getUint32(4, true),
-      checksum: view.getUint16(8, true)
+      checksum: receivedChecksum
     };
     
     if (packet.version !== PROTOCOL_VERSION) {
-      console.error('Protocol version mismatch');
+      console.error('🚨 Protocol version mismatch: expected', PROTOCOL_VERSION, 'got', packet.version);
       this.setConnectionState(ConnectionState.ERROR);
       return;
     }
@@ -362,7 +468,7 @@ export class UDPNetworkManager {
     this.playerId = packet.playerId;
     this.serverTimeOffset = packet.serverTime - performance.now();
     
-    console.log(`🏴‍☠️ Connected as player ${this.playerId}`);
+    console.log(`🏴‍☠️ Connected as player ${this.playerId}, server time offset: ${this.serverTimeOffset}ms`);
     this.setConnectionState(ConnectionState.CONNECTED);
   }
   
@@ -402,7 +508,8 @@ export class UDPNetworkManager {
         velX: 0,
         velY: 0,
         rotation: 0,
-        stateFlags: 0
+        stateFlags: 0,
+        reserved: 0
       };
       offset += 2;
       entity.posX = view.getUint16(offset, true);
@@ -416,7 +523,7 @@ export class UDPNetworkManager {
       entity.rotation = view.getUint16(offset, true);
       offset += 2;
       entity.stateFlags = view.getUint8(offset++);
-      offset++; // Skip reserved byte
+      entity.reserved = view.getUint8(offset++); // Read reserved byte
       entities.push(entity);
     }
     
@@ -448,53 +555,58 @@ export class UDPNetworkManager {
     this.sendHeartbeat();
   }
   
-  private sendBinaryPacket(packet: any): void {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-      return;
-    }
-    
-    const buffer = this.serializePacket(packet);
-    this.socket.send(buffer);
-    this.stats.bytesSent += buffer.byteLength;
-    this.stats.packetsSent++;
-    this.stats.messagesSent++; // Compatibility alias
-  }
-  
   private serializePacket(packet: any): ArrayBuffer {
-    // This is a simplified serialization - in practice you'd want
-    // proper binary packing to match the C struct layout exactly
-    const buffer = new ArrayBuffer(256); // Max packet size
-    const view = new DataView(buffer);
+    // Serialize packets to match exact C struct layout from server
+    let buffer: ArrayBuffer;
+    let view: DataView;
     let offset = 0;
     
-    view.setUint8(offset++, packet.type);
-    view.setUint8(offset++, packet.version || PROTOCOL_VERSION);
-    
-    // Pack remaining fields based on packet type
     switch (packet.type) {
       case PacketType.CLIENT_HANDSHAKE:
+        // struct ClientHandshake: type(1) + version(1) + client_id(4) + player_name(16) + checksum(2) = 24 bytes
+        buffer = new ArrayBuffer(24);
+        view = new DataView(buffer);
+        view.setUint8(offset++, packet.type);
+        view.setUint8(offset++, packet.version || PROTOCOL_VERSION);
         view.setUint32(offset, packet.clientId, true); offset += 4;
-        // Pack player name (16 bytes)
+        // Pack player name (16 bytes, null-terminated)
         const nameBytes = new TextEncoder().encode(packet.playerName);
         const nameView = new Uint8Array(buffer, offset, 16);
-        nameView.set(nameBytes.slice(0, 15));
+        nameView.fill(0); // Clear to null bytes
+        nameView.set(nameBytes.slice(0, 15)); // Leave room for null terminator
         offset += 16;
+        view.setUint16(offset, packet.checksum || 0, true); // checksum
         break;
         
       case PacketType.CLIENT_INPUT:
+        // struct CmdPacket: type(1) + version(1) + seq(2) + dt_ms(2) + thrust(2) + turn(2) + actions(2) + client_time(4) + checksum(2) = 18 bytes
+        buffer = new ArrayBuffer(18);
+        view = new DataView(buffer);
+        view.setUint8(offset++, packet.type);
+        view.setUint8(offset++, packet.version || PROTOCOL_VERSION);
         view.setUint16(offset, packet.sequence, true); offset += 2;
         view.setUint16(offset, packet.deltaTime, true); offset += 2;
         view.setInt16(offset, packet.thrust, true); offset += 2;
         view.setInt16(offset, packet.turn, true); offset += 2;
         view.setUint16(offset, packet.actions, true); offset += 2;
         view.setUint32(offset, packet.clientTime, true); offset += 4;
+        view.setUint16(offset, packet.checksum || 0, true); // checksum
         break;
+        
+      case PacketType.HEARTBEAT:
+        // Minimal heartbeat packet: type(1) + version(1) + client_time(4) = 6 bytes
+        buffer = new ArrayBuffer(6);
+        view = new DataView(buffer);
+        view.setUint8(offset++, packet.type);
+        view.setUint8(offset++, packet.version || PROTOCOL_VERSION);
+        view.setUint32(offset, packet.clientTime, true);
+        break;
+        
+      default:
+        throw new Error(`Unknown packet type: ${packet.type}`);
     }
     
-    // Add checksum
-    view.setUint16(offset, 0, true); // Placeholder checksum
-    
-    return buffer.slice(0, offset + 2);
+    return buffer;
   }
   
   private snapshotToWorldState(header: any, entities: EntityUpdate[]): WorldState {
@@ -561,7 +673,16 @@ export class UDPNetworkManager {
       version: PROTOCOL_VERSION,
       clientTime: performance.now()
     };
-    this.sendBinaryPacket(packet);
+    
+    const buffer = this.serializePacket(packet);
+    
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(buffer);
+      this.stats.bytesSent += buffer.byteLength;
+      this.stats.packetsSent++;
+      this.stats.messagesSent++;
+    }
+    
     this.lastPingTime = performance.now();
   }
   
@@ -574,7 +695,7 @@ export class UDPNetworkManager {
     }
   }
   
-  // Utility methods for fixed-point conversion
+  // Quantization helpers - must match server protocol.h exactly
   
   private floatToQ15(value: number): number {
     // Convert float [-1.0, 1.0] to Q0.15 fixed-point
@@ -586,15 +707,48 @@ export class UDPNetworkManager {
     return value / 32767.0;
   }
   
+  private quantizePosition(pos: number): number {
+    // Matches server: pos * 512.0f + 32768.0f (bias for signed range)
+    return Math.round(pos * 512.0 + 32768.0) & 0xFFFF;
+  }
+  
   private unquantizePosition(pos: number): number {
+    // Matches server: (pos - 32768) / 512.0f
     return (pos - 32768) / 512.0;
   }
   
+  private quantizeVelocity(vel: number): number {
+    // Matches server: vel * 256.0f + 32768.0f
+    return Math.round(vel * 256.0 + 32768.0) & 0xFFFF;
+  }
+  
   private unquantizeVelocity(vel: number): number {
+    // Matches server: (vel - 32768) / 256.0f
     return (vel - 32768) / 256.0;
   }
   
+  private quantizeRotation(angle: number): number {
+    // Matches server: normalize to [0, 2π) then quantize
+    while (angle < 0) angle += 2 * Math.PI;
+    while (angle >= 2 * Math.PI) angle -= 2 * Math.PI;
+    return Math.round(angle * 1024.0 / (2 * Math.PI)) & 0xFFFF;
+  }
+  
   private unquantizeRotation(rot: number): number {
+    // Matches server: rot * 2π / 1024.0f
     return rot * (2 * Math.PI) / 1024.0;
+  }
+  
+  private calculateChecksum(buffer: ArrayBuffer, length: number): number {
+    // Simple checksum algorithm matching server implementation
+    const bytes = new Uint8Array(buffer, 0, length);
+    let sum = 0;
+    
+    for (let i = 0; i < length; i++) {
+      sum += bytes[i];
+      sum = (sum & 0xFFFF) + (sum >> 16); // Fold carry bits
+    }
+    
+    return (~sum) & 0xFFFF; // One's complement
   }
 }
