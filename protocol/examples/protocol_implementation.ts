@@ -4,34 +4,44 @@
  * This file shows practical examples of how to implement the pirate game
  * protocol based on the working server implementation.
  * 
- * Server: UDP port 8080 (game traffic) + HTTP port 8081 (admin panel)
- * Protocol: Simple text-based commands with JSON responses for development
+ * Updated: September 27, 2025
+ * Server: ✅ UDP port 8080 + ✅ HTTP port 8081 + ✅ WebSocket port 8082
+ * Protocol: Simple text-based commands with JSON responses (WORKING)
+ * 
+ * 🎉 NEW: WebSocket support for browser clients!
+ *    - Native clients can use UDP directly
+ *    - Browser clients use WebSocket with automatic protocol translation
+ *    - Both protocols work with the same server simultaneously
+ * 
+ * See protocol_implementation_websocket.ts for full WebSocket client example
  */
 
 // =============================================================================
 // PROTOCOL CONSTANTS
 // =============================================================================
 
-// Server endpoints
+// Server endpoints (LIVE AND TESTED)
 const GAME_SERVER_HOST = 'localhost';
-const GAME_SERVER_PORT = 8080;
-const ADMIN_PANEL_URL = 'http://localhost:8081';
+const UDP_PORT = 8080;           // ✅ UDP for native clients  
+const ADMIN_PANEL_PORT = 8081;   // ✅ HTTP admin panel
+const WEBSOCKET_PORT = 8082;     // ✅ WebSocket for browsers
 
-// Protocol commands (working implementation)
+// Protocol commands (confirmed working on server)
 enum GameCommand {
-    PING = 'PING',      // Test connectivity - server responds with 'PONG'
-    JOIN = 'JOIN',      // Join game - server responds with welcome JSON
-    STATE = 'STATE',    // Request game state - server responds with state JSON
-    INPUT = 'INPUT',    // Send player input - server echoes or processes
-    LEAVE = 'LEAVE'     // Leave game - server acknowledges
+    PING = 'PING',      // ✅ Test connectivity - server responds with 'PONG'
+    JOIN = 'JOIN',      // ✅ Join game: 'JOIN:PlayerName' -> JSON welcome response  
+    STATE = 'STATE',    // ✅ Request game state -> JSON state response
+    QUIT = 'QUIT',      // ✅ Graceful disconnect
+    INPUT = 'INPUT',    // 🚧 Send player input (future)
+    LEAVE = 'LEAVE'     // 🚧 Leave game (alias for QUIT)
 }
 
-// Server response types
+// Server response types (confirmed working)
 enum ServerResponse {
-    PONG = 'PONG',
-    WELCOME = 'WELCOME',
-    GAME_STATE = 'GAME_STATE',
-    ECHO = 'ECHO'
+    PONG = 'PONG',                // Simple text response to PING
+    WELCOME = 'WELCOME',          // JSON: {type:'WELCOME', player_id:1234, player_name:'Name', server_time:12345}
+    GAME_STATE = 'GAME_STATE',    // JSON: {type:'GAME_STATE', tick:123, time:12345, ships:[], players:[], projectiles:[]}
+    UNKNOWN_COMMAND = 'UNKNOWN_COMMAND'  // Text response for unrecognized commands
 }
 
 // =============================================================================
@@ -100,7 +110,7 @@ class PirateGameClient {
         try {
             // For direct UDP testing, use a WebSocket-to-UDP proxy
             // In production, server would provide WebSocket endpoint
-            this.socket = new WebSocket(`ws://${GAME_SERVER_HOST}:${GAME_SERVER_PORT + 1000}`);
+            this.socket = new WebSocket(`ws://${GAME_SERVER_HOST}:${WEBSOCKET_PORT}`);
             
             this.socket.onopen = () => {
                 console.log('🔗 Connected to pirate game server');
@@ -241,7 +251,7 @@ class DirectUDPClient {
     private serverAddress: string;
     private serverPort: number;
 
-    constructor(host: string = GAME_SERVER_HOST, port: number = GAME_SERVER_PORT) {
+    constructor(host: string = GAME_SERVER_HOST, port: number = UDP_PORT) {
         this.serverAddress = host;
         this.serverPort = port;
         
@@ -309,7 +319,7 @@ class DirectUDPClient {
 class AdminPanelClient {
     private baseUrl: string;
 
-    constructor(baseUrl: string = ADMIN_PANEL_URL) {
+    constructor(baseUrl: string = `http://${GAME_SERVER_HOST}:${ADMIN_PANEL_PORT}`) {
         this.baseUrl = baseUrl;
     }
 

@@ -3,6 +3,7 @@
 #include "sim/simulation.h"
 #include "sim/types.h"
 #include "net/network.h"
+#include "net/websocket_server.h"
 #include "admin/admin_server.h"
 #include "util/log.h"
 #include "util/time.h"
@@ -78,11 +79,22 @@ int server_init(struct ServerContext** ctx) {
         return -1;
     }
     
+    // Initialize WebSocket server on port 8082
+    if (websocket_server_init(8082) != 0) {
+        log_error("Failed to initialize WebSocket server");
+        admin_server_cleanup(&server->admin);
+        network_cleanup(&server->network);
+        simulation_cleanup(&server->simulation);
+        free(server);
+        return -1;
+    }
+    
     log_info("Server initialized successfully");
     log_info("Simulation running at %d Hz (%.3f ms per tick)", 
              TICK_RATE_HZ, (float)TICK_DURATION_MS);
     log_info("Game server listening on UDP port 8080");
     log_info("Admin panel available at http://localhost:8081");
+    log_info("WebSocket server available on port 8082");
     
     *ctx = server;
     return 0;
@@ -108,6 +120,7 @@ void server_shutdown(struct ServerContext* ctx) {
     }
     
     // Cleanup subsystems
+    websocket_server_cleanup();
     admin_server_cleanup(&ctx->admin);
     network_cleanup(&ctx->network);
     simulation_cleanup(&ctx->simulation);
@@ -193,6 +206,12 @@ void server_tick(struct ServerContext* ctx) {
     
     // Update network systems (reliability, heartbeats, etc.)
     network_update(&ctx->network, current_time);
+    
+    // Update admin server (handle HTTP requests)
+    admin_server_update(&ctx->admin, &ctx->simulation, &ctx->network);
+    
+    // Update WebSocket server (handle browser clients)
+    websocket_server_update(&ctx->simulation);
     
     // Run physics simulation step
     simulation_step(&ctx->simulation);

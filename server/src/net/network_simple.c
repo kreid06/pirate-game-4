@@ -55,6 +55,15 @@ int network_init(struct NetworkManager* net_mgr, uint16_t port) {
     net_mgr->last_stats_time = get_time_ms();
     
     log_info("Network initialized on UDP port %u", port);
+    
+    // Enhanced startup message
+    printf("\n🏴‍☠️ ═══════════════════════════════════════════════════════════════\n");
+    printf("🌊 Pirate Game Server - Network Layer Ready!\n");
+    printf("🔗 UDP Socket listening on 0.0.0.0:%u\n", port);
+    printf("📡 Supported commands: PING, JOIN:PlayerName, STATE, QUIT\n");
+    printf("🎮 Ready to accept client connections...\n");
+    printf("═══════════════════════════════════════════════════════════════\n\n");
+    
     return 0;
 }
 
@@ -98,62 +107,125 @@ int network_process_incoming(struct NetworkManager* net_mgr, struct Sim* sim) {
         net_mgr->bandwidth_used += received;
         packets_processed++;
         
-        // Log incoming packet for debugging
+        // Get client info for logging
         char client_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+        uint16_t client_port = ntohs(client_addr.sin_port);
         
-        log_info("Received %ld bytes from %s:%u - Content: %.50s%s", 
-                 received, client_ip, ntohs(client_addr.sin_port),
-                 buffer, received > 50 ? "..." : "");
+        // Enhanced connection logging
+        printf("🔗 [CONNECTION] %s:%u → Server | ", client_ip, client_port);
         
-        // Simple protocol handling
+        // Null-terminate buffer for safe string operations
+        buffer[received] = '\0';
+        
+        // Log the command being processed
         if (received >= 4 && strncmp(buffer, "PING", 4) == 0) {
+            printf("PING request\n");
+            log_info("📡 PING from %s:%u", client_ip, client_port);
+            
             // Respond to ping
             const char* pong = "PONG";
             ssize_t sent = sendto(net_mgr->socket_fd, pong, 4, 0,
                                  (struct sockaddr*)&client_addr, addr_len);
             if (sent > 0) {
                 net_mgr->bandwidth_used += sent;
-                log_info("Sent PONG response to %s:%u", client_ip, ntohs(client_addr.sin_port));
+                printf("✅ [RESPONSE] Server → %s:%u | PONG sent (%ld bytes)\n", 
+                       client_ip, client_port, sent);
+                log_info("📡 PONG response sent to %s:%u", client_ip, client_port);
+            } else {
+                printf("❌ [ERROR] Failed to send PONG to %s:%u\n", client_ip, client_port);
+                log_error("Failed to send PONG to %s:%u: %s", client_ip, client_port, strerror(errno));
             }
         }
         else if (received >= 4 && strncmp(buffer, "JOIN", 4) == 0) {
+            // Extract player name if provided
+            char player_name[64] = "Unknown";
+            if (received > 5 && buffer[4] == ':') {
+                strncpy(player_name, &buffer[5], sizeof(player_name) - 1);
+                player_name[sizeof(player_name) - 1] = '\0';
+            }
+            
+            printf("JOIN request (Player: %s)\n", player_name);
+            log_info("🎮 JOIN request from %s:%u - Player: %s", client_ip, client_port, player_name);
             // Handle join request
             char response[256];
             int len = snprintf(response, sizeof(response), 
-                              "{\"type\":\"WELCOME\",\"player_id\":%u,\"server_time\":%u}",
-                              1234, get_time_ms());
+                              "{\"type\":\"WELCOME\",\"player_id\":%u,\"server_time\":%u,\"player_name\":\"%s\"}",
+                              1234, get_time_ms(), player_name);
             
             ssize_t sent = sendto(net_mgr->socket_fd, response, len, 0,
                                  (struct sockaddr*)&client_addr, addr_len);
             if (sent > 0) {
                 net_mgr->bandwidth_used += sent;
-                log_info("Sent WELCOME response to %s:%u", client_ip, ntohs(client_addr.sin_port));
+                printf("✅ [RESPONSE] Server → %s:%u | WELCOME sent (%ld bytes) - Player ID: 1234\n", 
+                       client_ip, client_port, sent);
+                log_info("🎮 WELCOME response sent to %s:%u - Player: %s assigned ID 1234", 
+                        client_ip, client_port, player_name);
+            } else {
+                printf("❌ [ERROR] Failed to send WELCOME to %s:%u\n", client_ip, client_port);
+                log_error("Failed to send WELCOME to %s:%u: %s", client_ip, client_port, strerror(errno));
             }
         }
         else if (received >= 5 && strncmp(buffer, "STATE", 5) == 0) {
+            printf("STATE request\n");
+            log_info("🗺️ STATE request from %s:%u", client_ip, client_port);
+            
             // Send game state
             char state[512];
             int len = snprintf(state, sizeof(state),
-                              "{\"type\":\"GAME_STATE\",\"tick\":%u,\"ships\":[],\"players\":[],\"projectiles\":[]}",
-                              sim ? sim->tick : 0);
+                              "{\"type\":\"GAME_STATE\",\"tick\":%u,\"time\":%u,\"ships\":[],\"players\":[],\"projectiles\":[]}",
+                              sim ? sim->tick : 0, get_time_ms());
             
             ssize_t sent = sendto(net_mgr->socket_fd, state, len, 0,
                                  (struct sockaddr*)&client_addr, addr_len);
             if (sent > 0) {
                 net_mgr->bandwidth_used += sent;
-                log_info("Sent GAME_STATE to %s:%u", client_ip, ntohs(client_addr.sin_port));
+                printf("✅ [RESPONSE] Server → %s:%u | GAME_STATE sent (%ld bytes) - Tick: %u\n", 
+                       client_ip, client_port, sent, sim ? sim->tick : 0);
+                log_info("🗺️ GAME_STATE response sent to %s:%u - Tick: %u", 
+                        client_ip, client_port, sim ? sim->tick : 0);
+            } else {
+                printf("❌ [ERROR] Failed to send GAME_STATE to %s:%u\n", client_ip, client_port);
+                log_error("Failed to send GAME_STATE to %s:%u: %s", client_ip, client_port, strerror(errno));
+            }
+        }
+        else if (received >= 4 && strncmp(buffer, "QUIT", 4) == 0) {
+            printf("QUIT request\n");
+            log_info("👋 QUIT request from %s:%u", client_ip, client_port);
+            
+            const char* goodbye = "GOODBYE";
+            ssize_t sent = sendto(net_mgr->socket_fd, goodbye, 7, 0,
+                                 (struct sockaddr*)&client_addr, addr_len);
+            if (sent > 0) {
+                net_mgr->bandwidth_used += sent;
+                printf("✅ [RESPONSE] Server → %s:%u | GOODBYE sent - Client disconnecting\n", 
+                       client_ip, client_port);
+                log_info("👋 GOODBYE response sent to %s:%u", client_ip, client_port);
             }
         }
         else {
+            // Log unknown command
+            char cmd_preview[32];
+            snprintf(cmd_preview, sizeof(cmd_preview), "%.20s%s", buffer, received > 20 ? "..." : "");
+            printf("UNKNOWN command: %s\n", cmd_preview);
+            log_info("❓ Unknown command from %s:%u: %s", client_ip, client_port, cmd_preview);
+            
             // Echo unknown packets back for testing
             ssize_t sent = sendto(net_mgr->socket_fd, buffer, received, 0,
                                  (struct sockaddr*)&client_addr, addr_len);
             if (sent > 0) {
                 net_mgr->bandwidth_used += sent;
-                log_info("Echoed %ld bytes back to %s:%u", sent, client_ip, ntohs(client_addr.sin_port));
+                printf("✅ [RESPONSE] Server → %s:%u | ECHO sent (%ld bytes)\n", 
+                       client_ip, client_port, sent);
+                log_info("🔄 Echoed %ld bytes back to %s:%u", sent, client_ip, client_port);
+            } else {
+                printf("❌ [ERROR] Failed to echo to %s:%u\n", client_ip, client_port);
+                log_error("Failed to echo to %s:%u: %s", client_ip, client_port, strerror(errno));
             }
         }
+        
+        // Add separator line for readability
+        printf("─────────────────────────────────────────────────────\n");
     }
     
     return packets_processed;
