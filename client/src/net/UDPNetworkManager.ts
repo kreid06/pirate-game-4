@@ -41,6 +41,9 @@ export interface NetworkStats {
   bytesSent: number;
   packetsReceived: number;
   packetsSent: number;
+  messagesReceived: number; // Alias for packetsReceived for compatibility
+  messagesSent: number;     // Alias for packetsSent for compatibility
+  averageFPS: number;       // Server tick rate
   connectionState: ConnectionState;
 }
 
@@ -122,12 +125,17 @@ export class UDPNetworkManager {
     bytesSent: 0,
     packetsReceived: 0,
     packetsSent: 0,
+    messagesReceived: 0,
+    messagesSent: 0,
+    averageFPS: 0,
     connectionState: ConnectionState.DISCONNECTED
   };
   
   // Timing
   private lastPingTime: number = 0;
   private serverTimeOffset: number = 0;
+  private lastSnapshotTime: number = 0;
+  private snapshotCount: number = 0;
   
   // Event handlers
   private onWorldStateUpdate: ((worldState: WorldState) => void) | null = null;
@@ -238,6 +246,7 @@ export class UDPNetworkManager {
         this.handleBinaryMessage(event.data);
         this.stats.bytesReceived += event.data.byteLength;
         this.stats.packetsReceived++;
+        this.stats.messagesReceived++; // Compatibility alias
       }
     };
     
@@ -416,6 +425,17 @@ export class UDPNetworkManager {
     if (this.onWorldStateUpdate) {
       this.onWorldStateUpdate(worldState);
     }
+    
+    // Update FPS tracking
+    const now = performance.now();
+    if (this.lastSnapshotTime > 0) {
+      const deltaTime = now - this.lastSnapshotTime;
+      const instantFPS = 1000 / deltaTime; // Convert ms to fps
+      // Simple moving average
+      this.stats.averageFPS = (this.stats.averageFPS * 0.9) + (instantFPS * 0.1);
+    }
+    this.lastSnapshotTime = now;
+    this.snapshotCount++;
   }
   
   private handleHeartbeat(view: DataView): void {
@@ -437,6 +457,7 @@ export class UDPNetworkManager {
     this.socket.send(buffer);
     this.stats.bytesSent += buffer.byteLength;
     this.stats.packetsSent++;
+    this.stats.messagesSent++; // Compatibility alias
   }
   
   private serializePacket(packet: any): ArrayBuffer {

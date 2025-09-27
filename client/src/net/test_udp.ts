@@ -8,10 +8,13 @@ import { Vec2 } from '../common/Vec2.js';
 
 // Test configuration
 const testConfig = {
-  serverUrl: 'ws://localhost:8080', // WebSocket bridge to UDP server
-  reconnectAttempts: 3,
+  serverUrl: 'ws://192.168.56.10:8080',
+  maxReconnectAttempts: 3,
+  reconnectDelay: 2000,
   heartbeatInterval: 5000,
-  timeout: 10000
+  timeoutDuration: 10000,
+  protocol: 'websocket' as const,
+  fallbackToWebSocket: true
 };
 
 async function testUDPConnection() {
