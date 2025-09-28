@@ -100,7 +100,7 @@ Replace the content of your `index.html` to use the new client:
 The client supports URL-based configuration:
 
 ```
-?server=ws://localhost:8080    # Custom server URL
+?server=ws://localhost:8082    # Custom server URL
 ?debug=true                    # Enable debug mode
 ?fps=120                       # Target FPS
 ```
@@ -112,7 +112,7 @@ The client supports URL-based configuration:
 const devConfig = {
   debug: { enabled: true, showNetworkStats: true },
   graphics: { particleQuality: 'high', antialiasing: true },
-  network: { serverUrl: 'ws://localhost:8080' }
+  network: { serverUrl: 'ws://localhost:8082' }
 };
 
 // Production configuration  
