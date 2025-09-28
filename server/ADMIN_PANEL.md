@@ -35,14 +35,14 @@ The Pirate Game Server includes a **built-in web-based admin control panel** tha
 ```
 ┌─────────────────┐    HTTP    ┌─────────────────┐
 │   Web Browser   │◄─────────►│   Admin Server   │
-│  (Dashboard)    │    8081    │   (Non-blocking) │
+│  (Dashboard)    │    8082    │   (Non-blocking) │
 └─────────────────┘            └─────────────────┘
                                         │
                                         ▼
 ┌─────────────────┐            ┌─────────────────┐
 │  Game Server    │            │  JSON APIs      │
 │  (30Hz Physics) │◄──────────►│  /api/status    │
-│  UDP Port 8080  │            │  /api/entities  │
+│  UDP Port 8081  │            │  /api/entities  │
 └─────────────────┘            │  /api/physics   │
                                │  /api/network   │
                                │  /api/performance│

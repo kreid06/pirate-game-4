@@ -32,10 +32,18 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
     
-    printf("Server initialized successfully\n");
-    printf("Listening on UDP port 8080\n");
-    printf("Tick rate: %d Hz (%.3f ms per tick)\n", TICK_RATE_HZ, 
+    printf("\n🌊 ═══════════════════ PIRATE GAME SERVER READY ═══════════════════\n");
+    printf("🚀 Server initialized successfully with Week 3-4 enhancements\n");
+    printf("\n🌐 WebSocket Server (Browser Clients): ws://localhost:8080\n");
+    printf("   → Ready for JavaScript/TypeScript clients\n");
+    printf("   → JSON message protocol with UDP compatibility\n");
+    printf("📡 UDP Server (Native Clients): udp://localhost:8081\n");  
+    printf("   → Binary protocol for high-performance clients\n");
+    printf("⚙️  Admin Panel: http://localhost:8082\n");
+    printf("   → Server statistics and management interface\n");
+    printf("\n⚡ Simulation: %d Hz (%.3f ms per tick)\n", TICK_RATE_HZ, 
            (float)TICK_DURATION_MS);
+    printf("═══════════════════════════════════════════════════════════════════\n");
     printf("Press Ctrl+C to stop\n");
     
     // Run main server loop

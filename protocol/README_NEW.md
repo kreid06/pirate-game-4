@@ -4,9 +4,9 @@ This directory contains working examples of how to implement the Pirate Game net
 
 ## 🚀 Live Server Status
 
-✅ **UDP Game Server** - Port 8080 - Native clients  
-✅ **HTTP Admin Panel** - Port 8081 - Web dashboard  
-✅ **WebSocket Server** - Port 8082 - Browser clients  
+✅ **WebSocket Server** - Port 8080 - Browser clients  
+✅ **UDP Game Server** - Port 8081 - Native clients  
+✅ **HTTP Admin Panel** - Port 8082 - Web dashboard  
 
 ## 📁 Files
 
@@ -35,27 +35,27 @@ cd protocol
 python3 -m http.server 3000
 
 # Open: http://localhost:3000/websocket_test.html
-# Click "Connect" to test WebSocket on port 8082
+# Click "Connect" to test WebSocket on port 8080
 ```
 
 ### 2. Test UDP (Command Line)
 ```bash
 # Test PING
-echo "PING" | nc -u localhost 8080
+echo "PING" | nc -u localhost 8081
 # Response: PONG
 
 # Test JOIN
-echo "JOIN:TestPlayer" | nc -u localhost 8080  
+echo "JOIN:TestPlayer" | nc -u localhost 8081  
 # Response: {"type":"WELCOME","player_id":1234,"server_time":12345,"player_name":"TestPlayer"}
 
 # Test STATE
-echo "STATE" | nc -u localhost 8080
+echo "STATE" | nc -u localhost 8081
 # Response: {"type":"GAME_STATE","tick":123,"time":12345,"ships":[],"players":[],"projectiles":[]}
 ```
 
 ### 3. Test Admin Panel (HTTP)
 ```bash
-# Open in browser: http://localhost:8081
+# Open in browser: http://localhost:8082
 # Features:
 # - Server status dashboard
 # - Live map visualization  
@@ -69,7 +69,7 @@ The server automatically translates between UDP and WebSocket:
 
 ```
 Native Client --UDP--> Server <--WebSocket-- Browser Client
-             (Port 8080)     (Port 8082)
+             (Port 8081)     (Port 8080)
 ```
 
 Both clients can:

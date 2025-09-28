@@ -12,7 +12,7 @@ BINDIR = bin
 
 # Source files (excluding duplicates and test files)
 CORE_SOURCES = $(filter-out $(SRCDIR)/core/server.c, $(wildcard $(SRCDIR)/core/*.c)) $(wildcard $(SRCDIR)/sim/*.c) $(wildcard $(SRCDIR)/util/*.c)
-NET_SOURCES = $(SRCDIR)/net/network.c $(SRCDIR)/net/protocol.c $(SRCDIR)/net/reliability.c $(SRCDIR)/net/snapshot.c
+NET_SOURCES = $(SRCDIR)/net/network.c $(SRCDIR)/net/protocol.c $(SRCDIR)/net/reliability.c $(SRCDIR)/net/snapshot.c $(SRCDIR)/net/websocket_server.c $(SRCDIR)/net/websocket_protocol.c
 AOI_SOURCES = $(wildcard $(SRCDIR)/aoi/*.c)
 ADMIN_SOURCES = $(SRCDIR)/admin/admin_server.c $(SRCDIR)/admin/admin_api.c
 MAIN_SOURCES = $(SRCDIR)/main.c $(SRCDIR)/server.c
@@ -33,7 +33,7 @@ $(BINDIR):
 
 # Build target
 # Libraries 
-LIBS = -lm -lpthread
+LIBS = -lm -lpthread -lssl -lcrypto
 OPTIONAL_LIBS = -lwebsockets -ljson-c
 
 # Link the target

@@ -13,7 +13,7 @@ struct WebSocketStats {
 
 /**
  * Initialize WebSocket server for browser clients
- * @param port Port to listen on (e.g., 8082)
+ * @param port Port to listen on (e.g., 8080 for browser clients)
  * @return 0 on success, -1 on error
  */
 int websocket_server_init(uint16_t port);

@@ -1,7 +1,16 @@
 #define _DEFAULT_SOURCE
 #include "server.h"
 #include "sim/simulation.h"
-#include "sim/types.h"
+#in    // Initialize network layer (UDP) on port 8081
+    if (network_init(&server->network, 8081) != 0) {
+        log_error("Failed to initialize network manager");
+        simulation_cleanup(&server->simulation);
+        free(server);
+        return -1;
+    }
+    
+    // Initialize admin server on port 8082
+    if (admin_server_init(&server->admin, 8082) != 0) {/types.h"
 #include "net/network.h"
 #include "net/websocket_server.h"
 #include "admin/admin_server.h"
@@ -73,16 +82,16 @@ int server_init(struct ServerContext** ctx) {
         return -1;
     }
     
-    // Initialize networking on port 8080
-    if (network_init(&server->network, 8080) != 0) {
+    // Initialize network layer (UDP) on port 8081
+    if (network_init(&server->network, 8081) != 0) {
         log_error("Failed to initialize network manager");
         simulation_cleanup(&server->simulation);
         free(server);
         return -1;
     }
     
-    // Initialize admin server on port 8081
-    if (admin_server_init(&server->admin, 8081) != 0) {
+    // Initialize admin server on port 8082
+    if (admin_server_init(&server->admin, 8082) != 0) {
         log_error("Failed to initialize admin server");
         network_cleanup(&server->network);
         simulation_cleanup(&server->simulation);
@@ -90,8 +99,8 @@ int server_init(struct ServerContext** ctx) {
         return -1;
     }
     
-    // Initialize WebSocket server on port 8082
-    if (websocket_server_init(8082) != 0) {
+    // Initialize WebSocket server on port 8080 (browser clients)
+    if (websocket_server_init(8080) != 0) {
         log_error("Failed to initialize WebSocket server");
         admin_server_cleanup(&server->admin);
         network_cleanup(&server->network);
@@ -100,14 +109,21 @@ int server_init(struct ServerContext** ctx) {
         return -1;
     }
     
-    log_info("Server initialized successfully with Week 3-4 enhancements");
-    log_info("Simulation running at %d Hz (%.3f ms per tick)", 
+    log_info("🚀 Pirate Game Server initialized successfully with Week 3-4 enhancements");
+    log_info("⚡ Simulation running at %d Hz (%.3f ms per tick)", 
              TICK_RATE_HZ, (float)TICK_DURATION_MS);
-    log_info("Rewind buffer: %d frames (≥%dms coverage)", 
+    log_info("⏪ Rewind buffer: %d frames (≥%dms coverage)", 
              REWIND_BUFFER_SIZE, MAX_REWIND_TIME_MS);
-    log_info("Game server listening on UDP port 8080");
-    log_info("Admin panel available at http://localhost:8081");
-    log_info("WebSocket server available on port 8082");
+    
+    printf("\n� ═══════════════════ PIRATE GAME SERVER READY ═══════════════════\n");
+    printf("�🌐 WebSocket Server (Browser Clients): ws://localhost:8080\n");
+    printf("   → Ready for JavaScript/TypeScript clients\n");
+    printf("   → JSON message protocol with UDP compatibility\n");
+    printf("📡 UDP Server (Native Clients): udp://localhost:8081\n");
+    printf("   → Binary protocol for high-performance clients\n");
+    printf("⚙️  Admin Panel: http://localhost:8082\n");
+    printf("   → Server statistics and management interface\n");
+    printf("═══════════════════════════════════════════════════════════════════\n\n");
     
     *ctx = server;
     return 0;
