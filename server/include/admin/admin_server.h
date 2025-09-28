@@ -10,7 +10,7 @@ struct Sim;
 struct NetworkManager;
 
 // Admin server configuration
-#define ADMIN_DEFAULT_PORT 8081
+#define ADMIN_DEFAULT_PORT 8082
 #define ADMIN_MAX_CONNECTIONS 10
 #define ADMIN_BUFFER_SIZE 4096
 #define ADMIN_MAX_CLIENTS 5

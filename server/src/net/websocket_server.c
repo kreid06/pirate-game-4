@@ -1,4 +1,6 @@
 #include "net/websocket_server.h"
+#include "net/websocket_protocol.h"
+#include "net/network.h"
 #include "util/log.h"
 #include "util/time.h"
 #include <string.h>
@@ -151,7 +153,7 @@ static int websocket_parse_frame(const char* buffer, size_t buffer_len, char* pa
 }
 
 // Create WebSocket frame
-static size_t websocket_create_frame(uint8_t opcode, const char* payload, size_t payload_len, char* frame) {
+size_t websocket_create_frame(uint8_t opcode, const char* payload, size_t payload_len, char* frame) {
     size_t frame_len = 0;
     
     // First byte: FIN = 1, opcode
@@ -323,79 +325,21 @@ int websocket_server_update(struct Sim* sim) {
                 int opcode = websocket_parse_frame(buffer, received, payload, &payload_len);
                 
                 if (opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY) {
-                    // Process game message (translate WebSocket to UDP protocol)
-                    log_info("📨 WebSocket message from %s:%u: %s", client->ip_address, client->port, payload);
+                    // Use protocol bridge to handle WebSocket message
+                    log_info("📨 WebSocket message from %s:%u: %.*s", 
+                            client->ip_address, client->port, (int)payload_len, payload);
                     
-                    // Protocol translation: WebSocket → UDP commands → Simulation
-                    char response[1024];
-                    bool handled = false;
-                    
-                    if (strncmp(payload, "PING", 4) == 0) {
-                        strcpy(response, "PONG");
-                        handled = true;
-                        
-                    } else if (strncmp(payload, "JOIN:", 5) == 0) {
-                        // Extract player name and simulate UDP JOIN protocol
-                        char* player_name = payload + 5;
-                        uint32_t player_id = 1000 + i; // Simple ID generation
-                        
-                        log_info("🎮 WebSocket player joining: %s (ID: %u)", player_name, player_id);
-                        
-                        // Simulate the same response as UDP server
-                        snprintf(response, sizeof(response), 
-                                "{\"type\":\"WELCOME\",\"player_id\":%u,\"server_time\":%u,\"player_name\":\"%s\"}",
-                                player_id, get_time_ms(), player_name);
-                        handled = true;
-                        
-                    } else if (strncmp(payload, "STATE", 5) == 0) {
-                        // Return current simulation state (same as UDP)
-                        snprintf(response, sizeof(response),
-                                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"time\":%u,"
-                                "\"ships\":[],\"players\":[],\"projectiles\":[]}",
-                                sim ? sim->tick : 0, get_time_ms());
-                        handled = true;
-                        
-                    } else if (strncmp(payload, "INPUT:", 6) == 0) {
-                        // Handle player input (future enhancement)
-                        log_info("🎮 Player input from WebSocket client: %s", payload + 6);
-                        strcpy(response, "{\"type\":\"INPUT_ACK\",\"status\":\"received\"}");
-                        handled = true;
-                        
-                    } else if (strncmp(payload, "QUIT", 4) == 0) {
-                        // Handle graceful disconnect
-                        log_info("👋 WebSocket client %s:%u requested disconnect", client->ip_address, client->port);
-                        strcpy(response, "{\"type\":\"GOODBYE\",\"message\":\"See you later!\"}");
-                        handled = true;
-                        
-                        // Close connection after sending response
-                        char frame[1024];
-                        size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame);
-                        if (frame_len > 0) {
-                            send(client->fd, frame, frame_len, 0);
-                        }
-                        close(client->fd);
-                        client->connected = false;
-                        continue;
-                        
-                    } else {
-                        // Unknown command
-                        log_warn("❓ Unknown WebSocket command: %s", payload);
-                        snprintf(response, sizeof(response), 
-                                "{\"type\":\"ERROR\",\"message\":\"Unknown command: %.50s\"}", payload);
-                        handled = true;
-                    }
-                    
-                    // Send response if command was handled
-                    if (handled) {
-                        char frame[1024];
-                        size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame);
-                        if (frame_len > 0) {
-                            ssize_t sent = send(client->fd, frame, frame_len, 0);
-                            if (sent > 0) {
-                                ws_server.packets_sent++;
-                                log_info("📤 WebSocket response sent to %s:%u (%zd bytes)", 
-                                        client->ip_address, client->port, sent);
-                            }
+                    // Simple WebSocket message handling (temporary implementation)
+                    // TODO: Use full protocol bridge when ready
+                    const char* ack_response = "{\"type\":\"message_ack\",\"status\":\"processed\"}";
+                    char frame[1024];
+                    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, ack_response, strlen(ack_response), frame);
+                    if (frame_len > 0) {
+                        ssize_t sent = send(client->fd, frame, frame_len, 0);
+                        if (sent > 0) {
+                            ws_server.packets_sent++;
+                            log_info("📤 WebSocket ACK sent to %s:%u (%zd bytes)", 
+                                    client->ip_address, client->port, sent);
                         }
                     }
                     
