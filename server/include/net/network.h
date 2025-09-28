@@ -43,7 +43,8 @@ int network_send_snapshots(struct NetworkManager* net_mgr, struct Sim* sim);
 // Handle new player connection
 int network_handle_handshake(struct NetworkManager* net_mgr, 
                             const struct sockaddr_in* from_addr,
-                            const struct HandshakePacket* handshake);
+                            const struct HandshakePacket* handshake,
+                            struct Sim* sim);
 
 // Process player command input
 int network_process_player_input(struct NetworkManager* net_mgr, struct Sim* sim,

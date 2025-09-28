@@ -15,6 +15,22 @@ static void update_projectile_physics(struct Projectile* projectile, q16_t dt);
 static void handle_ship_collisions(struct Sim* sim);
 static entity_id allocate_entity_id(struct Sim* sim);
 
+/**
+ * Allocate a new unique entity ID
+ */
+static entity_id allocate_entity_id(struct Sim* sim) {
+    static entity_id next_id = 1;
+    
+    // Simple sequential allocation
+    // TODO: Add recycling for production use
+    entity_id id = next_id++;
+    
+    // Avoid overflow (entity_id is uint16_t)
+    if (next_id == 0) next_id = 1;
+    
+    return id;
+}
+
 int sim_init(struct Sim* sim, const struct SimConfig* config) {
     if (!sim || !config) {
         log_error("Invalid simulation or config parameters");
@@ -69,7 +85,7 @@ void sim_step(struct Sim* sim, q16_t dt) {
     sim_handle_collisions(sim);
     
     // Update spatial acceleration structures
-    // TODO: Update spatial hash for collision detection
+    sim_update_spatial_hash(sim);
 }
 
 void sim_update_ships(struct Sim* sim, q16_t dt) {
@@ -144,8 +160,11 @@ void sim_handle_collisions(struct Sim* sim) {
     // Handle ship-to-ship collisions
     handle_ship_collisions(sim);
     
-    // TODO: Handle projectile collisions
-    // TODO: Handle player-ship collisions
+    // Handle projectile collisions with ships and players
+    handle_projectile_collisions(sim);
+    
+    // Handle player-ship collisions (boarding, falling off)
+    handle_player_ship_collisions(sim);
 }
 
 // Entity creation functions
@@ -168,7 +187,7 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
     ship->mass = Q16_FROM_FLOAT(1000.0f); // 1000 kg default
     ship->moment_inertia = Q16_FROM_FLOAT(50000.0f); // kg⋅m²
     ship->bounding_radius = Q16_FROM_FLOAT(10.0f); // 10m radius
-    ship->health = 100;
+    ship->hull_health = Q16_FROM_INT(100);
     
     // Create simple rectangular hull (8m × 3m)
     ship->hull_vertex_count = 4;
@@ -227,10 +246,11 @@ entity_id sim_create_projectile(struct Sim* sim, Vec2Q16 position, Vec2Q16 veloc
     memset(proj, 0, sizeof(struct Projectile));
     
     proj->id = id;
-    proj->shooter_id = shooter_id;
+    proj->owner_id = shooter_id;
     proj->position = position;
     proj->velocity = velocity;
-    proj->radius = Q16_FROM_FLOAT(0.12f); // 12cm cannonball radius
+    proj->damage = Q16_FROM_INT(25); // 25 damage per hit
+    proj->lifetime = Q16_FROM_INT(10); // 10 second lifetime
     proj->spawn_time = sim->time_ms;
     proj->damage = 50;
     proj->type = 0; // Cannonball
@@ -309,12 +329,44 @@ void sim_process_input(struct Sim* sim, const struct InputCmd* cmd) {
     }
     
     // Handle action buttons
-    if (cmd->actions & ACTION_FIRE_CANNON) {
-        // TODO: Fire cannon
+    if (cmd->actions & PLAYER_ACTION_FIRE_CANNON) {
+        // Fire cannon if player has one equipped
+        struct Player* player = sim_get_player(sim, cmd->player_id);
+        if (player && player->ship_id != INVALID_ENTITY_ID) {
+            // Find the ship the player is on
+            struct Ship* ship = sim_get_ship(sim, player->ship_id);
+            if (ship) {
+                // Create cannonball projectile
+                Vec2Q16 cannon_pos = {
+                    ship->position.x + q16_mul(Q16_FROM_INT(30), q16_cos(ship->rotation)),
+                    ship->position.y + q16_mul(Q16_FROM_INT(30), q16_sin(ship->rotation))
+                };
+                Vec2Q16 cannon_velocity = {
+                    ship->velocity.x + q16_mul(Q16_FROM_INT(200), q16_cos(ship->rotation)),
+                    ship->velocity.y + q16_mul(Q16_FROM_INT(200), q16_sin(ship->rotation))
+                };
+                entity_id projectile = sim_create_projectile(sim, cannon_pos, cannon_velocity, player->id);
+                log_info("🔥 Player %u fired cannon from ship %u (projectile %u)", 
+                        player->id, ship->id, projectile);
+            }
+        }
     }
     
-    if (cmd->actions & ACTION_JUMP) {
-        // TODO: Handle jump action
+    if (cmd->actions & PLAYER_ACTION_JUMP) {
+        // Handle player jump
+        struct Player* player = sim_get_player(sim, cmd->player_id);
+        if (player) {
+            // Add vertical velocity for jump
+            player->velocity.y = q16_add_sat(player->velocity.y, Q16_FROM_INT(5)); // 5 m/s upward
+            
+            // If jumping from a ship, leave the ship
+            if (player->ship_id != INVALID_ENTITY_ID) {
+                log_info("🦘 Player %u jumped off ship %u", player->id, player->ship_id);
+                player->ship_id = INVALID_ENTITY_ID;
+            } else {
+                log_info("🦘 Player %u jumped", player->id);
+            }
+        }
     }
 }
 
@@ -514,6 +566,201 @@ bool simulation_has_entity(const struct Sim* sim, entity_id entity_id) {
     }
     
     return false;
+}
+
+// Spatial hash and collision detection functions
+void sim_update_spatial_hash(struct Sim* sim) {
+    // Clear the spatial hash
+    memset(sim->spatial_hash, 0, sizeof(sim->spatial_hash));
+    
+    // Add all ships to spatial hash
+    for (uint16_t i = 0; i < sim->ship_count; i++) {
+        struct Ship* ship = &sim->ships[i];
+        spatial_hash_add_ship(sim, ship);
+    }
+    
+    // Add all players to spatial hash
+    for (uint16_t i = 0; i < sim->player_count; i++) {
+        struct Player* player = &sim->players[i];
+        spatial_hash_add_player(sim, player);
+    }
+    
+    // Add all projectiles to spatial hash
+    for (uint32_t i = 0; i < sim->projectile_count; i++) {
+        struct Projectile* projectile = &sim->projectiles[i];
+        spatial_hash_add_projectile(sim, projectile);
+    }
+}
+
+void spatial_hash_add_ship(struct Sim* sim, struct Ship* ship) {
+    // Simple spatial hash: divide world into 1024x1024 unit cells
+    int32_t cell_x = Q16_TO_INT(ship->position.x) / 1024;
+    int32_t cell_y = Q16_TO_INT(ship->position.y) / 1024;
+    
+    // Clamp to hash bounds
+    if (cell_x < 0) cell_x = 0;
+    if (cell_y < 0) cell_y = 0;
+    if (cell_x >= SPATIAL_HASH_SIZE) cell_x = SPATIAL_HASH_SIZE - 1;
+    if (cell_y >= SPATIAL_HASH_SIZE) cell_y = SPATIAL_HASH_SIZE - 1;
+    
+    uint32_t hash_index __attribute__((unused)) = cell_y * SPATIAL_HASH_SIZE + cell_x;
+    struct SpatialCell* cell = &sim->spatial_hash[hash_index];
+    
+    // Add ship to cell (if room)
+    if (cell->ship_count < MAX_ENTITIES_PER_CELL) {
+        cell->ships[cell->ship_count++] = ship;
+    }
+}
+
+void spatial_hash_add_player(struct Sim* sim, struct Player* player) {
+    int32_t cell_x = Q16_TO_INT(player->position.x) / 1024;
+    int32_t cell_y = Q16_TO_INT(player->position.y) / 1024;
+    
+    if (cell_x < 0) cell_x = 0;
+    if (cell_y < 0) cell_y = 0;
+    if (cell_x >= SPATIAL_HASH_SIZE) cell_x = SPATIAL_HASH_SIZE - 1;
+    if (cell_y >= SPATIAL_HASH_SIZE) cell_y = SPATIAL_HASH_SIZE - 1;
+    
+    uint32_t hash_index __attribute__((unused)) = cell_y * SPATIAL_HASH_SIZE + cell_x;
+    struct SpatialCell* cell = &sim->spatial_hash[hash_index];
+    
+    if (cell->player_count < MAX_ENTITIES_PER_CELL) {
+        cell->players[cell->player_count++] = player;
+    }
+}
+
+void spatial_hash_add_projectile(struct Sim* sim, struct Projectile* projectile) {
+    int32_t cell_x = Q16_TO_INT(projectile->position.x) / 1024;
+    int32_t cell_y = Q16_TO_INT(projectile->position.y) / 1024;
+    
+    if (cell_x < 0) cell_x = 0;
+    if (cell_y < 0) cell_y = 0;
+    if (cell_x >= SPATIAL_HASH_SIZE) cell_x = SPATIAL_HASH_SIZE - 1;
+    if (cell_y >= SPATIAL_HASH_SIZE) cell_y = SPATIAL_HASH_SIZE - 1;
+    
+    uint32_t hash_index __attribute__((unused)) = cell_y * SPATIAL_HASH_SIZE + cell_x;
+    struct SpatialCell* cell = &sim->spatial_hash[hash_index];
+    
+    if (cell->projectile_count < MAX_ENTITIES_PER_CELL) {
+        cell->projectiles[cell->projectile_count++] = projectile;
+    }
+}
+
+// Enhanced collision detection functions
+void handle_projectile_collisions(struct Sim* sim) {
+    for (uint32_t i = 0; i < sim->projectile_count; i++) {
+        struct Projectile* proj = &sim->projectiles[i];
+        
+        // Get spatial cell for projectile
+        int32_t cell_x = Q16_TO_INT(proj->position.x) / 1024;
+        int32_t cell_y = Q16_TO_INT(proj->position.y) / 1024;
+        
+        if (cell_x < 0 || cell_y < 0 || cell_x >= SPATIAL_HASH_SIZE || cell_y >= SPATIAL_HASH_SIZE) {
+            continue; // Out of bounds
+        }
+        
+        uint32_t hash_index __attribute__((unused)) = cell_y * SPATIAL_HASH_SIZE + cell_x;
+        struct SpatialCell* cell = &sim->spatial_hash[hash_index];
+        
+        // Check collision with ships in this cell
+        for (uint16_t j = 0; j < cell->ship_count; j++) {
+            struct Ship* ship = cell->ships[j];
+            if (ship->id == proj->owner_id) continue; // Can't hit own ship
+            
+            // Simple distance check (ship radius ~50 units)
+            q16_t dx = ship->position.x - proj->position.x;
+            q16_t dy = ship->position.y - proj->position.y;
+            q16_t dist_sq = q16_mul(dx, dx) + q16_mul(dy, dy);
+            q16_t hit_radius_sq = Q16_FROM_INT(50 * 50); // 50 unit radius
+            
+            if (dist_sq < hit_radius_sq) {
+                // Hit! Apply damage and remove projectile
+                ship->hull_health = ship->hull_health > proj->damage ? 
+                                   ship->hull_health - proj->damage : 0;
+                
+                log_info("🎯 Projectile %u hit ship %u for %d damage (hull: %d)", 
+                        proj->id, ship->id, Q16_TO_INT(proj->damage), 
+                        Q16_TO_INT(ship->hull_health));
+                
+                // Mark projectile for removal
+                proj->lifetime = 0;
+            }
+        }
+        
+        // Check collision with players
+        for (uint16_t j = 0; j < cell->player_count; j++) {
+            struct Player* player = cell->players[j];
+            if (player->id == proj->owner_id) continue; // Can't hit self
+            
+            q16_t dx = player->position.x - proj->position.x;
+            q16_t dy = player->position.y - proj->position.y;
+            q16_t dist_sq = q16_mul(dx, dx) + q16_mul(dy, dy);
+            q16_t hit_radius_sq = Q16_FROM_INT(16 * 16); // Smaller player radius
+            
+            if (dist_sq < hit_radius_sq) {
+                // Player hit! Apply damage
+                player->health = player->health > proj->damage ? 
+                                player->health - proj->damage : 0;
+                
+                log_info("💀 Projectile %u hit player %u for %d damage (health: %d)", 
+                        proj->id, player->id, Q16_TO_INT(proj->damage), 
+                        Q16_TO_INT(player->health));
+                
+                proj->lifetime = 0; // Remove projectile
+            }
+        }
+    }
+}
+
+void handle_player_ship_collisions(struct Sim* sim) {
+    for (uint16_t i = 0; i < sim->player_count; i++) {
+        struct Player* player = &sim->players[i];
+        
+        // Get spatial cell
+        int32_t cell_x = Q16_TO_INT(player->position.x) / 1024;
+        int32_t cell_y = Q16_TO_INT(player->position.y) / 1024;
+        
+        if (cell_x < 0 || cell_y < 0 || cell_x >= SPATIAL_HASH_SIZE || cell_y >= SPATIAL_HASH_SIZE) {
+            continue;
+        }
+        
+        uint32_t hash_index __attribute__((unused)) = cell_y * SPATIAL_HASH_SIZE + cell_x;
+        struct SpatialCell* cell = &sim->spatial_hash[hash_index];
+        
+        // Check collision with ships
+        for (uint16_t j = 0; j < cell->ship_count; j++) {
+            struct Ship* ship = cell->ships[j];
+            
+            // Distance check for ship boarding/landing
+            q16_t dx = ship->position.x - player->position.x;
+            q16_t dy = ship->position.y - player->position.y;
+            q16_t dist_sq = q16_mul(dx, dx) + q16_mul(dy, dy);
+            q16_t board_radius_sq = Q16_FROM_INT(60 * 60); // Boarding range
+            
+            if (dist_sq < board_radius_sq) {
+                // Player is near ship - handle boarding logic
+                if (player->ship_id == INVALID_ENTITY_ID && ship->id != player->id) {
+                    // Player not on ship and this isn't their ship - potential boarding
+                    if (player->action_flags & PLAYER_ACTION_BOARD) {
+                        player->ship_id = ship->id;
+                        log_info("🏴‍☠️ Player %u boarded ship %u", player->id, ship->id);
+                    }
+                } else if (player->ship_id == ship->id) {
+                    // Player is on this ship - sync position relative to ship
+                    // This keeps player "attached" to the moving ship
+                    player->position.x = ship->position.x + player->relative_pos.x;
+                    player->position.y = ship->position.y + player->relative_pos.y;
+                }
+            } else {
+                // Player moved away from ship
+                if (player->ship_id == ship->id) {
+                    // Player fell off or jumped off
+                    player->ship_id = INVALID_ENTITY_ID;
+                    log_info("🌊 Player %u left ship %u", player->id, ship->id);
+                }
+            }
+        }
+    }
 }
 
 int simulation_process_player_input(struct Sim* sim, entity_id player_id, const struct CmdPacket* cmd) {

@@ -26,6 +26,7 @@ typedef enum {
 #define DELTA_FLAG_ROTATION    (1 << 2)
 #define DELTA_FLAG_HEALTH      (1 << 3)
 #define DELTA_FLAG_STATE       (1 << 4)
+#define DELTA_FLAG_ALL         (DELTA_FLAG_POSITION | DELTA_FLAG_VELOCITY | DELTA_FLAG_ROTATION | DELTA_FLAG_HEALTH | DELTA_FLAG_STATE)
 
 // Compressed entity snapshot data
 struct EntitySnapshot {
@@ -41,9 +42,15 @@ struct EntitySnapshot {
 
 // Delta-compressed entity update
 struct EntityDelta {
-    entity_id id;
-    uint8_t delta_flags;   // Which fields changed
-    uint16_t changed_data[6]; // Variable data based on flags
+    entity_id entity_id;
+    uint8_t flags;         // Which fields changed (DELTA_FLAG_*)
+    uint16_t pos_x_q;      // Position X (only if DELTA_FLAG_POSITION)
+    uint16_t pos_y_q;      // Position Y (only if DELTA_FLAG_POSITION)
+    uint16_t vel_x_q;      // Velocity X (only if DELTA_FLAG_VELOCITY)
+    uint16_t vel_y_q;      // Velocity Y (only if DELTA_FLAG_VELOCITY)
+    uint16_t rotation_q;   // Rotation (only if DELTA_FLAG_ROTATION)
+    uint8_t health;        // Health (only if DELTA_FLAG_HEALTH)
+    uint8_t state_flags;   // State flags (only if DELTA_FLAG_STATE)
 } __attribute__((packed));
 
 // Snapshot packet with delta compression

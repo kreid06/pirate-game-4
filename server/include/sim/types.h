@@ -11,6 +11,10 @@
 #define MAX_PLAYERS 100
 #define MAX_PROJECTILES 500
 
+// Spatial hash configuration
+#define SPATIAL_HASH_SIZE 64                    // 64x64 grid
+#define MAX_ENTITIES_PER_CELL 16               // Max entities per cell
+
 // Simulation constants
 #define TICK_RATE_HZ 30
 #define TICK_DURATION_MS (1000 / TICK_RATE_HZ)
@@ -34,6 +38,7 @@ struct Ship {
     q16_t angular_velocity;  // Angular velocity (rad/s)
     q16_t mass;             // Ship mass (kg)
     q16_t moment_inertia;   // Rotational inertia (kg⋅m²)
+    q16_t hull_health;      // Hull integrity
     
     // Hull collision shape (local coordinates)
     Vec2Q16 hull_vertices[16];
@@ -42,8 +47,7 @@ struct Ship {
     
     // Ship state flags
     uint16_t flags;
-    uint8_t health;
-    uint8_t reserved;
+    uint8_t reserved[2];
 };
 
 // Player state  
@@ -52,25 +56,28 @@ struct Player {
     entity_id ship_id;       // Current ship (0 = in water)
     Vec2Q16 position;        // World position
     Vec2Q16 velocity;        // Velocity
+    Vec2Q16 relative_pos;    // Position relative to ship (when aboard)
     q16_t radius;           // Collision radius
+    q16_t health;           // Player health
     
     // Player state
-    uint16_t actions;        // Current action bitfield
-    uint8_t health;
-    uint8_t flags;
+    uint32_t action_flags;   // Current action bitfield (see PLAYER_ACTION_*)
+    uint16_t flags;          // Status flags (see PLAYER_FLAG_*)
+    uint8_t reserved[2];
 };
 
 // Projectile state (cannonballs, etc)  
 struct Projectile {
     entity_id id;
-    entity_id shooter_id;    // Who fired this
+    entity_id owner_id;      // Who fired this
     Vec2Q16 position;
     Vec2Q16 velocity;
-    q16_t radius;
-    uint32_t spawn_time;     // Server tick when created
-    uint16_t damage;
+    q16_t damage;           // Damage amount
+    q16_t lifetime;         // Remaining lifetime in seconds
+    uint32_t spawn_time;    // Server tick when created
+    uint16_t flags;         // Projectile flags
     uint8_t type;           // Cannonball, grapeshot, etc
-    uint8_t flags;
+    uint8_t reserved;
 };
 
 // Input command from client
@@ -82,6 +89,20 @@ struct InputCmd {
     int16_t turn;           // Q0.15 format  
     uint16_t actions;       // Bitfield
     uint16_t dt_ms;         // Client frame time echo
+};
+
+// Forward declarations
+struct SpatialCell;
+
+// Spatial hash cell for collision detection
+struct SpatialCell {
+    struct Ship* ships[MAX_ENTITIES_PER_CELL];
+    struct Player* players[MAX_ENTITIES_PER_CELL];
+    struct Projectile* projectiles[MAX_ENTITIES_PER_CELL];
+    uint8_t ship_count;
+    uint8_t player_count;
+    uint8_t projectile_count;
+    uint8_t reserved;
 };
 
 // Complete simulation state
@@ -101,7 +122,7 @@ struct Sim {
     uint16_t projectile_count;
     
     // Spatial acceleration structures
-    uint32_t spatial_hash[256]; // Simple spatial hash for broad-phase collision
+    struct SpatialCell spatial_hash[SPATIAL_HASH_SIZE * SPATIAL_HASH_SIZE];
     
     // Physics constants (tunable per simulation instance)
     q16_t water_friction;
@@ -118,13 +139,15 @@ struct SimConfig {
     q16_t buoyancy_factor;
 };
 
-// Action bit flags
-#define ACTION_JUMP         (1 << 0)
-#define ACTION_INTERACT     (1 << 1)  
-#define ACTION_FIRE_CANNON  (1 << 2)
-#define ACTION_GRAPPLE      (1 << 3)
-#define ACTION_MELEE        (1 << 4)
-#define ACTION_RELOAD       (1 << 5)
+// Action bit flags for players
+#define PLAYER_ACTION_JUMP         (1 << 0)
+#define PLAYER_ACTION_INTERACT     (1 << 1)  
+#define PLAYER_ACTION_FIRE_CANNON  (1 << 2)
+#define PLAYER_ACTION_GRAPPLE      (1 << 3)
+#define PLAYER_ACTION_MELEE        (1 << 4)
+#define PLAYER_ACTION_RELOAD       (1 << 5)
+#define PLAYER_ACTION_BOARD        (1 << 6)  // Attempt to board a ship
+#define PLAYER_ACTION_LEAVE        (1 << 7)  // Leave current ship
 
 // Ship flags
 #define SHIP_FLAG_SINKING   (1 << 0)

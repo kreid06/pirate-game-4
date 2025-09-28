@@ -354,7 +354,9 @@ static const char* dashboard_html =
 "    </script>\n"
 "</body>\n"
 "</html>\n";
-"        }\n"
+
+static const char* admin_dashboard_js = 
+"        function updateStats() {\n"
 "\n"
 "        async function updatePhysicsObjects() {\n"
 "            const data = await fetchJson('/api/physics');\n"

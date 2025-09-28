@@ -43,4 +43,12 @@ install-deps:
 	sudo apt-get update
 	sudo apt-get install -y build-essential libwebsockets-dev libjson-c-dev
 
-.PHONY: all clean install-deps
+.PHONY: all clean install-deps test-integration demo-simple
+
+# Full integration test for Week 3-4 systems
+test-integration: obj/core/rewind_buffer.o obj/core/input_validation.o obj/core/math.o obj/core/rng.o
+	gcc -Wall -Wextra -std=c99 -O2 -g -Iinclude -o bin/test_full_integration test_full_integration.c $^ -lm -lrt
+
+# Simple Week 3-4 demonstration
+demo-simple: obj/core/rewind_buffer.o obj/core/input_validation.o obj/core/math.o obj/core/rng.o
+	gcc -Wall -Wextra -std=c99 -O2 -g -Iinclude -o bin/simple_week3_4_demo simple_week3_4_demo.c $^ -lm -lrt
