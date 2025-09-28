@@ -199,7 +199,7 @@ static int init_networking(struct ServerContext* ctx) {
     memset(&ctx->server_addr, 0, sizeof(ctx->server_addr));
     ctx->server_addr.sin_family = AF_INET;
     ctx->server_addr.sin_addr.s_addr = INADDR_ANY;
-    ctx->server_addr.sin_port = htons(8080);
+    ctx->server_addr.sin_port = htons(8081);  // UDP on port 8081 (WebSocket uses 8080)
     
     if (bind(ctx->udp_socket, (struct sockaddr*)&ctx->server_addr, 
              sizeof(ctx->server_addr)) < 0) {
@@ -208,7 +208,7 @@ static int init_networking(struct ServerContext* ctx) {
         return -1;
     }
     
-    log_info("UDP socket bound to port 8080");
+    log_info("UDP socket bound to port 8081");
     return 0;
 }
 
