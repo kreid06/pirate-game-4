@@ -97,7 +97,7 @@
     <div class="server-info">
         <h3>Server Configuration</h3>
         <p><strong>Host:</strong> 192.168.56.10</p>
-        <p><strong>Port:</strong> 8082</p>
+        <p><strong>Port:</strong> 8080</p>
         <p><strong>Status:</strong> <span id="serverStatus" class="status disconnected">Not Connected</span></p>
         <p><strong>Protocol:</strong> WebSocket Bridge to UDP</p>
     </div>
@@ -162,7 +162,7 @@
             logToElement('textLog', '🚀 Starting text protocol tests...');
             
             try {
-                const ws = new WebSocket('ws://192.168.56.10:8082');
+                const ws = new WebSocket('ws://192.168.56.10:8080');
                 
                 ws.onopen = () => {
                     logToElement('textLog', '✅ WebSocket connected');
@@ -243,7 +243,7 @@
             }
 
             const config = {
-                serverUrl: 'ws://192.168.56.10:8082',
+                serverUrl: 'ws://192.168.56.10:8080',
                 maxReconnectAttempts: 3,
                 reconnectDelay: 2000,
                 heartbeatInterval: 5000,

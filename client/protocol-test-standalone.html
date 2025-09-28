@@ -97,7 +97,7 @@
     <div class="server-info">
         <h3>Server Configuration</h3>
         <p><strong>Host:</strong> 192.168.56.10</p>
-        <p><strong>WebSocket Port:</strong> 8082 (Browser clients)</p>
+        <p><strong>WebSocket Port:</strong> 8080 (Browser clients)</p>
         <p><strong>UDP Port:</strong> 8080 (Native clients)</p>
         <p><strong>Admin Port:</strong> 8081 (HTTP monitoring)</p>
         <p><strong>Status:</strong> <span id="serverStatus" class="status disconnected">Not Connected</span></p>
@@ -107,7 +107,7 @@
 
     <div class="test-section">
         <h2>📝 Text Protocol Tests</h2>
-        <p>Tests WebSocket text commands on port 8082 (matches reference test_protocol.js)</p>
+        <p>Tests WebSocket text commands on port 8080 (matches reference test_protocol.js)</p>
         <p><strong>Supported Commands:</strong> PING→PONG, JOIN:name→WELCOME, STATE→GAME_STATE, message→echo</p>
         <button onclick="runTextTests()">Run Text Protocol Tests</button>
         <button onclick="sendPing()">Send PING</button>
@@ -175,11 +175,11 @@
                     currentWS.close();
                 }
 
-                // Connect to WebSocket server on port 8082 (not 8080)
-                const ws = new WebSocket('ws://192.168.56.10:8082');
+                // Connect to WebSocket server on port 8080 (unified with UDP)
+                const ws = new WebSocket('ws://192.168.56.10:8080');
                 
                 ws.onopen = () => {
-                    logToElement(logId, '✅ WebSocket connected to server port 8082');
+                    logToElement(logId, '✅ WebSocket connected to server port 8080');
                     updateServerStatus('Connected', 'connected');
                 };
                 
@@ -217,7 +217,7 @@
                 };
                 
                 ws.onerror = (error) => {
-                    logToElement(logId, `❌ WebSocket error: Connection failed to port 8082`);
+                    logToElement(logId, `❌ WebSocket error: Connection failed to port 8080`);
                     logToElement(logId, `   Make sure the pirate-server is running with WebSocket support enabled`);
                     updateServerStatus('Error', 'disconnected');
                 };

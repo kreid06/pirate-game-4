@@ -8,7 +8,7 @@ import { Vec2 } from '../common/Vec2.js';
 
 // Test configuration matching the reference test
 const SERVER_HOST = '192.168.56.10';
-const SERVER_PORT = 8080;
+const SERVER_PORT = 8081;
 
 const testConfig = {
   serverUrl: `ws://${SERVER_HOST}:${SERVER_PORT}`,

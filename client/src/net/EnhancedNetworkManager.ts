@@ -390,12 +390,31 @@ export class EnhancedNetworkManager {
     });
   }
   
+  /**
+   * Send packet with protocol adaptation
+   */
   private sendPacket(packet: any): void {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return;
     }
     
-    const data = JSON.stringify(packet);
+    let data: string;
+    
+    // Protocol Bridge: Convert Enhanced packets to server-expected text commands
+    if (packet.type === PacketType.HANDSHAKE) {
+      // Convert handshake to JOIN command
+      data = `JOIN:enhanced_client_${this.sessionId}`;
+    } else if (packet.type === PacketType.PING) {
+      // Convert ping packet to simple PING command
+      data = 'PING';
+    } else if (packet.type === PacketType.INPUT) {
+      // For now, send as STATE request (game input handling would need server support)
+      data = 'STATE';
+    } else {
+      // Fallback to JSON for unknown packet types
+      data = JSON.stringify(packet);
+    }
+    
     this.socket.send(data);
     
     // Update metrics
@@ -404,11 +423,69 @@ export class EnhancedNetworkManager {
   
   private handleIncomingMessage(data: string): void {
     try {
-      const packet = JSON.parse(data);
-      
       // Update metrics
       this.metrics.bytesReceived += data.length;
       this.metrics.packetsReceived++;
+      
+      // Protocol Bridge: Handle both text commands and JSON packets
+      let packet: any;
+      
+      if (data.startsWith('{')) {
+        // JSON packet - parse normally
+        packet = JSON.parse(data);
+      } else {
+        // Text command - convert to packet structure
+        if (data === 'PONG') {
+          packet = {
+            type: PacketType.PONG,
+            clientTime: this.lastPingTime,
+            serverTime: Date.now(),
+            timestamp: Date.now(),
+            sequence: this.expectedIncomingSequence++
+          };
+        } else if (data.startsWith('WELCOME')) {
+          // JOIN response - extract client ID if present
+          const parts = data.split(':');
+          const clientId = parts.length > 1 ? parseInt(parts[1]) || 1 : 1;
+          packet = {
+            type: PacketType.HANDSHAKE_RESPONSE,
+            clientId: clientId,
+            serverTickRate: 30,
+            worldBounds: { x: 0, y: 0, width: 2000, height: 2000 },
+            success: true,
+            timestamp: Date.now(),
+            sequence: this.expectedIncomingSequence++
+          };
+        } else if (data.startsWith('GAME_STATE:')) {
+          // State response - convert to snapshot
+          try {
+            const stateJson = data.substring(11); // Remove "GAME_STATE:" prefix
+            const state = JSON.parse(stateJson);
+            packet = {
+              type: PacketType.SNAPSHOT,
+              tick: Date.now(), // Use timestamp as tick for now
+              timestamp: Date.now(),
+              entities: state.entities || [],
+              sequence: this.expectedIncomingSequence++
+            };
+          } catch (e) {
+            console.warn('Failed to parse GAME_STATE response:', e);
+            return;
+          }
+        } else if (data.startsWith('echo:')) {
+          // Echo response - convert to generic acknowledgment
+          packet = {
+            type: 'echo_response',
+            message: data,
+            timestamp: Date.now(),
+            sequence: this.expectedIncomingSequence++
+          };
+        } else {
+          // Unknown text command - log and return
+          console.warn('Unknown server text command:', data);
+          return;
+        }
+      }
       
       // Handle packet based on type
       switch (packet.type) {
@@ -425,11 +502,12 @@ export class EnhancedNetworkManager {
           break;
           
         default:
-          console.warn('Unknown packet type:', packet.type);
+          console.log('📨 Server message:', packet.type || 'unknown', packet);
       }
       
     } catch (error) {
       console.error('Failed to parse incoming message:', error);
+      console.error('Raw message:', data);
     }
   }
   
