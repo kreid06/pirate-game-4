@@ -510,20 +510,6 @@ int sim_deserialize_state(struct Sim* sim, const uint8_t* buffer, size_t buffer_
     return 0;
 }
 
-static entity_id allocate_entity_id(struct Sim* sim) {
-    // Simple incremental ID allocation
-    static entity_id next_id = 1;
-    
-    (void)sim; // Unused parameter
-    
-    if (next_id == INVALID_ENTITY_ID) {
-        log_error("Entity ID overflow");
-        return INVALID_ENTITY_ID;
-    }
-    
-    return next_id++;
-}
-
 // Network integration functions
 entity_id simulation_create_player_entity(struct Sim* sim, const char* player_name) {
     if (!sim || !player_name) return INVALID_ENTITY_ID;

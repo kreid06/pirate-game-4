@@ -61,8 +61,10 @@ export interface PredictionConfig {
   clientTickRate: number; // Hz (typically 120 for responsive input)
   serverTickRate: number; // Hz (typically 30 for bandwidth efficiency)
   interpolationBuffer: number; // milliseconds
+  interpolationDelay: number; // milliseconds (render delay for smooth interpolation)
   extrapolationLimit: number; // milliseconds
   rollbackLimit: number; // ticks
+  predictionErrorThreshold: number; // units (distance threshold for rollback)
   enablePrediction: boolean;
   enableInterpolation: boolean;
 }
@@ -162,8 +164,10 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     clientTickRate: 120, // 120 Hz for responsive input
     serverTickRate: 30, // 30 Hz matches current simulation
     interpolationBuffer: 100, // 100ms buffer for smooth interpolation
+    interpolationDelay: 66, // 66ms render delay (2 frames at 30Hz)
     extrapolationLimit: 50, // 50ms max extrapolation
     rollbackLimit: 10, // 10 ticks rollback for lag compensation
+    predictionErrorThreshold: 5.0, // 5 units position error threshold
     enablePrediction: true,
     enableInterpolation: true
   },

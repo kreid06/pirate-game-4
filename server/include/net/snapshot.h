@@ -8,6 +8,8 @@
 #include "net/protocol.h"
 #include "aoi/grid.h"
 
+// Delta compression flags
+
 // Snapshot configuration
 #define SNAPSHOT_BASELINE_INTERVAL 30    // Send full baseline every 30 snapshots (~1 sec)
 #define SNAPSHOT_HISTORY_SIZE 32         // Keep last 32 snapshots for delta compression
