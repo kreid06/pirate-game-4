@@ -82,8 +82,8 @@ int server_init(struct ServerContext** ctx) {
         return -1;
     }
     
-    // Initialize networking on port 8080
-    if (network_init(&server->network, 8080) != 0) {
+    // Initialize network layer (UDP) on port 8081
+    if (network_init(&server->network, 8081) != 0) {
         log_error("Failed to initialize network manager");
         simulation_cleanup(&server->simulation);
         free(server);
