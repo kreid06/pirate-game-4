@@ -49,4 +49,12 @@ void sim_update_players(struct Sim* sim, q16_t dt);
 void sim_update_projectiles(struct Sim* sim, q16_t dt);
 void sim_handle_collisions(struct Sim* sim);
 
+// Spatial hash and collision detection
+void sim_update_spatial_hash(struct Sim* sim);
+void spatial_hash_add_ship(struct Sim* sim, struct Ship* ship);
+void spatial_hash_add_player(struct Sim* sim, struct Player* player);
+void spatial_hash_add_projectile(struct Sim* sim, struct Projectile* projectile);
+void handle_projectile_collisions(struct Sim* sim);
+void handle_player_ship_collisions(struct Sim* sim);
+
 #endif /* SIM_SIMULATION_H */

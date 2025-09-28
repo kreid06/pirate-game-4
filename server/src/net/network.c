@@ -1,18 +1,26 @@
 #include "net/network.h"
+#include "net/reliability.h"
+#include "net/snapshot.h"
 #include "util/log.h"
-#include "util/time.h"
+#include "sim/simulation.h"
+#include "core/hash.h"
+#include "protocol.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <time.h>
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <arpa/inet.h>
 
 int network_init(struct NetworkManager* net_mgr, uint16_t port) {
     if (!net_mgr) return -1;
     
     memset(net_mgr, 0, sizeof(struct NetworkManager));
     net_mgr->port = port;
-    net_mgr->last_stats_time = get_time_ms();
+    net_mgr->last_stats_time = (uint32_t)time(NULL);
     
     // Create UDP socket
     net_mgr->socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -78,13 +86,13 @@ void network_cleanup(struct NetworkManager* net_mgr) {
     log_info("Network manager cleaned up");
 }
 
-int network_process_incoming(struct NetworkManager* net_mgr, struct Simulation* sim) {
+int network_process_incoming(struct NetworkManager* net_mgr, struct Sim* sim) {
     if (!net_mgr || !sim || net_mgr->socket_fd < 0) return -1;
     
     struct sockaddr_in from_addr;
     socklen_t addr_len = sizeof(from_addr);
     int packets_processed = 0;
-    uint32_t current_time = get_time_ms();
+    uint32_t current_time = (uint32_t)time(NULL);
     
     // Process all available packets
     while (packets_processed < 100) { // Rate limit to prevent starvation
@@ -115,7 +123,7 @@ int network_process_incoming(struct NetworkManager* net_mgr, struct Simulation* 
             
             if (packet_type == PACKET_HANDSHAKE && received >= sizeof(struct HandshakePacket)) {
                 const struct HandshakePacket* handshake = (const struct HandshakePacket*)net_mgr->recv_buffer;
-                network_handle_handshake(net_mgr, &from_addr, handshake);
+                network_handle_handshake(net_mgr, &from_addr, handshake, sim);
             } else {
                 log_warn("Unknown packet type %u from %s:%d", packet_type,
                          inet_ntoa(from_addr.sin_addr), ntohs(from_addr.sin_port));
@@ -168,7 +176,7 @@ int network_process_incoming(struct NetworkManager* net_mgr, struct Simulation* 
     return packets_processed;
 }
 
-int network_send_snapshots(struct NetworkManager* net_mgr, struct Simulation* sim) {
+int network_send_snapshots(struct NetworkManager* net_mgr, struct Sim* sim) {
     if (!net_mgr || !sim || net_mgr->socket_fd < 0) return -1;
     
     // Generate and send snapshots for all connected players
@@ -189,9 +197,9 @@ int network_send_snapshots(struct NetworkManager* net_mgr, struct Simulation* si
         uint32_t bandwidth_used = 0;
         
         int result = snapshot_generate_for_player(&net_mgr->snapshot_mgr, sim, 
-                                                 conn->player_id, snapshot_buffer, 
-                                                 sizeof(snapshot_buffer), &snapshot_size,
-                                                 &bandwidth_used);
+                                                 NULL, conn->player_id, 
+                                                 (uint32_t)time(NULL), snapshot_buffer,
+                                                 sizeof(snapshot_buffer), (size_t*)&snapshot_size);
         
         if (result == 0 && snapshot_size > 0) {
             // Send snapshot reliably
@@ -205,9 +213,10 @@ int network_send_snapshots(struct NetworkManager* net_mgr, struct Simulation* si
     return 0;
 }
 
-int network_handle_handshake(struct NetworkManager* net_mgr, 
+int network_handle_handshake(struct NetworkManager* net_mgr,
                             const struct sockaddr_in* from_addr,
-                            const struct HandshakePacket* handshake) {
+                            const struct HandshakePacket* handshake,
+                            struct Sim* sim) {
     if (!net_mgr || !from_addr || !handshake) return -1;
     
     // Validate handshake
@@ -217,15 +226,11 @@ int network_handle_handshake(struct NetworkManager* net_mgr,
         return -1;
     }
     
-    // Validate checksum
-    struct HandshakePacket temp_handshake = *handshake;
-    temp_handshake.checksum = 0;
-    uint16_t expected_checksum = protocol_checksum(&temp_handshake, 
-                                                  sizeof(temp_handshake) - sizeof(temp_handshake.checksum));
-    
-    if (handshake->checksum != expected_checksum) {
-        log_warn("Handshake checksum mismatch from %s:%d",
-                 inet_ntoa(from_addr->sin_addr), ntohs(from_addr->sin_port));
+    // Basic validation
+    if (handshake->version != PROTOCOL_VERSION) {
+        log_warn("Handshake version mismatch from %s:%d. Got %d, expected %d",
+                 inet_ntoa(from_addr->sin_addr), ntohs(from_addr->sin_port),
+                 handshake->version, PROTOCOL_VERSION);
         return -1;
     }
     
@@ -239,9 +244,12 @@ int network_handle_handshake(struct NetworkManager* net_mgr,
     }
     
     // Create new player entity (placeholder - would integrate with game logic)
-    entity_id new_player_id = simulation_create_player_entity(sim, handshake->player_name);
+    // Create player entity
+    char player_name[64];
+    snprintf(player_name, sizeof(player_name), "Player_%u", handshake->client_id);
+    entity_id new_player_id = simulation_create_player_entity(sim, player_name);
     if (new_player_id == INVALID_ENTITY_ID) {
-        log_error("Failed to create player entity for %s", handshake->player_name);
+        log_error("Failed to create player entity for %s", player_name);
         return -1;
     }
     
@@ -259,19 +267,16 @@ int network_handle_handshake(struct NetworkManager* net_mgr,
     // Send handshake response
     struct HandshakeResponsePacket response = {0};
     response.type = PACKET_HANDSHAKE_RESPONSE;
-    response.version = PROTOCOL_VERSION;
+    response.status = 0; // Success
     response.player_id = new_player_id;
-    response.server_time = get_time_ms();
-    
-    // Calculate checksum
-    response.checksum = protocol_checksum(&response, sizeof(response) - sizeof(response.checksum));
+    response.server_time = (uint32_t)time(NULL);
     
     ssize_t sent = sendto(net_mgr->socket_fd, &response, sizeof(response), 0,
                          (struct sockaddr*)from_addr, sizeof(*from_addr));
     
     if (sent == sizeof(response)) {
         log_info("New player connected: %s (ID: %u) from %s:%d",
-                 handshake->player_name, new_player_id,
+                 player_name, new_player_id,
                  inet_ntoa(from_addr->sin_addr), ntohs(from_addr->sin_port));
     } else {
         log_error("Failed to send handshake response");
@@ -282,7 +287,7 @@ int network_handle_handshake(struct NetworkManager* net_mgr,
     return 0;
 }
 
-int network_process_player_input(struct NetworkManager* net_mgr, struct Simulation* sim,
+int network_process_player_input(struct NetworkManager* net_mgr, struct Sim* sim,
                                 entity_id player_id, const struct CmdPacket* cmd) {
     if (!net_mgr || !sim || !cmd || player_id == INVALID_ENTITY_ID) return -1;
     

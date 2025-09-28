@@ -81,7 +81,7 @@ uint64_t hash_sim_state(const struct Sim* sim) {
         hash = hash_update(hash, &ship->velocity, sizeof(ship->velocity));
         hash = hash_update(hash, &ship->rotation, sizeof(ship->rotation));
         hash = hash_update(hash, &ship->angular_velocity, sizeof(ship->angular_velocity));
-        hash = hash_update(hash, &ship->health, sizeof(ship->health));
+        hash = hash_update(hash, &ship->hull_health, sizeof(ship->hull_health));
         hash = hash_update(hash, &ship->flags, sizeof(ship->flags));
     }
     
@@ -95,7 +95,7 @@ uint64_t hash_sim_state(const struct Sim* sim) {
         hash = hash_update(hash, &player->velocity, sizeof(player->velocity));
         hash = hash_update(hash, &player->health, sizeof(player->health));
         hash = hash_update(hash, &player->flags, sizeof(player->flags));
-        hash = hash_update(hash, &player->actions, sizeof(player->actions));
+        hash = hash_update(hash, &player->action_flags, sizeof(player->action_flags));
     }
     
     // Hash projectiles in ID order
@@ -103,7 +103,7 @@ uint64_t hash_sim_state(const struct Sim* sim) {
         const struct Projectile* proj = &sim->projectiles[i];
         
         hash = hash_update(hash, &proj->id, sizeof(proj->id));
-        hash = hash_update(hash, &proj->shooter_id, sizeof(proj->shooter_id));
+        hash = hash_update(hash, &proj->owner_id, sizeof(proj->owner_id));
         hash = hash_update(hash, &proj->position, sizeof(proj->position));
         hash = hash_update(hash, &proj->velocity, sizeof(proj->velocity));
         hash = hash_update(hash, &proj->spawn_time, sizeof(proj->spawn_time));

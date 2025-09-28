@@ -133,7 +133,7 @@ int admin_api_entities(struct HttpResponse* resp, const struct Sim* sim) {
             (float)proj->velocity.x / Q16_ONE,
             (float)proj->velocity.y / Q16_ONE,
             proj->damage,
-            proj->shooter_id
+            proj->owner_id
         );
     }
     
@@ -293,7 +293,7 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
             "      \"velocity\": {\"x\": %.2f, \"y\": %.2f},\n"
             "      \"health\": %u\n"
             "    }%s\n",
-            ship->id, pos_x, pos_y, rotation, vel_x, vel_y, ship->health,
+            ship->id, pos_x, pos_y, rotation, vel_x, vel_y, Q16_TO_INT(ship->hull_health),
             (i + 1 < sim->ship_count) ? "," : ""
         );
     }
@@ -345,7 +345,7 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
             "      \"velocity\": {\"x\": %.2f, \"y\": %.2f},\n"
             "      \"shooter_id\": %u\n"
             "    }%s\n",
-            proj->id, pos_x, pos_y, vel_x, vel_y, proj->shooter_id,
+            proj->id, pos_x, pos_y, vel_x, vel_y, proj->owner_id,
             (i + 1 < sim->projectile_count) ? "," : ""
         );
     }

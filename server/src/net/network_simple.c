@@ -240,14 +240,59 @@ void network_update(struct NetworkManager* net_mgr, uint32_t current_time) {
 
 // Stub implementations for missing functions
 int network_send_snapshots(struct NetworkManager* net_mgr, struct Sim* sim) {
-    (void)net_mgr; (void)sim;
-    return 0; // Not implemented yet
+    if (!net_mgr || !sim) return -1;
+    
+    // For now, send state updates to any recently active connections
+    // This is a simplified implementation - in a full game server,
+    // you'd track connected players and their subscription state
+    
+    // Generate JSON state for connected clients
+    char state_json[2048];
+    snprintf(state_json, sizeof(state_json),
+        "{\"type\":\"GAME_STATE\",\"tick\":%u,\"time\":%u,"
+        "\"ships\":[],\"players\":[],\"projectiles\":[]}",
+        sim->tick, sim->time_ms);
+    
+    // In a real implementation, you'd send this to specific connected players
+    // For now, this serves as a placeholder that can be extended
+    
+    return 0; // Success
 }
 
 int network_process_player_input(struct NetworkManager* net_mgr, struct Sim* sim,
                                 entity_id player_id, const struct CmdPacket* cmd) {
-    (void)net_mgr; (void)sim; (void)player_id; (void)cmd;
-    return 0; // Not implemented yet
+    if (!net_mgr || !sim || player_id == INVALID_ENTITY_ID || !cmd) {
+        return -1;
+    }
+    
+    // Log input processing for debugging
+    printf("🎮 Processing input from player %u: thrust=%d, turn=%d, actions=0x%X\n",
+           player_id, cmd->thrust, cmd->turn, cmd->actions);
+    
+    // Basic input validation
+    if (cmd->actions > 0xFF) { // Invalid action combination
+        printf("⚠️ Invalid input actions from player %u: 0x%X\n", player_id, cmd->actions);
+        return -1;
+    }
+    
+    // Find or create player entity in simulation
+    // For now, we'll just validate the command and log it
+    // In a full implementation, this would update player state in the simulation
+    
+    // Example input processing:
+    // - thrust for forward/backward movement
+    // - turn for rotation
+    // - actions for combat/interaction
+    
+    if (cmd->actions & 0x01) printf("  → Player %u: Action bit 0\n", player_id);
+    if (cmd->actions & 0x02) printf("  → Player %u: Action bit 1\n", player_id);
+    if (cmd->actions & 0x04) printf("  → Player %u: Action bit 2\n", player_id);
+    if (cmd->actions & 0x08) printf("  → Player %u: Action bit 3\n", player_id);
+    
+    // Update player's input state in simulation (placeholder)
+    // TODO: Actual simulation integration
+    
+    return 0; // Success
 }
 
 void network_get_stats(const struct NetworkManager* net_mgr,

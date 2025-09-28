@@ -1,6 +1,7 @@
 #ifndef NET_RELIABILITY_H
 #define NET_RELIABILITY_H
 
+#include "sim/types.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <netinet/in.h>

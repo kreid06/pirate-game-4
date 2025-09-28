@@ -1,6 +1,10 @@
 #include "net/snapshot.h"
+#include "sim/simulation.h"
+#include "core/math.h"
 #include "util/log.h"
 #include <string.h>
+#include <stdlib.h>
+#include <time.h>
 #include <assert.h>
 
 // Helper functions
@@ -9,6 +13,14 @@ static void quantize_entity_data(const struct Ship* ship, struct EntitySnapshot*
 static void quantize_player_data(const struct Player* player, struct EntitySnapshot* snap);
 static void quantize_projectile_data(const struct Projectile* proj, struct EntitySnapshot* snap);
 static uint16_t calculate_delta_size(const struct EntityDelta* delta);
+static bool entities_differ(const struct EntitySnapshot* a, const struct EntitySnapshot* b);
+// Forward declarations
+// create_entity_delta is defined in header
+static size_t apply_delta_compression(const struct EntitySnapshot* baseline, 
+                                      const struct EntitySnapshot* entities, 
+                                      uint16_t entity_count,
+                                      uint8_t* output_buffer,
+                                      size_t buffer_size);
 
 int snapshot_manager_init(struct SnapshotManager* mgr) {
     if (!mgr) return -1;
@@ -293,43 +305,41 @@ int create_entity_delta(const struct EntitySnapshot* baseline,
     }
     
     memset(delta, 0, sizeof(struct EntityDelta));
-    delta->id = current->id;
-    
-    uint8_t data_index = 0;
+    delta->entity_id = current->id;
     
     // Check position changes
     if (baseline->pos_x_q != current->pos_x_q || baseline->pos_y_q != current->pos_y_q) {
-        delta->delta_flags |= DELTA_FLAG_POSITION;
-        delta->changed_data[data_index++] = current->pos_x_q;
-        delta->changed_data[data_index++] = current->pos_y_q;
+        delta->flags |= DELTA_FLAG_POSITION;
+        delta->pos_x_q = current->pos_x_q;
+        delta->pos_y_q = current->pos_y_q;
     }
     
     // Check velocity changes
     if (baseline->vel_x_q != current->vel_x_q || baseline->vel_y_q != current->vel_y_q) {
-        delta->delta_flags |= DELTA_FLAG_VELOCITY;
-        delta->changed_data[data_index++] = current->vel_x_q;
-        delta->changed_data[data_index++] = current->vel_y_q;
+        delta->flags |= DELTA_FLAG_VELOCITY;
+        delta->vel_x_q = current->vel_x_q;
+        delta->vel_y_q = current->vel_y_q;
     }
     
     // Check rotation changes
     if (baseline->rotation_q != current->rotation_q) {
-        delta->delta_flags |= DELTA_FLAG_ROTATION;
-        delta->changed_data[data_index++] = current->rotation_q;
+        delta->flags |= DELTA_FLAG_ROTATION;
+        delta->rotation_q = current->rotation_q;
     }
     
     // Check health changes
     if (baseline->health != current->health) {
-        delta->delta_flags |= DELTA_FLAG_HEALTH;
-        delta->changed_data[data_index++] = current->health;
+        delta->flags |= DELTA_FLAG_HEALTH;
+        delta->health = current->health;
     }
     
     // Check state flag changes
     if (baseline->state_flags != current->state_flags) {
-        delta->delta_flags |= DELTA_FLAG_STATE;
-        delta->changed_data[data_index++] = current->state_flags;
+        delta->flags |= DELTA_FLAG_STATE;
+        delta->state_flags = current->state_flags;
     }
     
-    return delta->delta_flags ? 1 : 0; // Return 1 if any changes, 0 if no changes
+    return delta->flags ? 1 : 0; // Return 1 if any changes, 0 if no changes
 }
 
 bool should_send_snapshot_for_tier(aoi_tier_t tier, uint32_t current_time, uint32_t last_time) {
@@ -353,7 +363,7 @@ void update_bandwidth_stats(struct PlayerSnapshotState* player, size_t packet_si
     
     // Reset per-second counter every second (simplified)
     static uint32_t last_reset_time = 0;
-    uint32_t current_time = get_time_ms();
+    uint32_t current_time = (uint32_t)time(NULL) * 1000;
     
     if (current_time - last_reset_time >= 1000) {
         player->bytes_sent_this_second = 0;
@@ -385,7 +395,7 @@ static void quantize_entity_data(const struct Ship* ship, struct EntitySnapshot*
     snap->vel_x_q = quantize_velocity(Q16_TO_FLOAT(ship->velocity.x));
     snap->vel_y_q = quantize_velocity(Q16_TO_FLOAT(ship->velocity.y));
     snap->rotation_q = quantize_rotation(Q16_TO_FLOAT(ship->rotation));
-    snap->health = ship->health;
+    snap->health = (uint8_t)((ship->hull_health >> 8) & 0xFF); // Convert Q16 to uint8
     snap->state_flags = (uint8_t)ship->flags;
 }
 
@@ -420,12 +430,90 @@ static uint16_t calculate_delta_size(const struct EntityDelta* delta) {
     
     uint16_t size = sizeof(entity_id) + sizeof(uint8_t); // ID + flags
     
-    // Count data fields based on flags
-    if (delta->delta_flags & DELTA_FLAG_POSITION) size += 2 * sizeof(uint16_t);
-    if (delta->delta_flags & DELTA_FLAG_VELOCITY) size += 2 * sizeof(uint16_t);
-    if (delta->delta_flags & DELTA_FLAG_ROTATION) size += sizeof(uint16_t);
-    if (delta->delta_flags & DELTA_FLAG_HEALTH) size += sizeof(uint16_t);
-    if (delta->delta_flags & DELTA_FLAG_STATE) size += sizeof(uint16_t);
+    // Add size for each changed field
+    if (delta->flags & DELTA_FLAG_POSITION) size += 4; // pos_x + pos_y
+    if (delta->flags & DELTA_FLAG_VELOCITY) size += 4; // vel_x + vel_y  
+    if (delta->flags & DELTA_FLAG_ROTATION) size += 2; // rotation
+    if (delta->flags & DELTA_FLAG_HEALTH) size += 1;   // health
+    if (delta->flags & DELTA_FLAG_STATE) size += 1;    // state_flags
     
     return size;
+}
+
+static bool entities_differ(const struct EntitySnapshot* a, const struct EntitySnapshot* b) {
+    if (!a || !b || a->id != b->id) return true;
+    
+    return (a->pos_x_q != b->pos_x_q ||
+            a->pos_y_q != b->pos_y_q ||
+            a->vel_x_q != b->vel_x_q ||
+            a->vel_y_q != b->vel_y_q ||
+            a->rotation_q != b->rotation_q ||
+            a->health != b->health ||
+            a->state_flags != b->state_flags);
+}
+
+static size_t apply_delta_compression(const struct EntitySnapshot* baseline, 
+                                      const struct EntitySnapshot* entities, 
+                                      uint16_t entity_count,
+                                      uint8_t* output_buffer,
+                                      size_t buffer_size) {
+    if (!entities || !output_buffer || entity_count == 0) return 0;
+    
+    size_t bytes_written = 0;
+    uint16_t deltas_created = 0;
+    
+    for (uint16_t i = 0; i < entity_count; i++) {
+        const struct EntitySnapshot* current = &entities[i];
+        
+        // Find baseline for this entity (if any)
+        const struct EntitySnapshot* base = NULL;
+        if (baseline) {
+            // Linear search for matching entity in baseline
+            // In production, use a hash table for O(1) lookup
+            for (uint16_t j = 0; j < entity_count; j++) {
+                if (baseline[j].id == current->id) {
+                    base = &baseline[j];
+                    break;
+                }
+            }
+        }
+        
+        if (!base || entities_differ(base, current)) {
+            // Create delta for this entity
+            struct EntityDelta delta;
+            if (base) {
+                create_entity_delta(base, current, &delta);
+            } else {
+                // New entity - include all fields
+                memset(&delta, 0, sizeof(delta));
+                delta.entity_id = current->id;
+                delta.flags = DELTA_FLAG_ALL;
+                delta.pos_x_q = current->pos_x_q;
+                delta.pos_y_q = current->pos_y_q;
+                delta.vel_x_q = current->vel_x_q;
+                delta.vel_y_q = current->vel_y_q;
+                delta.rotation_q = current->rotation_q;
+                delta.health = current->health;
+                delta.state_flags = current->state_flags;
+            }
+            
+            // Serialize delta to output buffer
+            uint16_t delta_size = calculate_delta_size(&delta);
+            if (bytes_written + delta_size <= buffer_size) {
+                // Copy delta data to buffer
+                memcpy(output_buffer + bytes_written, &delta, delta_size);
+                bytes_written += delta_size;
+                deltas_created++;
+            } else {
+                log_warn("Delta compression buffer overflow - truncating");
+                break;
+            }
+        }
+    }
+    
+    log_info("Delta compression: %u entities → %u deltas (%zu bytes, %.1f%% of original)",
+             entity_count, deltas_created, bytes_written,
+             entity_count > 0 ? (bytes_written * 100.0f) / (entity_count * sizeof(struct EntitySnapshot)) : 0.0f);
+    
+    return bytes_written;
 }

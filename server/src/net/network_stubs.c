@@ -35,10 +35,12 @@ int network_send_snapshots(struct NetworkManager* net_mgr, struct Sim* sim) {
     return 0;
 }
 
-int network_handle_handshake(struct NetworkManager* net_mgr, 
+int network_handle_handshake(struct NetworkManager* net_mgr,
                             const struct sockaddr_in* from_addr,
-                            const struct HandshakePacket* handshake) {
-    (void)net_mgr; (void)from_addr; (void)handshake; // Unused
+                            const struct HandshakePacket* handshake,
+                            struct Sim* sim) {
+    (void)net_mgr; (void)from_addr; (void)handshake; (void)sim;
+    log_info("Stub: handshake received");
     return 0;
 }
 
