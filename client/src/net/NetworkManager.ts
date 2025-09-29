@@ -122,6 +122,9 @@ export class NetworkManager {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private pingTimer: NodeJS.Timeout | null = null;
   
+  // Player management
+  private assignedPlayerId: number | null = null;
+  
   // Message handling
   private messageSequenceId = 0;
   private pendingPings = new Map<number, number>(); // sequenceId -> timestamp
@@ -369,6 +372,13 @@ export class NetworkManager {
     return this.connectionState;
   }
   
+  /**
+   * Get the server-assigned player ID
+   */
+  getAssignedPlayerId(): number | null {
+    return this.assignedPlayerId;
+  }
+  
   // Private methods
   
   private setupSocketHandlers(): void {
@@ -539,6 +549,11 @@ export class NetworkManager {
         
       case MessageType.HANDSHAKE_RESPONSE:
         console.log('🤝 Received handshake response:', message);
+        // Extract and store the server-assigned player ID
+        if (message.player_id !== undefined) {
+          this.assignedPlayerId = message.player_id;
+          console.log(`🎮 Server assigned player ID: ${this.assignedPlayerId}`);
+        }
         break;
         
       case MessageType.MESSAGE_ACK:

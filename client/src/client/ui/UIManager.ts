@@ -19,6 +19,7 @@ export interface UIRenderContext {
   fps: number;
   networkStats: NetworkStats;
   config: ClientConfig;
+  assignedPlayerId?: number | null;
 }
 
 /**
@@ -191,7 +192,11 @@ class HUDElement implements UIElement {
   visible = true;
   
   render(ctx: CanvasRenderingContext2D, context: UIRenderContext): void {
-    const player = context.worldState.players[0]; // First player
+    // Find our player using the server-assigned player ID
+    const player = context.assignedPlayerId !== null && context.assignedPlayerId !== undefined
+      ? context.worldState.players.find(p => p.id === context.assignedPlayerId)
+      : context.worldState.players[0]; // Fallback to first player if no ID assigned yet
+    
     if (!player) return;
     
     // Set up text rendering with better visibility
@@ -244,7 +249,11 @@ class DebugOverlayElement implements UIElement {
   visible = false;
   
   render(ctx: CanvasRenderingContext2D, context: UIRenderContext): void {
-    const player = context.worldState.players[0];
+    // Find our player using the server-assigned player ID
+    const player = context.assignedPlayerId !== null && context.assignedPlayerId !== undefined
+      ? context.worldState.players.find(p => p.id === context.assignedPlayerId)
+      : context.worldState.players[0]; // Fallback to first player if no ID assigned yet
+    
     const cameraState = context.camera.getState();
     
     if (!player) return;

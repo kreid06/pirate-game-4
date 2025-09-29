@@ -290,7 +290,8 @@ export class ClientApplication {
         camera: this.camera,
         fps: this.currentFPS,
         networkStats: this.networkManager.getStats(),
-        config: this.config
+        config: this.config,
+        assignedPlayerId: this.networkManager.getAssignedPlayerId()
       });
     }
   }
@@ -299,9 +300,14 @@ export class ClientApplication {
    * Update camera based on world state
    */
   private updateCamera(worldState: WorldState, dt: number): void {
-    const player = worldState.players[0]; // TODO: Support multiple players
+    // Find our player using the server-assigned player ID
+    const assignedPlayerId = this.networkManager.getAssignedPlayerId();
+    const player = assignedPlayerId !== null 
+      ? worldState.players.find(p => p.id === assignedPlayerId)
+      : worldState.players[0]; // Fallback to first player if no ID assigned yet
+    
     if (!player) {
-      console.warn('No player found for camera following');
+      console.warn(`No player found for camera following (assigned ID: ${assignedPlayerId})`);
       return;
     }
     
@@ -309,12 +315,7 @@ export class ClientApplication {
     this.camera.setPosition(player.position);
     
     // Debug logging (can be removed later)
-    // console.log(`Camera following player at: ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`);
-    
-    // Alternative smooth following (comment out above line and uncomment below for smooth camera)
-    // const followSpeed = 10.0;
-    // this.camera.setTarget(player.position);
-    // this.camera.followTarget(player.position, followSpeed, dt);
+    // console.log(`Camera following player ${player.id} at: ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`);
   }
   
   /**
