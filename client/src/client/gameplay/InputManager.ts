@@ -57,6 +57,7 @@ export class InputManager {
   private actionMappings: ActionMapping[] = [];
   private currentInputFrame: InputFrame;
   private inputFrameCounter = 0;
+  private playerPosition: Vec2 = Vec2.zero();
   
   // Event callbacks
   public onInputFrame: ((inputFrame: InputFrame) => void) | null = null;
@@ -116,6 +117,13 @@ export class InputManager {
    */
   updateMouseWorldPosition(worldPos: Vec2): void {
     this.inputState.mouseWorldPosition = worldPos.clone();
+  }
+  
+  /**
+   * Update player position for mouse-relative movement calculation
+   */
+  setPlayerPosition(playerPos: Vec2): void {
+    this.playerPosition = playerPos.clone();
   }
   
   /**
@@ -203,8 +211,8 @@ export class InputManager {
   }
   
   private generateInputFrame(): void {
-    // Calculate movement vector
-    const movement = this.calculateMovementVector();
+    // Calculate movement vector using player position for mouse-relative movement
+    const movement = this.calculateMovementVector(this.playerPosition);
     
     // Calculate action bitmask
     const actions = this.calculateActionBitmask();
@@ -222,7 +230,7 @@ export class InputManager {
     }
   }
   
-  private calculateMovementVector(): Vec2 {
+  private calculateMovementVector(playerPosition?: Vec2): Vec2 {
     let movement = Vec2.zero();
     
     // Check for movement keys
@@ -231,12 +239,37 @@ export class InputManager {
     const left = this.isActionActive('move_left');
     const right = this.isActionActive('move_right');
     
-    // Calculate direction from player to mouse (for directional movement)
-    // This will be handled by the game logic, for now just use WASD
-    if (forward) movement = movement.add(Vec2.from(0, -1));
-    if (backward) movement = movement.add(Vec2.from(0, 1));
-    if (left) movement = movement.add(Vec2.from(-1, 0));
-    if (right) movement = movement.add(Vec2.from(1, 0));
+    // If we have player position, use mouse-relative movement
+    if (playerPosition && (forward || backward || left || right)) {
+      const mousePos = this.inputState.mouseWorldPosition;
+      const playerToMouse = mousePos.sub(playerPosition);
+      
+      // Calculate forward direction (towards mouse)
+      const forwardDir = playerToMouse.lengthSq() > 0 ? playerToMouse.normalize() : Vec2.from(0, -1);
+      
+      // Calculate right direction (perpendicular to forward)
+      const rightDir = Vec2.from(-forwardDir.y, forwardDir.x); // Rotate 90 degrees clockwise
+      
+      // Apply movement based on keys
+      if (forward) movement = movement.add(forwardDir);
+      if (backward) movement = movement.add(forwardDir.mul(-1));
+      if (right) movement = movement.add(rightDir);
+      if (left) movement = movement.add(rightDir.mul(-1));
+      
+      // Debug logging for mouse-relative movement (only when needed)
+      if (this.config.enableDebugLogging) {
+        const distance = Math.sqrt(playerToMouse.lengthSq());
+        console.log(`🖱️ Mouse-relative movement: Player(${playerPosition.x.toFixed(1)}, ${playerPosition.y.toFixed(1)}) -> Mouse(${mousePos.x.toFixed(1)}, ${mousePos.y.toFixed(1)}) Distance: ${distance.toFixed(1)}`);
+        console.log(`🧭 Forward: (${forwardDir.x.toFixed(2)}, ${forwardDir.y.toFixed(2)}), Right: (${rightDir.x.toFixed(2)}, ${rightDir.y.toFixed(2)})`);
+        console.log(`⌨️ Keys: W=${forward} S=${backward} A=${left} D=${right} -> Movement: (${movement.x.toFixed(2)}, ${movement.y.toFixed(2)})`);
+      }
+    } else {
+      // Fallback to traditional WASD if no player position provided
+      if (forward) movement = movement.add(Vec2.from(0, -1));
+      if (backward) movement = movement.add(Vec2.from(0, 1));
+      if (left) movement = movement.add(Vec2.from(-1, 0));
+      if (right) movement = movement.add(Vec2.from(1, 0));
+    }
     
     // Normalize diagonal movement
     if (movement.lengthSq() > 1) {

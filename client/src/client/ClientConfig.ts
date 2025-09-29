@@ -52,6 +52,7 @@ export interface InputConfig {
   keyBindings: Map<string, string>; // action -> key code
   gamepadEnabled: boolean;
   gamepadDeadzone: number; // 0.0 to 1.0
+  enableDebugLogging: boolean; // Enable verbose movement debug logging
 }
 
 /**
@@ -157,7 +158,8 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
       ['toggle_camera_mode', 'KeyC'],
     ]),
     gamepadEnabled: true,
-    gamepadDeadzone: 0.1
+    gamepadDeadzone: 0.1,
+    enableDebugLogging: false // Disable verbose movement logging by default
   },
   
   prediction: {

@@ -123,12 +123,19 @@ export class PredictionEngine {
   update(baseWorldState: WorldState, inputFrame: InputFrame, deltaTime: number): WorldState {
     this.clientTick++;
     
+    // Ensure movement is a proper Vec2 object
+    if (inputFrame.movement && typeof inputFrame.movement === 'object' && !('mul' in inputFrame.movement)) {
+      // Convert plain object to Vec2
+      const plainObj = inputFrame.movement as any;
+      inputFrame.movement = Vec2.from(plainObj.x || 0, plainObj.y || 0);
+    }
+    
     // Validate input frame
     if (!this.validateInputFrame(inputFrame)) {
       console.warn('🚨 Invalid input frame detected, using previous input');
       // Use last valid input or neutral input
       const lastState = this.predictionHistory[this.predictionHistory.length - 1];
-      inputFrame = lastState?.inputFrame || { tick: this.clientTick, movement: { x: 0, y: 0 }, actions: 0 };
+      inputFrame = lastState?.inputFrame || { tick: this.clientTick, movement: Vec2.zero(), actions: 0 };
     }
     
     // Store in rewind buffer for lag compensation
@@ -225,7 +232,11 @@ export class PredictionEngine {
     const state: PredictionState = {
       tick,
       worldState: this.cloneWorldState(worldState),
-      inputFrame: { ...inputFrame },
+      inputFrame: { 
+        tick: inputFrame.tick,
+        movement: inputFrame.movement.clone ? inputFrame.movement.clone() : Vec2.from(inputFrame.movement.x, inputFrame.movement.y),
+        actions: inputFrame.actions
+      },
       timestamp: Date.now(),
       serverConfirmed: false,
       predictionError: 0,
@@ -377,8 +388,9 @@ export class PredictionEngine {
     this.inputValidation.totalInputs++;
     
     // Check input rate (max 120Hz = 8.33ms between inputs)
+    // But allow some tolerance for client-side prediction frequency
     const timeSinceLastInput = now - this.inputValidation.lastInputTimestamp;
-    if (timeSinceLastInput < 8.0) {
+    if (timeSinceLastInput < 4.0) { // Relaxed from 8.0ms to 4.0ms
       this.inputValidation.inputRateViolations++;
       return false;
     }

@@ -372,6 +372,13 @@ export class NetworkManager {
 
     // Only send input if there's actual movement or actions to reduce network traffic
     if (inputFrame.movement.lengthSq() > 0 || inputFrame.actions !== 0) {
+      // Validate movement vector before sending
+      const movementMagnitude = Math.sqrt(inputFrame.movement.lengthSq());
+      if (movementMagnitude > 1.1) { // Allow small tolerance for floating point precision
+        console.warn(`⚠️ Movement vector too large: ${movementMagnitude.toFixed(3)}, normalizing...`);
+        inputFrame.movement = inputFrame.movement.normalize();
+      }
+      
       // Server expects flattened structure with movement at top level
       const message: InputMessage = {
         type: MessageType.INPUT_FRAME,
@@ -382,7 +389,7 @@ export class NetworkManager {
         actions: inputFrame.actions
       };
       
-      console.log(`🎮 Sending input - Movement: (${inputFrame.movement.x.toFixed(2)}, ${inputFrame.movement.y.toFixed(2)}), Actions: ${inputFrame.actions}`);
+      console.log(`🎮 Sending input - Movement: (${inputFrame.movement.x.toFixed(2)}, ${inputFrame.movement.y.toFixed(2)}), Magnitude: ${movementMagnitude.toFixed(2)}, Actions: ${inputFrame.actions}`);
       this.sendMessage(message);
     }
   }
@@ -548,8 +555,12 @@ export class NetworkManager {
           })),
           players: (message.players || []).map((player: any) => ({
             id: player.id || 0,
-            position: player.position ? Vec2.from(player.position.x || 0, player.position.y || 0) : Vec2.zero(),
-            velocity: player.velocity ? Vec2.from(player.velocity.x || 0, player.velocity.y || 0) : Vec2.zero(),
+            position: player.position 
+              ? Vec2.from(player.position.x || 0, player.position.y || 0) 
+              : Vec2.from(player.x || 0, player.y || 0), // Server sends x,y directly
+            velocity: player.velocity 
+              ? Vec2.from(player.velocity.x || 0, player.velocity.y || 0) 
+              : Vec2.from(player.velocity_x || 0, player.velocity_y || 0), // Server sends velocity_x,velocity_y
             radius: player.radius || 8,
             carrierId: player.carrierId || 0,
             deckId: player.deckId || 0,
@@ -569,6 +580,13 @@ export class NetworkManager {
         };
         
         console.log(`🗺️ Received game state - Tick: ${worldState.tick}, Players: ${worldState.players.length}, Ships: ${worldState.ships.length}`);
+        
+        // Debug: Log player positions to verify server updates
+        if (worldState.players.length > 0) {
+          const player = worldState.players[0];
+          console.log(`🎮 Player ${player.id} position: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)})`);
+        }
+        
         this.onWorldStateReceived?.(worldState);
         break;
         

@@ -113,6 +113,9 @@ export class ClientApplication {
       this.inputManager = new InputManager(this.canvas, this.config.input);
       this.inputManager.onInputFrame = this.onInputFrame.bind(this);
       
+      // Set up mouse tracking for mouse-relative movement
+      this.setupMouseTracking();
+      
       // Initialize UI System
       this.uiManager = new UIManager(this.canvas, this.config);
       
@@ -247,6 +250,16 @@ export class ClientApplication {
       // Update camera based on predicted state
       if (this.predictedWorldState) {
         this.updateCamera(this.predictedWorldState, dt);
+        
+        // Update input manager with current player position for mouse-relative movement
+        const assignedPlayerId = this.networkManager.getAssignedPlayerId();
+        const player = assignedPlayerId !== null 
+          ? this.predictedWorldState.players.find(p => p.id === assignedPlayerId)
+          : this.predictedWorldState.players[0];
+        
+        if (player) {
+          this.inputManager.setPlayerPosition(player.position);
+        }
       }
       
       // Update module interactions
@@ -358,6 +371,26 @@ export class ClientApplication {
       this.state = ClientState.CONNECTING;
       console.log('🔄 Connecting to server...');
     }
+  }
+  
+  /**
+   * Set up mouse tracking for mouse-relative movement
+   */
+  private setupMouseTracking(): void {
+    this.canvas.addEventListener('mousemove', (event) => {
+      // Get mouse position in screen coordinates
+      const rect = this.canvas.getBoundingClientRect();
+      const screenX = event.clientX - rect.left;
+      const screenY = event.clientY - rect.top;
+      
+      // Convert screen coordinates to world coordinates using camera
+      const worldPos = this.camera.screenToWorld(Vec2.from(screenX, screenY));
+      
+      // Update input manager with mouse world position
+      this.inputManager.updateMouseWorldPosition(worldPos);
+    });
+    
+    console.log('🖱️ Mouse tracking initialized for directional movement');
   }
   
   /**
