@@ -12,7 +12,7 @@ import { RenderSystem } from './gfx/RenderSystem.js';
 import { Camera } from './gfx/Camera.js';
 
 // Network System  
-import { UDPNetworkManager, ConnectionState } from '../net/UDPNetworkManager.js';
+import { NetworkManager, ConnectionState } from '../net/NetworkManager.js';
 import { PredictionEngine } from '../net/PredictionEngine.js';
 
 // Gameplay Systems
@@ -51,7 +51,7 @@ export class ClientApplication {
   
   // Core Systems
   private renderSystem!: RenderSystem;
-  private networkManager!: UDPNetworkManager;
+  private networkManager!: NetworkManager;
   private predictionEngine!: PredictionEngine;
   private inputManager!: InputManager;
   private uiManager!: UIManager;
@@ -102,7 +102,7 @@ export class ClientApplication {
       await this.renderSystem.initialize();
       
       // Initialize Network System
-      this.networkManager = new UDPNetworkManager(this.config.network);
+      this.networkManager = new NetworkManager(this.config.network);
       this.networkManager.setWorldStateHandler(this.onServerWorldState.bind(this));
       this.networkManager.setConnectionStateHandler(this.onConnectionStateChanged.bind(this));
       

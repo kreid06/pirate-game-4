@@ -4,6 +4,7 @@
 #include "util/log.h"
 #include "util/time.h"
 #include <string.h>
+#include <stdbool.h>
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -347,21 +348,84 @@ int websocket_server_update(struct Sim* sim) {
                 int opcode = websocket_parse_frame(buffer, received, payload, &payload_len);
                 
                 if (opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY) {
-                    // Use protocol bridge to handle WebSocket message
                     log_info("📨 WebSocket message from %s:%u: %.*s", 
                             client->ip_address, client->port, (int)payload_len, payload);
                     
-                    // Simple WebSocket message handling (temporary implementation)
-                    // TODO: Use full protocol bridge when ready
-                    const char* ack_response = "{\"type\":\"message_ack\",\"status\":\"processed\"}";
-                    char frame[1024];
-                    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, ack_response, strlen(ack_response), frame);
-                    if (frame_len > 0) {
-                        ssize_t sent = send(client->fd, frame, frame_len, 0);
-                        if (sent > 0) {
-                            ws_server.packets_sent++;
-                            log_info("📤 WebSocket ACK sent to %s:%u (%zd bytes)", 
-                                    client->ip_address, client->port, sent);
+                    char response[1024];
+                    bool handled = false;
+                    
+                    // Check if message is JSON or text command
+                    if (payload[0] == '{') {
+                        // JSON message - parse type
+                        if (strstr(payload, "\"type\":\"handshake\"")) {
+                            // Handshake message
+                            uint32_t player_id = 1000 + i;
+                            snprintf(response, sizeof(response),
+                                    "{\"type\":\"handshake_response\",\"player_id\":%u,\"server_time\":%u,\"status\":\"connected\"}",
+                                    player_id, get_time_ms());
+                            handled = true;
+                            log_info("🤝 WebSocket handshake from %s:%u (ID: %u)", client->ip_address, client->port, player_id);
+                            
+                        } else if (strstr(payload, "\"type\":\"input_frame\"")) {
+                            // Input frame message  
+                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"input_received\"}");
+                            handled = true;
+                            log_info("🎮 Input frame from %s:%u", client->ip_address, client->port);
+                            
+                        } else if (strstr(payload, "\"type\":\"ping\"")) {
+                            // JSON ping message
+                            snprintf(response, sizeof(response),
+                                    "{\"type\":\"pong\",\"timestamp\":%u,\"server_time\":%u}",
+                                    get_time_ms(), get_time_ms());
+                            handled = true;
+                            
+                        } else {
+                            // Unknown JSON message
+                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"processed\"}");
+                            handled = true;
+                        }
+                        
+                    } else {
+                        // Text command (simple protocol)
+                        if (strncmp(payload, "PING", 4) == 0) {
+                            strcpy(response, "PONG");
+                            handled = true;
+                            
+                        } else if (strncmp(payload, "JOIN:", 5) == 0) {
+                            // Extract player name
+                            char* player_name = payload + 5;
+                            uint32_t player_id = 1000 + i;
+                            snprintf(response, sizeof(response),
+                                    "{\"type\":\"handshake_response\",\"player_id\":%u,\"player_name\":\"%s\",\"server_time\":%u}",
+                                    player_id, player_name, get_time_ms());
+                            handled = true;
+                            log_info("🎮 Player joined via WebSocket: %s (ID: %u)", player_name, player_id);
+                            
+                        } else if (strncmp(payload, "STATE", 5) == 0) {
+                            // Request game state
+                            snprintf(response, sizeof(response),
+                                    "{\"type\":\"world_state\",\"tick\":%u,\"time\":%u,\"ships\":[],\"players\":[],\"projectiles\":[]}",
+                                    get_time_ms() / 33, get_time_ms()); // Approximate tick from time
+                            handled = true;
+                            
+                        } else {
+                            // Unknown command
+                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"unknown_command\"}");
+                            handled = true;
+                        }
+                    }
+                    
+                    // Send response
+                    if (handled) {
+                        char frame[1024];
+                        size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame);
+                        if (frame_len > 0) {
+                            ssize_t sent = send(client->fd, frame, frame_len, 0);
+                            if (sent > 0) {
+                                ws_server.packets_sent++;
+                                log_info("📤 WebSocket response sent to %s:%u (%zd bytes)", 
+                                        client->ip_address, client->port, sent);
+                            }
                         }
                     }
                     

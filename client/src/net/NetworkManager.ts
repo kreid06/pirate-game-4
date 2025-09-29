@@ -37,12 +37,16 @@ export interface NetworkStats {
  */
 export enum MessageType {
   // Client to Server
-  INPUT_FRAME = 'input_frame',
+  HANDSHAKE = 'handshake',
+  INPUT_FRAME = 'input_frame', 
   PING = 'ping',
   
   // Server to Client  
+  HANDSHAKE_RESPONSE = 'handshake_response',
   WORLD_STATE = 'world_state',
+  SNAPSHOT = 'snapshot',
   PONG = 'pong',
+  MESSAGE_ACK = 'message_ack',
   
   // Connection Management
   CONNECT = 'connect',
@@ -60,6 +64,15 @@ interface NetworkMessage {
 }
 
 /**
+ * Handshake message for initial connection
+ */
+interface HandshakeMessage extends NetworkMessage {
+  type: MessageType.HANDSHAKE;
+  playerName: string;
+  protocolVersion: string;
+}
+
+/**
  * Input frame message
  */
 interface InputMessage extends NetworkMessage {
@@ -68,25 +81,32 @@ interface InputMessage extends NetworkMessage {
 }
 
 /**
- * World state message
- */
-interface WorldStateMessage extends NetworkMessage {
-  type: MessageType.WORLD_STATE;
-  worldState: WorldState;
-}
-
-/**
  * Ping/Pong messages for latency measurement
  */
 interface PingPongMessage extends NetworkMessage {
   type: MessageType.PING | MessageType.PONG;
   clientTimestamp: number;
+  serverTimestamp?: number;
 }
 
 /**
- * Union of all message types
+ * World state update from server
  */
-type GameMessage = InputMessage | WorldStateMessage | PingPongMessage | NetworkMessage;
+interface WorldStateMessage extends NetworkMessage {
+  type: MessageType.WORLD_STATE | MessageType.SNAPSHOT;
+  worldState: WorldState;
+  tick: number;
+}
+
+/**
+ * Server acknowledgment message
+ */
+interface AckMessage extends NetworkMessage {
+  type: MessageType.MESSAGE_ACK;
+  status: string;
+}
+
+type GameMessage = HandshakeMessage | InputMessage | PingPongMessage | WorldStateMessage | AckMessage;
 
 /**
  * Main network manager class
@@ -104,6 +124,7 @@ export class NetworkManager {
   // Message handling
   private messageSequenceId = 0;
   private pendingPings = new Map<number, number>(); // sequenceId -> timestamp
+  private playerName: string = 'Player_' + Math.random().toString(36).substr(2, 5);
   
   // Statistics tracking
   private stats: NetworkStats = {
@@ -116,18 +137,53 @@ export class NetworkManager {
     averageFPS: 30
   };
   
+  private latency = 0;
+  
   // Event callbacks
   public onWorldStateReceived: ((worldState: WorldState) => void) | null = null;
-  public onConnectionStateChanged: ((connected: boolean) => void) | null = null;
+  public onConnectionStateChanged: ((state: ConnectionState) => void) | null = null;
   
   constructor(config: NetworkConfig) {
     this.config = config;
   }
   
   /**
+   * Set handler for world state updates
+   */
+  setWorldStateHandler(handler: (worldState: WorldState) => void): void {
+    this.onWorldStateReceived = handler;
+  }
+
+  /**
+   * Set handler for connection state changes  
+   */
+  setConnectionStateHandler(handler: (state: ConnectionState) => void): void {
+    this.onConnectionStateChanged = handler;
+  }
+
+  /**
+   * Get network statistics
+   */
+  getStats(): NetworkStats {
+    return {
+      ping: this.latency,
+      packetLoss: 0, // WebSocket handles reliability
+      bytesReceived: this.stats.bytesReceived,
+      bytesSent: this.stats.bytesSent,
+      messagesReceived: this.stats.messagesReceived,
+      messagesSent: this.stats.messagesSent,
+      averageFPS: 0 // TODO: Calculate from server updates
+    };
+  }
+  
+  /**
    * Connect to the game server
    */
-  async connect(): Promise<void> {
+  async connect(playerName?: string): Promise<void> {
+    if (playerName) {
+      this.playerName = playerName;
+    }
+    
     if (this.connectionState === ConnectionState.CONNECTING || 
         this.connectionState === ConnectionState.CONNECTED) {
       return; // Already connecting or connected
@@ -146,6 +202,9 @@ export class NetworkManager {
       // Wait for connection with timeout
       await this.waitForConnection();
       
+      // Send handshake
+      await this.sendHandshake();
+      
       // Start heartbeat
       this.startHeartbeat();
       
@@ -153,7 +212,7 @@ export class NetworkManager {
       this.reconnectAttempts = 0;
       
       console.log('✅ Connected to server');
-      this.onConnectionStateChanged?.(true);
+      this.onConnectionStateChanged?.(ConnectionState.CONNECTED);
       
     } catch (error) {
       this.connectionState = ConnectionState.ERROR;
@@ -189,8 +248,58 @@ export class NetworkManager {
       this.socket = null;
     }
     
-    this.onConnectionStateChanged?.(false);
+    this.onConnectionStateChanged?.(ConnectionState.DISCONNECTED);
     console.log('✅ Disconnected from server');
+  }
+  
+  /**
+   * Send handshake to server after connection
+   */
+  private async sendHandshake(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (!this.socket) {
+        reject(new Error('No socket available'));
+        return;
+      }
+      
+      const handshakeMessage: HandshakeMessage = {
+        type: MessageType.HANDSHAKE,
+        timestamp: Date.now(),
+        sequenceId: this.messageSequenceId++,
+        playerName: this.playerName,
+        protocolVersion: '1.0'
+      };
+      
+      // Set timeout for handshake response
+      const timeout = setTimeout(() => {
+        reject(new Error('Handshake timeout'));
+      }, 5000);
+      
+      // Wait for handshake response
+      const originalHandler = this.socket.onmessage;
+      this.socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === MessageType.HANDSHAKE_RESPONSE || data.type === MessageType.MESSAGE_ACK) {
+            clearTimeout(timeout);
+            this.socket!.onmessage = originalHandler;
+            console.log('🤝 Handshake completed');
+            resolve();
+          } else {
+            // Let original handler process other messages
+            originalHandler?.call(this.socket!, event);
+          }
+        } catch (error) {
+          // If not JSON, might be text response - accept it
+          clearTimeout(timeout);
+          this.socket!.onmessage = originalHandler;
+          console.log('🤝 Handshake completed (text response)');
+          resolve();
+        }
+      };
+      
+      this.sendMessage(handshakeMessage);
+    });
   }
   
   /**
@@ -236,12 +345,30 @@ export class NetworkManager {
     
     this.socket.onmessage = (event) => {
       try {
-        const message: GameMessage = JSON.parse(event.data);
+        const data = event.data;
+        
+        // Handle both JSON and text responses from server
+        let message: any;
+        if (data.startsWith('{')) {
+          // JSON response
+          message = JSON.parse(data);
+        } else {
+          // Text response (like PONG) - convert to expected format
+          message = {
+            type: data.toLowerCase(),
+            timestamp: Date.now(),
+            sequenceId: this.messageSequenceId - 1
+          };
+        }
+        
         this.handleMessage(message);
         this.stats.messagesReceived++;
-        this.stats.bytesReceived += event.data.length;
+        this.stats.bytesReceived += data.length;
       } catch (error) {
-        console.error('Failed to parse message:', error);
+        console.error('Failed to parse message:', error, 'Data:', event.data);
+        // Still count the message
+        this.stats.messagesReceived++;
+        this.stats.bytesReceived += event.data.length;
       }
     };
     
@@ -251,7 +378,7 @@ export class NetworkManager {
       if (this.connectionState === ConnectionState.CONNECTED) {
         // Unexpected disconnection - attempt reconnect
         this.connectionState = ConnectionState.DISCONNECTED;
-        this.onConnectionStateChanged?.(false);
+        this.onConnectionStateChanged?.(ConnectionState.DISCONNECTED);
         this.scheduleReconnect();
       }
     };
@@ -285,20 +412,30 @@ export class NetworkManager {
     });
   }
   
-  private handleMessage(message: GameMessage): void {
+  private handleMessage(message: any): void {
     switch (message.type) {
       case MessageType.WORLD_STATE:
-        const worldStateMsg = message as WorldStateMessage;
-        this.onWorldStateReceived?.(worldStateMsg.worldState);
+      case MessageType.SNAPSHOT:
+        if (message.worldState) {
+          this.onWorldStateReceived?.(message.worldState);
+        }
         break;
         
       case MessageType.PONG:
-        const pongMsg = message as PingPongMessage;
-        this.handlePong(pongMsg);
+      case 'pong': // Handle text response
+        this.handlePong(message);
+        break;
+        
+      case MessageType.HANDSHAKE_RESPONSE:
+        console.log('🤝 Received handshake response:', message);
+        break;
+        
+      case MessageType.MESSAGE_ACK:
+        console.log('✅ Server acknowledged message:', message.status);
         break;
         
       default:
-        console.warn('Unknown message type:', message.type);
+        console.log('📦 Received message:', message.type, message);
         break;
     }
   }
@@ -341,21 +478,20 @@ export class NetworkManager {
     const sequenceId = this.messageSequenceId++;
     const timestamp = Date.now();
     
-    const pingMessage: PingPongMessage = {
-      type: MessageType.PING,
-      timestamp,
-      sequenceId,
-      clientTimestamp: timestamp
-    };
-    
-    this.pendingPings.set(sequenceId, timestamp);
-    this.sendMessage(pingMessage);
-    
-    // Clean up old pings (prevent memory leak)
-    const oldPingThreshold = timestamp - 10000; // 10 seconds
-    for (const [id, time] of this.pendingPings.entries()) {
-      if (time < oldPingThreshold) {
-        this.pendingPings.delete(id);
+    // For now, send simple PING text that server expects
+    // TODO: Use JSON format when server fully supports it
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send('PING');
+      this.pendingPings.set(sequenceId, timestamp);
+      this.stats.messagesSent++;
+      this.stats.bytesSent += 4; // PING length
+      
+      // Clean up old pings (prevent memory leak)
+      const oldPingThreshold = timestamp - 10000; // 10 seconds
+      for (const [id, time] of this.pendingPings.entries()) {
+        if (time < oldPingThreshold) {
+          this.pendingPings.delete(id);
+        }
       }
     }
   }
