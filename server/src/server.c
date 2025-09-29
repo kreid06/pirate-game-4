@@ -1,6 +1,7 @@
 #include "server.h"
 #include "sim/types.h"
 #include "net/protocol.h"
+#include "net/websocket_server.h"
 #include "util/time.h"
 #include "util/log.h"
 #include "core/rng.h"
@@ -87,6 +88,14 @@ int server_init(struct ServerContext** out_ctx) {
     // Initialize simulation
     init_simulation(ctx);
     
+    // Initialize WebSocket server on port 8080 (browser clients)
+    if (websocket_server_init(8080) != 0) {
+        log_error("Failed to initialize WebSocket server");
+        cleanup_networking(ctx);
+        free(ctx);
+        return -1;
+    }
+    
     // Mark as initialized
     ctx->initialized = true;
     ctx->should_run = true;
@@ -101,20 +110,30 @@ int server_init(struct ServerContext** out_ctx) {
 void server_shutdown(struct ServerContext* ctx) {
     if (!ctx) return;
     
-    log_info("Shutting down server...");
+    log_info("Starting server shutdown sequence...");
     
-    // Print final statistics
-    log_info("Final stats: RX=%lu packets (%lu bytes), TX=%lu packets (%lu bytes)",
-             ctx->total_packets_received, ctx->total_bytes_received,
-             ctx->total_packets_sent, ctx->total_bytes_sent);
+    // Stop main loop
+    ctx->should_run = false;
     
-    // Cleanup networking
+    // Save current state for debugging
+    log_info("Final tick count: %u", ctx->current_tick);
+    log_info("Total packets: RX=%u TX=%u", ctx->total_packets_received, ctx->total_packets_sent);
+    log_info("Total bytes: RX=%u TX=%u", ctx->total_bytes_received, ctx->total_bytes_sent);
+    
+    // Cleanup networking resources first (close sockets)
     cleanup_networking(ctx);
     
-    // Free context
+    // Free the context
     free(ctx);
     
     log_info("Server shutdown complete");
+}
+
+void server_request_shutdown(struct ServerContext* ctx) {
+    if (!ctx) return;
+    
+    log_info("🛑 Shutdown requested - stopping main loop");
+    ctx->should_run = false;
 }
 
 int server_run(struct ServerContext* ctx) {
@@ -126,12 +145,16 @@ int server_run(struct ServerContext* ctx) {
     log_info("Starting main server loop at %d Hz", TICK_RATE_HZ);
     
     uint64_t next_tick_time = ctx->tick_start_time;
+    uint32_t shutdown_countdown = 0;
     
     while (ctx->should_run) {
         uint64_t tick_start = get_time_us();
         
         // Process incoming network packets
         process_network_input(ctx);
+        
+        // Update WebSocket server (process browser client connections)
+        websocket_server_update(NULL);  // TODO: pass simulation context if needed
         
         // Run physics simulation step
         step_simulation(ctx);
@@ -155,11 +178,24 @@ int server_run(struct ServerContext* ctx) {
                      ctx->current_tick, tick_duration, TICK_DURATION_US);
         }
         
+        // Check if shutdown was requested
+        if (!ctx->should_run) {
+            shutdown_countdown++;
+            if (shutdown_countdown == 1) {
+                log_info("📋 Shutdown initiated - completing current operations...");
+            }
+            // Allow a few ticks to complete ongoing operations
+            if (shutdown_countdown > 3) {
+                log_info("⏱️ Shutdown grace period complete");
+                break;
+            }
+        }
+        
         // Sleep until next tick boundary
         sleep_until_time(next_tick_time);
     }
     
-    log_info("Main server loop exited");
+    log_info("📋 Main server loop exited cleanly after %u ticks", ctx->current_tick);
     return 0;
 }
 

@@ -63,10 +63,19 @@ int sim_init(struct Sim* sim, const struct SimConfig* config) {
 void sim_cleanup(struct Sim* sim) {
     if (!sim) return;
     
+    log_info("📋 Starting simulation cleanup...");
+    
+    // Log final simulation state
+    log_info("Final simulation state:");
+    log_info("  Tick: %u", sim->tick);
+    log_info("  Ships: %u", sim->ship_count);
+    log_info("  Players: %u", sim->player_count);  
+    log_info("  Projectiles: %u", sim->projectile_count);
+    
     // Reset all counts and state
     memset(sim, 0, sizeof(struct Sim));
     
-    log_info("Simulation cleaned up");
+    log_info("✅ Simulation cleanup complete");
 }
 
 void sim_step(struct Sim* sim, q16_t dt) {

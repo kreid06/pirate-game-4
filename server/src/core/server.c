@@ -1,7 +1,7 @@
 #define _DEFAULT_SOURCE
 #include "server.h"
 #include "sim/simulation.h"
-#in    // Initialize network layer (UDP) on port 8081
+// Initialize network layer (UDP) on port 8081
     if (network_init(&server->network, 8081) != 0) {
         log_error("Failed to initialize network manager");
         simulation_cleanup(&server->simulation);
@@ -10,7 +10,13 @@
     }
     
     // Initialize admin server on port 8082
-    if (admin_server_init(&server->admin, 8082) != 0) {/types.h"
+    if (admin_server_init(&server->admin, 8082) != 0) {/types.h
+        log_error("Failed to initialize admin server");
+        network_cleanup(&server->network);
+        simulation_cleanup(&server->simulation);
+        free(server);
+        return -1;
+    }
 #include "net/network.h"
 #include "net/websocket_server.h"
 #include "admin/admin_server.h"
@@ -100,14 +106,17 @@ int server_init(struct ServerContext** ctx) {
     }
     
     // Initialize WebSocket server on port 8080 (browser clients)
+    printf("🔧 DEBUG: About to call websocket_server_init(8080)\n");
     if (websocket_server_init(8080) != 0) {
         log_error("Failed to initialize WebSocket server");
+        printf("🚨 DEBUG: websocket_server_init failed!\n");
         admin_server_cleanup(&server->admin);
         network_cleanup(&server->network);
         simulation_cleanup(&server->simulation);
         free(server);
         return -1;
     }
+    printf("🔧 DEBUG: WebSocket server initialization completed successfully\n");
     
     log_info("🚀 Pirate Game Server initialized successfully with Week 3-4 enhancements");
     log_info("⚡ Simulation running at %d Hz (%.3f ms per tick)", 
@@ -132,7 +141,7 @@ int server_init(struct ServerContext** ctx) {
 void server_shutdown(struct ServerContext* ctx) {
     if (!ctx) return;
     
-    log_info("Shutting down server...");
+    log_info("📋 Shutting down server...");
     
     // Log final statistics
     if (ctx->tick_count > 0) {
@@ -148,14 +157,28 @@ void server_shutdown(struct ServerContext* ctx) {
                  ctx->max_tick_time_us, ctx->max_tick_time_us / 1000.0);
     }
     
-    // Cleanup subsystems
+    // Cleanup subsystems in reverse order of initialization
+    log_info("🔧 Cleaning up WebSocket server...");
     websocket_server_cleanup();
+    
+    log_info("🔧 Cleaning up admin server...");
     admin_server_cleanup(&ctx->admin);
+    
+    log_info("🔧 Cleaning up network subsystem...");
     network_cleanup(&ctx->network);
+    
+    log_info("🔧 Cleaning up simulation...");
     simulation_cleanup(&ctx->simulation);
     
     free(ctx);
-    log_info("Server shutdown complete");
+    log_info("✅ Server shutdown complete");
+}
+
+void server_request_shutdown(struct ServerContext* ctx) {
+    if (!ctx) return;
+    
+    log_info("🛑 Shutdown requested - stopping main loop");
+    ctx->running = false;
 }
 
 int server_run(struct ServerContext* ctx) {
@@ -166,6 +189,7 @@ int server_run(struct ServerContext* ctx) {
     uint64_t next_tick_time = get_time_us();
     uint32_t ticks_this_second = 0;
     uint32_t last_second = get_time_ms() / 1000;
+    uint32_t shutdown_countdown = 0;
     
     while (ctx->running) {
         uint64_t tick_start = get_time_us();
@@ -191,6 +215,19 @@ int server_run(struct ServerContext* ctx) {
         
         ctx->tick_count++;
         
+        // Check if shutdown was requested
+        if (!ctx->running) {
+            shutdown_countdown++;
+            if (shutdown_countdown == 1) {
+                log_info("📋 Shutdown initiated - completing current operations...");
+            }
+            // Allow a few ticks to complete ongoing operations
+            if (shutdown_countdown > 3) {
+                log_info("⏱️ Shutdown grace period complete");
+                break;
+            }
+        }
+        
         // Sleep until next tick
         next_tick_time += TICK_DURATION_US;
         uint64_t current_time = get_time_us();
@@ -206,22 +243,24 @@ int server_run(struct ServerContext* ctx) {
             next_tick_time = current_time;
         }
         
-        // Log statistics periodically
-        uint32_t current_time_ms = get_time_ms();
-        if (current_time_ms - ctx->last_stats_time > 30000) { // Every 30 seconds
-            double avg_tick_time = ctx->tick_count > 0 ? 
-                (double)ctx->total_tick_time_us / ctx->tick_count : 0.0;
-            
-            log_info("Server performance - TPS: %u, Avg tick: %.1f μs, Max tick: %lu μs, "
-                     "Total ticks: %lu",
-                     ctx->ticks_per_second, avg_tick_time, ctx->max_tick_time_us,
-                     ctx->tick_count);
-            
-            ctx->last_stats_time = current_time_ms;
+        // Log statistics periodically (but not during shutdown)
+        if (ctx->running) {
+            uint32_t current_time_ms = get_time_ms();
+            if (current_time_ms - ctx->last_stats_time > 30000) { // Every 30 seconds
+                double avg_tick_time = ctx->tick_count > 0 ? 
+                    (double)ctx->total_tick_time_us / ctx->tick_count : 0.0;
+                
+                log_info("Server performance - TPS: %u, Avg tick: %.1f μs, Max tick: %lu μs, "
+                         "Total ticks: %lu",
+                         ctx->ticks_per_second, avg_tick_time, ctx->max_tick_time_us,
+                         ctx->tick_count);
+                
+                ctx->last_stats_time = current_time_ms;
+            }
         }
     }
     
-    log_info("Main server loop ended");
+    log_info("📋 Main server loop ended cleanly after %lu ticks", ctx->tick_count);
     return 0;
 }
 

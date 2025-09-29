@@ -1,0 +1,6 @@
+Pirate Game Server v1.0 - Deterministic 30Hz Physics Server
+Built: Sep 28 2025 19:37:44
+[32m[20:02:24 server.c:75] Initializing server subsystems...[0m
+[31m[20:02:24 server.c:206] Failed to bind socket: Address already in use[0m
+[31m[20:02:24 server.c:82] Failed to initialize networking[0m
+Failed to initialize server: -1
