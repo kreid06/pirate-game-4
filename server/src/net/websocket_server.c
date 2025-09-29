@@ -27,6 +27,15 @@
 #define WS_OPCODE_PING 0x9
 #define WS_OPCODE_PONG 0xA
 
+// Simple player data structure for movement
+typedef struct {
+    uint32_t player_id;
+    float x, y;
+    float velocity_x, velocity_y;
+    uint32_t last_input_time;
+    bool active;
+} WebSocketPlayer;
+
 struct WebSocketClient {
     int fd;
     bool connected;
@@ -34,6 +43,7 @@ struct WebSocketClient {
     uint32_t last_ping_time;
     char ip_address[INET_ADDRSTRLEN];
     uint16_t port;
+    uint32_t player_id; // Associated player ID
 };
 
 struct WebSocketServer {
@@ -47,6 +57,10 @@ struct WebSocketServer {
 };
 
 static struct WebSocketServer ws_server = {0};
+
+// Global player data for simple movement tracking
+static WebSocketPlayer players[WS_MAX_CLIENTS] = {0};
+static int next_player_id = 1000;
 
 // Base64 encoding for WebSocket handshake
 static char* base64_encode(const unsigned char* input, int length) {
@@ -109,6 +123,62 @@ static bool websocket_handshake(int client_fd, const char* request) {
 }
 
 // Parse WebSocket frame
+// Player management functions
+static WebSocketPlayer* create_player(uint32_t player_id) {
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (!players[i].active) {
+            players[i].player_id = player_id;
+            players[i].x = 400.0f; // Default spawn position
+            players[i].y = 300.0f;
+            players[i].velocity_x = 0.0f;
+            players[i].velocity_y = 0.0f;
+            players[i].last_input_time = get_time_ms();
+            players[i].active = true;
+            log_info("🎮 Created player %u at (%.1f, %.1f)", player_id, players[i].x, players[i].y);
+            return &players[i];
+        }
+    }
+    return NULL;
+}
+
+static WebSocketPlayer* find_player(uint32_t player_id) {
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (players[i].active && players[i].player_id == player_id) {
+            return &players[i];
+        }
+    }
+    return NULL;
+}
+
+static void remove_player(uint32_t player_id) {
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (players[i].active && players[i].player_id == player_id) {
+            players[i].active = false;
+            log_info("🎮 Removed player %u", player_id);
+            break;
+        }
+    }
+}
+
+static void update_player_movement(WebSocketPlayer* player, float movement_x, float movement_y, float dt) {
+    const float PLAYER_SPEED = 200.0f; // pixels per second
+    const float FRICTION = 0.85f;
+    
+    // Apply movement input
+    player->velocity_x = movement_x * PLAYER_SPEED;
+    player->velocity_y = movement_y * PLAYER_SPEED;
+    
+    // Update position
+    player->x += player->velocity_x * dt;
+    player->y += player->velocity_y * dt;
+    
+    // Simple bounds checking (assuming 800x600 world)
+    if (player->x < 0) player->x = 0;
+    if (player->x > 800) player->x = 800;
+    if (player->y < 0) player->y = 0;
+    if (player->y > 600) player->y = 600;
+}
+
 static int websocket_parse_frame(const char* buffer, size_t buffer_len, char* payload, size_t* payload_len) {
     if (buffer_len < 2) return -1;
     
@@ -309,6 +379,7 @@ int websocket_server_update(struct Sim* sim) {
             ws_server.clients[slot].connected = true;
             ws_server.clients[slot].handshake_complete = false;
             ws_server.clients[slot].last_ping_time = get_time_ms();
+            ws_server.clients[slot].player_id = 0; // Will be assigned during handshake
             inet_ntop(AF_INET, &client_addr.sin_addr, ws_server.clients[slot].ip_address, INET_ADDRSTRLEN);
             ws_server.clients[slot].port = ntohs(client_addr.sin_port);
             
@@ -359,7 +430,16 @@ int websocket_server_update(struct Sim* sim) {
                         // JSON message - parse type
                         if (strstr(payload, "\"type\":\"handshake\"")) {
                             // Handshake message
-                            uint32_t player_id = 1000 + i;
+                            uint32_t player_id = next_player_id++;
+                            client->player_id = player_id;
+                            
+                            // Create player for this client
+                            WebSocketPlayer* player = create_player(player_id);
+                            if (!player) {
+                                log_error("Failed to create player for client %s:%u", client->ip_address, client->port);
+                                continue;
+                            }
+                            
                             snprintf(response, sizeof(response),
                                     "{\"type\":\"handshake_response\",\"player_id\":%u,\"server_time\":%u,\"status\":\"connected\"}",
                                     player_id, get_time_ms());
@@ -370,8 +450,8 @@ int websocket_server_update(struct Sim* sim) {
                             char game_state_frame[2048];
                             char game_state_response[1024];
                             snprintf(game_state_response, sizeof(game_state_response),
-                                    "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":[],\"players\":[{\"id\":%u,\"name\":\"Player\",\"x\":400,\"y\":300}],\"projectiles\":[]}",
-                                    get_time_ms() / 33, get_time_ms(), player_id);
+                                    "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":[],\"players\":[{\"id\":%u,\"name\":\"Player\",\"x\":%.1f,\"y\":%.1f}],\"projectiles\":[]}",
+                                    get_time_ms() / 33, get_time_ms(), player_id, player->x, player->y);
                             
                             // Send handshake response first
                             char frame[1024];
@@ -393,10 +473,34 @@ int websocket_server_update(struct Sim* sim) {
                             continue;
                             
                         } else if (strstr(payload, "\"type\":\"input_frame\"")) {
-                            // Input frame message  
+                            // Input frame message - parse movement data
+                            WebSocketPlayer* player = find_player(client->player_id);
+                            if (player) {
+                                // Simple JSON parsing for movement (basic implementation)
+                                char* movement_start = strstr(payload, "\"movement\":{");
+                                if (movement_start) {
+                                    float x = 0.0f, y = 0.0f;
+                                    char* x_start = strstr(movement_start, "\"x\":");
+                                    char* y_start = strstr(movement_start, "\"y\":");
+                                    
+                                    if (x_start) sscanf(x_start + 4, "%f", &x);
+                                    if (y_start) sscanf(y_start + 4, "%f", &y);
+                                    
+                                    // Update player movement (using 0.033s as approximate tick time)
+                                    uint32_t current_time = get_time_ms();
+                                    float dt = (current_time - player->last_input_time) / 1000.0f;
+                                    if (dt > 0.1f) dt = 0.033f; // Cap delta time
+                                    
+                                    update_player_movement(player, x, y, dt);
+                                    player->last_input_time = current_time;
+                                    
+                                    log_info("🎮 Player %u moved to (%.1f, %.1f)", 
+                                             client->player_id, player->x, player->y);
+                                }
+                            }
+                            
                             strcpy(response, "{\"type\":\"message_ack\",\"status\":\"input_received\"}");
                             handled = true;
-                            log_info("🎮 Input frame from %s:%u", client->ip_address, client->port);
                             
                         } else if (strstr(payload, "\"type\":\"ping\"")) {
                             // JSON ping message
@@ -459,6 +563,10 @@ int websocket_server_update(struct Sim* sim) {
                     
                 } else if (opcode == WS_OPCODE_CLOSE) {
                     log_info("🔌 WebSocket client %s:%u disconnected", client->ip_address, client->port);
+                    if (client->player_id > 0) {
+                        remove_player(client->player_id);
+                        client->player_id = 0;
+                    }
                     close(client->fd);
                     client->connected = false;
                 } else if (opcode == WS_OPCODE_PING) {
@@ -473,11 +581,19 @@ int websocket_server_update(struct Sim* sim) {
         } else if (received == 0) {
             // Client disconnected
             log_info("🔌 WebSocket client %s:%u disconnected", client->ip_address, client->port);
+            if (client->player_id > 0) {
+                remove_player(client->player_id);
+                client->player_id = 0;
+            }
             close(client->fd);
             client->connected = false;
         } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
             // Error
             log_warn("WebSocket client %s:%u error: %s", client->ip_address, client->port, strerror(errno));
+            if (client->player_id > 0) {
+                remove_player(client->player_id);
+                client->player_id = 0;
+            }
             close(client->fd);
             client->connected = false;
         }
@@ -487,10 +603,28 @@ int websocket_server_update(struct Sim* sim) {
     static uint32_t last_game_state_time = 0;
     uint32_t current_time = get_time_ms();
     if (current_time - last_game_state_time > 500) {
+        // Build players JSON array with current positions
+        char players_json[512] = "[";
+        bool first_player = true;
+        
+        for (int p = 0; p < WS_MAX_CLIENTS; p++) {
+            if (players[p].active) {
+                if (!first_player) strcat(players_json, ",");
+                char player_entry[128];
+                snprintf(player_entry, sizeof(player_entry),
+                        "{\"id\":%u,\"name\":\"Player_%u\",\"x\":%.1f,\"y\":%.1f}",
+                        players[p].player_id, players[p].player_id, 
+                        players[p].x, players[p].y);
+                strcat(players_json, player_entry);
+                first_player = false;
+            }
+        }
+        strcat(players_json, "]");
+        
         char game_state[1024];
         snprintf(game_state, sizeof(game_state),
-                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":[],\"players\":[{\"id\":1001,\"name\":\"Player\",\"x\":400,\"y\":300}],\"projectiles\":[]}",
-                current_time / 33, current_time);
+                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":[],\"players\":%s,\"projectiles\":[]}",
+                current_time / 33, current_time, players_json);
         
         // Broadcast to all connected clients
         for (int i = 0; i < WS_MAX_CLIENTS; i++) {
