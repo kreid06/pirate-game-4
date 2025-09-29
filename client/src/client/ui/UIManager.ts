@@ -194,23 +194,45 @@ class HUDElement implements UIElement {
     const player = context.worldState.players[0]; // First player
     if (!player) return;
     
+    // Set up text rendering with better visibility
+    ctx.save();
+    
+    // Background for better readability
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(10, 10, 320, 120);
+    
+    // Border for the info box
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(10, 10, 320, 120);
+    
     // Set up text rendering
     ctx.fillStyle = '#ffffff';
-    ctx.font = '16px Arial';
+    ctx.font = 'bold 16px Consolas, monospace';
     ctx.textAlign = 'left';
     
-    // Basic player info
+    // Player coordinates (prominent display)
+    ctx.fillStyle = '#00ff00'; // Green for coordinates
+    ctx.font = 'bold 18px Consolas, monospace';
+    ctx.fillText(`POSITION: ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`, 20, 35);
+    
+    // Other info in white
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '14px Consolas, monospace';
     const lines = [
       `FPS: ${context.fps}`,
-      `Position: ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`,
-      `On Deck: ${player.onDeck ? 'Yes' : 'No'}`,
-      `Carrier: ${player.carrierId}`,
+      `On Ship: ${player.onDeck ? 'Yes' : 'No'}`,
+      `Carrier ID: ${player.carrierId}`,
+      `Velocity: ${player.velocity.x.toFixed(1)}, ${player.velocity.y.toFixed(1)}`,
+      `Network: ${context.networkStats.ping.toFixed(0)}ms`
     ];
     
-    // Render HUD lines
+    // Render additional info lines
     lines.forEach((line, index) => {
-      ctx.fillText(line, 20, 30 + index * 20);
+      ctx.fillText(line, 20, 55 + index * 16);
     });
+    
+    ctx.restore();
   }
 }
 

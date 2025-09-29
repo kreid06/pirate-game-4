@@ -300,12 +300,21 @@ export class ClientApplication {
    */
   private updateCamera(worldState: WorldState, dt: number): void {
     const player = worldState.players[0]; // TODO: Support multiple players
-    if (!player) return;
+    if (!player) {
+      console.warn('No player found for camera following');
+      return;
+    }
     
-    // Camera follows player smoothly
-    const followSpeed = 5.0;
-    this.camera.setTarget(player.position);
-    this.camera.followTarget(player.position, followSpeed, dt);
+    // Camera locked to player - immediate response for tight control
+    this.camera.setPosition(player.position);
+    
+    // Debug logging (can be removed later)
+    // console.log(`Camera following player at: ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`);
+    
+    // Alternative smooth following (comment out above line and uncomment below for smooth camera)
+    // const followSpeed = 10.0;
+    // this.camera.setTarget(player.position);
+    // this.camera.followTarget(player.position, followSpeed, dt);
   }
   
   /**
