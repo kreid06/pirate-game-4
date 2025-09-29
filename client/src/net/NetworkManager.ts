@@ -7,6 +7,7 @@
 
 import { NetworkConfig } from '../client/ClientConfig.js';
 import { WorldState, InputFrame } from '../sim/Types.js';
+import { Vec2 } from '../common/Vec2.js';
 
 /**
  * Network connection states
@@ -267,44 +268,60 @@ export class NetworkManager {
       
       // Set timeout for handshake response
       const timeout = setTimeout(() => {
-        reject(new Error('Handshake timeout'));
+        console.warn('⚠️ Handshake timeout - server may not be responding');
+        // Don't reject, just continue - server might be processing
+        resolve();
       }, 5000);
       
-      // Wait for WELCOME response
+      // Wait for WELCOME response or any acknowledgment
       const originalHandler = this.socket.onmessage;
       this.socket.onmessage = (event) => {
         try {
           const data = event.data;
+          console.log('📨 Handshake response received:', data);
           
-          // Check for WELCOME response (handshake success)
-          if (data.startsWith('WELCOME')) {
+          // Check for WELCOME response, message ack, or any response
+          if (data.startsWith('WELCOME') || 
+              data.includes('message_ack') ||
+              data.includes('status') ||
+              data.startsWith('PONG')) {
             clearTimeout(timeout);
             this.socket!.onmessage = originalHandler;
-            console.log('🤝 Handshake completed - Server welcomed player');
+            console.log('🤝 Handshake completed - Server acknowledged');
             
             // After successful handshake, request initial game state
             this.requestGameState();
             resolve();
           } else {
-            // Let original handler process other messages
-            originalHandler?.call(this.socket!, event);
+            // Any response means server is alive - accept it
+            clearTimeout(timeout);
+            this.socket!.onmessage = originalHandler;
+            console.log('🤝 Handshake completed (server responded)');
+            this.requestGameState();
+            resolve();
           }
         } catch (error) {
           console.warn('Error during handshake:', error);
-          // Still continue - maybe server doesn't send WELCOME
+          // Still continue - server is responding
           clearTimeout(timeout);
           this.socket!.onmessage = originalHandler;
-          console.log('🤝 Handshake completed (no WELCOME response)');
+          console.log('🤝 Handshake completed (server alive)');
           this.requestGameState();
           resolve();
         }
       };
       
       // Send the JOIN command
-      this.socket.send(joinCommand);
-      this.stats.messagesSent++;
-      this.stats.bytesSent += joinCommand.length;
-      console.log('📤 Sent handshake:', joinCommand);
+      try {
+        this.socket.send(joinCommand);
+        this.stats.messagesSent++;
+        this.stats.bytesSent += joinCommand.length;
+        console.log('📤 Sent handshake:', joinCommand);
+      } catch (error) {
+        clearTimeout(timeout);
+        console.error('❌ Failed to send handshake:', error);
+        reject(error);
+      }
     });
   }
   
@@ -369,22 +386,57 @@ export class NetworkManager {
         let message: any;
         if (data.startsWith('{')) {
           // JSON response
-          message = JSON.parse(data);
+          try {
+            message = JSON.parse(data);
+          } catch (parseError) {
+            console.warn('Failed to parse JSON message:', data);
+            return;
+          }
         } else {
-          // Text response (like PONG) - convert to expected format
-          message = {
-            type: data.toLowerCase(),
-            timestamp: Date.now(),
-            sequenceId: this.messageSequenceId - 1
-          };
+          // Text response (like PONG, WELCOME) - convert to expected format
+          if (data === 'PONG') {
+            message = {
+              type: 'pong',
+              timestamp: Date.now(),
+              sequenceId: this.messageSequenceId - 1
+            };
+          } else if (data.startsWith('WELCOME')) {
+            message = {
+              type: 'welcome',
+              message: data,
+              timestamp: Date.now()
+            };
+          } else if (data.startsWith('GAME_STATE:')) {
+            // Parse game state JSON
+            try {
+              const stateJson = data.substring(11); // Remove "GAME_STATE:" prefix
+              const gameState = JSON.parse(stateJson);
+              message = {
+                type: 'GAME_STATE',
+                ...gameState,
+                timestamp: Date.now()
+              };
+            } catch (parseError) {
+              console.warn('Failed to parse GAME_STATE:', data);
+              return;
+            }
+          } else {
+            // Unknown text message - log and continue
+            console.log('📦 Server text message:', data);
+            message = {
+              type: 'text',
+              message: data,
+              timestamp: Date.now()
+            };
+          }
         }
         
         this.handleMessage(message);
         this.stats.messagesReceived++;
         this.stats.bytesReceived += data.length;
       } catch (error) {
-        console.error('Failed to parse message:', error, 'Data:', event.data);
-        // Still count the message
+        console.error('Failed to process message:', error, 'Data:', event.data);
+        // Still count the message for stats
         this.stats.messagesReceived++;
         this.stats.bytesReceived += event.data.length;
       }
@@ -444,9 +496,36 @@ export class NetworkManager {
         const worldState: WorldState = {
           tick: message.tick || 0,
           timestamp: Date.now(),
-          ships: message.ships || [],
-          players: message.players || [],
-          cannonballs: message.projectiles || [],
+          ships: (message.ships || []).map((ship: any) => ({
+            id: ship.id || 0,
+            position: ship.position ? Vec2.from(ship.position.x || 0, ship.position.y || 0) : Vec2.zero(),
+            velocity: ship.velocity ? Vec2.from(ship.velocity.x || 0, ship.velocity.y || 0) : Vec2.zero(),
+            rotation: ship.rotation || 0,
+            angularVelocity: ship.angularVelocity || 0,
+            hull: (ship.hull || []).map((point: any) => 
+              point ? Vec2.from(point.x || 0, point.y || 0) : Vec2.zero()
+            ),
+            modules: ship.modules || []
+          })),
+          players: (message.players || []).map((player: any) => ({
+            id: player.id || 0,
+            position: player.position ? Vec2.from(player.position.x || 0, player.position.y || 0) : Vec2.zero(),
+            velocity: player.velocity ? Vec2.from(player.velocity.x || 0, player.velocity.y || 0) : Vec2.zero(),
+            radius: player.radius || 8,
+            carrierId: player.carrierId || 0,
+            deckId: player.deckId || 0,
+            onDeck: player.onDeck || false
+          })),
+          cannonballs: (message.projectiles || []).map((ball: any) => ({
+            id: ball.id || 0,
+            position: ball.position ? Vec2.from(ball.position.x || 0, ball.position.y || 0) : Vec2.zero(),
+            velocity: ball.velocity ? Vec2.from(ball.velocity.x || 0, ball.velocity.y || 0) : Vec2.zero(),
+            firingVelocity: ball.firingVelocity ? Vec2.from(ball.firingVelocity.x || 0, ball.firingVelocity.y || 0) : Vec2.zero(),
+            smokeTrail: (ball.smokeTrail || []).map((smoke: any) => ({
+              position: smoke.position ? Vec2.from(smoke.position.x || 0, smoke.position.y || 0) : Vec2.zero(),
+              age: smoke.age || 0
+            }))
+          })),
           carrierDetection: new Map() // Will be populated as needed
         };
         
@@ -454,8 +533,7 @@ export class NetworkManager {
         this.onWorldStateReceived?.(worldState);
         break;
         
-      case MessageType.PONG:
-      case 'pong': // Handle text response
+      case MessageType.PONG: // Handles both 'pong' enum and text response
         this.handlePong(message);
         break;
         

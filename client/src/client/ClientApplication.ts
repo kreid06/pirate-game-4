@@ -157,7 +157,7 @@ export class ClientApplication {
         console.log('🎮 Running in offline mode - UI and local systems will work');
         this.state = ClientState.DISCONNECTED;
         // Create demo world state for offline testing
-        this.createDemoWorldState();
+        this.demoWorldState = this.createDemoWorldState();
         // Continue execution - we can still show UI and test locally
       }
       
@@ -420,27 +420,58 @@ export class ClientApplication {
   /**
    * Create demo world state for offline mode
    */
-  private createDemoWorldState(): any {
+  private createDemoWorldState(): WorldState {
     return {
-      players: [
+      tick: 0,
+      timestamp: Date.now(),
+      ships: [
         {
-          id: 'demo-player',
-          position: { x: 0, y: 0 },
-          velocity: { x: 0, y: 0 },
+          id: 1,
+          position: Vec2.from(600, 400), // Center of screen
+          velocity: Vec2.zero(),
           rotation: 0,
-          health: 100,
-          ship: {
-            modules: [
-              { type: 'core', position: { x: 0, y: 0 } },
-              { type: 'cannon', position: { x: -1, y: 0 } },
-              { type: 'cannon', position: { x: 1, y: 0 } }
-            ]
-          }
+          angularVelocity: 0,
+          hull: [
+            Vec2.from(-60, -20),
+            Vec2.from(60, -20),
+            Vec2.from(60, 20),
+            Vec2.from(-60, 20)
+          ],
+          modules: [
+            {
+              id: 1,
+              kind: 'deck',
+              deckId: 0,
+              localPos: Vec2.zero(),
+              localRot: 0,
+              occupiedBy: null,
+              stateBits: 0
+            },
+            {
+              id: 2, 
+              kind: 'helm',
+              deckId: 0,
+              localPos: Vec2.from(0, -10),
+              localRot: 0,
+              occupiedBy: null,
+              stateBits: 0
+            }
+          ]
         }
       ],
-      projectiles: [],
-      particles: [],
-      tick: 0
+      players: [
+        {
+          id: 1,
+          position: Vec2.from(600, 400), // Same as ship position
+          velocity: Vec2.zero(),
+          radius: 8,
+          carrierId: 1, // On the demo ship
+          deckId: 0,
+          onDeck: true
+        }
+      ],
+      cannonballs: [],
+      carrierDetection: new Map()
     };
   }
 }

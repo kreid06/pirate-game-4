@@ -10,6 +10,7 @@
 
 import { PredictionConfig } from '../client/ClientConfig.js';
 import { WorldState, InputFrame } from '../sim/Types.js';
+import { Vec2 } from '../common/Vec2.js';
 import { simulate } from '../sim/Physics.js';
 
 /**
@@ -344,24 +345,24 @@ export class PredictionEngine {
       timestamp: worldState.timestamp,
       ships: worldState.ships.map(ship => ({
         ...ship,
-        position: ship.position.clone(),
-        velocity: ship.velocity.clone(),
-        hull: ship.hull.map(point => point.clone()),
-        modules: ship.modules.map(module => ({ ...module }))
+        position: ship.position ? ship.position.clone() : Vec2.zero(),
+        velocity: ship.velocity ? ship.velocity.clone() : Vec2.zero(),
+        hull: ship.hull ? ship.hull.map(point => point ? point.clone() : Vec2.zero()) : [],
+        modules: ship.modules ? ship.modules.map(module => ({ ...module })) : []
       })),
       players: worldState.players.map(player => ({
         ...player,
-        position: player.position.clone(),
-        velocity: player.velocity.clone()
+        position: player.position ? player.position.clone() : Vec2.zero(),
+        velocity: player.velocity ? player.velocity.clone() : Vec2.zero()
       })),
       cannonballs: worldState.cannonballs.map(ball => ({
         ...ball,
-        position: ball.position.clone(),
-        velocity: ball.velocity.clone(),
-        firingVelocity: ball.firingVelocity.clone(),
+        position: ball.position ? ball.position.clone() : Vec2.zero(),
+        velocity: ball.velocity ? ball.velocity.clone() : Vec2.zero(),
+        firingVelocity: ball.firingVelocity ? ball.firingVelocity.clone() : Vec2.zero(),
         smokeTrail: ball.smokeTrail ? ball.smokeTrail.map(smoke => ({
           ...smoke,
-          position: smoke.position.clone()
+          position: smoke.position ? smoke.position.clone() : Vec2.zero()
         })) : []
       })),
       carrierDetection: new Map(worldState.carrierDetection)
