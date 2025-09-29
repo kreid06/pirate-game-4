@@ -366,20 +366,25 @@ export class NetworkManager {
    */
   sendInput(inputFrame: InputFrame): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      console.log(`🚫 Cannot send input - Connection state: ${this.connectionState}, Socket: ${this.socket ? 'exists' : 'null'}`);
       return; // Not connected
     }
 
-    // Server expects flattened structure with movement at top level
-    const message: InputMessage = {
-      type: MessageType.INPUT_FRAME,
-      timestamp: Date.now(),
-      sequenceId: this.messageSequenceId++,
-      tick: inputFrame.tick,
-      movement: inputFrame.movement,
-      actions: inputFrame.actions
-    };
-    
-    this.sendMessage(message);
+    // Only send input if there's actual movement or actions to reduce network traffic
+    if (inputFrame.movement.lengthSq() > 0 || inputFrame.actions !== 0) {
+      // Server expects flattened structure with movement at top level
+      const message: InputMessage = {
+        type: MessageType.INPUT_FRAME,
+        timestamp: Date.now(),
+        sequenceId: this.messageSequenceId++,
+        tick: inputFrame.tick,
+        movement: inputFrame.movement,
+        actions: inputFrame.actions
+      };
+      
+      console.log(`🎮 Sending input - Movement: (${inputFrame.movement.x.toFixed(2)}, ${inputFrame.movement.y.toFixed(2)}), Actions: ${inputFrame.actions}`);
+      this.sendMessage(message);
+    }
   }
   
   /**

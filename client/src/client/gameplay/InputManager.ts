@@ -215,6 +215,11 @@ export class InputManager {
       movement,
       actions
     };
+    
+    // Debug log for movement input
+    if (movement.lengthSq() > 0 || actions !== 0) {
+      console.log(`🕹️ Input frame generated - Movement: (${movement.x.toFixed(2)}, ${movement.y.toFixed(2)}), Actions: ${actions}`);
+    }
   }
   
   private calculateMovementVector(): Vec2 {
