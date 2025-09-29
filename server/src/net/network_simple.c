@@ -70,12 +70,17 @@ int network_init(struct NetworkManager* net_mgr, uint16_t port) {
 void network_cleanup(struct NetworkManager* net_mgr) {
     if (!net_mgr) return;
     
+    log_info("📋 Starting network cleanup...");
+    
     if (net_mgr->socket_fd >= 0) {
+        // Shutdown the socket gracefully
+        shutdown(net_mgr->socket_fd, SHUT_RDWR);
         close(net_mgr->socket_fd);
         net_mgr->socket_fd = -1;
+        log_info("🔌 UDP server socket closed");
     }
     
-    log_info("Network cleanup complete");
+    log_info("✅ Network cleanup complete");
 }
 
 int network_process_incoming(struct NetworkManager* net_mgr, struct Sim* sim) {

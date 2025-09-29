@@ -9,8 +9,18 @@ static volatile int running = 1;
 static struct ServerContext* server_ctx = NULL;
 
 void signal_handler(int sig) {
-    printf("\nReceived signal %d, shutting down gracefully...\n", sig);
+    printf("\n🛑 Received signal %d, initiating graceful shutdown...\n", sig);
     running = 0;
+    
+    // Signal the server to stop
+    if (server_ctx != NULL) {
+        server_request_shutdown(server_ctx);
+    }
+    
+    // If we get a second signal, force exit
+    if (sig == SIGINT) {
+        signal(SIGINT, SIG_DFL);
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -49,14 +59,23 @@ int main(int argc, char *argv[]) {
     // Run main server loop
     result = server_run(server_ctx);
     
+    printf("\n🔄 Shutting down server components...\n");
+    
+    // Set alarm for forced shutdown after 5 seconds
+    signal(SIGALRM, SIG_DFL);
+    alarm(5);
+    
     // Cleanup
     server_shutdown(server_ctx);
     
+    // Cancel the alarm - we finished cleanup in time
+    alarm(0);
+    
     if (result == 0) {
-        printf("Server shut down successfully\n");
+        printf("✅ Server shut down successfully\n");
         return EXIT_SUCCESS;
     } else {
-        fprintf(stderr, "Server exited with error: %d\n", result);
+        fprintf(stderr, "❌ Server exited with error: %d\n", result);
         return EXIT_FAILURE;
     }
 }

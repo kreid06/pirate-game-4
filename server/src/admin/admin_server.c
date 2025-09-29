@@ -195,13 +195,20 @@ int admin_server_init(struct AdminServer* admin, uint16_t port) {
 void admin_server_cleanup(struct AdminServer* admin) {
     if (!admin) return;
     
+    log_info("📋 Starting admin server cleanup...");
+    
+    // Stop accepting new connections
+    admin->running = false;
+    
     if (admin->socket_fd >= 0) {
+        // Shutdown the socket gracefully
+        shutdown(admin->socket_fd, SHUT_RDWR);
         close(admin->socket_fd);
         admin->socket_fd = -1;
+        log_info("🔌 Admin server socket closed");
     }
     
-    admin->running = false;
-    log_info("Admin server cleanup complete");
+    log_info("✅ Admin server cleanup complete");
 }
 
 int admin_server_update(struct AdminServer* admin, const struct Sim* sim,

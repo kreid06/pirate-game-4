@@ -237,23 +237,45 @@ int websocket_server_init(uint16_t port) {
 }
 
 void websocket_server_cleanup(void) {
-    if (!ws_server.running) return;
+    if (!ws_server.running) {
+        log_info("WebSocket server already stopped");
+        return;
+    }
     
-    // Close all client connections
+    log_info("📋 Starting WebSocket server cleanup...");
+    
+    // Signal shutdown
+    ws_server.running = false;
+    
+    // Close all client connections gracefully
+    int closed_clients = 0;
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (ws_server.clients[i].connected) {
+            // Send close frame if possible
+            uint8_t close_frame[] = {0x88, 0x00}; // Close frame with no payload
+            send(ws_server.clients[i].fd, close_frame, sizeof(close_frame), MSG_NOSIGNAL);
+            
+            // Close the socket
             close(ws_server.clients[i].fd);
             ws_server.clients[i].connected = false;
+            ws_server.clients[i].fd = -1;
+            closed_clients++;
         }
     }
     
-    if (ws_server.socket_fd >= 0) {
-        close(ws_server.socket_fd);
-        ws_server.socket_fd = -1;
+    if (closed_clients > 0) {
+        log_info("🔌 Closed %d WebSocket client connections", closed_clients);
     }
     
-    ws_server.running = false;
-    log_info("WebSocket server cleanup complete");
+    // Close server socket
+    if (ws_server.socket_fd >= 0) {
+        shutdown(ws_server.socket_fd, SHUT_RDWR);
+        close(ws_server.socket_fd);
+        ws_server.socket_fd = -1;
+        log_info("🔌 WebSocket server socket closed");
+    }
+    
+    log_info("✅ WebSocket server cleanup complete");
 }
 
 int websocket_server_update(struct Sim* sim) {

@@ -30,6 +30,7 @@ struct AdminServer;
 int server_init(struct ServerContext** ctx);
 void server_shutdown(struct ServerContext* ctx);
 int server_run(struct ServerContext* ctx);
+void server_request_shutdown(struct ServerContext* ctx);
 
 // Main loop functions
 void server_tick(struct ServerContext* ctx);
