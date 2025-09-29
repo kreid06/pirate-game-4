@@ -151,6 +151,8 @@ export class NetworkManager {
   
   constructor(config: NetworkConfig) {
     this.config = config;
+    const nmId = Math.random().toString(36).substr(2, 9);
+    console.log(`📡 [${nmId}] NetworkManager instance created`);
   }
   
   /**
@@ -196,10 +198,12 @@ export class NetworkManager {
     }
     
     this.connectionState = ConnectionState.CONNECTING;
-    console.log(`🌐 Connecting to server: ${this.config.serverUrl}`);
+    const connectionId = Math.random().toString(36).substr(2, 9);
+    console.log(`🌐 [${connectionId}] Connecting to server: ${this.config.serverUrl}`);
     
     try {
       // Create WebSocket connection
+      console.log(`🔌 [${connectionId}] Creating new WebSocket connection`);
       this.socket = new WebSocket(this.config.serverUrl);
       
       // Set up event handlers

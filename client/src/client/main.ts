@@ -13,7 +13,8 @@ import { ClientConfig, DEFAULT_CLIENT_CONFIG } from './ClientConfig.js';
  */
 export async function main(): Promise<void> {
   try {
-    console.log('🏴‍☠️ Pirate MMO Client Starting...');
+    const mainId = Math.random().toString(36).substr(2, 9);
+    console.log(`🏴‍☠️ [${mainId}] Pirate MMO Client Starting...`);
     
     // Get canvas element
     const canvas = document.getElementById('gameCanvas') as HTMLCanvasElement;

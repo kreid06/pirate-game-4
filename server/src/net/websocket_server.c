@@ -543,6 +543,7 @@ int websocket_server_update(struct Sim* sim) {
                             // Input frame message - parse movement data
                             log_info("🎮 Input frame received from %s:%u (Player: %u)", 
                                      client->ip_address, client->port, client->player_id);
+                            log_info("🔍 Raw input_frame payload: %.*s", (int)payload_len, payload);
                             
                             if (client->player_id == 0) {
                                 log_warn("Input frame from client %s:%u with no player ID", client->ip_address, client->port);
@@ -607,6 +608,8 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else {
                             // Unknown JSON message
+                            log_warn("❓ Unknown JSON message type from %s:%u: %.*s", 
+                                     client->ip_address, client->port, (int)payload_len, payload);
                             strcpy(response, "{\"type\":\"message_ack\",\"status\":\"processed\"}");
                             handled = true;
                         }
