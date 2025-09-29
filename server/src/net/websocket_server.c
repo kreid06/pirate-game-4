@@ -182,6 +182,13 @@ static void remove_player(uint32_t player_id) {
     log_warn("Attempted to remove non-existent player %u", player_id);
 }
 
+// Global movement tracking for adaptive tick rate
+static uint32_t g_last_movement_time = 0;
+
+static void update_movement_activity(void) {
+    g_last_movement_time = get_time_ms();
+}
+
 static void debug_player_state(void) {
     int active_players = 0;
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
@@ -565,6 +572,11 @@ int websocket_server_update(struct Sim* sim) {
                                         update_player_movement(player, x, y, dt);
                                         player->last_input_time = current_time;
                                         
+                                        // Track movement for adaptive tick rate
+                                        if (x != 0.0f || y != 0.0f) {
+                                            update_movement_activity();
+                                        }
+                                        
                                         log_info("🎮 Player %u moved to (%.1f, %.1f)", 
                                                  client->player_id, player->x, player->y);
                                     } else {
@@ -686,9 +698,10 @@ int websocket_server_update(struct Sim* sim) {
         }
     }
     
-    // Send periodic game state updates (every ~500ms)
+    // Adaptive game state updates - 20Hz base, 30Hz max
     static uint32_t last_game_state_time = 0;
     static uint32_t last_debug_time = 0;
+    static uint32_t current_update_rate = 20; // Start at 20 Hz
     uint32_t current_time = get_time_ms();
     
     // Debug player state every 10 seconds
@@ -697,7 +710,10 @@ int websocket_server_update(struct Sim* sim) {
         last_debug_time = current_time;
     }
     
-    if (current_time - last_game_state_time > 500) {
+    // Calculate adaptive update interval (milliseconds)
+    uint32_t update_interval = 1000 / current_update_rate; // 20Hz = 50ms, 30Hz = 33ms
+    
+    if (current_time - last_game_state_time > update_interval) {
         // Build players JSON array with current positions
         char players_json[512] = "[";
         bool first_player = true;
@@ -718,8 +734,25 @@ int websocket_server_update(struct Sim* sim) {
         }
         strcat(players_json, "]");
         
+        // Adaptive tick rate based on activity
+        bool has_recent_movement = (current_time - g_last_movement_time) < 2000; // Movement in last 2 seconds
+        
+        // Determine optimal update rate
+        if (active_count == 0) {
+            current_update_rate = 5; // 5Hz when no players
+        } else if (has_recent_movement && active_count > 1) {
+            current_update_rate = 30; // 30Hz during multiplayer action
+        } else if (has_recent_movement) {
+            current_update_rate = 25; // 25Hz during single player movement
+        } else {
+            current_update_rate = 20; // 20Hz baseline
+        }
+        
+        // Cap at maximum rate
+        if (current_update_rate > 30) current_update_rate = 30;
+        
         if (active_count > 0) {
-            log_info("🌐 Broadcasting game state with %d active players", active_count);
+            log_info("🌐 Broadcasting game state with %d active players (Rate: %dHz)", active_count, current_update_rate);
         }
         
         char game_state[1024];
