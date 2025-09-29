@@ -74,11 +74,13 @@ interface HandshakeMessage extends NetworkMessage {
 }
 
 /**
- * Input frame message
+ * Input frame message (flattened for server compatibility)
  */
 interface InputMessage extends NetworkMessage {
   type: MessageType.INPUT_FRAME;
-  inputFrame: InputFrame;
+  tick: number;
+  movement: Vec2;
+  actions: number;
 }
 
 /**
@@ -266,8 +268,14 @@ export class NetworkManager {
         return;
       }
       
-      // Send JOIN command that server expects
-      const joinCommand = `JOIN:${this.playerName}`;
+      // Send JSON handshake that server expects
+      const handshakeMessage = {
+        type: 'handshake',
+        playerName: this.playerName,
+        protocolVersion: '1.0',
+        timestamp: Date.now()
+      };
+      const handshakeJson = JSON.stringify(handshakeMessage);
       
       // Set timeout for handshake response
       const timeout = setTimeout(() => {
@@ -276,23 +284,36 @@ export class NetworkManager {
         resolve();
       }, 5000);
       
-      // Wait for WELCOME response or any acknowledgment
+      // Wait for handshake_response or any acknowledgment
       const originalHandler = this.socket.onmessage;
       this.socket.onmessage = (event) => {
         try {
           const data = event.data;
           console.log('📨 Handshake response received:', data);
           
-          // Check for WELCOME response, message ack, or any response
-          if (data.startsWith('WELCOME') || 
-              data.includes('message_ack') ||
-              data.includes('status') ||
-              data.startsWith('PONG')) {
+          // Parse JSON response and look for player_id assignment
+          let response: any = {};
+          try {
+            response = JSON.parse(data);
+          } catch {
+            // Handle text responses as backup
+            response = { type: 'text', message: data };
+          }
+          
+          // Check for handshake_response with player_id
+          if (response.type === 'handshake_response' && response.player_id) {
+            this.assignedPlayerId = response.player_id;
+            console.log(`🎮 Server assigned player ID: ${this.assignedPlayerId}`);
+            clearTimeout(timeout);
+            this.socket!.onmessage = originalHandler;
+            console.log('🤝 Handshake completed - Player ID received');
+            this.requestGameState();
+            resolve();
+          } else if (data.includes('message_ack') || data.includes('status') || data.startsWith('PONG')) {
+            // Fallback acknowledgment
             clearTimeout(timeout);
             this.socket!.onmessage = originalHandler;
             console.log('🤝 Handshake completed - Server acknowledged');
-            
-            // After successful handshake, request initial game state
             this.requestGameState();
             resolve();
           } else {
@@ -314,12 +335,12 @@ export class NetworkManager {
         }
       };
       
-      // Send the JOIN command
+      // Send the JSON handshake
       try {
-        this.socket.send(joinCommand);
+        this.socket.send(handshakeJson);
         this.stats.messagesSent++;
-        this.stats.bytesSent += joinCommand.length;
-        console.log('📤 Sent handshake:', joinCommand);
+        this.stats.bytesSent += handshakeJson.length;
+        console.log('📤 Sent handshake:', handshakeJson);
       } catch (error) {
         clearTimeout(timeout);
         console.error('❌ Failed to send handshake:', error);
@@ -347,12 +368,15 @@ export class NetworkManager {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
       return; // Not connected
     }
-    
+
+    // Server expects flattened structure with movement at top level
     const message: InputMessage = {
       type: MessageType.INPUT_FRAME,
       timestamp: Date.now(),
       sequenceId: this.messageSequenceId++,
-      inputFrame
+      tick: inputFrame.tick,
+      movement: inputFrame.movement,
+      actions: inputFrame.actions
     };
     
     this.sendMessage(message);

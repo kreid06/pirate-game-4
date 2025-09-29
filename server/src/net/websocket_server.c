@@ -601,12 +601,22 @@ int websocket_server_update(struct Sim* sim) {
                         } else if (strncmp(payload, "JOIN:", 5) == 0) {
                             // Extract player name
                             char* player_name = payload + 5;
-                            uint32_t player_id = 1000 + i;
-                            snprintf(response, sizeof(response),
-                                    "{\"type\":\"handshake_response\",\"player_id\":%u,\"player_name\":\"%s\",\"server_time\":%u}",
-                                    player_id, player_name, get_time_ms());
+                            uint32_t player_id = next_player_id++;
+                            client->player_id = player_id;
+                            
+                            // Create player for this client
+                            WebSocketPlayer* player = create_player(player_id);
+                            if (!player) {
+                                log_error("Failed to create player for JOIN command from %s:%u", client->ip_address, client->port);
+                                client->player_id = 0; // Reset on failure
+                                strcpy(response, "{\"type\":\"handshake_response\",\"status\":\"failed\",\"error\":\"server_full\"}");
+                            } else {
+                                snprintf(response, sizeof(response),
+                                        "{\"type\":\"handshake_response\",\"player_id\":%u,\"player_name\":\"%s\",\"server_time\":%u,\"status\":\"connected\"}",
+                                        player_id, player_name, get_time_ms());
+                                log_info("🎮 Player joined via WebSocket: %s (ID: %u)", player_name, player_id);
+                            }
                             handled = true;
-                            log_info("🎮 Player joined via WebSocket: %s (ID: %u)", player_name, player_id);
                             
                         } else if (strncmp(payload, "STATE", 5) == 0) {
                             // Request game state
