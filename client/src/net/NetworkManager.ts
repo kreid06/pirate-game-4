@@ -262,44 +262,62 @@ export class NetworkManager {
         return;
       }
       
-      const handshakeMessage: HandshakeMessage = {
-        type: MessageType.HANDSHAKE,
-        timestamp: Date.now(),
-        sequenceId: this.messageSequenceId++,
-        playerName: this.playerName,
-        protocolVersion: '1.0'
-      };
+      // Send JOIN command that server expects
+      const joinCommand = `JOIN:${this.playerName}`;
       
       // Set timeout for handshake response
       const timeout = setTimeout(() => {
         reject(new Error('Handshake timeout'));
       }, 5000);
       
-      // Wait for handshake response
+      // Wait for WELCOME response
       const originalHandler = this.socket.onmessage;
       this.socket.onmessage = (event) => {
         try {
-          const data = JSON.parse(event.data);
-          if (data.type === MessageType.HANDSHAKE_RESPONSE || data.type === MessageType.MESSAGE_ACK) {
+          const data = event.data;
+          
+          // Check for WELCOME response (handshake success)
+          if (data.startsWith('WELCOME')) {
             clearTimeout(timeout);
             this.socket!.onmessage = originalHandler;
-            console.log('🤝 Handshake completed');
+            console.log('🤝 Handshake completed - Server welcomed player');
+            
+            // After successful handshake, request initial game state
+            this.requestGameState();
             resolve();
           } else {
             // Let original handler process other messages
             originalHandler?.call(this.socket!, event);
           }
         } catch (error) {
-          // If not JSON, might be text response - accept it
+          console.warn('Error during handshake:', error);
+          // Still continue - maybe server doesn't send WELCOME
           clearTimeout(timeout);
           this.socket!.onmessage = originalHandler;
-          console.log('🤝 Handshake completed (text response)');
+          console.log('🤝 Handshake completed (no WELCOME response)');
+          this.requestGameState();
           resolve();
         }
       };
       
-      this.sendMessage(handshakeMessage);
+      // Send the JOIN command
+      this.socket.send(joinCommand);
+      this.stats.messagesSent++;
+      this.stats.bytesSent += joinCommand.length;
+      console.log('📤 Sent handshake:', joinCommand);
     });
+  }
+  
+  /**
+   * Request current game state from server
+   */
+  private requestGameState(): void {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send('STATE');
+      this.stats.messagesSent++;
+      this.stats.bytesSent += 5; // 'STATE'.length
+      console.log('📤 Requested game state from server');
+    }
   }
   
   /**
@@ -421,6 +439,21 @@ export class NetworkManager {
         }
         break;
         
+      case 'GAME_STATE': // Handle server's GAME_STATE response
+        // Convert server GAME_STATE to client WorldState format
+        const worldState: WorldState = {
+          tick: message.tick || 0,
+          timestamp: Date.now(),
+          ships: message.ships || [],
+          players: message.players || [],
+          cannonballs: message.projectiles || [],
+          carrierDetection: new Map() // Will be populated as needed
+        };
+        
+        console.log(`🗺️ Received game state - Tick: ${worldState.tick}, Players: ${worldState.players.length}, Ships: ${worldState.ships.length}`);
+        this.onWorldStateReceived?.(worldState);
+        break;
+        
       case MessageType.PONG:
       case 'pong': // Handle text response
         this.handlePong(message);
@@ -471,6 +504,11 @@ export class NetworkManager {
     // Send ping every heartbeat interval
     this.pingTimer = setInterval(() => {
       this.sendPing();
+      
+      // Also periodically request game state to keep world updated
+      if (Math.random() < 0.3) { // 30% chance each heartbeat to avoid spam
+        this.requestGameState();
+      }
     }, this.config.heartbeatInterval);
   }
   
