@@ -366,6 +366,32 @@ int websocket_server_update(struct Sim* sim) {
                             handled = true;
                             log_info("🤝 WebSocket handshake from %s:%u (ID: %u)", client->ip_address, client->port, player_id);
                             
+                            // Send initial game state after handshake
+                            char game_state_frame[2048];
+                            char game_state_response[1024];
+                            snprintf(game_state_response, sizeof(game_state_response),
+                                    "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":[],\"players\":[{\"id\":%u,\"name\":\"Player\",\"x\":400,\"y\":300}],\"projectiles\":[]}",
+                                    get_time_ms() / 33, get_time_ms(), player_id);
+                            
+                            // Send handshake response first
+                            char frame[1024];
+                            size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame);
+                            if (frame_len > 0) {
+                                send(client->fd, frame, frame_len, 0);
+                            }
+                            
+                            // Then send game state
+                            size_t game_state_frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state_response, strlen(game_state_response), game_state_frame);
+                            if (game_state_frame_len > 0) {
+                                send(client->fd, game_state_frame, game_state_frame_len, 0);
+                                log_info("🎮 Sent initial game state to %s:%u", client->ip_address, client->port);
+                            }
+                            
+                            // Skip normal response sending since we already sent
+                            ws_server.packets_sent += 2;
+                            ws_server.packets_received++;
+                            continue;
+                            
                         } else if (strstr(payload, "\"type\":\"input_frame\"")) {
                             // Input frame message  
                             strcpy(response, "{\"type\":\"message_ack\",\"status\":\"input_received\"}");
@@ -404,7 +430,7 @@ int websocket_server_update(struct Sim* sim) {
                         } else if (strncmp(payload, "STATE", 5) == 0) {
                             // Request game state
                             snprintf(response, sizeof(response),
-                                    "{\"type\":\"world_state\",\"tick\":%u,\"time\":%u,\"ships\":[],\"players\":[],\"projectiles\":[]}",
+                                    "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":[],\"players\":[{\"id\":1001,\"name\":\"Player\",\"x\":400,\"y\":300}],\"projectiles\":[]}",
                                     get_time_ms() / 33, get_time_ms()); // Approximate tick from time
                             handled = true;
                             
@@ -455,6 +481,32 @@ int websocket_server_update(struct Sim* sim) {
             close(client->fd);
             client->connected = false;
         }
+    }
+    
+    // Send periodic game state updates (every ~500ms)
+    static uint32_t last_game_state_time = 0;
+    uint32_t current_time = get_time_ms();
+    if (current_time - last_game_state_time > 500) {
+        char game_state[1024];
+        snprintf(game_state, sizeof(game_state),
+                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":[],\"players\":[{\"id\":1001,\"name\":\"Player\",\"x\":400,\"y\":300}],\"projectiles\":[]}",
+                current_time / 33, current_time);
+        
+        // Broadcast to all connected clients
+        for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+            struct WebSocketClient* client = &ws_server.clients[i];
+            if (client->connected && client->handshake_complete) {
+                char frame[1024];
+                size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state, strlen(game_state), frame);
+                if (frame_len > 0) {
+                    ssize_t sent = send(client->fd, frame, frame_len, 0);
+                    if (sent > 0) {
+                        ws_server.packets_sent++;
+                    }
+                }
+            }
+        }
+        last_game_state_time = current_time;
     }
     
     return 0;
