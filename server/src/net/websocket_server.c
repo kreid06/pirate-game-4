@@ -541,6 +541,9 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else if (strstr(payload, "\"type\":\"input_frame\"")) {
                             // Input frame message - parse movement data
+                            log_info("🎮 Input frame received from %s:%u (Player: %u)", 
+                                     client->ip_address, client->port, client->player_id);
+                            
                             if (client->player_id == 0) {
                                 log_warn("Input frame from client %s:%u with no player ID", client->ip_address, client->port);
                                 strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_player\"}");
@@ -557,6 +560,10 @@ int websocket_server_update(struct Sim* sim) {
                                         
                                         if (x_start) sscanf(x_start + 4, "%f", &x);
                                         if (y_start) sscanf(y_start + 4, "%f", &y);
+                                        
+                                        // Temporary debug logging for movement data
+                                        log_info("📥 Movement data received from player %u: x=%.3f, y=%.3f", 
+                                                 client->player_id, x, y);
                                         
                                         // Validate movement values
                                         if (x < -1.0f) x = -1.0f;

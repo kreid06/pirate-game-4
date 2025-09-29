@@ -211,6 +211,9 @@ export class InputManager {
   }
   
   private generateInputFrame(): void {
+    // Debug: Check if we have player position and mouse position
+    console.log(`🔍 Debug - Player: (${this.playerPosition.x.toFixed(1)}, ${this.playerPosition.y.toFixed(1)}), Mouse: (${this.inputState.mouseWorldPosition.x.toFixed(1)}, ${this.inputState.mouseWorldPosition.y.toFixed(1)})`);
+    
     // Calculate movement vector using player position for mouse-relative movement
     const movement = this.calculateMovementVector(this.playerPosition);
     
@@ -224,10 +227,8 @@ export class InputManager {
       actions
     };
     
-    // Debug log for movement input
-    if (movement.lengthSq() > 0 || actions !== 0) {
-      console.log(`🕹️ Input frame generated - Movement: (${movement.x.toFixed(2)}, ${movement.y.toFixed(2)}), Actions: ${actions}`);
-    }
+        // Debug log for movement input (always log for now)
+    console.log(`🕹️ Input frame generated - Movement: (${movement.x.toFixed(2)}, ${movement.y.toFixed(2)}), Actions: ${actions}, Keys: W=${this.isActionActive('move_forward')} S=${this.isActionActive('move_backward')} A=${this.isActionActive('move_left')} D=${this.isActionActive('move_right')}`);
   }
   
   private calculateMovementVector(playerPosition?: Vec2): Vec2 {
