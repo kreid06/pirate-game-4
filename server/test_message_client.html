@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Message Test Client</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        button { padding: 10px 20px; margin: 5px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        #status { margin: 10px 0; padding: 10px; background: #f8f9fa; border-radius: 4px; }
+        #log { margin: 10px 0; padding: 10px; background: #f1f1f1; border-radius: 4px; max-height: 300px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <h1>🏴‍☠️ WebSocket Message Test Client</h1>
+    
+    <div id="status">Disconnected</div>
+    
+    <button onclick="connect()">Connect to Server</button>
+    <button onclick="disconnect()">Disconnect</button>
+    <button onclick="sendHandshake()">Send Handshake</button>
+    <button onclick="sendInputFrame()">Send Input Frame</button>
+    <button onclick="sendUnknownMessage()">Send Unknown Message</button>
+    <button onclick="sendPing()">Send Ping</button>
+    
+    <div id="log"></div>
+    
+    <script>
+        let ws = null;
+        let playerId = null;
+        
+        function log(message) {
+            const logDiv = document.getElementById('log');
+            logDiv.innerHTML += new Date().toLocaleTimeString() + ': ' + message + '<br>';
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+        
+        function updateStatus(status) {
+            document.getElementById('status').textContent = status;
+        }
+        
+        function connect() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                log('Already connected');
+                return;
+            }
+            
+            ws = new WebSocket('ws://localhost:8080');
+            
+            ws.onopen = function() {
+                updateStatus('Connected to WebSocket server');
+                log('✅ Connected to server');
+            };
+            
+            ws.onmessage = function(event) {
+                log('📥 Received: ' + event.data);
+                
+                try {
+                    const message = JSON.parse(event.data);
+                    if (message.type === 'handshake_response' && message.player_id) {
+                        playerId = message.player_id;
+                        log('🎮 Assigned player ID: ' + playerId);
+                    }
+                } catch (e) {
+                    log('❌ Failed to parse message: ' + e.message);
+                }
+            };
+            
+            ws.onerror = function(error) {
+                log('❌ WebSocket error: ' + error);
+                updateStatus('Connection error');
+            };
+            
+            ws.onclose = function() {
+                updateStatus('Disconnected');
+                log('🔌 Connection closed');
+            };
+        }
+        
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+                playerId = null;
+            }
+        }
+        
+        function sendMessage(message) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('❌ Not connected to server');
+                return;
+            }
+            
+            const messageStr = JSON.stringify(message);
+            ws.send(messageStr);
+            log('📤 Sent: ' + messageStr);
+        }
+        
+        function sendHandshake() {
+            sendMessage({
+                type: 'handshake',
+                player_name: 'TestPlayer_' + Math.floor(Math.random() * 1000),
+                client_version: '1.0'
+            });
+        }
+        
+        function sendInputFrame() {
+            if (!playerId) {
+                log('❌ No player ID - send handshake first');
+                return;
+            }
+            
+            sendMessage({
+                type: 'input_frame',
+                player_id: playerId,
+                movement: {
+                    x: Math.random() * 2 - 1,  // Random value between -1 and 1
+                    y: Math.random() * 2 - 1
+                },
+                timestamp: Date.now()
+            });
+        }
+        
+        function sendUnknownMessage() {
+            sendMessage({
+                type: 'unknown_message_type',
+                some_data: 'This is an unknown message',
+                random_value: Math.random()
+            });
+        }
+        
+        function sendPing() {
+            sendMessage({
+                type: 'ping',
+                timestamp: Date.now()
+            });
+        }
+        
+        // Auto-connect on page load
+        window.onload = function() {
+            log('🚀 Test client loaded');
+        };
+    </script>
+</body>
+</html>

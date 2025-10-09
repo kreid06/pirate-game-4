@@ -8,6 +8,10 @@ struct WebSocketStats {
     int connected_clients;
     uint64_t packets_sent;
     uint64_t packets_received;
+    uint64_t input_messages_received;
+    uint64_t unknown_messages_received;
+    uint32_t last_input_time;
+    uint32_t last_unknown_time;
     uint16_t port;
 };
 

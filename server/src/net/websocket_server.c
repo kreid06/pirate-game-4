@@ -54,6 +54,10 @@ struct WebSocketServer {
     int client_count;
     uint64_t packets_sent;
     uint64_t packets_received;
+    uint64_t input_messages_received;
+    uint64_t unknown_messages_received;
+    uint32_t last_input_time;
+    uint32_t last_unknown_time;
 };
 
 static struct WebSocketServer ws_server = {0};
@@ -541,6 +545,9 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else if (strstr(payload, "\"type\":\"input_frame\"")) {
                             // Input frame message - parse movement data
+                            ws_server.input_messages_received++;
+                            ws_server.last_input_time = get_time_ms();
+                            
                             log_info("🎮 Input frame received from %s:%u (Player: %u)", 
                                      client->ip_address, client->port, client->player_id);
                             log_info("🔍 Raw input_frame payload: %.*s", (int)payload_len, payload);
@@ -608,6 +615,9 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else {
                             // Unknown JSON message
+                            ws_server.unknown_messages_received++;
+                            ws_server.last_unknown_time = get_time_ms();
+                            
                             log_warn("❓ Unknown JSON message type from %s:%u: %.*s", 
                                      client->ip_address, client->port, (int)payload_len, payload);
                             strcpy(response, "{\"type\":\"message_ack\",\"status\":\"processed\"}");
@@ -761,8 +771,11 @@ int websocket_server_update(struct Sim* sim) {
         // Cap at maximum rate
         if (current_update_rate > 30) current_update_rate = 30;
         
-        if (active_count > 0) {
+        // Log broadcasting state less frequently (every 5 seconds)
+        static uint32_t last_broadcast_log_time = 0;
+        if (active_count > 0 && (current_time - last_broadcast_log_time) > 5000) {
             log_info("🌐 Broadcasting game state with %d active players (Rate: %dHz)", active_count, current_update_rate);
+            last_broadcast_log_time = current_time;
         }
         
         char game_state[1024];
@@ -819,6 +832,10 @@ int websocket_server_get_stats(struct WebSocketStats* stats) {
     
     stats->packets_sent = ws_server.packets_sent;
     stats->packets_received = ws_server.packets_received;
+    stats->input_messages_received = ws_server.input_messages_received;
+    stats->unknown_messages_received = ws_server.unknown_messages_received;
+    stats->last_input_time = ws_server.last_input_time;
+    stats->last_unknown_time = ws_server.last_unknown_time;
     stats->port = ws_server.port;
     
     return 0;
