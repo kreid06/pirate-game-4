@@ -192,8 +192,16 @@ export class NetworkManager {
       this.playerName = playerName;
     }
     
+    // Close any existing socket before creating new one
+    if (this.socket) {
+      console.log(`🔌 Closing existing socket before reconnection`);
+      this.socket.close();
+      this.socket = null;
+    }
+    
     if (this.connectionState === ConnectionState.CONNECTING || 
         this.connectionState === ConnectionState.CONNECTED) {
+      console.log(`⚠️ Already connecting/connected, skipping duplicate connection attempt`);
       return; // Already connecting or connected
     }
     
@@ -204,6 +212,8 @@ export class NetworkManager {
     try {
       // Create WebSocket connection
       console.log(`🔌 [${connectionId}] Creating new WebSocket connection`);
+      console.log(`🔌 [${connectionId}] URL: ${this.config.serverUrl}`);
+      console.log(`🔌 [${connectionId}] Current socket state: ${this.socket ? 'exists' : 'null'}`);
       this.socket = new WebSocket(this.config.serverUrl);
       
       // Set up event handlers
@@ -374,8 +384,14 @@ export class NetworkManager {
       return; // Not connected
     }
 
-    // Only send input if there's actual movement or actions to reduce network traffic
-    if (inputFrame.movement.lengthSq() > 0 || inputFrame.actions !== 0) {
+    // Temporarily disable input filtering to debug - send all input frames
+    const hasMovement = inputFrame.movement.lengthSq() > 0;
+    const hasActions = inputFrame.actions !== 0;
+    const shouldSend = true; // Always send for debugging
+    
+    if (shouldSend) {
+      console.log(`🔍 Input frame check - Movement: ${hasMovement}, Actions: ${hasActions}, Sending: ${shouldSend}`);
+      
       // Validate movement vector before sending
       const movementMagnitude = Math.sqrt(inputFrame.movement.lengthSq());
       if (movementMagnitude > 1.1) { // Allow small tolerance for floating point precision

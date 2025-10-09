@@ -132,7 +132,7 @@ export class PredictionEngine {
     
     // Validate input frame
     if (!this.validateInputFrame(inputFrame)) {
-      console.warn('🚨 Invalid input frame detected, using previous input');
+      console.warn('🚨 Input validation failed, using previous input');
       // Use last valid input or neutral input
       const lastState = this.predictionHistory[this.predictionHistory.length - 1];
       inputFrame = lastState?.inputFrame || { tick: this.clientTick, movement: Vec2.zero(), actions: 0 };
@@ -387,30 +387,28 @@ export class PredictionEngine {
     const now = Date.now();
     this.inputValidation.totalInputs++;
     
-    // Check input rate (max 120Hz = 8.33ms between inputs)
-    // But allow some tolerance for client-side prediction frequency
-    const timeSinceLastInput = now - this.inputValidation.lastInputTimestamp;
-    if (timeSinceLastInput < 4.0) { // Relaxed from 8.0ms to 4.0ms
-      this.inputValidation.inputRateViolations++;
-      return false;
-    }
+    // ✅ Input validation debug logging
+    console.log(`🔍 Input validation check - Tick: ${inputFrame.tick}, Movement: (${inputFrame.movement.x.toFixed(3)}, ${inputFrame.movement.y.toFixed(3)}), Actions: ${inputFrame.actions}`);
     
     // Check movement magnitude (reasonable bounds)
     const movementMagnitude = Math.sqrt(inputFrame.movement.x * inputFrame.movement.x + inputFrame.movement.y * inputFrame.movement.y);
     if (movementMagnitude > 1.5) { // Allow some tolerance for diagonal movement
       this.inputValidation.invalidInputs++;
+      console.log(`❌ Input rejected - Movement magnitude too high: ${movementMagnitude.toFixed(3)}`);
       return false;
     }
     
-    // Check for timestamp anomalies
+    // Check for timestamp anomalies (but don't reject based on timing)
     if (this.inputValidation.lastInputTimestamp > 0) {
       const timeDelta = now - this.inputValidation.lastInputTimestamp;
       if (timeDelta > 100 || timeDelta < 0) { // More than 100ms gap or negative time
         this.inputValidation.timestampAnomalies++;
+        console.log(`⚠️ Timestamp anomaly detected: ${timeDelta}ms delta`);
       }
     }
     
     this.inputValidation.lastInputTimestamp = now;
+    console.log(`✅ Input validation passed for tick ${inputFrame.tick}`);
     return true;
   }
   
