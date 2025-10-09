@@ -111,7 +111,7 @@ export interface ClientConfig {
  */
 export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
   network: {
-    serverUrl: 'ws://localhost:8080',
+    serverUrl: 'ws://192.168.56.10:8080',
     maxReconnectAttempts: 5,
     reconnectDelay: 2000,
     heartbeatInterval: 30000,
