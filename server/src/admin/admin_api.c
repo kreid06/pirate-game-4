@@ -1,6 +1,7 @@
 #include "admin/admin_server.h"
 #include "sim/types.h"
 #include "net/network.h"
+#include "net/websocket_server.h"
 #include "util/log.h"
 #include "util/time.h"
 #include <stdio.h>
@@ -18,6 +19,13 @@ int admin_api_status(struct HttpResponse* resp, const struct Sim* sim,
     uint32_t current_time = get_time_ms();
     uint32_t uptime = current_time - 0; // TODO: Get actual start time
     
+    // Get WebSocket player count for more accurate count
+    struct WebSocketStats ws_stats;
+    uint32_t total_players = sim->player_count;
+    if (websocket_server_get_stats(&ws_stats) == 0) {
+        total_players = ws_stats.connected_clients;
+    }
+    
     int len = snprintf(json_buffer, sizeof(json_buffer),
         "{\n"
         "  \"uptime_seconds\": %u,\n"
@@ -30,7 +38,7 @@ int admin_api_status(struct HttpResponse* resp, const struct Sim* sim,
         uptime / 1000,
         TICK_RATE_HZ,
         sim->tick,
-        sim->player_count,
+        total_players,
         current_time
     );
     
@@ -154,8 +162,15 @@ int admin_api_entities(struct HttpResponse* resp, const struct Sim* sim) {
 int admin_api_physics_objects(struct HttpResponse* resp, const struct Sim* sim) {
     if (!resp || !sim) return -1;
     
+    // Get accurate player count from WebSocket server
+    struct WebSocketStats ws_stats;
+    uint32_t websocket_players = 0;
+    if (websocket_server_get_stats(&ws_stats) == 0) {
+        websocket_players = ws_stats.connected_clients;
+    }
+    
     // Calculate physics statistics
-    uint32_t total_objects = sim->ship_count + sim->player_count + sim->projectile_count;
+    uint32_t total_objects = sim->ship_count + websocket_players + sim->projectile_count;
     uint32_t collisions_per_second = 0; // TODO: Track collision rate
     
     int len = snprintf(json_buffer, sizeof(json_buffer),
@@ -174,7 +189,7 @@ int admin_api_physics_objects(struct HttpResponse* resp, const struct Sim* sim) 
         "  }\n"
         "}",
         sim->ship_count,
-        sim->player_count,
+        websocket_players,
         sim->projectile_count,
         total_objects,
         collisions_per_second,
@@ -357,6 +372,64 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
     resp->content_type = "application/json";
     resp->body = json_buffer;
     resp->body_length = offset;
+    resp->cache_control = true;
+    
+    return 0;
+}
+
+int admin_api_message_stats(struct HttpResponse* resp) {
+    if (!resp) return -1;
+    
+    struct WebSocketStats ws_stats;
+    if (websocket_server_get_stats(&ws_stats) != 0) {
+        // WebSocket server not available, return empty stats
+        int len = snprintf(json_buffer, sizeof(json_buffer),
+            "{\n"
+            "  \"input_messages_received\": 0,\n"
+            "  \"unknown_messages_received\": 0,\n"
+            "  \"last_input_time\": 0,\n"
+            "  \"last_unknown_time\": 0,\n"
+            "  \"last_input_age_ms\": 0,\n"
+            "  \"last_unknown_age_ms\": 0,\n"
+            "  \"websocket_available\": false\n"
+            "}");
+        
+        resp->status_code = 200;
+        resp->content_type = "application/json";
+        resp->body = json_buffer;
+        resp->body_length = len;
+        resp->cache_control = true;
+        return 0;
+    }
+    
+    uint32_t current_time = get_time_ms();
+    uint32_t last_input_age = (ws_stats.last_input_time > 0) ? (current_time - ws_stats.last_input_time) : 0;
+    uint32_t last_unknown_age = (ws_stats.last_unknown_time > 0) ? (current_time - ws_stats.last_unknown_time) : 0;
+    
+    int len = snprintf(json_buffer, sizeof(json_buffer),
+        "{\n"
+        "  \"input_messages_received\": %llu,\n"
+        "  \"unknown_messages_received\": %llu,\n"
+        "  \"last_input_time\": %u,\n"
+        "  \"last_unknown_time\": %u,\n"
+        "  \"last_input_age_ms\": %u,\n"
+        "  \"last_unknown_age_ms\": %u,\n"
+        "  \"websocket_available\": true\n"
+        "}",
+        (unsigned long long)ws_stats.input_messages_received,
+        (unsigned long long)ws_stats.unknown_messages_received,
+        ws_stats.last_input_time,
+        ws_stats.last_unknown_time,
+        last_input_age,
+        last_unknown_age
+    );
+    
+    if (len >= (int)sizeof(json_buffer)) return -1;
+    
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = json_buffer;
+    resp->body_length = len;
     resp->cache_control = true;
     
     return 0;
