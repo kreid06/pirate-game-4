@@ -3,11 +3,18 @@
 #include "net/network.h"
 #include "net/websocket_server.h"
 #include "input_validation.h"
+#include "sim/physics_lod.h"
+#include "core/performance_monitor.h"
 #include "util/log.h"
 #include "util/time.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// External global instances (will be set by server)
+// For now, these are NULL pointers - server will initialize them
+physics_lod_manager_t* g_physics_lod_manager = NULL;
+performance_monitor_t* g_performance_monitor = NULL;
 
 // Static buffer for JSON responses (to avoid dynamic allocation)
 static char json_buffer[4096];
@@ -498,5 +505,66 @@ int admin_api_input_tiers(struct HttpResponse* resp) {
     resp->body_length = len;
     resp->cache_control = true;
 
+    return 0;
+}
+// Physics LOD statistics API endpoint
+int admin_api_physics_lod(struct HttpResponse* resp) {
+    if (!resp) return -1;
+    
+    // Check if physics LOD manager is available
+    if (g_physics_lod_manager == NULL) {
+        int len = snprintf(json_buffer, sizeof(json_buffer),
+            "{\"error\": \"Physics LOD system not initialized\", \"enabled\": false}");
+        
+        resp->status_code = 200;
+        resp->content_type = "application/json";
+        resp->body = json_buffer;
+        resp->body_length = len;
+        resp->cache_control = true;
+        return 0;
+    }
+    
+    // Export LOD stats as JSON
+    if (physics_lod_export_json(g_physics_lod_manager, json_buffer, sizeof(json_buffer)) != 0) {
+        return -1;
+    }
+    
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = json_buffer;
+    resp->body_length = strlen(json_buffer);
+    resp->cache_control = true;
+    
+    return 0;
+}
+
+// Performance monitor statistics API endpoint
+int admin_api_performance_monitor(struct HttpResponse* resp) {
+    if (!resp) return -1;
+    
+    // Check if performance monitor is available
+    if (g_performance_monitor == NULL) {
+        int len = snprintf(json_buffer, sizeof(json_buffer),
+            "{\"error\": \"Performance monitor not initialized\"}");
+        
+        resp->status_code = 200;
+        resp->content_type = "application/json";
+        resp->body = json_buffer;
+        resp->body_length = len;
+        resp->cache_control = true;
+        return 0;
+    }
+    
+    // Export performance stats as JSON
+    if (perf_export_json(g_performance_monitor, json_buffer, sizeof(json_buffer)) != 0) {
+        return -1;
+    }
+    
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = json_buffer;
+    resp->body_length = strlen(json_buffer);
+    resp->cache_control = true;
+    
     return 0;
 }
