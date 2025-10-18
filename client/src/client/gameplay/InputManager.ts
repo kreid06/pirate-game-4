@@ -66,6 +66,12 @@ export class InputManager {
   private lastInteractionTime = 0;
   private readonly interactionCooldown = 500; // 500ms
   
+  // Optimized input tracking (Option 2)
+  private lastInputFrame: InputFrame | null = null;
+  private lastHeartbeatTime = 0;
+  private readonly heartbeatInterval = 1000; // Send heartbeat every 1 second when idle
+  private hasActiveInput = false;
+  
   constructor(canvas: HTMLCanvasElement, config: InputConfig) {
     this.canvas = canvas;
     this.config = config;
@@ -103,9 +109,18 @@ export class InputManager {
     // Generate current input frame
     this.generateInputFrame();
     
-    // Send input frame to network layer
-    if (this.onInputFrame) {
+    // Optimized sending: only send if input changed or heartbeat needed
+    const shouldSend = this.shouldSendInputFrame();
+    
+    if (shouldSend && this.onInputFrame) {
       this.onInputFrame(this.currentInputFrame);
+      this.lastInputFrame = { ...this.currentInputFrame };
+      
+      if (this.hasActiveInput) {
+        console.log(`📤 Input changed - sending frame: Movement(${this.currentInputFrame.movement.x.toFixed(2)}, ${this.currentInputFrame.movement.y.toFixed(2)}), Actions: ${this.currentInputFrame.actions}`);
+      } else {
+        console.log(`💓 Heartbeat sent - keeping connection alive`);
+      }
     }
     
     // Reset per-frame flags
@@ -155,6 +170,41 @@ export class InputManager {
     this.config = { ...newConfig };
     this.setupActionMappings();
     console.log('🎮 Input configuration updated');
+  }
+  
+  /**
+   * Determine if we should send an input frame (Option 2: immediate + heartbeat)
+   */
+  private shouldSendInputFrame(): boolean {
+    const currentTime = Date.now();
+    
+    // Check if this is the first frame
+    if (!this.lastInputFrame) {
+      this.lastHeartbeatTime = currentTime;
+      return true;
+    }
+    
+    // Check if input has changed (immediate send)
+    const movementChanged = !this.currentInputFrame.movement.equals(this.lastInputFrame.movement);
+    const actionsChanged = this.currentInputFrame.actions !== this.lastInputFrame.actions;
+    
+    if (movementChanged || actionsChanged) {
+      this.hasActiveInput = true;
+      this.lastHeartbeatTime = currentTime; // Reset heartbeat timer on activity
+      return true;
+    }
+    
+    // Check if we need to send heartbeat (periodic send when idle)
+    const timeSinceHeartbeat = currentTime - this.lastHeartbeatTime;
+    if (timeSinceHeartbeat >= this.heartbeatInterval) {
+      this.hasActiveInput = false;
+      this.lastHeartbeatTime = currentTime;
+      return true;
+    }
+    
+    // No need to send
+    this.hasActiveInput = false;
+    return false;
   }
   
   /**
@@ -211,9 +261,6 @@ export class InputManager {
   }
   
   private generateInputFrame(): void {
-    // Debug: Check if we have player position and mouse position
-    console.log(`🔍 Debug - Player: (${this.playerPosition.x.toFixed(1)}, ${this.playerPosition.y.toFixed(1)}), Mouse: (${this.inputState.mouseWorldPosition.x.toFixed(1)}, ${this.inputState.mouseWorldPosition.y.toFixed(1)})`);
-    
     // Calculate movement vector using player position for mouse-relative movement
     const movement = this.calculateMovementVector(this.playerPosition);
     
@@ -227,8 +274,10 @@ export class InputManager {
       actions
     };
     
-        // Debug log for movement input (always log for now)
-    console.log(`🕹️ Input frame generated - Movement: (${movement.x.toFixed(2)}, ${movement.y.toFixed(2)}), Actions: ${actions}, Keys: W=${this.isActionActive('move_forward')} S=${this.isActionActive('move_backward')} A=${this.isActionActive('move_left')} D=${this.isActionActive('move_right')}`);
+    // Debug log only when debug logging is enabled
+    if (this.config.enableDebugLogging) {
+      console.log(`🕹️ Input frame generated - Movement: (${movement.x.toFixed(2)}, ${movement.y.toFixed(2)}), Actions: ${actions}, Keys: W=${this.isActionActive('move_forward')} S=${this.isActionActive('move_backward')} A=${this.isActionActive('move_left')} D=${this.isActionActive('move_right')}`);
+    }
   }
   
   private calculateMovementVector(playerPosition?: Vec2): Vec2 {

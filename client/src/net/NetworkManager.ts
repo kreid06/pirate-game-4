@@ -123,6 +123,7 @@ export class NetworkManager {
   private reconnectAttempts = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private pingTimer: NodeJS.Timeout | null = null;
+  private isConnecting = false; // Flag to prevent race conditions
   
   // Player management
   private assignedPlayerId: number | null = null;
@@ -192,17 +193,21 @@ export class NetworkManager {
       this.playerName = playerName;
     }
     
+    // Stronger protection against duplicate connections
+    if (this.isConnecting || 
+        this.connectionState === ConnectionState.CONNECTING || 
+        this.connectionState === ConnectionState.CONNECTED) {
+      console.log(`⚠️ Already connecting/connected (state: ${this.connectionState}, isConnecting: ${this.isConnecting}), skipping duplicate connection attempt`);
+      return;
+    }
+    
+    this.isConnecting = true;
+    
     // Close any existing socket before creating new one
     if (this.socket) {
       console.log(`🔌 Closing existing socket before reconnection`);
       this.socket.close();
       this.socket = null;
-    }
-    
-    if (this.connectionState === ConnectionState.CONNECTING || 
-        this.connectionState === ConnectionState.CONNECTED) {
-      console.log(`⚠️ Already connecting/connected, skipping duplicate connection attempt`);
-      return; // Already connecting or connected
     }
     
     this.connectionState = ConnectionState.CONNECTING;
@@ -230,12 +235,14 @@ export class NetworkManager {
       
       this.connectionState = ConnectionState.CONNECTED;
       this.reconnectAttempts = 0;
+      this.isConnecting = false; // Reset connection flag on success
       
       console.log('✅ Connected to server');
       this.onConnectionStateChanged?.(ConnectionState.CONNECTED);
       
     } catch (error) {
       this.connectionState = ConnectionState.ERROR;
+      this.isConnecting = false; // Reset connection flag on error
       console.error('❌ Failed to connect to server:', error);
       
       // Attempt reconnection
@@ -251,6 +258,7 @@ export class NetworkManager {
     console.log('🔌 Disconnecting from server...');
     
     this.connectionState = ConnectionState.DISCONNECTED;
+    this.isConnecting = false; // Reset connection flag on disconnect
     
     // Clear timers
     if (this.reconnectTimer) {
@@ -698,6 +706,7 @@ export class NetworkManager {
     if (this.reconnectAttempts >= this.config.maxReconnectAttempts) {
       console.error('❌ Max reconnection attempts reached');
       this.connectionState = ConnectionState.ERROR;
+      this.isConnecting = false; // Reset flag when giving up
       return;
     }
     
@@ -707,6 +716,7 @@ export class NetworkManager {
     console.log(`🔄 Scheduling reconnect attempt ${this.reconnectAttempts} in ${delay}ms`);
     
     this.connectionState = ConnectionState.RECONNECTING;
+    this.isConnecting = false; // Reset flag before scheduling reconnect
     this.reconnectTimer = setTimeout(() => {
       this.connect().catch((error) => {
         console.error('Reconnection failed:', error);

@@ -110,9 +110,4 @@ function parseClientConfigFromUrl(): Partial<ClientConfig> {
   return config;
 }
 
-// Start the application when DOM is ready
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', main);
-} else {
-  main();
-}
+// Note: main() is called from src/main.ts - don't call it here to avoid duplicates
