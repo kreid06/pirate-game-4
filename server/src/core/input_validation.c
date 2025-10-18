@@ -10,6 +10,10 @@
 #include <math.h>
 #include <stdio.h>
 
+// Global tier configuration and statistics
+input_tier_config_t g_tier_config[INPUT_TIER_COUNT];
+int tier_player_counts[INPUT_TIER_COUNT] = {0};
+
 // Static helper functions
 static float calculate_movement_magnitude(const input_frame_t* input);
 static bool is_valid_action_bitfield(uint32_t actions);
@@ -23,6 +27,68 @@ static void update_input_rate_tracking(input_validation_t* client, uint64_t time
 void input_validation_init(input_validator_t* validator) {
     memset(validator, 0, sizeof(input_validator_t));
     
+    // Initialize tier system configurations
+    validator->enable_tiered_input = true;
+    validator->max_total_input_rate = 5000; // Global rate limit
+    
+    // Configure input tiers based on SCALABLE_INPUT_SYSTEM.md
+    validator->tier_configs[INPUT_TIER_IDLE] = (input_tier_config_t){
+        .tier = INPUT_TIER_IDLE,
+        .max_rate_hz = 1,
+        .min_interval_ms = 1000,
+        .movement_threshold = 0.0f
+    };
+    
+    validator->tier_configs[INPUT_TIER_BACKGROUND] = (input_tier_config_t){
+        .tier = INPUT_TIER_BACKGROUND,
+        .max_rate_hz = 10,
+        .min_interval_ms = 100,
+        .movement_threshold = 0.20f
+    };
+    
+    validator->tier_configs[INPUT_TIER_NORMAL] = (input_tier_config_t){
+        .tier = INPUT_TIER_NORMAL,
+        .max_rate_hz = 30,
+        .min_interval_ms = 33,
+        .movement_threshold = 0.10f
+    };
+    
+    validator->tier_configs[INPUT_TIER_CRITICAL] = (input_tier_config_t){
+        .tier = INPUT_TIER_CRITICAL,
+        .max_rate_hz = 60,
+        .min_interval_ms = 16,
+        .movement_threshold = 0.05f
+    };
+    
+    // Initialize global tier configurations for API access
+    g_tier_config[INPUT_TIER_IDLE] = (input_tier_config_t){
+        .tier = INPUT_TIER_IDLE,
+        .max_rate_hz = 1,
+        .min_interval_ms = 1000,
+        .movement_threshold = 0.0f
+    };
+    
+    g_tier_config[INPUT_TIER_BACKGROUND] = (input_tier_config_t){
+        .tier = INPUT_TIER_BACKGROUND,
+        .max_rate_hz = 10,
+        .min_interval_ms = 100,
+        .movement_threshold = 0.20f
+    };
+    
+    g_tier_config[INPUT_TIER_NORMAL] = (input_tier_config_t){
+        .tier = INPUT_TIER_NORMAL,
+        .max_rate_hz = 30,
+        .min_interval_ms = 33,
+        .movement_threshold = 0.10f
+    };
+    
+    g_tier_config[INPUT_TIER_CRITICAL] = (input_tier_config_t){
+        .tier = INPUT_TIER_CRITICAL,
+        .max_rate_hz = 60,
+        .min_interval_ms = 16,
+        .movement_threshold = 0.05f
+    };
+    
     // Set default configuration
     validator->enable_rate_limiting = true;
     validator->enable_movement_validation = true;
@@ -30,10 +96,12 @@ void input_validation_init(input_validator_t* validator) {
     validator->ban_threshold_score = 0.85f; // Ban at 85% suspicious score
     
     log_info("🛡️ Input validation system initialized");
+    log_info("  Tiered input: %s", validator->enable_tiered_input ? "enabled" : "disabled");
     log_info("  Rate limiting: %s", validator->enable_rate_limiting ? "enabled" : "disabled");
     log_info("  Movement validation: %s", validator->enable_movement_validation ? "enabled" : "disabled");
     log_info("  Anomaly detection: %s", validator->enable_anomaly_detection ? "enabled" : "disabled");
     log_info("  Auto-ban threshold: %.1f%%", validator->ban_threshold_score * 100.0f);
+    log_info("  Global input rate limit: %u packets/sec", validator->max_total_input_rate);
 }
 
 /**
@@ -353,4 +421,129 @@ static void update_input_rate_tracking(input_validation_t* client, uint64_t time
     }
     
     client->input_count++;
+}
+
+/**
+ * Update client input tier based on gameplay context
+ */
+void input_validation_update_tier(input_validator_t* validator,
+                                 uint32_t client_id,
+                                 uint32_t nearby_players,
+                                 bool in_combat,
+                                 bool is_moving) {
+    if (!validator || client_id >= MAX_CLIENTS) return;
+    
+    input_validation_t* client = &validator->clients[client_id];
+    input_tier_t new_tier;
+    
+    // Tier selection logic from SCALABLE_INPUT_SYSTEM.md
+    if (in_combat || nearby_players >= 3) {
+        new_tier = INPUT_TIER_CRITICAL; // 60Hz for combat/high activity
+    } else if (nearby_players >= 1) {
+        new_tier = INPUT_TIER_NORMAL;    // 30Hz for normal gameplay
+    } else if (is_moving) {
+        new_tier = INPUT_TIER_BACKGROUND; // 10Hz for solo exploration
+    } else {
+        new_tier = INPUT_TIER_IDLE;      // 1Hz for idle/AFK
+    }
+    
+    // Update client state
+    if (client->current_tier != new_tier) {
+        log_info("🎯 Client %u tier changed: %d → %d (nearby:%u combat:%d moving:%d)",
+                 client_id, client->current_tier, new_tier, nearby_players, in_combat, is_moving);
+        
+        // Update global tier statistics
+        if (client->current_tier >= 0 && client->current_tier < INPUT_TIER_COUNT) {
+            tier_player_counts[client->current_tier]--;
+        }
+        tier_player_counts[new_tier]++;
+        
+        client->current_tier = new_tier;
+        client->last_tier_update = get_time_ms();
+    }
+    
+    client->nearby_players = nearby_players;
+    client->in_combat = in_combat;
+    client->is_moving = is_moving;
+}
+
+/**
+ * Check if input should be processed based on tier rate limiting
+ */
+bool input_validation_should_process_input(input_validator_t* validator,
+                                          uint32_t client_id,
+                                          uint64_t timestamp) {
+    if (!validator || client_id >= MAX_CLIENTS) return false;
+    if (!validator->enable_tiered_input) return true;
+    
+    input_validation_t* client = &validator->clients[client_id];
+    input_tier_config_t* tier_config = &validator->tier_configs[client->current_tier];
+    
+    // Check if enough time has passed since last input
+    uint64_t time_since_last = timestamp - client->last_input_timestamp;
+    if (time_since_last < tier_config->min_interval_ms) {
+        return false; // Rate limited
+    }
+    
+    return true;
+}
+
+/**
+ * Get input tier statistics
+ */
+void input_validation_get_tier_stats(const input_validator_t* validator,
+                                    uint64_t tier_counts[INPUT_TIER_COUNT],
+                                    uint32_t* total_players) {
+    if (!validator || !tier_counts || !total_players) return;
+    
+    memset(tier_counts, 0, sizeof(uint64_t) * INPUT_TIER_COUNT);
+    *total_players = 0;
+    
+    for (uint32_t i = 0; i < MAX_CLIENTS; i++) {
+        const input_validation_t* client = &validator->clients[i];
+        if (client->client_id != 0) { // Active client
+            tier_counts[client->current_tier]++;
+            (*total_players)++;
+        }
+    }
+}
+
+/**
+ * Register a new client for tier tracking
+ */
+void input_validation_register_client(input_validator_t* validator, uint32_t client_id) {
+    if (!validator || client_id >= MAX_CLIENTS) return;
+    
+    input_validation_t* client = &validator->clients[client_id];
+    
+    // Initialize new client to IDLE tier
+    if (client->client_id == 0) {
+        client->client_id = client_id;
+        client->current_tier = INPUT_TIER_IDLE;
+        client->last_tier_update = get_time_ms();
+        tier_player_counts[INPUT_TIER_IDLE]++;
+        
+        log_info("📋 Client %u registered for tier tracking (IDLE)", client_id);
+    }
+}
+
+/**
+ * Unregister a client from tier tracking
+ */
+void input_validation_unregister_client(input_validator_t* validator, uint32_t client_id) {
+    if (!validator || client_id >= MAX_CLIENTS) return;
+    
+    input_validation_t* client = &validator->clients[client_id];
+    
+    if (client->client_id != 0) {
+        // Remove from tier count
+        if (client->current_tier >= 0 && client->current_tier < INPUT_TIER_COUNT) {
+            tier_player_counts[client->current_tier]--;
+        }
+        
+        log_info("📋 Client %u unregistered from tier tracking", client_id);
+        
+        // Clear client data
+        memset(client, 0, sizeof(input_validation_t));
+    }
 }

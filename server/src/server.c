@@ -3,6 +3,7 @@
 #include "net/protocol.h"
 #include "net/websocket_server.h"
 #include "admin/admin_server.h"
+#include "input_validation.h"
 #include "util/time.h"
 #include "util/log.h"
 #include "core/rng.h"
@@ -36,6 +37,9 @@ struct ServerContext {
     
     // Admin server
     struct AdminServer admin_server;
+    
+    // Input validation system
+    input_validator_t input_validator;
     
     // Buffers for packet processing
     uint8_t recv_buffer[MAX_PACKET_SIZE];
@@ -91,6 +95,10 @@ int server_init(struct ServerContext** out_ctx) {
     
     // Initialize simulation
     init_simulation(ctx);
+    
+    // Initialize input validation system
+    input_validation_init(&ctx->input_validator);
+    log_info("Input validation system initialized");
     
     // Initialize admin server on port 8082
     if (admin_server_init(&ctx->admin_server, 8082) != 0) {

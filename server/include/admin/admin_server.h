@@ -83,6 +83,7 @@ int admin_api_network_stats(struct HttpResponse* resp, const struct NetworkManag
 int admin_api_performance(struct HttpResponse* resp, const struct Sim* sim);
 int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim);
 int admin_api_message_stats(struct HttpResponse* resp);
+int admin_api_input_tiers(struct HttpResponse* resp);
 
 // Static content serving
 int admin_serve_dashboard(struct HttpResponse* resp);

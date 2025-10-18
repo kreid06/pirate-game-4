@@ -2,6 +2,7 @@
 #include "sim/types.h"
 #include "net/network.h"
 #include "net/websocket_server.h"
+#include "input_validation.h"
 #include "util/log.h"
 #include "util/time.h"
 #include <stdio.h>
@@ -431,6 +432,71 @@ int admin_api_message_stats(struct HttpResponse* resp) {
     resp->body = json_buffer;
     resp->body_length = len;
     resp->cache_control = true;
+
+    return 0;
+}
+
+// Input tier statistics API endpoint
+int admin_api_input_tiers(struct HttpResponse* resp) {
+    if (!resp) return -1;
     
+    // Get global tier statistics
+    extern input_tier_config_t g_tier_config[INPUT_TIER_COUNT];
+    extern int tier_player_counts[INPUT_TIER_COUNT];
+    
+    // Calculate total processed inputs per tier
+    int total_inputs = 0;
+    int tier_inputs[INPUT_TIER_COUNT] = {0};
+    
+    for (int i = 0; i < INPUT_TIER_COUNT; i++) {
+        tier_inputs[i] = tier_player_counts[i] * g_tier_config[i].max_rate_hz;
+        total_inputs += tier_inputs[i];
+    }
+    
+    // Get total player count for efficiency calculation
+    int total_players = tier_player_counts[INPUT_TIER_IDLE] + tier_player_counts[INPUT_TIER_BACKGROUND] + 
+                       tier_player_counts[INPUT_TIER_NORMAL] + tier_player_counts[INPUT_TIER_CRITICAL];
+    
+    // Calculate efficiency (reduction compared to all players at 30Hz)
+    float efficiency = 0.0f;
+    if (total_players > 0) {
+        int baseline_inputs = total_players * 30; // All players at 30Hz
+        efficiency = 100.0f - ((float)total_inputs / baseline_inputs * 100.0f);
+    }
+    
+    // Build JSON response
+    int len = snprintf(json_buffer, sizeof(json_buffer),
+        "{\n"
+        "  \"tier_stats\": {\n"
+        "    \"IDLE\": {\"players\": %d, \"rate_hz\": %d, \"inputs_per_sec\": %d},\n"
+        "    \"BACKGROUND\": {\"players\": %d, \"rate_hz\": %d, \"inputs_per_sec\": %d},\n"
+        "    \"NORMAL\": {\"players\": %d, \"rate_hz\": %d, \"inputs_per_sec\": %d},\n"
+        "    \"CRITICAL\": {\"players\": %d, \"rate_hz\": %d, \"inputs_per_sec\": %d}\n"
+        "  },\n"
+        "  \"summary\": {\n"
+        "    \"total_players\": %d,\n"
+        "    \"total_inputs_per_sec\": %d,\n"
+        "    \"baseline_inputs_per_sec\": %d,\n"
+        "    \"efficiency_percent\": %.1f\n"
+        "  }\n"
+        "}",
+        tier_player_counts[INPUT_TIER_IDLE], g_tier_config[INPUT_TIER_IDLE].max_rate_hz, tier_inputs[INPUT_TIER_IDLE],
+        tier_player_counts[INPUT_TIER_BACKGROUND], g_tier_config[INPUT_TIER_BACKGROUND].max_rate_hz, tier_inputs[INPUT_TIER_BACKGROUND],
+        tier_player_counts[INPUT_TIER_NORMAL], g_tier_config[INPUT_TIER_NORMAL].max_rate_hz, tier_inputs[INPUT_TIER_NORMAL],
+        tier_player_counts[INPUT_TIER_CRITICAL], g_tier_config[INPUT_TIER_CRITICAL].max_rate_hz, tier_inputs[INPUT_TIER_CRITICAL],
+        total_players,
+        total_inputs,
+        total_players * 30,
+        efficiency
+    );
+    
+    if (len >= (int)sizeof(json_buffer)) return -1;
+    
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = json_buffer;
+    resp->body_length = len;
+    resp->cache_control = true;
+
     return 0;
 }
