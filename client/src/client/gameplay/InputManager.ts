@@ -11,6 +11,16 @@ import { PlayerActions } from '../../sim/Physics.js';
 import { Vec2 } from '../../common/Vec2.js';
 
 /**
+ * Input tier system for scalable 100+ player support
+ */
+enum InputTier {
+  CRITICAL = 'critical',    // Combat/near enemies - 60Hz
+  NORMAL = 'normal',        // Normal gameplay - 30Hz  
+  BACKGROUND = 'background', // Distant from others - 10Hz
+  IDLE = 'idle'             // Stationary - 1Hz
+}
+
+/**
  * Input state tracking
  */
 interface InputState {
@@ -66,11 +76,24 @@ export class InputManager {
   private lastInteractionTime = 0;
   private readonly interactionCooldown = 500; // 500ms
   
-  // Optimized input tracking (Option 2)
+  // Scalable input tracking for 100+ players
   private lastInputFrame: InputFrame | null = null;
   private lastHeartbeatTime = 0;
-  private readonly heartbeatInterval = 1000; // Send heartbeat every 1 second when idle
   private hasActiveInput = false;
+  
+  // Tiered sending system based on player activity and proximity
+  private inputBuffer: InputFrame[] = [];
+  private lastSendTime = 0;
+  private currentTier: InputTier = InputTier.NORMAL;
+  private nearbyPlayerCount = 0; // Updated by AOI system
+  
+  // Adaptive rates based on context
+  private readonly tierSettings = {
+    [InputTier.CRITICAL]: { interval: 16, threshold: 0.05 },   // 60Hz for combat
+    [InputTier.NORMAL]: { interval: 33, threshold: 0.1 },      // 30Hz for normal play  
+    [InputTier.BACKGROUND]: { interval: 100, threshold: 0.2 }, // 10Hz for distant players
+    [InputTier.IDLE]: { interval: 1000, threshold: 1.0 }       // 1Hz for stationary
+  };
   
   constructor(canvas: HTMLCanvasElement, config: InputConfig) {
     this.canvas = canvas;
@@ -164,16 +187,49 @@ export class InputManager {
   }
   
   /**
-   * Update input configuration
+   * Update nearby player count for tier calculation (called by AOI system)
    */
-  updateConfig(newConfig: InputConfig): void {
-    this.config = { ...newConfig };
-    this.setupActionMappings();
-    console.log('🎮 Input configuration updated');
+  updateNearbyPlayerCount(count: number): void {
+    this.nearbyPlayerCount = count;
+    this.updateInputTier();
   }
   
   /**
-   * Determine if we should send an input frame (Option 2: immediate + heartbeat)
+   * Set combat mode for critical input tier
+   */
+  setCombatMode(inCombat: boolean): void {
+    if (inCombat && this.currentTier !== InputTier.CRITICAL) {
+      this.currentTier = InputTier.CRITICAL;
+      console.log('🔥 Switching to CRITICAL input tier (60Hz) - combat detected');
+    } else if (!inCombat && this.currentTier === InputTier.CRITICAL) {
+      this.updateInputTier();
+    }
+  }
+  
+  /**
+   * Update input tier based on activity and proximity
+   */
+  private updateInputTier(): void {
+    const wasIdle = this.currentTier === InputTier.IDLE;
+    
+    // Determine tier based on activity and proximity
+    if (!this.hasActiveInput) {
+      this.currentTier = InputTier.IDLE;
+    } else if (this.nearbyPlayerCount >= 3) {
+      this.currentTier = InputTier.CRITICAL; // Crowded area
+    } else if (this.nearbyPlayerCount >= 1) {
+      this.currentTier = InputTier.NORMAL; // Normal interaction
+    } else {
+      this.currentTier = InputTier.BACKGROUND; // Exploring alone
+    }
+    
+    if (this.config.enableDebugLogging && wasIdle !== (this.currentTier === InputTier.IDLE)) {
+      console.log(`� Input tier: ${this.currentTier} (${this.tierSettings[this.currentTier].interval}ms interval, nearby: ${this.nearbyPlayerCount})`);
+    }
+  }
+  
+  /**
+   * Determine if we should send an input frame (Tiered system for 100+ players)
    */
   private shouldSendInputFrame(): boolean {
     const currentTime = Date.now();
@@ -181,30 +237,74 @@ export class InputManager {
     // Check if this is the first frame
     if (!this.lastInputFrame) {
       this.lastHeartbeatTime = currentTime;
+      this.lastSendTime = currentTime;
       return true;
     }
     
-    // Check if input has changed (immediate send)
+    // Update input tier based on current activity
+    this.updateInputTier();
+    
+    // Get current tier settings
+    const settings = this.tierSettings[this.currentTier];
+    
+    // Check if input has changed
     const movementChanged = !this.currentInputFrame.movement.equals(this.lastInputFrame.movement);
     const actionsChanged = this.currentInputFrame.actions !== this.lastInputFrame.actions;
     
-    if (movementChanged || actionsChanged) {
-      this.hasActiveInput = true;
-      this.lastHeartbeatTime = currentTime; // Reset heartbeat timer on activity
-      return true;
+    // Calculate movement change magnitude
+    let movementDelta = 0;
+    if (movementChanged) {
+      const lastMag = this.lastInputFrame.movement.length();
+      const currentMag = this.currentInputFrame.movement.length();
+      movementDelta = Math.abs(currentMag - lastMag) + 
+                     this.currentInputFrame.movement.sub(this.lastInputFrame.movement).length();
     }
     
-    // Check if we need to send heartbeat (periodic send when idle)
-    const timeSinceHeartbeat = currentTime - this.lastHeartbeatTime;
-    if (timeSinceHeartbeat >= this.heartbeatInterval) {
-      this.hasActiveInput = false;
+    const significantChange = movementDelta > settings.threshold || actionsChanged;
+    const timeSinceLastSend = currentTime - this.lastSendTime;
+    const hasAnyChange = movementChanged || actionsChanged;
+    
+    // Determine if we should send based on tier
+    let shouldSend = false;
+    let reason = '';
+    
+    if (significantChange) {
+      // Always send significant changes immediately
+      shouldSend = true;
+      reason = `significant change (delta: ${movementDelta.toFixed(3)})`;
+    } else if (hasAnyChange && timeSinceLastSend >= settings.interval) {
+      // Send minor changes at tier-appropriate rate
+      shouldSend = true;
+      reason = `tier-limited change (${this.currentTier})`;
+    } else if (!hasAnyChange && timeSinceLastSend >= Math.max(settings.interval * 10, 1000)) {
+      // Heartbeat: send idle state at slower rate
+      shouldSend = true;
+      reason = 'heartbeat';
+    }
+    
+    if (shouldSend) {
+      this.hasActiveInput = hasAnyChange;
       this.lastHeartbeatTime = currentTime;
+      this.lastSendTime = currentTime;
+      
+      if (this.config.enableDebugLogging) {
+        console.log(`📊 ${this.currentTier.toUpperCase()} send: ${reason} (interval: ${settings.interval}ms)`);
+      }
       return true;
     }
     
     // No need to send
-    this.hasActiveInput = false;
+    this.hasActiveInput = hasAnyChange;
     return false;
+  }
+  
+  /**
+   * Update input configuration
+   */
+  updateConfig(newConfig: InputConfig): void {
+    this.config = { ...newConfig };
+    this.setupActionMappings();
+    console.log('🎮 Input configuration updated');
   }
   
   /**
