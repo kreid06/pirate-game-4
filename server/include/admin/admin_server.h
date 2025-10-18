@@ -82,6 +82,7 @@ int admin_api_physics_objects(struct HttpResponse* resp, const struct Sim* sim);
 int admin_api_network_stats(struct HttpResponse* resp, const struct NetworkManager* net_mgr);
 int admin_api_performance(struct HttpResponse* resp, const struct Sim* sim);
 int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim);
+int admin_api_message_stats(struct HttpResponse* resp);
 
 // Static content serving
 int admin_serve_dashboard(struct HttpResponse* resp);

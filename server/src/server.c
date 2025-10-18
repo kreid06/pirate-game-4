@@ -2,6 +2,7 @@
 #include "sim/types.h"
 #include "net/protocol.h"
 #include "net/websocket_server.h"
+#include "admin/admin_server.h"
 #include "util/time.h"
 #include "util/log.h"
 #include "core/rng.h"
@@ -32,6 +33,9 @@ struct ServerContext {
     
     // Simulation
     struct Sim simulation;
+    
+    // Admin server
+    struct AdminServer admin_server;
     
     // Buffers for packet processing
     uint8_t recv_buffer[MAX_PACKET_SIZE];
@@ -88,6 +92,15 @@ int server_init(struct ServerContext** out_ctx) {
     // Initialize simulation
     init_simulation(ctx);
     
+    // Initialize admin server on port 8082
+    if (admin_server_init(&ctx->admin_server, 8082) != 0) {
+        log_error("Failed to initialize admin server");
+        // Don't fail server startup if admin server fails
+        log_warn("Admin panel will not be available");
+    } else {
+        log_info("Admin server initialized on port 8082");
+    }
+    
     // Initialize WebSocket server on port 8080 (browser clients)
     if (websocket_server_init(8080) != 0) {
         log_error("Failed to initialize WebSocket server");
@@ -123,6 +136,12 @@ void server_shutdown(struct ServerContext* ctx) {
     // Cleanup networking resources first (close sockets)
     cleanup_networking(ctx);
     
+    // Cleanup admin server
+    admin_server_cleanup(&ctx->admin_server);
+    
+    // Cleanup WebSocket server
+    websocket_server_cleanup();
+    
     // Free the context
     free(ctx);
     
@@ -155,6 +174,9 @@ int server_run(struct ServerContext* ctx) {
         
         // Update WebSocket server (process browser client connections)
         websocket_server_update(NULL);  // TODO: pass simulation context if needed
+        
+        // Update admin server (process admin panel requests)
+        admin_server_update(&ctx->admin_server, &ctx->simulation, NULL);
         
         // Run physics simulation step
         step_simulation(ctx);

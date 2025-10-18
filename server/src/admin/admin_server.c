@@ -30,6 +30,11 @@ static const char* dashboard_html =
 ".card h3 { margin-top: 0; color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 0.5rem; }\n"
 ".stat { display: flex; justify-content: space-between; margin: 0.5rem 0; }\n"
 ".stat-value { font-weight: bold; color: #27ae60; }\n"
+".indicator { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-left: 5px; }\n"
+".indicator.green { background: #27ae60; animation: pulse 2s infinite; }\n"
+".indicator.red { background: #e74c3c; }\n"
+".indicator.gray { background: #95a5a6; }\n"
+"@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }\n"
 "#map-container { position: relative; width: 100%; height: 500px; border: 2px solid #34495e; background: #2c5aa0; border-radius: 8px; }\n"
 "#map-canvas { width: 100%; height: 100%; display: block; }\n"
 ".map-legend { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.8); color: white; padding: 1rem; border-radius: 8px; }\n"
@@ -48,6 +53,7 @@ static const char* dashboard_html =
 "<div class=\"card\"><h3>📊 Server Status</h3><div id=\"server-status\">Loading...</div></div>\n"
 "<div class=\"card\"><h3>🎯 Physics Objects</h3><div id=\"physics-objects\">Loading...</div></div>\n"
 "<div class=\"card\"><h3>🌐 Network Stats</h3><div id=\"network-stats\">Loading...</div></div>\n"
+"<div class=\"card\"><h3>💬 Message Activity</h3><div id=\"message-stats\">Loading...</div></div>\n"
 "</div></div>\n"
 "<div id=\"map\" class=\"tab-pane\">\n"
 "<h2>🗺️ Live World Map</h2>\n"
@@ -132,8 +138,22 @@ static const char* dashboard_html =
 "<div class=\"stat\"><span>Bytes Sent:</span><span class=\"stat-value\">${data.bytes_sent}</span></div>\n"
 "`;\n"
 "}\n"
+"async function updateMessageStats() {\n"
+"const data = await fetchJson('/api/messages');\n"
+"if (!data) return;\n"
+"const inputAge = data.last_input_age_ms;\n"
+"const unknownAge = data.last_unknown_age_ms;\n"
+"const inputIndicator = inputAge < 5000 ? 'green' : 'gray';\n"
+"const unknownIndicator = unknownAge < 5000 ? 'red' : 'gray';\n"
+"document.getElementById('message-stats').innerHTML = `\n"
+"<div class=\"stat\"><span>🎮 Player Inputs:</span><span class=\"stat-value\">${data.input_messages_received} <span class=\"indicator ${inputIndicator}\"></span></span></div>\n"
+"<div class=\"stat\"><span>❓ Unknown Messages:</span><span class=\"stat-value\">${data.unknown_messages_received} <span class=\"indicator ${unknownIndicator}\"></span></span></div>\n"
+"<div class=\"stat\"><span>Last Input:</span><span class=\"stat-value\">${inputAge}ms ago</span></div>\n"
+"<div class=\"stat\"><span>Last Unknown:</span><span class=\"stat-value\">${unknownAge}ms ago</span></div>\n"
+"`;\n"
+"}\n"
 "function refreshAll() {\n"
-"updateServerStatus(); updatePhysicsObjects(); updateNetworkStats();\n"
+"updateServerStatus(); updatePhysicsObjects(); updateNetworkStats(); updateMessageStats();\n"
 "if (document.getElementById('map').classList.contains('active')) updateMap();\n"
 "}\n"
 "refreshAll(); setInterval(refreshAll, 2000);\n"
@@ -247,6 +267,8 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                         admin_api_network_stats(&resp, net_mgr);
                     } else if (strcmp(path_start, "/api/map") == 0) {
                         admin_api_map_data(&resp, sim);
+                    } else if (strcmp(path_start, "/api/messages") == 0) {
+                        admin_api_message_stats(&resp);
                     } else {
                         resp.status_code = 404;
                         resp.body = "Not Found";
