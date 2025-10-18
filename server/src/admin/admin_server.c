@@ -269,6 +269,8 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                         admin_api_map_data(&resp, sim);
                     } else if (strcmp(path_start, "/api/messages") == 0) {
                         admin_api_message_stats(&resp);
+                    } else if (strcmp(path_start, "/api/input-tiers") == 0) {
+                        admin_api_input_tiers(&resp);
                     } else {
                         resp.status_code = 404;
                         resp.body = "Not Found";
