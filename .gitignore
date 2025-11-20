@@ -1,2 +1,4 @@
-bin
-obj
+server/bin
+server/obj
+server/build
+server/build_debug

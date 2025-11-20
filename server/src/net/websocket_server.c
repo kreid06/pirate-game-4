@@ -474,6 +474,21 @@ int websocket_server_update(struct Sim* sim) {
                     if (payload[0] == '{') {
                         // JSON message - parse type
                         if (strstr(payload, "\"type\":\"handshake\"")) {
+                            // Extract player name from handshake if provided
+                            char player_name[32] = "Player";
+                            char* name_start = strstr(payload, "\"playerName\":\"");
+                            if (name_start) {
+                                name_start += 14; // Skip past "playerName":"
+                                char* name_end = strchr(name_start, '"');
+                                if (name_end) {
+                                    size_t name_len = name_end - name_start;
+                                    if (name_len > 0 && name_len < sizeof(player_name) - 1) {
+                                        strncpy(player_name, name_start, name_len);
+                                        player_name[name_len] = '\0';
+                                    }
+                                }
+                            }
+                            
                             // Check if client already has a player
                             if (client->player_id != 0) {
                                 WebSocketPlayer* existing_player = find_player(client->player_id);
@@ -481,8 +496,8 @@ int websocket_server_update(struct Sim* sim) {
                                     log_info("🤝 Client %s:%u reconnecting with existing player ID %u", 
                                              client->ip_address, client->port, client->player_id);
                                     snprintf(response, sizeof(response),
-                                            "{\"type\":\"handshake_response\",\"player_id\":%u,\"server_time\":%u,\"status\":\"reconnected\"}",
-                                            client->player_id, get_time_ms());
+                                            "{\"type\":\"handshake_response\",\"player_id\":%u,\"playerName\":\"%s\",\"server_time\":%u,\"status\":\"reconnected\"}",
+                                            client->player_id, player_name, get_time_ms());
                                     handled = true;
                                 } else {
                                     // Player ID exists but player not found - reset it
@@ -492,7 +507,7 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                             }
                             
-                            if (client->player_id == 0) {
+                            if (client->player_id == 0 && !handled) {
                                 // Handshake message - create new player
                                 uint32_t player_id = next_player_id++;
                                 client->player_id = player_id;
@@ -502,18 +517,21 @@ int websocket_server_update(struct Sim* sim) {
                                 if (!player) {
                                     log_error("Failed to create player for client %s:%u", client->ip_address, client->port);
                                     client->player_id = 0; // Reset on failure
-                                    continue;
+                                    snprintf(response, sizeof(response),
+                                            "{\"type\":\"handshake_response\",\"status\":\"error\",\"message\":\"Server full\"}");
+                                    handled = true;
+                                } else {
+                                    snprintf(response, sizeof(response),
+                                            "{\"type\":\"handshake_response\",\"player_id\":%u,\"playerName\":\"%s\",\"server_time\":%u,\"status\":\"connected\"}",
+                                            player_id, player_name, get_time_ms());
+                                    handled = true;
+                                    log_info("🤝 WebSocket handshake from %s:%u (Player: %s, ID: %u)", 
+                                             client->ip_address, client->port, player_name, player_id);
                                 }
-                                
-                                snprintf(response, sizeof(response),
-                                        "{\"type\":\"handshake_response\",\"player_id\":%u,\"server_time\":%u,\"status\":\"connected\"}",
-                                        player_id, get_time_ms());
-                                handled = true;
-                                log_info("🤝 WebSocket handshake from %s:%u (ID: %u)", client->ip_address, client->port, player_id);
                             }
                             
-                            if (handled) {
-                                // Send initial game state after handshake
+                            // Send initial game state after successful handshake
+                            if (handled && client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) {
                                     char game_state_frame[2048];
