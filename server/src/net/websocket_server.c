@@ -8,6 +8,8 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#define _USE_MATH_DEFINES
+#include <math.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <openssl/sha.h>
@@ -15,9 +17,26 @@
 #include <openssl/bio.h>
 #include <openssl/buffer.h>
 
+// Define M_PI if not available
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 // WebSocket magic key for handshake
 #define WS_MAGIC_KEY "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 #define WS_MAX_CLIENTS 100
+
+// Simple ship structure for WebSocket server (temporary until full Sim integration)
+typedef struct {
+    uint32_t ship_id;
+    float x, y;              // World position
+    float rotation;          // Radians
+    float velocity_x, velocity_y;
+    float angular_velocity;
+    float deck_min_x, deck_max_x;  // Walkable area
+    float deck_min_y, deck_max_y;
+    bool active;
+} SimpleShip;
 
 // WebSocket opcodes
 #define WS_OPCODE_CONTINUATION 0x0
@@ -27,11 +46,28 @@
 #define WS_OPCODE_PING 0x9
 #define WS_OPCODE_PONG 0xA
 
+// Player movement states
+typedef enum {
+    PLAYER_STATE_WALKING,   // On ship deck
+    PLAYER_STATE_SWIMMING,  // In water
+    PLAYER_STATE_FALLING    // Airborne (jumped off ship)
+} PlayerMovementState;
+
 // Simple player data structure for movement
 typedef struct {
     uint32_t player_id;
+    char name[64];          // Player name
+    
+    // World position (absolute coordinates)
     float x, y;
     float velocity_x, velocity_y;
+    float rotation;         // Player aim direction in radians (from mouse)
+    
+    // Ship relationship
+    uint32_t parent_ship_id;  // 0 if not on a ship
+    float local_x, local_y;   // Position relative to ship center
+    PlayerMovementState movement_state;
+    
     uint32_t last_input_time;
     bool active;
 } WebSocketPlayer;
@@ -65,6 +101,47 @@ static struct WebSocketServer ws_server = {0};
 // Global player data for simple movement tracking
 static WebSocketPlayer players[WS_MAX_CLIENTS] = {0};
 static int next_player_id = 1000;
+
+// Global ship data (simple ships for testing)
+#define MAX_SIMPLE_SHIPS 16
+static SimpleShip ships[MAX_SIMPLE_SHIPS] = {0};
+static int ship_count = 0;
+static int next_ship_id = 1;
+
+// Helper function to find a ship by ID
+static SimpleShip* find_ship(uint32_t ship_id) {
+    for (int i = 0; i < ship_count; i++) {
+        if (ships[i].active && ships[i].ship_id == ship_id) {
+            return &ships[i];
+        }
+    }
+    return NULL;
+}
+
+// Coordinate conversion helpers
+static void ship_local_to_world(const SimpleShip* ship, float local_x, float local_y, float* world_x, float* world_y) {
+    float cos_r = cosf(ship->rotation);
+    float sin_r = sinf(ship->rotation);
+    *world_x = ship->x + (local_x * cos_r - local_y * sin_r);
+    *world_y = ship->y + (local_x * sin_r + local_y * cos_r);
+}
+
+static void ship_clamp_to_deck(const SimpleShip* ship, float* local_x, float* local_y) {
+    if (*local_x < ship->deck_min_x) *local_x = ship->deck_min_x;
+    if (*local_x > ship->deck_max_x) *local_x = ship->deck_max_x;
+    if (*local_y < ship->deck_min_y) *local_y = ship->deck_min_y;
+    if (*local_y > ship->deck_max_y) *local_y = ship->deck_max_y;
+}
+
+// Helper function to get movement state as string
+static const char* get_state_string(PlayerMovementState state) {
+    switch (state) {
+        case PLAYER_STATE_WALKING: return "WALKING";
+        case PLAYER_STATE_SWIMMING: return "SWIMMING";
+        case PLAYER_STATE_FALLING: return "FALLING";
+        default: return "UNKNOWN";
+    }
+}
 
 // Base64 encoding for WebSocket handshake
 static char* base64_encode(const unsigned char* input, int length) {
@@ -156,13 +233,40 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             memset(&players[i], 0, sizeof(WebSocketPlayer));
             
             players[i].player_id = player_id;
-            players[i].x = 400.0f; // Default spawn position
-            players[i].y = 300.0f;
+            
+            // Spawn player on the first ship if it exists
+            if (ship_count > 0 && ships[0].active) {
+                players[i].parent_ship_id = ships[0].ship_id;
+                players[i].local_x = 0.0f;  // Center of ship deck
+                players[i].local_y = 0.0f;
+                players[i].movement_state = PLAYER_STATE_WALKING;
+                
+                // Calculate world position from ship position
+                ship_local_to_world(&ships[0], players[i].local_x, players[i].local_y, 
+                                   &players[i].x, &players[i].y);
+                
+                log_info("🎮 Spawned player %u on ship %u at local (%.1f, %.1f), world (%.1f, %.1f)", 
+                         player_id, ships[0].ship_id, players[i].local_x, players[i].local_y,
+                         players[i].x, players[i].y);
+            } else {
+                // No ship available - spawn in water
+                players[i].parent_ship_id = 0;
+                players[i].x = 400.0f;
+                players[i].y = 300.0f;
+                players[i].local_x = 0.0f;
+                players[i].local_y = 0.0f;
+                players[i].movement_state = PLAYER_STATE_SWIMMING;
+                
+                log_info("🎮 Spawned player %u in water at (%.1f, %.1f)", 
+                         player_id, players[i].x, players[i].y);
+            }
+            
             players[i].velocity_x = 0.0f;
             players[i].velocity_y = 0.0f;
+            players[i].rotation = 0.0f;
             players[i].last_input_time = get_time_ms();
             players[i].active = true;
-            log_info("🎮 Created player %u at (%.1f, %.1f)", player_id, players[i].x, players[i].y);
+            
             return &players[i];
         }
     }
@@ -205,19 +309,71 @@ static void debug_player_state(void) {
     log_info("🔍 Total active players: %d", active_players);
 }
 
-static void update_player_movement(WebSocketPlayer* player, float movement_x, float movement_y, float dt) {
-    const float PLAYER_SPEED = 200.0f; // pixels per second
+static void update_player_movement(WebSocketPlayer* player, float rotation, float movement_x, float movement_y, float dt) {
+    const float WALK_SPEED = 3.0f;    // m/s when walking on deck
+    const float SWIM_SPEED = 1.5f;    // m/s when swimming (slower)
     const float FRICTION = 0.85f;
     
-    // Apply movement input
-    player->velocity_x = movement_x * PLAYER_SPEED;
-    player->velocity_y = movement_y * PLAYER_SPEED;
+    // Update player aim rotation (from mouse)
+    player->rotation = rotation;
     
-    // Update position
-    player->x += player->velocity_x * dt;
-    player->y += player->velocity_y * dt;
+    // Calculate magnitude of WASD movement vector
+    float magnitude = sqrtf(movement_x * movement_x + movement_y * movement_y);
     
-    // Simple bounds checking (assuming 800x600 world)
+    if (player->parent_ship_id != 0) {
+        // Player is on a ship - move in ship-local coordinates
+        SimpleShip* ship = find_ship(player->parent_ship_id);
+        if (ship) {
+            if (magnitude > 0.01f) {
+                // Normalize movement vector
+                movement_x /= magnitude;
+                movement_y /= magnitude;
+                
+                // Update local position (movement is in ship's coordinate frame)
+                player->local_x += movement_x * WALK_SPEED * dt;
+                player->local_y += movement_y * WALK_SPEED * dt;
+                
+                // Clamp to deck boundaries
+                ship_clamp_to_deck(ship, &player->local_x, &player->local_y);
+            }
+            
+            // Convert local position to world position
+            ship_local_to_world(ship, player->local_x, player->local_y, 
+                              &player->x, &player->y);
+            
+            // Player inherits ship velocity
+            player->velocity_x = ship->velocity_x;
+            player->velocity_y = ship->velocity_y;
+            
+        } else {
+            // Ship not found - fall into water
+            log_warn("Player %u lost ship %u - falling into water", 
+                     player->player_id, player->parent_ship_id);
+            player->parent_ship_id = 0;
+            player->movement_state = PLAYER_STATE_SWIMMING;
+        }
+    } else {
+        // Player is swimming in water - move in world coordinates
+        if (magnitude > 0.01f) {
+            // Normalize movement vector
+            movement_x /= magnitude;
+            movement_y /= magnitude;
+            
+            // Direct world-space movement (slower in water)
+            player->velocity_x = movement_x * SWIM_SPEED;
+            player->velocity_y = movement_y * SWIM_SPEED;
+        } else {
+            // Apply friction when not moving
+            player->velocity_x *= FRICTION;
+            player->velocity_y *= FRICTION;
+        }
+        
+        // Update world position
+        player->x += player->velocity_x * dt;
+        player->y += player->velocity_y * dt;
+    }
+    
+    // World bounds checking
     if (player->x < 0) player->x = 0;
     if (player->x > 800) player->x = 800;
     if (player->y < 0) player->y = 0;
@@ -341,12 +497,29 @@ int websocket_server_init(uint16_t port) {
     ws_server.running = true;
     log_info("WebSocket server initialized on port %u", port);
     
+    // Initialize a test ship at world center (simple ship for testing)
+    ships[0].ship_id = next_ship_id++;
+    ships[0].x = 400.0f;
+    ships[0].y = 300.0f;
+    ships[0].rotation = 0.0f;
+    ships[0].velocity_x = 0.0f;
+    ships[0].velocity_y = 0.0f;
+    ships[0].angular_velocity = 0.0f;
+    ships[0].deck_min_x = -8.0f;  // Deck boundaries (in ship-local coords)
+    ships[0].deck_max_x = 8.0f;
+    ships[0].deck_min_y = -6.0f;
+    ships[0].deck_max_y = 6.0f;
+    ships[0].active = true;
+    ship_count = 1;
+    log_info("🚢 Initialized test ship (ID: %u) at (400, 300)", ships[0].ship_id);
+    
     // Enhanced startup message
     printf("\n🌐 ═══════════════════════════════════════════════════════════════\n");
     printf("🔌 WebSocket Server Ready for Browser Clients!\n");
     printf("🌍 WebSocket listening on 0.0.0.0:%u\n", port);
     printf("🔄 Protocol bridge: WebSocket ↔ UDP translation active\n");
     printf("🎯 Browser clients can now connect via WebSocket\n");
+    printf("🚢 Test ship spawned at (400, 300)\n");
     printf("═══════════════════════════════════════════════════════════════\n\n");
     
     return 0;
@@ -521,6 +694,10 @@ int websocket_server_update(struct Sim* sim) {
                                             "{\"type\":\"handshake_response\",\"status\":\"error\",\"message\":\"Server full\"}");
                                     handled = true;
                                 } else {
+                                    // Store player name
+                                    strncpy(player->name, player_name, sizeof(player->name) - 1);
+                                    player->name[sizeof(player->name) - 1] = '\0';
+                                    
                                     snprintf(response, sizeof(response),
                                             "{\"type\":\"handshake_response\",\"player_id\":%u,\"playerName\":\"%s\",\"server_time\":%u,\"status\":\"connected\"}",
                                             player_id, player_name, get_time_ms());
@@ -534,11 +711,32 @@ int websocket_server_update(struct Sim* sim) {
                             if (handled && client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) {
-                                    char game_state_frame[2048];
-                                    char game_state_response[1024];
+                                    char game_state_frame[4096];
+                                    char game_state_response[3072];
+                                    
+                                    // Build ships array for initial state
+                                    char ships_str[1024] = "[";
+                                    bool first_ship = true;
+                                    for (int s = 0; s < ship_count; s++) {
+                                        if (ships[s].active) {
+                                            if (!first_ship) strcat(ships_str, ",");
+                                            char ship_entry[256];
+                                            snprintf(ship_entry, sizeof(ship_entry),
+                                                    "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f}",
+                                                    ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
+                                                    ships[s].velocity_x, ships[s].velocity_y);
+                                            strcat(ships_str, ship_entry);
+                                            first_ship = false;
+                                        }
+                                    }
+                                    strcat(ships_str, "]");
+                                    
                                     snprintf(game_state_response, sizeof(game_state_response),
-                                            "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":[],\"players\":[{\"id\":%u,\"name\":\"Player\",\"x\":%.1f,\"y\":%.1f}],\"projectiles\":[]}",
-                                            get_time_ms() / 33, get_time_ms(), client->player_id, player->x, player->y);
+                                            "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":[{\"id\":%u,\"name\":\"Player\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\"}],\"projectiles\":[]}",
+                                            get_time_ms() / 33, get_time_ms(), ships_str, 
+                                            client->player_id, player->x, player->y, player->rotation,
+                                            player->parent_ship_id, player->local_x, player->local_y,
+                                            get_state_string(player->movement_state));
                                     
                                     // Send handshake response first
                                     char frame[1024];
@@ -577,6 +775,13 @@ int websocket_server_update(struct Sim* sim) {
                             } else {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) {
+                                    // Parse rotation from input frame
+                                    float rotation = 0.0f;
+                                    char* rotation_start = strstr(payload, "\"rotation\":");
+                                    if (rotation_start) {
+                                        sscanf(rotation_start + 11, "%f", &rotation);
+                                    }
+                                    
                                     // Simple JSON parsing for movement (basic implementation)
                                     char* movement_start = strstr(payload, "\"movement\":{");
                                     if (movement_start) {
@@ -588,8 +793,8 @@ int websocket_server_update(struct Sim* sim) {
                                         if (y_start) sscanf(y_start + 4, "%f", &y);
                                         
                                         // Temporary debug logging for movement data
-                                        log_info("📥 Movement data received from player %u: x=%.3f, y=%.3f", 
-                                                 client->player_id, x, y);
+                                        log_info("📥 Input from player %u: rotation=%.3f, movement=(%.3f, %.3f)", 
+                                                 client->player_id, rotation, x, y);
                                         
                                         // Validate movement values
                                         if (x < -1.0f) x = -1.0f;
@@ -597,12 +802,16 @@ int websocket_server_update(struct Sim* sim) {
                                         if (y < -1.0f) y = -1.0f;
                                         if (y > 1.0f) y = 1.0f;
                                         
+                                        // Validate rotation (should be in [-π, π])
+                                        if (rotation < -M_PI) rotation = -M_PI;
+                                        if (rotation > M_PI) rotation = M_PI;
+                                        
                                         // Update player movement (using 0.033s as approximate tick time)
                                         uint32_t current_time = get_time_ms();
                                         float dt = (current_time - player->last_input_time) / 1000.0f;
                                         if (dt > 0.1f) dt = 0.033f; // Cap delta time
                                         
-                                        update_player_movement(player, x, y, dt);
+                                        update_player_movement(player, rotation, x, y, dt);
                                         player->last_input_time = current_time;
                                         
                                         // Track movement for adaptive tick rate
@@ -610,8 +819,8 @@ int websocket_server_update(struct Sim* sim) {
                                             update_movement_activity();
                                         }
                                         
-                                        log_info("🎮 Player %u moved to (%.1f, %.1f)", 
-                                                 client->player_id, player->x, player->y);
+                                        log_info("🎮 Player %u at (%.1f, %.1f) facing %.3f rad", 
+                                                 client->player_id, player->x, player->y, player->rotation);
                                     } else {
                                         log_warn("Invalid input frame format from player %u", client->player_id);
                                     }
@@ -752,19 +961,38 @@ int websocket_server_update(struct Sim* sim) {
     uint32_t update_interval = 1000 / current_update_rate; // 20Hz = 50ms, 30Hz = 33ms
     
     if (current_time - last_game_state_time > update_interval) {
-        // Build players JSON array with current positions
-        char players_json[512] = "[";
+        // Build ships JSON array
+        char ships_json[1024] = "[";
+        bool first_ship = true;
+        for (int s = 0; s < ship_count; s++) {
+            if (ships[s].active) {
+                if (!first_ship) strcat(ships_json, ",");
+                char ship_entry[256];
+                snprintf(ship_entry, sizeof(ship_entry),
+                        "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f}",
+                        ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
+                        ships[s].velocity_x, ships[s].velocity_y, ships[s].angular_velocity);
+                strcat(ships_json, ship_entry);
+                first_ship = false;
+            }
+        }
+        strcat(ships_json, "]");
+        
+        // Build players JSON array with ship relationship data
+        char players_json[2048] = "[";
         bool first_player = true;
         int active_count = 0;
         
         for (int p = 0; p < WS_MAX_CLIENTS; p++) {
             if (players[p].active) {
                 if (!first_player) strcat(players_json, ",");
-                char player_entry[128];
+                char player_entry[256];
                 snprintf(player_entry, sizeof(player_entry),
-                        "{\"id\":%u,\"name\":\"Player_%u\",\"x\":%.1f,\"y\":%.1f}",
+                        "{\"id\":%u,\"name\":\"Player_%u\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\"}",
                         players[p].player_id, players[p].player_id, 
-                        players[p].x, players[p].y);
+                        players[p].x, players[p].y, players[p].rotation,
+                        players[p].parent_ship_id, players[p].local_x, players[p].local_y,
+                        get_state_string(players[p].movement_state));
                 strcat(players_json, player_entry);
                 first_player = false;
                 active_count++;
@@ -796,10 +1024,10 @@ int websocket_server_update(struct Sim* sim) {
             last_broadcast_log_time = current_time;
         }
         
-        char game_state[1024];
+        char game_state[4096];  // Increased buffer size for ships + players
         snprintf(game_state, sizeof(game_state),
-                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":[],\"players\":%s,\"projectiles\":[]}",
-                current_time / 33, current_time, players_json);
+                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":%s,\"projectiles\":[]}",
+                current_time / 33, current_time, ships_json, players_json);
         
         // Broadcast to all connected clients
         for (int i = 0; i < WS_MAX_CLIENTS; i++) {
