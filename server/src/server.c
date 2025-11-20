@@ -4,6 +4,8 @@
 #include "net/websocket_server.h"
 #include "admin/admin_server.h"
 #include "input_validation.h"
+#include "sim/physics_lod.h"
+#include "core/performance_monitor.h"
 #include "util/time.h"
 #include "util/log.h"
 #include "core/rng.h"
@@ -40,6 +42,10 @@ struct ServerContext {
     
     // Input validation system
     input_validator_t input_validator;
+    
+    // Performance monitoring
+    physics_lod_manager_t physics_lod;
+    performance_monitor_t perf_monitor;
     
     // Buffers for packet processing
     uint8_t recv_buffer[MAX_PACKET_SIZE];
@@ -99,6 +105,18 @@ int server_init(struct ServerContext** out_ctx) {
     // Initialize input validation system
     input_validation_init(&ctx->input_validator);
     log_info("Input validation system initialized");
+    
+    // Initialize physics LOD system
+    physics_lod_init(&ctx->physics_lod);
+    
+    // Initialize performance monitor
+    perf_monitor_init(&ctx->perf_monitor);
+    
+    // Set global pointers for admin API access
+    extern physics_lod_manager_t* g_physics_lod_manager;
+    extern performance_monitor_t* g_performance_monitor;
+    g_physics_lod_manager = &ctx->physics_lod;
+    g_performance_monitor = &ctx->perf_monitor;
     
     // Initialize admin server on port 8082
     if (admin_server_init(&ctx->admin_server, 8082) != 0) {
@@ -177,8 +195,13 @@ int server_run(struct ServerContext* ctx) {
     while (ctx->should_run) {
         uint64_t tick_start = get_time_us();
         
+        // Begin performance frame tracking
+        perf_begin_frame(&ctx->perf_monitor);
+        
         // Process incoming network packets
+        perf_timer_start(&ctx->perf_monitor, PERF_CATEGORY_NETWORKING);
         process_network_input(ctx);
+        float network_time = perf_timer_stop(&ctx->perf_monitor, PERF_CATEGORY_NETWORKING);
         
         // Update WebSocket server (process browser client connections)
         websocket_server_update(NULL);  // TODO: pass simulation context if needed
@@ -187,10 +210,14 @@ int server_run(struct ServerContext* ctx) {
         admin_server_update(&ctx->admin_server, &ctx->simulation, NULL);
         
         // Run physics simulation step
+        perf_timer_start(&ctx->perf_monitor, PERF_CATEGORY_PHYSICS);
         step_simulation(ctx);
+        float physics_time = perf_timer_stop(&ctx->perf_monitor, PERF_CATEGORY_PHYSICS);
         
         // Send state updates to clients
+        perf_timer_start(&ctx->perf_monitor, PERF_CATEGORY_SNAPSHOT_GEN);
         send_snapshots(ctx);
+        float snapshot_time = perf_timer_stop(&ctx->perf_monitor, PERF_CATEGORY_SNAPSHOT_GEN);
         
         // Update tick counter
         ctx->current_tick++;
@@ -200,12 +227,49 @@ int server_run(struct ServerContext* ctx) {
         
         // Sleep until next tick
         uint64_t tick_end = get_time_us();
-        uint64_t tick_duration = tick_end - tick_start;
+        float total_tick_time = (tick_end - tick_start) / 1000.0f; // Convert to ms
         
-        // Log performance warning if tick took too long
-        if (tick_duration > TICK_DURATION_US) {
-            log_warn("Tick %u took %lu us (budget: %u us)", 
-                     ctx->current_tick, tick_duration, TICK_DURATION_US);
+        // Record performance sample
+        performance_sample_t sample = {
+            .timestamp_us = tick_start,
+            .tick_time_ms = total_tick_time,
+            .physics_time_ms = physics_time,
+            .network_time_ms = network_time,
+            .snapshot_time_ms = snapshot_time,
+            .aoi_time_ms = 0.0f,  // TODO: Add AOI timing when implemented
+            .input_validation_time_ms = 0.0f,  // TODO: Add when integrated
+            
+            // Entity counts (will be populated when entities are tracked)
+            .active_bodies = ctx->simulation.ship_count,
+            .active_contacts = 0,  // TODO: Track contacts
+            .active_constraints = 0,  // TODO: Track constraints
+            .total_aoi_entities = 0,  // TODO: Track AOI entities
+            
+            // Network stats
+            .snapshots_sent = 0,  // TODO: Track from snapshot generation
+            .total_snapshot_bytes = 0,
+            
+            // Input stats
+            .inputs_processed = 0,  // TODO: Track from input validation
+            .inputs_dropped = 0
+        };
+        
+        perf_end_frame(&ctx->perf_monitor, &sample);
+        
+        // Log performance warnings if budget exceeded
+        if (total_tick_time > 33.0f) {
+            log_warn("⚠️  Tick %u exceeded budget: %.2fms (target: 33ms)", 
+                    ctx->current_tick, total_tick_time);
+        }
+        
+        // Log periodic performance summary (every 10 seconds = 300 ticks)
+        if (ctx->current_tick % 300 == 0) {
+            float avg_tick, max_tick, p95_tick, p99_tick;
+            uint32_t budget_exceeded;
+            perf_get_summary(&ctx->perf_monitor, &avg_tick, &max_tick, &p95_tick, &p99_tick, &budget_exceeded);
+            
+            log_info("📊 Performance (tick %u): avg=%.2fms max=%.2fms p95=%.2fms p99=%.2fms budget_exceeded=%u",
+                    ctx->current_tick, avg_tick, max_tick, p95_tick, p99_tick, budget_exceeded);
         }
         
         // Check if shutdown was requested
