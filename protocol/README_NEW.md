@@ -4,9 +4,9 @@ This directory contains working examples of how to implement the Pirate Game net
 
 ## 🚀 Live Server Status
 
-✅ **WebSocket Server** - Port 8080 - Browser clients  
-✅ **UDP Game Server** - Port 8081 - Native clients  
-✅ **HTTP Admin Panel** - Port 8082 - Web dashboard  
+✅ **WebSocket Server** - Port 8082 - Browser clients  
+✅ **UDP Game Server** - Port 8080 - Native clients  
+✅ **HTTP Admin Panel** - Port 8081 - Web dashboard  
 
 ## 📁 Files
 
@@ -41,21 +41,21 @@ python3 -m http.server 3000
 ### 2. Test UDP (Command Line)
 ```bash
 # Test PING
-echo "PING" | nc -u localhost 8081
+echo "PING" | nc -u localhost 8080
 # Response: PONG
 
 # Test JOIN
-echo "JOIN:TestPlayer" | nc -u localhost 8081  
+echo "JOIN:TestPlayer" | nc -u localhost 8080
 # Response: {"type":"WELCOME","player_id":1234,"server_time":12345,"player_name":"TestPlayer"}
 
 # Test STATE
-echo "STATE" | nc -u localhost 8081
+echo "STATE" | nc -u localhost 8080
 # Response: {"type":"GAME_STATE","tick":123,"time":12345,"ships":[],"players":[],"projectiles":[]}
 ```
 
 ### 3. Test Admin Panel (HTTP)
 ```bash
-# Open in browser: http://localhost:8082
+# Open in browser: http://localhost:8081
 # Features:
 # - Server status dashboard
 # - Live map visualization  

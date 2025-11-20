@@ -12,7 +12,7 @@ cd build_debug
 ./pirate-server
 ```
 
-### 2. Test UDP Game Port (8081)
+### 2. Test UDP Game Port (8080)
 ```bash
 # Test if server is listening
 netstat -ulnp | grep 8080
@@ -24,7 +24,7 @@ echo "test" | nc -u localhost 8080
 sudo tcpdump -i lo port 8080 -X
 ```
 
-### 3. Test Admin HTTP Port (8082)
+### 3. Test Admin HTTP Port (8081)
 ```bash
 # Test admin panel homepage
 curl http://localhost:8081/
@@ -57,7 +57,7 @@ echo '{"player_name":"TestPlayer","client_version":"1.0.0"}' | nc -u localhost 8
 ### Network Monitoring
 ```bash
 # Monitor all game traffic
-sudo tcpdump -i any port 8080 or port 8081 -v
+sudo tcpdump -i any port 8080 or port 8082 v
 
 # Monitor only UDP packets
 sudo tcpdump -i any udp port 8080 -X

@@ -104,7 +104,7 @@ void bot_disconnect(struct BotClient* bot) {
 
 int main(int argc, char* argv[]) {
     const char* server_ip = "127.0.0.1";
-    int server_port = 8081;  // UDP native clients port
+    int server_port = 8080  // UDP native clients port
     int num_bots = 1;
     int duration_seconds = 60;
     
