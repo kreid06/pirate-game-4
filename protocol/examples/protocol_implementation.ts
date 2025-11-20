@@ -5,7 +5,7 @@
  * protocol based on the working server implementation.
  * 
  * Updated: September 27, 2025
- * Server: ✅ WebSocket port 8080 + ✅ UDP port 8081 + ✅ HTTP port 8082
+ * Server: ✅ WebSocket port 8082 + ✅ UDP port 8080 + ✅ HTTP port 8081
  * Protocol: Simple text-based commands with JSON responses (WORKING)
  * 
  * 🎉 NEW: WebSocket support for browser clients!
@@ -22,9 +22,9 @@
 
 // Server endpoints (LIVE AND TESTED)
 const GAME_SERVER_HOST = 'localhost';
-const WEBSOCKET_PORT = 8080;     // ✅ WebSocket for browsers
-const UDP_PORT = 8081;           // ✅ UDP for native clients  
-const ADMIN_PANEL_PORT = 8082;   // ✅ HTTP admin panel
+const WEBSOCKET_PORT = 8082;     // ✅ WebSocket for browsers
+const UDP_PORT = 8080;           // ✅ UDP for native clients  
+const ADMIN_PANEL_PORT = 8081;   // ✅ HTTP admin panel
 
 // Protocol commands (confirmed working on server)
 enum GameCommand {

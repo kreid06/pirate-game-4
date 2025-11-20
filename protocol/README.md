@@ -7,7 +7,7 @@ This directory contains the shared protocol definitions between the client and s
 ## Quick Reference
 
 ### Connection Protocol
-- **Transport**: WebSocket on port 8080 (browsers), UDP on port 8081 (native), HTTP on port 8082 (admin)
+- **Transport**: WebSocket on port 8082 (browsers), UDP on port 8080(native), HTTP on port 8081(admin)
 - **Packet Format**: Binary with magic header + JSON/binary payload
 - **Frequency**: 30Hz server physics, 20-30Hz client updates
 - **Coordinates**: Q16.16 fixed-point math

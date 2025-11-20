@@ -100,17 +100,17 @@ int server_init(struct ServerContext** out_ctx) {
     input_validation_init(&ctx->input_validator);
     log_info("Input validation system initialized");
     
-    // Initialize admin server on port 8082
-    if (admin_server_init(&ctx->admin_server, 8082) != 0) {
+    // Initialize admin server on port 8081
+    if (admin_server_init(&ctx->admin_server, 8081) != 0) {
         log_error("Failed to initialize admin server");
         // Don't fail server startup if admin server fails
         log_warn("Admin panel will not be available");
     } else {
-        log_info("Admin server initialized on port 8082");
+        log_info("Admin server initialized on port 8081");
     }
     
-    // Initialize WebSocket server on port 8080 (browser clients)
-    if (websocket_server_init(8080) != 0) {
+    // Initialize WebSocket server on port 8082 (browser clients)
+    if (websocket_server_init(8082) != 0) {
         log_error("Failed to initialize WebSocket server");
         cleanup_networking(ctx);
         free(ctx);
@@ -265,7 +265,7 @@ static int init_networking(struct ServerContext* ctx) {
     memset(&ctx->server_addr, 0, sizeof(ctx->server_addr));
     ctx->server_addr.sin_family = AF_INET;
     ctx->server_addr.sin_addr.s_addr = INADDR_ANY;
-    ctx->server_addr.sin_port = htons(8081);  // UDP on port 8081 (WebSocket uses 8080)
+    ctx->server_addr.sin_port = htons(8080);  // UDP on port 8080 (WebSocket uses 8082)
     
     if (bind(ctx->udp_socket, (struct sockaddr*)&ctx->server_addr, 
              sizeof(ctx->server_addr)) < 0) {
@@ -274,7 +274,7 @@ static int init_networking(struct ServerContext* ctx) {
         return -1;
     }
     
-    log_info("UDP socket bound to port 8081");
+    log_info("UDP socket bound to port 8080");
     return 0;
 }
 

@@ -35,7 +35,7 @@ cd protocol
 python3 -m http.server 3000
 
 # Open: http://localhost:3000/websocket_test.html
-# Click "Connect" to test WebSocket on port 8080
+# Click "Connect" to test WebSocket on port 8082
 ```
 
 ### 2. Test UDP (Command Line)
@@ -69,7 +69,7 @@ The server automatically translates between UDP and WebSocket:
 
 ```
 Native Client --UDP--> Server <--WebSocket-- Browser Client
-             (Port 8081)     (Port 8080)
+             (Port 8080)     (Port 8082)
 ```
 
 Both clients can:

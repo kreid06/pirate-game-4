@@ -1,16 +1,16 @@
 #define _DEFAULT_SOURCE
 #include "server.h"
 #include "sim/simulation.h"
-// Initialize network layer (UDP) on port 8081
-    if (network_init(&server->network, 8081) != 0) {
+// Initialize network layer (UDP) on port 8080
+    if (network_init(&server->network, 8080) != 0) {
         log_error("Failed to initialize network manager");
         simulation_cleanup(&server->simulation);
         free(server);
         return -1;
     }
     
-    // Initialize admin server on port 8082
-    if (admin_server_init(&server->admin, 8082) != 0) {/types.h
+    // Initialize admin server on port 8081
+    if (admin_server_init(&server->admin, 8081) != 0) {/types.h
         log_error("Failed to initialize admin server");
         network_cleanup(&server->network);
         simulation_cleanup(&server->simulation);
@@ -88,16 +88,16 @@ int server_init(struct ServerContext** ctx) {
         return -1;
     }
     
-    // Initialize network layer (UDP) on port 8081
-    if (network_init(&server->network, 8081) != 0) {
+    // Initialize network layer (UDP) on port 8080
+    if (network_init(&server->network, 8080) != 0) {
         log_error("Failed to initialize network manager");
         simulation_cleanup(&server->simulation);
         free(server);
         return -1;
     }
     
-    // Initialize admin server on port 8082
-    if (admin_server_init(&server->admin, 8082) != 0) {
+    // Initialize admin server on port 8081
+    if (admin_server_init(&server->admin, 8081) != 0) {
         log_error("Failed to initialize admin server");
         network_cleanup(&server->network);
         simulation_cleanup(&server->simulation);
@@ -105,9 +105,9 @@ int server_init(struct ServerContext** ctx) {
         return -1;
     }
     
-    // Initialize WebSocket server on port 8080 (browser clients)
-    printf("🔧 DEBUG: About to call websocket_server_init(8080)\n");
-    if (websocket_server_init(8080) != 0) {
+    // Initialize WebSocket server on port 8082 (browser clients)
+    printf("🔧 DEBUG: About to call websocket_server_init(8082)\n");
+    if (websocket_server_init(8082) != 0) {
         log_error("Failed to initialize WebSocket server");
         printf("🚨 DEBUG: websocket_server_init failed!\n");
         admin_server_cleanup(&server->admin);
@@ -125,12 +125,12 @@ int server_init(struct ServerContext** ctx) {
              REWIND_BUFFER_SIZE, MAX_REWIND_TIME_MS);
     
     printf("\n� ═══════════════════ PIRATE GAME SERVER READY ═══════════════════\n");
-    printf("�🌐 WebSocket Server (Browser Clients): ws://localhost:8080\n");
+    printf("�🌐 WebSocket Server (Browser Clients): ws://localhost:8082\n");
     printf("   → Ready for JavaScript/TypeScript clients\n");
     printf("   → JSON message protocol with UDP compatibility\n");
-    printf("📡 UDP Server (Native Clients): udp://localhost:8081\n");
+    printf("📡 UDP Server (Native Clients): udp://localhost:8080\n");
     printf("   → Binary protocol for high-performance clients\n");
-    printf("⚙️  Admin Panel: http://localhost:8082\n");
+    printf("⚙️  Admin Panel: http://localhost:8081\n");
     printf("   → Server statistics and management interface\n");
     printf("═══════════════════════════════════════════════════════════════════\n\n");
     

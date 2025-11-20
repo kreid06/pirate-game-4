@@ -4,13 +4,13 @@
  * Pirate Game Protocol Test Suite
  * 
  * This script tests the actual UDP protocol implementation
- * against the running pirate-server on localhost:8081 (UDP)
+ * against the running pirate-server on localhost:8080(UDP)
  */
 
 const dgram = require('dgram');
 
 const SERVER_HOST = 'localhost';
-const SERVER_PORT = 8081;  // UDP for native clients
+const SERVER_PORT = 8080  // UDP for native clients
 
 class PirateServerTester {
     constructor() {

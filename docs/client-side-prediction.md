@@ -248,7 +248,7 @@ interface PredictionConfig {
 ### Network Configuration
 ```typescript
 interface NetworkConfig {
-  serverUrl: 'ws://localhost:8080';       // Server WebSocket endpoint
+  serverUrl: 'ws://localhost:8082';      // Server WebSocket endpoint
   maxReconnectAttempts: 5;                // Auto-reconnection limit
   reconnectDelay: 2000;                   // Base reconnection delay
   heartbeatInterval: 30000;               // Ping frequency

@@ -15,9 +15,9 @@
 // =============================================================================
 
 // Server endpoints (LIVE AND WORKING)
-const WEBSOCKET_PORT = 8080;           // ✅ WebSocket for browsers
-const GAME_SERVER_UDP_PORT = 8081;     // ✅ UDP for native clients
-const ADMIN_PANEL_PORT = 8082;         // ✅ HTTP admin panel
+const WEBSOCKET_PORT = 8082;           // ✅ WebSocket for browsers
+const GAME_SERVER_UDP_PORT = 8080;     // ✅ UDP for native clients
+const ADMIN_PANEL_PORT = 8081;         // ✅ HTTP admin panel
 
 // Protocol commands (confirmed working on server)
 enum GameCommand {
@@ -88,7 +88,7 @@ interface PlayerInput {
 
 /**
  * WebSocket-based client for browser compatibility
- * Connects to server port 8080 with automatic protocol translation
+ * Connects to server port 8082 with automatic protocol translation
  */
 class PirateGameWebSocketClient {
     private ws: WebSocket | null = null;
@@ -425,7 +425,7 @@ class PirateGameWebSocketClient {
  */
 class ExamplePirateClient extends PirateGameWebSocketClient {
     constructor() {
-        super('localhost', 8080);
+        super('localhost', 8082);
     }
 
     protected onConnected(): void {
@@ -479,12 +479,12 @@ async function testPirateGameProtocols() {
     }
     
     console.log('2. Manual UDP Testing (Use netcat):');
-    console.log('   echo "PING" | nc -u localhost 8081');
-    console.log('   echo "JOIN:TestPlayer" | nc -u localhost 8081');
-    console.log('   echo "STATE" | nc -u localhost 8081\n');
+    console.log('   echo "PING" | nc -u localhost 8080');
+    console.log('   echo "JOIN:TestPlayer" | nc -u localhost 8080');
+    console.log('   echo "STATE" | nc -u localhost 8080\n');
     
     console.log('3. Admin Panel Testing:');
-    console.log('   Open: http://localhost:8082');
+    console.log('   Open: http://localhost:8081');
     console.log('   Live map: Click "Live Map" tab\n');
 }
 
