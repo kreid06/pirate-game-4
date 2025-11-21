@@ -70,16 +70,22 @@ interface NetworkMessage {
 interface HandshakeMessage extends NetworkMessage {
   type: MessageType.HANDSHAKE;
   playerName: string;
-  protocolVersion: string;
+  protocolVersion: number;
 }
 
 /**
- * Input frame message (flattened for server compatibility)
+ * Input frame message (server protocol format)
  */
 interface InputMessage extends NetworkMessage {
   type: MessageType.INPUT_FRAME;
+  timestamp: number;
+  sequenceId: number;
   tick: number;
-  movement: Vec2;
+  rotation: number; // Player aim direction in radians (required by server)
+  movement: {
+    x: number;
+    y: number;
+  };
   actions: number;
 }
 
@@ -294,7 +300,7 @@ export class NetworkManager {
       const handshakeMessage = {
         type: 'handshake',
         playerName: this.playerName,
-        protocolVersion: '1.0',
+        protocolVersion: 1,
         timestamp: Date.now()
       };
       const handshakeJson = JSON.stringify(handshakeMessage);
@@ -407,17 +413,21 @@ export class NetworkManager {
         inputFrame.movement = inputFrame.movement.normalize();
       }
       
-      // Server expects flattened structure with movement at top level
+      // Server expects movement as {x, y} object and rotation in radians
       const message: InputMessage = {
         type: MessageType.INPUT_FRAME,
         timestamp: Date.now(),
         sequenceId: this.messageSequenceId++,
         tick: inputFrame.tick,
-        movement: inputFrame.movement,
+        rotation: inputFrame.rotation,
+        movement: {
+          x: inputFrame.movement.x,
+          y: inputFrame.movement.y
+        },
         actions: inputFrame.actions
       };
       
-      console.log(`🎮 Sending input - Movement: (${inputFrame.movement.x.toFixed(2)}, ${inputFrame.movement.y.toFixed(2)}), Magnitude: ${movementMagnitude.toFixed(2)}, Actions: ${inputFrame.actions}`);
+      console.log(`🎮 Sending input - Movement: (${inputFrame.movement.x.toFixed(2)}, ${inputFrame.movement.y.toFixed(2)}), Rotation: ${inputFrame.rotation.toFixed(2)} rad, Magnitude: ${movementMagnitude.toFixed(2)}, Actions: ${inputFrame.actions}`);
       this.sendMessage(message);
     }
   }
@@ -583,16 +593,14 @@ export class NetworkManager {
           })),
           players: (message.players || []).map((player: any) => ({
             id: player.id || 0,
-            position: player.position 
-              ? Vec2.from(player.position.x || 0, player.position.y || 0) 
-              : Vec2.from(player.x || 0, player.y || 0), // Server sends x,y directly
+            position: Vec2.from(player.world_x || 0, player.world_y || 0), // Server sends world_x, world_y
             velocity: player.velocity 
               ? Vec2.from(player.velocity.x || 0, player.velocity.y || 0) 
               : Vec2.from(player.velocity_x || 0, player.velocity_y || 0), // Server sends velocity_x,velocity_y
             radius: player.radius || 8,
-            carrierId: player.carrierId || 0,
+            carrierId: player.parent_ship || 0, // Server sends parent_ship
             deckId: player.deckId || 0,
-            onDeck: player.onDeck || false
+            onDeck: player.state === 'onship' // Server sends state field
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,

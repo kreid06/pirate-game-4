@@ -115,7 +115,8 @@ export class InputManager {
     this.currentInputFrame = {
       tick: 0,
       movement: Vec2.zero(),
-      actions: 0
+      actions: 0,
+      rotation: 0
     };
     
     this.setupEventListeners();
@@ -367,17 +368,33 @@ export class InputManager {
     // Calculate action bitmask
     const actions = this.calculateActionBitmask();
     
+    // Calculate rotation (player facing mouse direction)
+    const rotation = this.calculatePlayerRotation();
+    
     // Create input frame
     this.currentInputFrame = {
       tick: this.inputFrameCounter++,
       movement,
-      actions
+      actions,
+      rotation
     };
     
     // Debug log only when debug logging is enabled
     if (this.config.enableDebugLogging) {
-      console.log(`🕹️ Input frame generated - Movement: (${movement.x.toFixed(2)}, ${movement.y.toFixed(2)}), Actions: ${actions}, Keys: W=${this.isActionActive('move_forward')} S=${this.isActionActive('move_backward')} A=${this.isActionActive('move_left')} D=${this.isActionActive('move_right')}`);
+      console.log(`🕹️ Input frame generated - Movement: (${movement.x.toFixed(2)}, ${movement.y.toFixed(2)}), Rotation: ${rotation.toFixed(2)} rad, Actions: ${actions}, Keys: W=${this.isActionActive('move_forward')} S=${this.isActionActive('move_backward')} A=${this.isActionActive('move_left')} D=${this.isActionActive('move_right')}`);
     }
+  }
+  
+  private calculatePlayerRotation(): number {
+    // Calculate angle from player to mouse (in radians)
+    if (this.playerPosition) {
+      const mousePos = this.inputState.mouseWorldPosition;
+      const dx = mousePos.x - this.playerPosition.x;
+      const dy = mousePos.y - this.playerPosition.y;
+      return Math.atan2(dy, dx);
+    }
+    // Default to facing right (0 radians) if no player position
+    return 0;
   }
   
   private calculateMovementVector(playerPosition?: Vec2): Vec2 {

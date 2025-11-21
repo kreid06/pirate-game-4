@@ -235,7 +235,8 @@ export class PredictionEngine {
       inputFrame: { 
         tick: inputFrame.tick,
         movement: inputFrame.movement.clone ? inputFrame.movement.clone() : Vec2.from(inputFrame.movement.x, inputFrame.movement.y),
-        actions: inputFrame.actions
+        actions: inputFrame.actions,
+        rotation: inputFrame.rotation
       },
       timestamp: Date.now(),
       serverConfirmed: false,

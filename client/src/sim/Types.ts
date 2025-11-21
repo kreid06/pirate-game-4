@@ -8,6 +8,7 @@ import { CarrierDetectionState } from './CarrierDetection.js';
 export interface InputFrame {
   tick: number;
   movement: Vec2; // Movement vector (normalized, in world coordinates)
+  rotation: number; // Player aim direction in radians (for server protocol)
   actions: number; // Bitmask for actions
 }
 

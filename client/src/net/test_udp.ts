@@ -251,7 +251,8 @@ class PirateClientTester {
           const testInput = {
             tick: 0,
             movement: new Vec2(0.5, 0.8), // Forward and right
-            actions: 1 // Fire action
+            actions: 1, // Fire action
+            rotation: 0 // Facing right
           };
           
           networkManager.sendInput(testInput);
