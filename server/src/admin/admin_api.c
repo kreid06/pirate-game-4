@@ -436,6 +436,98 @@ int admin_api_message_stats(struct HttpResponse* resp) {
     return 0;
 }
 
+int admin_api_websocket_entities(struct HttpResponse* resp) {
+    if (!resp) return -1;
+    
+    SimpleShip* ships = NULL;
+    WebSocketPlayer* players = NULL;
+    int ship_count = 0;
+    int player_count = 0;
+    
+    websocket_server_get_ships(&ships, &ship_count);
+    websocket_server_get_players(&players, &player_count);
+    
+    // Start JSON
+    int offset = snprintf(json_buffer, sizeof(json_buffer),
+        "{\n  \"ships\": [\n");
+    
+    // Add ships
+    for (int i = 0; i < ship_count && offset < (int)sizeof(json_buffer) - 500; i++) {
+        if (i > 0) offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, ",\n");
+        
+        offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+            "    {\n"
+            "      \"id\": %u,\n"
+            "      \"x\": %.1f,\n"
+            "      \"y\": %.1f,\n"
+            "      \"rotation\": %.3f,\n"
+            "      \"velocity_x\": %.2f,\n"
+            "      \"velocity_y\": %.2f,\n"
+            "      \"deck_bounds\": {\"min_x\": %.1f, \"max_x\": %.1f, \"min_y\": %.1f, \"max_y\": %.1f}\n"
+            "    }",
+            ships[i].ship_id,
+            ships[i].x, ships[i].y,
+            ships[i].rotation,
+            ships[i].velocity_x, ships[i].velocity_y,
+            ships[i].deck_min_x, ships[i].deck_max_x,
+            ships[i].deck_min_y, ships[i].deck_max_y);
+    }
+    
+    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+        "\n  ],\n  \"players\": [\n");
+    
+    // Add active players
+    bool first_player = true;
+    for (int i = 0; i < 100 && offset < (int)sizeof(json_buffer) - 500; i++) {
+        if (!players[i].active) continue;
+        
+        if (!first_player) offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, ",\n");
+        first_player = false;
+        
+        const char* state_str = "UNKNOWN";
+        switch(players[i].movement_state) {
+            case PLAYER_STATE_WALKING: state_str = "WALKING"; break;
+            case PLAYER_STATE_SWIMMING: state_str = "SWIMMING"; break;
+            case PLAYER_STATE_FALLING: state_str = "FALLING"; break;
+        }
+        
+        offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+            "    {\n"
+            "      \"id\": %u,\n"
+            "      \"name\": \"%s\",\n"
+            "      \"world_x\": %.1f,\n"
+            "      \"world_y\": %.1f,\n"
+            "      \"rotation\": %.3f,\n"
+            "      \"velocity_x\": %.2f,\n"
+            "      \"velocity_y\": %.2f,\n"
+            "      \"ship_id\": %u,\n"
+            "      \"local_x\": %.1f,\n"
+            "      \"local_y\": %.1f,\n"
+            "      \"state\": \"%s\"\n"
+            "    }",
+            players[i].player_id,
+            players[i].name,
+            players[i].x, players[i].y,
+            players[i].rotation,
+            players[i].velocity_x, players[i].velocity_y,
+            players[i].parent_ship_id,
+            players[i].local_x, players[i].local_y,
+            state_str);
+    }
+    
+    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+        "\n  ]\n}");
+    
+    if (offset >= (int)sizeof(json_buffer)) return -1;
+    
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = json_buffer;
+    resp->body_length = offset;
+    resp->cache_control = true;
+
+    return 0;
+}
 // Input tier statistics API endpoint
 int admin_api_input_tiers(struct HttpResponse* resp) {
     if (!resp) return -1;

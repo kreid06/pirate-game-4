@@ -27,18 +27,6 @@
 #define WS_MAGIC_KEY "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 #define WS_MAX_CLIENTS 100
 
-// Simple ship structure for WebSocket server (temporary until full Sim integration)
-typedef struct {
-    uint32_t ship_id;
-    float x, y;              // World position
-    float rotation;          // Radians
-    float velocity_x, velocity_y;
-    float angular_velocity;
-    float deck_min_x, deck_max_x;  // Walkable area
-    float deck_min_y, deck_max_y;
-    bool active;
-} SimpleShip;
-
 // WebSocket opcodes
 #define WS_OPCODE_CONTINUATION 0x0
 #define WS_OPCODE_TEXT 0x1
@@ -47,31 +35,8 @@ typedef struct {
 #define WS_OPCODE_PING 0x9
 #define WS_OPCODE_PONG 0xA
 
-// Player movement states
-typedef enum {
-    PLAYER_STATE_WALKING,   // On ship deck
-    PLAYER_STATE_SWIMMING,  // In water
-    PLAYER_STATE_FALLING    // Airborne (jumped off ship)
-} PlayerMovementState;
-
 // Simple player data structure for movement
-typedef struct {
-    uint32_t player_id;
-    char name[64];          // Player name
-    
-    // World position (absolute coordinates)
-    float x, y;
-    float velocity_x, velocity_y;
-    float rotation;         // Player aim direction in radians (from mouse)
-    
-    // Ship relationship
-    uint32_t parent_ship_id;  // 0 if not on a ship
-    float local_x, local_y;   // Position relative to ship center
-    PlayerMovementState movement_state;
-    
-    uint32_t last_input_time;
-    bool active;
-} WebSocketPlayer;
+// (Definition in websocket_server.h)
 
 struct WebSocketClient {
     int fd;
@@ -235,6 +200,20 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             
             players[i].player_id = player_id;
             
+            // Spawn player in water near origin for testing swimming
+            players[i].parent_ship_id = 0;
+            players[i].x = 0.0f;
+            players[i].y = 0.0f;
+            players[i].local_x = 0.0f;
+            players[i].local_y = 0.0f;
+            players[i].movement_state = PLAYER_STATE_SWIMMING;
+            
+            log_info("🎮 Spawned player %u in water at (%.1f, %.1f) - Ship at (%.1f, %.1f)", 
+                     player_id, players[i].x, players[i].y,
+                     ship_count > 0 ? ships[0].x : 0.0f,
+                     ship_count > 0 ? ships[0].y : 0.0f);
+            
+            /* Original ship spawn code - commented out for swimming tests
             // Spawn player on the first ship if it exists
             if (ship_count > 0 && ships[0].active) {
                 players[i].parent_ship_id = ships[0].ship_id;
@@ -250,10 +229,10 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
                          player_id, ships[0].ship_id, players[i].local_x, players[i].local_y,
                          players[i].x, players[i].y);
             } else {
-                // No ship available - spawn in water
+                // No ship available - spawn in water at origin
                 players[i].parent_ship_id = 0;
-                players[i].x = 400.0f;
-                players[i].y = 300.0f;
+                players[i].x = 0.0f;
+                players[i].y = 0.0f;
                 players[i].local_x = 0.0f;
                 players[i].local_y = 0.0f;
                 players[i].movement_state = PLAYER_STATE_SWIMMING;
@@ -261,6 +240,7 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
                 log_info("🎮 Spawned player %u in water at (%.1f, %.1f)", 
                          player_id, players[i].x, players[i].y);
             }
+            */
             
             players[i].velocity_x = 0.0f;
             players[i].velocity_y = 0.0f;
@@ -311,8 +291,8 @@ static void debug_player_state(void) {
 }
 
 static void update_player_movement(WebSocketPlayer* player, float rotation, float movement_x, float movement_y, float dt) {
-    const float WALK_SPEED = 3.0f;    // m/s when walking on deck
-    const float SWIM_SPEED = 1.5f;    // m/s when swimming (slower)
+    const float WALK_SPEED = 30.0f;   // m/s when walking on deck (10x faster)
+    const float SWIM_SPEED = 15.0f;   // m/s when swimming (10x faster)
     const float FRICTION = 0.85f;
     
     // Update player aim rotation (from mouse)
@@ -374,11 +354,8 @@ static void update_player_movement(WebSocketPlayer* player, float rotation, floa
         player->y += player->velocity_y * dt;
     }
     
-    // World bounds checking
-    if (player->x < 0) player->x = 0;
-    if (player->x > 800) player->x = 800;
-    if (player->y < 0) player->y = 0;
-    if (player->y > 600) player->y = 600;
+    // No world bounds - players can swim freely in the open world
+    // (Deck boundaries still apply when on a ship)
     
     // Debug logging for movement
     static uint32_t last_movement_log_time = 0;
@@ -521,10 +498,10 @@ int websocket_server_init(uint16_t port) {
     ws_server.running = true;
     log_info("WebSocket server initialized on port %u", port);
     
-    // Initialize a test ship at world center (simple ship for testing)
+    // Initialize a test ship away from origin (simple ship for testing)
     ships[0].ship_id = next_ship_id++;
-    ships[0].x = 400.0f;
-    ships[0].y = 300.0f;
+    ships[0].x = 100.0f;  // Spawn ship away from center
+    ships[0].y = 100.0f;
     ships[0].rotation = 0.0f;
     ships[0].velocity_x = 0.0f;
     ships[0].velocity_y = 0.0f;
@@ -535,7 +512,7 @@ int websocket_server_init(uint16_t port) {
     ships[0].deck_max_y = 6.0f;
     ships[0].active = true;
     ship_count = 1;
-    log_info("🚢 Initialized test ship (ID: %u) at (400, 300)", ships[0].ship_id);
+    log_info("🚢 Initialized test ship (ID: %u) at (%.1f, %.1f)", ships[0].ship_id, ships[0].x, ships[0].y);
     
     // Enhanced startup message
     printf("\n🌐 ═══════════════════════════════════════════════════════════════\n");
@@ -543,7 +520,7 @@ int websocket_server_init(uint16_t port) {
     printf("🌍 WebSocket listening on 0.0.0.0:%u\n", port);
     printf("🔄 Protocol bridge: WebSocket ↔ UDP translation active\n");
     printf("🎯 Browser clients can now connect via WebSocket\n");
-    printf("🚢 Test ship spawned at (400, 300)\n");
+    printf("🚢 Test ship spawned at (%.1f, %.1f)\n", ships[0].x, ships[0].y);
     printf("═══════════════════════════════════════════════════════════════\n\n");
     
     return 0;
@@ -1163,5 +1140,30 @@ int websocket_server_get_stats(struct WebSocketStats* stats) {
     stats->last_unknown_time = ws_server.last_unknown_time;
     stats->port = ws_server.port;
     
+    return 0;
+}
+
+// Get WebSocket ships data for admin panel
+int websocket_server_get_ships(SimpleShip** out_ships, int* out_count) {
+    if (!out_ships || !out_count) return -1;
+    *out_ships = ships;
+    *out_count = ship_count;
+    return 0;
+}
+
+// Get WebSocket players data for admin panel
+int websocket_server_get_players(WebSocketPlayer** out_players, int* out_count) {
+    if (!out_players || !out_count) return -1;
+    
+    // Count active players
+    int active_count = 0;
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (players[i].active) {
+            active_count++;
+        }
+    }
+    
+    *out_players = players;
+    *out_count = active_count;
     return 0;
 }
