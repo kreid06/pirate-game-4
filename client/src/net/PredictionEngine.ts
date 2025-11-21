@@ -203,6 +203,9 @@ export class PredictionEngine {
    */
   getInterpolatedState(currentTime: number): WorldState | null {
     if (!this.config.enableInterpolation || this.serverStateBuffer.length === 0) {
+      if (this.serverStateBuffer.length === 0) {
+        console.warn('⚠️ No server states in buffer - waiting for data');
+      }
       return this.authoritativeState;
     }
     
@@ -224,15 +227,43 @@ export class PredictionEngine {
       }
     }
     
-    // If we can't interpolate, use the latest or oldest state
+    // Handle cases where we need extrapolation or fallback
     if (!fromState || !toState) {
       if (this.serverStateBuffer.length > 0) {
-        // Use most recent state if we're ahead
-        if (renderTime >= this.serverStateBuffer[this.serverStateBuffer.length - 1].receiveTime) {
-          return this.serverStateBuffer[this.serverStateBuffer.length - 1].worldState;
+        const latestState = this.serverStateBuffer[this.serverStateBuffer.length - 1];
+        const oldestState = this.serverStateBuffer[0];
+        
+        // If we're ahead of the latest state, extrapolate forward
+        if (renderTime > latestState.receiveTime) {
+          const timeSinceLastUpdate = renderTime - latestState.receiveTime;
+          
+          // Only extrapolate up to the configured limit
+          if (timeSinceLastUpdate <= this.config.extrapolationLimit) {
+            // Occasional debug log for extrapolation
+            if (Math.random() < 0.01) {
+              console.log(`📊 Extrapolating ${timeSinceLastUpdate.toFixed(1)}ms ahead of latest server state`);
+            }
+            return this.extrapolateState(latestState.worldState, timeSinceLastUpdate / 1000);
+          } else {
+            // Warn if we're extrapolating too far (indicates server lag or packet loss)
+            if (Math.random() < 0.05) {
+              console.warn(`⚠️ Extrapolation limit exceeded: ${timeSinceLastUpdate.toFixed(1)}ms (limit: ${this.config.extrapolationLimit}ms) - using last state`);
+            }
+          }
         }
+        
+        // Use most recent state if extrapolation limit exceeded
+        if (renderTime >= latestState.receiveTime) {
+          return latestState.worldState;
+        }
+        
+        // Warn if we're behind the buffer (shouldn't happen with proper buffering)
+        if (renderTime < oldestState.receiveTime && Math.random() < 0.05) {
+          console.warn(`⚠️ Render time ${renderTime.toFixed(1)} behind oldest state ${oldestState.receiveTime.toFixed(1)} - buffer underrun`);
+        }
+        
         // Use oldest state if we're behind
-        return this.serverStateBuffer[0].worldState;
+        return oldestState.worldState;
       }
       return this.authoritativeState;
     }
@@ -245,8 +276,40 @@ export class PredictionEngine {
     
     const alpha = (renderTime - fromState.receiveTime) / timeDelta;
     
+    // Debug: Log abnormal time deltas (server updates should be ~50ms at 20Hz)
+    if ((timeDelta < 30 || timeDelta > 100) && Math.random() < 0.02) {
+      console.warn(`⚠️ Unusual server update interval: ${timeDelta.toFixed(1)}ms (expected ~50ms at 20Hz)`);
+    }
+    
+    // Clamp alpha but allow slight extrapolation (up to 1.2 for smoother motion)
+    const clampedAlpha = Math.max(0, Math.min(1.2, alpha));
+    
     // Interpolate between the two states
-    return this.interpolateStates(fromState.worldState, toState.worldState, alpha);
+    return this.interpolateStates(fromState.worldState, toState.worldState, clampedAlpha);
+  }
+  
+  /**
+   * Extrapolate state forward based on velocity (for smooth 60Hz rendering with 20Hz server)
+   */
+  private extrapolateState(state: WorldState, deltaTime: number): WorldState {
+    return {
+      tick: state.tick,
+      timestamp: state.timestamp + deltaTime * 1000,
+      ships: state.ships.map(ship => ({
+        ...ship,
+        position: ship.position.add(ship.velocity.mul(deltaTime)),
+        rotation: ship.rotation + ship.angularVelocity * deltaTime
+      })),
+      players: state.players.map(player => ({
+        ...player,
+        position: player.position.add(player.velocity.mul(deltaTime))
+      })),
+      cannonballs: state.cannonballs.map(ball => ({
+        ...ball,
+        position: ball.position.add(ball.velocity.mul(deltaTime))
+      })),
+      carrierDetection: new Map(state.carrierDetection)
+    };
   }
   
   /**
@@ -272,17 +335,33 @@ export class PredictionEngine {
    * Interpolate between two world states
    */
   private interpolateStates(from: WorldState, to: WorldState, alpha: number): WorldState {
-    // Clamp alpha to [0, 1]
-    alpha = Math.max(0, Math.min(1, alpha));
+    // Apply smoothing curve for more natural motion (ease-out)
+    const smoothAlpha = this.smoothStep(alpha);
     
     return {
       tick: Math.round(from.tick + (to.tick - from.tick) * alpha),
       timestamp: from.timestamp + (to.timestamp - from.timestamp) * alpha,
-      ships: this.interpolateShips(from.ships, to.ships, alpha),
-      players: this.interpolatePlayers(from.players, to.players, alpha),
-      cannonballs: this.interpolateCannonballs(from.cannonballs, to.cannonballs, alpha),
+      ships: this.interpolateShips(from.ships, to.ships, smoothAlpha),
+      players: this.interpolatePlayers(from.players, to.players, smoothAlpha),
+      cannonballs: this.interpolateCannonballs(from.cannonballs, to.cannonballs, smoothAlpha),
       carrierDetection: new Map(from.carrierDetection)
     };
+  }
+  
+  /**
+   * Smooth step function for natural interpolation (ease-in-out cubic)
+   */
+  private smoothStep(t: number): number {
+    // Clamp to [0, 1.2] for slight extrapolation support
+    t = Math.max(0, Math.min(1.2, t));
+    
+    // For values > 1, use linear extrapolation
+    if (t > 1) {
+      return t;
+    }
+    
+    // Cubic ease-in-out: 3t² - 2t³
+    return t * t * (3 - 2 * t);
   }
   
   /**

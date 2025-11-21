@@ -287,19 +287,34 @@ export class ClientApplication {
    * Render a frame with interpolation
    */
   private renderFrame(alpha: number): void {
-    // Get interpolated state for smooth rendering
+    // Get interpolated state for smooth rendering of other entities
     const currentTime = performance.now();
     const interpolatedState = this.predictionEngine.getInterpolatedState(currentTime);
     
-    // Use predicted world state for local player (most responsive)
-    // But interpolated state for other entities (smooth)
-    const worldToRender = interpolatedState || this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+    // Build hybrid world: predicted local player + interpolated other entities
+    const assignedPlayerId = this.networkManager.getAssignedPlayerId();
+    let worldToRender = interpolatedState || this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+    
+    // If we have both predicted and interpolated states, create hybrid
+    if (assignedPlayerId !== null && this.predictedWorldState && interpolatedState) {
+      const predictedPlayer = this.predictedWorldState.players.find(p => p.id === assignedPlayerId);
+      
+      if (predictedPlayer) {
+        // Clone interpolated state and replace our player with predicted version
+        worldToRender = {
+          ...interpolatedState,
+          players: interpolatedState.players.map(p => 
+            p.id === assignedPlayerId ? predictedPlayer : p
+          )
+        };
+      }
+    }
     
     if (!worldToRender) {
       // Render loading/connection screen
       this.renderSystem.renderLoadingScreen(this.state, this.camera);
     } else {
-      // Render game world with interpolation
+      // Render game world with hybrid state
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
       
       // Render UI overlay
@@ -329,11 +344,14 @@ export class ClientApplication {
       return;
     }
     
-    // Camera locked to player - immediate response for tight control
-    this.camera.setPosition(player.position);
+    // Smooth camera follow with lerp for grid stability
+    // Fast lerp keeps camera responsive while smoothing out prediction jitter
+    const currentPos = this.camera.getState().position;
+    const lerpFactor = 1.0 - Math.pow(0.001, dt); // Frame-rate independent smoothing
+    const smoothedX = currentPos.x + (player.position.x - currentPos.x) * lerpFactor;
+    const smoothedY = currentPos.y + (player.position.y - currentPos.y) * lerpFactor;
     
-    // Debug logging (can be removed later)
-    // console.log(`Camera following player ${player.id} at: ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`);
+    this.camera.setPosition(Vec2.from(smoothedX, smoothedY));
   }
   
   /**
