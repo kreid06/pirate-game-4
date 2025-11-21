@@ -72,6 +72,16 @@ export class InputManager {
   // Event callbacks
   public onInputFrame: ((inputFrame: InputFrame) => void) | null = null;
   
+  // HYBRID PROTOCOL: Callbacks for state changes
+  public onMovementStateChange: ((movement: Vec2, isMoving: boolean) => void) | null = null;
+  public onRotationUpdate: ((rotation: number) => void) | null = null;
+  public onActionEvent: ((action: string, target?: Vec2) => void) | null = null;
+  
+  // HYBRID PROTOCOL: State tracking for change detection
+  private previousMovementState: Vec2 = Vec2.zero();
+  private lastSentRotation: number = 0;
+  private readonly ROTATION_THRESHOLD = 0.0524; // 3 degrees in radians
+  
   // Cooldowns and timing
   private lastInteractionTime = 0;
   private readonly interactionCooldown = 500; // 500ms
@@ -133,7 +143,28 @@ export class InputManager {
     // Generate current input frame
     this.generateInputFrame();
     
-    // Optimized sending: only send if input changed or heartbeat needed
+    // HYBRID PROTOCOL: Detect movement state changes
+    const currentMovement = this.currentInputFrame.movement;
+    if (!currentMovement.equals(this.previousMovementState)) {
+      const isMoving = currentMovement.lengthSq() > 0.01;
+      if (this.onMovementStateChange) {
+        this.onMovementStateChange(currentMovement, isMoving);
+      }
+      this.previousMovementState = currentMovement.clone();
+    }
+    
+    // HYBRID PROTOCOL: Detect rotation changes >3 degrees
+    const currentRotation = this.currentInputFrame.rotation;
+    const rotationDelta = Math.abs(currentRotation - this.lastSentRotation);
+    
+    if (rotationDelta > this.ROTATION_THRESHOLD) {
+      if (this.onRotationUpdate) {
+        this.onRotationUpdate(currentRotation);
+      }
+      this.lastSentRotation = currentRotation;
+    }
+    
+    // OLD: Optimized sending for backward compatibility (can be removed after migration)
     const shouldSend = this.shouldSendInputFrame();
     
     if (shouldSend && this.onInputFrame) {
@@ -562,6 +593,11 @@ export class InputManager {
     
     if (event.button === 0) { // Left mouse button
       this.inputState.leftMouseDown = true;
+      
+      // HYBRID PROTOCOL: Send fire action event
+      if (this.onActionEvent) {
+        this.onActionEvent('fire_cannon', this.inputState.mouseWorldPosition);
+      }
     } else if (event.button === 2) { // Right mouse button
       this.inputState.rightMouseDown = true;
     }

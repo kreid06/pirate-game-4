@@ -39,7 +39,13 @@ export interface NetworkStats {
 export enum MessageType {
   // Client to Server
   HANDSHAKE = 'handshake',
-  INPUT_FRAME = 'input_frame', 
+  INPUT_FRAME = 'input_frame', // OLD - still supported for backward compatibility
+  
+  // NEW: Hybrid protocol
+  MOVEMENT_STATE = 'movement_state',
+  ROTATION_UPDATE = 'rotation_update',
+  ACTION_EVENT = 'action_event',
+  
   PING = 'ping',
   
   // Server to Client  
@@ -90,6 +96,41 @@ interface InputMessage extends NetworkMessage {
 }
 
 /**
+ * Movement state message (HYBRID PROTOCOL)
+ */
+interface MovementStateMessage extends NetworkMessage {
+  type: MessageType.MOVEMENT_STATE;
+  timestamp: number;
+  movement: {
+    x: number;
+    y: number;
+  };
+  is_moving: boolean;
+}
+
+/**
+ * Rotation update message (HYBRID PROTOCOL)
+ */
+interface RotationUpdateMessage extends NetworkMessage {
+  type: MessageType.ROTATION_UPDATE;
+  timestamp: number;
+  rotation: number;
+}
+
+/**
+ * Action event message (HYBRID PROTOCOL)
+ */
+interface ActionEventMessage extends NetworkMessage {
+  type: MessageType.ACTION_EVENT;
+  timestamp: number;
+  action: string;
+  target?: {
+    x: number;
+    y: number;
+  };
+}
+
+/**
  * Ping/Pong messages for latency measurement
  */
 interface PingPongMessage extends NetworkMessage {
@@ -115,7 +156,7 @@ interface AckMessage extends NetworkMessage {
   status: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | PingPongMessage | WorldStateMessage | AckMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | PingPongMessage | WorldStateMessage | AckMessage;
 
 /**
  * Main network manager class
@@ -430,6 +471,71 @@ export class NetworkManager {
       console.log(`🎮 Sending input - Movement: (${inputFrame.movement.x.toFixed(2)}, ${inputFrame.movement.y.toFixed(2)}), Rotation: ${inputFrame.rotation.toFixed(2)} rad, Magnitude: ${movementMagnitude.toFixed(2)}, Actions: ${inputFrame.actions}`);
       this.sendMessage(message);
     }
+  }
+  
+  /**
+   * Send movement state change (HYBRID PROTOCOL)
+   * Only send when movement keys change, not every frame
+   */
+  sendMovementState(movement: Vec2, isMoving: boolean): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      return;
+    }
+
+    const message: MovementStateMessage = {
+      type: MessageType.MOVEMENT_STATE,
+      timestamp: Date.now(),
+      movement: {
+        x: movement.x,
+        y: movement.y
+      },
+      is_moving: isMoving
+    };
+
+    console.log(`🚶 Movement state: (${movement.x.toFixed(2)}, ${movement.y.toFixed(2)}), moving: ${isMoving}`);
+    this.sendMessage(message);
+  }
+
+  /**
+   * Send rotation update (HYBRID PROTOCOL)
+   * Only send when rotation changes >3 degrees
+   */
+  sendRotationUpdate(rotation: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      return;
+    }
+
+    const message: RotationUpdateMessage = {
+      type: MessageType.ROTATION_UPDATE,
+      timestamp: Date.now(),
+      rotation: rotation
+    };
+
+    console.log(`🎯 Rotation update: ${rotation.toFixed(3)} rad (${(rotation * 180 / Math.PI).toFixed(1)}°)`);
+    this.sendMessage(message);
+  }
+
+  /**
+   * Send action event (HYBRID PROTOCOL)
+   * Send immediately when actions occur
+   */
+  sendAction(action: string, target?: Vec2): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      return;
+    }
+
+    const message: ActionEventMessage = {
+      type: MessageType.ACTION_EVENT,
+      timestamp: Date.now(),
+      action: action,
+      target: target ? {
+        x: target.x,
+        y: target.y
+      } : undefined
+    };
+
+    console.log(`⚡ Action: ${action}${target ? ` at (${target.x.toFixed(1)}, ${target.y.toFixed(1)})` : ''}`);
+    this.sendMessage(message);
   }
   
   /**

@@ -113,6 +113,17 @@ export class ClientApplication {
       this.inputManager = new InputManager(this.canvas, this.config.input);
       this.inputManager.onInputFrame = this.onInputFrame.bind(this);
       
+      // HYBRID PROTOCOL: Wire up state change callbacks
+      this.inputManager.onMovementStateChange = (movement, isMoving) => {
+        this.networkManager.sendMovementState(movement, isMoving);
+      };
+      this.inputManager.onRotationUpdate = (rotation) => {
+        this.networkManager.sendRotationUpdate(rotation);
+      };
+      this.inputManager.onActionEvent = (action, target) => {
+        this.networkManager.sendAction(action, target);
+      };
+      
       // Set up mouse tracking for mouse-relative movement
       this.setupMouseTracking();
       
