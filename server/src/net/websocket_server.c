@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <time.h>
 #define _USE_MATH_DEFINES
 #include <math.h>
 #include <arpa/inet.h>
@@ -98,6 +99,16 @@ struct WebSocketServer {
 
 static struct WebSocketServer ws_server = {0};
 
+// Helper function to get movement state string
+static const char* get_state_string(PlayerMovementState state) {
+    switch (state) {
+        case PLAYER_STATE_WALKING: return "WALKING";
+        case PLAYER_STATE_SWIMMING: return "SWIMMING";
+        case PLAYER_STATE_FALLING: return "FALLING";
+        default: return "UNKNOWN";
+    }
+}
+
 // Global player data for simple movement tracking
 static WebSocketPlayer players[WS_MAX_CLIENTS] = {0};
 static int next_player_id = 1000;
@@ -131,16 +142,6 @@ static void ship_clamp_to_deck(const SimpleShip* ship, float* local_x, float* lo
     if (*local_x > ship->deck_max_x) *local_x = ship->deck_max_x;
     if (*local_y < ship->deck_min_y) *local_y = ship->deck_min_y;
     if (*local_y > ship->deck_max_y) *local_y = ship->deck_max_y;
-}
-
-// Helper function to get movement state as string
-static const char* get_state_string(PlayerMovementState state) {
-    switch (state) {
-        case PLAYER_STATE_WALKING: return "WALKING";
-        case PLAYER_STATE_SWIMMING: return "SWIMMING";
-        case PLAYER_STATE_FALLING: return "FALLING";
-        default: return "UNKNOWN";
-    }
 }
 
 // Base64 encoding for WebSocket handshake
@@ -378,6 +379,29 @@ static void update_player_movement(WebSocketPlayer* player, float rotation, floa
     if (player->x > 800) player->x = 800;
     if (player->y < 0) player->y = 0;
     if (player->y > 600) player->y = 600;
+    
+    // Debug logging for movement
+    static uint32_t last_movement_log_time = 0;
+    uint32_t current_time_ms = get_time_ms();
+    if (current_time_ms - last_movement_log_time > 1000) {  // Log every second
+        if (magnitude > 0.01f) {
+            log_info("🚶 MOVEMENT: Player %u moved | State: %s | Ship: %u | World: (%.1f, %.1f) | Local: (%.1f, %.1f) | Vel: (%.2f, %.2f) | Input: (%.2f, %.2f)",
+                     player->player_id,
+                     get_state_string(player->movement_state),
+                     player->parent_ship_id,
+                     player->x, player->y,
+                     player->local_x, player->local_y,
+                     player->velocity_x, player->velocity_y,
+                     movement_x, movement_y);
+        } else {
+            log_info("🛑 STATIONARY: Player %u not moving | State: %s | Ship: %u | World: (%.1f, %.1f)",
+                     player->player_id,
+                     get_state_string(player->movement_state),
+                     player->parent_ship_id,
+                     player->x, player->y);
+        }
+        last_movement_log_time = current_time_ms;
+    }
 }
 
 static int websocket_parse_frame(const char* buffer, size_t buffer_len, char* payload, size_t* payload_len) {
@@ -399,7 +423,7 @@ static int websocket_parse_frame(const char* buffer, size_t buffer_len, char* pa
     // Extended payload length
     if (payload_length == 126) {
         if (buffer_len < 4) return -1;
-        actual_payload_len = (buffer[2] << 8) | buffer[3];
+        actual_payload_len = ((unsigned char)buffer[2] << 8) | (unsigned char)buffer[3];
         header_len += 2;
     } else if (payload_length == 127) {
         if (buffer_len < 10) return -1;
@@ -633,12 +657,48 @@ int websocket_server_update(struct Sim* sim) {
             } else {
                 // Handle WebSocket frames
                 char payload[1024];
-                size_t payload_len;
+                size_t payload_len = 0;
                 int opcode = websocket_parse_frame(buffer, received, payload, &payload_len);
                 
+                // Check for parsing errors
+                if (opcode < 0) {
+                    log_warn("WebSocket frame parsing failed from %s:%u (Player: %u) | Received: %zd bytes",
+                            client->ip_address, client->port, client->player_id, received);
+                    
+                    if (received >= 2) {
+                        log_warn("Frame header: 0x%02X 0x%02X (FIN=%d, Opcode=0x%X, Masked=%d, PayloadLen=%d)",
+                                (unsigned char)buffer[0], (unsigned char)buffer[1],
+                                (buffer[0] & 0x80) >> 7, buffer[0] & 0x0F,
+                                (buffer[1] & 0x80) >> 7, buffer[1] & 0x7F);
+                    }
+                    
+                    // Log raw data for debugging
+                    char hex_dump[256] = {0};
+                    int offset = 0;
+                    for (size_t i = 0; i < received && i < 32; i++) {
+                        offset += snprintf(hex_dump + offset, sizeof(hex_dump) - offset, "%02X ", (unsigned char)buffer[i]);
+                    }
+                    log_warn("Raw bytes (first 32): %s", hex_dump);
+                    continue;
+                }
+                
+                // Debug: Log all WebSocket frame information
+                const char* opcode_name = "UNKNOWN";
+                switch(opcode) {
+                    case WS_OPCODE_TEXT: opcode_name = "TEXT"; break;
+                    case WS_OPCODE_BINARY: opcode_name = "BINARY"; break;
+                    case WS_OPCODE_CLOSE: opcode_name = "CLOSE"; break;
+                    case WS_OPCODE_PING: opcode_name = "PING"; break;
+                    case WS_OPCODE_PONG: opcode_name = "PONG"; break;
+                    default: opcode_name = "UNKNOWN"; break;
+                }
+                
+                log_info("� WebSocket frame received | From: %s:%u | Player: %u | Opcode: %s (0x%X) | Length: %zu bytes",
+                        client->ip_address, client->port, client->player_id, opcode_name, opcode, payload_len);
+                
                 if (opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY) {
-                    log_info("📨 WebSocket message from %s:%u: %.*s", 
-                            client->ip_address, client->port, (int)payload_len, payload);
+                    log_info("📨 WebSocket payload: %.*s", 
+                            (int)payload_len, payload);
                     
                     char response[1024];
                     bool handled = false;
@@ -646,7 +706,10 @@ int websocket_server_update(struct Sim* sim) {
                     // Check if message is JSON or text command
                     if (payload[0] == '{') {
                         // JSON message - parse type
+                        log_info("🔍 JSON message detected, parsing type...");
+                        
                         if (strstr(payload, "\"type\":\"handshake\"")) {
+                            log_info("🤝 Processing HANDSHAKE message");
                             // Extract player name from handshake if provided
                             char player_name[32] = "Player";
                             char* name_start = strstr(payload, "\"playerName\":\"");
@@ -761,6 +824,7 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else if (strstr(payload, "\"type\":\"input_frame\"")) {
                             // Input frame message - parse movement data
+                            log_info("🎮 Processing INPUT_FRAME message");
                             ws_server.input_messages_received++;
                             ws_server.last_input_time = get_time_ms();
                             
@@ -835,6 +899,7 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else if (strstr(payload, "\"type\":\"ping\"")) {
                             // JSON ping message
+                            log_info("🏓 Processing JSON PING message");
                             snprintf(response, sizeof(response),
                                     "{\"type\":\"pong\",\"timestamp\":%u,\"server_time\":%u}",
                                     get_time_ms(), get_time_ms());
@@ -845,15 +910,18 @@ int websocket_server_update(struct Sim* sim) {
                             ws_server.unknown_messages_received++;
                             ws_server.last_unknown_time = get_time_ms();
                             
-                            log_warn("❓ Unknown JSON message type from %s:%u: %.*s", 
-                                     client->ip_address, client->port, (int)payload_len, payload);
+                            log_warn("❓ Unknown JSON message type from %s:%u (Player: %u)", 
+                                     client->ip_address, client->port, client->player_id);
+                            log_warn("❓ Full unknown message: %.*s", (int)payload_len, payload);
                             strcpy(response, "{\"type\":\"message_ack\",\"status\":\"processed\"}");
                             handled = true;
                         }
                         
                     } else {
                         // Text command (simple protocol)
+                        log_info("📝 Text command received (not JSON)");
                         if (strncmp(payload, "PING", 4) == 0) {
+                            log_info("🏓 Processing text PING command");
                             strcpy(response, "PONG");
                             handled = true;
                             
@@ -908,20 +976,31 @@ int websocket_server_update(struct Sim* sim) {
                     ws_server.packets_received++;
                     
                 } else if (opcode == WS_OPCODE_CLOSE) {
-                    log_info("🔌 WebSocket client %s:%u disconnected", client->ip_address, client->port);
+                    log_info("🔌 WebSocket CLOSE frame received from %s:%u (Player: %u)", 
+                            client->ip_address, client->port, client->player_id);
                     if (client->player_id > 0) {
+                        log_info("🗑️ Removing player %u due to disconnect", client->player_id);
                         remove_player(client->player_id);
                         client->player_id = 0;
                     }
                     close(client->fd);
                     client->connected = false;
                 } else if (opcode == WS_OPCODE_PING) {
+                    log_info("🏓 WebSocket PING received from %s:%u (Player: %u) - sending PONG", 
+                            client->ip_address, client->port, client->player_id);
                     // Respond with pong
                     char frame[64];
                     size_t frame_len = websocket_create_frame(WS_OPCODE_PONG, payload, payload_len, frame);
                     if (frame_len > 0) {
-                        send(client->fd, frame, frame_len, 0);
+                        ssize_t sent = send(client->fd, frame, frame_len, 0);
+                        log_info("🏓 PONG sent to %s:%u (%zd bytes)", client->ip_address, client->port, sent);
                     }
+                } else if (opcode == WS_OPCODE_PONG) {
+                    log_info("🏓 WebSocket PONG received from %s:%u (Player: %u)", 
+                            client->ip_address, client->port, client->player_id);
+                } else {
+                    log_warn("⚠️ Unknown WebSocket opcode 0x%X from %s:%u (Player: %u)", 
+                            opcode, client->ip_address, client->port, client->player_id);
                 }
             }
         } else if (received == 0) {
