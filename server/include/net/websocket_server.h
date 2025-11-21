@@ -7,6 +7,7 @@
 // Simple ship structure for WebSocket server
 typedef struct SimpleShip {
     uint32_t ship_id;
+    uint32_t ship_type;      // Ship type ID (1=sloop, 2=cutter, 3=brigantine, etc.)
     float x, y;              // World position
     float rotation;          // Radians
     float velocity_x, velocity_y;
@@ -30,6 +31,16 @@ typedef struct WebSocketPlayer {
     float x, y;
     float velocity_x, velocity_y;
     float rotation;
+    
+    // Hybrid input system - movement state (persistent)
+    float movement_direction_x;  // -1.0 to 1.0 (normalized)
+    float movement_direction_y;  // -1.0 to 1.0 (normalized)
+    bool is_moving;              // true if actively moving
+    
+    // Rotation tracking for interpolation
+    float last_rotation;         // Previous rotation value
+    uint32_t last_rotation_update_time;
+    
     uint32_t parent_ship_id;
     float local_x, local_y;
     PlayerMovementState movement_state;
@@ -67,6 +78,13 @@ void websocket_server_cleanup(void);
  * @return 0 on success, -1 on error
  */
 int websocket_server_update(struct Sim* sim);
+
+/**
+ * Apply movement state to all players (HYBRID approach)
+ * Should be called every server tick (30Hz)
+ * @param dt Delta time in seconds (typically 0.033)
+ */
+void websocket_server_tick(float dt);
 
 /**
  * Broadcast message to all connected WebSocket clients

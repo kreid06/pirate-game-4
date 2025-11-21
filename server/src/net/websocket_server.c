@@ -245,6 +245,14 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].velocity_x = 0.0f;
             players[i].velocity_y = 0.0f;
             players[i].rotation = 0.0f;
+            
+            // Initialize hybrid input system fields
+            players[i].movement_direction_x = 0.0f;
+            players[i].movement_direction_y = 0.0f;
+            players[i].is_moving = false;
+            players[i].last_rotation = 0.0f;
+            players[i].last_rotation_update_time = get_time_ms();
+            
             players[i].last_input_time = get_time_ms();
             players[i].active = true;
             
@@ -290,6 +298,78 @@ static void debug_player_state(void) {
     log_info("🔍 Total active players: %d", active_players);
 }
 
+// HYBRID APPROACH: Apply player movement state every tick (called from server loop)
+static void apply_player_movement_state(WebSocketPlayer* player, float dt) {
+    const float WALK_SPEED = 30.0f;   // m/s when walking on deck (10x faster)
+    const float SWIM_SPEED = 15.0f;   // m/s when swimming (10x faster)
+    const float FRICTION = 0.85f;
+    
+    // Use stored movement direction from state
+    float movement_x = player->movement_direction_x;
+    float movement_y = player->movement_direction_y;
+    bool is_moving = player->is_moving;
+    
+    // Calculate magnitude of movement vector
+    float magnitude = sqrtf(movement_x * movement_x + movement_y * movement_y);
+    
+    if (player->parent_ship_id != 0) {
+        // Player is on a ship - move in ship-local coordinates
+        SimpleShip* ship = find_ship(player->parent_ship_id);
+        if (ship) {
+            if (is_moving && magnitude > 0.01f) {
+                // Normalize movement vector
+                movement_x /= magnitude;
+                movement_y /= magnitude;
+                
+                // Update local position (movement is in ship's coordinate frame)
+                player->local_x += movement_x * WALK_SPEED * dt;
+                player->local_y += movement_y * WALK_SPEED * dt;
+                
+                // Clamp to deck boundaries
+                ship_clamp_to_deck(ship, &player->local_x, &player->local_y);
+            }
+            
+            // Convert local position to world position
+            ship_local_to_world(ship, player->local_x, player->local_y, 
+                              &player->x, &player->y);
+            
+            // Player inherits ship velocity
+            player->velocity_x = ship->velocity_x;
+            player->velocity_y = ship->velocity_y;
+            
+        } else {
+            // Ship not found - fall into water
+            log_warn("Player %u lost ship %u - falling into water", 
+                     player->player_id, player->parent_ship_id);
+            player->parent_ship_id = 0;
+            player->movement_state = PLAYER_STATE_SWIMMING;
+        }
+    } else {
+        // Player is swimming in water - move in world coordinates
+        if (is_moving && magnitude > 0.01f) {
+            // Normalize movement vector
+            movement_x /= magnitude;
+            movement_y /= magnitude;
+            
+            // Direct world-space movement (slower in water)
+            player->velocity_x = movement_x * SWIM_SPEED;
+            player->velocity_y = movement_y * SWIM_SPEED;
+        } else {
+            // Apply friction when not moving
+            player->velocity_x *= FRICTION;
+            player->velocity_y *= FRICTION;
+        }
+        
+        // Update world position
+        player->x += player->velocity_x * dt;
+        player->y += player->velocity_y * dt;
+    }
+    
+    // No world bounds - players can swim freely in the open world
+    // (Deck boundaries still apply when on a ship)
+}
+
+// LEGACY: Old per-message movement update (for backward compatibility with input_frame)
 static void update_player_movement(WebSocketPlayer* player, float rotation, float movement_x, float movement_y, float dt) {
     const float WALK_SPEED = 30.0f;   // m/s when walking on deck (10x faster)
     const float SWIM_SPEED = 15.0f;   // m/s when swimming (10x faster)
@@ -500,6 +580,7 @@ int websocket_server_init(uint16_t port) {
     
     // Initialize a test ship away from origin (simple ship for testing)
     ships[0].ship_id = next_ship_id++;
+    ships[0].ship_type = 3;  // Brigantine
     ships[0].x = 100.0f;  // Spawn ship away from center
     ships[0].y = 100.0f;
     ships[0].rotation = 0.0f;
@@ -512,7 +593,7 @@ int websocket_server_init(uint16_t port) {
     ships[0].deck_max_y = 6.0f;
     ships[0].active = true;
     ship_count = 1;
-    log_info("🚢 Initialized test ship (ID: %u) at (%.1f, %.1f)", ships[0].ship_id, ships[0].x, ships[0].y);
+    log_info("🚢 Initialized test ship (ID: %u, Type: Brigantine) at (%.1f, %.1f)", ships[0].ship_id, ships[0].x, ships[0].y);
     
     // Enhanced startup message
     printf("\n🌐 ═══════════════════════════════════════════════════════════════\n");
@@ -874,6 +955,141 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
+                        } else if (strstr(payload, "\"type\":\"movement_state\"")) {
+                            // HYBRID: Movement state change message
+                            log_info("🚶 Processing MOVEMENT_STATE message");
+                            ws_server.input_messages_received++;
+                            ws_server.last_input_time = get_time_ms();
+                            
+                            if (client->player_id == 0) {
+                                log_warn("Movement state from client %s:%u with no player ID", client->ip_address, client->port);
+                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_player\"}");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    // Parse movement direction
+                                    float x = 0.0f, y = 0.0f;
+                                    char* movement_start = strstr(payload, "\"movement\":{");
+                                    if (movement_start) {
+                                        char* x_start = strstr(movement_start, "\"x\":");
+                                        char* y_start = strstr(movement_start, "\"y\":");
+                                        if (x_start) sscanf(x_start + 4, "%f", &x);
+                                        if (y_start) sscanf(y_start + 4, "%f", &y);
+                                    }
+                                    
+                                    // Parse is_moving flag
+                                    bool is_moving = false;
+                                    if (strstr(payload, "\"is_moving\":true")) {
+                                        is_moving = true;
+                                    }
+                                    
+                                    // Validate movement values
+                                    if (x < -1.0f) x = -1.0f;
+                                    if (x > 1.0f) x = 1.0f;
+                                    if (y < -1.0f) y = -1.0f;
+                                    if (y > 1.0f) y = 1.0f;
+                                    
+                                    // Update player's movement state (NOT apply movement yet - that happens every tick)
+                                    player->movement_direction_x = x;
+                                    player->movement_direction_y = y;
+                                    player->is_moving = is_moving;
+                                    player->last_input_time = get_time_ms();
+                                    
+                                    log_info("🚶 Player %u movement state: (%.2f, %.2f) moving=%d", 
+                                             player->player_id, x, y, is_moving);
+                                    
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"state_updated\"}");
+                                } else {
+                                    log_warn("Movement state for non-existent player %u", client->player_id);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"player_not_found\"}");
+                                }
+                                handled = true;
+                            }
+                            
+                        } else if (strstr(payload, "\"type\":\"rotation_update\"")) {
+                            // HYBRID: Rotation update message
+                            log_info("🎯 Processing ROTATION_UPDATE message");
+                            
+                            if (client->player_id == 0) {
+                                log_warn("Rotation update from client %s:%u with no player ID", client->ip_address, client->port);
+                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_player\"}");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    // Parse rotation
+                                    float rotation = 0.0f;
+                                    char* rotation_start = strstr(payload, "\"rotation\":");
+                                    if (rotation_start) {
+                                        sscanf(rotation_start + 11, "%f", &rotation);
+                                    }
+                                    
+                                    // Validate rotation (should be in [-π, π])
+                                    if (rotation < -M_PI) rotation = -M_PI;
+                                    if (rotation > M_PI) rotation = M_PI;
+                                    
+                                    // Update player rotation
+                                    player->last_rotation = player->rotation;
+                                    player->rotation = rotation;
+                                    player->last_rotation_update_time = get_time_ms();
+                                    
+                                    log_info("🎯 Player %u rotation: %.3f rad", player->player_id, rotation);
+                                    
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"rotation_updated\"}");
+                                } else {
+                                    log_warn("Rotation update for non-existent player %u", client->player_id);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"player_not_found\"}");
+                                }
+                                handled = true;
+                            }
+                            
+                        } else if (strstr(payload, "\"type\":\"action_event\"")) {
+                            // HYBRID: Action event message
+                            log_info("⚡ Processing ACTION_EVENT message");
+                            
+                            if (client->player_id == 0) {
+                                log_warn("Action event from client %s:%u with no player ID", client->ip_address, client->port);
+                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_player\"}");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    // Parse action type
+                                    char action[32] = {0};
+                                    char* action_start = strstr(payload, "\"action\":\"");
+                                    if (action_start) {
+                                        action_start += 10; // Skip past "action":"
+                                        int i = 0;
+                                        while (i < 31 && action_start[i] != '"' && action_start[i] != '\0') {
+                                            action[i] = action_start[i];
+                                            i++;
+                                        }
+                                        action[i] = '\0';
+                                    }
+                                    
+                                    log_info("⚡ Player %u action: %s", player->player_id, action);
+                                    
+                                    // Process action immediately (no state persistence)
+                                    if (strcmp(action, "fire_cannon") == 0) {
+                                        // TODO: Implement cannon firing
+                                        log_info("💥 Player %u fired cannon!", player->player_id);
+                                    } else if (strcmp(action, "jump") == 0) {
+                                        // TODO: Implement jumping
+                                        log_info("🦘 Player %u jumped!", player->player_id);
+                                    } else if (strcmp(action, "interact") == 0) {
+                                        // TODO: Implement interaction
+                                        log_info("🤝 Player %u interacted!", player->player_id);
+                                    }
+                                    
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"action_processed\"}");
+                                } else {
+                                    log_warn("Action event for non-existent player %u", client->player_id);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"player_not_found\"}");
+                                }
+                                handled = true;
+                            }
+                            
                         } else if (strstr(payload, "\"type\":\"ping\"")) {
                             // JSON ping message
                             log_info("🏓 Processing JSON PING message");
@@ -1166,4 +1382,31 @@ int websocket_server_get_players(WebSocketPlayer** out_players, int* out_count) 
     *out_players = players;
     *out_count = active_count;
     return 0;
+}
+
+// HYBRID: Apply movement state to all active players (called every server tick)
+void websocket_server_tick(float dt) {
+    static uint32_t last_tick_log_time = 0;
+    uint32_t current_time = get_time_ms();
+    
+    int moving_players = 0;
+    
+    // Apply movement state for all active players
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (players[i].active) {
+            apply_player_movement_state(&players[i], dt);
+            
+            if (players[i].is_moving) {
+                moving_players++;
+            }
+        }
+    }
+    
+    // Log tick info periodically (every 5 seconds)
+    if (current_time - last_tick_log_time > 5000) {
+        if (moving_players > 0) {
+            log_info("🎮 TICK: Applied movement to %d/%d players", moving_players, WS_MAX_CLIENTS);
+        }
+        last_tick_log_time = current_time;
+    }
 }

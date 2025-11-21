@@ -458,6 +458,7 @@ int admin_api_websocket_entities(struct HttpResponse* resp) {
         offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
             "    {\n"
             "      \"id\": %u,\n"
+            "      \"type\": %u,\n"
             "      \"x\": %.1f,\n"
             "      \"y\": %.1f,\n"
             "      \"rotation\": %.3f,\n"
@@ -466,6 +467,7 @@ int admin_api_websocket_entities(struct HttpResponse* resp) {
             "      \"deck_bounds\": {\"min_x\": %.1f, \"max_x\": %.1f, \"min_y\": %.1f, \"max_y\": %.1f}\n"
             "    }",
             ships[i].ship_id,
+            ships[i].ship_type,
             ships[i].x, ships[i].y,
             ships[i].rotation,
             ships[i].velocity_x, ships[i].velocity_y,
