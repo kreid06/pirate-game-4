@@ -61,6 +61,16 @@ interface PredictionMetrics {
 }
 
 /**
+ * Server state buffer entry for interpolation
+ */
+interface ServerStateEntry {
+  worldState: WorldState;
+  tick: number;
+  timestamp: number;
+  receiveTime: number; // Client time when received
+}
+
+/**
  * Enhanced Client-side prediction engine with Week 3-4 features
  */
 export class PredictionEngine {
@@ -71,6 +81,10 @@ export class PredictionEngine {
   private rewindBuffer: RewindBufferEntry[] = [];
   private authoritativeState: WorldState | null = null;
   private lastAuthoritativeTick = 0;
+  
+  // Server state buffer for interpolation
+  private serverStateBuffer: ServerStateEntry[] = [];
+  private static readonly MAX_SERVER_STATES = 10;
   
   // Timing and lag compensation
   private clientTick = 0;
@@ -167,6 +181,9 @@ export class PredictionEngine {
     this.authoritativeState = serverState;
     this.lastAuthoritativeTick = serverState.tick;
     
+    // Add to server state buffer for interpolation
+    this.addServerState(serverState);
+    
     // Check if we need to rollback and re-predict
     const predictionState = this.findPredictionState(serverState.tick);
     if (predictionState) {
@@ -184,17 +201,194 @@ export class PredictionEngine {
   /**
    * Get interpolated state for rendering
    */
-  getInterpolatedState(_currentTime: number): WorldState | null {
-    if (!this.config.enableInterpolation || !this.authoritativeState) {
+  getInterpolatedState(currentTime: number): WorldState | null {
+    if (!this.config.enableInterpolation || this.serverStateBuffer.length === 0) {
       return this.authoritativeState;
     }
     
-    // Find two states to interpolate between
-    // const bufferTime = currentTime - this.config.interpolationBuffer;
+    // Use interpolation buffer delay to smooth out network jitter
+    const renderTime = currentTime - this.config.interpolationBuffer;
     
-    // For now, return the latest authoritative state
-    // TODO: Implement proper interpolation between server states
-    return this.authoritativeState;
+    // Find two states to interpolate between
+    let fromState: ServerStateEntry | null = null;
+    let toState: ServerStateEntry | null = null;
+    
+    for (let i = 0; i < this.serverStateBuffer.length - 1; i++) {
+      const current = this.serverStateBuffer[i];
+      const next = this.serverStateBuffer[i + 1];
+      
+      if (current.receiveTime <= renderTime && next.receiveTime >= renderTime) {
+        fromState = current;
+        toState = next;
+        break;
+      }
+    }
+    
+    // If we can't interpolate, use the latest or oldest state
+    if (!fromState || !toState) {
+      if (this.serverStateBuffer.length > 0) {
+        // Use most recent state if we're ahead
+        if (renderTime >= this.serverStateBuffer[this.serverStateBuffer.length - 1].receiveTime) {
+          return this.serverStateBuffer[this.serverStateBuffer.length - 1].worldState;
+        }
+        // Use oldest state if we're behind
+        return this.serverStateBuffer[0].worldState;
+      }
+      return this.authoritativeState;
+    }
+    
+    // Calculate interpolation factor
+    const timeDelta = toState.receiveTime - fromState.receiveTime;
+    if (timeDelta === 0) {
+      return fromState.worldState;
+    }
+    
+    const alpha = (renderTime - fromState.receiveTime) / timeDelta;
+    
+    // Interpolate between the two states
+    return this.interpolateStates(fromState.worldState, toState.worldState, alpha);
+  }
+  
+  /**
+   * Add server state to interpolation buffer
+   */
+  private addServerState(worldState: WorldState): void {
+    const entry: ServerStateEntry = {
+      worldState: this.cloneWorldState(worldState),
+      tick: worldState.tick,
+      timestamp: worldState.timestamp,
+      receiveTime: performance.now()
+    };
+    
+    this.serverStateBuffer.push(entry);
+    
+    // Keep buffer size limited
+    if (this.serverStateBuffer.length > PredictionEngine.MAX_SERVER_STATES) {
+      this.serverStateBuffer.shift();
+    }
+  }
+  
+  /**
+   * Interpolate between two world states
+   */
+  private interpolateStates(from: WorldState, to: WorldState, alpha: number): WorldState {
+    // Clamp alpha to [0, 1]
+    alpha = Math.max(0, Math.min(1, alpha));
+    
+    return {
+      tick: Math.round(from.tick + (to.tick - from.tick) * alpha),
+      timestamp: from.timestamp + (to.timestamp - from.timestamp) * alpha,
+      ships: this.interpolateShips(from.ships, to.ships, alpha),
+      players: this.interpolatePlayers(from.players, to.players, alpha),
+      cannonballs: this.interpolateCannonballs(from.cannonballs, to.cannonballs, alpha),
+      carrierDetection: new Map(from.carrierDetection)
+    };
+  }
+  
+  /**
+   * Interpolate ship positions and rotations
+   */
+  private interpolateShips(fromShips: any[], toShips: any[], alpha: number): any[] {
+    const result = [];
+    
+    for (const toShip of toShips) {
+      const fromShip = fromShips.find(s => s.id === toShip.id);
+      
+      if (!fromShip) {
+        result.push(toShip);
+        continue;
+      }
+      
+      result.push({
+        ...toShip,
+        position: this.lerpVec2(fromShip.position, toShip.position, alpha),
+        velocity: this.lerpVec2(fromShip.velocity, toShip.velocity, alpha),
+        rotation: this.lerpAngle(fromShip.rotation, toShip.rotation, alpha),
+        angularVelocity: fromShip.angularVelocity + (toShip.angularVelocity - fromShip.angularVelocity) * alpha
+      });
+    }
+    
+    return result;
+  }
+  
+  /**
+   * Interpolate player positions
+   */
+  private interpolatePlayers(fromPlayers: any[], toPlayers: any[], alpha: number): any[] {
+    const result = [];
+    
+    for (const toPlayer of toPlayers) {
+      const fromPlayer = fromPlayers.find(p => p.id === toPlayer.id);
+      
+      if (!fromPlayer) {
+        result.push(toPlayer);
+        continue;
+      }
+      
+      result.push({
+        ...toPlayer,
+        position: this.lerpVec2(fromPlayer.position, toPlayer.position, alpha),
+        velocity: this.lerpVec2(fromPlayer.velocity, toPlayer.velocity, alpha)
+      });
+    }
+    
+    return result;
+  }
+  
+  /**
+   * Interpolate cannonball positions
+   */
+  private interpolateCannonballs(fromBalls: any[], toBalls: any[], alpha: number): any[] {
+    const result = [];
+    
+    for (const toBall of toBalls) {
+      const fromBall = fromBalls.find(b => b.id === toBall.id);
+      
+      if (!fromBall) {
+        result.push(toBall);
+        continue;
+      }
+      
+      result.push({
+        ...toBall,
+        position: this.lerpVec2(fromBall.position, toBall.position, alpha),
+        velocity: this.lerpVec2(fromBall.velocity, toBall.velocity, alpha)
+      });
+    }
+    
+    return result;
+  }
+  
+  /**
+   * Linear interpolation between two Vec2 vectors
+   */
+  private lerpVec2(from: Vec2, to: Vec2, alpha: number): Vec2 {
+    return Vec2.from(
+      from.x + (to.x - from.x) * alpha,
+      from.y + (to.y - from.y) * alpha
+    );
+  }
+  
+  /**
+   * Linear interpolation for angles (handles wrapping)
+   */
+  private lerpAngle(from: number, to: number, alpha: number): number {
+    // Normalize angles to [-PI, PI]
+    const normalizeAngle = (angle: number) => {
+      while (angle > Math.PI) angle -= 2 * Math.PI;
+      while (angle < -Math.PI) angle += 2 * Math.PI;
+      return angle;
+    };
+    
+    from = normalizeAngle(from);
+    to = normalizeAngle(to);
+    
+    // Take shortest path
+    let diff = to - from;
+    if (diff > Math.PI) diff -= 2 * Math.PI;
+    if (diff < -Math.PI) diff += 2 * Math.PI;
+    
+    return normalizeAngle(from + diff * alpha);
   }
   
   /**

@@ -287,14 +287,19 @@ export class ClientApplication {
    * Render a frame with interpolation
    */
   private renderFrame(alpha: number): void {
-    // Use predicted world state for rendering (most responsive)
-    const worldToRender = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+    // Get interpolated state for smooth rendering
+    const currentTime = performance.now();
+    const interpolatedState = this.predictionEngine.getInterpolatedState(currentTime);
+    
+    // Use predicted world state for local player (most responsive)
+    // But interpolated state for other entities (smooth)
+    const worldToRender = interpolatedState || this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
     
     if (!worldToRender) {
       // Render loading/connection screen
       this.renderSystem.renderLoadingScreen(this.state, this.camera);
     } else {
-      // Render game world
+      // Render game world with interpolation
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
       
       // Render UI overlay

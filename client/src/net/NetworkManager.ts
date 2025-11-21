@@ -582,10 +582,10 @@ export class NetworkManager {
           timestamp: Date.now(),
           ships: (message.ships || []).map((ship: any) => ({
             id: ship.id || 0,
-            position: ship.position ? Vec2.from(ship.position.x || 0, ship.position.y || 0) : Vec2.zero(),
-            velocity: ship.velocity ? Vec2.from(ship.velocity.x || 0, ship.velocity.y || 0) : Vec2.zero(),
+            position: Vec2.from(ship.x || 0, ship.y || 0), // Server sends x, y (not position.x/y)
+            velocity: Vec2.from(ship.velocity_x || 0, ship.velocity_y || 0), // Server sends velocity_x, velocity_y
             rotation: ship.rotation || 0,
-            angularVelocity: ship.angularVelocity || 0,
+            angularVelocity: ship.angular_velocity || 0, // Server sends angular_velocity
             hull: (ship.hull || []).map((point: any) => 
               point ? Vec2.from(point.x || 0, point.y || 0) : Vec2.zero()
             ),
@@ -600,7 +600,7 @@ export class NetworkManager {
             radius: player.radius || 8,
             carrierId: player.parent_ship || 0, // Server sends parent_ship
             deckId: player.deckId || 0,
-            onDeck: player.state === 'onship' // Server sends state field
+            onDeck: player.state === 'WALKING' || player.state === 'onship' // Server sends state field (WALKING, SWIMMING, etc.)
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,
@@ -617,10 +617,14 @@ export class NetworkManager {
         
         console.log(`🗺️ Received game state - Tick: ${worldState.tick}, Players: ${worldState.players.length}, Ships: ${worldState.ships.length}`);
         
-        // Debug: Log player positions to verify server updates
+        // Debug: Log ship and player data
+        if (worldState.ships.length > 0) {
+          const ship = worldState.ships[0];
+          console.log(`🚢 Ship ${ship.id} position: (${ship.position.x.toFixed(1)}, ${ship.position.y.toFixed(1)}), rotation: ${ship.rotation.toFixed(2)}`);
+        }
         if (worldState.players.length > 0) {
           const player = worldState.players[0];
-          console.log(`🎮 Player ${player.id} position: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)})`);
+          console.log(`🎮 Player ${player.id} position: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}), carrierId: ${player.carrierId}, onDeck: ${player.onDeck}`);
         }
         
         this.onWorldStateReceived?.(worldState);
