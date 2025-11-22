@@ -129,6 +129,21 @@ void sim_update_players(struct Sim* sim, q16_t dt) {
         }
     }
     
+    // Log player positions periodically
+    static uint32_t pos_log_count = 0;
+    if (pos_log_count++ % 100 == 0 && sim->player_count > 0) {
+        log_info("📍 Player positions:");
+        for (uint16_t i = 0; i < sim->player_count; i++) {
+            struct Player* p = &sim->players[i];
+            log_info("  P%u: pos(%.2f, %.2f) vel(%.2f, %.2f) radius=%.2f ship_id=%u",
+                p->id,
+                Q16_TO_FLOAT(p->position.x), Q16_TO_FLOAT(p->position.y),
+                Q16_TO_FLOAT(p->velocity.x), Q16_TO_FLOAT(p->velocity.y),
+                Q16_TO_FLOAT(p->radius),
+                p->ship_id);
+        }
+    }
+    
     // Update each player's physics
     for (uint16_t i = 0; i < sim->player_count; i++) {
         update_player_physics(&sim->players[i], sim, dt);
