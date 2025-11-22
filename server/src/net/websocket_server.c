@@ -1065,7 +1065,6 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else if (strstr(payload, "\"type\":\"ping\"")) {
                             // JSON ping message
-                            log_info("🏓 Processing JSON PING message");
                             snprintf(response, sizeof(response),
                                     "{\"type\":\"pong\",\"timestamp\":%u,\"server_time\":%u}",
                                     get_time_ms(), get_time_ms());
@@ -1085,9 +1084,7 @@ int websocket_server_update(struct Sim* sim) {
                         
                     } else {
                         // Text command (simple protocol)
-                        log_info("📝 Text command received (not JSON)");
                         if (strncmp(payload, "PING", 4) == 0) {
-                            log_info("🏓 Processing text PING command");
                             strcpy(response, "PONG");
                             handled = true;
                             
