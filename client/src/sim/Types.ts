@@ -109,7 +109,7 @@ export const PhysicsConfig = {
   
   // Player movement
   PLAYER_SPEED: 200, // units/second
-  PLAYER_RADIUS: 10, // Match server radius (2x larger for better collision detection)
+  PLAYER_RADIUS: 8, // Match server radius for collision detection
   
   // Cannonball physics
   CANNONBALL_SPEED: 400, // units/second
