@@ -21,11 +21,24 @@ jobs:
           SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
         run: |
           mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_rsa
+          echo "$SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+          
+          # Debug: Check key format
+          echo "=== SSH Key File Info ==="
+          ls -la ~/.ssh/id_rsa
+          echo "=== First/Last lines of key ==="
+          head -n 1 ~/.ssh/id_rsa
+          tail -n 1 ~/.ssh/id_rsa
+          echo "=== Key validation ==="
+          ssh-keygen -l -f ~/.ssh/id_rsa || {
+            echo "ERROR: SSH key is invalid!"
+            echo "Key might be missing BEGIN/END markers or has formatting issues"
+            exit 1
+          }
+          
+          # Add known hosts
           ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
-          # Test the key format
-          ssh-keygen -l -f ~/.ssh/id_rsa || echo "Warning: Key validation failed"
         
       - name: Install dependencies
         run: |
