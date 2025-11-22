@@ -41,7 +41,12 @@ jobs:
           
       - name: Build
         working-directory: ./client
-        run: npm run build
+        run: |
+          echo "Building with environment variables:"
+          echo "VITE_WS_PROTOCOL=$VITE_WS_PROTOCOL"
+          echo "VITE_WS_HOST=$VITE_WS_HOST"
+          echo "VITE_WS_PORT=$VITE_WS_PORT"
+          npm run build
         env:
           VITE_WS_PROTOCOL: ${{ secrets.VITE_WS_PROTOCOL }}
           VITE_WS_HOST: ${{ secrets.VITE_WS_HOST }}
