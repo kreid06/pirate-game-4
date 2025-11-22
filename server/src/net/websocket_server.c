@@ -211,10 +211,7 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].local_y = 0.0f;
             players[i].movement_state = PLAYER_STATE_SWIMMING;
             
-            log_info("🎮 Spawned player %u in water at (%.1f, %.1f) - Ship at (%.1f, %.1f)", 
-                     player_id, players[i].x, players[i].y,
-                     ship_count > 0 ? ships[0].x : 0.0f,
-                     ship_count > 0 ? ships[0].y : 0.0f);
+            // Player spawned in water
             
             /* Original ship spawn code - commented out for swimming tests
             // Spawn player on the first ship if it exists
@@ -290,15 +287,7 @@ static void update_movement_activity(void) {
 }
 
 static void debug_player_state(void) {
-    int active_players = 0;
-    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-        if (players[i].active) {
-            active_players++;
-            log_info("🔍 Player %u: pos(%.1f, %.1f) active=%d", 
-                     players[i].player_id, players[i].x, players[i].y, players[i].active);
-        }
-    }
-    log_info("🔍 Total active players: %d", active_players);
+    // Debug function - logging disabled
 }
 
 // HYBRID APPROACH: Apply player movement state every tick (called from server loop)
@@ -883,13 +872,8 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else if (strstr(payload, "\"type\":\"input_frame\"")) {
                             // Input frame message - parse movement data
-                            log_info("🎮 Processing INPUT_FRAME message");
                             ws_server.input_messages_received++;
                             ws_server.last_input_time = get_time_ms();
-                            
-                            log_info("🎮 Input frame received from %s:%u (Player: %u)", 
-                                     client->ip_address, client->port, client->player_id);
-                            log_info("🔍 Raw input_frame payload: %.*s", (int)payload_len, payload);
                             
                             if (client->player_id == 0) {
                                 log_warn("Input frame from client %s:%u with no player ID", client->ip_address, client->port);
@@ -938,8 +922,7 @@ int websocket_server_update(struct Sim* sim) {
                                             update_movement_activity();
                                         }
                                         
-                                        log_info("🎮 Player %u at (%.1f, %.1f) facing %.3f rad", 
-                                                 client->player_id, player->x, player->y, player->rotation);
+                                        // Player input processed
                                     } else {
                                         log_warn("Invalid input frame format from player %u", client->player_id);
                                     }
@@ -1288,12 +1271,7 @@ int websocket_server_update(struct Sim* sim) {
         // Cap at maximum rate
         if (current_update_rate > 30) current_update_rate = 30;
         
-        // Log broadcasting state less frequently (every 5 seconds)
-        static uint32_t last_broadcast_log_time = 0;
-        if (active_count > 0 && (current_time - last_broadcast_log_time) > 5000) {
-            log_info("🌐 Broadcasting game state with %d active players (Rate: %dHz)", active_count, current_update_rate);
-            last_broadcast_log_time = current_time;
-        }
+        // Broadcasting game state
         
         char game_state[4096];  // Increased buffer size for ships + players
         snprintf(game_state, sizeof(game_state),
