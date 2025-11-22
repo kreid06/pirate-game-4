@@ -281,8 +281,8 @@ export class PredictionEngine {
       console.warn(`⚠️ Unusual server update interval: ${timeDelta.toFixed(1)}ms (expected ~50ms at 20Hz)`);
     }
     
-    // Clamp alpha but allow slight extrapolation (reduced to 1.1 for stability)
-    const clampedAlpha = Math.max(0, Math.min(1.1, alpha));
+    // Allow more aggressive extrapolation for doubled speeds
+    const clampedAlpha = Math.max(0, Math.min(1.3, alpha));
     
     // Interpolate between the two states
     return this.interpolateStates(fromState.worldState, toState.worldState, clampedAlpha);
@@ -290,11 +290,11 @@ export class PredictionEngine {
   
   /**
    * Extrapolate state forward based on velocity (for smooth 60Hz rendering with 20Hz server)
-   * Uses damped extrapolation to reduce overshoot
+   * More aggressive for doubled player speeds
    */
   private extrapolateState(state: WorldState, deltaTime: number): WorldState {
-    // Apply damping factor to reduce aggressive extrapolation
-    const dampingFactor = 0.8; // Reduce velocity effect slightly
+    // Increase damping factor for faster movement (less conservative)
+    const dampingFactor = 1.0; // Full velocity extrapolation for doubled speeds
     
     return {
       tick: state.tick,
@@ -366,8 +366,8 @@ export class PredictionEngine {
    * Smooth step function for natural interpolation (quintic ease-in-out for extra smoothness)
    */
   private smoothStep(t: number): number {
-    // Clamp to [0, 1.1] for slight extrapolation support (reduced from 1.2 for stability)
-    t = Math.max(0, Math.min(1.1, t));
+    // Allow more extrapolation for doubled speeds
+    t = Math.max(0, Math.min(1.3, t));
     
     // For values > 1, use linear extrapolation
     if (t > 1) {
