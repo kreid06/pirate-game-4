@@ -76,6 +76,12 @@ struct WebSocketStats {
 int websocket_server_init(uint16_t port);
 
 /**
+ * Set the simulation context for player collision detection
+ * @param sim Simulation context
+ */
+void websocket_server_set_simulation(struct Sim* sim);
+
+/**
  * Clean up WebSocket server and close all connections
  */
 void websocket_server_cleanup(void);

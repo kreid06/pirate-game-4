@@ -1,6 +1,7 @@
 #include "net/websocket_server.h"
 #include "net/websocket_protocol.h"
 #include "net/network.h"
+#include "sim/simulation.h"
 #include "util/log.h"
 #include "util/time.h"
 #include <string.h>
@@ -66,6 +67,9 @@ struct WebSocketServer {
 };
 
 static struct WebSocketServer ws_server = {0};
+
+// Global simulation pointer for player collision detection
+static struct Sim* global_sim = NULL;
 
 // Helper function to get movement state string
 static const char* get_state_string(PlayerMovementState state) {
@@ -210,6 +214,20 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].local_x = 0.0f;
             players[i].local_y = 0.0f;
             players[i].movement_state = PLAYER_STATE_SWIMMING;
+            
+            // ===== ADD PLAYER TO C SIMULATION FOR COLLISION DETECTION =====
+            if (global_sim) {
+                Vec2Q16 spawn_pos = {
+                    Q16_FROM_FLOAT(players[i].x),
+                    Q16_FROM_FLOAT(players[i].y)
+                };
+                entity_id sim_player_id = sim_create_player(global_sim, spawn_pos, 0);
+                if (sim_player_id != INVALID_ENTITY_ID) {
+                    log_info("✅ Player %u added to simulation (sim_id: %u)", player_id, sim_player_id);
+                } else {
+                    log_warn("❌ Failed to add player %u to simulation", player_id);
+                }
+            }
             
             // Player spawned in water
             
@@ -506,6 +524,11 @@ size_t websocket_create_frame(uint8_t opcode, const char* payload, size_t payloa
     frame_len += payload_len;
     
     return frame_len;
+}
+
+void websocket_server_set_simulation(struct Sim* sim) {
+    global_sim = sim;
+    log_info("✅ WebSocket server linked to simulation for collision detection");
 }
 
 int websocket_server_init(uint16_t port) {
@@ -1372,6 +1395,23 @@ void websocket_server_tick(float dt) {
             
             if (players[i].is_moving) {
                 moving_players++;
+            }
+        }
+    }
+    
+    // ===== SYNC WEBSOCKET PLAYERS TO SIMULATION FOR COLLISION DETECTION =====
+    if (global_sim) {
+        for (uint16_t i = 0; i < global_sim->player_count; i++) {
+            struct Player* sim_player = &global_sim->players[i];
+            
+            // Find corresponding WebSocket player by ID
+            WebSocketPlayer* ws_player = find_player(sim_player->id);
+            if (ws_player && ws_player->active) {
+                // Update simulation player position from WebSocket player
+                sim_player->position.x = Q16_FROM_FLOAT(ws_player->x);
+                sim_player->position.y = Q16_FROM_FLOAT(ws_player->y);
+                sim_player->velocity.x = Q16_FROM_FLOAT(ws_player->velocity_x);
+                sim_player->velocity.y = Q16_FROM_FLOAT(ws_player->velocity_y);
             }
         }
     }

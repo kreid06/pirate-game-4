@@ -117,6 +117,10 @@ int server_init(struct ServerContext** out_ctx) {
         return -1;
     }
     
+    // Link WebSocket server to simulation for collision detection
+    websocket_server_set_simulation(&ctx->simulation);
+    log_info("WebSocket server linked to simulation");
+    
     // Mark as initialized
     ctx->initialized = true;
     ctx->should_run = true;
