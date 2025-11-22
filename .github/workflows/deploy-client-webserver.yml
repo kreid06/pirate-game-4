@@ -1,0 +1,46 @@
+name: Deploy Client to Web Server
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'client/**'
+      - 'protocol/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      - name: Install dependencies
+        run: |
+          cd client
+          npm ci
+          
+      - name: Build
+        run: |
+          cd client
+          npm run build
+        env:
+          VITE_WS_PROTOCOL: ${{ secrets.VITE_WS_PROTOCOL }}
+          VITE_WS_HOST: ${{ secrets.VITE_WS_HOST }}
+          VITE_WS_PORT: ${{ secrets.VITE_WS_PORT }}
+          
+      - name: Deploy to web server via SCP
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.CLIENT_HOST }}
+          username: ${{ secrets.CLIENT_USER }}
+          key: ${{ secrets.CLIENT_SSH_KEY }}
+          source: "client/dist/*"
+          target: "/var/www/html/pirate-game/"
+          strip_components: 2
+          rm: true  # Remove old files first
