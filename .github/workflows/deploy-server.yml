@@ -17,11 +17,15 @@ jobs:
         uses: actions/checkout@v4
         
       - name: Setup SSH key
+        env:
+          SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/id_rsa
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+          # Test the key format
+          ssh-keygen -l -f ~/.ssh/id_rsa || echo "Warning: Key validation failed"
         
       - name: Install dependencies
         run: |
