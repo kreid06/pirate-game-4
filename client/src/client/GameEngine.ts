@@ -27,6 +27,7 @@ export class GameEngine {
   private currentInput: InputFrame = {
     tick: 0,
     movement: Vec2.zero(),
+    rotation: 0,
     actions: 0 // Bitmask for actions
   };
   
@@ -66,6 +67,12 @@ export class GameEngine {
       velocity: Vec2.zero(),
       angularVelocity: 0,
       hull: shipHull,
+      mass: 5000,
+      momentOfInertia: 50000,
+      maxSpeed: 10,
+      turnRate: 0.5,
+      waterDrag: 0.98,
+      angularDrag: 0.95,
       modules: [
         // Ship deck (interior floor)
         ModuleUtils.createShipDeckFromPolygon(shipHull, 200),
@@ -97,6 +104,7 @@ export class GameEngine {
         id: 1,
         position: Vec2.from(600, 400),
         velocity: Vec2.zero(),
+        rotation: 0,
         radius: 8,
         onDeck: true,
         carrierId: ship.id,
@@ -147,6 +155,7 @@ export class GameEngine {
     this.currentInput = {
       tick: this.worldState.tick,
       movement,
+      rotation: 0,
       actions: 0
     };
   }

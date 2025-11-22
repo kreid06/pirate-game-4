@@ -1,7 +1,8 @@
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
-#include "../src/net/protocol.c"
+#include <stdbool.h>
+#include "../include/net/protocol.h"
 
 void test_packet_validation(void) {
     printf("Testing packet validation...\n");

@@ -1,8 +1,10 @@
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
-#include "../src/core/math.c"
-#include "../src/core/rng.c"
+#include <stdint.h>
+#include <stdbool.h>
+#include "../include/core/math.h"
+#include "../include/core/rng.h"
 
 // Simple determinism test
 void test_fixed_point_math(void) {

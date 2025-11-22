@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import path from 'path'
 
 export default defineConfig({
+  base: '/pirate-game-4/',
   resolve: {
     alias: {
       '@': path.resolve(process.cwd(), 'src'),

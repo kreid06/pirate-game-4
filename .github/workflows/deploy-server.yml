@@ -8,6 +8,7 @@ on:
       - 'server/**'
       - 'protocol/**'
       - '.github/workflows/deploy-server.yml'
+  workflow_dispatch:  # Allows manual trigger from GitHub Actions UI
 
 jobs:
   build-and-deploy:
@@ -16,16 +17,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         
-      - name: Install SSH key
-        uses: shimataro/ssh-key-action@v2
-        with:
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          known_hosts: 'placeholder'
-          if_key_exists: replace
-          
-      - name: Add known hosts
+      - name: Setup SSH key
+        env:
+          SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
         run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+          # Debug: Check key format
+          echo "=== SSH Key File Info ==="
+          ls -la ~/.ssh/id_rsa
+          echo "=== First/Last lines of key ==="
+          head -n 1 ~/.ssh/id_rsa
+          tail -n 1 ~/.ssh/id_rsa
+          echo "=== Key validation ==="
+          ssh-keygen -l -f ~/.ssh/id_rsa || {
+            echo "ERROR: SSH key is invalid!"
+            echo "Key might be missing BEGIN/END markers or has formatting issues"
+            exit 1
+          }
+          
+          # Add known hosts
           ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+          
+      - name: Test SSH connection
+        run: |
+          echo "=== Testing SSH connection ==="
+          ssh -vvv -o StrictHostKeyChecking=no -o BatchMode=yes ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo 'SSH connection successful!'" || {
+            echo "ERROR: SSH connection failed!"
+            echo "Please verify:"
+            echo "1. The public key is added to ~/.ssh/authorized_keys on the server"
+            echo "2. SERVER_USER is correct (check if it should be 'root' or 'u123456789' format)"
+            echo "3. SSH is enabled on the Hostinger VPS"
+            exit 1
+          }
         
       - name: Install dependencies
         run: |
@@ -38,36 +64,28 @@ jobs:
           mkdir -p build
           cd build
           cmake -DCMAKE_BUILD_TYPE=Release ..
-          make
+          make -j$(nproc)
+          
+      - name: Strip debug symbols
+        run: |
+          cd server/build
           strip pirate-server  # Remove debug symbols for smaller binary
           
-      - name: Deploy binary to server
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          source: "server/build/pirate-server"
-          target: "/opt/pirate-game/bin/"
-          strip_components: 2
+      - name: Deploy to server
+        run: |
+          # Create directories with sudo, then change ownership to deploy user
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mkdir -p /opt/pirate-game/bin /opt/pirate-game/config && sudo chown -R deploy:deploy /opt/pirate-game"
           
-      - name: Deploy config files
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          source: "server/config/server.conf"
-          target: "/opt/pirate-game/config/"
-          strip_components: 2
+          # Copy binary
+          scp -o StrictHostKeyChecking=no server/build/pirate-server ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/pirate-game/bin/
+          
+          # Copy config
+          scp -o StrictHostKeyChecking=no server/config/server.conf ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/pirate-game/config/
           
       - name: Restart server service
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          script: |
-            sudo systemctl restart pirate-server
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+            sudo systemctl restart pirate-server || echo "Service restart failed (may not exist yet)"
             sleep 2
-            sudo systemctl status pirate-server
+            sudo systemctl status pirate-server || echo "Service not running yet"
+          EOF
