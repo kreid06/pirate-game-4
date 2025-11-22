@@ -111,9 +111,9 @@ export interface ClientConfig {
  */
 export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
   network: {
-    serverUrl: import.meta.env.VITE_WS_PROTOCOL && import.meta.env.VITE_WS_HOST && import.meta.env.VITE_WS_PORT
+    serverUrl: (import.meta.env.VITE_WS_PROTOCOL && import.meta.env.VITE_WS_HOST && import.meta.env.VITE_WS_PORT)
       ? `${import.meta.env.VITE_WS_PROTOCOL}://${import.meta.env.VITE_WS_HOST}:${import.meta.env.VITE_WS_PORT}`
-      : 'wss://192.168.56.10:44300', // Fallback to default if env vars not set
+      : 'ws://localhost:8082', // Fallback for local development
     maxReconnectAttempts: 5,
     reconnectDelay: 2000,
     heartbeatInterval: 30000,
