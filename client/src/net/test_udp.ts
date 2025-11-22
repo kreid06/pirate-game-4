@@ -7,7 +7,7 @@ import { UDPNetworkManager, ConnectionState } from './UDPNetworkManager.js';
 import { Vec2 } from '../common/Vec2.js';
 
 // Test configuration matching the reference test
-const SERVER_HOST = '192.168.56.10';
+const SERVER_HOST = '192.168.56.100';
 const SERVER_PORT = 8080
 
 const testConfig = {
