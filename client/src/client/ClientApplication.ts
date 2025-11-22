@@ -63,6 +63,7 @@ export class ClientApplication {
   private predictedWorldState: WorldState | null = null;
   private demoWorldState: WorldState | null = null;
   private camera!: Camera;
+  private hasReceivedWorldState = false; // Track if we've received at least one world state
   
   // Timing
   private running = false;
@@ -355,7 +356,10 @@ export class ClientApplication {
       : worldState.players[0]; // Fallback to first player if no ID assigned yet
     
     if (!player) {
-      console.warn(`No player found for camera following (assigned ID: ${assignedPlayerId})`);
+      // Only warn if we've received at least one world state (avoid spam during initial connection)
+      if (this.hasReceivedWorldState && assignedPlayerId !== null) {
+        console.warn(`No player found for camera following (assigned ID: ${assignedPlayerId})`);
+      }
       return;
     }
     
@@ -382,6 +386,11 @@ export class ClientApplication {
    */
   private onServerWorldState(worldState: WorldState): void {
     this.authoritativeWorldState = worldState;
+    
+    // Mark that we've received at least one world state (suppresses early camera warnings)
+    if (!this.hasReceivedWorldState && worldState.players.length > 0) {
+      this.hasReceivedWorldState = true;
+    }
     
     // Update prediction engine with authoritative state
     this.predictionEngine.onAuthoritativeState(worldState);
@@ -540,7 +549,14 @@ export class ClientApplication {
               occupiedBy: null,
               stateBits: 0
             }
-          ]
+          ],
+          // Brigantine physics properties (match server)
+          mass: 5000,                    // kg
+          momentOfInertia: 500000,       // kg⋅m²
+          maxSpeed: 30,                  // m/s
+          turnRate: 0.5,                 // rad/s
+          waterDrag: 0.98,               // coefficient (0-1)
+          angularDrag: 0.95              // coefficient (0-1)
         }
       ],
       players: [

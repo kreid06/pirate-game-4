@@ -158,18 +158,28 @@ function updateShipPhysics(ship: Ship, dt: number): void {
   const thrustVector = forwardDir.mul(thrustForce);
   
   // Ship mass affects acceleration (lighter ships accelerate faster)
-  const shipMass = 60; // Reduced from 120 for faster acceleration
-  const acceleration = thrustVector.div(shipMass);
+  // Use brigantine physics properties from server (mass, waterDrag, maxSpeed, etc.)
+  const acceleration = thrustVector.div(ship.mass);
   
   // Apply acceleration to velocity
   ship.velocity = ship.velocity.add(acceleration.mul(dt));
   
-  // Speed-dependent drag (reduced drag for higher speeds)
-  const baseDrag = 0.995; // Reduced from 0.985 for less drag
-  const speedDragFactor = 1 - (currentSpeed * 0.0002); // Reduced from 0.0005
-  const finalDrag = Math.max(baseDrag * speedDragFactor, 0.98); // Higher minimum drag
+  // Apply water drag (server physics property, typically 0.98)
+  // This must be applied BEFORE integration as per server guide
+  ship.velocity = ship.velocity.mul(ship.waterDrag);
   
-  ship.velocity = ship.velocity.mul(finalDrag);
+  // Clamp linear speed to maxSpeed (server physics property)
+  // This must be applied AFTER integration as per server guide
+  const speed = ship.velocity.length();
+  if (speed > ship.maxSpeed) {
+    ship.velocity = ship.velocity.mul(ship.maxSpeed / speed);
+  }
+  
+  // Apply angular drag to rotation velocity (server physics property, typically 0.95)
+  ship.angularVelocity *= ship.angularDrag;
+  
+  // Clamp angular velocity to turnRate (server physics property)
+  ship.angularVelocity = Math.max(-ship.turnRate, Math.min(ship.turnRate, ship.angularVelocity));
   
   // Note: Position integration is now handled separately in the collision loop
 }

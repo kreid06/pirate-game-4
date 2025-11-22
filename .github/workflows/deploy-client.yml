@@ -1,0 +1,55 @@
+name: Deploy Client
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'client/**'
+      - 'protocol/**'
+      - '.github/workflows/deploy-client.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      - name: Install dependencies
+        run: |
+          cd client
+          npm ci
+          
+      - name: Build
+        run: |
+          cd client
+          npm run build
+        env:
+          VITE_WS_PROTOCOL: ${{ secrets.VITE_WS_PROTOCOL }}
+          VITE_WS_HOST: ${{ secrets.VITE_WS_HOST }}
+          VITE_WS_PORT: ${{ secrets.VITE_WS_PORT }}
+          
+      - name: Deploy to Production
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./client/dist
+          cname: yourgame.com  # Optional: your custom domain
+          
+      # OR deploy to Netlify:
+      # - name: Deploy to Netlify
+      #   uses: nwtgck/actions-netlify@v2
+      #   with:
+      #     publish-dir: './client/dist'
+      #     production-branch: main
+      #     github-token: ${{ secrets.GITHUB_TOKEN }}
+      #     deploy-message: "Deploy from GitHub Actions"
+      #   env:
+      #     NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+      #     NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}

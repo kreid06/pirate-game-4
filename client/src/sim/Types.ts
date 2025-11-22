@@ -23,6 +23,14 @@ export interface Ship {
   angularVelocity: number; // rad/s
   hull: Vec2[]; // Polygon in ship-local coordinates for collision detection
   modules: ShipModule[]; // Modules placed on this ship (including deck module)
+  
+  // Brigantine physics properties (from server or ship definitions)
+  mass: number;              // kg
+  momentOfInertia: number;   // kg⋅m²
+  maxSpeed: number;          // m/s - velocity magnitude limit
+  turnRate: number;          // rad/s - angular velocity limit
+  waterDrag: number;         // 0-1 coefficient (multiply velocity each frame)
+  angularDrag: number;       // 0-1 coefficient (multiply angular velocity each frame)
 }
 
 /**

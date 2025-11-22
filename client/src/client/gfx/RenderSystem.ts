@@ -38,9 +38,6 @@ export class RenderSystem {
   // Render queue for layered rendering
   private renderQueue: RenderQueueItem[] = [];
   
-  // Background pattern for water
-  private waterPattern: CanvasPattern | null = null;
-  
   constructor(canvas: HTMLCanvasElement, config: GraphicsConfig) {
     this.canvas = canvas;
     this.config = config;
@@ -64,9 +61,6 @@ export class RenderSystem {
     
     // Set up canvas properties
     this.setupCanvasProperties();
-    
-    // Initialize water pattern
-    await this.createWaterPattern();
     
     // Initialize sub-systems
     await this.particleSystem.initialize();
@@ -160,8 +154,7 @@ export class RenderSystem {
    */
   onCanvasResize(width: number, height: number): void {
     // Canvas size is handled by the main application
-    // Just need to update any cached patterns or buffers
-    this.createWaterPattern();
+    // No need to update patterns since we're using solid color
   }
   
   /**
@@ -198,46 +191,9 @@ export class RenderSystem {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }
   
-  private async createWaterPattern(): Promise<void> {
-    // Create a simple water pattern
-    const patternCanvas = document.createElement('canvas');
-    patternCanvas.width = 64;
-    patternCanvas.height = 64;
-    const patternCtx = patternCanvas.getContext('2d')!;
-    
-    // Draw water pattern
-    const gradient = patternCtx.createLinearGradient(0, 0, 64, 64);
-    gradient.addColorStop(0, '#1e90ff');
-    gradient.addColorStop(0.5, '#4169e1');
-    gradient.addColorStop(1, '#1e90ff');
-    
-    patternCtx.fillStyle = gradient;
-    patternCtx.fillRect(0, 0, 64, 64);
-    
-    // Add some wave-like noise
-    patternCtx.globalCompositeOperation = 'overlay';
-    patternCtx.fillStyle = '#ffffff10';
-    for (let i = 0; i < 10; i++) {
-      patternCtx.beginPath();
-      patternCtx.arc(
-        Math.random() * 64, 
-        Math.random() * 64, 
-        Math.random() * 5 + 2, 
-        0, 
-        Math.PI * 2
-      );
-      patternCtx.fill();
-    }
-    
-    this.waterPattern = this.ctx.createPattern(patternCanvas, 'repeat');
-  }
-  
   private drawWater(camera: Camera): void {
-    if (this.waterPattern) {
-      this.ctx.fillStyle = this.waterPattern;
-    } else {
-      this.ctx.fillStyle = '#1e90ff'; // Fallback color
-    }
+    // Simple solid water color
+    this.ctx.fillStyle = '#1e90ff'; // Ocean blue
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
   }
   

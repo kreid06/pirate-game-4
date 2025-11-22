@@ -8,6 +8,7 @@
 import { Vec2 } from '../common/Vec2.js';
 import { Ship, WorldState } from './Types.js';
 import { HULL_POINTS, getQuadraticPoint, ModuleUtils } from './modules.js';
+import { BRIGANTINE_PHYSICS } from '../common/ShipDefinitions.js';
 
 /**
  * Create a curved ship hull polygon that matches the HULL_POINTS definition
@@ -72,6 +73,13 @@ export function createShipAtPosition(position: Vec2, rotation: number): Ship {
       ...ModuleUtils.createShipPlanksFromSegments(100),
       // Basic helm
       ModuleUtils.createDefaultModule(1000, 'helm', Vec2.from(-90, 0))
-    ]
+    ],
+    // Brigantine physics properties (match protocol/ship_definitions.h)
+    mass: BRIGANTINE_PHYSICS.mass,
+    momentOfInertia: BRIGANTINE_PHYSICS.momentOfInertia,
+    maxSpeed: BRIGANTINE_PHYSICS.maxSpeed,
+    turnRate: BRIGANTINE_PHYSICS.turnRate,
+    waterDrag: BRIGANTINE_PHYSICS.waterDrag,
+    angularDrag: BRIGANTINE_PHYSICS.angularDrag
   };
 }

@@ -12,6 +12,7 @@
 import { NetworkConfig } from '../client/ClientConfig.js';
 import { WorldState, InputFrame, Ship, Player, Cannonball } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
+import { BRIGANTINE_PHYSICS } from '../common/ShipDefinitions.js';
 
 // Protocol constants matching server
 const PROTOCOL_VERSION = 1;
@@ -638,7 +639,14 @@ export class UDPNetworkManager {
           rotation: rotation,
           angularVelocity: 0, // Not transmitted in this simplified version
           hull: [], // Will be filled from ship data
-          modules: []
+          modules: [],
+          // Brigantine physics properties (UDP protocol doesn't send these, use defaults)
+          mass: BRIGANTINE_PHYSICS.mass,
+          momentOfInertia: BRIGANTINE_PHYSICS.momentOfInertia,
+          maxSpeed: BRIGANTINE_PHYSICS.maxSpeed,
+          turnRate: BRIGANTINE_PHYSICS.turnRate,
+          waterDrag: BRIGANTINE_PHYSICS.waterDrag,
+          angularDrag: BRIGANTINE_PHYSICS.angularDrag
         });
       } else {
         // Projectile entities  

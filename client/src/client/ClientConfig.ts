@@ -111,7 +111,9 @@ export interface ClientConfig {
  */
 export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
   network: {
-    serverUrl: 'ws://192.168.56.10:8082', // Default to local server WebSocket port
+    serverUrl: import.meta.env.VITE_WS_PROTOCOL && import.meta.env.VITE_WS_HOST && import.meta.env.VITE_WS_PORT
+      ? `${import.meta.env.VITE_WS_PROTOCOL}://${import.meta.env.VITE_WS_HOST}:${import.meta.env.VITE_WS_PORT}`
+      : 'ws://192.168.56.10:8082', // Fallback to default if env vars not set
     maxReconnectAttempts: 5,
     reconnectDelay: 2000,
     heartbeatInterval: 30000,

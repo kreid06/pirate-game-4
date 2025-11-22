@@ -701,6 +701,15 @@ export class NetworkManager {
               velocity: Vec2.from(ship.velocity_x || 0, ship.velocity_y || 0),
               angularVelocity: ship.angular_velocity || 0,
               
+              // Parse physics properties from server (override defaults if provided)
+              // Server sends: mass, moment_of_inertia, max_speed, turn_rate, water_drag, angular_drag
+              mass: ship.mass ?? properShip.mass,
+              momentOfInertia: ship.moment_of_inertia ?? properShip.momentOfInertia,
+              maxSpeed: ship.max_speed ?? properShip.maxSpeed,
+              turnRate: ship.turn_rate ?? properShip.turnRate,
+              waterDrag: ship.water_drag ?? properShip.waterDrag,
+              angularDrag: ship.angular_drag ?? properShip.angularDrag,
+              
               // TODO: Future server features
               // - ship.type: 'brigantine' | 'sloop' | 'galleon' (use different ship designs)
               // - ship.modules: Parse plank data, cannons, sails, etc. from server
