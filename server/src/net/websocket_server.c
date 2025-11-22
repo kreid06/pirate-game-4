@@ -1388,30 +1388,49 @@ void websocket_server_tick(float dt) {
     
     int moving_players = 0;
     
-    // Apply movement state for all active players
+    // Count moving players (for adaptive tick rate)
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-        if (players[i].active) {
-            apply_player_movement_state(&players[i], dt);
-            
-            if (players[i].is_moving) {
-                moving_players++;
-            }
+        if (players[i].active && players[i].is_moving) {
+            moving_players++;
         }
     }
     
     // ===== SYNC WEBSOCKET PLAYERS TO SIMULATION FOR COLLISION DETECTION =====
     if (global_sim) {
+        const float SWIM_FORCE = 150.0f; // Force applied when swimming (N)
+        
         for (uint16_t i = 0; i < global_sim->player_count; i++) {
             struct Player* sim_player = &global_sim->players[i];
             
             // Find corresponding WebSocket player by ID
             WebSocketPlayer* ws_player = find_player(sim_player->id);
             if (ws_player && ws_player->active) {
-                // Update simulation player position from WebSocket player
-                sim_player->position.x = Q16_FROM_FLOAT(ws_player->x);
-                sim_player->position.y = Q16_FROM_FLOAT(ws_player->y);
-                sim_player->velocity.x = Q16_FROM_FLOAT(ws_player->velocity_x);
-                sim_player->velocity.y = Q16_FROM_FLOAT(ws_player->velocity_y);
+                // Apply movement forces to simulation player instead of direct position update
+                if (ws_player->is_moving) {
+                    float movement_x = ws_player->movement_direction_x;
+                    float movement_y = ws_player->movement_direction_y;
+                    float magnitude = sqrtf(movement_x * movement_x + movement_y * movement_y);
+                    
+                    if (magnitude > 0.01f) {
+                        // Normalize and apply force
+                        movement_x /= magnitude;
+                        movement_y /= magnitude;
+                        
+                        // Apply swimming force (simulation will integrate this)
+                        q16_t force_x = Q16_FROM_FLOAT(movement_x * SWIM_FORCE);
+                        q16_t force_y = Q16_FROM_FLOAT(movement_y * SWIM_FORCE);
+                        
+                        // Add to velocity (simplified force application: F*dt/m, assuming m=1)
+                        sim_player->velocity.x += q16_mul(force_x, Q16_FROM_FLOAT(dt));
+                        sim_player->velocity.y += q16_mul(force_y, Q16_FROM_FLOAT(dt));
+                    }
+                }
+                
+                // Copy simulation position BACK to WebSocket player for rendering
+                ws_player->x = Q16_TO_FLOAT(sim_player->position.x);
+                ws_player->y = Q16_TO_FLOAT(sim_player->position.y);
+                ws_player->velocity_x = Q16_TO_FLOAT(sim_player->velocity.x);
+                ws_player->velocity_y = Q16_TO_FLOAT(sim_player->velocity.y);
             }
         }
     }
