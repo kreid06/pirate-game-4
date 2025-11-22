@@ -38,7 +38,11 @@ jobs:
           mkdir -p build
           cd build
           cmake -DCMAKE_BUILD_TYPE=Release ..
-          make
+          make -j$(nproc)
+          
+      - name: Strip debug symbols
+        run: |
+          cd server/build
           strip pirate-server  # Remove debug symbols for smaller binary
           
       - name: Deploy binary to server
