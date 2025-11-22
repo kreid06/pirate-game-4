@@ -1422,6 +1422,11 @@ void websocket_server_tick(float dt) {
                         q16_t accel_x = Q16_FROM_FLOAT(movement_x * SWIM_ACCELERATION * dt);
                         q16_t accel_y = Q16_FROM_FLOAT(movement_y * SWIM_ACCELERATION * dt);
                         
+                        log_info("⚡ P%u: Applying acceleration (%.2f, %.2f) | dir=(%.2f, %.2f) | dt=%.3f",
+                                 sim_player->id,
+                                 Q16_TO_FLOAT(accel_x), Q16_TO_FLOAT(accel_y),
+                                 movement_x, movement_y, dt);
+                        
                         sim_player->velocity.x += accel_x;
                         sim_player->velocity.y += accel_y;
                         
@@ -1433,6 +1438,11 @@ void websocket_server_tick(float dt) {
                         if (current_speed > SWIM_MAX_SPEED) {
                             // Scale velocity back to max speed
                             float scale = SWIM_MAX_SPEED / current_speed;
+                            log_info("🚀 P%u: Speed clamped %.2f → %.2f m/s | vel=(%.2f, %.2f) → (%.2f, %.2f)",
+                                     sim_player->id,
+                                     current_speed, SWIM_MAX_SPEED,
+                                     current_vx, current_vy,
+                                     current_vx * scale, current_vy * scale);
                             sim_player->velocity.x = Q16_FROM_FLOAT(current_vx * scale);
                             sim_player->velocity.y = Q16_FROM_FLOAT(current_vy * scale);
                         }
@@ -1449,16 +1459,26 @@ void websocket_server_tick(float dt) {
                         
                         if (decel_amount >= current_speed) {
                             // Stop completely
+                            log_info("🛑 P%u: Stopping | speed=%.2f → 0.00 m/s | vel=(%.2f, %.2f) → (0.00, 0.00)",
+                                     sim_player->id, current_speed, current_vx, current_vy);
                             sim_player->velocity.x = 0;
                             sim_player->velocity.y = 0;
                         } else {
                             // Reduce speed
                             float scale = (current_speed - decel_amount) / current_speed;
-                            sim_player->velocity.x = Q16_FROM_FLOAT(current_vx * scale);
-                            sim_player->velocity.y = Q16_FROM_FLOAT(current_vy * scale);
+                            float new_vx = current_vx * scale;
+                            float new_vy = current_vy * scale;
+                            log_info("⬇️ P%u: Decelerating | speed=%.2f → %.2f m/s | vel=(%.2f, %.2f) → (%.2f, %.2f)",
+                                     sim_player->id,
+                                     current_speed, current_speed - decel_amount,
+                                     current_vx, current_vy, new_vx, new_vy);
+                            sim_player->velocity.x = Q16_FROM_FLOAT(new_vx);
+                            sim_player->velocity.y = Q16_FROM_FLOAT(new_vy);
                         }
-                    } else {
-                        // Already stopped
+                    } else if (current_speed > 0.01f) {
+                        // Snap to zero for very low speeds
+                        log_info("🛑 P%u: Snap to zero | speed=%.2f m/s (below threshold)",
+                                 sim_player->id, current_speed);
                         sim_player->velocity.x = 0;
                         sim_player->velocity.y = 0;
                     }
