@@ -387,6 +387,31 @@ export class RenderSystem {
     const velEnd = camera.worldToScreen(player.position.add(player.velocity.mul(0.1)));
     this.ctx.lineTo(velEnd.x, velEnd.y);
     this.ctx.stroke();
+    
+    // Draw player name above the player
+    if (player.name) {
+      this.ctx.font = '14px Arial';
+      this.ctx.textAlign = 'center';
+      this.ctx.textBaseline = 'bottom';
+      
+      // Draw text background for readability
+      const textMetrics = this.ctx.measureText(player.name);
+      const textWidth = textMetrics.width;
+      const textHeight = 16;
+      const nameY = screenPos.y - scaledRadius - 8;
+      
+      this.ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+      this.ctx.fillRect(
+        screenPos.x - textWidth / 2 - 4,
+        nameY - textHeight,
+        textWidth + 8,
+        textHeight + 4
+      );
+      
+      // Draw the name text
+      this.ctx.fillStyle = '#ffffff';
+      this.ctx.fillText(player.name, screenPos.x, nameY);
+    }
   }
   
   private drawCannonball(cannonball: Cannonball, camera: Camera): void {
