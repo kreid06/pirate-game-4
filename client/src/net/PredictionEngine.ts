@@ -329,6 +329,16 @@ export class PredictionEngine {
     if (this.serverStateBuffer.length > PredictionEngine.MAX_SERVER_STATES) {
       this.serverStateBuffer.shift();
     }
+    
+    // DEBUG: Log enhanced movement data from server (sample rate to avoid spam)
+    if (Math.random() < 0.05 && worldState.players.length > 0) { // 5% sample rate
+      const player = worldState.players[0];
+      if (player.isMoving !== undefined || player.movementDirection !== undefined) {
+        console.log(`📊 Server Player State - Velocity: (${player.velocity.x.toFixed(2)}, ${player.velocity.y.toFixed(2)}), ` +
+                    `isMoving: ${player.isMoving}, ` +
+                    `movementDir: ${player.movementDirection ? `(${player.movementDirection.x.toFixed(2)}, ${player.movementDirection.y.toFixed(2)})` : 'N/A'}`);
+      }
+    }
   }
   
   /**

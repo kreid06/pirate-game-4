@@ -262,7 +262,7 @@ export class ClientApplication {
       if (this.predictedWorldState) {
         this.updateCamera(this.predictedWorldState, dt);
         
-        // Update input manager with current player position for mouse-relative movement
+        // Update input manager with current player position and velocity for hybrid protocol
         const assignedPlayerId = this.networkManager.getAssignedPlayerId();
         const player = assignedPlayerId !== null 
           ? this.predictedWorldState.players.find(p => p.id === assignedPlayerId)
@@ -270,6 +270,7 @@ export class ClientApplication {
         
         if (player) {
           this.inputManager.setPlayerPosition(player.position);
+          this.inputManager.setPlayerVelocity(player.velocity); // For stop detection
         }
       }
       
@@ -311,11 +312,14 @@ export class ClientApplication {
       const predictedPlayer = this.predictedWorldState.players.find(p => p.id === assignedPlayerId);
       
       if (predictedPlayer) {
-        // Clone interpolated state and replace our player with predicted version
+        // Get current rotation from input manager
+        const currentRotation = this.inputManager.getCurrentInputFrame().rotation;
+        
+        // Clone interpolated state and replace our player with predicted version (including rotation)
         worldToRender = {
           ...interpolatedState,
           players: interpolatedState.players.map(p => 
-            p.id === assignedPlayerId ? predictedPlayer : p
+            p.id === assignedPlayerId ? { ...predictedPlayer, rotation: currentRotation } : p
           )
         };
       }
@@ -544,6 +548,7 @@ export class ClientApplication {
           id: 1,
           position: Vec2.from(600, 400), // Same as ship position
           velocity: Vec2.zero(),
+          rotation: 0, // Facing right
           radius: 8,
           carrierId: 1, // On the demo ship
           deckId: 0,

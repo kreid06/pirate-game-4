@@ -391,6 +391,38 @@ export class RenderSystem {
     this.ctx.fill();
     this.ctx.stroke();
     
+    // Draw rotation indicator (facing direction from mouse aim)
+    const rotation = player.rotation;
+    
+    this.ctx.strokeStyle = '#ffffff';
+    this.ctx.lineWidth = 3;
+    this.ctx.beginPath();
+    this.ctx.moveTo(screenPos.x, screenPos.y);
+    const directionLength = scaledRadius * 1.5;
+    const directionEnd = {
+      x: screenPos.x + Math.cos(rotation) * directionLength,
+      y: screenPos.y + Math.sin(rotation) * directionLength
+    };
+    this.ctx.lineTo(directionEnd.x, directionEnd.y);
+    this.ctx.stroke();
+    
+    // Draw arrowhead
+    const arrowSize = scaledRadius * 0.4;
+    const arrowAngle = Math.PI / 6; // 30 degrees
+    
+    this.ctx.beginPath();
+    this.ctx.moveTo(directionEnd.x, directionEnd.y);
+    this.ctx.lineTo(
+      directionEnd.x - Math.cos(rotation - arrowAngle) * arrowSize,
+      directionEnd.y - Math.sin(rotation - arrowAngle) * arrowSize
+    );
+    this.ctx.moveTo(directionEnd.x, directionEnd.y);
+    this.ctx.lineTo(
+      directionEnd.x - Math.cos(rotation + arrowAngle) * arrowSize,
+      directionEnd.y - Math.sin(rotation + arrowAngle) * arrowSize
+    );
+    this.ctx.stroke();
+    
     // Draw velocity vector
     this.ctx.strokeStyle = '#ffff00';
     this.ctx.lineWidth = 2;

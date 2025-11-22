@@ -82,6 +82,12 @@ export class InputManager {
   private lastSentRotation: number = 0;
   private readonly ROTATION_THRESHOLD = 0.0524; // 3 degrees in radians
   
+  // HYBRID PROTOCOL: Movement stop detection
+  private playerVelocity: Vec2 = Vec2.zero();
+  private lastStopSentTime: number = 0;
+  private readonly STOP_RESEND_INTERVAL = 100; // Resend stop every 100ms if still moving
+  private readonly VELOCITY_STOP_THRESHOLD = 0.1; // Consider stopped if velocity < 0.1
+  
   // Cooldowns and timing
   private lastInteractionTime = 0;
   private readonly interactionCooldown = 500; // 500ms
@@ -149,8 +155,24 @@ export class InputManager {
       const isMoving = currentMovement.lengthSq() > 0.01;
       if (this.onMovementStateChange) {
         this.onMovementStateChange(currentMovement, isMoving);
+        this.lastStopSentTime = Date.now();
       }
       this.previousMovementState = currentMovement.clone();
+    }
+    
+    // HYBRID PROTOCOL: Detect if player released keys but is still moving (server-side friction)
+    // Resend stop message periodically until player actually stops
+    const noInput = currentMovement.lengthSq() < 0.01;
+    const stillMoving = this.playerVelocity.lengthSq() > this.VELOCITY_STOP_THRESHOLD * this.VELOCITY_STOP_THRESHOLD;
+    const timeSinceLastStop = Date.now() - this.lastStopSentTime;
+    
+    if (noInput && stillMoving && timeSinceLastStop > this.STOP_RESEND_INTERVAL) {
+      // Player released keys but server hasn't stopped them yet - resend stop
+      if (this.onMovementStateChange) {
+        console.log(`🛑 Resending stop - velocity: ${this.playerVelocity.length().toFixed(2)}`);
+        this.onMovementStateChange(Vec2.zero(), false);
+        this.lastStopSentTime = Date.now();
+      }
     }
     
     // HYBRID PROTOCOL: Detect rotation changes >3 degrees
@@ -194,6 +216,13 @@ export class InputManager {
    */
   setPlayerPosition(playerPos: Vec2): void {
     this.playerPosition = playerPos.clone();
+  }
+  
+  /**
+   * Update player velocity for stop detection (HYBRID PROTOCOL)
+   */
+  setPlayerVelocity(velocity: Vec2): void {
+    this.playerVelocity = velocity.clone();
   }
   
   /**

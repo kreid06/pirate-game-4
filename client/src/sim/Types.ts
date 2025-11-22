@@ -30,12 +30,18 @@ export interface Ship {
  */
 export interface Player {
   id: number;
+  name?: string; // Player name from server
   position: Vec2;
   velocity: Vec2;
+  rotation: number; // Facing direction in radians (from mouse aim)
   radius: number;
   carrierId: number; // 0 = not on ship
   deckId: number;
   onDeck: boolean;
+  
+  // Enhanced movement data from server (for reconciliation & debugging)
+  isMoving?: boolean; // Is player actively moving (from hybrid protocol)
+  movementDirection?: Vec2; // Server's stored movement direction (normalized)
 }
 
 /**

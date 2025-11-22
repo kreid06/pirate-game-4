@@ -699,14 +699,22 @@ export class NetworkManager {
           })),
           players: (message.players || []).map((player: any) => ({
             id: player.id || 0,
+            name: player.name || `Player_${player.id || 0}`,
             position: Vec2.from(player.world_x || 0, player.world_y || 0), // Server sends world_x, world_y
             velocity: player.velocity 
               ? Vec2.from(player.velocity.x || 0, player.velocity.y || 0) 
               : Vec2.from(player.velocity_x || 0, player.velocity_y || 0), // Server sends velocity_x,velocity_y
+            rotation: player.rotation || 0, // Server sends rotation (facing direction)
             radius: player.radius || 8,
             carrierId: player.parent_ship || 0, // Server sends parent_ship
             deckId: player.deckId || 0,
-            onDeck: player.state === 'WALKING' || player.state === 'onship' // Server sends state field (WALKING, SWIMMING, etc.)
+            onDeck: player.state === 'WALKING' || player.state === 'onship', // Server sends state field (WALKING, SWIMMING, etc.)
+            
+            // Enhanced movement data from server (hybrid protocol)
+            isMoving: player.is_moving !== undefined ? player.is_moving : undefined,
+            movementDirection: (player.movement_direction_x !== undefined && player.movement_direction_y !== undefined)
+              ? Vec2.from(player.movement_direction_x, player.movement_direction_y)
+              : undefined
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,
