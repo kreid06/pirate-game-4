@@ -111,31 +111,9 @@ export interface ClientConfig {
  */
 export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
   network: {
-    serverUrl: (() => {
-      const protocol = import.meta.env.VITE_WS_PROTOCOL;
-      const host = import.meta.env.VITE_WS_HOST;
-      const port = import.meta.env.VITE_WS_PORT;
-      
-      console.log('🔧 Network Configuration Debug:');
-      console.log('  VITE_WS_PROTOCOL:', protocol || '❌ UNDEFINED');
-      console.log('  VITE_WS_HOST:', host || '❌ UNDEFINED');
-      console.log('  VITE_WS_PORT:', port || '❌ UNDEFINED');
-      
-      if (protocol && host && port) {
-        const url = `${protocol}://${host}:${port}`;
-        console.log('✅ Using configured server URL:', url);
-        return url;
-      } else {
-        const fallback = 'ws://localhost:8082';
-        console.warn('⚠️ Environment variables not set, using fallback:', fallback);
-        console.warn('   Missing:', 
-          !protocol ? 'VITE_WS_PROTOCOL ' : '',
-          !host ? 'VITE_WS_HOST ' : '',
-          !port ? 'VITE_WS_PORT' : ''
-        );
-        return fallback;
-      }
-    })(),
+    serverUrl: import.meta.env.VITE_WS_PROTOCOL && import.meta.env.VITE_WS_HOST && import.meta.env.VITE_WS_PORT
+      ? `${import.meta.env.VITE_WS_PROTOCOL}://${import.meta.env.VITE_WS_HOST}:${import.meta.env.VITE_WS_PORT}`
+      : 'wss://192.168.56.10:44300', // Fallback to default if env vars not set
     maxReconnectAttempts: 5,
     reconnectDelay: 2000,
     heartbeatInterval: 30000,

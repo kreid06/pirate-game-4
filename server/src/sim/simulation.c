@@ -13,6 +13,7 @@ static void update_ship_physics(struct Ship* ship, q16_t dt);
 static void update_player_physics(struct Player* player, struct Sim* sim, q16_t dt);
 static void update_projectile_physics(struct Projectile* projectile, q16_t dt);
 static void handle_ship_collisions(struct Sim* sim);
+static void handle_player_player_collisions(struct Sim* sim);
 static entity_id allocate_entity_id(struct Sim* sim);
 
 /**
@@ -169,6 +170,9 @@ void sim_handle_collisions(struct Sim* sim) {
     // Handle ship-to-ship collisions
     handle_ship_collisions(sim);
     
+    // Handle player-to-player collisions
+    handle_player_player_collisions(sim);
+    
     // Handle projectile collisions with ships and players
     handle_projectile_collisions(sim);
     
@@ -228,7 +232,7 @@ entity_id sim_create_player(struct Sim* sim, Vec2Q16 position, entity_id ship_id
     player->ship_id = ship_id;
     player->position = position;
     player->velocity = VEC2_ZERO;
-    player->radius = Q16_FROM_FLOAT(0.4f); // 40cm radius
+    player->radius = Q16_FROM_FLOAT(5.0f); // 5 unit radius (increased for better collision detection)
     player->health = 100;
     
     if (ship_id == 0) {
@@ -702,6 +706,107 @@ void handle_projectile_collisions(struct Sim* sim) {
                         Q16_TO_INT(player->health));
                 
                 proj->lifetime = 0; // Remove projectile
+            }
+        }
+    }
+}
+
+/**
+ * Handle player-to-player collisions with physics-based push
+ */
+static void handle_player_player_collisions(struct Sim* sim) {
+    // Early exit if not enough players
+    if (sim->player_count < 2) return;
+    
+    // Check all pairs of players for collisions
+    for (uint16_t i = 0; i < sim->player_count; i++) {
+        for (uint16_t j = i + 1; j < sim->player_count; j++) {
+            struct Player* p1 = &sim->players[i];
+            struct Player* p2 = &sim->players[j];
+            
+            // Calculate distance between players using distance squared for efficiency
+            q16_t dx = p2->position.x - p1->position.x;
+            q16_t dy = p2->position.y - p1->position.y;
+            q16_t dist_sq = q16_mul(dx, dx) + q16_mul(dy, dy);
+            
+            // Calculate minimum distance (sum of radii) for collision check
+            q16_t min_dist = p1->radius + p2->radius;
+            
+            // Broad phase: Check if players are close enough to potentially collide
+            // Add a small buffer zone (1.5x radius) to catch fast-moving players
+            q16_t check_dist = q16_mul(min_dist, Q16_FROM_FLOAT(1.5f));
+            q16_t check_dist_sq = q16_mul(check_dist, check_dist);
+            
+            // Skip if players are too far apart
+            if (dist_sq >= check_dist_sq) continue;
+            
+            // Calculate actual distance for precise collision check
+            Vec2Q16 delta = {dx, dy};
+            q16_t dist = vec2_length(delta);
+            
+            // Skip if exactly on top of each other (avoid division by zero)
+            if (dist < Q16_FROM_FLOAT(0.01f)) {
+                // Push them apart in a random direction if overlapping perfectly
+                p1->position.x -= Q16_FROM_FLOAT(0.5f);
+                p2->position.x += Q16_FROM_FLOAT(0.5f);
+                continue;
+            }
+            
+            // Check if players are actually overlapping
+            if (dist < min_dist) {
+                q16_t overlap = min_dist - dist;
+                
+                // Log collision for debugging
+                log_debug("💥 Player collision: P%u <-> P%u (overlap: %d.%02d units)",
+                    p1->id, p2->id, 
+                    Q16_TO_INT(overlap), 
+                    (int)((Q16_TO_FLOAT(overlap) * 100) - (Q16_TO_INT(overlap) * 100)));
+                
+                // Calculate collision normal (direction from p1 to p2)
+                q16_t normal_x = q16_div(dx, dist);
+                q16_t normal_y = q16_div(dy, dist);
+                
+                // ALWAYS separate overlapping players first (regardless of velocity)
+                q16_t separation = q16_mul(overlap, Q16_FROM_FLOAT(0.5f));
+                q16_t sep_x = q16_mul(normal_x, separation);
+                q16_t sep_y = q16_mul(normal_y, separation);
+                
+                p1->position.x -= sep_x;
+                p1->position.y -= sep_y;
+                p2->position.x += sep_x;
+                p2->position.y += sep_y;
+                
+                // Calculate relative velocity for impulse
+                q16_t rel_vel_x = p2->velocity.x - p1->velocity.x;
+                q16_t rel_vel_y = p2->velocity.y - p1->velocity.y;
+                q16_t vel_along_normal = q16_mul(rel_vel_x, normal_x) + q16_mul(rel_vel_y, normal_y);
+                
+                // Apply velocity changes only if players are moving toward each other
+                if (vel_along_normal < 0) {
+                    // Velocity correction with restitution and dampening
+                    q16_t restitution = Q16_FROM_FLOAT(0.3f);  // Bounciness
+                    q16_t dampening = Q16_FROM_FLOAT(0.7f);    // Energy loss
+                    
+                    // Calculate impulse (equal mass assumption)
+                    q16_t impulse = q16_mul(-(Q16_ONE + restitution), vel_along_normal);
+                    impulse = q16_div(impulse, Q16_FROM_INT(2)); // Divide by 2 for equal mass
+                    
+                    q16_t impulse_x = q16_mul(normal_x, impulse);
+                    q16_t impulse_y = q16_mul(normal_y, impulse);
+                    
+                    // Apply impulse to both players
+                    p1->velocity.x = q16_mul(p1->velocity.x - impulse_x, dampening);
+                    p1->velocity.y = q16_mul(p1->velocity.y - impulse_y, dampening);
+                    p2->velocity.x = q16_mul(p2->velocity.x + impulse_x, dampening);
+                    p2->velocity.y = q16_mul(p2->velocity.y + impulse_y, dampening);
+                    
+                    // Apply friction
+                    q16_t friction = Q16_FROM_FLOAT(0.95f);
+                    p1->velocity.x = q16_mul(p1->velocity.x, friction);
+                    p1->velocity.y = q16_mul(p1->velocity.y, friction);
+                    p2->velocity.x = q16_mul(p2->velocity.x, friction);
+                    p2->velocity.y = q16_mul(p2->velocity.y, friction);
+                }
             }
         }
     }
