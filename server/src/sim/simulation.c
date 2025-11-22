@@ -247,7 +247,7 @@ entity_id sim_create_player(struct Sim* sim, Vec2Q16 position, entity_id ship_id
     player->ship_id = ship_id;
     player->position = position;
     player->velocity = VEC2_ZERO;
-    player->radius = Q16_FROM_FLOAT(5.0f); // 5 unit radius (increased for better collision detection)
+    player->radius = Q16_FROM_FLOAT(10.0f); // 10 unit radius (2x larger for better collision detection)
     player->health = 100;
     
     if (ship_id == 0) {
