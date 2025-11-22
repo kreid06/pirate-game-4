@@ -1409,7 +1409,7 @@ void websocket_server_tick(float dt) {
     // ===== SYNC WEBSOCKET PLAYERS TO SIMULATION FOR COLLISION DETECTION =====
     if (global_sim) {
         const float SWIM_ACCELERATION = 80.0f; // Acceleration when swimming (m/s²)
-        const float SWIM_MAX_SPEED = 15.0f;    // Maximum swimming speed (m/s)
+        const float SWIM_MAX_SPEED = 30.0f;    // Maximum swimming speed (m/s) - doubled from 15
         const float SWIM_DECELERATION = 60.0f; // Deceleration when stopping (m/s²)
         
         for (uint16_t i = 0; i < global_sim->player_count; i++) {
