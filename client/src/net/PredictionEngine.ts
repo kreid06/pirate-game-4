@@ -294,7 +294,7 @@ export class PredictionEngine {
    */
   private extrapolateState(state: WorldState, deltaTime: number): WorldState {
     // Use conservative damping to reduce jitter from corrections
-    const dampingFactor = 0.9; // Slightly damped to smooth out corrections
+    const dampingFactor = 0.75; // Lower damping for maximum smoothness
     
     return {
       tick: state.tick,
