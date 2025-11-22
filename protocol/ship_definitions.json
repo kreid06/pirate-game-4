@@ -1,0 +1,88 @@
+{
+  "brigantine": {
+    "name": "Brigantine",
+    "description": "Medium-sized two-masted sailing ship with curved bow and stern",
+    "hull_control_points": {
+      "bow": { "x": 190, "y": 90 },
+      "bow_tip": { "x": 415, "y": 0 },
+      "bow_bottom": { "x": 190, "y": -90 },
+      "stern_bottom": { "x": -260, "y": -90 },
+      "stern_tip": { "x": -345, "y": 0 },
+      "stern": { "x": -260, "y": 90 }
+    },
+    "hull_generation": {
+      "description": "Hull is generated using quadratic Bezier curves for bow/stern and straight lines for sides",
+      "segments": [
+        {
+          "name": "bow_curve",
+          "type": "quadratic_bezier",
+          "p0": "bow",
+          "p1": "bow_tip",
+          "p2": "bow_bottom",
+          "subdivisions": 12,
+          "comment": "Curved bow section (port side)"
+        },
+        {
+          "name": "starboard_side",
+          "type": "straight_line",
+          "p0": "bow_bottom",
+          "p1": "stern_bottom",
+          "subdivisions": 12,
+          "comment": "Straight starboard (right) side"
+        },
+        {
+          "name": "stern_curve",
+          "type": "quadratic_bezier",
+          "p0": "stern_bottom",
+          "p1": "stern_tip",
+          "p2": "stern",
+          "subdivisions": 12,
+          "comment": "Curved stern section"
+        },
+        {
+          "name": "port_side",
+          "type": "straight_line",
+          "p0": "stern",
+          "p1": "bow",
+          "subdivisions": 11,
+          "comment": "Straight port (left) side (11 to avoid duplicate point)"
+        }
+      ],
+      "total_points": 49,
+      "quadratic_bezier_formula": "B(t) = (1-t)²*P0 + 2(1-t)t*P1 + t²*P2, where t ∈ [0,1]"
+    },
+    "physics": {
+      "mass": 5000,
+      "moment_of_inertia": 500000,
+      "max_speed": 30.0,
+      "turn_rate": 0.5,
+      "water_drag": 0.98,
+      "angular_drag": 0.95
+    },
+    "dimensions": {
+      "length": 760,
+      "beam": 180,
+      "comment": "Length from stern_tip to bow_tip, beam is width at widest point"
+    },
+    "modules": {
+      "deck": {
+        "id": 200,
+        "type": "deck",
+        "inset_margin": 20,
+        "comment": "Walkable deck polygon, inset from hull by margin"
+      },
+      "helm": {
+        "id": 1000,
+        "type": "helm",
+        "position": { "x": -90, "y": 0 },
+        "comment": "Ship control point, positioned near stern"
+      },
+      "plank_segments": {
+        "start_id": 100,
+        "count": 48,
+        "thickness": 30,
+        "comment": "Auto-generated from hull segments, see PlankSegments.ts"
+      }
+    }
+  }
+}

@@ -8,6 +8,7 @@
 import { NetworkConfig } from '../client/ClientConfig.js';
 import { WorldState, InputFrame } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
+import { createShipAtPosition } from '../sim/ShipUtils.js';
 
 /**
  * Network connection states
@@ -686,17 +687,27 @@ export class NetworkManager {
         const worldState: WorldState = {
           tick: message.tick || 0,
           timestamp: Date.now(),
-          ships: (message.ships || []).map((ship: any) => ({
-            id: ship.id || 0,
-            position: Vec2.from(ship.x || 0, ship.y || 0), // Server sends x, y (not position.x/y)
-            velocity: Vec2.from(ship.velocity_x || 0, ship.velocity_y || 0), // Server sends velocity_x, velocity_y
-            rotation: ship.rotation || 0,
-            angularVelocity: ship.angular_velocity || 0, // Server sends angular_velocity
-            hull: (ship.hull || []).map((point: any) => 
-              point ? Vec2.from(point.x || 0, point.y || 0) : Vec2.zero()
-            ),
-            modules: ship.modules || []
-          })),
+          ships: (message.ships || []).map((ship: any) => {
+            // Create proper ship with brigantine design (hull, deck, planks, modules)
+            // This ensures all ships have the correct visual appearance and collision geometry
+            const position = Vec2.from(ship.x || 0, ship.y || 0);
+            const rotation = ship.rotation || 0;
+            const properShip = createShipAtPosition(position, rotation);
+            
+            // Override with server's authoritative state
+            return {
+              ...properShip,
+              id: ship.id || properShip.id, // Use server-assigned ship ID
+              velocity: Vec2.from(ship.velocity_x || 0, ship.velocity_y || 0),
+              angularVelocity: ship.angular_velocity || 0,
+              
+              // TODO: Future server features
+              // - ship.type: 'brigantine' | 'sloop' | 'galleon' (use different ship designs)
+              // - ship.modules: Parse plank data, cannons, sails, etc. from server
+              // - ship.health: Ship health/damage state
+              // - ship.sails: Sail configuration and state
+            };
+          }),
           players: (message.players || []).map((player: any) => ({
             id: player.id || 0,
             name: player.name || `Player_${player.id || 0}`,
