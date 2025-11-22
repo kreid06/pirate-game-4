@@ -18,6 +18,7 @@ import { PredictionEngine } from '../net/PredictionEngine.js';
 // Gameplay Systems
 import { InputManager } from './gameplay/InputManager.js';
 import { ModuleInteractionSystem } from './gameplay/ModuleInteractionSystem.js';
+import { PhysicsConfig } from '../sim/Types.js';
 
 // UI System
 import { UIManager } from './ui/UIManager.js';
@@ -565,7 +566,7 @@ export class ClientApplication {
           position: Vec2.from(600, 400), // Same as ship position
           velocity: Vec2.zero(),
           rotation: 0, // Facing right
-          radius: 8,
+          radius: PhysicsConfig.PLAYER_RADIUS,
           carrierId: 1, // On the demo ship
           deckId: 0,
           onDeck: true

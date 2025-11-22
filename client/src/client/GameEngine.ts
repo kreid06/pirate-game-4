@@ -5,7 +5,7 @@
  * without complex networking or client architecture dependencies.
  */
 
-import { WorldState, Ship, InputFrame } from '../sim/Types.js';
+import { WorldState, Ship, InputFrame, PhysicsConfig } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
@@ -105,7 +105,7 @@ export class GameEngine {
         position: Vec2.from(600, 400),
         velocity: Vec2.zero(),
         rotation: 0,
-        radius: 8,
+        radius: PhysicsConfig.PLAYER_RADIUS,
         onDeck: true,
         carrierId: ship.id,
         deckId: ship.modules[0].id
