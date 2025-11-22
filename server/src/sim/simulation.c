@@ -438,12 +438,11 @@ static void update_player_physics(struct Player* player, struct Sim* sim, q16_t 
             player->flags &= ~PLAYER_FLAG_IN_WATER;
         }
     } else {
-        // Player in water - apply swimming physics
+        // Player in water - swimming physics
         player->flags |= PLAYER_FLAG_IN_WATER;
         
-        // Apply water friction
-        q16_t water_friction = Q16_FROM_FLOAT(0.9f);
-        player->velocity = vec2_mul_scalar(player->velocity, water_friction);
+        // Note: Velocity is controlled by WebSocket server (acceleration/deceleration)
+        // No friction applied here - deceleration is handled when player stops moving
         
         // Integrate position
         Vec2Q16 displacement = vec2_mul_scalar(player->velocity, dt);

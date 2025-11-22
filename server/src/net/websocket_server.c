@@ -1397,7 +1397,9 @@ void websocket_server_tick(float dt) {
     
     // ===== SYNC WEBSOCKET PLAYERS TO SIMULATION FOR COLLISION DETECTION =====
     if (global_sim) {
-        const float SWIM_FORCE = 150.0f; // Force applied when swimming (N)
+        const float SWIM_ACCELERATION = 80.0f; // Acceleration when swimming (m/s²)
+        const float SWIM_MAX_SPEED = 15.0f;    // Maximum swimming speed (m/s)
+        const float SWIM_DECELERATION = 60.0f; // Deceleration when stopping (m/s²)
         
         for (uint16_t i = 0; i < global_sim->player_count; i++) {
             struct Player* sim_player = &global_sim->players[i];
@@ -1405,24 +1407,60 @@ void websocket_server_tick(float dt) {
             // Find corresponding WebSocket player by ID
             WebSocketPlayer* ws_player = find_player(sim_player->id);
             if (ws_player && ws_player->active) {
-                // Apply movement forces to simulation player instead of direct position update
                 if (ws_player->is_moving) {
+                    // Player is actively moving - apply acceleration
                     float movement_x = ws_player->movement_direction_x;
                     float movement_y = ws_player->movement_direction_y;
                     float magnitude = sqrtf(movement_x * movement_x + movement_y * movement_y);
                     
                     if (magnitude > 0.01f) {
-                        // Normalize and apply force
+                        // Normalize movement direction
                         movement_x /= magnitude;
                         movement_y /= magnitude;
                         
-                        // Apply swimming force (simulation will integrate this)
-                        q16_t force_x = Q16_FROM_FLOAT(movement_x * SWIM_FORCE);
-                        q16_t force_y = Q16_FROM_FLOAT(movement_y * SWIM_FORCE);
+                        // Apply acceleration in movement direction
+                        q16_t accel_x = Q16_FROM_FLOAT(movement_x * SWIM_ACCELERATION * dt);
+                        q16_t accel_y = Q16_FROM_FLOAT(movement_y * SWIM_ACCELERATION * dt);
                         
-                        // Add to velocity (simplified force application: F*dt/m, assuming m=1)
-                        sim_player->velocity.x += q16_mul(force_x, Q16_FROM_FLOAT(dt));
-                        sim_player->velocity.y += q16_mul(force_y, Q16_FROM_FLOAT(dt));
+                        sim_player->velocity.x += accel_x;
+                        sim_player->velocity.y += accel_y;
+                        
+                        // Clamp to maximum speed
+                        float current_vx = Q16_TO_FLOAT(sim_player->velocity.x);
+                        float current_vy = Q16_TO_FLOAT(sim_player->velocity.y);
+                        float current_speed = sqrtf(current_vx * current_vx + current_vy * current_vy);
+                        
+                        if (current_speed > SWIM_MAX_SPEED) {
+                            // Scale velocity back to max speed
+                            float scale = SWIM_MAX_SPEED / current_speed;
+                            sim_player->velocity.x = Q16_FROM_FLOAT(current_vx * scale);
+                            sim_player->velocity.y = Q16_FROM_FLOAT(current_vy * scale);
+                        }
+                    }
+                } else {
+                    // Player stopped moving - apply deceleration
+                    float current_vx = Q16_TO_FLOAT(sim_player->velocity.x);
+                    float current_vy = Q16_TO_FLOAT(sim_player->velocity.y);
+                    float current_speed = sqrtf(current_vx * current_vx + current_vy * current_vy);
+                    
+                    if (current_speed > 0.1f) {
+                        // Apply deceleration opposite to velocity direction
+                        float decel_amount = SWIM_DECELERATION * dt;
+                        
+                        if (decel_amount >= current_speed) {
+                            // Stop completely
+                            sim_player->velocity.x = 0;
+                            sim_player->velocity.y = 0;
+                        } else {
+                            // Reduce speed
+                            float scale = (current_speed - decel_amount) / current_speed;
+                            sim_player->velocity.x = Q16_FROM_FLOAT(current_vx * scale);
+                            sim_player->velocity.y = Q16_FROM_FLOAT(current_vy * scale);
+                        }
+                    } else {
+                        // Already stopped
+                        sim_player->velocity.x = 0;
+                        sim_player->velocity.y = 0;
                     }
                 }
                 
