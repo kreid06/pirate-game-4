@@ -1,5 +1,6 @@
 #include "server.h"
 #include "sim/types.h"
+#include "sim/simulation.h"
 #include "net/protocol.h"
 #include "net/websocket_server.h"
 #include "admin/admin_server.h"
@@ -116,6 +117,10 @@ int server_init(struct ServerContext** out_ctx) {
         free(ctx);
         return -1;
     }
+    
+    // Link WebSocket server to simulation for collision detection
+    websocket_server_set_simulation(&ctx->simulation);
+    log_info("WebSocket server linked to simulation");
     
     // Mark as initialized
     ctx->initialized = true;
@@ -394,15 +399,7 @@ static void step_simulation(struct ServerContext* ctx) {
     sim->tick = ctx->current_tick;
     sim->time_ms = ctx->current_tick * TICK_DURATION_MS;
     
-    // TODO: Implement full physics simulation
-    // This is a placeholder that would include:
-    // 1. Process player input commands
-    // 2. Update ship physics (forces, collisions)
-    // 3. Update projectile physics  
-    // 4. Handle game events (combat, interactions)
-    // 5. Update spatial acceleration structures
-    
-    // For now, just demonstrate deterministic behavior
-    uint32_t random_val = rng_next(&sim->rng);
-    (void)random_val; // Suppress unused warning
+    // Run the full simulation step (physics, collisions, etc.)
+    q16_t dt = Q16_FROM_FLOAT(TICK_DURATION_MS / 1000.0f); // Convert ms to seconds
+    sim_step(sim, dt);
 }

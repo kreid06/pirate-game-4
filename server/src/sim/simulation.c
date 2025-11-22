@@ -129,6 +129,21 @@ void sim_update_players(struct Sim* sim, q16_t dt) {
         }
     }
     
+    // Log player positions periodically
+    static uint32_t pos_log_count = 0;
+    if (pos_log_count++ % 100 == 0 && sim->player_count > 0) {
+        log_info("📍 Player positions:");
+        for (uint16_t i = 0; i < sim->player_count; i++) {
+            struct Player* p = &sim->players[i];
+            log_info("  P%u: pos(%.2f, %.2f) vel(%.2f, %.2f) radius=%.2f ship_id=%u",
+                p->id,
+                Q16_TO_FLOAT(p->position.x), Q16_TO_FLOAT(p->position.y),
+                Q16_TO_FLOAT(p->velocity.x), Q16_TO_FLOAT(p->velocity.y),
+                Q16_TO_FLOAT(p->radius),
+                p->ship_id);
+        }
+    }
+    
     // Update each player's physics
     for (uint16_t i = 0; i < sim->player_count; i++) {
         update_player_physics(&sim->players[i], sim, dt);
@@ -232,7 +247,7 @@ entity_id sim_create_player(struct Sim* sim, Vec2Q16 position, entity_id ship_id
     player->ship_id = ship_id;
     player->position = position;
     player->velocity = VEC2_ZERO;
-    player->radius = Q16_FROM_FLOAT(5.0f); // 5 unit radius (increased for better collision detection)
+    player->radius = Q16_FROM_FLOAT(8.0f); // 8 unit radius for collision detection
     player->health = 100;
     
     if (ship_id == 0) {
@@ -423,12 +438,11 @@ static void update_player_physics(struct Player* player, struct Sim* sim, q16_t 
             player->flags &= ~PLAYER_FLAG_IN_WATER;
         }
     } else {
-        // Player in water - apply swimming physics
+        // Player in water - swimming physics
         player->flags |= PLAYER_FLAG_IN_WATER;
         
-        // Apply water friction
-        q16_t water_friction = Q16_FROM_FLOAT(0.9f);
-        player->velocity = vec2_mul_scalar(player->velocity, water_friction);
+        // Note: Velocity is controlled by WebSocket server (acceleration/deceleration)
+        // No friction applied here - deceleration is handled when player stops moving
         
         // Integrate position
         Vec2Q16 displacement = vec2_mul_scalar(player->velocity, dt);
@@ -718,6 +732,12 @@ static void handle_player_player_collisions(struct Sim* sim) {
     // Early exit if not enough players
     if (sim->player_count < 2) return;
     
+    // Log that we're checking collisions
+    static uint32_t check_count = 0;
+    if (check_count++ % 100 == 0) {
+        log_info("🔍 Checking player collisions: %u players", sim->player_count);
+    }
+    
     // Check all pairs of players for collisions
     for (uint16_t i = 0; i < sim->player_count; i++) {
         for (uint16_t j = i + 1; j < sim->player_count; j++) {
@@ -740,12 +760,17 @@ static void handle_player_player_collisions(struct Sim* sim) {
             // Skip if players are too far apart
             if (dist_sq >= check_dist_sq) continue;
             
+            // Log when players are within check distance
+            log_info("⚠️ Players nearby: P%u <-> P%u (dist²: %d, check²: %d)",
+                p1->id, p2->id, Q16_TO_INT(dist_sq), Q16_TO_INT(check_dist_sq));
+            
             // Calculate actual distance for precise collision check
             Vec2Q16 delta = {dx, dy};
             q16_t dist = vec2_length(delta);
             
             // Skip if exactly on top of each other (avoid division by zero)
             if (dist < Q16_FROM_FLOAT(0.01f)) {
+                log_info("💥 Players on same position! P%u <-> P%u - pushing apart", p1->id, p2->id);
                 // Push them apart in a random direction if overlapping perfectly
                 p1->position.x -= Q16_FROM_FLOAT(0.5f);
                 p2->position.x += Q16_FROM_FLOAT(0.5f);
@@ -757,10 +782,11 @@ static void handle_player_player_collisions(struct Sim* sim) {
                 q16_t overlap = min_dist - dist;
                 
                 // Log collision for debugging
-                log_debug("💥 Player collision: P%u <-> P%u (overlap: %d.%02d units)",
+                log_info("💥 Player collision: P%u <-> P%u (overlap: %d.%02d units, dist: %d.%02d, min: %d.%02d)",
                     p1->id, p2->id, 
-                    Q16_TO_INT(overlap), 
-                    (int)((Q16_TO_FLOAT(overlap) * 100) - (Q16_TO_INT(overlap) * 100)));
+                    Q16_TO_INT(overlap), (int)((Q16_TO_FLOAT(overlap) * 100) - (Q16_TO_INT(overlap) * 100)),
+                    Q16_TO_INT(dist), (int)((Q16_TO_FLOAT(dist) * 100) - (Q16_TO_INT(dist) * 100)),
+                    Q16_TO_INT(min_dist), (int)((Q16_TO_FLOAT(min_dist) * 100) - (Q16_TO_INT(min_dist) * 100)));
                 
                 // Calculate collision normal (direction from p1 to p2)
                 q16_t normal_x = q16_div(dx, dist);

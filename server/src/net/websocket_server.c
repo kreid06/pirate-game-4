@@ -1,6 +1,7 @@
 #include "net/websocket_server.h"
 #include "net/websocket_protocol.h"
 #include "net/network.h"
+#include "sim/simulation.h"
 #include "util/log.h"
 #include "util/time.h"
 #include <string.h>
@@ -66,6 +67,9 @@ struct WebSocketServer {
 };
 
 static struct WebSocketServer ws_server = {0};
+
+// Global simulation pointer for player collision detection
+static struct Sim* global_sim = NULL;
 
 // Helper function to get movement state string
 static const char* get_state_string(PlayerMovementState state) {
@@ -188,6 +192,15 @@ static WebSocketPlayer* find_player(uint32_t player_id) {
     return NULL;
 }
 
+static WebSocketPlayer* find_player_by_sim_id(uint32_t sim_entity_id) {
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (players[i].active && players[i].sim_entity_id == sim_entity_id) {
+            return &players[i];
+        }
+    }
+    return NULL;
+}
+
 static WebSocketPlayer* create_player(uint32_t player_id) {
     // Check if player already exists
     WebSocketPlayer* existing = find_player(player_id);
@@ -202,6 +215,7 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             memset(&players[i], 0, sizeof(WebSocketPlayer));
             
             players[i].player_id = player_id;
+            players[i].sim_entity_id = 0; // Will be set when added to simulation
             
             // Spawn player in water near origin for testing swimming
             players[i].parent_ship_id = 0;
@@ -211,10 +225,22 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].local_y = 0.0f;
             players[i].movement_state = PLAYER_STATE_SWIMMING;
             
-            log_info("🎮 Spawned player %u in water at (%.1f, %.1f) - Ship at (%.1f, %.1f)", 
-                     player_id, players[i].x, players[i].y,
-                     ship_count > 0 ? ships[0].x : 0.0f,
-                     ship_count > 0 ? ships[0].y : 0.0f);
+            // ===== ADD PLAYER TO C SIMULATION FOR COLLISION DETECTION =====
+            if (global_sim) {
+                Vec2Q16 spawn_pos = {
+                    Q16_FROM_FLOAT(players[i].x),
+                    Q16_FROM_FLOAT(players[i].y)
+                };
+                entity_id sim_player_id = sim_create_player(global_sim, spawn_pos, 0);
+                if (sim_player_id != INVALID_ENTITY_ID) {
+                    players[i].sim_entity_id = sim_player_id;
+                    log_info("✅ Player %u added to simulation (sim_entity_id: %u)", player_id, sim_player_id);
+                } else {
+                    log_warn("❌ Failed to add player %u to simulation", player_id);
+                }
+            }
+            
+            // Player spawned in water
             
             /* Original ship spawn code - commented out for swimming tests
             // Spawn player on the first ship if it exists
@@ -290,15 +316,7 @@ static void update_movement_activity(void) {
 }
 
 static void debug_player_state(void) {
-    int active_players = 0;
-    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-        if (players[i].active) {
-            active_players++;
-            log_info("🔍 Player %u: pos(%.1f, %.1f) active=%d", 
-                     players[i].player_id, players[i].x, players[i].y, players[i].active);
-        }
-    }
-    log_info("🔍 Total active players: %d", active_players);
+    // Debug function - logging disabled
 }
 
 // HYBRID APPROACH: Apply player movement state every tick (called from server loop)
@@ -443,23 +461,8 @@ static void update_player_movement(WebSocketPlayer* player, float rotation, floa
     // Debug logging for movement
     static uint32_t last_movement_log_time = 0;
     uint32_t current_time_ms = get_time_ms();
-    if (current_time_ms - last_movement_log_time > 1000) {  // Log every second
-        if (magnitude > 0.01f) {
-            log_info("🚶 MOVEMENT: Player %u moved | State: %s | Ship: %u | World: (%.1f, %.1f) | Local: (%.1f, %.1f) | Vel: (%.2f, %.2f) | Input: (%.2f, %.2f)",
-                     player->player_id,
-                     get_state_string(player->movement_state),
-                     player->parent_ship_id,
-                     player->x, player->y,
-                     player->local_x, player->local_y,
-                     player->velocity_x, player->velocity_y,
-                     movement_x, movement_y);
-        } else {
-            log_info("🛑 STATIONARY: Player %u not moving | State: %s | Ship: %u | World: (%.1f, %.1f)",
-                     player->player_id,
-                     get_state_string(player->movement_state),
-                     player->parent_ship_id,
-                     player->x, player->y);
-        }
+    if (current_time_ms - last_movement_log_time > 1000) {  // Track time
+        // Movement updates happening (logging disabled)
         last_movement_log_time = current_time_ms;
     }
 }
@@ -532,6 +535,11 @@ size_t websocket_create_frame(uint8_t opcode, const char* payload, size_t payloa
     frame_len += payload_len;
     
     return frame_len;
+}
+
+void websocket_server_set_simulation(struct Sim* sim) {
+    global_sim = sim;
+    log_info("✅ WebSocket server linked to simulation for collision detection");
 }
 
 int websocket_server_init(uint16_t port) {
@@ -696,8 +704,7 @@ int websocket_server_update(struct Sim* sim) {
             inet_ntop(AF_INET, &client_addr.sin_addr, ws_server.clients[slot].ip_address, INET_ADDRSTRLEN);
             ws_server.clients[slot].port = ntohs(client_addr.sin_port);
             
-            log_info("🔗 New WebSocket connection from %s:%u (slot %d)", 
-                     ws_server.clients[slot].ip_address, ws_server.clients[slot].port, slot);
+            // New WebSocket connection accepted
         } else {
             log_warn("WebSocket server full, rejecting connection");
             close(client_fd);
@@ -719,7 +726,7 @@ int websocket_server_update(struct Sim* sim) {
                 // Handle WebSocket handshake
                 if (websocket_handshake(client->fd, buffer)) {
                     client->handshake_complete = true;
-                    log_info("✅ WebSocket handshake completed for %s:%u", client->ip_address, client->port);
+                    // WebSocket handshake completed
                 } else {
                     log_warn("❌ WebSocket handshake failed for %s:%u", client->ip_address, client->port);
                     close(client->fd);
@@ -764,12 +771,9 @@ int websocket_server_update(struct Sim* sim) {
                     default: opcode_name = "UNKNOWN"; break;
                 }
                 
-                log_info("� WebSocket frame received | From: %s:%u | Player: %u | Opcode: %s (0x%X) | Length: %zu bytes",
-                        client->ip_address, client->port, client->player_id, opcode_name, opcode, payload_len);
+                // Frame received - processing
                 
                 if (opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY) {
-                    log_info("📨 WebSocket payload: %.*s", 
-                            (int)payload_len, payload);
                     
                     char response[1024];
                     bool handled = false;
@@ -777,10 +781,10 @@ int websocket_server_update(struct Sim* sim) {
                     // Check if message is JSON or text command
                     if (payload[0] == '{') {
                         // JSON message - parse type
-                        log_info("🔍 JSON message detected, parsing type...");
+                        // JSON message - parsing type
                         
                         if (strstr(payload, "\"type\":\"handshake\"")) {
-                            log_info("🤝 Processing HANDSHAKE message");
+                            // Processing HANDSHAKE message
                             // Extract player name from handshake if provided
                             char player_name[32] = "Player";
                             char* name_start = strstr(payload, "\"playerName\":\"");
@@ -890,7 +894,7 @@ int websocket_server_update(struct Sim* sim) {
                                     size_t game_state_frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state_response, strlen(game_state_response), game_state_frame);
                                     if (game_state_frame_len > 0) {
                                         send(client->fd, game_state_frame, game_state_frame_len, 0);
-                                        log_info("🎮 Sent initial game state to %s:%u", client->ip_address, client->port);
+                                        // Sent initial game state
                                     }
                                     
                                     // Skip normal response sending since we already sent
@@ -902,13 +906,8 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else if (strstr(payload, "\"type\":\"input_frame\"")) {
                             // Input frame message - parse movement data
-                            log_info("🎮 Processing INPUT_FRAME message");
                             ws_server.input_messages_received++;
                             ws_server.last_input_time = get_time_ms();
-                            
-                            log_info("🎮 Input frame received from %s:%u (Player: %u)", 
-                                     client->ip_address, client->port, client->player_id);
-                            log_info("🔍 Raw input_frame payload: %.*s", (int)payload_len, payload);
                             
                             if (client->player_id == 0) {
                                 log_warn("Input frame from client %s:%u with no player ID", client->ip_address, client->port);
@@ -934,10 +933,6 @@ int websocket_server_update(struct Sim* sim) {
                                         if (x_start) sscanf(x_start + 4, "%f", &x);
                                         if (y_start) sscanf(y_start + 4, "%f", &y);
                                         
-                                        // Temporary debug logging for movement data
-                                        log_info("📥 Input from player %u: rotation=%.3f, movement=(%.3f, %.3f)", 
-                                                 client->player_id, rotation, x, y);
-                                        
                                         // Validate movement values
                                         if (x < -1.0f) x = -1.0f;
                                         if (x > 1.0f) x = 1.0f;
@@ -961,8 +956,7 @@ int websocket_server_update(struct Sim* sim) {
                                             update_movement_activity();
                                         }
                                         
-                                        log_info("🎮 Player %u at (%.1f, %.1f) facing %.3f rad", 
-                                                 client->player_id, player->x, player->y, player->rotation);
+                                        // Player input processed
                                     } else {
                                         log_warn("Invalid input frame format from player %u", client->player_id);
                                     }
@@ -977,7 +971,6 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else if (strstr(payload, "\"type\":\"movement_state\"")) {
                             // HYBRID: Movement state change message
-                            log_info("🚶 Processing MOVEMENT_STATE message");
                             ws_server.input_messages_received++;
                             ws_server.last_input_time = get_time_ms();
                             
@@ -1016,9 +1009,6 @@ int websocket_server_update(struct Sim* sim) {
                                     player->is_moving = is_moving;
                                     player->last_input_time = get_time_ms();
                                     
-                                    log_info("🚶 Player %u movement state: (%.2f, %.2f) moving=%d", 
-                                             player->player_id, x, y, is_moving);
-                                    
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"state_updated\"}");
                                 } else {
                                     log_warn("Movement state for non-existent player %u", client->player_id);
@@ -1029,7 +1019,6 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else if (strstr(payload, "\"type\":\"rotation_update\"")) {
                             // HYBRID: Rotation update message
-                            log_info("🎯 Processing ROTATION_UPDATE message");
                             
                             if (client->player_id == 0) {
                                 log_warn("Rotation update from client %s:%u with no player ID", client->ip_address, client->port);
@@ -1053,8 +1042,6 @@ int websocket_server_update(struct Sim* sim) {
                                     player->last_rotation = player->rotation;
                                     player->rotation = rotation;
                                     player->last_rotation_update_time = get_time_ms();
-                                    
-                                    log_info("🎯 Player %u rotation: %.3f rad", player->player_id, rotation);
                                     
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"rotation_updated\"}");
                                 } else {
@@ -1112,7 +1099,6 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else if (strstr(payload, "\"type\":\"ping\"")) {
                             // JSON ping message
-                            log_info("🏓 Processing JSON PING message");
                             snprintf(response, sizeof(response),
                                     "{\"type\":\"pong\",\"timestamp\":%u,\"server_time\":%u}",
                                     get_time_ms(), get_time_ms());
@@ -1132,9 +1118,7 @@ int websocket_server_update(struct Sim* sim) {
                         
                     } else {
                         // Text command (simple protocol)
-                        log_info("📝 Text command received (not JSON)");
                         if (strncmp(payload, "PING", 4) == 0) {
-                            log_info("🏓 Processing text PING command");
                             strcpy(response, "PONG");
                             handled = true;
                             
@@ -1154,7 +1138,7 @@ int websocket_server_update(struct Sim* sim) {
                                 snprintf(response, sizeof(response),
                                         "{\"type\":\"handshake_response\",\"player_id\":%u,\"player_name\":\"%s\",\"server_time\":%u,\"status\":\"connected\"}",
                                         player_id, player_name, get_time_ms());
-                                log_info("🎮 Player joined via WebSocket: %s (ID: %u)", player_name, player_id);
+                                // Player joined
                             }
                             handled = true;
                             
@@ -1180,8 +1164,7 @@ int websocket_server_update(struct Sim* sim) {
                             ssize_t sent = send(client->fd, frame, frame_len, 0);
                             if (sent > 0) {
                                 ws_server.packets_sent++;
-                                log_info("📤 WebSocket response sent to %s:%u (%zd bytes)", 
-                                        client->ip_address, client->port, sent);
+                                // Response sent
                             }
                         }
                     }
@@ -1189,28 +1172,25 @@ int websocket_server_update(struct Sim* sim) {
                     ws_server.packets_received++;
                     
                 } else if (opcode == WS_OPCODE_CLOSE) {
-                    log_info("🔌 WebSocket CLOSE frame received from %s:%u (Player: %u)", 
-                            client->ip_address, client->port, client->player_id);
+                    // CLOSE frame received
                     if (client->player_id > 0) {
-                        log_info("🗑️ Removing player %u due to disconnect", client->player_id);
+                        // Removing player due to disconnect
                         remove_player(client->player_id);
                         client->player_id = 0;
                     }
                     close(client->fd);
                     client->connected = false;
                 } else if (opcode == WS_OPCODE_PING) {
-                    log_info("🏓 WebSocket PING received from %s:%u (Player: %u) - sending PONG", 
-                            client->ip_address, client->port, client->player_id);
+                    // PING received - sending PONG
                     // Respond with pong
                     char frame[64];
                     size_t frame_len = websocket_create_frame(WS_OPCODE_PONG, payload, payload_len, frame);
                     if (frame_len > 0) {
                         ssize_t sent = send(client->fd, frame, frame_len, 0);
-                        log_info("🏓 PONG sent to %s:%u (%zd bytes)", client->ip_address, client->port, sent);
+                        // PONG sent
                     }
                 } else if (opcode == WS_OPCODE_PONG) {
-                    log_info("🏓 WebSocket PONG received from %s:%u (Player: %u)", 
-                            client->ip_address, client->port, client->player_id);
+                    // PONG received
                 } else {
                     log_warn("⚠️ Unknown WebSocket opcode 0x%X from %s:%u (Player: %u)", 
                             opcode, client->ip_address, client->port, client->player_id);
@@ -1218,7 +1198,7 @@ int websocket_server_update(struct Sim* sim) {
             }
         } else if (received == 0) {
             // Client disconnected
-            log_info("🔌 WebSocket client %s:%u disconnected", client->ip_address, client->port);
+            // WebSocket client disconnected
             if (client->player_id > 0) {
                 remove_player(client->player_id);
                 client->player_id = 0;
@@ -1322,12 +1302,7 @@ int websocket_server_update(struct Sim* sim) {
         // Cap at maximum rate
         if (current_update_rate > 30) current_update_rate = 30;
         
-        // Log broadcasting state less frequently (every 5 seconds)
-        static uint32_t last_broadcast_log_time = 0;
-        if (active_count > 0 && (current_time - last_broadcast_log_time) > 5000) {
-            log_info("🌐 Broadcasting game state with %d active players (Rate: %dHz)", active_count, current_update_rate);
-            last_broadcast_log_time = current_time;
-        }
+        // Broadcasting game state
         
         char game_state[4096];  // Increased buffer size for ships + players
         snprintf(game_state, sizeof(game_state),
@@ -1424,22 +1399,111 @@ void websocket_server_tick(float dt) {
     
     int moving_players = 0;
     
-    // Apply movement state for all active players
+    // Count moving players (for adaptive tick rate)
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-        if (players[i].active) {
-            apply_player_movement_state(&players[i], dt);
+        if (players[i].active && players[i].is_moving) {
+            moving_players++;
+        }
+    }
+    
+    // ===== SYNC WEBSOCKET PLAYERS TO SIMULATION FOR COLLISION DETECTION =====
+    if (global_sim) {
+        const float SWIM_ACCELERATION = 80.0f; // Acceleration when swimming (m/s²)
+        const float SWIM_MAX_SPEED = 15.0f;    // Maximum swimming speed (m/s)
+        const float SWIM_DECELERATION = 60.0f; // Deceleration when stopping (m/s²)
+        
+        for (uint16_t i = 0; i < global_sim->player_count; i++) {
+            struct Player* sim_player = &global_sim->players[i];
             
-            if (players[i].is_moving) {
-                moving_players++;
+            // Find corresponding WebSocket player by simulation entity ID
+            WebSocketPlayer* ws_player = find_player_by_sim_id(sim_player->id);
+            if (ws_player && ws_player->active) {
+                if (ws_player->is_moving) {
+                    // Player is actively moving - apply acceleration
+                    float movement_x = ws_player->movement_direction_x;
+                    float movement_y = ws_player->movement_direction_y;
+                    float magnitude = sqrtf(movement_x * movement_x + movement_y * movement_y);
+                    
+                    if (magnitude > 0.01f) {
+                        // Normalize movement direction
+                        movement_x /= magnitude;
+                        movement_y /= magnitude;
+                        
+                        // Apply acceleration in movement direction
+                        q16_t accel_x = Q16_FROM_FLOAT(movement_x * SWIM_ACCELERATION * dt);
+                        q16_t accel_y = Q16_FROM_FLOAT(movement_y * SWIM_ACCELERATION * dt);
+                        
+                        log_info("⚡ P%u: Applying acceleration (%.2f, %.2f) | dir=(%.2f, %.2f) | dt=%.3f",
+                                 sim_player->id,
+                                 Q16_TO_FLOAT(accel_x), Q16_TO_FLOAT(accel_y),
+                                 movement_x, movement_y, dt);
+                        
+                        sim_player->velocity.x += accel_x;
+                        sim_player->velocity.y += accel_y;
+                        
+                        // Clamp to maximum speed
+                        float current_vx = Q16_TO_FLOAT(sim_player->velocity.x);
+                        float current_vy = Q16_TO_FLOAT(sim_player->velocity.y);
+                        float current_speed = sqrtf(current_vx * current_vx + current_vy * current_vy);
+                        
+                        if (current_speed > SWIM_MAX_SPEED) {
+                            // Scale velocity back to max speed
+                            float scale = SWIM_MAX_SPEED / current_speed;
+                            log_info("🚀 P%u: Speed clamped %.2f → %.2f m/s | vel=(%.2f, %.2f) → (%.2f, %.2f)",
+                                     sim_player->id,
+                                     current_speed, SWIM_MAX_SPEED,
+                                     current_vx, current_vy,
+                                     current_vx * scale, current_vy * scale);
+                            sim_player->velocity.x = Q16_FROM_FLOAT(current_vx * scale);
+                            sim_player->velocity.y = Q16_FROM_FLOAT(current_vy * scale);
+                        }
+                    }
+                } else {
+                    // Player stopped moving - apply deceleration
+                    float current_vx = Q16_TO_FLOAT(sim_player->velocity.x);
+                    float current_vy = Q16_TO_FLOAT(sim_player->velocity.y);
+                    float current_speed = sqrtf(current_vx * current_vx + current_vy * current_vy);
+                    
+                    if (current_speed > 0.1f) {
+                        // Apply deceleration opposite to velocity direction
+                        float decel_amount = SWIM_DECELERATION * dt;
+                        
+                        if (decel_amount >= current_speed) {
+                            // Stop completely
+                            log_info("🛑 P%u: Stopping | speed=%.2f → 0.00 m/s | vel=(%.2f, %.2f) → (0.00, 0.00)",
+                                     sim_player->id, current_speed, current_vx, current_vy);
+                            sim_player->velocity.x = 0;
+                            sim_player->velocity.y = 0;
+                        } else {
+                            // Reduce speed
+                            float scale = (current_speed - decel_amount) / current_speed;
+                            float new_vx = current_vx * scale;
+                            float new_vy = current_vy * scale;
+                            log_info("⬇️ P%u: Decelerating | speed=%.2f → %.2f m/s | vel=(%.2f, %.2f) → (%.2f, %.2f)",
+                                     sim_player->id,
+                                     current_speed, current_speed - decel_amount,
+                                     current_vx, current_vy, new_vx, new_vy);
+                            sim_player->velocity.x = Q16_FROM_FLOAT(new_vx);
+                            sim_player->velocity.y = Q16_FROM_FLOAT(new_vy);
+                        }
+                    } else if (current_speed > 0.01f) {
+                        // Snap to zero for very low speeds
+                        log_info("🛑 P%u: Snap to zero | speed=%.2f m/s (below threshold)",
+                                 sim_player->id, current_speed);
+                        sim_player->velocity.x = 0;
+                        sim_player->velocity.y = 0;
+                    }
+                }
+                
+                // Copy simulation position BACK to WebSocket player for rendering
+                ws_player->x = Q16_TO_FLOAT(sim_player->position.x);
+                ws_player->y = Q16_TO_FLOAT(sim_player->position.y);
+                ws_player->velocity_x = Q16_TO_FLOAT(sim_player->velocity.x);
+                ws_player->velocity_y = Q16_TO_FLOAT(sim_player->velocity.y);
             }
         }
     }
     
-    // Log tick info periodically (every 5 seconds)
-    if (current_time - last_tick_log_time > 5000) {
-        if (moving_players > 0) {
-            log_info("🎮 TICK: Applied movement to %d/%d players", moving_players, WS_MAX_CLIENTS);
-        }
-        last_tick_log_time = current_time;
-    }
+    // Tick processing complete
+    last_tick_log_time = current_time;
 }

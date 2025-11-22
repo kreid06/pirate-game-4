@@ -35,7 +35,8 @@ typedef enum {
 
 // WebSocket player structure
 typedef struct WebSocketPlayer {
-    uint32_t player_id;
+    uint32_t player_id;          // WebSocket client player ID (e.g., 1000, 1001)
+    uint32_t sim_entity_id;      // Simulation entity ID (e.g., 1, 2, 3)
     char name[64];
     float x, y;
     float velocity_x, velocity_y;
@@ -74,6 +75,12 @@ struct WebSocketStats {
  * @return 0 on success, -1 on error
  */
 int websocket_server_init(uint16_t port);
+
+/**
+ * Set the simulation context for player collision detection
+ * @param sim Simulation context
+ */
+void websocket_server_set_simulation(struct Sim* sim);
 
 /**
  * Clean up WebSocket server and close all connections
