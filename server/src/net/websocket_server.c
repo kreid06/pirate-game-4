@@ -853,9 +853,16 @@ int websocket_server_update(struct Sim* sim) {
                                     strcat(ships_str, "]");
                                     
                                     snprintf(game_state_response, sizeof(game_state_response),
-                                            "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":[{\"id\":%u,\"name\":\"Player\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\"}],\"projectiles\":[]}",
+                                            "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":[{\"id\":%u,\"name\":\"Player\","
+                                            "\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
+                                            "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
+                                            "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
+                                            "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\"}],\"projectiles\":[]}",
                                             get_time_ms() / 33, get_time_ms(), ships_str, 
                                             client->player_id, player->x, player->y, player->rotation,
+                                            player->velocity_x, player->velocity_y,
+                                            player->is_moving ? "true" : "false",
+                                            player->movement_direction_x, player->movement_direction_y,
                                             player->parent_ship_id, player->local_x, player->local_y,
                                             get_state_string(player->movement_state));
                                     
@@ -1258,11 +1265,17 @@ int websocket_server_update(struct Sim* sim) {
         for (int p = 0; p < WS_MAX_CLIENTS; p++) {
             if (players[p].active) {
                 if (!first_player) strcat(players_json, ",");
-                char player_entry[256];
+                char player_entry[384];  // Increased size for additional fields
                 snprintf(player_entry, sizeof(player_entry),
-                        "{\"id\":%u,\"name\":\"Player_%u\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\"}",
+                        "{\"id\":%u,\"name\":\"Player_%u\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
+                        "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
+                        "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
+                        "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\"}",
                         players[p].player_id, players[p].player_id, 
                         players[p].x, players[p].y, players[p].rotation,
+                        players[p].velocity_x, players[p].velocity_y, 
+                        players[p].is_moving ? "true" : "false",
+                        players[p].movement_direction_x, players[p].movement_direction_y,
                         players[p].parent_ship_id, players[p].local_x, players[p].local_y,
                         get_state_string(players[p].movement_state));
                 strcat(players_json, player_entry);
