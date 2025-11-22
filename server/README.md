@@ -35,4 +35,4 @@ make
 Server configuration is handled via environment variables or config files:
 - `PORT`: Server port (default: 8080 for UDP, 8082 for WebSocket, 8081 for admin)
 - `MAX_PLAYERS`: Maximum concurrent players (default: 100)
-- `TICK_RATE`: Physics simulation tick rate (default: 60)
+- `TICK_RATE`: Physics simulation tick rate (default: 60)# Test trigger

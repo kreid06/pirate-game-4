@@ -73,14 +73,16 @@ jobs:
           
       - name: Deploy to server
         run: |
-          # Create directories with sudo, then change ownership to deploy user
-          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mkdir -p /opt/pirate-game/bin /opt/pirate-game/config && sudo chown -R deploy:deploy /opt/pirate-game"
+          # Create directories
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mkdir -p /opt/pirate-game/bin /opt/pirate-game/config"
           
-          # Copy binary
-          scp -o StrictHostKeyChecking=no server/build/pirate-server ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/pirate-game/bin/
+          # Copy binary to temp location, then move with sudo
+          scp -o StrictHostKeyChecking=no server/build/pirate-server ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/pirate-server
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mv /tmp/pirate-server /opt/pirate-game/bin/pirate-server && sudo chmod +x /opt/pirate-game/bin/pirate-server"
           
-          # Copy config
-          scp -o StrictHostKeyChecking=no server/config/server.conf ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/pirate-game/config/
+          # Copy config to temp location, then move with sudo
+          scp -o StrictHostKeyChecking=no server/config/server.conf ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/server.conf
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mv /tmp/server.conf /opt/pirate-game/config/server.conf"
           
       - name: Restart server service
         run: |
