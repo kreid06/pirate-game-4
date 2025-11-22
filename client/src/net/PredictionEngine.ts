@@ -281,8 +281,8 @@ export class PredictionEngine {
       console.warn(`⚠️ Unusual server update interval: ${timeDelta.toFixed(1)}ms (expected ~50ms at 20Hz)`);
     }
     
-    // Clamp alpha but allow slight extrapolation (up to 1.2 for smoother motion)
-    const clampedAlpha = Math.max(0, Math.min(1.2, alpha));
+    // Clamp alpha but allow slight extrapolation (reduced to 1.1 for stability)
+    const clampedAlpha = Math.max(0, Math.min(1.1, alpha));
     
     // Interpolate between the two states
     return this.interpolateStates(fromState.worldState, toState.worldState, clampedAlpha);
@@ -290,23 +290,27 @@ export class PredictionEngine {
   
   /**
    * Extrapolate state forward based on velocity (for smooth 60Hz rendering with 20Hz server)
+   * Uses damped extrapolation to reduce overshoot
    */
   private extrapolateState(state: WorldState, deltaTime: number): WorldState {
+    // Apply damping factor to reduce aggressive extrapolation
+    const dampingFactor = 0.8; // Reduce velocity effect slightly
+    
     return {
       tick: state.tick,
       timestamp: state.timestamp + deltaTime * 1000,
       ships: state.ships.map(ship => ({
         ...ship,
-        position: ship.position.add(ship.velocity.mul(deltaTime)),
-        rotation: ship.rotation + ship.angularVelocity * deltaTime
+        position: ship.position.add(ship.velocity.mul(deltaTime * dampingFactor)),
+        rotation: ship.rotation + ship.angularVelocity * deltaTime * dampingFactor
       })),
       players: state.players.map(player => ({
         ...player,
-        position: player.position.add(player.velocity.mul(deltaTime))
+        position: player.position.add(player.velocity.mul(deltaTime * dampingFactor))
       })),
       cannonballs: state.cannonballs.map(ball => ({
         ...ball,
-        position: ball.position.add(ball.velocity.mul(deltaTime))
+        position: ball.position.add(ball.velocity.mul(deltaTime * dampingFactor))
       })),
       carrierDetection: new Map(state.carrierDetection)
     };
@@ -359,19 +363,19 @@ export class PredictionEngine {
   }
   
   /**
-   * Smooth step function for natural interpolation (ease-in-out cubic)
+   * Smooth step function for natural interpolation (quintic ease-in-out for extra smoothness)
    */
   private smoothStep(t: number): number {
-    // Clamp to [0, 1.2] for slight extrapolation support
-    t = Math.max(0, Math.min(1.2, t));
+    // Clamp to [0, 1.1] for slight extrapolation support (reduced from 1.2 for stability)
+    t = Math.max(0, Math.min(1.1, t));
     
     // For values > 1, use linear extrapolation
     if (t > 1) {
       return t;
     }
     
-    // Cubic ease-in-out: 3t² - 2t³
-    return t * t * (3 - 2 * t);
+    // Quintic ease-in-out: 6t⁵ - 15t⁴ + 10t³ (smoother than cubic)
+    return t * t * t * (t * (t * 6 - 15) + 10);
   }
   
   /**
