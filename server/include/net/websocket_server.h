@@ -12,6 +12,15 @@ typedef struct SimpleShip {
     float rotation;          // Radians
     float velocity_x, velocity_y;
     float angular_velocity;
+    
+    // Physics properties (from ship definitions)
+    float mass;              // Ship mass (kg)
+    float moment_of_inertia; // Rotational inertia (kg⋅m²)
+    float max_speed;         // Maximum speed (m/s)
+    float turn_rate;         // Maximum turn rate (rad/s)
+    float water_drag;        // Linear drag coefficient (0-1)
+    float angular_drag;      // Angular drag coefficient (0-1)
+    
     float deck_min_x, deck_max_x;  // Walkable area
     float deck_min_y, deck_max_y;
     bool active;

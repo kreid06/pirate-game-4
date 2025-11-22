@@ -18,6 +18,9 @@
 #include <openssl/bio.h>
 #include <openssl/buffer.h>
 
+// Include shared ship definitions from protocol folder
+#include "../../protocol/ship_definitions.h"
+
 // Define M_PI if not available
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -578,7 +581,7 @@ int websocket_server_init(uint16_t port) {
     ws_server.running = true;
     log_info("WebSocket server initialized on port %u", port);
     
-    // Initialize a test ship away from origin (simple ship for testing)
+    // Initialize a test ship away from origin (using brigantine physics from protocol/ship_definitions.h)
     ships[0].ship_id = next_ship_id++;
     ships[0].ship_type = 3;  // Brigantine
     ships[0].x = 100.0f;  // Spawn ship away from center
@@ -587,13 +590,23 @@ int websocket_server_init(uint16_t port) {
     ships[0].velocity_x = 0.0f;
     ships[0].velocity_y = 0.0f;
     ships[0].angular_velocity = 0.0f;
+    
+    // Physics properties from brigantine ship definition
+    ships[0].mass = BRIGANTINE_MASS;
+    ships[0].moment_of_inertia = BRIGANTINE_MOMENT_OF_INERTIA;
+    ships[0].max_speed = BRIGANTINE_MAX_SPEED;
+    ships[0].turn_rate = BRIGANTINE_TURN_RATE;
+    ships[0].water_drag = BRIGANTINE_WATER_DRAG;
+    ships[0].angular_drag = BRIGANTINE_ANGULAR_DRAG;
+    
     ships[0].deck_min_x = -8.0f;  // Deck boundaries (in ship-local coords)
     ships[0].deck_max_x = 8.0f;
     ships[0].deck_min_y = -6.0f;
     ships[0].deck_max_y = 6.0f;
     ships[0].active = true;
     ship_count = 1;
-    log_info("🚢 Initialized test ship (ID: %u, Type: Brigantine) at (%.1f, %.1f)", ships[0].ship_id, ships[0].x, ships[0].y);
+    log_info("🚢 Initialized test ship (ID: %u, Type: Brigantine, Mass: %.0f kg, Inertia: %.0f kg⋅m²) at (%.1f, %.1f)", 
+             ships[0].ship_id, ships[0].mass, ships[0].moment_of_inertia, ships[0].x, ships[0].y);
     
     // Enhanced startup message
     printf("\n🌐 ═══════════════════════════════════════════════════════════════\n");
@@ -1240,17 +1253,24 @@ int websocket_server_update(struct Sim* sim) {
     uint32_t update_interval = 1000 / current_update_rate; // 20Hz = 50ms, 30Hz = 33ms
     
     if (current_time - last_game_state_time > update_interval) {
-        // Build ships JSON array
-        char ships_json[1024] = "[";
+        // Build ships JSON array with physics properties
+        char ships_json[2048] = "[";  // Increased buffer for physics data
         bool first_ship = true;
         for (int s = 0; s < ship_count; s++) {
             if (ships[s].active) {
                 if (!first_ship) strcat(ships_json, ",");
-                char ship_entry[256];
+                char ship_entry[512];  // Increased for physics properties
                 snprintf(ship_entry, sizeof(ship_entry),
-                        "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f}",
+                        "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
+                        "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
+                        "\"mass\":%.1f,\"moment_of_inertia\":%.1f,"
+                        "\"max_speed\":%.1f,\"turn_rate\":%.2f,"
+                        "\"water_drag\":%.3f,\"angular_drag\":%.3f}",
                         ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
-                        ships[s].velocity_x, ships[s].velocity_y, ships[s].angular_velocity);
+                        ships[s].velocity_x, ships[s].velocity_y, ships[s].angular_velocity,
+                        ships[s].mass, ships[s].moment_of_inertia,
+                        ships[s].max_speed, ships[s].turn_rate,
+                        ships[s].water_drag, ships[s].angular_drag);
                 strcat(ships_json, ship_entry);
                 first_ship = false;
             }
