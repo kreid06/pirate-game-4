@@ -443,23 +443,8 @@ static void update_player_movement(WebSocketPlayer* player, float rotation, floa
     // Debug logging for movement
     static uint32_t last_movement_log_time = 0;
     uint32_t current_time_ms = get_time_ms();
-    if (current_time_ms - last_movement_log_time > 1000) {  // Log every second
-        if (magnitude > 0.01f) {
-            log_info("🚶 MOVEMENT: Player %u moved | State: %s | Ship: %u | World: (%.1f, %.1f) | Local: (%.1f, %.1f) | Vel: (%.2f, %.2f) | Input: (%.2f, %.2f)",
-                     player->player_id,
-                     get_state_string(player->movement_state),
-                     player->parent_ship_id,
-                     player->x, player->y,
-                     player->local_x, player->local_y,
-                     player->velocity_x, player->velocity_y,
-                     movement_x, movement_y);
-        } else {
-            log_info("🛑 STATIONARY: Player %u not moving | State: %s | Ship: %u | World: (%.1f, %.1f)",
-                     player->player_id,
-                     get_state_string(player->movement_state),
-                     player->parent_ship_id,
-                     player->x, player->y);
-        }
+    if (current_time_ms - last_movement_log_time > 1000) {  // Track time
+        // Movement updates happening (logging disabled)
         last_movement_log_time = current_time_ms;
     }
 }
@@ -930,10 +915,6 @@ int websocket_server_update(struct Sim* sim) {
                                         if (x_start) sscanf(x_start + 4, "%f", &x);
                                         if (y_start) sscanf(y_start + 4, "%f", &y);
                                         
-                                        // Temporary debug logging for movement data
-                                        log_info("📥 Input from player %u: rotation=%.3f, movement=(%.3f, %.3f)", 
-                                                 client->player_id, rotation, x, y);
-                                        
                                         // Validate movement values
                                         if (x < -1.0f) x = -1.0f;
                                         if (x > 1.0f) x = 1.0f;
@@ -973,7 +954,6 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else if (strstr(payload, "\"type\":\"movement_state\"")) {
                             // HYBRID: Movement state change message
-                            log_info("🚶 Processing MOVEMENT_STATE message");
                             ws_server.input_messages_received++;
                             ws_server.last_input_time = get_time_ms();
                             
@@ -1012,9 +992,6 @@ int websocket_server_update(struct Sim* sim) {
                                     player->is_moving = is_moving;
                                     player->last_input_time = get_time_ms();
                                     
-                                    log_info("🚶 Player %u movement state: (%.2f, %.2f) moving=%d", 
-                                             player->player_id, x, y, is_moving);
-                                    
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"state_updated\"}");
                                 } else {
                                     log_warn("Movement state for non-existent player %u", client->player_id);
@@ -1025,7 +1002,6 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else if (strstr(payload, "\"type\":\"rotation_update\"")) {
                             // HYBRID: Rotation update message
-                            log_info("🎯 Processing ROTATION_UPDATE message");
                             
                             if (client->player_id == 0) {
                                 log_warn("Rotation update from client %s:%u with no player ID", client->ip_address, client->port);
@@ -1049,8 +1025,6 @@ int websocket_server_update(struct Sim* sim) {
                                     player->last_rotation = player->rotation;
                                     player->rotation = rotation;
                                     player->last_rotation_update_time = get_time_ms();
-                                    
-                                    log_info("🎯 Player %u rotation: %.3f rad", player->player_id, rotation);
                                     
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"rotation_updated\"}");
                                 } else {
