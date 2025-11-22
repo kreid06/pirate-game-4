@@ -1,19 +1,20 @@
-name: Deploy Client Staging
+# DISABLED - Staging environment not configured
+# name: Deploy Client Staging
 
-on:
-  push:
-    branches:
-      - develop
-    paths:
-      - 'client/**'
-      - 'protocol/**'
+# on:
+#   push:
+#     branches:
+#       - develop
+#     paths:
+#       - 'client/**'
+#       - 'protocol/**'
 
-jobs:
-  deploy-staging:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+# jobs:
+#   deploy-staging:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
         
       - name: Setup Node
         uses: actions/setup-node@v4

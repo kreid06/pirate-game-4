@@ -1,19 +1,20 @@
-name: Deploy Client to Web Server
+# DISABLED - Using GitHub Pages deployment instead (see deploy-client.yml)
+# name: Deploy Client to Web Server
 
-on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'client/**'
-      - 'protocol/**'
+# on:
+#   push:
+#     branches:
+#       - main
+#     paths:
+#       - 'client/**'
+#       - 'protocol/**'
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+# jobs:
+#   deploy:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
         
       - name: Setup Node
         uses: actions/setup-node@v4
