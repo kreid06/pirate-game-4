@@ -8,6 +8,7 @@ on:
       - 'server/**'
       - 'protocol/**'
       - '.github/workflows/deploy-server.yml'
+  workflow_dispatch:  # Allows manual trigger from GitHub Actions UI
 
 jobs:
   build-and-deploy:
