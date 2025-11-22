@@ -167,11 +167,11 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
   prediction: {
     clientTickRate: 60, // 60 Hz for smooth rendering (matches target FPS)
     serverTickRate: 20, // 20 Hz server update rate
-    interpolationBuffer: 150, // 150ms buffer to handle doubled speeds (3 server frames)
-    interpolationDelay: 75, // 75ms render delay for faster movement
-    extrapolationLimit: 100, // 100ms max extrapolation for doubled speeds (2 server frames)
+    interpolationBuffer: 200, // 200ms buffer for jitter-free rendering (4 server frames)
+    interpolationDelay: 100, // 100ms render delay (2 server frames - ensures we always have data)
+    extrapolationLimit: 50, // 50ms max extrapolation (conservative to reduce snap-back)
     rollbackLimit: 10, // 10 ticks rollback for lag compensation
-    predictionErrorThreshold: 4.0, // 4 units position error threshold (higher for faster movement)
+    predictionErrorThreshold: 8.0, // 8 units position error threshold (very high to reduce jitter corrections)
     enablePrediction: true,
     enableInterpolation: true
   },
