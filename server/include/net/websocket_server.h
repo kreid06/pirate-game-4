@@ -35,7 +35,8 @@ typedef enum {
 
 // WebSocket player structure
 typedef struct WebSocketPlayer {
-    uint32_t player_id;
+    uint32_t player_id;          // WebSocket client player ID (e.g., 1000, 1001)
+    uint32_t sim_entity_id;      // Simulation entity ID (e.g., 1, 2, 3)
     char name[64];
     float x, y;
     float velocity_x, velocity_y;

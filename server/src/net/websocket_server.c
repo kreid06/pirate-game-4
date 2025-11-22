@@ -192,6 +192,15 @@ static WebSocketPlayer* find_player(uint32_t player_id) {
     return NULL;
 }
 
+static WebSocketPlayer* find_player_by_sim_id(uint32_t sim_entity_id) {
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (players[i].active && players[i].sim_entity_id == sim_entity_id) {
+            return &players[i];
+        }
+    }
+    return NULL;
+}
+
 static WebSocketPlayer* create_player(uint32_t player_id) {
     // Check if player already exists
     WebSocketPlayer* existing = find_player(player_id);
@@ -206,6 +215,7 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             memset(&players[i], 0, sizeof(WebSocketPlayer));
             
             players[i].player_id = player_id;
+            players[i].sim_entity_id = 0; // Will be set when added to simulation
             
             // Spawn player in water near origin for testing swimming
             players[i].parent_ship_id = 0;
@@ -223,7 +233,8 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
                 };
                 entity_id sim_player_id = sim_create_player(global_sim, spawn_pos, 0);
                 if (sim_player_id != INVALID_ENTITY_ID) {
-                    log_info("✅ Player %u added to simulation (sim_id: %u)", player_id, sim_player_id);
+                    players[i].sim_entity_id = sim_player_id;
+                    log_info("✅ Player %u added to simulation (sim_entity_id: %u)", player_id, sim_player_id);
                 } else {
                     log_warn("❌ Failed to add player %u to simulation", player_id);
                 }
@@ -1404,8 +1415,8 @@ void websocket_server_tick(float dt) {
         for (uint16_t i = 0; i < global_sim->player_count; i++) {
             struct Player* sim_player = &global_sim->players[i];
             
-            // Find corresponding WebSocket player by ID
-            WebSocketPlayer* ws_player = find_player(sim_player->id);
+            // Find corresponding WebSocket player by simulation entity ID
+            WebSocketPlayer* ws_player = find_player_by_sim_id(sim_player->id);
             if (ws_player && ws_player->active) {
                 if (ws_player->is_moving) {
                     // Player is actively moving - apply acceleration
