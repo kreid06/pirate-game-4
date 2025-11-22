@@ -40,6 +40,18 @@ jobs:
           
           # Add known hosts
           ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+          
+      - name: Test SSH connection
+        run: |
+          echo "=== Testing SSH connection ==="
+          ssh -vvv -o StrictHostKeyChecking=no -o BatchMode=yes ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo 'SSH connection successful!'" || {
+            echo "ERROR: SSH connection failed!"
+            echo "Please verify:"
+            echo "1. The public key is added to ~/.ssh/authorized_keys on the server"
+            echo "2. SERVER_USER is correct (check if it should be 'root' or 'u123456789' format)"
+            echo "3. SSH is enabled on the Hostinger VPS"
+            exit 1
+          }
         
       - name: Install dependencies
         run: |
