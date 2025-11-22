@@ -73,8 +73,8 @@ jobs:
           
       - name: Deploy to server
         run: |
-          # Create directories if they don't exist
-          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mkdir -p /opt/pirate-game/bin /opt/pirate-game/config && sudo chown -R ${{ secrets.SERVER_USER }}:${{ secrets.SERVER_USER }} /opt/pirate-game"
+          # Create directories with sudo, then change ownership to deploy user
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mkdir -p /opt/pirate-game/bin /opt/pirate-game/config && sudo chown -R deploy:deploy /opt/pirate-game"
           
           # Copy binary
           scp -o StrictHostKeyChecking=no server/build/pirate-server ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/pirate-game/bin/
