@@ -696,8 +696,7 @@ int websocket_server_update(struct Sim* sim) {
             inet_ntop(AF_INET, &client_addr.sin_addr, ws_server.clients[slot].ip_address, INET_ADDRSTRLEN);
             ws_server.clients[slot].port = ntohs(client_addr.sin_port);
             
-            log_info("🔗 New WebSocket connection from %s:%u (slot %d)", 
-                     ws_server.clients[slot].ip_address, ws_server.clients[slot].port, slot);
+            // New WebSocket connection accepted
         } else {
             log_warn("WebSocket server full, rejecting connection");
             close(client_fd);
@@ -719,7 +718,7 @@ int websocket_server_update(struct Sim* sim) {
                 // Handle WebSocket handshake
                 if (websocket_handshake(client->fd, buffer)) {
                     client->handshake_complete = true;
-                    log_info("✅ WebSocket handshake completed for %s:%u", client->ip_address, client->port);
+                    // WebSocket handshake completed
                 } else {
                     log_warn("❌ WebSocket handshake failed for %s:%u", client->ip_address, client->port);
                     close(client->fd);
@@ -764,12 +763,9 @@ int websocket_server_update(struct Sim* sim) {
                     default: opcode_name = "UNKNOWN"; break;
                 }
                 
-                log_info("� WebSocket frame received | From: %s:%u | Player: %u | Opcode: %s (0x%X) | Length: %zu bytes",
-                        client->ip_address, client->port, client->player_id, opcode_name, opcode, payload_len);
+                // Frame received - processing
                 
                 if (opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY) {
-                    log_info("📨 WebSocket payload: %.*s", 
-                            (int)payload_len, payload);
                     
                     char response[1024];
                     bool handled = false;
@@ -777,10 +773,10 @@ int websocket_server_update(struct Sim* sim) {
                     // Check if message is JSON or text command
                     if (payload[0] == '{') {
                         // JSON message - parse type
-                        log_info("🔍 JSON message detected, parsing type...");
+                        // JSON message - parsing type
                         
                         if (strstr(payload, "\"type\":\"handshake\"")) {
-                            log_info("🤝 Processing HANDSHAKE message");
+                            // Processing HANDSHAKE message
                             // Extract player name from handshake if provided
                             char player_name[32] = "Player";
                             char* name_start = strstr(payload, "\"playerName\":\"");
@@ -890,7 +886,7 @@ int websocket_server_update(struct Sim* sim) {
                                     size_t game_state_frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state_response, strlen(game_state_response), game_state_frame);
                                     if (game_state_frame_len > 0) {
                                         send(client->fd, game_state_frame, game_state_frame_len, 0);
-                                        log_info("🎮 Sent initial game state to %s:%u", client->ip_address, client->port);
+                                        // Sent initial game state
                                     }
                                     
                                     // Skip normal response sending since we already sent
@@ -1154,7 +1150,7 @@ int websocket_server_update(struct Sim* sim) {
                                 snprintf(response, sizeof(response),
                                         "{\"type\":\"handshake_response\",\"player_id\":%u,\"player_name\":\"%s\",\"server_time\":%u,\"status\":\"connected\"}",
                                         player_id, player_name, get_time_ms());
-                                log_info("🎮 Player joined via WebSocket: %s (ID: %u)", player_name, player_id);
+                                // Player joined
                             }
                             handled = true;
                             
@@ -1180,8 +1176,7 @@ int websocket_server_update(struct Sim* sim) {
                             ssize_t sent = send(client->fd, frame, frame_len, 0);
                             if (sent > 0) {
                                 ws_server.packets_sent++;
-                                log_info("📤 WebSocket response sent to %s:%u (%zd bytes)", 
-                                        client->ip_address, client->port, sent);
+                                // Response sent
                             }
                         }
                     }
@@ -1189,28 +1184,25 @@ int websocket_server_update(struct Sim* sim) {
                     ws_server.packets_received++;
                     
                 } else if (opcode == WS_OPCODE_CLOSE) {
-                    log_info("🔌 WebSocket CLOSE frame received from %s:%u (Player: %u)", 
-                            client->ip_address, client->port, client->player_id);
+                    // CLOSE frame received
                     if (client->player_id > 0) {
-                        log_info("🗑️ Removing player %u due to disconnect", client->player_id);
+                        // Removing player due to disconnect
                         remove_player(client->player_id);
                         client->player_id = 0;
                     }
                     close(client->fd);
                     client->connected = false;
                 } else if (opcode == WS_OPCODE_PING) {
-                    log_info("🏓 WebSocket PING received from %s:%u (Player: %u) - sending PONG", 
-                            client->ip_address, client->port, client->player_id);
+                    // PING received - sending PONG
                     // Respond with pong
                     char frame[64];
                     size_t frame_len = websocket_create_frame(WS_OPCODE_PONG, payload, payload_len, frame);
                     if (frame_len > 0) {
                         ssize_t sent = send(client->fd, frame, frame_len, 0);
-                        log_info("🏓 PONG sent to %s:%u (%zd bytes)", client->ip_address, client->port, sent);
+                        // PONG sent
                     }
                 } else if (opcode == WS_OPCODE_PONG) {
-                    log_info("🏓 WebSocket PONG received from %s:%u (Player: %u)", 
-                            client->ip_address, client->port, client->player_id);
+                    // PONG received
                 } else {
                     log_warn("⚠️ Unknown WebSocket opcode 0x%X from %s:%u (Player: %u)", 
                             opcode, client->ip_address, client->port, client->player_id);
@@ -1218,7 +1210,7 @@ int websocket_server_update(struct Sim* sim) {
             }
         } else if (received == 0) {
             // Client disconnected
-            log_info("🔌 WebSocket client %s:%u disconnected", client->ip_address, client->port);
+            // WebSocket client disconnected
             if (client->player_id > 0) {
                 remove_player(client->player_id);
                 client->player_id = 0;
@@ -1435,11 +1427,6 @@ void websocket_server_tick(float dt) {
         }
     }
     
-    // Log tick info periodically (every 5 seconds)
-    if (current_time - last_tick_log_time > 5000) {
-        if (moving_players > 0) {
-            log_info("🎮 TICK: Applied movement to %d/%d players", moving_players, WS_MAX_CLIENTS);
-        }
-        last_tick_log_time = current_time;
-    }
+    // Tick processing complete
+    last_tick_log_time = current_time;
 }
