@@ -293,10 +293,10 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].player_id = player_id;
             players[i].sim_entity_id = 0; // Will be set when added to simulation
             
-            // Spawn player in water near origin for testing swimming
+            // Spawn player in water well above the ship for testing collision
             players[i].parent_ship_id = 0;
-            players[i].x = 0.0f;
-            players[i].y = 0.0f;
+            players[i].x = 100.0f;  // Directly above the ship at (100, 100) in client coords
+            players[i].y = 600.0f;  // 500 units above in client coords
             players[i].local_x = 0.0f;
             players[i].local_y = 0.0f;
             players[i].movement_state = PLAYER_STATE_SWIMMING;
@@ -304,8 +304,8 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             // ===== ADD PLAYER TO C SIMULATION FOR COLLISION DETECTION =====
             if (global_sim) {
                 Vec2Q16 spawn_pos = {
-                    Q16_FROM_FLOAT(players[i].x),
-                    Q16_FROM_FLOAT(players[i].y)
+                    Q16_FROM_FLOAT(CLIENT_TO_SERVER(players[i].x)),
+                    Q16_FROM_FLOAT(CLIENT_TO_SERVER(players[i].y))
                 };
                 entity_id sim_player_id = sim_create_player(global_sim, spawn_pos, 0);
                 if (sim_player_id != INVALID_ENTITY_ID) {
@@ -1581,11 +1581,11 @@ void websocket_server_tick(float dt) {
                     }
                 }
                 
-                // Copy simulation position BACK to WebSocket player for rendering
-                ws_player->x = Q16_TO_FLOAT(sim_player->position.x);
-                ws_player->y = Q16_TO_FLOAT(sim_player->position.y);
-                ws_player->velocity_x = Q16_TO_FLOAT(sim_player->velocity.x);
-                ws_player->velocity_y = Q16_TO_FLOAT(sim_player->velocity.y);
+                // Copy simulation position BACK to WebSocket player for rendering (scale to client coords)
+                ws_player->x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->position.x));
+                ws_player->y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->position.y));
+                ws_player->velocity_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->velocity.x));
+                ws_player->velocity_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->velocity.y));
             }
         }
     }

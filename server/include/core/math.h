@@ -4,6 +4,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// World unit scaling: Client uses pixels, server uses scaled-down units for Q16 stability
+// Scale factor of 10 means client coordinate 100 = server coordinate 10
+#define WORLD_SCALE_FACTOR 10.0f
+#define CLIENT_TO_SERVER(x) ((x) / WORLD_SCALE_FACTOR)
+#define SERVER_TO_CLIENT(x) ((x) * WORLD_SCALE_FACTOR)
+
 // Q16.16 Fixed-point math for determinism
 typedef int32_t q16_t;
 typedef int64_t q32_t;

@@ -292,12 +292,12 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
         const struct Ship* ship = &sim->ships[i];
         if (ship->id == 0) continue; // Skip invalid ships
         
-        // Convert Q16.16 fixed-point to float for JSON
-        float pos_x = (float)ship->position.x / 65536.0f;
-        float pos_y = (float)ship->position.y / 65536.0f;
+        // Convert Q16.16 fixed-point to float and scale back to client coordinates
+        float pos_x = SERVER_TO_CLIENT((float)ship->position.x / 65536.0f);
+        float pos_y = SERVER_TO_CLIENT((float)ship->position.y / 65536.0f);
         float rotation = (float)ship->rotation / 65536.0f;
-        float vel_x = (float)ship->velocity.x / 65536.0f;
-        float vel_y = (float)ship->velocity.y / 65536.0f;
+        float vel_x = SERVER_TO_CLIENT((float)ship->velocity.x / 65536.0f);
+        float vel_y = SERVER_TO_CLIENT((float)ship->velocity.y / 65536.0f);
         
         offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
             "    {\n"
@@ -312,10 +312,10 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
             ship->id, pos_x, pos_y, rotation, vel_x, vel_y, Q16_TO_INT(ship->hull_health)
         );
         
-        // Add hull vertices
+        // Add hull vertices (scale back to client coordinates)
         for (uint8_t v = 0; v < ship->hull_vertex_count && offset < (int)sizeof(json_buffer) - 200; v++) {
-            float vx = (float)ship->hull_vertices[v].x / 65536.0f;
-            float vy = (float)ship->hull_vertices[v].y / 65536.0f;
+            float vx = SERVER_TO_CLIENT((float)ship->hull_vertices[v].x / 65536.0f);
+            float vy = SERVER_TO_CLIENT((float)ship->hull_vertices[v].y / 65536.0f);
             offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
                 "{\"x\":%.2f,\"y\":%.2f}%s",
                 vx, vy, (v + 1 < ship->hull_vertex_count) ? "," : ""
@@ -336,8 +336,9 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
         const struct Player* player = &sim->players[i];
         if (player->id == 0) continue; // Skip invalid players
         
-        float pos_x = (float)player->position.x / 65536.0f;
-        float pos_y = (float)player->position.y / 65536.0f;
+        // Scale back to client coordinates
+        float pos_x = SERVER_TO_CLIENT((float)player->position.x / 65536.0f);
+        float pos_y = SERVER_TO_CLIENT((float)player->position.y / 65536.0f);
         
         offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
             "    {\n"
@@ -361,10 +362,11 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
         const struct Projectile* proj = &sim->projectiles[i];
         if (proj->id == 0) continue; // Skip invalid projectiles
         
-        float pos_x = (float)proj->position.x / 65536.0f;
-        float pos_y = (float)proj->position.y / 65536.0f;
-        float vel_x = (float)proj->velocity.x / 65536.0f;
-        float vel_y = (float)proj->velocity.y / 65536.0f;
+        // Scale back to client coordinates
+        float pos_x = SERVER_TO_CLIENT((float)proj->position.x / 65536.0f);
+        float pos_y = SERVER_TO_CLIENT((float)proj->position.y / 65536.0f);
+        float vel_x = SERVER_TO_CLIENT((float)proj->velocity.x / 65536.0f);
+        float vel_y = SERVER_TO_CLIENT((float)proj->velocity.y / 65536.0f);
         
         offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
             "    {\n"

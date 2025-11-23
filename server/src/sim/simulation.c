@@ -219,8 +219,9 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
     
     // Create brigantine hull with curved bow/stern sections (47 vertices)
     // Matches client-side createCurvedShipHull() from ShipUtils.ts
-    // Hull points (in meters): bow(190,90), bowTip(415,0), bowBottom(190,-90),
-    //                         sternBottom(-260,-90), sternTip(-345,0), stern(-260,90)
+    // Hull points (in client pixels): bow(190,90), bowTip(415,0), bowBottom(190,-90),
+    //                                  sternBottom(-260,-90), sternTip(-345,0), stern(-260,90)
+    // Scaled down by WORLD_SCALE_FACTOR for server Q16 stability
     ship->hull_vertex_count = 47;
     int idx = 0;
     
@@ -230,7 +231,10 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         // Quadratic bezier: P(t) = (1-t)²P0 + 2(1-t)tP1 + t²P2
         float x = (1-t)*(1-t)*190.0f + 2*(1-t)*t*415.0f + t*t*190.0f;
         float y = (1-t)*(1-t)*90.0f + 2*(1-t)*t*0.0f + t*t*(-90.0f);
-        ship->hull_vertices[idx++] = (Vec2Q16){Q16_FROM_FLOAT(x), Q16_FROM_FLOAT(y)};
+        ship->hull_vertices[idx++] = (Vec2Q16){
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)), 
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
+        };
     }
     
     // Straight starboard side (bowBottom -> sternBottom) - 12 points
@@ -238,7 +242,10 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         float t = (float)i / 12.0f;
         float x = 190.0f + t * (-260.0f - 190.0f);
         float y = -90.0f + t * (-90.0f - (-90.0f));
-        ship->hull_vertices[idx++] = (Vec2Q16){Q16_FROM_FLOAT(x), Q16_FROM_FLOAT(y)};
+        ship->hull_vertices[idx++] = (Vec2Q16){
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)), 
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
+        };
     }
     
     // Curved stern section (sternBottom -> sternTip -> stern) - 12 points
@@ -246,7 +253,10 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         float t = (float)i / 12.0f;
         float x = (1-t)*(1-t)*(-260.0f) + 2*(1-t)*t*(-345.0f) + t*t*(-260.0f);
         float y = (1-t)*(1-t)*(-90.0f) + 2*(1-t)*t*0.0f + t*t*90.0f;
-        ship->hull_vertices[idx++] = (Vec2Q16){Q16_FROM_FLOAT(x), Q16_FROM_FLOAT(y)};
+        ship->hull_vertices[idx++] = (Vec2Q16){
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)), 
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
+        };
     }
     
     // Straight port side (stern -> bow) - 11 points (excluding last to avoid duplication)
@@ -254,10 +264,16 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         float t = (float)i / 12.0f;
         float x = -260.0f + t * (190.0f - (-260.0f));
         float y = 90.0f + t * (90.0f - 90.0f);
-        ship->hull_vertices[idx++] = (Vec2Q16){Q16_FROM_FLOAT(x), Q16_FROM_FLOAT(y)};
+        ship->hull_vertices[idx++] = (Vec2Q16){
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)), 
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
+        };
     }
     
-    ship->bounding_radius = Q16_FROM_FLOAT(430.0f); // Slightly larger than bowTip x-coordinate
+    // Calculate bounding radius from actual hull extent (scaled)
+    // Hull extends from -345 to 415 in x (client), -90 to 90 in y (client)
+    // Max distance from center is sqrt(415^2 + 90^2) ≈ 424.6 client units = 42.46 server units
+    ship->bounding_radius = Q16_FROM_FLOAT(CLIENT_TO_SERVER(430.0f)); // Slightly larger than max hull extent
     
     sim->ship_count++;
     
@@ -282,7 +298,7 @@ entity_id sim_create_player(struct Sim* sim, Vec2Q16 position, entity_id ship_id
     player->ship_id = ship_id;
     player->position = position;
     player->velocity = VEC2_ZERO;
-    player->radius = Q16_FROM_FLOAT(8.0f); // 8 unit radius for collision detection
+    player->radius = Q16_FROM_FLOAT(CLIENT_TO_SERVER(8.0f)); // 8 client pixels = 0.8 server units
     player->health = 100;
     
     if (ship_id == 0) {
@@ -898,12 +914,12 @@ static void handle_player_player_collisions(struct Sim* sim) {
             struct Player* p2 = &sim->players[j];
             
             // Calculate distance between players using distance squared for efficiency
-            q16_t dx = p2->position.x - p1->position.x;
-            q16_t dy = p2->position.y - p1->position.y;
-            q16_t dist_sq = q16_mul(dx, dx) + q16_mul(dy, dy);
+            q16_t dx = q16_sub_sat(p2->position.x, p1->position.x);
+            q16_t dy = q16_sub_sat(p2->position.y, p1->position.y);
+            q16_t dist_sq = q16_add_sat(q16_mul(dx, dx), q16_mul(dy, dy));
             
             // Calculate minimum distance (sum of radii) for collision check
-            q16_t min_dist = p1->radius + p2->radius;
+            q16_t min_dist = q16_add_sat(p1->radius, p2->radius);
             
             // Broad phase: Check if players are close enough to potentially collide
             // Add a small buffer zone (1.5x radius) to catch fast-moving players
@@ -932,7 +948,7 @@ static void handle_player_player_collisions(struct Sim* sim) {
             
             // Check if players are actually overlapping
             if (dist < min_dist) {
-                q16_t overlap = min_dist - dist;
+                q16_t overlap = q16_sub_sat(min_dist, dist);
                 
                 // Log collision for debugging
                 log_info("💥 Player collision: P%u <-> P%u (overlap: %d.%02d units, dist: %d.%02d, min: %d.%02d)",
@@ -950,15 +966,15 @@ static void handle_player_player_collisions(struct Sim* sim) {
                 q16_t sep_x = q16_mul(normal_x, separation);
                 q16_t sep_y = q16_mul(normal_y, separation);
                 
-                p1->position.x -= sep_x;
-                p1->position.y -= sep_y;
-                p2->position.x += sep_x;
-                p2->position.y += sep_y;
+                p1->position.x = q16_sub_sat(p1->position.x, sep_x);
+                p1->position.y = q16_sub_sat(p1->position.y, sep_y);
+                p2->position.x = q16_add_sat(p2->position.x, sep_x);
+                p2->position.y = q16_add_sat(p2->position.y, sep_y);
                 
                 // Calculate relative velocity for impulse
-                q16_t rel_vel_x = p2->velocity.x - p1->velocity.x;
-                q16_t rel_vel_y = p2->velocity.y - p1->velocity.y;
-                q16_t vel_along_normal = q16_mul(rel_vel_x, normal_x) + q16_mul(rel_vel_y, normal_y);
+                q16_t rel_vel_x = q16_sub_sat(p2->velocity.x, p1->velocity.x);
+                q16_t rel_vel_y = q16_sub_sat(p2->velocity.y, p1->velocity.y);
+                q16_t vel_along_normal = q16_add_sat(q16_mul(rel_vel_x, normal_x), q16_mul(rel_vel_y, normal_y));
                 
                 // Apply velocity changes only if players are moving toward each other
                 if (vel_along_normal < 0) {
@@ -974,10 +990,10 @@ static void handle_player_player_collisions(struct Sim* sim) {
                     q16_t impulse_y = q16_mul(normal_y, impulse);
                     
                     // Apply impulse to both players
-                    p1->velocity.x = q16_mul(p1->velocity.x - impulse_x, dampening);
-                    p1->velocity.y = q16_mul(p1->velocity.y - impulse_y, dampening);
-                    p2->velocity.x = q16_mul(p2->velocity.x + impulse_x, dampening);
-                    p2->velocity.y = q16_mul(p2->velocity.y + impulse_y, dampening);
+                    p1->velocity.x = q16_mul(q16_sub_sat(p1->velocity.x, impulse_x), dampening);
+                    p1->velocity.y = q16_mul(q16_sub_sat(p1->velocity.y, impulse_y), dampening);
+                    p2->velocity.x = q16_mul(q16_add_sat(p2->velocity.x, impulse_x), dampening);
+                    p2->velocity.y = q16_mul(q16_add_sat(p2->velocity.y, impulse_y), dampening);
                     
                     // Apply friction
                     q16_t friction = Q16_FROM_FLOAT(0.95f);
@@ -1059,6 +1075,10 @@ static Vec2Q16 closest_point_on_hull(Vec2Q16 player_pos, const struct Ship* ship
 }
 
 void handle_player_ship_collisions(struct Sim* sim) {
+    // Debug log periodically
+    static uint32_t debug_count = 0;
+    bool should_log = (debug_count++ % 30 == 0);
+    
     // First, check for swimming player collisions with ship hulls
     for (uint16_t i = 0; i < sim->player_count; i++) {
         struct Player* player = &sim->players[i];
@@ -1075,6 +1095,14 @@ void handle_player_ship_collisions(struct Sim* sim) {
             q16_t dist_sq = vec2_length_sq(diff);
             q16_t check_radius = q16_add_sat(ship->bounding_radius, player->radius);
             q16_t check_radius_sq = q16_mul(check_radius, check_radius);
+            
+            if (should_log) {
+                log_info("🔍 Collision check P%u vs S%u: dist=%.2f, check_radius=%.2f, hull_verts=%u",
+                    player->id, ship->id, 
+                    Q16_TO_FLOAT(vec2_length(diff)), 
+                    Q16_TO_FLOAT(check_radius),
+                    ship->hull_vertex_count);
+            }
             
             if (dist_sq > check_radius_sq) continue; // Too far away
             
