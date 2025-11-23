@@ -142,9 +142,21 @@ static char* base64_encode(const unsigned char* input, int length) {
 static bool websocket_handshake(int client_fd, const char* request) {
     log_info("🤝 Starting WebSocket handshake, request length: %zu bytes", strlen(request));
     
-    // Check for WebSocket upgrade request
+    // Log first line of request for debugging
+    const char* first_line_end = strstr(request, "\r\n");
+    if (first_line_end) {
+        size_t first_line_len = first_line_end - request;
+        char first_line[256];
+        size_t copy_len = (first_line_len < sizeof(first_line) - 1) ? first_line_len : sizeof(first_line) - 1;
+        memcpy(first_line, request, copy_len);
+        first_line[copy_len] = '\0';
+        log_debug("📋 Request first line: '%s'", first_line);
+    }
+    
+    // Check for WebSocket upgrade request - must be GET
     if (!strstr(request, "GET ")) {
-        log_error("❌ Handshake failed: Not a GET request");
+        log_error("❌ Handshake failed: Not a GET request (might be POST/OPTIONS or non-HTTP data)");
+        log_debug("First 100 chars of request: '%.100s'", request);
         return false;
     }
     
