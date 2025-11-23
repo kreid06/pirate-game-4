@@ -140,7 +140,19 @@ static char* base64_encode(const unsigned char* input, int length) {
 
 // WebSocket handshake
 static bool websocket_handshake(int client_fd, const char* request) {
-    log_info("🤝 Starting WebSocket handshake, request length: %zu bytes", strlen(request));
+    size_t request_len = strlen(request);
+    log_info("🤝 Starting WebSocket handshake, request length: %zu bytes", request_len);
+    
+    // Log raw bytes for debugging if request is suspiciously short
+    if (request_len < 20) {
+        log_error("⚠️ Request too short (%zu bytes) for HTTP handshake. Raw bytes (hex):", request_len);
+        for (size_t i = 0; i < request_len && i < 50; i++) {
+            fprintf(stderr, "%02X ", (unsigned char)request[i]);
+        }
+        fprintf(stderr, "\n");
+        log_debug("ASCII representation: '%s'", request);
+        return false;
+    }
     
     // Log first line of request for debugging
     const char* first_line_end = strstr(request, "\r\n");

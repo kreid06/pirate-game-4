@@ -991,51 +991,129 @@ static void handle_player_player_collisions(struct Sim* sim) {
     }
 }
 
+// Helper: Check if point is inside polygon using ray casting
+static bool point_in_polygon(Vec2Q16 point, const struct Ship* ship) {
+    bool inside = false;
+    
+    for (uint8_t i = 0, j = ship->hull_vertex_count - 1; i < ship->hull_vertex_count; j = i++) {
+        // Transform hull vertices to world space
+        Vec2Q16 vi = transform_hull_vertex(ship->hull_vertices[i], ship->position, ship->rotation);
+        Vec2Q16 vj = transform_hull_vertex(ship->hull_vertices[j], ship->position, ship->rotation);
+        
+        // Ray casting algorithm
+        if (((vi.y > point.y) != (vj.y > point.y)) &&
+            (point.x < q16_add_sat(vi.x, q16_mul(q16_div(q16_sub_sat(vj.x, vi.x), 
+                                                          q16_sub_sat(vj.y, vi.y)),
+                                                  q16_sub_sat(point.y, vi.y))))) {
+            inside = !inside;
+        }
+    }
+    
+    return inside;
+}
+
+// Helper: Find closest point on ship hull edge to player
+static Vec2Q16 closest_point_on_hull(Vec2Q16 player_pos, const struct Ship* ship, q16_t* out_distance) {
+    Vec2Q16 closest = player_pos;
+    q16_t min_dist_sq = Q16_MAX;
+    
+    for (uint8_t i = 0; i < ship->hull_vertex_count; i++) {
+        uint8_t next_i = (i + 1) % ship->hull_vertex_count;
+        
+        Vec2Q16 v1 = transform_hull_vertex(ship->hull_vertices[i], ship->position, ship->rotation);
+        Vec2Q16 v2 = transform_hull_vertex(ship->hull_vertices[next_i], ship->position, ship->rotation);
+        
+        // Find closest point on line segment v1-v2 to player_pos
+        Vec2Q16 edge = vec2_sub(v2, v1);
+        Vec2Q16 to_player = vec2_sub(player_pos, v1);
+        
+        q16_t edge_length_sq = vec2_length_sq(edge);
+        if (edge_length_sq < Q16_FROM_FLOAT(0.0001f)) continue; // Skip degenerate edges
+        
+        // Project player onto edge: t = dot(to_player, edge) / |edge|^2
+        q16_t t = q16_div(vec2_dot(to_player, edge), edge_length_sq);
+        
+        // Clamp t to [0, 1] to stay on segment
+        if (t < 0) t = 0;
+        if (t > Q16_ONE) t = Q16_ONE;
+        
+        // Closest point on edge
+        Vec2Q16 point_on_edge = {
+            q16_add_sat(v1.x, q16_mul(edge.x, t)),
+            q16_add_sat(v1.y, q16_mul(edge.y, t))
+        };
+        
+        q16_t dist_sq = vec2_length_sq(vec2_sub(player_pos, point_on_edge));
+        
+        if (dist_sq < min_dist_sq) {
+            min_dist_sq = dist_sq;
+            closest = point_on_edge;
+        }
+    }
+    
+    if (out_distance) {
+        *out_distance = vec2_length(vec2_sub(player_pos, closest));
+    }
+    
+    return closest;
+}
+
 void handle_player_ship_collisions(struct Sim* sim) {
+    // First, check for swimming player collisions with ship hulls
     for (uint16_t i = 0; i < sim->player_count; i++) {
         struct Player* player = &sim->players[i];
         
-        // Get spatial cell
-        int32_t cell_x = Q16_TO_INT(player->position.x) / 1024;
-        int32_t cell_y = Q16_TO_INT(player->position.y) / 1024;
+        // Only check collision for swimming players (not on a ship)
+        if (player->ship_id != INVALID_ENTITY_ID) continue;
         
-        if (cell_x < 0 || cell_y < 0 || cell_x >= SPATIAL_HASH_SIZE || cell_y >= SPATIAL_HASH_SIZE) {
-            continue;
-        }
-        
-        uint32_t hash_index __attribute__((unused)) = cell_y * SPATIAL_HASH_SIZE + cell_x;
-        struct SpatialCell* cell = &sim->spatial_hash[hash_index];
-        
-        // Check collision with ships
-        for (uint16_t j = 0; j < cell->ship_count; j++) {
-            struct Ship* ship = cell->ships[j];
+        // Check collision with all ships
+        for (uint16_t s = 0; s < sim->ship_count; s++) {
+            struct Ship* ship = &sim->ships[s];
             
-            // Distance check for ship boarding/landing
-            q16_t dx = ship->position.x - player->position.x;
-            q16_t dy = ship->position.y - player->position.y;
-            q16_t dist_sq = q16_mul(dx, dx) + q16_mul(dy, dy);
-            q16_t board_radius_sq = Q16_FROM_INT(60 * 60); // Boarding range
+            // Quick broad-phase check using bounding radius
+            Vec2Q16 diff = vec2_sub(player->position, ship->position);
+            q16_t dist_sq = vec2_length_sq(diff);
+            q16_t check_radius = q16_add_sat(ship->bounding_radius, player->radius);
+            q16_t check_radius_sq = q16_mul(check_radius, check_radius);
             
-            if (dist_sq < board_radius_sq) {
-                // Player is near ship - handle boarding logic
-                if (player->ship_id == INVALID_ENTITY_ID && ship->id != player->id) {
-                    // Player not on ship and this isn't their ship - potential boarding
-                    if (player->action_flags & PLAYER_ACTION_BOARD) {
-                        player->ship_id = ship->id;
-                        log_info("🏴‍☠️ Player %u boarded ship %u", player->id, ship->id);
+            if (dist_sq > check_radius_sq) continue; // Too far away
+            
+            // Check if player is inside ship hull polygon
+            bool inside = point_in_polygon(player->position, ship);
+            
+            if (inside) {
+                // Player is colliding with ship hull - push them out
+                q16_t penetration_depth;
+                Vec2Q16 closest_hull_point = closest_point_on_hull(player->position, ship, &penetration_depth);
+                
+                // Calculate separation vector (from hull to player)
+                Vec2Q16 separation = vec2_sub(player->position, closest_hull_point);
+                q16_t sep_length = vec2_length(separation);
+                
+                if (sep_length > Q16_FROM_FLOAT(0.01f)) {
+                    // Normalize and push player out by their radius
+                    Vec2Q16 push_dir = vec2_normalize(separation);
+                    q16_t push_distance = q16_add_sat(player->radius, Q16_FROM_FLOAT(1.0f)); // radius + 1m safety margin
+                    
+                    Vec2Q16 push = vec2_mul_scalar(push_dir, push_distance);
+                    player->position = vec2_add(closest_hull_point, push);
+                    
+                    // Apply bounce-back to velocity
+                    q16_t vel_along_normal = vec2_dot(player->velocity, push_dir);
+                    if (vel_along_normal < 0) {
+                        // Moving into the hull - reflect velocity
+                        q16_t restitution = Q16_FROM_FLOAT(0.5f); // 50% bounce
+                        Vec2Q16 normal_vel = vec2_mul_scalar(push_dir, vel_along_normal);
+                        Vec2Q16 reflected = vec2_mul_scalar(normal_vel, -restitution);
+                        player->velocity = vec2_add(player->velocity, vec2_sub(reflected, normal_vel));
                     }
-                } else if (player->ship_id == ship->id) {
-                    // Player is on this ship - sync position relative to ship
-                    // This keeps player "attached" to the moving ship
-                    player->position.x = ship->position.x + player->relative_pos.x;
-                    player->position.y = ship->position.y + player->relative_pos.y;
-                }
-            } else {
-                // Player moved away from ship
-                if (player->ship_id == ship->id) {
-                    // Player fell off or jumped off
-                    player->ship_id = INVALID_ENTITY_ID;
-                    log_info("🌊 Player %u left ship %u", player->id, ship->id);
+                    
+                    log_info("🚫 Player %u collided with ship %u hull - pushed out by %.2f units", 
+                             player->id, ship->id, Q16_TO_FLOAT(push_distance));
+                } else {
+                    // Very close to hull edge - just push away from ship center
+                    Vec2Q16 push_dir = vec2_normalize(vec2_sub(player->position, ship->position));
+                    player->position = vec2_add(player->position, vec2_mul_scalar(push_dir, player->radius));
                 }
             }
         }
