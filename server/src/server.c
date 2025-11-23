@@ -389,7 +389,12 @@ static void init_simulation(struct ServerContext* ctx) {
     ctx->simulation.air_friction = Q16_FROM_FLOAT(0.99f);  
     ctx->simulation.buoyancy_factor = Q16_FROM_FLOAT(1.2f);
     
+    // Create the starting brigantine ship at spawn point
+    Vec2Q16 ship_spawn = {Q16_FROM_INT(100), Q16_FROM_INT(100)};
+    entity_id ship_id = sim_create_ship(&ctx->simulation, ship_spawn, Q16_FROM_INT(0));
+    
     log_info("Simulation initialized with RNG seed: %u", rng->seed);
+    log_info("Created brigantine ship (ID: %u) at spawn point (100, 100)", ship_id);
 }
 
 static void step_simulation(struct ServerContext* ctx) {

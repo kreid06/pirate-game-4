@@ -576,23 +576,23 @@ int sim_deserialize_state(struct Sim* sim, const uint8_t* buffer, size_t buffer_
 entity_id simulation_create_player_entity(struct Sim* sim, const char* player_name) {
     if (!sim || !player_name) return INVALID_ENTITY_ID;
     
-    // Create player at default spawn location
-    Vec2Q16 spawn_pos = {Q16_FROM_INT(100), Q16_FROM_INT(100)};
-    
-    // First create a ship for the player
-    entity_id ship_id = sim_create_ship(sim, spawn_pos, Q16_FROM_INT(0));
-    if (ship_id == INVALID_ENTITY_ID) return INVALID_ENTITY_ID;
-    
-    // Then create the player entity linked to the ship
-    entity_id player_id = sim_create_player(sim, spawn_pos, ship_id);
-    if (player_id == INVALID_ENTITY_ID) {
-        // Failed to create player - clean up ship
-        sim_destroy_entity(sim, ship_id);
+    // Find the first available ship (should be the brigantine spawned at server start)
+    entity_id ship_id = INVALID_ENTITY_ID;
+    if (sim->ship_count > 0) {
+        ship_id = sim->ships[0].id;  // Use the first ship (the brigantine)
+    } else {
+        log_error("No ships available! Cannot spawn player %s", player_name);
         return INVALID_ENTITY_ID;
     }
     
-    // Store player name (if we had storage for it)
-    log_info("Created player entity %u (%s) with ship %u", player_id, player_name, ship_id);
+    // Spawn player on the existing ship at a default position on deck
+    Vec2Q16 spawn_pos = sim->ships[0].position;
+    entity_id player_id = sim_create_player(sim, spawn_pos, ship_id);
+    if (player_id == INVALID_ENTITY_ID) {
+        return INVALID_ENTITY_ID;
+    }
+    
+    log_info("Created player entity %u (%s) on brigantine ship %u", player_id, player_name, ship_id);
     
     return player_id;
 }
