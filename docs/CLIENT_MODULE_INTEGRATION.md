@@ -2,7 +2,34 @@
 
 ## Overview
 
-This guide explains how to handle module data in `GAME_STATE` updates from the server. The server now sends complete module information for all ships, enabling clients to render cannons, masts, helms, and other ship modules accurately.
+This guide explains how to handle module data in `GAME_STATE` updates from the server. The server sends optimized module information:
+
+- **Planks & Deck**: Only health/status data (client generates positions from hull geometry)
+- **Gameplay modules**: Full transform data (cannons, masts, helm, etc.)
+
+This approach minimizes bandwidth while allowing the client to maintain full visual fidelity by generating structural module positions deterministically from the ship's hull.
+
+## Module Categories
+
+### 1. Structural Modules (Client-Generated Positions)
+
+**Planks** (typeId: 6, IDs: 100-109)
+- Server sends: `{id, typeId, health}`
+- Client generates positions from hull geometry using `createCompleteHullSegments()`
+- 10 planks total: 2 bow, 3 starboard, 2 stern, 3 port
+- Used for radial hit detection (cannonballs, etc.)
+
+**Deck** (typeId: 7, ID: 200)
+- Server sends: `{id, typeId}`
+- Client generates polygon from hull using `createShipDeckFromPolygon()`
+- No position needed - covers interior
+
+### 2. Gameplay Modules (Server-Authoritative Positions)
+
+**Helm** (typeId: 0), **Cannons** (typeId: 2), **Masts** (typeId: 3), etc.
+- Server sends: `{id, typeId, x, y, rotation}`
+- Client uses exact positions for rendering and interaction
+- Positions are ship-relative in client coordinate units
 
 ## GAME_STATE Message Format
 
@@ -29,6 +56,7 @@ This guide explains how to handle module data in `GAME_STATE` updates from the s
       "water_drag": 0.950,
       "angular_drag": 0.900,
       "modules": [
+        // Gameplay module (full transform)
         {
           "id": 1000,
           "typeId": 0,
@@ -36,12 +64,24 @@ This guide explains how to handle module data in `GAME_STATE` updates from the s
           "y": 0.0,
           "rotation": 0.00
         },
+        // Cannon (full transform)
         {
           "id": 1001,
           "typeId": 2,
           "x": -35.0,
           "y": 75.0,
           "rotation": 3.14
+        },
+        // Plank (health only - client generates position)
+        {
+          "id": 100,
+          "typeId": 6,
+          "health": 85
+        },
+        // Deck (ID only - client generates polygon)
+        {
+          "id": 200,
+          "typeId": 7
         }
         // ... more modules
       ]

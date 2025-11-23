@@ -1348,16 +1348,32 @@ int websocket_server_update(struct Sim* sim) {
                         5000.0f, 500000.0f, 15.0f, 1.0f, 0.95f, 0.90f);
                 
                 // Add modules array
+                // Planks (100-109) and deck (200): only send health/ID, client generates positions
+                // Gameplay modules (1000+): send full transform
                 for (uint8_t m = 0; m < ship->module_count && offset < (int)sizeof(ship_entry) - 200; m++) {
                     const ShipModule* module = &ship->modules[m];
-                    float module_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
-                    float module_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
-                    float module_rot = Q16_TO_FLOAT(module->local_rot);
                     
-                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
-                        m > 0 ? "," : "", module->id, module->type_id, 
-                        module_x, module_y, module_rot);
+                    if (module->type_id == MODULE_TYPE_PLANK) {
+                        // Plank: only health data (client has hard-coded positions from hull)
+                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                            "%s{\"id\":%u,\"typeId\":%u,\"health\":%u}",
+                            m > 0 ? "," : "", module->id, module->type_id, module->data.plank.health);
+                    } else if (module->type_id == MODULE_TYPE_DECK) {
+                        // Deck: only ID/type (client generates polygon from hull)
+                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                            "%s{\"id\":%u,\"typeId\":%u}",
+                            m > 0 ? "," : "", module->id, module->type_id);
+                    } else {
+                        // Gameplay modules: full transform data
+                        float module_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+                        float module_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+                        float module_rot = Q16_TO_FLOAT(module->local_rot);
+                        
+                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
+                            m > 0 ? "," : "", module->id, module->type_id, 
+                            module_x, module_y, module_rot);
+                    }
                 }
                 
                 offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");

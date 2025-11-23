@@ -4,6 +4,7 @@
 #include "util/log.h"
 #include <string.h>
 #include <assert.h>
+#include <math.h>
 
 // Include hash function implementation
 extern uint64_t hash_sim_state(const struct Sim* sim);
@@ -351,7 +352,28 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         0
     );
     
-    log_info("⚓ Created brigantine ship %u with BROADSIDE loadout: %u modules (6 cannons, 3 masts, 1 helm)",
+    // Initialize 10 hull planks (health tracking only - client creates positions from hull geometry)
+    // Plank IDs: 100-109 (hard-coded indices matching client createCompleteHullSegments())
+    // Order: bow_port, bow_starboard, 3x starboard_side, stern_starboard, stern_port, 3x port_side
+    for (int i = 0; i < 10; i++) {
+        ShipModule plank = module_create(
+            100 + i, MODULE_TYPE_PLANK,
+            (Vec2Q16){0, 0}, // Position not used - client generates from hull
+            0 // Rotation not used - client calculates from segment
+        );
+        // Set initial health to 100%
+        plank.data.plank.health = 100;
+        ship->modules[ship->module_count++] = plank;
+    }
+    
+    // Deck module (ID 200) - position not used, client generates from hull polygon
+    ship->modules[ship->module_count++] = module_create(
+        200, MODULE_TYPE_DECK,
+        (Vec2Q16){0, 0},
+        0
+    );
+    
+    log_info("⚓ Created brigantine ship %u with BROADSIDE loadout: %u modules (6 cannons, 3 masts, 1 helm, 10 planks, 1 deck)",
              id, ship->module_count);
     
     sim->ship_count++;
