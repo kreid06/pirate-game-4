@@ -935,11 +935,11 @@ int websocket_server_update(struct Sim* sim) {
                             if (handled && client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) {
-                                    char game_state_frame[4096];
-                                    char game_state_response[3072];
+                                    char game_state_frame[16384];  // Increased for module data
+                                    char game_state_response[12288];  // Increased for module data
                                     
-                                    // Build ships array for initial state
-                                    char ships_str[1024] = "[";
+                                    // Build ships array for initial state (increased buffer for modules)
+                                    char ships_str[8192] = "[";
                                     bool first_ship = true;
                                     for (int s = 0; s < ship_count; s++) {
                                         if (ships[s].active) {
