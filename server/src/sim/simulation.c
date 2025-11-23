@@ -502,44 +502,162 @@ static void update_projectile_physics(struct Projectile* projectile, q16_t dt) {
     projectile->position = vec2_add(projectile->position, displacement);
 }
 
+// Helper: Transform hull vertex from local to world space
+static Vec2Q16 transform_hull_vertex(Vec2Q16 local_vertex, Vec2Q16 position, q16_t rotation) {
+    // Rotate: [cos -sin] [x]
+    //         [sin  cos] [y]
+    q16_t cos_r = q16_cos(rotation);
+    q16_t sin_r = q16_sin(rotation);
+    
+    q16_t rotated_x = q16_sub(q16_mul(local_vertex.x, cos_r), q16_mul(local_vertex.y, sin_r));
+    q16_t rotated_y = q16_add(q16_mul(local_vertex.x, sin_r), q16_mul(local_vertex.y, cos_r));
+    
+    return (Vec2Q16){
+        q16_add(position.x, rotated_x),
+        q16_add(position.y, rotated_y)
+    };
+}
+
+// Helper: Get edge normal for SAT
+static Vec2Q16 get_edge_normal(Vec2Q16 v1, Vec2Q16 v2) {
+    Vec2Q16 edge = vec2_sub(v2, v1);
+    // Perpendicular: (-y, x)
+    Vec2Q16 normal = {q16_neg(edge.y), edge.x};
+    return vec2_normalize(normal);
+}
+
+// Helper: Project polygon onto axis and return min/max
+static void project_polygon_onto_axis(const struct Ship* ship, Vec2Q16 axis, q16_t* out_min, q16_t* out_max) {
+    q16_t min_proj = Q16_MAX;
+    q16_t max_proj = Q16_MIN;
+    
+    for (uint8_t i = 0; i < ship->hull_vertex_count; i++) {
+        Vec2Q16 world_vertex = transform_hull_vertex(ship->hull_vertices[i], ship->position, ship->rotation);
+        q16_t projection = vec2_dot(world_vertex, axis);
+        
+        if (projection < min_proj) min_proj = projection;
+        if (projection > max_proj) max_proj = projection;
+    }
+    
+    *out_min = min_proj;
+    *out_max = max_proj;
+}
+
+// SAT polygon-polygon collision detection
+static bool check_polygon_collision(const struct Ship* ship1, const struct Ship* ship2, 
+                                    Vec2Q16* out_normal, q16_t* out_depth) {
+    q16_t min_overlap = Q16_MAX;
+    Vec2Q16 min_axis = VEC2_ZERO;
+    
+    // Test all edge normals from both ships
+    for (int ship_idx = 0; ship_idx < 2; ship_idx++) {
+        const struct Ship* ship = (ship_idx == 0) ? ship1 : ship2;
+        
+        for (uint8_t i = 0; i < ship->hull_vertex_count; i++) {
+            uint8_t next_i = (i + 1) % ship->hull_vertex_count;
+            
+            Vec2Q16 v1 = transform_hull_vertex(ship->hull_vertices[i], ship->position, ship->rotation);
+            Vec2Q16 v2 = transform_hull_vertex(ship->hull_vertices[next_i], ship->position, ship->rotation);
+            
+            Vec2Q16 axis = get_edge_normal(v1, v2);
+            if (vec2_length_sq(axis) < Q16_FROM_FLOAT(0.0001f)) continue; // Skip degenerate edges
+            
+            // Project both polygons onto this axis
+            q16_t min1, max1, min2, max2;
+            project_polygon_onto_axis(ship1, axis, &min1, &max1);
+            project_polygon_onto_axis(ship2, axis, &min2, &max2);
+            
+            // Check for separation
+            if (max1 < min2 || max2 < min1) {
+                return false; // Separating axis found - no collision
+            }
+            
+            // Calculate overlap
+            q16_t overlap = (max1 < max2) ? q16_sub(max1, min2) : q16_sub(max2, min1);
+            
+            if (overlap < min_overlap) {
+                min_overlap = overlap;
+                min_axis = axis;
+            }
+        }
+    }
+    
+    // No separating axis found - collision detected
+    if (out_normal) {
+        // Ensure normal points from ship1 to ship2
+        Vec2Q16 center_diff = vec2_sub(ship2->position, ship1->position);
+        if (vec2_dot(min_axis, center_diff) < 0) {
+            min_axis = vec2_negate(min_axis);
+        }
+        *out_normal = min_axis;
+    }
+    if (out_depth) *out_depth = min_overlap;
+    
+    return true;
+}
+
 static void handle_ship_collisions(struct Sim* sim) {
     if (!sim || sim->ship_count < 2) return;
     
-    // Simple O(n²) collision detection for now
+    // O(n²) collision detection with SAT polygon collision
     for (uint16_t i = 0; i < sim->ship_count; i++) {
         for (uint16_t j = i + 1; j < sim->ship_count; j++) {
             struct Ship* ship1 = &sim->ships[i];
             struct Ship* ship2 = &sim->ships[j];
             
-            // Broad phase: check bounding circles
+            // Broad phase: check bounding circles first for early rejection
             Vec2Q16 diff = vec2_sub(ship2->position, ship1->position);
             q16_t dist_sq = vec2_length_sq(diff);
             q16_t combined_radius = q16_add_sat(ship1->bounding_radius, ship2->bounding_radius);
             q16_t radius_sq = q16_mul(combined_radius, combined_radius);
             
-            if (dist_sq < radius_sq) {
-                // Collision detected - simple elastic response
-                Vec2Q16 collision_normal = vec2_normalize(diff);
-                if (vec2_length_sq(collision_normal) == 0) {
-                    collision_normal = (Vec2Q16){Q16_ONE, 0}; // Fallback normal
-                }
+            if (dist_sq >= radius_sq) {
+                continue; // Too far apart, skip expensive polygon check
+            }
+            
+            // Narrow phase: SAT polygon-polygon collision
+            Vec2Q16 collision_normal;
+            q16_t overlap_depth;
+            
+            if (check_polygon_collision(ship1, ship2, &collision_normal, &overlap_depth)) {
+                // Collision detected with actual hull polygons
                 
-                // Separate ships
-                q16_t overlap = q16_sub_sat(combined_radius, vec2_length(diff));
-                Vec2Q16 separation = vec2_mul_scalar(collision_normal, q16_div(overlap, Q16_FROM_INT(2)));
-                
+                // Separate ships along collision normal
+                Vec2Q16 separation = vec2_mul_scalar(collision_normal, q16_div(overlap_depth, Q16_FROM_INT(2)));
                 ship1->position = vec2_sub(ship1->position, separation);
                 ship2->position = vec2_add(ship2->position, separation);
                 
-                // Exchange some velocity (simplified)
+                // Apply impulse-based collision response
                 q16_t rel_velocity = vec2_dot(vec2_sub(ship2->velocity, ship1->velocity), collision_normal);
+                
                 if (rel_velocity < 0) { // Ships are approaching
-                    Vec2Q16 impulse = vec2_mul_scalar(collision_normal, q16_mul(rel_velocity, Q16_FROM_FLOAT(0.5f)));
-                    ship1->velocity = vec2_add(ship1->velocity, impulse);
-                    ship2->velocity = vec2_sub(ship2->velocity, impulse);
+                    // Coefficient of restitution (bounciness)
+                    q16_t restitution = Q16_FROM_FLOAT(0.3f);
+                    
+                    // Calculate impulse magnitude: J = -(1 + e) * v_rel / (1/m1 + 1/m2)
+                    q16_t numerator = q16_mul(q16_add(Q16_ONE, restitution), q16_neg(rel_velocity));
+                    q16_t inv_mass_sum = q16_add(q16_div(Q16_ONE, ship1->mass), q16_div(Q16_ONE, ship2->mass));
+                    q16_t impulse_mag = q16_div(numerator, inv_mass_sum);
+                    
+                    Vec2Q16 impulse = vec2_mul_scalar(collision_normal, impulse_mag);
+                    
+                    // Apply impulses (F = ma, so dv = F/m)
+                    Vec2Q16 impulse1 = vec2_mul_scalar(impulse, q16_div(Q16_ONE, ship1->mass));
+                    Vec2Q16 impulse2 = vec2_mul_scalar(impulse, q16_div(Q16_ONE, ship2->mass));
+                    
+                    ship1->velocity = vec2_sub(ship1->velocity, impulse1);
+                    ship2->velocity = vec2_add(ship2->velocity, impulse2);
+                    
+                    // Apply rotational impulse at collision point
+                    // For simplicity, apply small angular velocity change
+                    q16_t angular_impulse = q16_mul(impulse_mag, Q16_FROM_FLOAT(0.001f));
+                    ship1->angular_velocity = q16_sub_sat(ship1->angular_velocity, angular_impulse);
+                    ship2->angular_velocity = q16_add_sat(ship2->angular_velocity, angular_impulse);
                 }
                 
-                log_debug("Ship collision: %u <-> %u", ship1->id, ship2->id);
+                log_info("⚓ Ship hull collision: %u <-> %u (overlap: %.2f, normal: (%.2f, %.2f))", 
+                         ship1->id, ship2->id, Q16_TO_FLOAT(overlap_depth),
+                         Q16_TO_FLOAT(collision_normal.x), Q16_TO_FLOAT(collision_normal.y));
             }
         }
     }
