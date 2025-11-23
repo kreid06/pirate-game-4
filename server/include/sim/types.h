@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include "core/math.h"
 #include "core/rng.h"
+#include "sim/module_types.h"
 
 // Maximum entity counts
 #define MAX_SHIPS 50
@@ -45,9 +46,13 @@ struct Ship {
     uint8_t hull_vertex_count;
     q16_t bounding_radius;   // For broad-phase collision
     
+    // Ship modules (cannons, masts, seats, etc.)
+    ShipModule modules[MAX_MODULES_PER_SHIP];
+    uint8_t module_count;
+    
     // Ship state flags
     uint16_t flags;
-    uint8_t reserved[2];
+    uint8_t reserved[1];
 };
 
 // Player state  

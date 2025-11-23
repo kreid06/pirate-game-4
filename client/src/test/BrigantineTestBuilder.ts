@@ -203,8 +203,6 @@ export class BrigantineLoadouts {
       { kind: 'mast', position: { x: -235, y: 0 } }, // Back mast
       
       // Crew positions
-      { kind: 'seat', position: { x: 150, y: 0 } },
-      { kind: 'seat', position: { x: -200, y: 0 } }
     ]
   };
 

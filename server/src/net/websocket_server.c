@@ -1494,9 +1494,11 @@ void websocket_server_tick(float dt) {
     
     // ===== SYNC WEBSOCKET PLAYERS TO SIMULATION FOR COLLISION DETECTION =====
     if (global_sim) {
-        const float SWIM_ACCELERATION = 160.0f; // Acceleration when swimming (m/s²) - doubled for responsiveness
-        const float SWIM_MAX_SPEED = 30.0f;    // Maximum swimming speed (m/s) - doubled from 15
-        const float SWIM_DECELERATION = 120.0f; // Deceleration when stopping (m/s²) - doubled for responsiveness
+        // Swimming physics constants (scaled to server units via WORLD_SCALE_FACTOR)
+        // Client speed: 200 units/s → Server speed: 20 units/s (after 10x scaling)
+        const float SWIM_ACCELERATION = CLIENT_TO_SERVER(160.0f); // Acceleration when swimming (server units/s²)
+        const float SWIM_MAX_SPEED = CLIENT_TO_SERVER(30.0f);     // Maximum swimming speed (server units/s)
+        const float SWIM_DECELERATION = CLIENT_TO_SERVER(120.0f); // Deceleration when stopping (server units/s²)
         
         for (uint16_t i = 0; i < global_sim->player_count; i++) {
             struct Player* sim_player = &global_sim->players[i];

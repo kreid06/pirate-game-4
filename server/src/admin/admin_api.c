@@ -322,6 +322,22 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
             );
         }
         
+        offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, "],\n      \"modules\": [");
+        
+        // Add modules (scale positions back to client coordinates)
+        for (uint8_t m = 0; m < ship->module_count && offset < (int)sizeof(json_buffer) - 300; m++) {
+            const ShipModule* module = &ship->modules[m];
+            float module_x = SERVER_TO_CLIENT((float)module->local_pos.x / 65536.0f);
+            float module_y = SERVER_TO_CLIENT((float)module->local_pos.y / 65536.0f);
+            float module_rot = (float)module->local_rot / 65536.0f;
+            
+            offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+                "{\"id\":%u,\"typeId\":%u,\"x\":%.2f,\"y\":%.2f,\"rotation\":%.2f}%s",
+                module->id, module->type_id, module_x, module_y, module_rot,
+                (m + 1 < ship->module_count) ? "," : ""
+            );
+        }
+        
         offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
             "]\n    }%s\n",
             (i + 1 < sim->ship_count) ? "," : ""

@@ -231,6 +231,9 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         // Quadratic bezier: P(t) = (1-t)²P0 + 2(1-t)tP1 + t²P2
         float x = (1-t)*(1-t)*190.0f + 2*(1-t)*t*415.0f + t*t*190.0f;
         float y = (1-t)*(1-t)*90.0f + 2*(1-t)*t*0.0f + t*t*(-90.0f);
+        // Scale by 1.1 for collision boundary expansion
+        x *= 1.1f;
+        y *= 1.1f;
         ship->hull_vertices[idx++] = (Vec2Q16){
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)), 
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
@@ -242,6 +245,9 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         float t = (float)i / 12.0f;
         float x = 190.0f + t * (-260.0f - 190.0f);
         float y = -90.0f + t * (-90.0f - (-90.0f));
+        // Scale by 1.1 for collision boundary expansion
+        x *= 1.1f;
+        y *= 1.1f;
         ship->hull_vertices[idx++] = (Vec2Q16){
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)), 
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
@@ -253,6 +259,9 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         float t = (float)i / 12.0f;
         float x = (1-t)*(1-t)*(-260.0f) + 2*(1-t)*t*(-345.0f) + t*t*(-260.0f);
         float y = (1-t)*(1-t)*(-90.0f) + 2*(1-t)*t*0.0f + t*t*90.0f;
+        // Scale by 1.1 for collision boundary expansion
+        x *= 1.1f;
+        y *= 1.1f;
         ship->hull_vertices[idx++] = (Vec2Q16){
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)), 
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
@@ -264,16 +273,86 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         float t = (float)i / 12.0f;
         float x = -260.0f + t * (190.0f - (-260.0f));
         float y = 90.0f + t * (90.0f - 90.0f);
+        // Scale by 1.1 for collision boundary expansion
+        x *= 1.1f;
+        y *= 1.1f;
         ship->hull_vertices[idx++] = (Vec2Q16){
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)), 
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
         };
     }
     
-    // Calculate bounding radius from actual hull extent (scaled)
+    // Calculate bounding radius from actual hull extent (scaled by 1.1)
     // Hull extends from -345 to 415 in x (client), -90 to 90 in y (client)
-    // Max distance from center is sqrt(415^2 + 90^2) ≈ 424.6 client units = 42.46 server units
-    ship->bounding_radius = Q16_FROM_FLOAT(CLIENT_TO_SERVER(430.0f)); // Slightly larger than max hull extent
+    // After 1.1x scaling: -379.5 to 456.5 in x, -99 to 99 in y
+    // Max distance from center is sqrt(456.5^2 + 99^2) ≈ 467.1 client units = 46.71 server units
+    ship->bounding_radius = Q16_FROM_FLOAT(CLIENT_TO_SERVER(430.0f * 1.1f)); // Scaled bounding radius
+    
+    // Initialize BROADSIDE loadout modules
+    // Matches BrigantineLoadouts.BROADSIDE from BrigantineTestBuilder.ts
+    ship->module_count = 0;
+    uint16_t module_id = 1000;
+    
+    // Helm
+    ship->modules[ship->module_count++] = module_create(
+        module_id++, MODULE_TYPE_HELM,
+        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-90.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
+        0
+    );
+    
+    // Port side cannons (3)
+    ship->modules[ship->module_count++] = module_create(
+        module_id++, MODULE_TYPE_CANNON,
+        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
+        Q16_FROM_FLOAT(3.14159f) // PI (180 degrees)
+    );
+    ship->modules[ship->module_count++] = module_create(
+        module_id++, MODULE_TYPE_CANNON,
+        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(65.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
+        Q16_FROM_FLOAT(3.14159f)
+    );
+    ship->modules[ship->module_count++] = module_create(
+        module_id++, MODULE_TYPE_CANNON,
+        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
+        Q16_FROM_FLOAT(3.14159f)
+    );
+    
+    // Starboard side cannons (3)
+    ship->modules[ship->module_count++] = module_create(
+        module_id++, MODULE_TYPE_CANNON,
+        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
+        0
+    );
+    ship->modules[ship->module_count++] = module_create(
+        module_id++, MODULE_TYPE_CANNON,
+        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(65.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
+        0
+    );
+    ship->modules[ship->module_count++] = module_create(
+        module_id++, MODULE_TYPE_CANNON,
+        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
+        0
+    );
+    
+    // Three masts (front, middle, back)
+    ship->modules[ship->module_count++] = module_create(
+        module_id++, MODULE_TYPE_MAST,
+        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(165.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
+        0
+    );
+    ship->modules[ship->module_count++] = module_create(
+        module_id++, MODULE_TYPE_MAST,
+        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
+        0
+    );
+    ship->modules[ship->module_count++] = module_create(
+        module_id++, MODULE_TYPE_MAST,
+        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-235.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
+        0
+    );
+    
+    log_info("⚓ Created brigantine ship %u with BROADSIDE loadout: %u modules (6 cannons, 3 masts, 1 helm)",
+             id, ship->module_count);
     
     sim->ship_count++;
     
@@ -1119,25 +1198,31 @@ void handle_player_ship_collisions(struct Sim* sim) {
                 q16_t sep_length = vec2_length(separation);
                 
                 if (sep_length > Q16_FROM_FLOAT(0.01f)) {
-                    // Normalize and push player out by their radius
-                    Vec2Q16 push_dir = vec2_normalize(separation);
-                    q16_t push_distance = q16_add_sat(player->radius, Q16_FROM_FLOAT(1.0f)); // radius + 1m safety margin
+                    // Normalize to get the collision normal (pointing away from hull)
+                    Vec2Q16 normal = vec2_normalize(separation);
                     
-                    Vec2Q16 push = vec2_mul_scalar(push_dir, push_distance);
-                    player->position = vec2_add(closest_hull_point, push);
+                    // Push player out to just outside the hull (radius + small margin)
+                    q16_t target_distance = q16_add_sat(player->radius, Q16_FROM_FLOAT(0.1f)); // radius + 0.1 unit margin
+                    Vec2Q16 target_pos = vec2_add(closest_hull_point, vec2_mul_scalar(normal, target_distance));
+                    player->position = target_pos;
                     
-                    // Apply bounce-back to velocity
-                    q16_t vel_along_normal = vec2_dot(player->velocity, push_dir);
+                    // Reflect velocity if moving into the hull
+                    q16_t vel_along_normal = vec2_dot(player->velocity, normal);
                     if (vel_along_normal < 0) {
-                        // Moving into the hull - reflect velocity
-                        q16_t restitution = Q16_FROM_FLOAT(0.5f); // 50% bounce
-                        Vec2Q16 normal_vel = vec2_mul_scalar(push_dir, vel_along_normal);
-                        Vec2Q16 reflected = vec2_mul_scalar(normal_vel, -restitution);
-                        player->velocity = vec2_add(player->velocity, vec2_sub(reflected, normal_vel));
+                        // Moving into the hull - reflect velocity with restitution
+                        q16_t restitution = Q16_FROM_FLOAT(0.3f); // 30% bounce (reduced for smoother feel)
+                        
+                        // Separate velocity into normal and tangential components
+                        Vec2Q16 vel_normal = vec2_mul_scalar(normal, vel_along_normal);
+                        Vec2Q16 vel_tangent = vec2_sub(player->velocity, vel_normal);
+                        
+                        // Reflect normal component with restitution, keep tangential (sliding)
+                        Vec2Q16 vel_reflected = vec2_mul_scalar(vel_normal, -restitution);
+                        player->velocity = vec2_add(vel_tangent, vel_reflected);
                     }
                     
-                    log_info("🚫 Player %u collided with ship %u hull - pushed out by %.2f units", 
-                             player->id, ship->id, Q16_TO_FLOAT(push_distance));
+                    log_info("🚫 Player %u collided with ship %u hull - repositioned to %.2f units from edge", 
+                             player->id, ship->id, Q16_TO_FLOAT(target_distance));
                 } else {
                     // Very close to hull edge - just push away from ship center
                     Vec2Q16 push_dir = vec2_normalize(vec2_sub(player->position, ship->position));
