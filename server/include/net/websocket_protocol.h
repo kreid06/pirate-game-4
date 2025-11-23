@@ -39,7 +39,13 @@ int websocket_send_response(int websocket_fd, const uint8_t* udp_packet, size_t 
 
 /**
  * Create WebSocket frame (external function from websocket_server.c)
+ * @param opcode WebSocket opcode (WS_OPCODE_TEXT, WS_OPCODE_BINARY, etc.)
+ * @param payload Payload data to send
+ * @param payload_len Length of payload in bytes
+ * @param frame Output buffer for the WebSocket frame
+ * @param frame_size Size of the frame buffer (must be at least payload_len + 10)
+ * @return Length of created frame, or 0 on error
  */
-size_t websocket_create_frame(uint8_t opcode, const char* payload, size_t payload_len, char* frame);
+size_t websocket_create_frame(uint8_t opcode, const char* payload, size_t payload_len, char* frame, size_t frame_size);
 
 #endif // WEBSOCKET_PROTOCOL_H

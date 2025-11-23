@@ -596,11 +596,19 @@ static int websocket_parse_frame(const char* buffer, size_t buffer_len, char* pa
 }
 
 // Create WebSocket frame
-size_t websocket_create_frame(uint8_t opcode, const char* payload, size_t payload_len, char* frame) {
+// NOTE: Caller must ensure frame buffer is large enough (payload_len + 10 bytes for header)
+size_t websocket_create_frame(uint8_t opcode, const char* payload, size_t payload_len, char* frame, size_t frame_size) {
     size_t frame_len = 0;
     
     // Calculate required frame size (header + payload)
     size_t required_size = payload_len + 10; // Max header is 10 bytes
+    
+    // Validate buffer size
+    if (required_size > frame_size) {
+        log_error("❌ Frame buffer overflow prevented: need %zu bytes, have %zu bytes (payload: %zu)", 
+                  required_size, frame_size, payload_len);
+        return 0;
+    }
     
     // First byte: FIN = 1, opcode
     frame[frame_len++] = 0x80 | opcode;
@@ -991,13 +999,13 @@ int websocket_server_update(struct Sim* sim) {
                                     
                                     // Send handshake response first
                                     char frame[2048];  // Increased to match earlier fix
-                                    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame);
+                                    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
                                     if (frame_len > 0 && frame_len < sizeof(frame)) {
                                         send(client->fd, frame, frame_len, 0);
                                     }
                                     
                                     // Then send game state
-                                    size_t game_state_frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state_response, strlen(game_state_response), game_state_frame);
+                                    size_t game_state_frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state_response, strlen(game_state_response), game_state_frame, sizeof(game_state_frame));
                                     if (game_state_frame_len > 0 && game_state_frame_len < sizeof(game_state_frame)) {
                                         send(client->fd, game_state_frame, game_state_frame_len, 0);
                                         // Sent initial game state
@@ -1283,7 +1291,7 @@ int websocket_server_update(struct Sim* sim) {
                     // Send response
                     if (handled) {
                         char frame[2048];  // Increased to safely hold 1024-byte response + frame headers
-                        size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame);
+                        size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
                         if (frame_len > 0 && frame_len < sizeof(frame)) {
                             ssize_t sent = send(client->fd, frame, frame_len, 0);
                             if (sent > 0) {
@@ -1311,7 +1319,7 @@ int websocket_server_update(struct Sim* sim) {
                     // PING received - sending PONG
                     // Respond with pong
                     char frame[64];
-                    size_t frame_len = websocket_create_frame(WS_OPCODE_PONG, payload, payload_len, frame);
+                    size_t frame_len = websocket_create_frame(WS_OPCODE_PONG, payload, payload_len, frame, sizeof(frame));
                     if (frame_len > 0) {
                         ssize_t sent = send(client->fd, frame, frame_len, 0);
                         // PONG sent
@@ -1502,7 +1510,7 @@ int websocket_server_update(struct Sim* sim) {
             struct WebSocketClient* client = &ws_server.clients[i];
             if (client->connected && client->handshake_complete) {
                 char frame[1024];
-                size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state, strlen(game_state), frame);
+                size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state, strlen(game_state), frame, sizeof(frame));
                 if (frame_len > 0) {
                     ssize_t sent = send(client->fd, frame, frame_len, 0);
                     if (sent > 0) {
@@ -1521,7 +1529,7 @@ void websocket_server_broadcast(const char* message) {
     if (!ws_server.running || !message) return;
     
     char frame[2048];
-    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, message, strlen(message), frame);
+    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, message, strlen(message), frame, sizeof(frame));
     if (frame_len == 0) return;
     
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {

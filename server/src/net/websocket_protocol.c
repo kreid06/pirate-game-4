@@ -269,7 +269,7 @@ int websocket_send_response(int websocket_fd, const uint8_t* udp_packet, size_t 
     
     // Create WebSocket frame
     char frame[4096];
-    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, json_message, strlen(json_message), frame);
+    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, json_message, strlen(json_message), frame, sizeof(frame));
     
     if (frame_len == 0) {
         return -1;
