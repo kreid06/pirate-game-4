@@ -438,7 +438,6 @@ export class ClientApplication {
       const worldPos = this.camera.screenToWorld(Vec2.from(screenX, screenY));
       
       // Debug: Log mouse position updates (temporarily)
-      console.log(`🖱️ Mouse: screen(${screenX.toFixed(1)}, ${screenY.toFixed(1)}) -> world(${worldPos.x.toFixed(1)}, ${worldPos.y.toFixed(1)})`);
       
       // Update input manager with mouse world position
       this.inputManager.updateMouseWorldPosition(worldPos);

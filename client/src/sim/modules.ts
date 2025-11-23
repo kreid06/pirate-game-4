@@ -513,7 +513,6 @@ export class ModuleUtils {
       deckModule.moduleData.walkable = true;
       deckModule.moduleData.deckLevel = 0;
       
-      console.log(`Created curved deck with ${deckPolygon.length} points following hull shape`);
     }
     
     return deckModule;
@@ -530,7 +529,6 @@ export class ModuleUtils {
     // Create hull segments using the precise hull points
     const segments = createCompleteHullSegments(10); // 10 unit thickness
     
-    console.log(`Creating ${segments.length} planks from hull segments`);
     
     for (const segment of segments) {
       // Calculate segment center position
@@ -573,10 +571,8 @@ export class ModuleUtils {
       planks.push(plank);
       
       const curveInfo = segment.isCurved ? ' [CURVED]' : ' [STRAIGHT]';
-      console.log(`  ${segment.sectionName} plank ${segment.index}${curveInfo}: pos=(${centerX.toFixed(1)}, ${centerY.toFixed(1)}), length=${length.toFixed(1)}, angle=${(angle * 180 / Math.PI).toFixed(1)}°`);
     }
     
-    console.log(`Total planks created: ${planks.length}`);
     return planks;
   }
 

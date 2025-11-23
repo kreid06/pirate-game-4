@@ -709,6 +709,19 @@ export class RenderSystem {
     // Find all cannon modules
     const cannons = ship.modules.filter(m => m.kind === 'cannon');
     
+    // Debug: Log once per ship with world positions
+    if (ship.id === 1 && cannons.length > 0) {
+      console.log(`[RenderSystem] Drawing ${cannons.length} cannons for ship ${ship.id} at world pos (${ship.position.x}, ${ship.position.y})`);
+      cannons.forEach((cannon, i) => {
+        // Calculate world position: rotate localPos by ship rotation, then add to ship position
+        const cos = Math.cos(ship.rotation);
+        const sin = Math.sin(ship.rotation);
+        const worldX = ship.position.x + (cannon.localPos.x * cos - cannon.localPos.y * sin);
+        const worldY = ship.position.y + (cannon.localPos.x * sin + cannon.localPos.y * cos);
+        console.log(`  Cannon ${i}: local(${cannon.localPos.x}, ${cannon.localPos.y}) → world(${worldX.toFixed(1)}, ${worldY.toFixed(1)})`);
+      });
+    }
+    
     for (const cannon of cannons) {
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
       
@@ -785,6 +798,18 @@ export class RenderSystem {
     // Find all helm/steering wheel modules
     const helms = ship.modules.filter(m => m.kind === 'helm' || m.kind === 'steering-wheel');
     
+    // Debug: Log once per ship with world positions
+    if (ship.id === 1 && helms.length > 0) {
+      console.log(`[RenderSystem] Drawing ${helms.length} helms for ship ${ship.id} at world pos (${ship.position.x}, ${ship.position.y})`);
+      helms.forEach((helm, i) => {
+        const cos = Math.cos(ship.rotation);
+        const sin = Math.sin(ship.rotation);
+        const worldX = ship.position.x + (helm.localPos.x * cos - helm.localPos.y * sin);
+        const worldY = ship.position.y + (helm.localPos.x * sin + helm.localPos.y * cos);
+        console.log(`  Helm ${i}: local(${helm.localPos.x}, ${helm.localPos.y}) → world(${worldX.toFixed(1)}, ${worldY.toFixed(1)})`);
+      });
+    }
+    
     for (const helm of helms) {
       if (!helm.moduleData) continue;
       
@@ -818,6 +843,18 @@ export class RenderSystem {
     
     // Find all mast modules
     const masts = ship.modules.filter(m => m.kind === 'mast');
+    
+    // Debug: Log once per ship with world positions
+    if (ship.id === 1 && masts.length > 0) {
+      console.log(`[RenderSystem] Drawing ${masts.length} masts for ship ${ship.id} at world pos (${ship.position.x}, ${ship.position.y})`);
+      masts.forEach((mast, i) => {
+        const cos = Math.cos(ship.rotation);
+        const sin = Math.sin(ship.rotation);
+        const worldX = ship.position.x + (mast.localPos.x * cos - mast.localPos.y * sin);
+        const worldY = ship.position.y + (mast.localPos.x * sin + mast.localPos.y * cos);
+        console.log(`  Mast ${i}: local(${mast.localPos.x}, ${mast.localPos.y}) → world(${worldX.toFixed(1)}, ${worldY.toFixed(1)})`);
+      });
+    }
     
     for (const mast of masts) {
       if (!mast.moduleData || mast.moduleData.kind !== 'mast') continue;

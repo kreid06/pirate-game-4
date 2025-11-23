@@ -494,7 +494,6 @@ export class NetworkManager {
       is_moving: isMoving
     };
 
-    console.log(`🚶 Movement state: (${movement.x.toFixed(2)}, ${movement.y.toFixed(2)}), moving: ${isMoving}`);
     this.sendMessage(message);
   }
 
@@ -513,7 +512,6 @@ export class NetworkManager {
       rotation: rotation
     };
 
-    console.log(`🎯 Rotation update: ${rotation.toFixed(3)} rad (${(rotation * 180 / Math.PI).toFixed(1)}°)`);
     this.sendMessage(message);
   }
 
@@ -707,6 +705,41 @@ export class NetworkManager {
               serverModules = ship.modules.map((mod: any) => {
                 const kind = MODULE_TYPE_MAP.toKind(mod.typeId);
                 
+                // Create default moduleData based on kind
+                let moduleData: any = undefined;
+                
+                if (kind === 'cannon') {
+                  moduleData = {
+                    kind: 'cannon',
+                    aimDirection: 0,
+                    maxAimSpeed: 1.0,
+                    fireRange: 500,
+                    reloadTime: 3.0,
+                    timeSinceLastFire: 0,
+                    ammunition: 50,
+                    maxAmmunition: 50
+                  };
+                } else if (kind === 'helm' || kind === 'steering-wheel') {
+                  moduleData = {
+                    kind: kind,
+                    maxTurnRate: 1.0,
+                    responsiveness: 0.8,
+                    currentInput: Vec2.from(0, 0),
+                    wheelRotation: 0
+                  };
+                } else if (kind === 'mast') {
+                  moduleData = {
+                    kind: 'mast',
+                    sailState: 'full',
+                    openness: 80,
+                    angle: 0,
+                    radius: 15,
+                    height: 120,
+                    sailWidth: 80,
+                    sailColor: '#F5F5DC'
+                  };
+                }
+                
                 return {
                   id: mod.id,
                   kind: kind,
@@ -715,11 +748,20 @@ export class NetworkManager {
                   localRot: mod.rotation || 0,
                   occupiedBy: null,
                   stateBits: 0,
-                  // Module-specific data initialized with defaults
-                  // Client can enhance this with specific module logic
-                  moduleData: undefined
+                  moduleData: moduleData
                 } as ShipModule;
               });
+              
+              // Debug: Log parsed modules for first ship
+              if (ship.id === 1 && serverModules) {
+                console.log(`[NetworkManager] Parsed ${serverModules.length} modules for ship ${ship.id}:`);
+                const summary = serverModules.reduce((acc, m) => {
+                  acc[m.kind] = (acc[m.kind] || 0) + 1;
+                  return acc;
+                }, {} as Record<string, number>);
+                console.log('  Module counts:', summary);
+                console.log('  Sample modules:', serverModules.slice(0, 3));
+              }
             }
             
             // Override with server's authoritative state
@@ -774,16 +816,13 @@ export class NetworkManager {
           carrierDetection: new Map() // Will be populated as needed
         };
         
-        console.log(`🗺️ Received game state - Tick: ${worldState.tick}, Players: ${worldState.players.length}, Ships: ${worldState.ships.length}`);
         
         // Debug: Log ship and player data
         if (worldState.ships.length > 0) {
           const ship = worldState.ships[0];
-          console.log(`🚢 Ship ${ship.id} position: (${ship.position.x.toFixed(1)}, ${ship.position.y.toFixed(1)}), rotation: ${ship.rotation.toFixed(2)}`);
         }
         if (worldState.players.length > 0) {
           const player = worldState.players[0];
-          console.log(`🎮 Player ${player.id} position: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}), carrierId: ${player.carrierId}, onDeck: ${player.onDeck}`);
         }
         
         this.onWorldStateReceived?.(worldState);
@@ -803,7 +842,6 @@ export class NetworkManager {
         break;
         
       case MessageType.MESSAGE_ACK:
-        console.log('✅ Server acknowledged message:', message.status);
         break;
         
       default:

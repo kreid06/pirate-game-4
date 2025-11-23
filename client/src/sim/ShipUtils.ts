@@ -48,7 +48,6 @@ export function createCurvedShipHull(): Vec2[] {
     hull.push(Vec2.from(x, y));
   }
   
-  console.log(`Created curved hull with ${hull.length} points`);
   return hull;
 }
 

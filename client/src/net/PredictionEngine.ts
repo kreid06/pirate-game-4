@@ -671,7 +671,6 @@ export class PredictionEngine {
     this.inputValidation.totalInputs++;
     
     // ✅ Input validation debug logging
-    console.log(`🔍 Input validation check - Tick: ${inputFrame.tick}, Movement: (${inputFrame.movement.x.toFixed(3)}, ${inputFrame.movement.y.toFixed(3)}), Actions: ${inputFrame.actions}`);
     
     // Check movement magnitude (reasonable bounds)
     const movementMagnitude = Math.sqrt(inputFrame.movement.x * inputFrame.movement.x + inputFrame.movement.y * inputFrame.movement.y);
@@ -691,7 +690,6 @@ export class PredictionEngine {
     }
     
     this.inputValidation.lastInputTimestamp = now;
-    console.log(`✅ Input validation passed for tick ${inputFrame.tick}`);
     return true;
   }
   

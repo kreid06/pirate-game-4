@@ -169,7 +169,6 @@ export class InputManager {
     if (noInput && stillMoving && timeSinceLastStop > this.STOP_RESEND_INTERVAL) {
       // Player released keys but server hasn't stopped them yet - resend stop
       if (this.onMovementStateChange) {
-        console.log(`🛑 Resending stop - velocity: ${this.playerVelocity.length().toFixed(2)}`);
         this.onMovementStateChange(Vec2.zero(), false);
         this.lastStopSentTime = Date.now();
       }
