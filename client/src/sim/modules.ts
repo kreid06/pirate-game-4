@@ -15,6 +15,55 @@ export type ModuleKind =
   | 'custom';        // User-defined module types
 
 /**
+ * Numeric module type IDs for efficient network serialization
+ * Maps to ModuleKind for bandwidth optimization
+ */
+export enum ModuleTypeId {
+  HELM = 0,
+  SEAT = 1,
+  CANNON = 2,
+  MAST = 3,
+  STEERING_WHEEL = 4,
+  LADDER = 5,
+  PLANK = 6,
+  DECK = 7,
+  CUSTOM = 255  // Use high value for custom types
+}
+
+/**
+ * Bidirectional mapping between ModuleKind and ModuleTypeId
+ */
+export const MODULE_TYPE_MAP = {
+  toTypeId: (kind: ModuleKind): ModuleTypeId => {
+    switch (kind) {
+      case 'helm': return ModuleTypeId.HELM;
+      case 'seat': return ModuleTypeId.SEAT;
+      case 'cannon': return ModuleTypeId.CANNON;
+      case 'mast': return ModuleTypeId.MAST;
+      case 'steering-wheel': return ModuleTypeId.STEERING_WHEEL;
+      case 'ladder': return ModuleTypeId.LADDER;
+      case 'plank': return ModuleTypeId.PLANK;
+      case 'deck': return ModuleTypeId.DECK;
+      case 'custom': return ModuleTypeId.CUSTOM;
+    }
+  },
+  toKind: (typeId: ModuleTypeId): ModuleKind => {
+    switch (typeId) {
+      case ModuleTypeId.HELM: return 'helm';
+      case ModuleTypeId.SEAT: return 'seat';
+      case ModuleTypeId.CANNON: return 'cannon';
+      case ModuleTypeId.MAST: return 'mast';
+      case ModuleTypeId.STEERING_WHEEL: return 'steering-wheel';
+      case ModuleTypeId.LADDER: return 'ladder';
+      case ModuleTypeId.PLANK: return 'plank';
+      case ModuleTypeId.DECK: return 'deck';
+      case ModuleTypeId.CUSTOM: return 'custom';
+      default: return 'custom';
+    }
+  }
+};
+
+/**
  * Module state represented as bit flags for network efficiency
  */
 export enum ModuleStateBits {
@@ -180,6 +229,13 @@ export interface ModuleInteraction {
  * Helper functions for module management
  */
 export class ModuleUtils {
+  /**
+   * Get the numeric type ID for a module (for network serialization)
+   */
+  static getTypeId(module: ShipModule): ModuleTypeId {
+    return MODULE_TYPE_MAP.toTypeId(module.kind);
+  }
+
   /**
    * Check if a module can be interacted with
    */
