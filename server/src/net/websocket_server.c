@@ -1509,7 +1509,7 @@ int websocket_server_update(struct Sim* sim) {
         for (int i = 0; i < WS_MAX_CLIENTS; i++) {
             struct WebSocketClient* client = &ws_server.clients[i];
             if (client->connected && client->handshake_complete) {
-                char frame[1024];
+                char frame[2048];  // Increased to handle module data in game state
                 size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state, strlen(game_state), frame, sizeof(frame));
                 if (frame_len > 0) {
                     ssize_t sent = send(client->fd, frame, frame_len, 0);
