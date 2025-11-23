@@ -36,6 +36,7 @@ set(CORE_SOURCES
 
 set(SIM_SOURCES
     src/sim/simulation.c
+    src/sim/module_types.c
 )
 
 set(NET_SOURCES
