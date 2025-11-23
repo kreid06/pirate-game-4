@@ -140,17 +140,44 @@ static char* base64_encode(const unsigned char* input, int length) {
 
 // WebSocket handshake
 static bool websocket_handshake(int client_fd, const char* request) {
+    log_info("🤝 Starting WebSocket handshake, request length: %zu bytes", strlen(request));
+    
+    // Check for WebSocket upgrade request
+    if (!strstr(request, "GET ")) {
+        log_error("❌ Handshake failed: Not a GET request");
+        return false;
+    }
+    
+    if (!strstr(request, "Upgrade: websocket") && !strstr(request, "Upgrade: WebSocket")) {
+        log_error("❌ Handshake failed: Missing 'Upgrade: websocket' header");
+        return false;
+    }
+    
     char* key_start = strstr(request, "Sec-WebSocket-Key: ");
-    if (!key_start) return false;
+    if (!key_start) {
+        log_error("❌ Handshake failed: Missing 'Sec-WebSocket-Key' header");
+        log_debug("Request headers:\n%s", request);
+        return false;
+    }
     
     key_start += 19; // Length of "Sec-WebSocket-Key: "
     char* key_end = strstr(key_start, "\r\n");
-    if (!key_end) return false;
+    if (!key_end) {
+        log_error("❌ Handshake failed: Malformed Sec-WebSocket-Key (no CRLF)");
+        return false;
+    }
     
     size_t key_len = key_end - key_start;
+    if (key_len == 0 || key_len > 255) {
+        log_error("❌ Handshake failed: Invalid key length: %zu", key_len);
+        return false;
+    }
+    
     char key[256];
     memcpy(key, key_start, key_len);
     key[key_len] = '\0';
+    
+    log_debug("📋 Extracted WebSocket key: '%s' (length: %zu)", key, key_len);
     
     // Create accept key
     char accept_input[512];
@@ -160,20 +187,45 @@ static bool websocket_handshake(int client_fd, const char* request) {
     SHA1((unsigned char*)accept_input, strlen(accept_input), hash);
     
     char* accept_key = base64_encode(hash, SHA_DIGEST_LENGTH);
+    if (!accept_key) {
+        log_error("❌ Handshake failed: base64_encode returned NULL");
+        return false;
+    }
+    
+    log_debug("🔑 Computed Sec-WebSocket-Accept: '%s'", accept_key);
     
     // Send handshake response
     char response[1024];
-    snprintf(response, sizeof(response),
+    int response_len = snprintf(response, sizeof(response),
         "HTTP/1.1 101 Switching Protocols\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Accept: %s\r\n\r\n",
         accept_key);
     
+    if (response_len < 0 || response_len >= (int)sizeof(response)) {
+        log_error("❌ Handshake failed: Response buffer overflow");
+        free(accept_key);
+        return false;
+    }
+    
+    log_debug("📤 Sending handshake response (%d bytes)", response_len);
+    
     ssize_t sent = send(client_fd, response, strlen(response), 0);
     free(accept_key);
     
-    return sent > 0;
+    if (sent <= 0) {
+        log_error("❌ Handshake failed: send() returned %zd, errno: %d (%s)", 
+                  sent, errno, strerror(errno));
+        return false;
+    }
+    
+    if (sent != response_len) {
+        log_warn("⚠️ Handshake partial send: %zd/%d bytes", sent, response_len);
+    }
+    
+    log_info("✅ WebSocket handshake completed successfully (%zd bytes sent)", sent);
+    return true;
 }
 
 // Parse WebSocket frame
@@ -704,9 +756,14 @@ int websocket_server_update(struct Sim* sim) {
             inet_ntop(AF_INET, &client_addr.sin_addr, ws_server.clients[slot].ip_address, INET_ADDRSTRLEN);
             ws_server.clients[slot].port = ntohs(client_addr.sin_port);
             
-            // New WebSocket connection accepted
+            log_info("🔌 New WebSocket connection from %s:%u (slot %d, fd %d)", 
+                     ws_server.clients[slot].ip_address, 
+                     ws_server.clients[slot].port, 
+                     slot, client_fd);
         } else {
-            log_warn("WebSocket server full, rejecting connection");
+            log_warn("❌ WebSocket server full (%d/%d), rejecting connection from %s:%u",
+                     ws_server.client_count, WS_MAX_CLIENTS,
+                     inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
             close(client_fd);
         }
     }
@@ -723,12 +780,17 @@ int websocket_server_update(struct Sim* sim) {
             buffer[received] = '\0';
             
             if (!client->handshake_complete) {
+                log_debug("📨 Received handshake request from %s:%u (%zd bytes)", 
+                         client->ip_address, client->port, received);
+                
                 // Handle WebSocket handshake
                 if (websocket_handshake(client->fd, buffer)) {
                     client->handshake_complete = true;
-                    // WebSocket handshake completed
+                    log_info("✅ WebSocket handshake successful for %s:%u", 
+                            client->ip_address, client->port);
                 } else {
-                    log_warn("❌ WebSocket handshake failed for %s:%u", client->ip_address, client->port);
+                    log_error("❌ WebSocket handshake FAILED for %s:%u - closing connection", 
+                             client->ip_address, client->port);
                     close(client->fd);
                     client->connected = false;
                 }
