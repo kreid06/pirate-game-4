@@ -943,21 +943,25 @@ int websocket_server_update(struct Sim* sim) {
                                     char game_state_response[12288];  // Increased for module data
                                     
                                     // Build ships array for initial state (increased buffer for modules)
-                                    char ships_str[8192] = "[";
+                                    char ships_str[8192];
+                                    int ships_offset = 0;
+                                    ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "[");
+                                    
                                     bool first_ship = true;
-                                    for (int s = 0; s < ship_count; s++) {
+                                    for (int s = 0; s < ship_count && ships_offset < (int)sizeof(ships_str) - 512; s++) {
                                         if (ships[s].active) {
-                                            if (!first_ship) strcat(ships_str, ",");
-                                            char ship_entry[256];
-                                            snprintf(ship_entry, sizeof(ship_entry),
-                                                    "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f}",
+                                            ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
+                                                    "%s{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f}",
+                                                    first_ship ? "" : ",",
                                                     ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
                                                     ships[s].velocity_x, ships[s].velocity_y);
-                                            strcat(ships_str, ship_entry);
                                             first_ship = false;
                                         }
                                     }
-                                    strcat(ships_str, "]");
+                                    ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "]");
+                                    
+                                    log_info("📊 Initial game state: ships_str size=%d, buffer=%zu", 
+                                             ships_offset, sizeof(ships_str));
                                     
                                     snprintf(game_state_response, sizeof(game_state_response),
                                             "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":[{\"id\":%u,\"name\":\"Player\","
@@ -973,16 +977,20 @@ int websocket_server_update(struct Sim* sim) {
                                             player->parent_ship_id, player->local_x, player->local_y,
                                             get_state_string(player->movement_state));
                                     
+                                    size_t response_len = strlen(game_state_response);
+                                    log_info("📊 Game state response: %zu bytes (buffer: %zu bytes)", 
+                                             response_len, sizeof(game_state_response));
+                                    
                                     // Send handshake response first
-                                    char frame[1024];
+                                    char frame[2048];  // Increased to match earlier fix
                                     size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame);
-                                    if (frame_len > 0) {
+                                    if (frame_len > 0 && frame_len < sizeof(frame)) {
                                         send(client->fd, frame, frame_len, 0);
                                     }
                                     
                                     // Then send game state
                                     size_t game_state_frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state_response, strlen(game_state_response), game_state_frame);
-                                    if (game_state_frame_len > 0) {
+                                    if (game_state_frame_len > 0 && game_state_frame_len < sizeof(game_state_frame)) {
                                         send(client->fd, game_state_frame, game_state_frame_len, 0);
                                         // Sent initial game state
                                     }
