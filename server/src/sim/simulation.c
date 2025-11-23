@@ -1130,8 +1130,9 @@ static bool point_in_polygon(Vec2Q16 point, const struct Ship* ship) {
 }
 
 // Helper: Find closest point on ship hull edge to player
-static Vec2Q16 closest_point_on_hull(Vec2Q16 player_pos, const struct Ship* ship, q16_t* out_distance) {
+static Vec2Q16 closest_point_on_hull(Vec2Q16 player_pos, const struct Ship* ship, q16_t* out_distance, Vec2Q16* out_edge_normal) {
     Vec2Q16 closest = player_pos;
+    Vec2Q16 edge_normal = {0, 0};
     q16_t min_dist_sq = Q16_MAX;
     
     for (uint8_t i = 0; i < ship->hull_vertex_count; i++) {
@@ -1165,11 +1166,35 @@ static Vec2Q16 closest_point_on_hull(Vec2Q16 player_pos, const struct Ship* ship
         if (dist_sq < min_dist_sq) {
             min_dist_sq = dist_sq;
             closest = point_on_edge;
+            
+            // Calculate edge normal (perpendicular to edge, pointing outward)
+            // For CCW winding, normal = (-edge.y, edge.x) points outward (right side)
+            q16_t edge_length = vec2_length(edge);
+            if (edge_length > Q16_FROM_FLOAT(0.01f)) {
+                edge_normal.x = -q16_div(edge.y, edge_length);
+                edge_normal.y = q16_div(edge.x, edge_length);
+                
+                // Ensure normal points away from ship center
+                Vec2Q16 edge_center = {
+                    (v1.x >> 1) + (v2.x >> 1),
+                    (v1.y >> 1) + (v2.y >> 1)
+                };
+                Vec2Q16 to_center = vec2_sub(ship->position, edge_center);
+                if (vec2_dot(edge_normal, to_center) > 0) {
+                    // Normal pointing inward, flip it
+                    edge_normal.x = -edge_normal.x;
+                    edge_normal.y = -edge_normal.y;
+                }
+            }
         }
     }
     
     if (out_distance) {
         *out_distance = vec2_length(vec2_sub(player_pos, closest));
+    }
+    
+    if (out_edge_normal) {
+        *out_edge_normal = edge_normal;
     }
     
     return closest;
@@ -1213,43 +1238,47 @@ void handle_player_ship_collisions(struct Sim* sim) {
             if (inside) {
                 // Player is colliding with ship hull - push them out
                 q16_t penetration_depth;
-                Vec2Q16 closest_hull_point = closest_point_on_hull(player->position, ship, &penetration_depth);
+                Vec2Q16 edge_normal;
+                Vec2Q16 closest_hull_point = closest_point_on_hull(player->position, ship, &penetration_depth, &edge_normal);
                 
-                // Calculate separation vector (from hull to player)
-                Vec2Q16 separation = vec2_sub(player->position, closest_hull_point);
-                q16_t sep_length = vec2_length(separation);
+                // Use edge normal for collision response (more accurate than radial direction)
+                Vec2Q16 normal = edge_normal;
+                q16_t normal_length = vec2_length(normal);
                 
-                if (sep_length > Q16_FROM_FLOAT(0.01f)) {
-                    // Normalize to get the collision normal (pointing away from hull)
-                    Vec2Q16 normal = vec2_normalize(separation);
-                    
-                    // Push player out to just outside the hull (radius + small margin)
-                    q16_t target_distance = q16_add_sat(player->radius, Q16_FROM_FLOAT(0.1f)); // radius + 0.1 unit margin
-                    Vec2Q16 target_pos = vec2_add(closest_hull_point, vec2_mul_scalar(normal, target_distance));
-                    player->position = target_pos;
-                    
-                    // Reflect velocity if moving into the hull
-                    q16_t vel_along_normal = vec2_dot(player->velocity, normal);
-                    if (vel_along_normal < 0) {
-                        // Moving into the hull - reflect velocity with restitution
-                        q16_t restitution = Q16_FROM_FLOAT(0.3f); // 30% bounce (reduced for smoother feel)
-                        
-                        // Separate velocity into normal and tangential components
-                        Vec2Q16 vel_normal = vec2_mul_scalar(normal, vel_along_normal);
-                        Vec2Q16 vel_tangent = vec2_sub(player->velocity, vel_normal);
-                        
-                        // Reflect normal component with restitution, keep tangential (sliding)
-                        Vec2Q16 vel_reflected = vec2_mul_scalar(vel_normal, -restitution);
-                        player->velocity = vec2_add(vel_tangent, vel_reflected);
+                // Fallback to radial direction if edge normal is invalid
+                if (normal_length < Q16_FROM_FLOAT(0.01f)) {
+                    Vec2Q16 separation = vec2_sub(player->position, closest_hull_point);
+                    q16_t sep_length = vec2_length(separation);
+                    if (sep_length > Q16_FROM_FLOAT(0.01f)) {
+                        normal = vec2_normalize(separation);
+                    } else {
+                        // Last resort: push away from ship center
+                        normal = vec2_normalize(vec2_sub(player->position, ship->position));
                     }
-                    
-                    log_info("🚫 Player %u collided with ship %u hull - repositioned to %.2f units from edge", 
-                             player->id, ship->id, Q16_TO_FLOAT(target_distance));
-                } else {
-                    // Very close to hull edge - just push away from ship center
-                    Vec2Q16 push_dir = vec2_normalize(vec2_sub(player->position, ship->position));
-                    player->position = vec2_add(player->position, vec2_mul_scalar(push_dir, player->radius));
                 }
+                
+                // Push player out to just outside the hull (radius + small margin)
+                q16_t target_distance = q16_add_sat(player->radius, Q16_FROM_FLOAT(0.1f)); // radius + 0.1 unit margin
+                Vec2Q16 target_pos = vec2_add(closest_hull_point, vec2_mul_scalar(normal, target_distance));
+                player->position = target_pos;
+                
+                // Reflect velocity if moving into the hull
+                q16_t vel_along_normal = vec2_dot(player->velocity, normal);
+                if (vel_along_normal < 0) {
+                    // Moving into the hull - reflect velocity with restitution
+                    q16_t restitution = Q16_FROM_FLOAT(0.3f); // 30% bounce (reduced for smoother feel)
+                    
+                    // Separate velocity into normal and tangential components
+                    Vec2Q16 vel_normal = vec2_mul_scalar(normal, vel_along_normal);
+                    Vec2Q16 vel_tangent = vec2_sub(player->velocity, vel_normal);
+                    
+                    // Reflect normal component with restitution, keep tangential (sliding)
+                    Vec2Q16 vel_reflected = vec2_mul_scalar(vel_normal, -restitution);
+                    player->velocity = vec2_add(vel_tangent, vel_reflected);
+                }
+                
+                log_info("🚫 Player %u collided with ship %u hull - repositioned to %.2f units from edge", 
+                         player->id, ship->id, Q16_TO_FLOAT(target_distance));
             }
         }
     }
