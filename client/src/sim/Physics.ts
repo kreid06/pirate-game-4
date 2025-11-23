@@ -2,7 +2,7 @@ import { Vec2 } from '../common/Vec2.js';
 import { AngleUtils } from '../common/AngleUtils.js';
 import { PolygonUtils } from '../common/PolygonUtils.js';
 import { WorldState, InputFrame, Ship, Player, PhysicsConfig } from './Types.js';
-import { CollisionSystem } from './CollisionSystem.js';
+import { CollisionSystem, CollisionResult } from './CollisionSystem.js';
 import { 
   CarrierDetectionState, 
   CarrierChangeEvent,
@@ -331,17 +331,16 @@ function updatePlayerOnDeck(player: Player, ship: Ship, inputFrame: InputFrame, 
     }
   }
 
-  // Always use plank-based collision system - this replaces the old deck polygon collision
-  const collisionResult = CollisionSystem.sweptCircleVsPlankSegments(
+  // Use hull polygon collision system with plank-aware gaps
+  // Healthy planks block movement, destroyed planks create gaps players can walk through
+  const collisionResult = sweptCircleVsHealthyHull(
     carriedPosition,
     newPosition,
     player.radius,
     player.velocity,
     ship,
     epsilon,
-    dt,
-    false, // Don't allow ladder entry when on deck (they should walk off normally)
-    isJumping   // Allow exit when jumping
+    dt
   );
   
   if (collisionResult.collided) {
@@ -418,17 +417,15 @@ function updatePlayerOffDeck(player: Player, ships: Ship[], inputFrame: InputFra
     const maxRelevantDistance = 400; // Generous bounding check
     if (distanceToShip > maxRelevantDistance) continue;
     
-    // Use collision system to check for ship hull collision
-    const collisionResult = CollisionSystem.sweptCircleVsPlankSegments(
+    // Use hull polygon collision for swimming players with plank-aware gaps
+    const collisionResult = sweptCircleVsHealthyHull(
       player.position,
       finalPosition,
       player.radius,
       finalVelocity,
       ship,
       epsilon,
-      dt,
-      true,  // allowLadderEntry = true for swimming players
-      false  // allowJumpExit = false for swimming players
+      dt
     );
     
     if (collisionResult.collided) {
@@ -714,22 +711,346 @@ function resolveShipCollision(ship1: Ship, ship2: Ship, collision: any): void {
 }
 
 /**
- * Calculate plank damage from ship collision
+ * Map a collision point to the corresponding plank index using radial angle
+ * This assumes planks are distributed around the ship hull in a circular pattern
+ * 
+ * @param ship - The ship being hit
+ * @param collisionPoint - World coordinates of the collision
+ * @param totalPlanks - Total number of planks (typically 10 for brigantine)
+ * @returns Plank index (0-based)
+ */
+function mapCollisionToPlankIndex(ship: Ship, collisionPoint: Vec2, totalPlanks: number = 10): number {
+  // Convert collision point to ship-local coordinates
+  const localCollision = collisionPoint.sub(ship.position).rotate(-ship.rotation);
+  
+  // Calculate angle from ship center to collision point
+  // atan2 returns angle in radians from -π to π
+  const angle = Math.atan2(localCollision.y, localCollision.x);
+  
+  // Normalize angle to 0-2π range
+  const normalizedAngle = angle < 0 ? angle + Math.PI * 2 : angle;
+  
+  // Map angle to plank index
+  // Divide the circle into equal segments (one per plank)
+  const anglePerPlank = (Math.PI * 2) / totalPlanks;
+  const plankIndex = Math.floor(normalizedAngle / anglePerPlank) % totalPlanks;
+  
+  return plankIndex;
+}
+
+/**
+ * Get the plank index for a given hull edge index
+ * Assumes 1:1 mapping between hull edges and planks
+ * 
+ * @param hullEdgeIndex - Index of the hull edge (0-based)
+ * @param totalPlanks - Total number of planks
+ * @returns Plank index corresponding to this hull edge
+ */
+function mapHullEdgeToPlankIndex(hullEdgeIndex: number, totalPlanks: number): number {
+  return hullEdgeIndex % totalPlanks;
+}
+
+/**
+ * Create hull collision segments only for healthy planks
+ * Destroyed planks create gaps that players can walk/fall through
+ * 
+ * @param ship - The ship to generate collision segments for
+ * @returns Array of line segments (world coordinates) representing solid hull sections
+ */
+function createHealthyHullSegments(ship: Ship): Array<{start: Vec2, end: Vec2, plankIndex: number}> {
+  const segments: Array<{start: Vec2, end: Vec2, plankIndex: number}> = [];
+  
+  // Get all plank modules and build health map
+  const planks = ship.modules.filter(m => 
+    m.kind === 'plank' && 
+    m.moduleData && 
+    m.moduleData.kind === 'plank'
+  );
+  
+  // Build plank health lookup by index
+  const plankHealthMap = new Map<number, number>();
+  for (const plank of planks) {
+    if (plank.moduleData && plank.moduleData.kind === 'plank') {
+      // Use segmentIndex if available, otherwise calculate from module ID
+      const plankIndex = plank.moduleData.segmentIndex ?? (plank.id - 100);
+      plankHealthMap.set(plankIndex, plank.moduleData.health);
+    }
+  }
+  
+  // Transform hull to world coordinates
+  const hullWorld = ship.hull.map(p => p.rotate(ship.rotation).add(ship.position));
+  
+  // Create segments only for healthy planks
+  for (let i = 0; i < hullWorld.length; i++) {
+    const startPoint = hullWorld[i];
+    const endPoint = hullWorld[(i + 1) % hullWorld.length];
+    const plankIndex = mapHullEdgeToPlankIndex(i, planks.length);
+    
+    // Check if this plank is healthy (health > 0)
+    const plankHealth = plankHealthMap.get(plankIndex) ?? 100;
+    
+    if (plankHealth > 0) {
+      // Plank is healthy - add collision segment
+      segments.push({
+        start: startPoint,
+        end: endPoint,
+        plankIndex: plankIndex
+      });
+    } else {
+      // Plank is destroyed - skip this segment (creates a gap)
+      // Players can walk/fall through here
+    }
+  }
+  
+  return segments;
+}
+
+/**
+ * Check collision against healthy hull segments
+ * Only segments with healthy planks provide collision
+ * Destroyed planks create gaps that players can pass through
+ */
+function sweptCircleVsHealthyHull(
+  startPos: Vec2,
+  endPos: Vec2,
+  radius: number,
+  velocity: Vec2,
+  ship: Ship,
+  epsilon: number,
+  dt: number
+): CollisionResult {
+  const segments = createHealthyHullSegments(ship);
+  
+  // If no healthy segments, no collision possible - player can pass through
+  if (segments.length === 0) {
+    return {
+      newPosition: endPos,
+      newVelocity: velocity,
+      collided: false,
+      normal: Vec2.zero(),
+      penetrationDepth: 0,
+      contactPoint: endPos,
+      slideDistance: 0
+    };
+  }
+  
+  // Build a polygon from the healthy segments
+  // Note: This might create gaps where destroyed planks are
+  const healthyPolygon: Vec2[] = [];
+  const segmentSet = new Set(segments.map(s => `${s.start.x},${s.start.y}`));
+  
+  // Try to build a contiguous polygon from segments
+  // If there are gaps (destroyed planks), we'll handle collision segment-by-segment
+  let hasGaps = segments.length < ship.hull.length;
+  
+  if (!hasGaps) {
+    // All planks healthy - use full hull polygon (faster)
+    const hullWorld = ship.hull.map(p => p.rotate(ship.rotation).add(ship.position));
+    return CollisionSystem.sweptCircleVsPolygon({
+      startPos: startPos,
+      endPos: endPos,
+      radius: radius,
+      velocity: velocity,
+      polygon: hullWorld,
+      epsilon: epsilon,
+      dt: dt
+    });
+  }
+  
+  // Has gaps - check if player path crosses any healthy segment
+  // If not, they can pass through the gap
+  let collided = false;
+  let closestPoint = endPos;
+  let collisionNormal = Vec2.zero();
+  let minDistance = Infinity;
+  
+  const movement = endPos.sub(startPos);
+  const movementLength = movement.length();
+  
+  if (movementLength < 0.001) {
+    // No significant movement
+    return {
+      newPosition: endPos,
+      newVelocity: velocity,
+      collided: false,
+      normal: Vec2.zero(),
+      penetrationDepth: 0,
+      contactPoint: endPos,
+      slideDistance: 0
+    };
+  }
+  
+  // Check each healthy segment for collision
+  for (const segment of segments) {
+    const edgeVec = segment.end.sub(segment.start);
+    const edgeDir = edgeVec.normalize();
+    const edgeNormal = Vec2.from(-edgeDir.y, edgeDir.x);
+    
+    // Check if movement path intersects this segment (with radius)
+    const distToSegment = pointToSegmentDistance(startPos, segment.start, segment.end);
+    const endDistToSegment = pointToSegmentDistance(endPos, segment.start, segment.end);
+    
+    // If either start or end is within collision distance, handle it
+    if (distToSegment < radius + epsilon || endDistToSegment < radius + epsilon) {
+      // Collision with this segment - project onto it
+      const closestOnSegment = closestPointOnSegment(endPos, segment.start, segment.end);
+      const distanceToEdge = endPos.sub(closestOnSegment).length();
+      
+      if (distanceToEdge < minDistance) {
+        minDistance = distanceToEdge;
+        collided = true;
+        
+        // Push player away from segment
+        const pushDir = endPos.sub(closestOnSegment).normalize();
+        closestPoint = closestOnSegment.add(pushDir.mul(radius + epsilon));
+        collisionNormal = pushDir;
+      }
+    }
+  }
+  
+  if (collided) {
+    // Apply sliding along the collision normal
+    const slideVel = velocity.sub(collisionNormal.mul(velocity.dot(collisionNormal)));
+    
+    return {
+      newPosition: closestPoint,
+      newVelocity: slideVel,
+      collided: true,
+      normal: collisionNormal,
+      penetrationDepth: Math.max(0, radius + epsilon - minDistance),
+      contactPoint: closestPoint,
+      slideDistance: 0
+    };
+  }
+  
+  // No collision - player can move freely (possibly through a gap)
+  return {
+    newPosition: endPos,
+    newVelocity: velocity,
+    collided: false,
+    normal: Vec2.zero(),
+    penetrationDepth: 0,
+    contactPoint: endPos,
+    slideDistance: 0
+  };
+}
+
+/**
+ * Calculate distance from point to line segment
+ */
+function pointToSegmentDistance(point: Vec2, segStart: Vec2, segEnd: Vec2): number {
+  const closest = closestPointOnSegment(point, segStart, segEnd);
+  return point.sub(closest).length();
+}
+
+/**
+ * Find closest point on line segment to given point
+ */
+function closestPointOnSegment(point: Vec2, segStart: Vec2, segEnd: Vec2): Vec2 {
+  const segVec = segEnd.sub(segStart);
+  const segLengthSq = segVec.lengthSq();
+  
+  if (segLengthSq < 0.0001) {
+    return segStart; // Degenerate segment
+  }
+  
+  const pointVec = point.sub(segStart);
+  const t = Math.max(0, Math.min(1, pointVec.dot(segVec) / segLengthSq));
+  
+  return segStart.add(segVec.mul(t));
+}
+
+/**
+ * Apply radial angle-based damage to a plank
+ * Finds the plank based on collision angle and applies damage
+ * 
+ * @param ship - The ship being damaged
+ * @param collisionPoint - World coordinates of the collision
+ * @param damage - Amount of damage to apply
+ * @param spreadRadius - Optional angular spread to damage adjacent planks (in radians)
+ */
+function applyRadialPlankDamage(
+  ship: Ship, 
+  collisionPoint: Vec2, 
+  damage: number,
+  spreadRadius: number = 0
+): void {
+  // Find all plank modules
+  const planks = ship.modules.filter(m => 
+    m.kind === 'plank' && 
+    m.moduleData && 
+    m.moduleData.kind === 'plank' &&
+    m.moduleData.health > 0
+  );
+  
+  if (planks.length === 0) return;
+  
+  // Get the primary plank hit
+  const primaryPlankIndex = mapCollisionToPlankIndex(ship, collisionPoint, planks.length);
+  
+  // Apply damage to primary plank
+  const primaryPlank = planks[primaryPlankIndex];
+  if (primaryPlank && primaryPlank.moduleData && primaryPlank.moduleData.kind === 'plank') {
+    const plankData = primaryPlank.moduleData;
+    plankData.health = Math.max(0, plankData.health - damage);
+    
+    if (plankData.health <= 0) {
+      console.log(`💥 Radial collision destroyed plank ${primaryPlankIndex}! (${damage.toFixed(1)} damage)`);
+    } else {
+      console.log(`⚔️ Radial collision damaged plank ${primaryPlankIndex}: ${plankData.health.toFixed(1)} health remaining`);
+    }
+  }
+  
+  // If spread radius is specified, damage adjacent planks
+  if (spreadRadius > 0) {
+    const anglePerPlank = (Math.PI * 2) / planks.length;
+    const spreadPlanks = Math.ceil(spreadRadius / anglePerPlank);
+    
+    for (let offset = 1; offset <= spreadPlanks; offset++) {
+      const falloffFactor = 1 - (offset / (spreadPlanks + 1)); // Damage decreases with distance
+      const spreadDamage = damage * falloffFactor * 0.5; // 50% max for adjacent planks
+      
+      // Damage plank to the left
+      const leftIndex = (primaryPlankIndex - offset + planks.length) % planks.length;
+      const leftPlank = planks[leftIndex];
+      if (leftPlank && leftPlank.moduleData && leftPlank.moduleData.kind === 'plank') {
+        leftPlank.moduleData.health = Math.max(0, leftPlank.moduleData.health - spreadDamage);
+      }
+      
+      // Damage plank to the right
+      const rightIndex = (primaryPlankIndex + offset) % planks.length;
+      const rightPlank = planks[rightIndex];
+      if (rightPlank && rightPlank.moduleData && rightPlank.moduleData.kind === 'plank') {
+        rightPlank.moduleData.health = Math.max(0, rightPlank.moduleData.health - spreadDamage);
+      }
+    }
+  }
+}
+
+/**
+ * Calculate plank damage from ship collision using radial angle-based detection
  */
 function calculateCollisionPlankDamage(ship1: Ship, ship2: Ship, collision: any): void {
   const impactForce = collision.penetration * 10; // Convert penetration to damage force
-  const damageRadius = 50; // Radius around contact point where planks take damage
   const baseDamage = Math.min(impactForce * 2, 15); // Cap collision damage at 15 per hit
   
-  // Apply damage to planks near the collision contact point on both ships
-  applyCollisionDamageToShip(ship1, collision.contactPoint, baseDamage, damageRadius);
-  applyCollisionDamageToShip(ship2, collision.contactPoint, baseDamage, damageRadius);
+  // Use radial angle-based damage instead of distance-based
+  // Apply to both ships at their respective collision points
+  const spreadAngle = Math.PI / 6; // 30 degrees spread (affects 1-2 adjacent planks)
+  
+  applyRadialPlankDamage(ship1, collision.contactPoint, baseDamage, spreadAngle);
+  applyRadialPlankDamage(ship2, collision.contactPoint, baseDamage, spreadAngle);
 }
 
 /**
  * Apply collision damage to planks within radius of contact point
+ * DEPRECATED: Use applyRadialPlankDamage instead for angle-based damage
  */
 function applyCollisionDamageToShip(ship: Ship, contactPoint: Vec2, baseDamage: number, damageRadius: number): void {
+  // This function is deprecated - keeping for reference only
+  // New code should use applyRadialPlankDamage() instead
+  console.warn('applyCollisionDamageToShip is deprecated. Use applyRadialPlankDamage instead.');
+  
   for (const module of ship.modules) {
     if (module.kind !== 'plank') continue;
     if (!module.moduleData || module.moduleData.kind !== 'plank') continue;

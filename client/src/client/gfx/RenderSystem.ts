@@ -297,6 +297,9 @@ export class RenderSystem {
     // Draw ship hull
     this.drawShipHull(ship);
     
+    // Draw planks (on top of hull)
+    this.drawShipPlanks(ship);
+    
     // Draw ship direction indicator
     this.ctx.strokeStyle = '#ff0000';
     this.ctx.lineWidth = 4 / cameraState.zoom;
@@ -325,6 +328,161 @@ export class RenderSystem {
     this.ctx.closePath();
     this.ctx.fill();
     this.ctx.stroke();
+  }
+  
+  private drawShipPlanks(ship: Ship): void {
+    // Find all plank modules
+    const planks = ship.modules.filter(m => m.kind === 'plank');
+    
+    for (const plank of planks) {
+      if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
+      
+      const plankData = plank.moduleData;
+      const pos = plank.localPos;
+      const rot = plank.localRot;
+      const length = plankData.length;
+      const width = plankData.width;
+      const health = plankData.health;
+      const isCurved = plankData.isCurved || false;
+      
+      // Skip completely destroyed planks
+      if (health <= 0) continue;
+      
+      // Color based on health
+      const healthRatio = health / 100;
+      let fillColor: string;
+      let strokeColor: string;
+      
+      if (healthRatio > 0.66) {
+        fillColor = '#8B7355'; // Healthy brown
+        strokeColor = '#654321';
+      } else if (healthRatio > 0.33) {
+        fillColor = '#A0826D'; // Damaged (lighter)
+        strokeColor = '#8B4513';
+      } else {
+        fillColor = '#B8956A'; // Critical (very light)
+        strokeColor = '#A0826D';
+      }
+      
+      this.ctx.fillStyle = fillColor;
+      this.ctx.strokeStyle = strokeColor;
+      this.ctx.lineWidth = 1;
+      
+      if (isCurved && plankData.curveData) {
+        // For curved planks, draw directly in ship-local coordinates
+        // The curve shape already defines the correct position and orientation
+        this.ctx.save();
+        this.drawCurvedPlank(plankData.curveData, width, fillColor, strokeColor);
+        this.ctx.restore();
+      } else {
+        // For straight planks, use position and rotation
+        this.ctx.save();
+        this.ctx.translate(pos.x, pos.y);
+        this.ctx.rotate(rot);
+        
+        const halfLength = length / 2;
+        const halfWidth = width / 2;
+        
+        this.ctx.fillRect(-halfLength, -halfWidth, length, width);
+        this.ctx.strokeRect(-halfLength, -halfWidth, length, width);
+        
+        // Add wood grain effect (parallel lines)
+        this.ctx.strokeStyle = strokeColor;
+        this.ctx.lineWidth = 0.5;
+        this.ctx.globalAlpha = 0.3;
+        
+        const grainCount = Math.floor(length / 10);
+        for (let i = 1; i < grainCount; i++) {
+          const x = -halfLength + (i * length / grainCount);
+          this.ctx.beginPath();
+          this.ctx.moveTo(x, -halfWidth);
+          this.ctx.lineTo(x, halfWidth);
+          this.ctx.stroke();
+        }
+        
+        this.ctx.globalAlpha = 1.0;
+        this.ctx.restore();
+      }
+    }
+  }
+  
+  private drawCurvedPlank(
+    curveData: { start: any; control: any; end: any; t1: number; t2: number },
+    width: number,
+    fillColor: string,
+    strokeColor: string
+  ): void {
+    const { start, control, end, t1, t2 } = curveData;
+    const halfWidth = width / 2;
+    
+    // Sample points along the curve segment
+    const segments = 10; // Number of subdivisions for smooth curve
+    const points: Array<{x: number, y: number}> = [];
+    
+    for (let i = 0; i <= segments; i++) {
+      const t = t1 + (t2 - t1) * (i / segments);
+      const pt = this.getQuadraticPoint(start, control, end, t);
+      points.push(pt);
+    }
+    
+    // Points are already in ship-local coordinates, no transformation needed
+    
+    // Calculate perpendicular offsets for the plank width
+    const innerPoints: Array<{x: number, y: number}> = [];
+    const outerPoints: Array<{x: number, y: number}> = [];
+    
+    for (let i = 0; i < points.length; i++) {
+      const curr = points[i];
+      let tangent;
+      
+      if (i === 0) {
+        tangent = { x: points[1].x - curr.x, y: points[1].y - curr.y };
+      } else if (i === points.length - 1) {
+        tangent = { x: curr.x - points[i-1].x, y: curr.y - points[i-1].y };
+      } else {
+        tangent = { x: points[i+1].x - points[i-1].x, y: points[i+1].y - points[i-1].y };
+      }
+      
+      const len = Math.sqrt(tangent.x * tangent.x + tangent.y * tangent.y);
+      tangent.x /= len;
+      tangent.y /= len;
+      
+      // Perpendicular vector (rotated 90 degrees)
+      const perp = { x: -tangent.y, y: tangent.x };
+      
+      innerPoints.push({
+        x: curr.x + perp.x * halfWidth,
+        y: curr.y + perp.y * halfWidth
+      });
+      outerPoints.push({
+        x: curr.x - perp.x * halfWidth,
+        y: curr.y - perp.y * halfWidth
+      });
+    }
+    
+    // Draw filled curved plank
+    this.ctx.beginPath();
+    this.ctx.moveTo(innerPoints[0].x, innerPoints[0].y);
+    for (let i = 1; i < innerPoints.length; i++) {
+      this.ctx.lineTo(innerPoints[i].x, innerPoints[i].y);
+    }
+    for (let i = outerPoints.length - 1; i >= 0; i--) {
+      this.ctx.lineTo(outerPoints[i].x, outerPoints[i].y);
+    }
+    this.ctx.closePath();
+    this.ctx.fill();
+    this.ctx.stroke();
+  }
+  
+  private getQuadraticPoint(
+    p0: {x: number, y: number},
+    p1: {x: number, y: number},
+    p2: {x: number, y: number},
+    t: number
+  ): {x: number, y: number} {
+    const x = Math.pow(1-t, 2) * p0.x + 2 * (1-t) * t * p1.x + Math.pow(t, 2) * p2.x;
+    const y = Math.pow(1-t, 2) * p0.y + 2 * (1-t) * t * p1.y + Math.pow(t, 2) * p2.y;
+    return { x, y };
   }
   
   private drawPlayer(player: Player, camera: Camera): void {

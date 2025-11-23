@@ -129,6 +129,15 @@ export interface PlankModuleData {
   health: number;              // Structural integrity (0-100)
   material: 'wood' | 'iron' | 'steel'; // Plank material type
   segmentIndex: number;        // Which segment of the ship hull (0-11)
+  sectionName?: string;        // Section name (e.g., "port_bow", "starboard_side")
+  isCurved?: boolean;          // Whether this plank follows a curve
+  curveData?: {                // Curve information for rendering
+    start: PlankPoint;
+    control: PlankPoint;
+    end: PlankPoint;
+    t1: number;                // Start position on curve (0-1)
+    t2: number;                // End position on curve (0-1)
+  };
 }
 
 /**
@@ -480,12 +489,29 @@ export class ModuleUtils {
         plank.moduleData.health = 100;
         plank.moduleData.material = 'wood';
         plank.moduleData.segmentIndex = segment.index;
+        plank.moduleData.sectionName = segment.sectionName;
+        plank.moduleData.isCurved = segment.isCurved || false;
+        
+        // Store curve data if this is a curved segment
+        if (segment.isCurved && segment.curveStart && segment.curveControl && segment.curveEnd && segment.t1 !== undefined && segment.t2 !== undefined) {
+          // Store the ORIGINAL full curve points, not the segment endpoints
+          // This ensures the renderer uses the correct curve shape
+          plank.moduleData.curveData = {
+            start: segment.curveStart,      // Original curve start (e.g., bow)
+            control: segment.curveControl,  // Original curve control (e.g., bowTip)
+            end: segment.curveEnd,          // Original curve end (e.g., bowBottom)
+            t1: segment.t1,                 // Start parameter (e.g., 0 or 0.5)
+            t2: segment.t2                  // End parameter (e.g., 0.5 or 1.0)
+          };
+        }
+        
         plank.localRot = angle;
       }
       
       planks.push(plank);
       
-      console.log(`  ${segment.sectionName} plank ${segment.index}: pos=(${centerX.toFixed(1)}, ${centerY.toFixed(1)}), length=${length.toFixed(1)}, angle=${(angle * 180 / Math.PI).toFixed(1)}°`);
+      const curveInfo = segment.isCurved ? ' [CURVED]' : ' [STRAIGHT]';
+      console.log(`  ${segment.sectionName} plank ${segment.index}${curveInfo}: pos=(${centerX.toFixed(1)}, ${centerY.toFixed(1)}), length=${length.toFixed(1)}, angle=${(angle * 180 / Math.PI).toFixed(1)}°`);
     }
     
     console.log(`Total planks created: ${planks.length}`);
@@ -560,6 +586,12 @@ export interface PlankSegment {
   thickness: number;
   sectionName: string;
   index: number;
+  isCurved?: boolean;          // Whether this segment is curved
+  curveStart?: PlankPoint;     // Original curve start point (P0)
+  curveControl?: PlankPoint;   // Control point for curved segments (P1)
+  curveEnd?: PlankPoint;       // Original curve end point (P2)
+  t1?: number;                 // Start t value on curve (0-1)
+  t2?: number;                 // End t value on curve (0-1)
 }
 
 /**
@@ -613,7 +645,11 @@ export function createCurvedSegments(
       end: segEnd,
       thickness: plankThickness,
       sectionName: sectionName,
-      index: i
+      index: i,
+      isCurved: true,
+      curveControl: control,
+      t1: t1,
+      t2: t2
     });
   }
   
@@ -660,22 +696,61 @@ export function createStraightSegments(
 
 /**
  * Create all plank segments for a complete ship hull
+ * Total: 10 planks (2 bow + 3 starboard + 2 stern + 3 port)
+ * Each bow/stern has one plank on port side and one on starboard side
  */
 export function createCompleteHullSegments(plankThickness: number = 10): PlankSegment[] {
   const p = HULL_POINTS;
   const segments: PlankSegment[] = [];
   
-  // Add bow curves (3 segments each)
-  segments.push(...createCurvedSegments(p.bow, p.bowTip, p.bowBottom, 3, "port_bow", plankThickness));
-  segments.push(...createCurvedSegments(p.bowBottom, p.bowTip, p.bow, 3, "starboard_bow", plankThickness));
+  // Bow Port Side: Half curve from bow to bowTip (t: 0 to 0.5)
+  segments.push(...createCurvedSegmentRange(p.bow, p.bowTip, p.bowBottom, 0, 0.5, "bow_port", plankThickness, 0));
   
-  // Add stern curves (3 segments each)
-  segments.push(...createCurvedSegments(p.stern, p.sternTip, p.sternBottom, 3, "port_stern", plankThickness));
-  segments.push(...createCurvedSegments(p.sternBottom, p.sternTip, p.stern, 3, "starboard_stern", plankThickness));
+  // Bow Starboard Side: Half curve from bowTip to bowBottom (t: 0.5 to 1)
+  segments.push(...createCurvedSegmentRange(p.bow, p.bowTip, p.bowBottom, 0.5, 1.0, "bow_starboard", plankThickness, 1));
   
-  // Add straight sides (6 segments each)
-  segments.push(...createStraightSegments(p.bowBottom, p.sternBottom, 6, "starboard_side", plankThickness));
-  segments.push(...createStraightSegments(p.stern, p.bow, 6, "port_side", plankThickness));
+  // Starboard Side: 3 straight planks
+  segments.push(...createStraightSegments(p.bowBottom, p.sternBottom, 3, "starboard_side", plankThickness));
+  
+  // Stern Starboard Side: Half curve from sternBottom to sternTip (t: 0 to 0.5)
+  segments.push(...createCurvedSegmentRange(p.sternBottom, p.sternTip, p.stern, 0, 0.5, "stern_starboard", plankThickness, 4));
+  
+  // Stern Port Side: Half curve from sternTip to stern (t: 0.5 to 1)
+  segments.push(...createCurvedSegmentRange(p.sternBottom, p.sternTip, p.stern, 0.5, 1.0, "stern_port", plankThickness, 5));
+  
+  // Port Side: 3 straight planks
+  segments.push(...createStraightSegments(p.stern, p.bow, 3, "port_side", plankThickness));
   
   return segments;
+}
+
+/**
+ * Create a single curved segment for a specific range of t values
+ */
+function createCurvedSegmentRange(
+  start: PlankPoint,
+  control: PlankPoint,
+  end: PlankPoint,
+  t1: number,
+  t2: number,
+  sectionName: string,
+  plankThickness: number,
+  index: number
+): PlankSegment[] {
+  const segStart = getQuadraticPoint(start, control, end, t1);
+  const segEnd = getQuadraticPoint(start, control, end, t2);
+  
+  return [{
+    start: segStart,
+    end: segEnd,
+    thickness: plankThickness,
+    sectionName: sectionName,
+    index: index,
+    isCurved: true,
+    curveStart: start,      // Store original curve start
+    curveControl: control,   // Store original curve control point
+    curveEnd: end,          // Store original curve end
+    t1: t1,
+    t2: t2
+  }];
 }
