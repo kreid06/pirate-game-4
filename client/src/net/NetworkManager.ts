@@ -700,67 +700,99 @@ export class NetworkManager {
             //   - typeId: numeric type (0=HELM, 1=SEAT, 2=CANNON, 3=MAST, 5=LADDER, 6=PLANK, 7=DECK)
             //   - x, y: position relative to ship center (in client coordinates)
             //   - rotation: module rotation in radians
+            
+            // IMPORTANT: Planks and deck are client-generated from hull geometry
+            // Server only sends health/status data for planks
+            // Gameplay modules (cannons, masts, helm) come with full transform data
+            
             let serverModules: ShipModule[] | undefined;
             if (ship.modules && Array.isArray(ship.modules)) {
-              serverModules = ship.modules.map((mod: any) => {
+              // Separate gameplay modules from structural modules
+              const gameplayModules: ShipModule[] = [];
+              const plankHealthUpdates = new Map<number, number>();
+              
+              for (const mod of ship.modules) {
                 const kind = MODULE_TYPE_MAP.toKind(mod.typeId);
                 
-                // Create default moduleData based on kind
-                let moduleData: any = undefined;
-                
-                if (kind === 'cannon') {
-                  moduleData = {
-                    kind: 'cannon',
-                    aimDirection: 0,
-                    maxAimSpeed: 1.0,
-                    fireRange: 500,
-                    reloadTime: 3.0,
-                    timeSinceLastFire: 0,
-                    ammunition: 50,
-                    maxAmmunition: 50
-                  };
-                } else if (kind === 'helm' || kind === 'steering-wheel') {
-                  moduleData = {
+                if (kind === 'plank') {
+                  // Plank: Server only sends health, client generates positions
+                  plankHealthUpdates.set(mod.id, mod.health ?? 100);
+                } else if (kind === 'deck') {
+                  // Deck: Client generates from hull, server sends ID only
+                  // Skip - client already has deck module
+                } else {
+                  // Gameplay modules: Full transform data from server
+                  let moduleData: any = undefined;
+                  
+                  if (kind === 'cannon') {
+                    moduleData = {
+                      kind: 'cannon',
+                      aimDirection: 0,
+                      maxAimSpeed: 1.0,
+                      fireRange: 500,
+                      reloadTime: 3.0,
+                      timeSinceLastFire: 0,
+                      ammunition: 50,
+                      maxAmmunition: 50
+                    };
+                  } else if (kind === 'helm' || kind === 'steering-wheel') {
+                    moduleData = {
+                      kind: kind,
+                      maxTurnRate: 1.0,
+                      responsiveness: 0.8,
+                      currentInput: Vec2.from(0, 0),
+                      wheelRotation: 0
+                    };
+                  } else if (kind === 'mast') {
+                    moduleData = {
+                      kind: 'mast',
+                      sailState: 'full',
+                      openness: 80,
+                      angle: 0,
+                      radius: 15,
+                      height: 120,
+                      sailWidth: 80,
+                      sailColor: '#F5F5DC'
+                    };
+                  }
+                  
+                  gameplayModules.push({
+                    id: mod.id,
                     kind: kind,
-                    maxTurnRate: 1.0,
-                    responsiveness: 0.8,
-                    currentInput: Vec2.from(0, 0),
-                    wheelRotation: 0
-                  };
-                } else if (kind === 'mast') {
-                  moduleData = {
-                    kind: 'mast',
-                    sailState: 'full',
-                    openness: 80,
-                    angle: 0,
-                    radius: 15,
-                    height: 120,
-                    sailWidth: 80,
-                    sailColor: '#F5F5DC'
-                  };
+                    deckId: 0,
+                    localPos: Vec2.from(mod.x || 0, mod.y || 0),
+                    localRot: mod.rotation || 0,
+                    occupiedBy: null,
+                    stateBits: 0,
+                    moduleData: moduleData
+                  } as ShipModule);
                 }
-                
-                return {
-                  id: mod.id,
-                  kind: kind,
-                  deckId: 0, // Default to main deck
-                  localPos: Vec2.from(mod.x || 0, mod.y || 0),
-                  localRot: mod.rotation || 0,
-                  occupiedBy: null,
-                  stateBits: 0,
-                  moduleData: moduleData
-                } as ShipModule;
-              });
+              }
+              
+              // Merge: Keep client-generated planks/deck, add server gameplay modules
+              const clientPlanks = properShip.modules.filter(m => m.kind === 'plank');
+              const clientDeck = properShip.modules.filter(m => m.kind === 'deck');
+              
+              // Update plank health from server data
+              for (const plank of clientPlanks) {
+                const serverHealth = plankHealthUpdates.get(plank.id);
+                if (serverHealth !== undefined && plank.moduleData && plank.moduleData.kind === 'plank') {
+                  plank.moduleData.health = serverHealth;
+                }
+              }
+              
+              // Combine: client planks/deck + server gameplay modules
+              serverModules = [...clientDeck, ...clientPlanks, ...gameplayModules];
               
               // Debug: Log parsed modules for first ship
-              if (ship.id === 1 && serverModules) {
-                console.log(`[NetworkManager] Parsed ${serverModules.length} modules for ship ${ship.id}:`);
+              if (ship.id === 1) {
+                console.log(`[NetworkManager] Merged ${serverModules.length} modules for ship ${ship.id}:`);
                 const summary = serverModules.reduce((acc, m) => {
                   acc[m.kind] = (acc[m.kind] || 0) + 1;
                   return acc;
                 }, {} as Record<string, number>);
                 console.log('  Module counts:', summary);
-                console.log('  Sample modules:', serverModules.slice(0, 3));
+                console.log('  Plank health updates:', plankHealthUpdates.size);
               }
             }
             
