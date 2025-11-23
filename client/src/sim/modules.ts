@@ -92,6 +92,9 @@ export interface MastModuleData {
   windEfficiency: number;       // How well this mast catches wind (0-1)
   height: number;              // Mast height (affects wind catching)
   integrity: number;           // Structural integrity (0-1, affects performance)
+  radius: number;              // Mast pole radius for rendering
+  sailWidth: number;           // Width of the sail
+  sailColor: string;           // Color of the sail fabric
   
   // Rendering properties
   openness: number;            // Sail openness (0-100) - how much the sail is deployed
@@ -256,6 +259,9 @@ export class ModuleUtils {
           windEfficiency: 0.85,
           height: 100,
           integrity: 1.0,
+          radius: 15,             // Mast pole radius
+          sailWidth: 80,          // Sail width
+          sailColor: '#F5F5DC',   // Beige/cream color for sails
           openness: 80,           // Start with sails mostly deployed
           angle: 0,               // Start with sails aligned with ship
         } as MastModuleData;

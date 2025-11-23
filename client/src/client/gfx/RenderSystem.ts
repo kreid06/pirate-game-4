@@ -143,6 +143,11 @@ export class RenderSystem {
         } else if (moduleData.kind === 'cannon') {
           width = 30;
           height = 20;
+        } else if (moduleData.kind === 'mast') {
+          // Masts are circles, so use radius for both width and height
+          const radius = moduleData.radius || 15;
+          width = radius * 2;
+          height = radius * 2;
         }
         
         // Check if mouse is within module bounds (simple rectangle check)
@@ -400,19 +405,50 @@ export class RenderSystem {
     // Clear render queue
     this.renderQueue = [];
     
-    // Queue ships (background layer)
+    // Render order (from lowest to highest):
+    // 0: water, gridlines (drawn before this queue)
+    // 1: ship hull
+    // 2: players
+    // 3: ship planks
+    // 4: cannons
+    // 5: steering wheels
+    // 6: sail fibers
+    // 7: sail masts
+    
+    // Queue ship hulls (layer 1)
     for (const ship of worldState.ships) {
-      this.queueRenderItem(1, 'ships', () => this.drawShip(ship, camera));
+      this.queueRenderItem(1, 'ship-hull', () => this.drawShipHull(ship, camera));
     }
     
-    // Queue players (middle layer)
+    // Queue players (layer 2)
     for (const player of worldState.players) {
       this.queueRenderItem(2, 'players', () => this.drawPlayer(player, camera));
     }
     
-    // Queue cannonballs (foreground layer)  
+    // Queue ship planks (layer 3)
+    for (const ship of worldState.ships) {
+      this.queueRenderItem(3, 'ship-planks', () => this.drawShipPlanks(ship, camera));
+    }
+    
+    // Queue cannons and steering wheels (layers 4-5)
+    for (const ship of worldState.ships) {
+      this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
+      this.queueRenderItem(5, 'steering-wheels', () => this.drawShipSteeringWheels(ship, camera));
+    }
+    
+    // Queue sail fibers (layer 6)
+    for (const ship of worldState.ships) {
+      this.queueRenderItem(6, 'sail-fibers', () => this.drawShipSailFibers(ship, camera));
+    }
+    
+    // Queue sail masts (layer 7)
+    for (const ship of worldState.ships) {
+      this.queueRenderItem(7, 'sail-masts', () => this.drawShipSailMasts(ship, camera));
+    }
+    
+    // Queue cannonballs (layer 8 - on top of everything)  
     for (const cannonball of worldState.cannonballs) {
-      this.queueRenderItem(3, 'cannonballs', () => this.drawCannonball(cannonball, camera));
+      this.queueRenderItem(8, 'cannonballs', () => this.drawCannonball(cannonball, camera));
     }
   }
   
@@ -442,11 +478,13 @@ export class RenderSystem {
     }
   }
   
-  private drawShip(ship: Ship, camera: Camera): void {
+  private drawShipHull(ship: Ship, camera: Camera): void {
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
-      return; // Skip off-screen ships
+      return;
     }
+    
+    if (ship.hull.length === 0) return;
     
     this.ctx.save();
     
@@ -457,11 +495,20 @@ export class RenderSystem {
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
     
-    // Draw ship hull
-    this.drawShipHull(ship);
+    this.ctx.strokeStyle = '#8B4513'; // Brown
+    this.ctx.fillStyle = '#DEB887'; // BurlyWood
+    this.ctx.lineWidth = 2 / cameraState.zoom;
     
-    // Draw planks (on top of hull)
-    this.drawShipPlanks(ship);
+    this.ctx.beginPath();
+    this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+    
+    for (let i = 1; i < ship.hull.length; i++) {
+      this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+    }
+    
+    this.ctx.closePath();
+    this.ctx.fill();
+    this.ctx.stroke();
     
     // Draw ship direction indicator
     this.ctx.strokeStyle = '#ff0000';
@@ -474,26 +521,20 @@ export class RenderSystem {
     this.ctx.restore();
   }
   
-  private drawShipHull(ship: Ship): void {
-    if (ship.hull.length === 0) return;
-    
-    this.ctx.strokeStyle = '#8B4513'; // Brown
-    this.ctx.fillStyle = '#DEB887'; // BurlyWood
-    this.ctx.lineWidth = 2;
-    
-    this.ctx.beginPath();
-    this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
-    
-    for (let i = 1; i < ship.hull.length; i++) {
-      this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+  private drawShipPlanks(ship: Ship, camera: Camera): void {
+    // Check if ship is visible
+    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+      return;
     }
     
-    this.ctx.closePath();
-    this.ctx.fill();
-    this.ctx.stroke();
-  }
-  
-  private drawShipPlanks(ship: Ship): void {
+    this.ctx.save();
+    
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
     // Find all plank modules
     const planks = ship.modules.filter(m => m.kind === 'plank');
     
@@ -567,6 +608,8 @@ export class RenderSystem {
         this.ctx.restore();
       }
     }
+    
+    this.ctx.restore();
   }
   
   private drawCurvedPlank(
@@ -646,6 +689,158 @@ export class RenderSystem {
     const x = Math.pow(1-t, 2) * p0.x + 2 * (1-t) * t * p1.x + Math.pow(t, 2) * p2.x;
     const y = Math.pow(1-t, 2) * p0.y + 2 * (1-t) * t * p1.y + Math.pow(t, 2) * p2.y;
     return { x, y };
+  }
+  
+  private drawShipCannons(ship: Ship, camera: Camera): void {
+    // Check if ship is visible
+    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+      return;
+    }
+    
+    // Find all cannon modules - implement when needed
+    // For now, this is a placeholder
+  }
+  
+  private drawShipSteeringWheels(ship: Ship, camera: Camera): void {
+    // Check if ship is visible
+    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+      return;
+    }
+    
+    // Find all steering wheel modules - implement when needed
+    // For now, this is a placeholder
+  }
+  
+  private drawShipSailFibers(ship: Ship, camera: Camera): void {
+    // Check if ship is visible
+    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+      return;
+    }
+    
+    this.ctx.save();
+    
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+    
+    // Find all mast modules
+    const masts = ship.modules.filter(m => m.kind === 'mast');
+    
+    for (const mast of masts) {
+      if (!mast.moduleData || mast.moduleData.kind !== 'mast') continue;
+      
+      const mastData = mast.moduleData;
+      const x = mast.localPos.x;
+      const y = mast.localPos.y;
+      const width = mastData.sailWidth;
+      const height = mastData.height;
+      const sailColor = mastData.sailColor;
+      const angle = mastData.angle; // Sail angle in degrees
+      
+      // Only draw sail if openness > 0
+      if (mastData.openness > 0) {
+        this.drawSailFiber(x, y, width, height, sailColor, mastData.openness / 100, angle);
+      }
+    }
+    
+    this.ctx.restore();
+  }
+  
+  private drawSailFiber(x: number, y: number, width: number, height: number, sailColor: string, openness: number, angle: number): void {
+    // Save context and apply rotation around mast position
+    this.ctx.save();
+    
+    // Translate to mast position, rotate, then translate back
+    this.ctx.translate(x, y);
+    this.ctx.rotate(angle * Math.PI / 180); // Convert degrees to radians
+    this.ctx.translate(-x, -y);
+    
+    const sailTopY = y - height * 1.2; // Top of sail attaches to yard
+    const sailPower = height * 1.2 * openness; // Adjust height based on openness
+    
+    // Create a gradient for the sail
+    const gradient = this.ctx.createLinearGradient(
+      x - width / 2, sailTopY,
+      x + width / 2, sailTopY
+    );
+    gradient.addColorStop(0, '#E6E6E6');
+    gradient.addColorStop(0.5, sailColor);
+    gradient.addColorStop(1, '#E6E6E6');
+    
+    // Draw sail shape
+    this.ctx.beginPath();
+    this.ctx.moveTo(x, sailTopY);
+    this.ctx.lineTo(x, -sailTopY);
+    
+    // Bottom of sail curves slightly
+    this.ctx.quadraticCurveTo(x+sailPower+10, y, x, sailTopY);
+   
+    this.ctx.closePath();
+    
+    // Fill with gradient
+    this.ctx.fillStyle = gradient;
+    this.ctx.fill();
+    
+    // Add some sail details (horizontal lines)
+    this.ctx.strokeStyle = '#DDDDDD';
+    this.ctx.lineWidth = 0.5;
+    
+    const lineCount = 3;
+    const spacing = sailPower / (lineCount + 1);
+    
+    
+    this.ctx.beginPath();
+
+    // Restore context after rotation
+    this.ctx.restore();
+    this.ctx.fillStyle ='#8B4513';
+    this.ctx.strokeStyle = '#654321';
+    this.ctx.fillRect(x-width/20,sailTopY, width/10,-sailTopY*2);
+    this.ctx.strokeRect(x-width/20,sailTopY, width/10,-sailTopY*2);
+
+  }
+  
+  private drawShipSailMasts(ship: Ship, camera: Camera): void {
+    // Check if ship is visible
+    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+      return;
+    }
+    
+    this.ctx.save();
+    
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+    
+    // Find all mast modules
+    const masts = ship.modules.filter(m => m.kind === 'mast');
+    
+    for (const mast of masts) {
+      if (!mast.moduleData || mast.moduleData.kind !== 'mast') continue;
+      
+      const mastData = mast.moduleData;
+      const x = mast.localPos.x;
+      const y = mast.localPos.y;
+      const radius = mastData.radius;
+      
+      // Draw mast as a circle
+      this.ctx.fillStyle = '#8B4513'; // Brown color for wooden mast
+      this.ctx.strokeStyle = '#654321'; // Darker brown outline
+      this.ctx.lineWidth = 2 / cameraState.zoom;
+      
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, radius, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.stroke();
+    }
+    
+    this.ctx.restore();
   }
   
   private drawPlayer(player: Player, camera: Camera): void {
@@ -954,6 +1149,11 @@ export class RenderSystem {
     } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
       lines.push(`Turn Rate: ${moduleData.maxTurnRate.toFixed(2)}`);
       lines.push(`Responsiveness: ${(moduleData.responsiveness * 100).toFixed(0)}%`);
+    } else if (moduleData.kind === 'mast') {
+      lines.push(`Sail State: ${moduleData.sailState.toUpperCase()}`);
+      lines.push(`Openness: ${moduleData.openness.toFixed(0)}%`);
+      lines.push(`Wind Efficiency: ${(moduleData.windEfficiency * 100).toFixed(0)}%`);
+      lines.push(`Height: ${moduleData.height.toFixed(0)}`);
     }
     
     // Measure text dimensions

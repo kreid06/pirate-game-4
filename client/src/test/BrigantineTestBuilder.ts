@@ -149,9 +149,31 @@ export class BrigantineLoadouts {
       // Minimal crew
       { kind: 'seat', position: { x: 100, y: 0 } },
       
-      // Masts for speed (if implemented)
+      // Masts for speed
       { kind: 'mast', position: { x: 50, y: 0 } },
       { kind: 'mast', position: { x: -50, y: 0 } }
+    ]
+  };
+  
+  /**
+   * Full sail loadout with 3 masts
+   */
+  static FULL_SAIL: BrigantineLoadout = {
+    name: 'Full Sail',
+    description: 'Traditional brigantine with 3 masts and sails',
+    modules: [
+      // Helm
+      { kind: 'helm', position: { x: -90, y: 0 } },
+      
+      // Three masts (front, middle, back)
+      { kind: 'mast', position: { x: 165, y: 0 } },  // Front mast
+      { kind: 'mast', position: { x: -35, y: 0 } },  // Middle mast
+      { kind: 'mast', position: { x: -235, y: 0 } }, // Back mast
+      
+      // Crew positions
+      { kind: 'seat', position: { x: 100, y: -40 } },
+      { kind: 'seat', position: { x: 100, y: 40 } },
+      { kind: 'seat', position: { x: -150, y: 0 } }
     ]
   };
 
@@ -164,7 +186,8 @@ export class BrigantineLoadouts {
       this.COMBAT,
       this.ARTILLERY,
       this.TRANSPORT,
-      this.SPEED
+      this.SPEED,
+      this.FULL_SAIL
     ];
   }
 }
