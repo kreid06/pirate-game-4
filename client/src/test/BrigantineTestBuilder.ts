@@ -201,6 +201,8 @@ export class BrigantineLoadouts {
       { kind: 'mast', position: { x: 165, y: 0 } },  // Front mast
       { kind: 'mast', position: { x: -35, y: 0 } },  // Middle mast
       { kind: 'mast', position: { x: -235, y: 0 } }, // Back mast
+
+      { kind: 'ladder', position: { x: -305, y: 0 }, rotation: 0}
       
       // Crew positions
     ]

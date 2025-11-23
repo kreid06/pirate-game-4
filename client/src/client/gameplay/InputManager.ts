@@ -517,6 +517,11 @@ export class InputManager {
     if (this.isActionActive('interact') && this.canInteract()) {
       actions |= PlayerActions.INTERACT;
       this.lastInteractionTime = Date.now();
+      
+      // Trigger action event for module interaction
+      if (this.onActionEvent) {
+        this.onActionEvent('interact');
+      }
     }
     
     // Dismount action (with cooldown)

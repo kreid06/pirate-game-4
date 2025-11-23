@@ -47,6 +47,7 @@ export enum MessageType {
   MOVEMENT_STATE = 'movement_state',
   ROTATION_UPDATE = 'rotation_update',
   ACTION_EVENT = 'action_event',
+  MODULE_INTERACT = 'module_interact',
   
   PING = 'ping',
   
@@ -754,6 +755,14 @@ export class NetworkManager {
                       sailWidth: 80,
                       sailColor: '#F5F5DC'
                     };
+                  } else if (kind === 'ladder') {
+                    moduleData = {
+                      kind: 'ladder',
+                      length: 40,
+                      width: 20,
+                      climbSpeed: 2.0,
+                      deployState: 'deployed'
+                    };
                   }
                   
                   gameplayModules.push({
@@ -892,6 +901,20 @@ export class NetworkManager {
       this.stats.ping = ping;
       this.pendingPings.delete(pongMessage.sequenceId);
     }
+  }
+  
+  /**
+   * Send module interaction to server
+   */
+  sendModuleInteract(moduleId: number): void {
+    const message: any = {
+      type: MessageType.MODULE_INTERACT,
+      module_id: moduleId,
+      timestamp: Date.now()
+    };
+    
+    console.log(`[NetworkManager] Sending MODULE_INTERACT for module ${moduleId}`);
+    this.sendMessage(message);
   }
   
   private sendMessage(message: GameMessage): void {

@@ -142,6 +142,11 @@ export class ClientApplication {
       // Initialize Gameplay Systems
       this.moduleInteractionSystem = new ModuleInteractionSystem();
       
+      // Set up module interaction callback to send to server
+      this.moduleInteractionSystem.onModuleInteract = (moduleId: number) => {
+        this.networkManager.sendModuleInteract(moduleId);
+      };
+      
       // Set up canvas resize handler
       this.setupCanvasResizeHandler();
       

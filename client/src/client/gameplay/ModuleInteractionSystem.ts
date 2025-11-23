@@ -63,6 +63,9 @@ export class ModuleInteractionSystem {
   private mountedPlayers = new Map<number, number>(); // playerId -> moduleId
   private lastInteractionResults: ModuleInteraction[] = [];
   
+  // Callback for when player wants to interact with a module
+  public onModuleInteract: ((moduleId: number) => void) | null = null;
+  
   /**
    * Update the interaction system
    */
@@ -202,6 +205,48 @@ export class ModuleInteractionSystem {
    */
   getLastInteractionResults(): ModuleInteraction[] {
     return [...this.lastInteractionResults];
+  }
+  
+  /**
+   * Attempt to interact with the nearest module
+   * Called when player presses E
+   */
+  tryInteractWithNearestModule(worldState: WorldState, playerId: number): void {
+    const nearbyModules = this.getNearbyInteractableModules(worldState, playerId);
+    
+    if (nearbyModules.length === 0) {
+      console.log('[ModuleInteraction] No nearby modules to interact with');
+      return;
+    }
+    
+    // Find closest module
+    const player = worldState.players.find(p => p.id === playerId);
+    if (!player) return;
+    
+    let closestModule: ShipModule | null = null;
+    let closestDistance = Infinity;
+    
+    for (const module of nearbyModules) {
+      const ship = worldState.ships.find(s => s.modules.includes(module));
+      if (!ship) continue;
+      
+      const moduleWorldPos = this.getModuleWorldPosition(ship, module);
+      const distance = player.position.sub(moduleWorldPos).length();
+      
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestModule = module;
+      }
+    }
+    
+    if (closestModule) {
+      console.log(`[ModuleInteraction] Interacting with ${closestModule.kind} module (id: ${closestModule.id}) at distance ${closestDistance.toFixed(1)}`);
+      
+      // Trigger callback to send to server
+      if (this.onModuleInteract) {
+        this.onModuleInteract(closestModule.id);
+      }
+    }
   }
   
   // Private methods

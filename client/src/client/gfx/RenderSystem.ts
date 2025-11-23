@@ -434,6 +434,7 @@ export class RenderSystem {
     for (const ship of worldState.ships) {
       this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
       this.queueRenderItem(5, 'steering-wheels', () => this.drawShipSteeringWheels(ship, camera));
+      this.queueRenderItem(5, 'ladders', () => this.drawShipLadders(ship, camera));
     }
     
     // Queue sail fibers (layer 6)
@@ -821,6 +822,59 @@ export class RenderSystem {
       this.ctx.beginPath();
       this.ctx.arc(x, y, 8, 0, Math.PI * 2);
       this.ctx.fill();
+    }
+    
+    this.ctx.restore();
+  }
+  
+  private drawShipLadders(ship: Ship, camera: Camera): void {
+    // Check if ship is visible
+    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+      return;
+    }
+    
+    this.ctx.save();
+    
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+    
+    // Find all ladder modules
+    const ladders = ship.modules.filter(m => m.kind === 'ladder');
+    
+    // Debug: Log once per ship with world positions
+    if (ship.id === 1 && ladders.length > 0) {
+      console.log(`[RenderSystem] Drawing ${ladders.length} ladders for ship ${ship.id} at world pos (${ship.position.x}, ${ship.position.y})`);
+      ladders.forEach((ladder, i) => {
+        const cos = Math.cos(ship.rotation);
+        const sin = Math.sin(ship.rotation);
+        const worldX = ship.position.x + (ladder.localPos.x * cos - ladder.localPos.y * sin);
+        const worldY = ship.position.y + (ladder.localPos.x * sin + ladder.localPos.y * cos);
+        console.log(`  Ladder ${i}: local(${ladder.localPos.x}, ${ladder.localPos.y}) → world(${worldX.toFixed(1)}, ${worldY.toFixed(1)})`);
+      });
+    }
+    
+    for (const ladder of ladders) {
+      const x = ladder.localPos.x;
+      const y = ladder.localPos.y;
+      const rot = ladder.localRot || 0;
+      
+      // Save context for this ladder
+      this.ctx.save();
+      
+      // Move to ladder position and apply rotation
+      this.ctx.translate(x, y);
+      this.ctx.rotate(rot);
+      
+      // Draw ladder as a black rectangle (20x40 pixels)
+      this.ctx.fillStyle = '#000000';
+      this.ctx.fillRect(-10, -20, 20, 40);
+      
+      // Restore ladder transform
+      this.ctx.restore();
     }
     
     this.ctx.restore();
