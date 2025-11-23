@@ -697,8 +697,74 @@ export class RenderSystem {
       return;
     }
     
-    // Find all cannon modules - implement when needed
-    // For now, this is a placeholder
+    this.ctx.save();
+    
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+    
+    // Find all cannon modules
+    const cannons = ship.modules.filter(m => m.kind === 'cannon');
+    
+    for (const cannon of cannons) {
+      if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
+      
+      const cannonData = cannon.moduleData;
+      const x = cannon.localPos.x;
+      const y = cannon.localPos.y;
+      const turretAngle = cannonData.aimDirection || 0; // Cannon aim direction in radians
+      const localRot = cannon.localRot || 0; // Module rotation
+      
+      // Save context for this cannon
+      this.ctx.save();
+      
+      // Move to cannon position and apply module rotation
+      this.ctx.translate(x, y);
+      this.ctx.rotate(localRot);
+      
+      const lineWidth = 1 / cameraState.zoom;
+      
+      // Draw cannon base (doesn't rotate with turret)
+      this.ctx.fillStyle = '#8B4513';
+      this.ctx.strokeStyle = '#000000';
+      this.ctx.lineWidth = lineWidth;
+      this.ctx.fillRect(-15, -10, 30, 20);
+      this.ctx.strokeRect(-15, -10, 30, 20);
+
+   
+      // Save context to apply turret rotation
+      this.ctx.save();
+      
+      // Move to the pivot point (center of the cannon base)
+      this.ctx.translate(0, 0); // Pivot point at center of cannon base
+      
+      // Rotate by turretAngle
+      this.ctx.rotate(turretAngle);
+      
+      // Draw cannon turret (barrel) - now relative to the pivot point
+      this.ctx.fillStyle = '#333333';
+      this.ctx.strokeStyle = '#000000';
+      this.ctx.lineWidth = lineWidth;
+      this.ctx.beginPath();
+      this.ctx.moveTo(-8, 0);    // Start at pivot point (center of base)
+      this.ctx.lineTo(-8, -40);  // Extend forward
+      this.ctx.lineTo(8, -40);   // Barrel width
+      this.ctx.lineTo(8, 0);     // Back to pivot point
+      this.ctx.closePath();
+      this.ctx.fill();
+      this.ctx.stroke();
+      
+      // Restore turret rotation
+      this.ctx.restore();
+      
+      // Restore cannon position
+      this.ctx.restore();
+    }
+    
+    this.ctx.restore();
   }
   
   private drawShipSteeringWheels(ship: Ship, camera: Camera): void {
@@ -707,8 +773,32 @@ export class RenderSystem {
       return;
     }
     
-    // Find all steering wheel modules - implement when needed
-    // For now, this is a placeholder
+    this.ctx.save();
+    
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+    
+    // Find all helm/steering wheel modules
+    const helms = ship.modules.filter(m => m.kind === 'helm' || m.kind === 'steering-wheel');
+    
+    for (const helm of helms) {
+      if (!helm.moduleData) continue;
+      
+      const x = helm.localPos.x;
+      const y = helm.localPos.y;
+      
+      // Draw helm as a simple brown circle
+      this.ctx.fillStyle = '#8B4513';
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, 8, 0, Math.PI * 2);
+      this.ctx.fill();
+    }
+    
+    this.ctx.restore();
   }
   
   private drawShipSailFibers(ship: Ship, camera: Camera): void {
@@ -758,8 +848,8 @@ export class RenderSystem {
     this.ctx.rotate(angle * Math.PI / 180); // Convert degrees to radians
     this.ctx.translate(-x, -y);
     
-    const sailTopY = y - height * 1.2; // Top of sail attaches to yard
-    const sailPower = height * 1.2 * openness; // Adjust height based on openness
+    const sailTopY = y - height * 1.4; // Top of sail attaches to yard
+    const sailPower = height * 1.4 * openness; // Adjust height based on openness
     
     // Create a gradient for the sail
     const gradient = this.ctx.createLinearGradient(

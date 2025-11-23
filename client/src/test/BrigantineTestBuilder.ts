@@ -178,6 +178,37 @@ export class BrigantineLoadouts {
   };
 
   /**
+   * Broadside cannon loadout with 6 cannons (3 per side)
+   */
+  static BROADSIDE: BrigantineLoadout = {
+    name: 'Broadside',
+    description: '6 cannons arranged for devastating broadside attacks',
+    modules: [
+      // Helm
+      { kind: 'helm', position: { x: -90, y: 0 } },
+      
+      // Port side cannons (3)
+      { kind: 'cannon', position: { x: -35, y: 75 }, rotation: Math.PI },
+      { kind: 'cannon', position: { x: 65, y: 75 }, rotation: Math.PI },
+      { kind: 'cannon', position: { x: -135, y: 75 }, rotation: Math.PI },
+      
+      // Starboard side cannons (3)
+      { kind: 'cannon', position: { x: -35, y: -75 }, rotation: 0 },
+      { kind: 'cannon', position: { x: 65, y: -75 }, rotation: 0 },
+      { kind: 'cannon', position: { x: -135, y: -75 }, rotation: 0 },
+
+            // Three masts (front, middle, back)
+      { kind: 'mast', position: { x: 165, y: 0 } },  // Front mast
+      { kind: 'mast', position: { x: -35, y: 0 } },  // Middle mast
+      { kind: 'mast', position: { x: -235, y: 0 } }, // Back mast
+      
+      // Crew positions
+      { kind: 'seat', position: { x: 150, y: 0 } },
+      { kind: 'seat', position: { x: -200, y: 0 } }
+    ]
+  };
+
+  /**
    * Get all available loadouts
    */
   static getAll(): BrigantineLoadout[] {
@@ -187,7 +218,8 @@ export class BrigantineLoadouts {
       this.ARTILLERY,
       this.TRANSPORT,
       this.SPEED,
-      this.FULL_SAIL
+      this.FULL_SAIL,
+      this.BROADSIDE
     ];
   }
 }
