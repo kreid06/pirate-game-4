@@ -41,7 +41,7 @@ struct Ship {
     q16_t hull_health;      // Hull integrity
     
     // Hull collision shape (local coordinates)
-    Vec2Q16 hull_vertices[16];
+    Vec2Q16 hull_vertices[64];  // Increased to support detailed brigantine hull (47 vertices)
     uint8_t hull_vertex_count;
     q16_t bounding_radius;   // For broad-phase collision
     

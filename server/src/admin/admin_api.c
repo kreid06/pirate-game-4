@@ -307,9 +307,23 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
             "      \"y\": %.2f,\n"
             "      \"rotation\": %.2f,\n"
             "      \"velocity\": {\"x\": %.2f, \"y\": %.2f},\n"
-            "      \"health\": %u\n"
-            "    }%s\n",
-            ship->id, pos_x, pos_y, rotation, vel_x, vel_y, Q16_TO_INT(ship->hull_health),
+            "      \"health\": %u,\n"
+            "      \"hull\": [",
+            ship->id, pos_x, pos_y, rotation, vel_x, vel_y, Q16_TO_INT(ship->hull_health)
+        );
+        
+        // Add hull vertices
+        for (uint8_t v = 0; v < ship->hull_vertex_count && offset < (int)sizeof(json_buffer) - 200; v++) {
+            float vx = (float)ship->hull_vertices[v].x / 65536.0f;
+            float vy = (float)ship->hull_vertices[v].y / 65536.0f;
+            offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+                "{\"x\":%.2f,\"y\":%.2f}%s",
+                vx, vy, (v + 1 < ship->hull_vertex_count) ? "," : ""
+            );
+        }
+        
+        offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+            "]\n    }%s\n",
             (i + 1 < sim->ship_count) ? "," : ""
         );
     }

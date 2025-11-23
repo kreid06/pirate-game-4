@@ -217,12 +217,47 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
     ship->bounding_radius = Q16_FROM_FLOAT(10.0f); // 10m radius
     ship->hull_health = Q16_FROM_INT(100);
     
-    // Create simple rectangular hull (8m × 3m)
-    ship->hull_vertex_count = 4;
-    ship->hull_vertices[0] = (Vec2Q16){Q16_FROM_FLOAT(-4.0f), Q16_FROM_FLOAT(-1.5f)};
-    ship->hull_vertices[1] = (Vec2Q16){Q16_FROM_FLOAT(4.0f),  Q16_FROM_FLOAT(-1.5f)};
-    ship->hull_vertices[2] = (Vec2Q16){Q16_FROM_FLOAT(4.0f),  Q16_FROM_FLOAT(1.5f)};
-    ship->hull_vertices[3] = (Vec2Q16){Q16_FROM_FLOAT(-4.0f), Q16_FROM_FLOAT(1.5f)};
+    // Create brigantine hull with curved bow/stern sections (47 vertices)
+    // Matches client-side createCurvedShipHull() from ShipUtils.ts
+    // Hull points (in meters): bow(190,90), bowTip(415,0), bowBottom(190,-90),
+    //                         sternBottom(-260,-90), sternTip(-345,0), stern(-260,90)
+    ship->hull_vertex_count = 47;
+    int idx = 0;
+    
+    // Curved bow section (port side: bow -> bowTip -> bowBottom) - 13 points
+    for (int i = 0; i <= 12; i++) {
+        float t = (float)i / 12.0f;
+        // Quadratic bezier: P(t) = (1-t)²P0 + 2(1-t)tP1 + t²P2
+        float x = (1-t)*(1-t)*190.0f + 2*(1-t)*t*415.0f + t*t*190.0f;
+        float y = (1-t)*(1-t)*90.0f + 2*(1-t)*t*0.0f + t*t*(-90.0f);
+        ship->hull_vertices[idx++] = (Vec2Q16){Q16_FROM_FLOAT(x), Q16_FROM_FLOAT(y)};
+    }
+    
+    // Straight starboard side (bowBottom -> sternBottom) - 12 points
+    for (int i = 1; i <= 12; i++) {
+        float t = (float)i / 12.0f;
+        float x = 190.0f + t * (-260.0f - 190.0f);
+        float y = -90.0f + t * (-90.0f - (-90.0f));
+        ship->hull_vertices[idx++] = (Vec2Q16){Q16_FROM_FLOAT(x), Q16_FROM_FLOAT(y)};
+    }
+    
+    // Curved stern section (sternBottom -> sternTip -> stern) - 12 points
+    for (int i = 1; i <= 12; i++) {
+        float t = (float)i / 12.0f;
+        float x = (1-t)*(1-t)*(-260.0f) + 2*(1-t)*t*(-345.0f) + t*t*(-260.0f);
+        float y = (1-t)*(1-t)*(-90.0f) + 2*(1-t)*t*0.0f + t*t*90.0f;
+        ship->hull_vertices[idx++] = (Vec2Q16){Q16_FROM_FLOAT(x), Q16_FROM_FLOAT(y)};
+    }
+    
+    // Straight port side (stern -> bow) - 11 points (excluding last to avoid duplication)
+    for (int i = 1; i < 12; i++) {
+        float t = (float)i / 12.0f;
+        float x = -260.0f + t * (190.0f - (-260.0f));
+        float y = 90.0f + t * (90.0f - 90.0f);
+        ship->hull_vertices[idx++] = (Vec2Q16){Q16_FROM_FLOAT(x), Q16_FROM_FLOAT(y)};
+    }
+    
+    ship->bounding_radius = Q16_FROM_FLOAT(430.0f); // Slightly larger than bowTip x-coordinate
     
     sim->ship_count++;
     
