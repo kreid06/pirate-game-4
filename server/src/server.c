@@ -186,7 +186,7 @@ int server_run(struct ServerContext* ctx) {
         process_network_input(ctx);
         
         // Update WebSocket server (process browser client connections)
-        websocket_server_update(NULL);  // TODO: pass simulation context if needed
+        websocket_server_update(&ctx->simulation);
         
         // HYBRID: Apply player movement states (30Hz tick)
         websocket_server_tick(TICK_DURATION_MS / 1000.0f);

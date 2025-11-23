@@ -1319,26 +1319,71 @@ int websocket_server_update(struct Sim* sim) {
     uint32_t update_interval = 1000 / current_update_rate; // 20Hz = 50ms, 30Hz = 33ms
     
     if (current_time - last_game_state_time > update_interval) {
-        // Build ships JSON array with physics properties
-        char ships_json[2048] = "[";  // Increased buffer for physics data
+        // Build ships JSON array with physics properties and modules
+        char ships_json[8192] = "[";  // Increased buffer for module data
         bool first_ship = true;
-        for (int s = 0; s < ship_count; s++) {
-            if (ships[s].active) {
+        
+        // Use actual simulation ships if available
+        if (sim && sim->ship_count > 0) {
+            for (uint32_t s = 0; s < sim->ship_count; s++) {
+                const struct Ship* ship = &sim->ships[s];
                 if (!first_ship) strcat(ships_json, ",");
-                char ship_entry[512];  // Increased for physics properties
-                snprintf(ship_entry, sizeof(ship_entry),
+                
+                // Convert ship physics to client units
+                float pos_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
+                float pos_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y));
+                float rotation = Q16_TO_FLOAT(ship->rotation);
+                float vel_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->velocity.x));
+                float vel_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->velocity.y));
+                float ang_vel = Q16_TO_FLOAT(ship->angular_velocity);
+                
+                char ship_entry[4096];
+                int offset = snprintf(ship_entry, sizeof(ship_entry),
                         "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                         "\"mass\":%.1f,\"moment_of_inertia\":%.1f,"
                         "\"max_speed\":%.1f,\"turn_rate\":%.2f,"
-                        "\"water_drag\":%.3f,\"angular_drag\":%.3f}",
-                        ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
-                        ships[s].velocity_x, ships[s].velocity_y, ships[s].angular_velocity,
-                        ships[s].mass, ships[s].moment_of_inertia,
-                        ships[s].max_speed, ships[s].turn_rate,
-                        ships[s].water_drag, ships[s].angular_drag);
+                        "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"modules\":[",
+                        ship->id, pos_x, pos_y, rotation, vel_x, vel_y, ang_vel,
+                        5000.0f, 500000.0f, 15.0f, 1.0f, 0.95f, 0.90f);
+                
+                // Add modules array
+                for (uint8_t m = 0; m < ship->module_count && offset < (int)sizeof(ship_entry) - 200; m++) {
+                    const ShipModule* module = &ship->modules[m];
+                    float module_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+                    float module_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+                    float module_rot = Q16_TO_FLOAT(module->local_rot);
+                    
+                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
+                        m > 0 ? "," : "", module->id, module->type_id, 
+                        module_x, module_y, module_rot);
+                }
+                
+                offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
                 strcat(ships_json, ship_entry);
                 first_ship = false;
+            }
+        } else {
+            // Fallback to simple ships array (backward compatibility)
+            for (int s = 0; s < ship_count; s++) {
+                if (ships[s].active) {
+                    if (!first_ship) strcat(ships_json, ",");
+                    char ship_entry[512];
+                    snprintf(ship_entry, sizeof(ship_entry),
+                            "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
+                            "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
+                            "\"mass\":%.1f,\"moment_of_inertia\":%.1f,"
+                            "\"max_speed\":%.1f,\"turn_rate\":%.2f,"
+                            "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"modules\":[]}",
+                            ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
+                            ships[s].velocity_x, ships[s].velocity_y, ships[s].angular_velocity,
+                            ships[s].mass, ships[s].moment_of_inertia,
+                            ships[s].max_speed, ships[s].turn_rate,
+                            ships[s].water_drag, ships[s].angular_drag);
+                    strcat(ships_json, ship_entry);
+                    first_ship = false;
+                }
             }
         }
         strcat(ships_json, "]");

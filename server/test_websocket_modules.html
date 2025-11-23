@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Module Test</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #d4d4d4; }
+        #output { background: #252526; padding: 15px; border-radius: 5px; max-height: 600px; overflow-y: auto; }
+        .module { color: #4ec9b0; }
+        .ship { color: #dcdcaa; }
+        .error { color: #f48771; }
+        .success { color: #4fc1ff; }
+        button { background: #0e639c; color: white; border: none; padding: 10px 20px; margin: 5px; cursor: pointer; border-radius: 3px; }
+        button:hover { background: #1177bb; }
+    </style>
+</head>
+<body>
+    <h1>🏴‍☠️ WebSocket Module Data Test</h1>
+    <div>
+        <button onclick="connect()">Connect</button>
+        <button onclick="disconnect()">Disconnect</button>
+        <button onclick="clearOutput()">Clear Output</button>
+    </div>
+    <div id="output"></div>
+
+    <script>
+        let ws = null;
+        let messageCount = 0;
+
+        function log(message, className = '') {
+            const output = document.getElementById('output');
+            const div = document.createElement('div');
+            div.className = className;
+            div.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            output.appendChild(div);
+            output.scrollTop = output.scrollHeight;
+        }
+
+        function connect() {
+            if (ws) {
+                log('Already connected', 'error');
+                return;
+            }
+
+            log('Connecting to ws://localhost:8082...', 'success');
+            ws = new WebSocket('ws://localhost:8082');
+
+            ws.onopen = () => {
+                log('✅ Connected to server', 'success');
+                // Send handshake
+                const handshake = {
+                    type: 'handshake',
+                    player_name: 'ModuleTester'
+                };
+                ws.send(JSON.stringify(handshake));
+                log('Sent handshake', 'success');
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    messageCount++;
+
+                    if (data.type === 'handshake_response') {
+                        log(`🤝 Handshake complete - Player ID: ${data.player_id}`, 'success');
+                    } else if (data.type === 'GAME_STATE') {
+                        // Only log first few game states to avoid spam
+                        if (messageCount <= 5) {
+                            log(`📦 GAME_STATE #${messageCount}`, 'ship');
+                            
+                            if (data.ships && data.ships.length > 0) {
+                                data.ships.forEach(ship => {
+                                    log(`  Ship ${ship.id} at (${ship.x.toFixed(1)}, ${ship.y.toFixed(1)})`, 'ship');
+                                    
+                                    if (ship.modules) {
+                                        log(`  └─ ${ship.modules.length} modules:`, 'module');
+                                        ship.modules.forEach((mod, i) => {
+                                            const types = ['HELM', 'SEAT', 'CANNON', 'MAST', '?', 'LADDER', 'PLANK', 'DECK'];
+                                            const typeName = types[mod.typeId] || 'UNKNOWN';
+                                            log(`     [${i}] ${typeName} (id:${mod.id}) at (${mod.x.toFixed(1)}, ${mod.y.toFixed(1)}) rot:${mod.rotation.toFixed(2)}`, 'module');
+                                        });
+                                    } else {
+                                        log('  └─ No modules!', 'error');
+                                    }
+                                });
+                            } else {
+                                log('  No ships in game state!', 'error');
+                            }
+                        } else if (messageCount === 6) {
+                            log('... (suppressing further GAME_STATE messages)', 'success');
+                        }
+                    } else {
+                        log(`📨 ${data.type}`, 'success');
+                    }
+                } catch (e) {
+                    log(`Parse error: ${e.message}`, 'error');
+                }
+            };
+
+            ws.onerror = (error) => {
+                log(`❌ WebSocket error: ${error}`, 'error');
+            };
+
+            ws.onclose = () => {
+                log('🔌 Disconnected', 'error');
+                ws = null;
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+                log('Disconnected manually', 'success');
+            }
+        }
+
+        function clearOutput() {
+            document.getElementById('output').innerHTML = '';
+            messageCount = 0;
+        }
+
+        // Auto-connect on load
+        window.onload = () => {
+            setTimeout(connect, 500);
+        };
+    </script>
+</body>
+</html>
