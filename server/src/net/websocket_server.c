@@ -570,6 +570,14 @@ static int websocket_parse_frame(const char* buffer, size_t buffer_len, char* pa
         return -1;
     }
     
+    // CRITICAL: Check payload won't overflow destination buffer (assumed to be 4096 bytes)
+    if (actual_payload_len > 4095) {
+        log_warn("⚠️ Dropping oversized WebSocket frame: %lu bytes (max 4095) - connection remains active", 
+                  (unsigned long)actual_payload_len);
+        *payload_len = 0;
+        return opcode;  // Return opcode but with zero payload length
+    }
+    
     if (buffer_len < header_len + 4 + actual_payload_len) return -1;
     
     // Extract masking key
@@ -824,7 +832,7 @@ int websocket_server_update(struct Sim* sim) {
                 }
             } else {
                 // Handle WebSocket frames
-                char payload[1024];
+                char payload[4096];  // Increased to handle larger messages
                 size_t payload_len = 0;
                 int opcode = websocket_parse_frame(buffer, received, payload, &payload_len);
                 
