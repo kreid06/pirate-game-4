@@ -591,6 +591,9 @@ static int websocket_parse_frame(const char* buffer, size_t buffer_len, char* pa
 size_t websocket_create_frame(uint8_t opcode, const char* payload, size_t payload_len, char* frame) {
     size_t frame_len = 0;
     
+    // Calculate required frame size (header + payload)
+    size_t required_size = payload_len + 10; // Max header is 10 bytes
+    
     // First byte: FIN = 1, opcode
     frame[frame_len++] = 0x80 | opcode;
     
@@ -603,6 +606,7 @@ size_t websocket_create_frame(uint8_t opcode, const char* payload, size_t payloa
         frame[frame_len++] = payload_len & 0xFF;
     } else {
         // We don't handle large payloads for simplicity
+        log_error("Payload too large for WebSocket frame: %zu bytes", payload_len);
         return 0;
     }
     
@@ -1209,8 +1213,26 @@ int websocket_server_update(struct Sim* sim) {
                             handled = true;
                             
                         } else if (strncmp(payload, "JOIN:", 5) == 0) {
-                            // Extract player name
-                            char* player_name = payload + 5;
+                            // Extract player name (with safety limits)
+                            char player_name[64] = "Player";  // Default name
+                            const char* name_src = payload + 5;
+                            size_t max_name_len = payload_len - 5;
+                            if (max_name_len > sizeof(player_name) - 1) {
+                                max_name_len = sizeof(player_name) - 1;
+                            }
+                            if (max_name_len > 0) {
+                                strncpy(player_name, name_src, max_name_len);
+                                player_name[max_name_len] = '\0';
+                                // Remove any newlines or control characters
+                                for (size_t i = 0; i < sizeof(player_name); i++) {
+                                    if (player_name[i] == '\0') break;
+                                    if (player_name[i] < 32 || player_name[i] > 126) {
+                                        player_name[i] = '\0';
+                                        break;
+                                    }
+                                }
+                            }
+                            
                             uint32_t player_id = next_player_id++;
                             client->player_id = player_id;
                             
@@ -1244,14 +1266,17 @@ int websocket_server_update(struct Sim* sim) {
                     
                     // Send response
                     if (handled) {
-                        char frame[1024];
+                        char frame[2048];  // Increased to safely hold 1024-byte response + frame headers
                         size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame);
-                        if (frame_len > 0) {
+                        if (frame_len > 0 && frame_len < sizeof(frame)) {
                             ssize_t sent = send(client->fd, frame, frame_len, 0);
                             if (sent > 0) {
                                 ws_server.packets_sent++;
                                 // Response sent
                             }
+                        } else if (frame_len >= sizeof(frame)) {
+                            log_error("Frame buffer overflow prevented! frame_len=%zu, buffer=%zu", 
+                                     frame_len, sizeof(frame));
                         }
                     }
                     
