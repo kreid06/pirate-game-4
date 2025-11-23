@@ -38,6 +38,13 @@ export class RenderSystem {
   // Render queue for layered rendering
   private renderQueue: RenderQueueItem[] = [];
   
+  // Hover state
+  private mouseWorldPos: Vec2 | null = null;
+  private hoveredModule: { ship: Ship; module: any } | null = null;
+  
+  // Debug flags
+  private showHoverBoundaries: boolean = false;
+  
   constructor(canvas: HTMLCanvasElement, config: GraphicsConfig) {
     this.canvas = canvas;
     this.config = config;
@@ -78,11 +85,159 @@ export class RenderSystem {
   }
   
   /**
+   * Update mouse position for hover detection
+   */
+  updateMousePosition(worldPos: Vec2): void {
+    this.mouseWorldPos = worldPos;
+  }
+  
+  /**
+   * Toggle hover boundary debug visualization
+   */
+  toggleHoverBoundaries(): void {
+    this.showHoverBoundaries = !this.showHoverBoundaries;
+    console.log(`🔍 Hover boundaries debug: ${this.showHoverBoundaries ? 'ON' : 'OFF'}`);
+  }
+  
+  /**
+   * Detect which module is under the mouse cursor
+   */
+  private detectHoveredModule(worldState: WorldState): void {
+    this.hoveredModule = null;
+    
+    if (!this.mouseWorldPos) return;
+    
+    // Check all ships
+    for (const ship of worldState.ships) {
+      // Transform mouse to ship-local coordinates
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const localX = dx * cos - dy * sin;
+      const localY = dx * sin + dy * cos;
+      
+      // Check each module
+      for (const module of ship.modules) {
+        if (!module.moduleData) continue;
+        
+        const moduleData = module.moduleData;
+        
+        // Special handling for curved planks
+        if (moduleData.kind === 'plank' && moduleData.isCurved && moduleData.curveData) {
+          // Check if mouse is within curved plank boundary
+          if (this.isPointInCurvedPlank(localX, localY, moduleData.curveData, moduleData.width)) {
+            this.hoveredModule = { ship, module };
+            return; // Found a match, stop searching
+          }
+          continue; // Skip regular rectangle check for curved planks
+        }
+        
+        // Regular rectangle check for straight modules
+        let width = 20;
+        let height = 20;
+        
+        if (moduleData.kind === 'plank') {
+          width = moduleData.length || 20;
+          height = moduleData.width || 10;
+        } else if (moduleData.kind === 'cannon') {
+          width = 30;
+          height = 20;
+        }
+        
+        // Check if mouse is within module bounds (simple rectangle check)
+        const halfWidth = width / 2;
+        const halfHeight = height / 2;
+        
+        // Transform to module-local coordinates
+        const mdx = localX - module.localPos.x;
+        const mdy = localY - module.localPos.y;
+        const mcos = Math.cos(-module.localRot);
+        const msin = Math.sin(-module.localRot);
+        const modLocalX = mdx * mcos - mdy * msin;
+        const modLocalY = mdx * msin + mdy * mcos;
+        
+        if (Math.abs(modLocalX) <= halfWidth && Math.abs(modLocalY) <= halfHeight) {
+          this.hoveredModule = { ship, module };
+          return; // Found a match, stop searching
+        }
+      }
+    }
+  }
+  
+  /**
+   * Check if a point (in ship-local coordinates) is inside a curved plank
+   */
+  private isPointInCurvedPlank(
+    localX: number, 
+    localY: number, 
+    curveData: { start: any; control: any; end: any; t1: number; t2: number },
+    plankWidth: number
+  ): boolean {
+    const { start, control, end, t1, t2 } = curveData;
+    const halfWidth = plankWidth / 2;
+    
+    // Sample the curve to find the closest point
+    const samples = 20;
+    let minDistance = Infinity;
+    let closestT = 0;
+    
+    for (let i = 0; i <= samples; i++) {
+      const t = t1 + (t2 - t1) * (i / samples);
+      const pt = this.getQuadraticPoint(start, control, end, t);
+      const dist = Math.sqrt((pt.x - localX) ** 2 + (pt.y - localY) ** 2);
+      
+      if (dist < minDistance) {
+        minDistance = dist;
+        closestT = t;
+      }
+    }
+    
+    // Get the point on the curve at closestT
+    const curvePoint = this.getQuadraticPoint(start, control, end, closestT);
+    
+    // Calculate the tangent at this point to get perpendicular direction
+    const delta = 0.01;
+    const t1Point = this.getQuadraticPoint(start, control, end, Math.max(t1, closestT - delta));
+    const t2Point = this.getQuadraticPoint(start, control, end, Math.min(t2, closestT + delta));
+    
+    const tangentX = t2Point.x - t1Point.x;
+    const tangentY = t2Point.y - t1Point.y;
+    const tangentLen = Math.sqrt(tangentX * tangentX + tangentY * tangentY);
+    
+    if (tangentLen === 0) return false;
+    
+    // Normalized tangent
+    const tx = tangentX / tangentLen;
+    const ty = tangentY / tangentLen;
+    
+    // Perpendicular (normal) to the curve
+    const nx = -ty;
+    const ny = tx;
+    
+    // Vector from curve point to mouse
+    const toMouseX = localX - curvePoint.x;
+    const toMouseY = localY - curvePoint.y;
+    
+    // Project onto perpendicular to get distance from curve centerline
+    const perpDist = Math.abs(toMouseX * nx + toMouseY * ny);
+    
+    // Also check distance along the curve
+    const alongDist = toMouseX * tx + toMouseY * ty;
+    
+    // Check if within plank width and reasonably close along curve
+    return perpDist <= halfWidth && minDistance < plankWidth * 2;
+  }
+  
+  /**
    * Render the game world
    */
   renderWorld(worldState: WorldState, camera: Camera, interpolationAlpha: number): void {
     // Clear canvas
     this.clearCanvas();
+    
+    // Detect hovered module
+    this.detectHoveredModule(worldState);
     
     // Draw background elements
     this.drawWater(camera);
@@ -97,6 +252,14 @@ export class RenderSystem {
     // Draw effects and particles (always on top)
     this.particleSystem.render(camera);
     this.effectRenderer.render(camera);
+    
+    // Draw hover boundaries debug if enabled
+    if (this.showHoverBoundaries) {
+      this.drawHoverBoundariesDebug(worldState, camera);
+    }
+    
+    // Draw hover tooltip (screen space, on top of everything)
+    this.drawHoverTooltip(camera);
   }
   
   /**
@@ -607,5 +770,347 @@ export class RenderSystem {
     this.ctx.beginPath();
     this.ctx.arc(centerX, centerY, radius, time, time + Math.PI * 1.5);
     this.ctx.stroke();
+  }
+  
+  /**
+   * Debug visualization for hover boundaries
+   */
+  private drawHoverBoundariesDebug(worldState: WorldState, camera: Camera): void {
+    for (const ship of worldState.ships) {
+      for (const module of ship.modules) {
+        if (!module.moduleData) continue;
+        
+        const moduleData = module.moduleData;
+        
+        // Get module bounds
+        let width = 20;
+        let height = 20;
+        
+        if (moduleData.kind === 'plank') {
+          width = moduleData.length || 20;
+          height = moduleData.width || 10;
+        } else if (moduleData.kind === 'cannon') {
+          width = 30;
+          height = 20;
+        }
+        
+        this.ctx.save();
+        
+        // Check if this is a curved plank
+        if (moduleData.kind === 'plank' && moduleData.isCurved && moduleData.curveData) {
+          // For curved planks, draw in ship-local coordinates
+          this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
+          this.ctx.rotate(ship.rotation);
+          this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
+          
+          // Draw curved plank boundary
+          this.ctx.strokeStyle = 'rgba(255, 0, 255, 0.5)'; // Magenta
+          this.ctx.lineWidth = 2 / camera.getState().zoom;
+          this.ctx.setLineDash([5, 5]);
+          this.ctx.beginPath();
+          
+          const { start, control, end, t1, t2 } = moduleData.curveData;
+          const segments = 20;
+          const halfPlankWidth = moduleData.width / 2;
+          
+          // Sample points along the curve
+          const points: Array<{x: number, y: number}> = [];
+          for (let i = 0; i <= segments; i++) {
+            const t = t1 + (t2 - t1) * (i / segments);
+            const pt = this.getQuadraticPoint(start, control, end, t);
+            points.push(pt);
+          }
+          
+          // Calculate perpendicular offsets for width
+          const outerPoints: Array<{x: number, y: number}> = [];
+          const innerPoints: Array<{x: number, y: number}> = [];
+          
+          for (let i = 0; i < points.length; i++) {
+            const pt = points[i];
+            
+            // Calculate tangent direction
+            let dx: number, dy: number;
+            if (i === 0) {
+              dx = points[1].x - pt.x;
+              dy = points[1].y - pt.y;
+            } else if (i === points.length - 1) {
+              dx = pt.x - points[i - 1].x;
+              dy = pt.y - points[i - 1].y;
+            } else {
+              dx = points[i + 1].x - points[i - 1].x;
+              dy = points[i + 1].y - points[i - 1].y;
+            }
+            
+            const len = Math.sqrt(dx * dx + dy * dy);
+            if (len > 0) {
+              dx /= len;
+              dy /= len;
+            }
+            
+            const perpX = -dy;
+            const perpY = dx;
+            
+            outerPoints.push({
+              x: pt.x + perpX * halfPlankWidth,
+              y: pt.y + perpY * halfPlankWidth
+            });
+            
+            innerPoints.push({
+              x: pt.x - perpX * halfPlankWidth,
+              y: pt.y - perpY * halfPlankWidth
+            });
+          }
+          
+          // Draw the boundary outline
+          this.ctx.moveTo(outerPoints[0].x, outerPoints[0].y);
+          for (let i = 1; i < outerPoints.length; i++) {
+            this.ctx.lineTo(outerPoints[i].x, outerPoints[i].y);
+          }
+          for (let i = innerPoints.length - 1; i >= 0; i--) {
+            this.ctx.lineTo(innerPoints[i].x, innerPoints[i].y);
+          }
+          this.ctx.closePath();
+          this.ctx.stroke();
+          
+          // Draw center line
+          this.ctx.strokeStyle = 'rgba(255, 255, 0, 0.7)'; // Yellow
+          this.ctx.setLineDash([]);
+          this.ctx.beginPath();
+          this.ctx.moveTo(points[0].x, points[0].y);
+          for (let i = 1; i < points.length; i++) {
+            this.ctx.lineTo(points[i].x, points[i].y);
+          }
+          this.ctx.stroke();
+        } else {
+          // For straight modules, draw simple rectangle boundary
+          this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
+          this.ctx.rotate(ship.rotation);
+          this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
+          this.ctx.translate(module.localPos.x, module.localPos.y);
+          this.ctx.rotate(module.localRot);
+          
+          const halfWidth = width / 2;
+          const halfHeight = height / 2;
+          
+          // Draw boundary rectangle
+          this.ctx.strokeStyle = 'rgba(255, 0, 255, 0.5)'; // Magenta
+          this.ctx.lineWidth = 2 / camera.getState().zoom;
+          this.ctx.setLineDash([5, 5]);
+          this.ctx.strokeRect(-halfWidth, -halfHeight, width, height);
+          
+          // Draw center point
+          this.ctx.fillStyle = 'rgba(255, 255, 0, 0.8)'; // Yellow
+          this.ctx.setLineDash([]);
+          this.ctx.beginPath();
+          this.ctx.arc(0, 0, 3 / camera.getState().zoom, 0, Math.PI * 2);
+          this.ctx.fill();
+          
+          // Draw module ID label
+          this.ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+          this.ctx.font = `${12 / camera.getState().zoom}px monospace`;
+          this.ctx.textAlign = 'center';
+          this.ctx.textBaseline = 'middle';
+          this.ctx.fillText(`#${module.id}`, 0, 0);
+        }
+        
+        this.ctx.restore();
+      }
+    }
+  }
+  
+  /**
+   * Draw hover tooltip for modules
+   */
+  private drawHoverTooltip(camera: Camera): void {
+    if (!this.hoveredModule || !this.mouseWorldPos) return;
+    
+    const { ship, module } = this.hoveredModule;
+    const moduleData = module.moduleData;
+    
+    if (!moduleData) return;
+    
+    // Convert mouse world position to screen position for tooltip
+    const screenPos = camera.worldToScreen(this.mouseWorldPos);
+    
+    // Build tooltip text lines
+    const lines: string[] = [];
+    lines.push(`Type: ${moduleData.kind.toUpperCase()}`);
+    lines.push(`ID: ${module.id}`);
+    
+    // Add type-specific info
+    if (moduleData.kind === 'plank') {
+      const healthPercent = moduleData.health.toFixed(1);
+      lines.push(`Health: ${healthPercent}%`);
+      lines.push(`Material: ${moduleData.material}`);
+      if (moduleData.sectionName) {
+        lines.push(`Section: ${moduleData.sectionName}`);
+      }
+      if (moduleData.isCurved) {
+        lines.push(`Type: CURVED`);
+      }
+    } else if (moduleData.kind === 'cannon') {
+      lines.push(`Ammo: ${moduleData.ammunition}/${moduleData.maxAmmunition}`);
+      lines.push(`Reload: ${moduleData.timeSinceLastFire.toFixed(1)}s`);
+    } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
+      lines.push(`Turn Rate: ${moduleData.maxTurnRate.toFixed(2)}`);
+      lines.push(`Responsiveness: ${(moduleData.responsiveness * 100).toFixed(0)}%`);
+    }
+    
+    // Measure text dimensions
+    this.ctx.font = '14px monospace';
+    this.ctx.textAlign = 'left';
+    this.ctx.textBaseline = 'top';
+    
+    let maxWidth = 0;
+    for (const line of lines) {
+      const metrics = this.ctx.measureText(line);
+      maxWidth = Math.max(maxWidth, metrics.width);
+    }
+    
+    const padding = 10;
+    const lineHeight = 18;
+    const boxWidth = maxWidth + padding * 2;
+    const boxHeight = lines.length * lineHeight + padding * 2;
+    
+    // Position tooltip near mouse, but keep it on screen
+    let tooltipX = screenPos.x + 15;
+    let tooltipY = screenPos.y + 15;
+    
+    // Keep tooltip on screen
+    if (tooltipX + boxWidth > this.canvas.width) {
+      tooltipX = screenPos.x - boxWidth - 15;
+    }
+    if (tooltipY + boxHeight > this.canvas.height) {
+      tooltipY = screenPos.y - boxHeight - 15;
+    }
+    
+    // Draw tooltip background
+    this.ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+    this.ctx.strokeStyle = '#ffaa00';
+    this.ctx.lineWidth = 2;
+    this.ctx.fillRect(tooltipX, tooltipY, boxWidth, boxHeight);
+    this.ctx.strokeRect(tooltipX, tooltipY, boxWidth, boxHeight);
+    
+    // Draw tooltip text
+    this.ctx.fillStyle = '#ffffff';
+    for (let i = 0; i < lines.length; i++) {
+      const textY = tooltipY + padding + i * lineHeight;
+      this.ctx.fillText(lines[i], tooltipX + padding, textY);
+    }
+    
+    // Draw green highlight outline around the hovered module
+    this.ctx.save();
+    
+    // Check if it's a curved plank (needs special handling)
+    if (moduleData.kind === 'plank' && moduleData.isCurved && moduleData.curveData) {
+      // For curved planks, draw directly in ship-local coordinates
+      // Transform to ship's coordinate system only
+      this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
+      this.ctx.rotate(ship.rotation);
+      this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
+      
+      // Draw curved plank highlight
+      this.ctx.strokeStyle = '#00ff00'; // Green
+      this.ctx.lineWidth = 3 / camera.getState().zoom;
+      this.ctx.beginPath();
+      
+      const { start, control, end, t1, t2 } = moduleData.curveData;
+      const segments = 20;
+      const halfPlankWidth = moduleData.width / 2;
+      
+      // Sample points along the curve
+      const points: Array<{x: number, y: number}> = [];
+      for (let i = 0; i <= segments; i++) {
+        const t = t1 + (t2 - t1) * (i / segments);
+        const pt = this.getQuadraticPoint(start, control, end, t);
+        points.push(pt);
+      }
+      
+      // Calculate perpendicular offsets for width
+      const outerPoints: Array<{x: number, y: number}> = [];
+      const innerPoints: Array<{x: number, y: number}> = [];
+      
+      for (let i = 0; i < points.length; i++) {
+        const pt = points[i];
+        
+        // Calculate tangent direction
+        let dx: number, dy: number;
+        if (i === 0) {
+          dx = points[1].x - pt.x;
+          dy = points[1].y - pt.y;
+        } else if (i === points.length - 1) {
+          dx = pt.x - points[i - 1].x;
+          dy = pt.y - points[i - 1].y;
+        } else {
+          dx = points[i + 1].x - points[i - 1].x;
+          dy = points[i + 1].y - points[i - 1].y;
+        }
+        
+        // Normalize and get perpendicular
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len > 0) {
+          dx /= len;
+          dy /= len;
+        }
+        
+        const perpX = -dy;
+        const perpY = dx;
+        
+        outerPoints.push({
+          x: pt.x + perpX * halfPlankWidth,
+          y: pt.y + perpY * halfPlankWidth
+        });
+        
+        innerPoints.push({
+          x: pt.x - perpX * halfPlankWidth,
+          y: pt.y - perpY * halfPlankWidth
+        });
+      }
+      
+      // Draw the outline
+      this.ctx.moveTo(outerPoints[0].x, outerPoints[0].y);
+      for (let i = 1; i < outerPoints.length; i++) {
+        this.ctx.lineTo(outerPoints[i].x, outerPoints[i].y);
+      }
+      for (let i = innerPoints.length - 1; i >= 0; i--) {
+        this.ctx.lineTo(innerPoints[i].x, innerPoints[i].y);
+      }
+      this.ctx.closePath();
+      this.ctx.stroke();
+    } else {
+      // For straight planks and other modules, use full transform
+      // Transform to ship's coordinate system
+      this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
+      this.ctx.rotate(ship.rotation);
+      this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
+      
+      // Transform to module's local position and rotation
+      this.ctx.translate(module.localPos.x, module.localPos.y);
+      this.ctx.rotate(module.localRot);
+      
+      // Draw highlight based on module type
+      this.ctx.strokeStyle = '#00ff00'; // Green
+      this.ctx.lineWidth = 3 / camera.getState().zoom;
+      
+      if (moduleData.kind === 'plank') {
+        // Straight plank
+        const width = moduleData.length || 20;
+        const height = moduleData.width || 10;
+        const halfWidth = width / 2;
+        const halfHeight = height / 2;
+        this.ctx.strokeRect(-halfWidth, -halfHeight, width, height);
+      } else if (moduleData.kind === 'cannon') {
+        // Draw cannon highlight
+        const width = 30;
+        const height = 20;
+        this.ctx.strokeRect(-width/2, -height/2, width, height);
+      } else {
+        // Default highlight for other modules
+        const size = 20;
+        this.ctx.strokeRect(-size/2, -size/2, size, size);
+      }
+    }
+    
+    this.ctx.restore();
   }
 }

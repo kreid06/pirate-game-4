@@ -129,6 +129,9 @@ export class ClientApplication {
       // Set up mouse tracking for mouse-relative movement
       this.setupMouseTracking();
       
+      // Set up debug keyboard shortcuts
+      this.setupDebugKeys();
+      
       // Initialize UI System
       this.uiManager = new UIManager(this.canvas, this.config);
       
@@ -439,9 +442,34 @@ export class ClientApplication {
       
       // Update input manager with mouse world position
       this.inputManager.updateMouseWorldPosition(worldPos);
+      
+      // Update render system for hover detection
+      this.renderSystem.updateMousePosition(worldPos);
     });
     
     console.log('🖱️ Mouse tracking initialized for directional movement');
+  }
+  
+  /**
+   * Set up debug keyboard shortcuts
+   */
+  private setupDebugKeys(): void {
+    window.addEventListener('keydown', (e) => {
+      // Only handle if not typing in an input field
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+      
+      switch (e.key) {
+        case 'l':
+        case 'L':
+          this.renderSystem.toggleHoverBoundaries();
+          e.preventDefault();
+          break;
+      }
+    });
+    
+    console.log('⌨️ Debug keys initialized (L = toggle hover boundaries)');
   }
   
   /**

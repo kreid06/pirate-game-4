@@ -217,6 +217,11 @@ export class BrigantineLoadoutTester {
           this.camera.setPosition(Vec2.zero());
           this.camera.setZoom(0.5);
           break;
+        case 'l':
+        case 'L':
+          this.renderSystem.toggleHoverBoundaries();
+          e.preventDefault();
+          break;
       }
     });
     
@@ -238,6 +243,14 @@ export class BrigantineLoadoutTester {
     });
     
     window.addEventListener('mousemove', (e) => {
+      // Update render system for hover detection
+      const rect = this.canvas.getBoundingClientRect();
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+      const worldPos = this.camera.screenToWorld(Vec2.from(screenX, screenY));
+      this.renderSystem.updateMousePosition(worldPos);
+      
+      // Handle camera dragging
       if (isDragging) {
         const dx = e.clientX - lastMousePos.x;
         const dy = e.clientY - lastMousePos.y;
