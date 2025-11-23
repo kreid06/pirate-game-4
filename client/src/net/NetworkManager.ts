@@ -9,6 +9,7 @@ import { NetworkConfig } from '../client/ClientConfig.js';
 import { WorldState, InputFrame } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { createShipAtPosition } from '../sim/ShipUtils.js';
+import { ShipModule, ModuleKind, MODULE_TYPE_MAP } from '../sim/modules.js';
 
 /**
  * Network connection states
@@ -694,12 +695,42 @@ export class NetworkManager {
             const rotation = ship.rotation || 0;
             const properShip = createShipAtPosition(position, rotation);
             
+            // Parse modules from server if available
+            // Server sends: modules: [{id, typeId, x, y, rotation}, ...]
+            // Each module has:
+            //   - id: unique module identifier
+            //   - typeId: numeric type (0=HELM, 1=SEAT, 2=CANNON, 3=MAST, 5=LADDER, 6=PLANK, 7=DECK)
+            //   - x, y: position relative to ship center (in client coordinates)
+            //   - rotation: module rotation in radians
+            let serverModules: ShipModule[] | undefined;
+            if (ship.modules && Array.isArray(ship.modules)) {
+              serverModules = ship.modules.map((mod: any) => {
+                const kind = MODULE_TYPE_MAP.toKind(mod.typeId);
+                
+                return {
+                  id: mod.id,
+                  kind: kind,
+                  deckId: 0, // Default to main deck
+                  localPos: Vec2.from(mod.x || 0, mod.y || 0),
+                  localRot: mod.rotation || 0,
+                  occupiedBy: null,
+                  stateBits: 0,
+                  // Module-specific data initialized with defaults
+                  // Client can enhance this with specific module logic
+                  moduleData: undefined
+                } as ShipModule;
+              });
+            }
+            
             // Override with server's authoritative state
             return {
               ...properShip,
               id: ship.id || properShip.id, // Use server-assigned ship ID
               velocity: Vec2.from(ship.velocity_x || 0, ship.velocity_y || 0),
               angularVelocity: ship.angular_velocity || 0,
+              
+              // Use server modules if provided, otherwise keep client defaults
+              modules: serverModules || properShip.modules,
               
               // Parse physics properties from server (override defaults if provided)
               // Server sends: mass, moment_of_inertia, max_speed, turn_rate, water_drag, angular_drag
@@ -709,12 +740,6 @@ export class NetworkManager {
               turnRate: ship.turn_rate ?? properShip.turnRate,
               waterDrag: ship.water_drag ?? properShip.waterDrag,
               angularDrag: ship.angular_drag ?? properShip.angularDrag,
-              
-              // TODO: Future server features
-              // - ship.type: 'brigantine' | 'sloop' | 'galleon' (use different ship designs)
-              // - ship.modules: Parse plank data, cannons, sails, etc. from server
-              // - ship.health: Ship health/damage state
-              // - ship.sails: Sail configuration and state
             };
           }),
           players: (message.players || []).map((player: any) => ({

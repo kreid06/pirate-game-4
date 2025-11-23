@@ -1,0 +1,87 @@
+{
+  "description": "Example GAME_STATE message showing module data format",
+  "example": {
+    "type": "GAME_STATE",
+    "tick": 1500,
+    "timestamp": 50000,
+    "ships": [
+      {
+        "id": 1,
+        "x": 100.0,
+        "y": 100.0,
+        "rotation": 0.0,
+        "velocity_x": 5.0,
+        "velocity_y": 0.0,
+        "angular_velocity": 0.0,
+        "mass": 5000.0,
+        "moment_of_inertia": 500000.0,
+        "max_speed": 15.0,
+        "turn_rate": 1.0,
+        "water_drag": 0.95,
+        "angular_drag": 0.90,
+        "modules": [
+          {
+            "_comment": "Helm - Center aft steering position",
+            "id": 1000,
+            "typeId": 0,
+            "x": -90.0,
+            "y": 0.0,
+            "rotation": 0.0
+          },
+          {
+            "_comment": "Port forward cannon - Points left (rotation π)",
+            "id": 1001,
+            "typeId": 2,
+            "x": 65.0,
+            "y": 75.0,
+            "rotation": 3.14159
+          },
+          {
+            "_comment": "Starboard forward cannon - Points right (rotation 0)",
+            "id": 1002,
+            "typeId": 2,
+            "x": 65.0,
+            "y": -75.0,
+            "rotation": 0.0
+          },
+          {
+            "_comment": "Foremast - Front sail at bow",
+            "id": 1003,
+            "typeId": 3,
+            "x": 165.0,
+            "y": 0.0,
+            "rotation": 0.0
+          },
+          {
+            "_comment": "Mainmast - Center sail",
+            "id": 1004,
+            "typeId": 3,
+            "x": -35.0,
+            "y": 0.0,
+            "rotation": 0.0
+          }
+        ]
+      }
+    ],
+    "players": [],
+    "projectiles": []
+  },
+  "notes": {
+    "coordinates": "All module x,y positions are relative to ship center and in client coordinates (pixels)",
+    "rotation": "Rotation is in radians, relative to ship's forward direction (0 = forward, π ≈ 3.14 = backward)",
+    "typeId_mapping": {
+      "0": "HELM - Steering wheel",
+      "1": "SEAT - Crew seating",
+      "2": "CANNON - Offensive weapon",
+      "3": "MAST - Sail system",
+      "5": "LADDER - Boarding ladder",
+      "6": "PLANK - Hull segment",
+      "7": "DECK - Floor surface"
+    },
+    "coordinate_conventions": {
+      "x_axis": "Negative = aft (back), Positive = fore (front)",
+      "y_axis": "Positive = port (left), Negative = starboard (right)",
+      "ship_center": "Origin (0,0) is at the center of the ship"
+    }
+  }
+}
