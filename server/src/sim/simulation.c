@@ -509,12 +509,12 @@ static Vec2Q16 transform_hull_vertex(Vec2Q16 local_vertex, Vec2Q16 position, q16
     q16_t cos_r = q16_cos(rotation);
     q16_t sin_r = q16_sin(rotation);
     
-    q16_t rotated_x = q16_sub(q16_mul(local_vertex.x, cos_r), q16_mul(local_vertex.y, sin_r));
-    q16_t rotated_y = q16_add(q16_mul(local_vertex.x, sin_r), q16_mul(local_vertex.y, cos_r));
+    q16_t rotated_x = q16_sub_sat(q16_mul(local_vertex.x, cos_r), q16_mul(local_vertex.y, sin_r));
+    q16_t rotated_y = q16_add_sat(q16_mul(local_vertex.x, sin_r), q16_mul(local_vertex.y, cos_r));
     
     return (Vec2Q16){
-        q16_add(position.x, rotated_x),
-        q16_add(position.y, rotated_y)
+        q16_add_sat(position.x, rotated_x),
+        q16_add_sat(position.y, rotated_y)
     };
 }
 
@@ -522,7 +522,7 @@ static Vec2Q16 transform_hull_vertex(Vec2Q16 local_vertex, Vec2Q16 position, q16
 static Vec2Q16 get_edge_normal(Vec2Q16 v1, Vec2Q16 v2) {
     Vec2Q16 edge = vec2_sub(v2, v1);
     // Perpendicular: (-y, x)
-    Vec2Q16 normal = {q16_neg(edge.y), edge.x};
+    Vec2Q16 normal = {-edge.y, edge.x};
     return vec2_normalize(normal);
 }
 
@@ -573,7 +573,7 @@ static bool check_polygon_collision(const struct Ship* ship1, const struct Ship*
             }
             
             // Calculate overlap
-            q16_t overlap = (max1 < max2) ? q16_sub(max1, min2) : q16_sub(max2, min1);
+            q16_t overlap = (max1 < max2) ? q16_sub_sat(max1, min2) : q16_sub_sat(max2, min1);
             
             if (overlap < min_overlap) {
                 min_overlap = overlap;
@@ -587,7 +587,7 @@ static bool check_polygon_collision(const struct Ship* ship1, const struct Ship*
         // Ensure normal points from ship1 to ship2
         Vec2Q16 center_diff = vec2_sub(ship2->position, ship1->position);
         if (vec2_dot(min_axis, center_diff) < 0) {
-            min_axis = vec2_negate(min_axis);
+            min_axis = (Vec2Q16){-min_axis.x, -min_axis.y};  // Negate the vector
         }
         *out_normal = min_axis;
     }
@@ -635,8 +635,8 @@ static void handle_ship_collisions(struct Sim* sim) {
                     q16_t restitution = Q16_FROM_FLOAT(0.3f);
                     
                     // Calculate impulse magnitude: J = -(1 + e) * v_rel / (1/m1 + 1/m2)
-                    q16_t numerator = q16_mul(q16_add(Q16_ONE, restitution), q16_neg(rel_velocity));
-                    q16_t inv_mass_sum = q16_add(q16_div(Q16_ONE, ship1->mass), q16_div(Q16_ONE, ship2->mass));
+                    q16_t numerator = q16_mul(q16_add_sat(Q16_ONE, restitution), -rel_velocity);
+                    q16_t inv_mass_sum = q16_add_sat(q16_div(Q16_ONE, ship1->mass), q16_div(Q16_ONE, ship2->mass));
                     q16_t impulse_mag = q16_div(numerator, inv_mass_sum);
                     
                     Vec2Q16 impulse = vec2_mul_scalar(collision_normal, impulse_mag);
