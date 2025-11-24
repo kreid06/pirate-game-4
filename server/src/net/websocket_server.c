@@ -1539,10 +1539,25 @@ int websocket_server_update(struct Sim* sim) {
                                     for (int s = 0; s < ship_count && ships_offset < (int)sizeof(ships_str) - 512; s++) {
                                         if (ships[s].active) {
                                             ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
-                                                    "%s{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f}",
+                                                    "%s{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"modules\":[",
                                                     first_ship ? "" : ",",
                                                     ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
                                                     ships[s].velocity_x, ships[s].velocity_y);
+                                            
+                                            // Add modules
+                                            for (int m = 0; m < ships[s].module_count && ships_offset < (int)sizeof(ships_str) - 200; m++) {
+                                                const ShipModule* module = &ships[s].modules[m];
+                                                float module_x = Q16_TO_FLOAT(module->local_pos.x);
+                                                float module_y = Q16_TO_FLOAT(module->local_pos.y);
+                                                float module_rot = Q16_TO_FLOAT(module->local_rot);
+                                                
+                                                ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
+                                                    "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
+                                                    m > 0 ? "," : "", module->id, module->type_id, 
+                                                    module_x, module_y, module_rot);
+                                            }
+                                            
+                                            ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "]}");
                                             first_ship = false;
                                         }
                                     }
@@ -1984,6 +1999,17 @@ int websocket_server_update(struct Sim* sim) {
         char ships_json[8192] = "[";  // Increased buffer for module data
         bool first_ship = true;
         
+        // Log which ship source we're using
+        static uint32_t last_ship_source_log = 0;
+        if (current_time - last_ship_source_log > 5000) {
+            log_info("📦 Ship source: sim=%p, sim->ship_count=%d, simple_ship_count=%d",
+                     (void*)sim, sim ? sim->ship_count : 0, ship_count);
+            if (ship_count > 0) {
+                log_info("📦 Simple ship[0]: module_count=%d", ships[0].module_count);
+            }
+            last_ship_source_log = current_time;
+        }
+        
         // Use actual simulation ships if available
         if (sim && sim->ship_count > 0) {
             for (uint32_t s = 0; s < sim->ship_count; s++) {
@@ -2046,18 +2072,35 @@ int websocket_server_update(struct Sim* sim) {
             for (int s = 0; s < ship_count; s++) {
                 if (ships[s].active) {
                     if (!first_ship) strcat(ships_json, ",");
-                    char ship_entry[512];
-                    snprintf(ship_entry, sizeof(ship_entry),
+                    
+                    // Build ship entry with modules
+                    char ship_entry[4096];
+                    int offset = snprintf(ship_entry, sizeof(ship_entry),
                             "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                             "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                             "\"mass\":%.1f,\"moment_of_inertia\":%.1f,"
                             "\"max_speed\":%.1f,\"turn_rate\":%.2f,"
-                            "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"modules\":[]}",
+                            "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"modules\":[",
                             ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
                             ships[s].velocity_x, ships[s].velocity_y, ships[s].angular_velocity,
                             ships[s].mass, ships[s].moment_of_inertia,
                             ships[s].max_speed, ships[s].turn_rate,
                             ships[s].water_drag, ships[s].angular_drag);
+                    
+                    // Add modules from simple ships
+                    for (int m = 0; m < ships[s].module_count && offset < (int)sizeof(ship_entry) - 200; m++) {
+                        const ShipModule* module = &ships[s].modules[m];
+                        float module_x = Q16_TO_FLOAT(module->local_pos.x);
+                        float module_y = Q16_TO_FLOAT(module->local_pos.y);
+                        float module_rot = Q16_TO_FLOAT(module->local_rot);
+                        
+                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
+                            m > 0 ? "," : "", module->id, module->type_id, 
+                            module_x, module_y, module_rot);
+                    }
+                    
+                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
                     strcat(ships_json, ship_entry);
                     first_ship = false;
                 }
@@ -2228,6 +2271,15 @@ void websocket_server_tick(float dt) {
             // Find corresponding WebSocket player by simulation entity ID
             WebSocketPlayer* ws_player = find_player_by_sim_id(sim_player->id);
             if (ws_player && ws_player->active) {
+                // Sync ship boarding state to simulation for collision filtering
+                if (ws_player->parent_ship_id != 0) {
+                    // Player is on a ship - disable ship collision
+                    sim_player->ship_id = ws_player->parent_ship_id;
+                } else {
+                    // Player is swimming - enable ship collision
+                    sim_player->ship_id = INVALID_ENTITY_ID;
+                }
+                
                 if (ws_player->is_moving) {
                     // Player is actively moving - apply acceleration
                     float movement_x = ws_player->movement_direction_x;

@@ -232,9 +232,9 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         // Quadratic bezier: P(t) = (1-t)²P0 + 2(1-t)tP1 + t²P2
         float x = (1-t)*(1-t)*190.0f + 2*(1-t)*t*415.0f + t*t*190.0f;
         float y = (1-t)*(1-t)*90.0f + 2*(1-t)*t*0.0f + t*t*(-90.0f);
-        // Scale by 1.1 for collision boundary expansion
-        x *= 1.1f;
-        y *= 1.1f;
+        // Minimal expansion for bow curve (1.02x) to match side thickness
+        x *= 1.02f;
+        y *= 1.1f;  // Keep Y expansion for width consistency
         ship->hull_vertices[idx++] = (Vec2Q16){
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)), 
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
@@ -246,9 +246,9 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         float t = (float)i / 12.0f;
         float x = 190.0f + t * (-260.0f - 190.0f);
         float y = -90.0f + t * (-90.0f - (-90.0f));
-        // Scale by 1.1 for collision boundary expansion
-        x *= 1.1f;
-        y *= 1.1f;
+        // Only expand Y (width) for straight sides, keep X (length) unchanged
+        // x *= 1.0f;  // No X expansion
+        y *= 1.1f;  // Width expansion
         ship->hull_vertices[idx++] = (Vec2Q16){
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)), 
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
@@ -260,9 +260,9 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         float t = (float)i / 12.0f;
         float x = (1-t)*(1-t)*(-260.0f) + 2*(1-t)*t*(-345.0f) + t*t*(-260.0f);
         float y = (1-t)*(1-t)*(-90.0f) + 2*(1-t)*t*0.0f + t*t*90.0f;
-        // Scale by 1.1 for collision boundary expansion
-        x *= 1.1f;
-        y *= 1.1f;
+        // Minimal expansion for stern curve (1.02x) to match side thickness
+        x *= 1.02f;
+        y *= 1.1f;  // Keep Y expansion for width consistency
         ship->hull_vertices[idx++] = (Vec2Q16){
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)), 
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
@@ -274,20 +274,20 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         float t = (float)i / 12.0f;
         float x = -260.0f + t * (190.0f - (-260.0f));
         float y = 90.0f + t * (90.0f - 90.0f);
-        // Scale by 1.1 for collision boundary expansion
-        x *= 1.1f;
-        y *= 1.1f;
+        // Only expand Y (width) for straight sides, keep X (length) unchanged
+        // x *= 1.0f;  // No X expansion
+        y *= 1.1f;  // Width expansion
         ship->hull_vertices[idx++] = (Vec2Q16){
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)), 
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
         };
     }
     
-    // Calculate bounding radius from actual hull extent (scaled by 1.1)
-    // Hull extends from -345 to 415 in x (client), -90 to 90 in y (client)
-    // After 1.1x scaling: -379.5 to 456.5 in x, -99 to 99 in y
-    // Max distance from center is sqrt(456.5^2 + 99^2) ≈ 467.1 client units = 46.71 server units
-    ship->bounding_radius = Q16_FROM_FLOAT(CLIENT_TO_SERVER(430.0f * 1.1f)); // Scaled bounding radius
+    // Calculate bounding radius from actual hull extent
+    // Hull base extends from -345 to 415 in x (client), -90 to 90 in y (client)
+    // After scaling: bow/stern 1.02x X, all 1.1x Y → max ~423 x, 99 y
+    // Max distance from center is sqrt(423^2 + 99^2) ≈ 434.5 client units = 43.45 server units
+    ship->bounding_radius = Q16_FROM_FLOAT(CLIENT_TO_SERVER(435.0f)); // Conservative bounding radius
     
     // Initialize BROADSIDE loadout modules
     // Matches BrigantineLoadouts.BROADSIDE from BrigantineTestBuilder.ts
@@ -352,6 +352,13 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         0
     );
     
+    // Add ladder at specified position (-305, 0 in client coords)
+    ship->modules[ship->module_count++] = module_create(
+        module_id++, MODULE_TYPE_LADDER,
+        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-305.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
+        0
+    );
+    
     // Initialize 10 hull planks (health tracking only - client creates positions from hull geometry)
     // Plank IDs: 100-109 (hard-coded indices matching client createCompleteHullSegments())
     // Order: bow_port, bow_starboard, 3x starboard_side, stern_starboard, stern_port, 3x port_side
@@ -373,7 +380,7 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         0
     );
     
-    log_info("⚓ Created brigantine ship %u with BROADSIDE loadout: %u modules (6 cannons, 3 masts, 1 helm, 10 planks, 1 deck)",
+    log_info("⚓ Created brigantine ship %u with BROADSIDE loadout: %u modules (6 cannons, 3 masts, 1 helm, 1 ladder, 10 planks, 1 deck)",
              id, ship->module_count);
     
     sim->ship_count++;
