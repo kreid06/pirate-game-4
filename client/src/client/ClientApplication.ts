@@ -123,7 +123,47 @@ export class ClientApplication {
         this.networkManager.sendRotationUpdate(rotation);
       };
       this.inputManager.onActionEvent = (action, target) => {
-        this.networkManager.sendAction(action, target);
+        if (action === 'interact') {
+          // Player pressed E - interact with hovered module
+          const hoveredModule = this.renderSystem.getHoveredModule();
+          
+          if (hoveredModule) {
+            const playerId = this.networkManager.getAssignedPlayerId();
+            if (playerId !== null) {
+              // Check if player is close enough to the module
+              const worldState = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+              if (!worldState) return;
+              
+              const player = worldState.players.find(p => p.id === playerId);
+              
+              if (player) {
+                // Calculate module world position
+                const cos = Math.cos(hoveredModule.ship.rotation);
+                const sin = Math.sin(hoveredModule.ship.rotation);
+                const moduleWorldX = hoveredModule.ship.position.x + 
+                  (hoveredModule.module.localPos.x * cos - hoveredModule.module.localPos.y * sin);
+                const moduleWorldY = hoveredModule.ship.position.y + 
+                  (hoveredModule.module.localPos.x * sin + hoveredModule.module.localPos.y * cos);
+                const moduleWorldPos = Vec2.from(moduleWorldX, moduleWorldY);
+                
+                const distance = player.position.sub(moduleWorldPos).length();
+                const maxInteractDistance = 50; // Maximum interaction range
+                
+                if (distance <= maxInteractDistance) {
+                  console.log(`🎯 [INTERACTION] Player interacting with ${hoveredModule.module.kind.toUpperCase()} (ID: ${hoveredModule.module.id}) at distance ${distance.toFixed(1)}px`);
+                  this.networkManager.sendModuleInteract(hoveredModule.module.id);
+                } else {
+                  console.log(`❌ [INTERACTION] ${hoveredModule.module.kind.toUpperCase()} too far: ${distance.toFixed(1)}px > ${maxInteractDistance}px`);
+                }
+              }
+            }
+          } else {
+            console.log(`⚠️ [INTERACTION] No module hovered - move mouse over a module and press E`);
+          }
+        } else {
+          // Other actions go to server
+          this.networkManager.sendAction(action, target);
+        }
       };
       
       // Set up mouse tracking for mouse-relative movement

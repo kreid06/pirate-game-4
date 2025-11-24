@@ -159,7 +159,15 @@ interface AckMessage extends NetworkMessage {
   status: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | PingPongMessage | WorldStateMessage | AckMessage;
+/**
+ * Module interaction message
+ */
+interface ModuleInteractMessage extends NetworkMessage {
+  type: MessageType.MODULE_INTERACT;
+  module_id: number;
+}
+
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | PingPongMessage | WorldStateMessage | AckMessage;
 
 /**
  * Main network manager class
@@ -202,8 +210,6 @@ export class NetworkManager {
   
   constructor(config: NetworkConfig) {
     this.config = config;
-    const nmId = Math.random().toString(36).substr(2, 9);
-    console.log(`📡 [${nmId}] NetworkManager instance created`);
   }
   
   /**
@@ -792,17 +798,6 @@ export class NetworkManager {
               
               // Combine: client planks/deck + server gameplay modules
               serverModules = [...clientDeck, ...clientPlanks, ...gameplayModules];
-              
-              // Debug: Log parsed modules for first ship
-              if (ship.id === 1) {
-                console.log(`[NetworkManager] Merged ${serverModules.length} modules for ship ${ship.id}:`);
-                const summary = serverModules.reduce((acc, m) => {
-                  acc[m.kind] = (acc[m.kind] || 0) + 1;
-                  return acc;
-                }, {} as Record<string, number>);
-                console.log('  Module counts:', summary);
-                console.log('  Plank health updates:', plankHealthUpdates.size);
-              }
             }
             
             // Override with server's authoritative state
@@ -907,18 +902,18 @@ export class NetworkManager {
    * Send module interaction to server
    */
   sendModuleInteract(moduleId: number): void {
-    const message: any = {
+    const message: ModuleInteractMessage = {
       type: MessageType.MODULE_INTERACT,
       module_id: moduleId,
       timestamp: Date.now()
     };
     
-    console.log(`[NetworkManager] Sending MODULE_INTERACT for module ${moduleId}`);
     this.sendMessage(message);
   }
   
   private sendMessage(message: GameMessage): void {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      console.warn('⚠️ [NETWORK] Cannot send message - socket not connected');
       return;
     }
     
@@ -927,6 +922,11 @@ export class NetworkManager {
       this.socket.send(data);
       this.stats.messagesSent++;
       this.stats.bytesSent += data.length;
+      
+      // Log MODULE_INTERACT messages
+      if (message.type === MessageType.MODULE_INTERACT) {
+        console.log(`📤 [NETWORK] Sent MODULE_INTERACT for module ${(message as any).module_id}`);
+      }
     } catch (error) {
       console.error('Failed to send message:', error);
     }
