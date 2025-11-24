@@ -116,6 +116,70 @@ static void ship_clamp_to_deck(const SimpleShip* ship, float* local_x, float* lo
     if (*local_y > ship->deck_max_y) *local_y = ship->deck_max_y;
 }
 
+// Helper to convert world coordinates to ship-local coordinates
+static void ship_world_to_local(const SimpleShip* ship, float world_x, float world_y, float* local_x, float* local_y) {
+    float dx = world_x - ship->x;
+    float dy = world_y - ship->y;
+    float cos_r = cosf(-ship->rotation);
+    float sin_r = sinf(-ship->rotation);
+    *local_x = dx * cos_r - dy * sin_r;
+    *local_y = dx * sin_r + dy * cos_r;
+}
+
+// Helper to check if player is outside deck bounds
+static bool is_outside_deck(const SimpleShip* ship, float local_x, float local_y) {
+    return (local_x < ship->deck_min_x || local_x > ship->deck_max_x ||
+            local_y < ship->deck_min_y || local_y > ship->deck_max_y);
+}
+
+// Helper to board a player onto a ship
+static void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y) {
+    player->parent_ship_id = ship->ship_id;
+    player->local_x = local_x;
+    player->local_y = local_y;
+    player->movement_state = PLAYER_STATE_WALKING;
+    
+    // Clamp to deck boundaries
+    ship_clamp_to_deck(ship, &player->local_x, &player->local_y);
+    
+    // Update world position to match ship
+    ship_local_to_world(ship, player->local_x, player->local_y, &player->x, &player->y);
+    
+    // Inherit ship velocity
+    player->velocity_x = ship->velocity_x;
+    player->velocity_y = ship->velocity_y;
+    
+    log_info("⚓ Player %u boarded ship %u at local (%.1f, %.1f)", 
+             player->player_id, ship->ship_id, player->local_x, player->local_y);
+}
+
+// Helper to dismount a player from a ship (into water)
+static void dismount_player_from_ship(WebSocketPlayer* player, const char* reason) {
+    if (player->parent_ship_id == 0) {
+        return; // Already in water
+    }
+    
+    log_info("🌊 Player %u dismounting from ship %u (reason: %s)", 
+             player->player_id, player->parent_ship_id, reason);
+    
+    // Keep current world position but clear ship reference
+    player->parent_ship_id = 0;
+    player->local_x = 0.0f;
+    player->local_y = 0.0f;
+    player->movement_state = PLAYER_STATE_SWIMMING;
+    
+    // Keep some of the ship's velocity (player carries momentum)
+    player->velocity_x *= 0.5f;
+    player->velocity_y *= 0.5f;
+    
+    // Clear mounted state if player was on a module
+    if (player->is_mounted) {
+        player->is_mounted = false;
+        player->mounted_module_id = 0;
+        player->controlling_ship_id = 0;
+    }
+}
+
 // Base64 encoding for WebSocket handshake
 static char* base64_encode(const unsigned char* input, int length) {
     BIO *bio, *b64;
@@ -361,6 +425,11 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].last_input_time = get_time_ms();
             players[i].active = true;
             
+            // Initialize module interaction state
+            players[i].is_mounted = false;
+            players[i].mounted_module_id = 0;
+            players[i].controlling_ship_id = 0;
+            
             return &players[i];
         }
     }
@@ -383,6 +452,386 @@ static void remove_player(uint32_t player_id) {
     }
     log_warn("Attempted to remove non-existent player %u", player_id);
 }
+
+// ============================================================================
+// MODULE INTERACTION SYSTEM
+// ============================================================================
+
+/**
+ * Get human-readable module type name
+ */
+static const char* get_module_type_name(ModuleTypeId type_id) {
+    switch (type_id) {
+        case MODULE_TYPE_CANNON: return "CANNON";
+        case MODULE_TYPE_HELM: return "HELM";
+        case MODULE_TYPE_MAST: return "MAST";
+        case MODULE_TYPE_LADDER: return "LADDER";
+        case MODULE_TYPE_SEAT: return "SEAT";
+        case MODULE_TYPE_PLANK: return "PLANK";
+        case MODULE_TYPE_DECK: return "DECK";
+        case MODULE_TYPE_STEERING_WHEEL: return "STEERING_WHEEL";
+        default: return "UNKNOWN";
+    }
+}
+
+/**
+ * Find ship by ID
+ */
+static SimpleShip* find_ship_by_id(uint32_t ship_id) {
+    for (int i = 0; i < ship_count; i++) {
+        if (ships[i].active && ships[i].ship_id == ship_id) {
+            return &ships[i];
+        }
+    }
+    return NULL;
+}
+
+/**
+ * Find module by ID on a ship
+ */
+static ShipModule* find_module_by_id(SimpleShip* ship, uint32_t module_id) {
+    if (!ship) return NULL;
+    
+    for (int i = 0; i < ship->module_count; i++) {
+        if (ship->modules[i].id == module_id) {
+            return &ship->modules[i];
+        }
+    }
+    return NULL;
+}
+
+/**
+ * Send interaction failure to client
+ */
+static void send_interaction_failure(struct WebSocketClient* client, const char* reason) {
+    char response[256];
+    snprintf(response, sizeof(response),
+             "{\"type\":\"module_interact_failure\",\"reason\":\"%s\"}",
+             reason);
+    
+    char frame[512];
+    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0) {
+        send(client->fd, frame, frame_len, 0);
+    }
+}
+
+/**
+ * Send mount success to client
+ */
+static void send_mount_success(struct WebSocketClient* client, ShipModule* module) {
+    char response[256];
+    snprintf(response, sizeof(response),
+             "{\"type\":\"module_interact_success\",\"module_id\":%u,\"module_kind\":\"%s\",\"mounted\":true}",
+             module->id, get_module_type_name(module->type_id));
+    
+    char frame[512];
+    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0) {
+        send(client->fd, frame, frame_len, 0);
+    }
+}
+
+/**
+ * Send interaction success (non-mounting actions)
+ */
+static void send_interaction_success(struct WebSocketClient* client, const char* action) {
+    char response[256];
+    snprintf(response, sizeof(response),
+             "{\"type\":\"module_interact_success\",\"action\":\"%s\"}",
+             action);
+    
+    char frame[512];
+    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0) {
+        send(client->fd, frame, frame_len, 0);
+    }
+}
+
+/**
+ * Broadcast player mounted state to nearby players
+ */
+static void broadcast_player_mounted(WebSocketPlayer* player, ShipModule* module, SimpleShip* ship) {
+    char message[512];
+    snprintf(message, sizeof(message),
+             "{\"type\":\"player_mounted\",\"player_id\":%u,\"module_id\":%u,\"ship_id\":%u}",
+             player->player_id, module->id, ship->ship_id);
+    
+    // Broadcast to all connected clients
+    // TODO: Optimize to only send to nearby players
+    websocket_server_broadcast(message);
+}
+
+// Module-specific interaction handlers
+static void handle_cannon_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
+    // Check if cannon is already occupied
+    if (module->data.cannon.ammunition > 0 && module->state_bits & MODULE_STATE_OCCUPIED) {
+        uint16_t occupier_id = 0; // TODO: Track which player occupies
+        if (occupier_id != 0 && occupier_id != player->player_id) {
+            log_info("Cannon %u already occupied by player %u", module->id, occupier_id);
+            send_interaction_failure(client, "module_occupied");
+            return;
+        }
+    }
+    
+    // Mount player to cannon
+    module->state_bits |= MODULE_STATE_OCCUPIED;
+    player->is_mounted = true;
+    player->mounted_module_id = module->id;
+    
+    log_info("🎯 Player %u mounted to cannon %u", player->player_id, module->id);
+    
+    send_mount_success(client, module);
+    broadcast_player_mounted(player, module, ship);
+}
+
+static void handle_helm_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
+    // Check if helm is occupied
+    if (module->data.helm.occupied_by != 0 && module->data.helm.occupied_by != player->player_id) {
+        log_info("Helm %u already occupied by player %u", module->id, module->data.helm.occupied_by);
+        send_interaction_failure(client, "module_occupied");
+        return;
+    }
+    
+    // Mount player and grant ship control
+    module->data.helm.occupied_by = player->player_id;
+    module->state_bits |= MODULE_STATE_OCCUPIED;
+    player->is_mounted = true;
+    player->mounted_module_id = module->id;
+    player->controlling_ship_id = ship->ship_id;
+    
+    log_info("⚓ Player %u mounted to helm %u, controlling ship %u", 
+             player->player_id, module->id, ship->ship_id);
+    
+    send_mount_success(client, module);
+    broadcast_player_mounted(player, module, ship);
+}
+
+static void handle_mast_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
+    // Toggle sail state (raised/lowered)
+    if (module->state_bits & MODULE_STATE_DEPLOYED) {
+        module->state_bits &= ~MODULE_STATE_DEPLOYED;
+        module->data.mast.openness = 0;
+        log_info("⛵ Player %u furled mast %u sail", player->player_id, module->id);
+    } else {
+        module->state_bits |= MODULE_STATE_DEPLOYED;
+        module->data.mast.openness = 100;
+        log_info("⛵ Player %u deployed mast %u sail", player->player_id, module->id);
+    }
+    
+    send_interaction_success(client, "sail_toggled");
+    
+    // Broadcast sail state change
+    char message[256];
+    snprintf(message, sizeof(message),
+             "{\"type\":\"sail_state\",\"ship_id\":%u,\"module_id\":%u,\"deployed\":%s}",
+             ship->ship_id, module->id, (module->state_bits & MODULE_STATE_DEPLOYED) ? "true" : "false");
+    websocket_server_broadcast(message);
+}
+
+static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
+    // Check if player is already on this ship
+    if (player->parent_ship_id == ship->ship_id) {
+        log_info("🪜 Player %u already on ship %u, no need to board", player->player_id, ship->ship_id);
+        send_interaction_success(client, "already_aboard");
+        return;
+    }
+    
+    // Player is swimming - board them onto the ship at the ladder position
+    if (player->parent_ship_id == 0) {
+        // Get ladder position in ship-local coordinates
+        float ladder_local_x = Q16_TO_FLOAT(module->local_pos.x);
+        float ladder_local_y = Q16_TO_FLOAT(module->local_pos.y);
+        
+        // Board player at ladder position (or nearby safe spot)
+        board_player_on_ship(player, ship, ladder_local_x, ladder_local_y);
+        
+        log_info("🪜 Player %u boarded ship %u via ladder %u", 
+                 player->player_id, ship->ship_id, module->id);
+        
+        // Send success response
+        char response[256];
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"player_boarded\",\"ship_id\":%u,\"state\":\"walking\"}",
+                 ship->ship_id);
+        
+        char frame[512];
+        size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+        if (frame_len > 0) {
+            send(client->fd, frame, frame_len, 0);
+        }
+        
+        // Broadcast boarding event to all players
+        char broadcast[256];
+        snprintf(broadcast, sizeof(broadcast),
+                 "{\"type\":\"player_state_changed\",\"player_id\":%u,\"state\":\"walking\",\"ship_id\":%u}",
+                 player->player_id, ship->ship_id);
+        websocket_server_broadcast(broadcast);
+    } else {
+        // Player is on a different ship - transfer them
+        log_info("🪜 Player %u transferring from ship %u to ship %u via ladder",
+                 player->player_id, player->parent_ship_id, ship->ship_id);
+        
+        float ladder_local_x = Q16_TO_FLOAT(module->local_pos.x);
+        float ladder_local_y = Q16_TO_FLOAT(module->local_pos.y);
+        
+        board_player_on_ship(player, ship, ladder_local_x, ladder_local_y);
+        send_interaction_success(client, "ship_transfer");
+    }
+}
+
+static void handle_seat_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
+    // Check if seat is occupied
+    if (module->data.seat.occupied_by != 0 && module->data.seat.occupied_by != player->player_id) {
+        send_interaction_failure(client, "module_occupied");
+        return;
+    }
+    
+    module->data.seat.occupied_by = player->player_id;
+    module->state_bits |= MODULE_STATE_OCCUPIED;
+    player->is_mounted = true;
+    player->mounted_module_id = module->id;
+    
+    log_info("💺 Player %u seated at %u", player->player_id, module->id);
+    
+    send_mount_success(client, module);
+    broadcast_player_mounted(player, module, ship);
+}
+
+/**
+ * Handle module interaction request from client
+ */
+static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    // Parse module_id from JSON
+    uint32_t module_id = 0;
+    char* module_id_start = strstr(payload, "\"module_id\":");
+    if (module_id_start) {
+        module_id_start += 12; // Skip past "module_id":
+        module_id = (uint32_t)atoi(module_id_start);
+    } else {
+        log_error("module_interact missing module_id field");
+        send_interaction_failure(client, "invalid_request");
+        return;
+    }
+    
+    log_info("🎮 [MODULE_INTERACT] Player %u -> Module %u", player->player_id, module_id);
+    
+    // For ladder interactions, we need to find which ship has this ladder
+    // For other modules, player must be on the ship
+    
+    SimpleShip* target_ship = NULL;
+    ShipModule* module = NULL;
+    
+    // Search all ships for the module
+    for (int i = 0; i < ship_count; i++) {
+        if (ships[i].active) {
+            ShipModule* found_module = find_module_by_id(&ships[i], module_id);
+            if (found_module) {
+                target_ship = &ships[i];
+                module = found_module;
+                break;
+            }
+        }
+    }
+    
+    if (!module || !target_ship) {
+        log_warn("Module %u not found on any ship", module_id);
+        send_interaction_failure(client, "module_not_found");
+        return;
+    }
+    
+    // Special handling for ladders - can be used from water or different ships
+    bool is_ladder = (module->type_id == MODULE_TYPE_LADDER);
+    
+    // For non-ladder modules, player must be on the same ship
+    if (!is_ladder && player->parent_ship_id != target_ship->ship_id) {
+        if (player->parent_ship_id == 0) {
+            log_warn("Player %u not on a ship, cannot interact with module %u", player->player_id, module_id);
+            send_interaction_failure(client, "not_on_ship");
+        } else {
+            log_warn("Player %u on different ship, cannot interact with module %u on ship %u", 
+                     player->player_id, module_id, target_ship->ship_id);
+            send_interaction_failure(client, "wrong_ship");
+        }
+        return;
+    }
+    
+    // Validate range
+    float dx, dy, distance;
+    
+    if (player->parent_ship_id == target_ship->ship_id) {
+        // Player on same ship - use ship-local coordinates
+        dx = player->local_x - Q16_TO_FLOAT(module->local_pos.x);
+        dy = player->local_y - Q16_TO_FLOAT(module->local_pos.y);
+    } else {
+        // Player in water or on different ship - use world coordinates
+        float module_world_x, module_world_y;
+        ship_local_to_world(target_ship, Q16_TO_FLOAT(module->local_pos.x), 
+                          Q16_TO_FLOAT(module->local_pos.y), &module_world_x, &module_world_y);
+        dx = player->x - module_world_x;
+        dy = player->y - module_world_y;
+    }
+    
+    distance = sqrtf(dx * dx + dy * dy);
+    const float MAX_INTERACT_RANGE = 60.0f; // Slightly more lenient on server
+    
+    if (distance > MAX_INTERACT_RANGE) {
+        log_warn("Player %u too far from module %u (%.1fpx > %.1fpx)", 
+                 player->player_id, module_id, distance, MAX_INTERACT_RANGE);
+        send_interaction_failure(client, "out_of_range");
+        return;
+    }
+    
+    // Check module is active (not destroyed)
+    if (module->state_bits & MODULE_STATE_DESTROYED) {
+        log_warn("Module %u is destroyed, cannot interact", module_id);
+        send_interaction_failure(client, "module_destroyed");
+        return;
+    }
+    
+    // Process interaction based on module type
+    log_info("✅ Player %u interacting with %s (ID: %u) at %.1fpx", 
+             player->player_id, get_module_type_name(module->type_id), module_id, distance);
+    
+    switch (module->type_id) {
+        case MODULE_TYPE_CANNON:
+            handle_cannon_interact(player, client, target_ship, module);
+            break;
+            
+        case MODULE_TYPE_HELM:
+        case MODULE_TYPE_STEERING_WHEEL:
+            handle_helm_interact(player, client, target_ship, module);
+            break;
+            
+        case MODULE_TYPE_MAST:
+            handle_mast_interact(player, client, target_ship, module);
+            break;
+            
+        case MODULE_TYPE_LADDER:
+            handle_ladder_interact(player, client, target_ship, module);
+            break;
+            
+        case MODULE_TYPE_SEAT:
+            handle_seat_interact(player, client, target_ship, module);
+            break;
+            
+        case MODULE_TYPE_PLANK:
+        case MODULE_TYPE_DECK:
+            // Structural modules, no interaction
+            log_warn("Cannot interact with structural module type %d", module->type_id);
+            send_interaction_failure(client, "not_interactive");
+            break;
+            
+        default:
+            log_warn("Unhandled module type: %d", module->type_id);
+            send_interaction_failure(client, "unknown_module_type");
+            break;
+    }
+}
+
+// ============================================================================
+// END MODULE INTERACTION SYSTEM
+// ============================================================================
 
 // Global movement tracking for adaptive tick rate
 static uint32_t g_last_movement_time = 0;
@@ -418,21 +867,48 @@ static void apply_player_movement_state(WebSocketPlayer* player, float dt) {
                 movement_x /= magnitude;
                 movement_y /= magnitude;
                 
-                // Update local position (movement is in ship's coordinate frame)
-                player->local_x += movement_x * WALK_SPEED * dt;
-                player->local_y += movement_y * WALK_SPEED * dt;
+                // Calculate new local position
+                float new_local_x = player->local_x + movement_x * WALK_SPEED * dt;
+                float new_local_y = player->local_y + movement_y * WALK_SPEED * dt;
                 
-                // Clamp to deck boundaries
-                ship_clamp_to_deck(ship, &player->local_x, &player->local_y);
+                // Check if player would walk off the deck
+                if (is_outside_deck(ship, new_local_x, new_local_y)) {
+                    // Player walked off the edge - dismount into water
+                    log_info("🌊 Player %u walked off the deck of ship %u", 
+                             player->player_id, ship->ship_id);
+                    
+                    // Update to edge position first, then dismount
+                    ship_clamp_to_deck(ship, &new_local_x, &new_local_y);
+                    player->local_x = new_local_x;
+                    player->local_y = new_local_y;
+                    
+                    // Convert to world position before dismounting
+                    ship_local_to_world(ship, player->local_x, player->local_y, 
+                                      &player->x, &player->y);
+                    
+                    // Dismount player
+                    dismount_player_from_ship(player, "walked_off_deck");
+                    
+                    // Continue movement in water
+                    player->velocity_x = movement_x * SWIM_SPEED;
+                    player->velocity_y = movement_y * SWIM_SPEED;
+                } else {
+                    // Normal movement on deck
+                    player->local_x = new_local_x;
+                    player->local_y = new_local_y;
+                }
             }
             
-            // Convert local position to world position
-            ship_local_to_world(ship, player->local_x, player->local_y, 
-                              &player->x, &player->y);
-            
-            // Player inherits ship velocity
-            player->velocity_x = ship->velocity_x;
-            player->velocity_y = ship->velocity_y;
+            // Only update position if still on ship
+            if (player->parent_ship_id != 0) {
+                // Convert local position to world position
+                ship_local_to_world(ship, player->local_x, player->local_y, 
+                                  &player->x, &player->y);
+                
+                // Player inherits ship velocity
+                player->velocity_x = ship->velocity_x;
+                player->velocity_y = ship->velocity_y;
+            }
             
         } else {
             // Ship not found - fall into water
@@ -487,21 +963,48 @@ static void update_player_movement(WebSocketPlayer* player, float rotation, floa
                 movement_x /= magnitude;
                 movement_y /= magnitude;
                 
-                // Update local position (movement is in ship's coordinate frame)
-                player->local_x += movement_x * WALK_SPEED * dt;
-                player->local_y += movement_y * WALK_SPEED * dt;
+                // Calculate new local position
+                float new_local_x = player->local_x + movement_x * WALK_SPEED * dt;
+                float new_local_y = player->local_y + movement_y * WALK_SPEED * dt;
                 
-                // Clamp to deck boundaries
-                ship_clamp_to_deck(ship, &player->local_x, &player->local_y);
+                // Check if player would walk off the deck
+                if (is_outside_deck(ship, new_local_x, new_local_y)) {
+                    // Player walked off the edge - dismount into water
+                    log_info("🌊 Player %u walked off the deck of ship %u", 
+                             player->player_id, ship->ship_id);
+                    
+                    // Update to edge position first, then dismount
+                    ship_clamp_to_deck(ship, &new_local_x, &new_local_y);
+                    player->local_x = new_local_x;
+                    player->local_y = new_local_y;
+                    
+                    // Convert to world position before dismounting
+                    ship_local_to_world(ship, player->local_x, player->local_y, 
+                                      &player->x, &player->y);
+                    
+                    // Dismount player
+                    dismount_player_from_ship(player, "walked_off_deck");
+                    
+                    // Continue movement in water
+                    player->velocity_x = movement_x * SWIM_SPEED;
+                    player->velocity_y = movement_y * SWIM_SPEED;
+                } else {
+                    // Normal movement on deck
+                    player->local_x = new_local_x;
+                    player->local_y = new_local_y;
+                }
             }
             
-            // Convert local position to world position
-            ship_local_to_world(ship, player->local_x, player->local_y, 
-                              &player->x, &player->y);
-            
-            // Player inherits ship velocity
-            player->velocity_x = ship->velocity_x;
-            player->velocity_y = ship->velocity_y;
+            // Only update position if still on ship
+            if (player->parent_ship_id != 0) {
+                // Convert local position to world position
+                ship_local_to_world(ship, player->local_x, player->local_y, 
+                                  &player->x, &player->y);
+                
+                // Player inherits ship velocity
+                player->velocity_x = ship->velocity_x;
+                player->velocity_y = ship->velocity_y;
+            }
             
         } else {
             // Ship not found - fall into water
@@ -708,6 +1211,75 @@ int websocket_server_init(uint16_t port) {
     ships[0].deck_min_y = -6.0f;
     ships[0].deck_max_y = 6.0f;
     ships[0].active = true;
+    
+    // Initialize ship modules for brigantine
+    ships[0].module_count = 0;
+    uint16_t module_id_counter = 1000; // Start module IDs at 1000
+    
+    // Add helm at center-rear
+    ships[0].modules[ships[0].module_count].id = module_id_counter++;
+    ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_HELM;
+    ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(0.0f);
+    ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(-5.0f);
+    ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(0.0f);
+    ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE;
+    ships[0].modules[ships[0].module_count].data.helm.occupied_by = 0;
+    ships[0].modules[ships[0].module_count].data.helm.wheel_rotation = Q16_FROM_FLOAT(0.0f);
+    ships[0].module_count++;
+    
+    // Add 6 cannons (3 port, 3 starboard)
+    for (int i = 0; i < 6; i++) {
+        float side = (i < 3) ? -7.0f : 7.0f;  // Port vs starboard
+        float y_pos = -3.0f + (i % 3) * 3.0f; // Spacing along ship
+        
+        ships[0].modules[ships[0].module_count].id = module_id_counter++;
+        ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_CANNON;
+        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(side);
+        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(y_pos);
+        ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT((i < 3) ? -M_PI/2 : M_PI/2);
+        ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE;
+        ships[0].modules[ships[0].module_count].data.cannon.aim_direction = Q16_FROM_FLOAT(0.0f);
+        ships[0].modules[ships[0].module_count].data.cannon.ammunition = 10;
+        ships[0].modules[ships[0].module_count].data.cannon.time_since_fire = 0;
+        ships[0].modules[ships[0].module_count].data.cannon.reload_time = Q16_FROM_FLOAT(3000.0f);
+        ships[0].module_count++;
+    }
+    
+    // Add 3 masts
+    for (int i = 0; i < 3; i++) {
+        float y_pos = -4.0f + i * 4.0f;
+        
+        ships[0].modules[ships[0].module_count].id = module_id_counter++;
+        ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_MAST;
+        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(0.0f);
+        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(y_pos);
+        ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(0.0f);
+        ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE | MODULE_STATE_DEPLOYED;
+        ships[0].modules[ships[0].module_count].data.mast.angle = Q16_FROM_FLOAT(0.0f);
+        ships[0].modules[ships[0].module_count].data.mast.openness = 100;
+        ships[0].modules[ships[0].module_count].data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
+        ships[0].module_count++;
+    }
+    
+    // Add 4 ladders (port/starboard sides, front/back) plus one at the specified position
+    float ladder_positions[1][2] = {
+ 
+        {-305.0f, 0.0f}   // Special ladder at requested position
+    };
+    
+    for (int i = 0; i < 1; i++) {
+        ships[0].modules[ships[0].module_count].id = module_id_counter++;
+        ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_LADDER;
+        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(ladder_positions[i][0]);
+        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(ladder_positions[i][1]);
+        ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(0.0f);
+        ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE;
+        ships[0].module_count++;
+    }
+    
+    log_info("🔧 Initialized %d modules for ship %u (1 helm, 6 cannons, 3 masts, 1 ladder)", 
+             ships[0].module_count, ships[0].ship_id);
+    
     ship_count = 1;
     log_info("🚢 Initialized test ship (ID: %u, Type: Brigantine, Mass: %.0f kg, Inertia: %.0f kg⋅m²) at (%.1f, %.1f)", 
              ships[0].ship_id, ships[0].mass, ships[0].moment_of_inertia, ships[0].x, ships[0].y);
@@ -1165,6 +1737,25 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
+                        } else if (strstr(payload, "\"type\":\"module_interact\"")) {
+                            // MODULE_INTERACT message
+                            log_info("🎮 Processing MODULE_INTERACT message");
+                            
+                            if (client->player_id == 0) {
+                                log_warn("Module interact from client %s:%u with no player ID", client->ip_address, client->port);
+                                send_interaction_failure(client, "no_player");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    handle_module_interact(player, client, payload);
+                                } else {
+                                    log_warn("Module interact for non-existent player %u", client->player_id);
+                                    send_interaction_failure(client, "player_not_found");
+                                }
+                                handled = true;
+                            }
+                            
                         } else if (strstr(payload, "\"type\":\"action_event\"")) {
                             // HYBRID: Action event message
                             log_info("⚡ Processing ACTION_EVENT message");
@@ -1196,8 +1787,29 @@ int websocket_server_update(struct Sim* sim) {
                                         // TODO: Implement cannon firing
                                         log_info("💥 Player %u fired cannon!", player->player_id);
                                     } else if (strcmp(action, "jump") == 0) {
-                                        // TODO: Implement jumping
-                                        log_info("🦘 Player %u jumped!", player->player_id);
+                                        // Jump action - dismount from ship if on one
+                                        if (player->parent_ship_id != 0) {
+                                            log_info("🦘 Player %u jumped off ship %u!", player->player_id, player->parent_ship_id);
+                                            dismount_player_from_ship(player, "jumped");
+                                            
+                                            // Send state update to player
+                                            char jump_response[256];
+                                            snprintf(jump_response, sizeof(jump_response),
+                                                    "{\"type\":\"player_state_changed\",\"player_id\":%u,\"state\":\"swimming\",\"ship_id\":0}",
+                                                    player->player_id);
+                                            
+                                            char jump_frame[512];
+                                            size_t jump_frame_len = websocket_create_frame(WS_OPCODE_TEXT, jump_response, 
+                                                                                          strlen(jump_response), jump_frame, sizeof(jump_frame));
+                                            if (jump_frame_len > 0) {
+                                                send(client->fd, jump_frame, jump_frame_len, 0);
+                                            }
+                                            
+                                            // Broadcast to other players
+                                            websocket_server_broadcast(jump_response);
+                                        } else {
+                                            log_info("🦘 Player %u jumped (already in water)", player->player_id);
+                                        }
                                     } else if (strcmp(action, "interact") == 0) {
                                         // TODO: Implement interaction
                                         log_info("🤝 Player %u interacted!", player->player_id);

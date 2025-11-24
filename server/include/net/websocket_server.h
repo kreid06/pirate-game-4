@@ -24,6 +24,10 @@ typedef struct SimpleShip {
     float deck_min_x, deck_max_x;  // Walkable area
     float deck_min_y, deck_max_y;
     bool active;
+    
+    // Ship modules (cannons, masts, helm, seats, etc.)
+    ShipModule modules[MAX_MODULES_PER_SHIP];
+    uint8_t module_count;
 } SimpleShip;
 
 // Player movement states
@@ -56,6 +60,11 @@ typedef struct WebSocketPlayer {
     PlayerMovementState movement_state;
     uint32_t last_input_time;
     bool active;
+    
+    // Module interaction state
+    bool is_mounted;               // Is player mounted to a module
+    uint32_t mounted_module_id;    // ID of mounted module (0 if not mounted)
+    uint32_t controlling_ship_id;  // ID of ship being controlled (helm only, 0 if not controlling)
 } WebSocketPlayer;
 
 struct WebSocketStats {
