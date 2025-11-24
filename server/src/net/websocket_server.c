@@ -2468,10 +2468,24 @@ void websocket_server_tick(float dt) {
                 }
                 
                 // Copy simulation position BACK to WebSocket player for rendering (scale to client coords)
-                ws_player->x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->position.x));
-                ws_player->y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->position.y));
-                ws_player->velocity_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->velocity.x));
-                ws_player->velocity_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->velocity.y));
+                // BUT: For players on ships, their world position is calculated from local coords + ship transform
+                // So we only copy back position for swimming players
+                if (!on_ship) {
+                    ws_player->x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->position.x));
+                    ws_player->y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->position.y));
+                    ws_player->velocity_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->velocity.x));
+                    ws_player->velocity_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->velocity.y));
+                } else {
+                    // For on-ship players, recalculate world position from local coords
+                    // (ship might have moved/rotated since last tick)
+                    if (player_ship) {
+                        ship_local_to_world(player_ship, ws_player->local_x, ws_player->local_y,
+                                          &ws_player->x, &ws_player->y);
+                    }
+                    // On-ship players have zero velocity (movement is relative to ship)
+                    ws_player->velocity_x = 0.0f;
+                    ws_player->velocity_y = 0.0f;
+                }
             }
         }
     }
