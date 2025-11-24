@@ -833,6 +833,11 @@ export class NetworkManager {
             deckId: player.deckId || 0,
             onDeck: player.state === 'WALKING' || player.state === 'onship', // Server sends state field (WALKING, SWIMMING, etc.)
             
+            // Local (ship-relative) position when on a ship
+            localPosition: (player.local_x !== undefined && player.local_y !== undefined)
+              ? Vec2.from(player.local_x, player.local_y)
+              : undefined,
+            
             // Enhanced movement data from server (hybrid protocol)
             isMoving: player.is_moving !== undefined ? player.is_moving : undefined,
             movementDirection: (player.movement_direction_x !== undefined && player.movement_direction_y !== undefined)

@@ -137,16 +137,25 @@ export class ClientApplication {
               const player = worldState.players.find(p => p.id === playerId);
               
               if (player) {
-                // Calculate module world position
-                const cos = Math.cos(hoveredModule.ship.rotation);
-                const sin = Math.sin(hoveredModule.ship.rotation);
-                const moduleWorldX = hoveredModule.ship.position.x + 
-                  (hoveredModule.module.localPos.x * cos - hoveredModule.module.localPos.y * sin);
-                const moduleWorldY = hoveredModule.ship.position.y + 
-                  (hoveredModule.module.localPos.x * sin + hoveredModule.module.localPos.y * cos);
-                const moduleWorldPos = Vec2.from(moduleWorldX, moduleWorldY);
+                let distance: number;
                 
-                const distance = player.position.sub(moduleWorldPos).length();
+                // If player is on the same ship as the module, use local (ship-relative) coordinates
+                if (player.carrierId === hoveredModule.ship.id && player.localPosition) {
+                  // Both player and module are on the same ship - use local coordinates
+                  const moduleLocalPos = hoveredModule.module.localPos;
+                  distance = player.localPosition.sub(moduleLocalPos).length();
+                } else {
+                  // Player not on ship or on different ship - use world coordinates
+                  const cos = Math.cos(hoveredModule.ship.rotation);
+                  const sin = Math.sin(hoveredModule.ship.rotation);
+                  const moduleWorldX = hoveredModule.ship.position.x + 
+                    (hoveredModule.module.localPos.x * cos - hoveredModule.module.localPos.y * sin);
+                  const moduleWorldY = hoveredModule.ship.position.y + 
+                    (hoveredModule.module.localPos.x * sin + hoveredModule.module.localPos.y * cos);
+                  const moduleWorldPos = Vec2.from(moduleWorldX, moduleWorldY);
+                  distance = player.position.sub(moduleWorldPos).length();
+                }
+                
                 const maxInteractDistance = 50; // Maximum interaction range
                 
                 if (distance <= maxInteractDistance) {
