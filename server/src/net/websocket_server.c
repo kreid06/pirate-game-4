@@ -2,6 +2,7 @@
 #include "net/websocket_protocol.h"
 #include "net/network.h"
 #include "sim/simulation.h"
+#include "core/math.h"
 #include "util/log.h"
 #include "util/time.h"
 #include <string.h>
@@ -126,10 +127,52 @@ static void ship_world_to_local(const SimpleShip* ship, float world_x, float wor
     *local_y = dx * sin_r + dy * cos_r;
 }
 
-// Helper to check if player is outside deck bounds
-static bool is_outside_deck(const SimpleShip* ship, float local_x, float local_y) {
-    return (local_x < ship->deck_min_x || local_x > ship->deck_max_x ||
-            local_y < ship->deck_min_y || local_y > ship->deck_max_y);
+// Helper to check if player is outside hull polygon (using simulation ship hull)
+static bool is_outside_deck(uint32_t ship_id, float local_x, float local_y) {
+    if (!global_sim) {
+        return false; // No simulation, can't check
+    }
+    
+    // Find the ship in the simulation
+    struct Ship* sim_ship = NULL;
+    for (uint16_t i = 0; i < global_sim->ship_count; i++) {
+        if (global_sim->ships[i].id == ship_id) {
+            sim_ship = &global_sim->ships[i];
+            break;
+        }
+    }
+    
+    if (!sim_ship || sim_ship->hull_vertex_count < 3) {
+        return false; // No hull to check against
+    }
+    
+    // Convert client local coordinates to server coordinates for comparison
+    Vec2Q16 point = {
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_x)),
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y))
+    };
+    
+    // Point-in-polygon test using ray casting algorithm
+    bool inside = false;
+    uint8_t vertex_count = sim_ship->hull_vertex_count;
+    
+    for (uint8_t i = 0, j = vertex_count - 1; i < vertex_count; j = i++) {
+        Vec2Q16 vi = sim_ship->hull_vertices[i];
+        Vec2Q16 vj = sim_ship->hull_vertices[j];
+        
+        // Check if point is between the y-coordinates of the edge
+        if (((vi.y > point.y) != (vj.y > point.y))) {
+            // Calculate the x-coordinate where the ray intersects the edge
+            q16_t slope = q16_div(vj.x - vi.x, vj.y - vi.y);
+            q16_t x_intersect = vi.x + q16_mul(slope, point.y - vi.y);
+            
+            if (point.x < x_intersect) {
+                inside = !inside;
+            }
+        }
+    }
+    
+    return !inside; // Return true if OUTSIDE
 }
 
 // Helper to board a player onto a ship
@@ -138,9 +181,6 @@ static void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, floa
     player->local_x = local_x;
     player->local_y = local_y;
     player->movement_state = PLAYER_STATE_WALKING;
-    
-    // Clamp to deck boundaries
-    ship_clamp_to_deck(ship, &player->local_x, &player->local_y);
     
     // Update world position to match ship
     ship_local_to_world(ship, player->local_x, player->local_y, &player->x, &player->y);
@@ -871,17 +911,13 @@ static void apply_player_movement_state(WebSocketPlayer* player, float dt) {
                 float new_local_x = player->local_x + movement_x * WALK_SPEED * dt;
                 float new_local_y = player->local_y + movement_y * WALK_SPEED * dt;
                 
-                // Check if player would walk off the deck
-                if (is_outside_deck(ship, new_local_x, new_local_y)) {
+                // Check if player would walk off the deck (hull boundary)
+                if (is_outside_deck(ship->ship_id, new_local_x, new_local_y)) {
                     // Player walked off the edge - dismount into water
                     log_info("🌊 Player %u walked off the deck of ship %u", 
                              player->player_id, ship->ship_id);
                     
-                    // Update to edge position first, then dismount
-                    ship_clamp_to_deck(ship, &new_local_x, &new_local_y);
-                    player->local_x = new_local_x;
-                    player->local_y = new_local_y;
-                    
+                    // Keep current position (at edge), then dismount
                     // Convert to world position before dismounting
                     ship_local_to_world(ship, player->local_x, player->local_y, 
                                       &player->x, &player->y);
@@ -967,17 +1003,13 @@ static void update_player_movement(WebSocketPlayer* player, float rotation, floa
                 float new_local_x = player->local_x + movement_x * WALK_SPEED * dt;
                 float new_local_y = player->local_y + movement_y * WALK_SPEED * dt;
                 
-                // Check if player would walk off the deck
-                if (is_outside_deck(ship, new_local_x, new_local_y)) {
+                // Check if player would walk off the deck (hull boundary)
+                if (is_outside_deck(ship->ship_id, new_local_x, new_local_y)) {
                     // Player walked off the edge - dismount into water
                     log_info("🌊 Player %u walked off the deck of ship %u", 
                              player->player_id, ship->ship_id);
                     
-                    // Update to edge position first, then dismount
-                    ship_clamp_to_deck(ship, &new_local_x, &new_local_y);
-                    player->local_x = new_local_x;
-                    player->local_y = new_local_y;
-                    
+                    // Keep current position (at edge), then dismount
                     // Convert to world position before dismounting
                     ship_local_to_world(ship, player->local_x, player->local_y, 
                                       &player->x, &player->y);
@@ -2259,11 +2291,14 @@ void websocket_server_tick(float dt) {
     
     // ===== SYNC WEBSOCKET PLAYERS TO SIMULATION FOR COLLISION DETECTION =====
     if (global_sim) {
-        // Swimming physics constants (scaled to server units via WORLD_SCALE_FACTOR)
-        // Client speed: 200 units/s → Server speed: 20 units/s (after 10x scaling)
+        // Physics constants (scaled to server units via WORLD_SCALE_FACTOR)
         const float SWIM_ACCELERATION = CLIENT_TO_SERVER(160.0f); // Acceleration when swimming (server units/s²)
         const float SWIM_MAX_SPEED = CLIENT_TO_SERVER(30.0f);     // Maximum swimming speed (server units/s)
         const float SWIM_DECELERATION = CLIENT_TO_SERVER(120.0f); // Deceleration when stopping (server units/s²)
+        
+        const float WALK_ACCELERATION = CLIENT_TO_SERVER(240.0f); // Acceleration when walking on deck (server units/s²)
+        const float WALK_MAX_SPEED = CLIENT_TO_SERVER(40.0f);     // Maximum walking speed on deck (server units/s)
+        const float WALK_DECELERATION = CLIENT_TO_SERVER(180.0f); // Deceleration when stopping on deck (server units/s²)
         
         for (uint16_t i = 0; i < global_sim->player_count; i++) {
             struct Player* sim_player = &global_sim->players[i];
@@ -2280,8 +2315,21 @@ void websocket_server_tick(float dt) {
                     sim_player->ship_id = INVALID_ENTITY_ID;
                 }
                 
+                // Check if player is on a ship
+                bool on_ship = (ws_player->parent_ship_id != 0);
+                SimpleShip* player_ship = NULL;
+                if (on_ship) {
+                    // Find the ship
+                    for (int s = 0; s < ship_count; s++) {
+                        if (ships[s].active && ships[s].ship_id == ws_player->parent_ship_id) {
+                            player_ship = &ships[s];
+                            break;
+                        }
+                    }
+                }
+                
                 if (ws_player->is_moving) {
-                    // Player is actively moving - apply acceleration
+                    // Player is actively moving
                     float movement_x = ws_player->movement_direction_x;
                     float movement_y = ws_player->movement_direction_y;
                     float magnitude = sqrtf(movement_x * movement_x + movement_y * movement_y);
@@ -2291,69 +2339,131 @@ void websocket_server_tick(float dt) {
                         movement_x /= magnitude;
                         movement_y /= magnitude;
                         
-                        // Apply acceleration in movement direction
-                        q16_t accel_x = Q16_FROM_FLOAT(movement_x * SWIM_ACCELERATION * dt);
-                        q16_t accel_y = Q16_FROM_FLOAT(movement_y * SWIM_ACCELERATION * dt);
-                        
-                        log_info("⚡ P%u: Applying acceleration (%.2f, %.2f) | dir=(%.2f, %.2f) | dt=%.3f",
-                                 sim_player->id,
-                                 Q16_TO_FLOAT(accel_x), Q16_TO_FLOAT(accel_y),
-                                 movement_x, movement_y, dt);
-                        
-                        sim_player->velocity.x += accel_x;
-                        sim_player->velocity.y += accel_y;
-                        
-                        // Clamp to maximum speed
+                        if (on_ship && player_ship) {
+                            // ===== ON-SHIP MOVEMENT (LOCAL COORDINATES) =====
+                            // Movement is in world space, need to convert to ship-local space
+                            float ship_cos = cosf(player_ship->rotation);
+                            float ship_sin = sinf(player_ship->rotation);
+                            
+                            // Rotate movement vector to ship-local coordinates
+                            float local_move_x = movement_x * ship_cos + movement_y * ship_sin;
+                            float local_move_y = -movement_x * ship_sin + movement_y * ship_cos;
+                            
+                            // Apply acceleration in local coordinates
+                            float local_accel = WALK_ACCELERATION * dt;
+                            float new_local_x = ws_player->local_x + local_move_x * local_accel * dt;
+                            float new_local_y = ws_player->local_y + local_move_y * local_accel * dt;
+                            
+                            // Check if player would walk off the deck (hull boundary)
+                            if (is_outside_deck(player_ship->ship_id, new_local_x, new_local_y)) {
+                                // Player walked off the edge - dismount into water
+                                log_info("🌊 Player %u walked off the deck of ship %u (tick movement)", 
+                                         ws_player->player_id, player_ship->ship_id);
+                                
+                                // Keep current position (at edge), then dismount
+                                // Convert to world position before dismounting
+                                ship_local_to_world(player_ship, ws_player->local_x, ws_player->local_y, 
+                                                  &ws_player->x, &ws_player->y);
+                                
+                                // Dismount player
+                                dismount_player_from_ship(ws_player, "walked_off_deck");
+                                
+                                // Continue movement in water (set velocity to swim at max speed in movement direction)
+                                ws_player->velocity_x = movement_x * SWIM_MAX_SPEED;
+                                ws_player->velocity_y = movement_y * SWIM_MAX_SPEED;
+                                
+                                // Clear simulation ship_id (now swimming)
+                                sim_player->ship_id = INVALID_ENTITY_ID;
+                            } else {
+                                // Normal movement on deck
+                                ws_player->local_x = new_local_x;
+                                ws_player->local_y = new_local_y;
+                                
+                                // Update world position from local position
+                                ship_local_to_world(player_ship, ws_player->local_x, ws_player->local_y,
+                                                  &ws_player->x, &ws_player->y);
+                                
+                                // Sync to simulation relative_pos
+                                sim_player->relative_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->local_x));
+                                sim_player->relative_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->local_y));
+                                sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->x));
+                                sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->y));
+                                
+                                log_info("🚶 P%u: Walking on ship %u | local=(%.2f, %.2f) | world=(%.2f, %.2f)",
+                                         sim_player->id, ws_player->parent_ship_id,
+                                         ws_player->local_x, ws_player->local_y,
+                                         ws_player->x, ws_player->y);
+                            }
+                        } else {
+                            // ===== SWIMMING MOVEMENT (WORLD COORDINATES) =====
+                            // Apply acceleration in movement direction
+                            q16_t accel_x = Q16_FROM_FLOAT(movement_x * SWIM_ACCELERATION * dt);
+                            q16_t accel_y = Q16_FROM_FLOAT(movement_y * SWIM_ACCELERATION * dt);
+                            
+                            log_info("⚡ P%u: Swimming | accel=(%.2f, %.2f) | dir=(%.2f, %.2f) | dt=%.3f",
+                                     sim_player->id,
+                                     Q16_TO_FLOAT(accel_x), Q16_TO_FLOAT(accel_y),
+                                     movement_x, movement_y, dt);
+                            
+                            sim_player->velocity.x += accel_x;
+                            sim_player->velocity.y += accel_y;
+                            
+                            // Clamp to maximum speed
+                            float current_vx = Q16_TO_FLOAT(sim_player->velocity.x);
+                            float current_vy = Q16_TO_FLOAT(sim_player->velocity.y);
+                            float current_speed = sqrtf(current_vx * current_vx + current_vy * current_vy);
+                            
+                            if (current_speed > SWIM_MAX_SPEED) {
+                                // Scale velocity back to max speed
+                                float scale = SWIM_MAX_SPEED / current_speed;
+                                log_info("🚀 P%u: Speed clamped %.2f → %.2f m/s | vel=(%.2f, %.2f) → (%.2f, %.2f)",
+                                         sim_player->id,
+                                         current_speed, SWIM_MAX_SPEED,
+                                         current_vx, current_vy,
+                                         current_vx * scale, current_vy * scale);
+                                sim_player->velocity.x = Q16_FROM_FLOAT(current_vx * scale);
+                                sim_player->velocity.y = Q16_FROM_FLOAT(current_vy * scale);
+                            }
+                        }
+                    }
+                } else {
+                    // Player stopped moving - no deceleration needed for on-ship movement
+                    // (player position is fixed relative to ship, ship velocity handles world movement)
+                    if (!on_ship) {
+                        // Only apply deceleration for swimming players
                         float current_vx = Q16_TO_FLOAT(sim_player->velocity.x);
                         float current_vy = Q16_TO_FLOAT(sim_player->velocity.y);
                         float current_speed = sqrtf(current_vx * current_vx + current_vy * current_vy);
                         
-                        if (current_speed > SWIM_MAX_SPEED) {
-                            // Scale velocity back to max speed
-                            float scale = SWIM_MAX_SPEED / current_speed;
-                            log_info("🚀 P%u: Speed clamped %.2f → %.2f m/s | vel=(%.2f, %.2f) → (%.2f, %.2f)",
-                                     sim_player->id,
-                                     current_speed, SWIM_MAX_SPEED,
-                                     current_vx, current_vy,
-                                     current_vx * scale, current_vy * scale);
-                            sim_player->velocity.x = Q16_FROM_FLOAT(current_vx * scale);
-                            sim_player->velocity.y = Q16_FROM_FLOAT(current_vy * scale);
-                        }
-                    }
-                } else {
-                    // Player stopped moving - apply deceleration
-                    float current_vx = Q16_TO_FLOAT(sim_player->velocity.x);
-                    float current_vy = Q16_TO_FLOAT(sim_player->velocity.y);
-                    float current_speed = sqrtf(current_vx * current_vx + current_vy * current_vy);
-                    
-                    if (current_speed > 0.1f) {
-                        // Apply deceleration opposite to velocity direction
-                        float decel_amount = SWIM_DECELERATION * dt;
-                        
-                        if (decel_amount >= current_speed) {
-                            // Stop completely
-                            log_info("🛑 P%u: Stopping | speed=%.2f → 0.00 m/s | vel=(%.2f, %.2f) → (0.00, 0.00)",
-                                     sim_player->id, current_speed, current_vx, current_vy);
+                        if (current_speed > 0.1f) {
+                            // Apply deceleration opposite to velocity direction
+                            float decel_amount = SWIM_DECELERATION * dt;
+                            
+                            if (decel_amount >= current_speed) {
+                                // Stop completely
+                                log_info("🛑 P%u: Stopping | speed=%.2f → 0.00 m/s | vel=(%.2f, %.2f) → (0.00, 0.00)",
+                                         sim_player->id, current_speed, current_vx, current_vy);
+                                sim_player->velocity.x = 0;
+                                sim_player->velocity.y = 0;
+                            } else {
+                                // Reduce speed
+                                float scale = (current_speed - decel_amount) / current_speed;
+                                float new_vx = current_vx * scale;
+                                float new_vy = current_vy * scale;
+                                log_info("⬇️ P%u: Decelerating | speed=%.2f → %.2f m/s | vel=(%.2f, %.2f) → (%.2f, %.2f)",
+                                         sim_player->id,
+                                         current_speed, current_speed - decel_amount,
+                                         current_vx, current_vy, new_vx, new_vy);
+                                sim_player->velocity.x = Q16_FROM_FLOAT(new_vx);
+                                sim_player->velocity.y = Q16_FROM_FLOAT(new_vy);
+                            }
+                        } else if (current_speed > 0.01f) {
+                            // Snap to zero for very low speeds
+                            log_info("🛑 P%u: Snap to zero | speed=%.2f m/s (below threshold)",
+                                     sim_player->id, current_speed);
                             sim_player->velocity.x = 0;
                             sim_player->velocity.y = 0;
-                        } else {
-                            // Reduce speed
-                            float scale = (current_speed - decel_amount) / current_speed;
-                            float new_vx = current_vx * scale;
-                            float new_vy = current_vy * scale;
-                            log_info("⬇️ P%u: Decelerating | speed=%.2f → %.2f m/s | vel=(%.2f, %.2f) → (%.2f, %.2f)",
-                                     sim_player->id,
-                                     current_speed, current_speed - decel_amount,
-                                     current_vx, current_vy, new_vx, new_vy);
-                            sim_player->velocity.x = Q16_FROM_FLOAT(new_vx);
-                            sim_player->velocity.y = Q16_FROM_FLOAT(new_vy);
                         }
-                    } else if (current_speed > 0.01f) {
-                        // Snap to zero for very low speeds
-                        log_info("🛑 P%u: Snap to zero | speed=%.2f m/s (below threshold)",
-                                 sim_player->id, current_speed);
-                        sim_player->velocity.x = 0;
-                        sim_player->velocity.y = 0;
                     }
                 }
                 
