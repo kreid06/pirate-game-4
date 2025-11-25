@@ -1,6 +1,7 @@
 #include "sim/simulation.h"
 #include "net/protocol.h"
 #include "core/hash.h"
+#include "core/math.h"
 #include "util/log.h"
 #include <string.h>
 #include <assert.h>

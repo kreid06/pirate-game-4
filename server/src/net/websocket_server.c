@@ -877,23 +877,32 @@ static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClie
     
     // Validate range
     float dx, dy, distance;
+    float player_world_x, player_world_y, module_world_x, module_world_y;
+    
+    // Convert module position from Q16 to client coordinates
+    float module_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+    float module_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+    
+    log_info("🔍 Module %u Q16 pos: (%d, %d)", module_id, module->local_pos.x, module->local_pos.y);
+    log_info("🔍 Module %u converted local pos: (%.1f, %.1f)", module_id, module_local_x, module_local_y);
+    log_info("🔍 Ship %u pos: (%.1f, %.1f), rot: %.3f", target_ship->ship_id, target_ship->x, target_ship->y, target_ship->rotation);
     
     if (player->parent_ship_id == target_ship->ship_id) {
         // Player on same ship - use ship-local coordinates
-        // Convert module position from server Q16 to client coordinates
-        float module_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
-        float module_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
         dx = player->local_x - module_local_x;
         dy = player->local_y - module_local_y;
+        
+        // Calculate world coords for logging
+        ship_local_to_world(target_ship, player->local_x, player->local_y, &player_world_x, &player_world_y);
+        ship_local_to_world(target_ship, module_local_x, module_local_y, &module_world_x, &module_world_y);
     } else {
         // Player in water or on different ship - use world coordinates
-        // Module position is in server coords, convert to client for ship_local_to_world
-        float module_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
-        float module_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
-        float module_world_x, module_world_y;
         ship_local_to_world(target_ship, module_local_x, module_local_y, &module_world_x, &module_world_y);
         dx = player->x - module_world_x;
         dy = player->y - module_world_y;
+        
+        player_world_x = player->x;
+        player_world_y = player->y;
     }
     
     distance = sqrtf(dx * dx + dy * dy);
@@ -902,6 +911,8 @@ static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClie
     if (distance > MAX_INTERACT_RANGE) {
         log_warn("Player %u too far from module %u (%.1fpx > %.1fpx)", 
                  player->player_id, module_id, distance, MAX_INTERACT_RANGE);
+        log_warn("  Player world pos: (%.1f, %.1f), Module world pos: (%.1f, %.1f)", 
+                 player_world_x, player_world_y, module_world_x, module_world_y);
         send_interaction_failure(client, "out_of_range");
         return;
     }
@@ -1332,11 +1343,11 @@ int websocket_server_init(uint16_t port) {
     ships[0].module_count = 0;
     uint16_t module_id_counter = 1000; // Start module IDs at 1000
     
-    // Add helm at center-rear
+    // Add helm at center-rear (client coords: 0, -50 pixels)
     ships[0].modules[ships[0].module_count].id = module_id_counter++;
     ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_HELM;
-    ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(0.0f);
-    ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(-5.0f);
+    ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
+    ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-50.0f));
     ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(0.0f);
     ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE;
     ships[0].modules[ships[0].module_count].data.helm.occupied_by = 0;
@@ -1345,13 +1356,13 @@ int websocket_server_init(uint16_t port) {
     
     // Add 6 cannons (3 port, 3 starboard)
     for (int i = 0; i < 6; i++) {
-        float side = (i < 3) ? -7.0f : 7.0f;  // Port vs starboard
-        float y_pos = -3.0f + (i % 3) * 3.0f; // Spacing along ship
+        float side = (i < 3) ? -70.0f : 70.0f;  // Port vs starboard (client pixels)
+        float y_pos = -30.0f + (i % 3) * 30.0f; // Spacing along ship (client pixels)
         
         ships[0].modules[ships[0].module_count].id = module_id_counter++;
         ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_CANNON;
-        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(side);
-        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(y_pos);
+        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(side));
+        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(y_pos));
         ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT((i < 3) ? -M_PI/2 : M_PI/2);
         ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE;
         ships[0].modules[ships[0].module_count].data.cannon.aim_direction = Q16_FROM_FLOAT(0.0f);
@@ -1363,12 +1374,12 @@ int websocket_server_init(uint16_t port) {
     
     // Add 3 masts
     for (int i = 0; i < 3; i++) {
-        float y_pos = -4.0f + i * 4.0f;
+        float y_pos = -40.0f + i * 40.0f;  // Client pixels
         
         ships[0].modules[ships[0].module_count].id = module_id_counter++;
         ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_MAST;
-        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(0.0f);
-        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(y_pos);
+        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
+        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(y_pos));
         ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(0.0f);
         ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE | MODULE_STATE_DEPLOYED;
         ships[0].modules[ships[0].module_count].data.mast.angle = Q16_FROM_FLOAT(0.0f);
@@ -1386,8 +1397,8 @@ int websocket_server_init(uint16_t port) {
     for (int i = 0; i < 1; i++) {
         ships[0].modules[ships[0].module_count].id = module_id_counter++;
         ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_LADDER;
-        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(ladder_positions[i][0]);
-        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(ladder_positions[i][1]);
+        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ladder_positions[i][0]));
+        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ladder_positions[i][1]));
         ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(0.0f);
         ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE;
         ships[0].module_count++;
