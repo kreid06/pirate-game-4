@@ -963,6 +963,13 @@ export class NetworkManager {
             isMoving: player.is_moving !== undefined ? player.is_moving : undefined,
             movementDirection: (player.movement_direction_x !== undefined && player.movement_direction_y !== undefined)
               ? Vec2.from(player.movement_direction_x, player.movement_direction_y)
+              : undefined,
+            
+            // Mount state from server
+            isMounted: player.is_mounted || false,
+            mountedModuleId: player.mounted_module_id || undefined,
+            mountOffset: (player.mount_offset_x !== undefined && player.mount_offset_y !== undefined)
+              ? Vec2.from(player.mount_offset_x, player.mount_offset_y)
               : undefined
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({

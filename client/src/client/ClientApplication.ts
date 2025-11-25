@@ -65,6 +65,7 @@ export class ClientApplication {
   private demoWorldState: WorldState | null = null;
   private camera!: Camera;
   private hasReceivedWorldState = false; // Track if we've received at least one world state
+  private previousMountState = false; // Track previous mount state to detect changes
   
   // Timing
   private running = false;
@@ -469,14 +470,25 @@ export class ClientApplication {
   private onServerWorldState(worldState: WorldState): void {
     this.authoritativeWorldState = worldState;
     
-    // Check if player mount state changed (server can dismount player)
+    // Check if player mount state changed
     const playerId = this.networkManager.getAssignedPlayerId();
-    if (playerId !== null) {
+    if (playerId !== null && this.inputManager) {
       const player = worldState.players.find(p => p.id === playerId);
       if (player) {
-        // If player was mounted but server says not mounted, disable ship controls
-        if (!player.isMounted && this.inputManager) {
-          this.inputManager.setMountState(false);
+        const currentlyMounted = player.isMounted || false;
+        
+        // Only update if mount state actually changed
+        if (currentlyMounted !== this.previousMountState) {
+          if (currentlyMounted) {
+            // Player is now mounted - enable ship controls
+            console.log(`⚓ [MOUNT STATE] Server says player is mounted to module ${player.mountedModuleId}`);
+            this.inputManager.setMountState(true, player.carrierId);
+          } else {
+            // Player is now dismounted - disable ship controls
+            console.log(`⚓ [MOUNT STATE] Server says player is dismounted`);
+            this.inputManager.setMountState(false);
+          }
+          this.previousMountState = currentlyMounted;
         }
       }
     }
