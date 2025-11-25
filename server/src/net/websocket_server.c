@@ -640,8 +640,23 @@ static void handle_helm_interact(WebSocketPlayer* player, struct WebSocketClient
     player->mounted_module_id = module->id;
     player->controlling_ship_id = ship->ship_id;
     
-    log_info("⚓ Player %u mounted to helm %u, controlling ship %u", 
-             player->player_id, module->id, ship->ship_id);
+    // Position player at mounted location relative to helm
+    // Helm mounted position: x:-10, y:0 in client coordinates
+    const float HELM_MOUNT_OFFSET_X = -10.0f;
+    const float HELM_MOUNT_OFFSET_Y = 0.0f;
+    
+    // Calculate player's local position as helm position + offset
+    // Convert module position from server Q16 to client coordinates
+    float helm_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+    float helm_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+    player->local_x = helm_local_x + HELM_MOUNT_OFFSET_X;
+    player->local_y = helm_local_y + HELM_MOUNT_OFFSET_Y;
+    
+    // Update world position based on ship transform
+    ship_local_to_world(ship, player->local_x, player->local_y, &player->x, &player->y);
+    
+    log_info("⚓ Player %u mounted to helm %u at local (%.1f, %.1f), controlling ship %u", 
+             player->player_id, module->id, player->local_x, player->local_y, ship->ship_id);
     
     send_mount_success(client, module);
     broadcast_player_mounted(player, module, ship);
@@ -679,9 +694,9 @@ static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClie
     
     // Player is swimming - board them onto the ship at the ladder position
     if (player->parent_ship_id == 0) {
-        // Get ladder position in ship-local coordinates
-        float ladder_local_x = Q16_TO_FLOAT(module->local_pos.x);
-        float ladder_local_y = Q16_TO_FLOAT(module->local_pos.y);
+        // Get ladder position in ship-local coordinates (convert from server to client)
+        float ladder_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+        float ladder_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
         
         // Board player at ladder position (or nearby safe spot)
         board_player_on_ship(player, ship, ladder_local_x, ladder_local_y);
@@ -712,8 +727,8 @@ static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClie
         log_info("🪜 Player %u transferring from ship %u to ship %u via ladder",
                  player->player_id, player->parent_ship_id, ship->ship_id);
         
-        float ladder_local_x = Q16_TO_FLOAT(module->local_pos.x);
-        float ladder_local_y = Q16_TO_FLOAT(module->local_pos.y);
+        float ladder_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+        float ladder_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
         
         board_player_on_ship(player, ship, ladder_local_x, ladder_local_y);
         send_interaction_success(client, "ship_transfer");
@@ -736,6 +751,70 @@ static void handle_seat_interact(WebSocketPlayer* player, struct WebSocketClient
     
     send_mount_success(client, module);
     broadcast_player_mounted(player, module, ship);
+}
+
+/**
+ * Handle module unmount request from client
+ */
+static void handle_module_unmount(WebSocketPlayer* player, struct WebSocketClient* client) {
+    if (!player->is_mounted) {
+        log_warn("Player %u tried to unmount but is not mounted", player->player_id);
+        send_interaction_failure(client, "not_mounted");
+        return;
+    }
+    
+    // Find the module and ship
+    SimpleShip* target_ship = NULL;
+    ShipModule* module = NULL;
+    
+    for (int i = 0; i < ship_count; i++) {
+        if (ships[i].active) {
+            ShipModule* found_module = find_module_by_id(&ships[i], player->mounted_module_id);
+            if (found_module) {
+                target_ship = &ships[i];
+                module = found_module;
+                break;
+            }
+        }
+    }
+    
+    if (module && target_ship) {
+        // Clear module occupation
+        switch (module->type_id) {
+            case MODULE_TYPE_CANNON:
+                // Cannons just use the OCCUPIED state bit
+                module->state_bits &= ~MODULE_STATE_OCCUPIED;
+                break;
+            case MODULE_TYPE_HELM:
+            case MODULE_TYPE_STEERING_WHEEL:
+                module->data.helm.occupied_by = 0;
+                player->controlling_ship_id = 0;
+                break;
+            case MODULE_TYPE_SEAT:
+                module->data.seat.occupied_by = 0;
+                break;
+            default:
+                module->state_bits &= ~MODULE_STATE_OCCUPIED;
+                break;
+        }
+        
+        log_info("🔓 Player %u unmounted from %s (ID: %u)", 
+                 player->player_id, get_module_type_name(module->type_id), module->id);
+    }
+    
+    // Clear player mount state
+    player->is_mounted = false;
+    player->mounted_module_id = 0;
+    
+    // Send success response
+    send_interaction_success(client, "unmounted");
+    
+    // Broadcast unmount event
+    char broadcast[512];
+    snprintf(broadcast, sizeof(broadcast),
+             "{\"type\":\"player_unmounted\",\"player_id\":%u}",
+             player->player_id);
+    websocket_server_broadcast(broadcast);
 }
 
 /**
@@ -801,13 +880,18 @@ static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClie
     
     if (player->parent_ship_id == target_ship->ship_id) {
         // Player on same ship - use ship-local coordinates
-        dx = player->local_x - Q16_TO_FLOAT(module->local_pos.x);
-        dy = player->local_y - Q16_TO_FLOAT(module->local_pos.y);
+        // Convert module position from server Q16 to client coordinates
+        float module_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+        float module_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+        dx = player->local_x - module_local_x;
+        dy = player->local_y - module_local_y;
     } else {
         // Player in water or on different ship - use world coordinates
+        // Module position is in server coords, convert to client for ship_local_to_world
+        float module_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+        float module_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
         float module_world_x, module_world_y;
-        ship_local_to_world(target_ship, Q16_TO_FLOAT(module->local_pos.x), 
-                          Q16_TO_FLOAT(module->local_pos.y), &module_world_x, &module_world_y);
+        ship_local_to_world(target_ship, module_local_x, module_local_y, &module_world_x, &module_world_y);
         dx = player->x - module_world_x;
         dy = player->y - module_world_y;
     }
@@ -1676,16 +1760,16 @@ int websocket_server_update(struct Sim* sim) {
                                         if (rotation < -M_PI) rotation = -M_PI;
                                         if (rotation > M_PI) rotation = M_PI;
                                         
-                                        // Update player movement (using 0.033s as approximate tick time)
-                                        uint32_t current_time = get_time_ms();
-                                        float dt = (current_time - player->last_input_time) / 1000.0f;
-                                        if (dt > 0.1f) dt = 0.033f; // Cap delta time
-                                        
-                                        update_player_movement(player, rotation, x, y, dt);
-                                        player->last_input_time = current_time;
+                                        // Store movement state for tick-based processing
+                                        // (Don't apply movement immediately - let websocket_server_tick handle it)
+                                        player->movement_direction_x = x;
+                                        player->movement_direction_y = y;
+                                        player->is_moving = (x != 0.0f || y != 0.0f);
+                                        player->rotation = rotation;
+                                        player->last_input_time = get_time_ms();
                                         
                                         // Track movement for adaptive tick rate
-                                        if (x != 0.0f || y != 0.0f) {
+                                        if (player->is_moving) {
                                             update_movement_activity();
                                         }
                                         
@@ -1798,6 +1882,25 @@ int websocket_server_update(struct Sim* sim) {
                                     handle_module_interact(player, client, payload);
                                 } else {
                                     log_warn("Module interact for non-existent player %u", client->player_id);
+                                    send_interaction_failure(client, "player_not_found");
+                                }
+                                handled = true;
+                            }
+                            
+                        } else if (strstr(payload, "\"type\":\"module_unmount\"")) {
+                            // MODULE_UNMOUNT message
+                            log_info("🔓 Processing MODULE_UNMOUNT message");
+                            
+                            if (client->player_id == 0) {
+                                log_warn("Module unmount from client %s:%u with no player ID", client->ip_address, client->port);
+                                send_interaction_failure(client, "no_player");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    handle_module_unmount(player, client);
+                                } else {
+                                    log_warn("Module unmount for non-existent player %u", client->player_id);
                                     send_interaction_failure(client, "player_not_found");
                                 }
                                 handled = true;
@@ -2328,7 +2431,16 @@ void websocket_server_tick(float dt) {
                     }
                 }
                 
-                if (ws_player->is_moving) {
+                // Players who are mounted cannot move - they're locked to the module position
+                if (ws_player->is_mounted) {
+                    // Mounted players stay at their mount position
+                    // Their world position still updates as the ship moves/rotates
+                    if (on_ship && player_ship) {
+                        ship_local_to_world(player_ship, ws_player->local_x, ws_player->local_y,
+                                          &ws_player->x, &ws_player->y);
+                    }
+                    // Skip movement processing
+                } else if (ws_player->is_moving) {
                     // Player is actively moving
                     float movement_x = ws_player->movement_direction_x;
                     float movement_y = ws_player->movement_direction_y;
@@ -2349,10 +2461,17 @@ void websocket_server_tick(float dt) {
                             float local_move_x = movement_x * ship_cos + movement_y * ship_sin;
                             float local_move_y = -movement_x * ship_sin + movement_y * ship_cos;
                             
-                            // Apply acceleration in local coordinates
-                            float local_accel = WALK_ACCELERATION * dt;
-                            float new_local_x = ws_player->local_x + local_move_x * local_accel * dt;
-                            float new_local_y = ws_player->local_y + local_move_y * local_accel * dt;
+                            // Apply movement in local coordinates (direct velocity, not acceleration)
+                            // Note: local_x/y are stored in CLIENT coordinates, so convert speed back to client
+                            float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED);
+                            float new_local_x = ws_player->local_x + local_move_x * walk_speed_client * dt;
+                            float new_local_y = ws_player->local_y + local_move_y * walk_speed_client * dt;
+                            
+                            log_info("🚶 P%u: Move calc | speed=%.2f client/s | dt=%.4f | delta=(%.4f, %.4f) | old_local=(%.2f, %.2f) | new_local=(%.2f, %.2f)",
+                                     ws_player->player_id, walk_speed_client, dt,
+                                     local_move_x * walk_speed_client * dt, local_move_y * walk_speed_client * dt,
+                                     ws_player->local_x, ws_player->local_y,
+                                     new_local_x, new_local_y);
                             
                             // Check if player would walk off the deck (hull boundary)
                             if (is_outside_deck(player_ship->ship_id, new_local_x, new_local_y)) {
