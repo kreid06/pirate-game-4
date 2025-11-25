@@ -626,6 +626,8 @@ static void handle_cannon_interact(WebSocketPlayer* player, struct WebSocketClie
 }
 
 static void handle_helm_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
+    log_info("🎮 handle_helm_interact called for player %u, module %u", player->player_id, module->id);
+    
     // Check if helm is occupied
     if (module->data.helm.occupied_by != 0 && module->data.helm.occupied_by != player->player_id) {
         log_info("Helm %u already occupied by player %u", module->id, module->data.helm.occupied_by);
@@ -886,20 +888,28 @@ static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClie
     log_info("🔍 Module %u Q16 pos: (%d, %d)", module_id, module->local_pos.x, module->local_pos.y);
     log_info("🔍 Module %u converted local pos: (%.1f, %.1f)", module_id, module_local_x, module_local_y);
     log_info("🔍 Ship %u pos: (%.1f, %.1f), rot: %.3f", target_ship->ship_id, target_ship->x, target_ship->y, target_ship->rotation);
+    log_info("🔍 Player %u parent_ship_id: %u, local pos: (%.1f, %.1f), world pos: (%.1f, %.1f)", 
+             player->player_id, player->parent_ship_id, player->local_x, player->local_y, player->x, player->y);
     
     if (player->parent_ship_id == target_ship->ship_id) {
         // Player on same ship - use ship-local coordinates
+        log_info("🔍 Using LOCAL coordinates (player on ship %u)", target_ship->ship_id);
         dx = player->local_x - module_local_x;
         dy = player->local_y - module_local_y;
+        log_info("🔍 Local distance: player (%.1f, %.1f) - module (%.1f, %.1f) = delta (%.1f, %.1f)", 
+                 player->local_x, player->local_y, module_local_x, module_local_y, dx, dy);
         
         // Calculate world coords for logging
         ship_local_to_world(target_ship, player->local_x, player->local_y, &player_world_x, &player_world_y);
         ship_local_to_world(target_ship, module_local_x, module_local_y, &module_world_x, &module_world_y);
     } else {
         // Player in water or on different ship - use world coordinates
+        log_info("🔍 Using WORLD coordinates (player in water or different ship)");
         ship_local_to_world(target_ship, module_local_x, module_local_y, &module_world_x, &module_world_y);
         dx = player->x - module_world_x;
         dy = player->y - module_world_y;
+        log_info("🔍 World distance: player (%.1f, %.1f) - module (%.1f, %.1f) = delta (%.1f, %.1f)", 
+                 player->x, player->y, module_world_x, module_world_y, dx, dy);
         
         player_world_x = player->x;
         player_world_y = player->y;
