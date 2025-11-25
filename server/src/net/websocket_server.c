@@ -1353,11 +1353,11 @@ int websocket_server_init(uint16_t port) {
     ships[0].module_count = 0;
     uint16_t module_id_counter = 1000; // Start module IDs at 1000
     
-    // Add helm at center-rear (client coords: 0, -50 pixels)
+    // Add helm at standard position matching client (-90, 0 pixels)
     ships[0].modules[ships[0].module_count].id = module_id_counter++;
     ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_HELM;
-    ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
-    ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-50.0f));
+    ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-90.0f));
+    ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
     ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(0.0f);
     ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE;
     ships[0].modules[ships[0].module_count].data.helm.occupied_by = 0;
