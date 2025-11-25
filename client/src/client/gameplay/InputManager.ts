@@ -96,8 +96,8 @@ export class InputManager {
   private lastSailAngle: number = 0;
   private lastSailOpennessChangeTime: number = 0; // Track last sail openness change
   private lastSailAngleChangeTime: number = 0; // Track last sail angle change
-  private readonly SAIL_OPENNESS_COOLDOWN = 200; // 0.2s per 10% change
-  private readonly SAIL_ANGLE_COOLDOWN = 200; // 0.2s per 6° change
+  private readonly SAIL_OPENNESS_COOLDOWN = 100; // 0.1s per 10% change
+  private readonly SAIL_ANGLE_COOLDOWN = 100; // 0.1s per 6° change
   
   // HYBRID PROTOCOL: Movement stop detection
   private playerVelocity: Vec2 = Vec2.zero();
