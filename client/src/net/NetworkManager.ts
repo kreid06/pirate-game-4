@@ -57,6 +57,8 @@ export enum MessageType {
   SNAPSHOT = 'snapshot',
   PONG = 'pong',
   MESSAGE_ACK = 'message_ack',
+  MODULE_INTERACT_SUCCESS = 'module_interact_success',
+  MODULE_INTERACT_FAILURE = 'module_interact_failure',
   
   // Connection Management
   CONNECT = 'connect',
@@ -167,7 +169,27 @@ interface ModuleInteractMessage extends NetworkMessage {
   module_id: number;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | PingPongMessage | WorldStateMessage | AckMessage;
+/**
+ * Module interaction success response
+ */
+interface ModuleInteractSuccessMessage extends NetworkMessage {
+  type: MessageType.MODULE_INTERACT_SUCCESS;
+  module_id: number;
+  module_kind: string;
+  mounted: boolean;
+  mount_offset?: { x: number; y: number };
+}
+
+/**
+ * Module interaction failure response
+ */
+interface ModuleInteractFailureMessage extends NetworkMessage {
+  type: MessageType.MODULE_INTERACT_FAILURE;
+  module_id?: number;
+  reason: string;
+}
+
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | PingPongMessage | WorldStateMessage | AckMessage;
 
 /**
  * Main network manager class
@@ -207,6 +229,8 @@ export class NetworkManager {
   // Event callbacks
   public onWorldStateReceived: ((worldState: WorldState) => void) | null = null;
   public onConnectionStateChanged: ((state: ConnectionState) => void) | null = null;
+  public onModuleMountSuccess: ((moduleId: number, moduleKind: string, mountOffset?: Vec2) => void) | null = null;
+  public onModuleMountFailure: ((reason: string) => void) | null = null;
   
   constructor(config: NetworkConfig) {
     this.config = config;
@@ -885,6 +909,14 @@ export class NetworkManager {
       case MessageType.MESSAGE_ACK:
         break;
         
+      case MessageType.MODULE_INTERACT_SUCCESS:
+        this.handleModuleInteractSuccess(message as ModuleInteractSuccessMessage);
+        break;
+        
+      case MessageType.MODULE_INTERACT_FAILURE:
+        this.handleModuleInteractFailure(message as ModuleInteractFailureMessage);
+        break;
+        
       default:
         console.log('📦 Received message:', message.type, message);
         break;
@@ -901,6 +933,30 @@ export class NetworkManager {
       this.stats.ping = ping;
       this.pendingPings.delete(pongMessage.sequenceId);
     }
+  }
+  
+  /**
+   * Handle successful module interaction (mounting)
+   */
+  private handleModuleInteractSuccess(message: ModuleInteractSuccessMessage): void {
+    console.log(`✅ [MOUNT] Successfully mounted to ${message.module_kind.toUpperCase()} (ID: ${message.module_id})`);
+    
+    // Parse mount offset if provided
+    let mountOffset: Vec2 | undefined;
+    if (message.mount_offset) {
+      mountOffset = Vec2.from(message.mount_offset.x, message.mount_offset.y);
+    }
+    
+    // Notify application layer
+    this.onModuleMountSuccess?.(message.module_id, message.module_kind, mountOffset);
+  }
+  
+  /**
+   * Handle failed module interaction
+   */
+  private handleModuleInteractFailure(message: ModuleInteractFailureMessage): void {
+    console.log(`❌ [MOUNT] Failed to mount: ${message.reason}`);
+    this.onModuleMountFailure?.(message.reason);
   }
   
   /**

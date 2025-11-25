@@ -50,6 +50,11 @@ export interface Player {
   // Local (ship-relative) position - used when on a ship
   localPosition?: Vec2; // Position relative to ship (local_x, local_y from server)
   
+  // Module mounting state
+  isMounted: boolean; // Is player mounted to a module
+  mountedModuleId?: number; // ID of mounted module (helm, cannon, seat, etc.)
+  mountOffset?: Vec2; // Offset from module position (e.g., {x: -10, y: 0} for helm)
+  
   // Enhanced movement data from server (for reconciliation & debugging)
   isMoving?: boolean; // Is player actively moving (from hybrid protocol)
   movementDirection?: Vec2; // Server's stored movement direction (normalized)

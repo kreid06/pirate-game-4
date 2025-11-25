@@ -994,7 +994,12 @@ export class RenderSystem {
     const scaledRadius = player.radius * cameraState.zoom;
     
     // Draw player circle
-    this.ctx.fillStyle = player.onDeck ? '#00ff00' : '#ff0000';
+    // Color: Green if on deck, Blue if mounted, Red if swimming
+    if (player.isMounted) {
+      this.ctx.fillStyle = '#0099ff'; // Blue for mounted
+    } else {
+      this.ctx.fillStyle = player.onDeck ? '#00ff00' : '#ff0000';
+    }
     this.ctx.strokeStyle = '#ffffff';
     this.ctx.lineWidth = 2;
     
@@ -1002,6 +1007,13 @@ export class RenderSystem {
     this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, 0, Math.PI * 2);
     this.ctx.fill();
     this.ctx.stroke();
+    
+    // If mounted, draw mount indicator
+    if (player.isMounted) {
+      this.ctx.fillStyle = '#ffffff';
+      this.ctx.font = '12px Arial';
+      this.ctx.fillText('⚓', screenPos.x - 5, screenPos.y - scaledRadius - 5);
+    }
     
     // Draw rotation indicator (facing direction from mouse aim)
     const rotation = player.rotation;

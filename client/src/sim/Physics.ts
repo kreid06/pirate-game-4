@@ -206,6 +206,36 @@ function updatePlayerWithDetection(
   dt: number,
   currentTime: number
 ): CarrierChangeEvent[] {
+  // If player is mounted to a module, lock their position and prevent movement
+  if (player.isMounted && player.mountedModuleId && player.mountOffset) {
+    const carrierShip = ships.find(ship => ship.id === player.carrierId);
+    if (carrierShip) {
+      const module = carrierShip.modules.find(m => m.id === player.mountedModuleId);
+      if (module) {
+        // Lock player position to module + offset
+        const mountLocalPos = Vec2.from(
+          module.localPos.x + player.mountOffset.x,
+          module.localPos.y + player.mountOffset.y
+        );
+        player.localPosition = mountLocalPos;
+        
+        // Convert to world position
+        const cos = Math.cos(carrierShip.rotation);
+        const sin = Math.sin(carrierShip.rotation);
+        const worldX = carrierShip.position.x + (mountLocalPos.x * cos - mountLocalPos.y * sin);
+        const worldY = carrierShip.position.y + (mountLocalPos.x * sin + mountLocalPos.y * cos);
+        player.position = Vec2.from(worldX, worldY);
+        
+        // Match ship velocity
+        player.velocity = carrierShip.velocity.add(
+          mountLocalPos.perp().mul(carrierShip.angularVelocity)
+        );
+        
+        return []; // No carrier events when mounted
+      }
+    }
+  }
+  
   // Get or create detection state for this player
   let detectionState = carrierDetectionMap.get(player.id);
   if (!detectionState) {

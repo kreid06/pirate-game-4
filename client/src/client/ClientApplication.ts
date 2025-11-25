@@ -108,6 +108,14 @@ export class ClientApplication {
       this.networkManager.setWorldStateHandler(this.onServerWorldState.bind(this));
       this.networkManager.setConnectionStateHandler(this.onConnectionStateChanged.bind(this));
       
+      // Module mounting callbacks
+      this.networkManager.onModuleMountSuccess = (moduleId, moduleKind, mountOffset) => {
+        this.handleModuleMountSuccess(moduleId, moduleKind, mountOffset);
+      };
+      this.networkManager.onModuleMountFailure = (reason) => {
+        this.handleModuleMountFailure(reason);
+      };
+      
       // Initialize Prediction Engine
       this.predictionEngine = new PredictionEngine(this.config.prediction);
       
@@ -138,6 +146,16 @@ export class ClientApplication {
               
               if (player) {
                 let distance: number;
+                let moduleWorldPos: Vec2;
+                
+                // Calculate module world position
+                const cos = Math.cos(hoveredModule.ship.rotation);
+                const sin = Math.sin(hoveredModule.ship.rotation);
+                const moduleWorldX = hoveredModule.ship.position.x + 
+                  (hoveredModule.module.localPos.x * cos - hoveredModule.module.localPos.y * sin);
+                const moduleWorldY = hoveredModule.ship.position.y + 
+                  (hoveredModule.module.localPos.x * sin + hoveredModule.module.localPos.y * cos);
+                moduleWorldPos = Vec2.from(moduleWorldX, moduleWorldY);
                 
                 // If player is on the same ship as the module, use local (ship-relative) coordinates
                 if (player.carrierId === hoveredModule.ship.id && player.localPosition) {
@@ -146,13 +164,6 @@ export class ClientApplication {
                   distance = player.localPosition.sub(moduleLocalPos).length();
                 } else {
                   // Player not on ship or on different ship - use world coordinates
-                  const cos = Math.cos(hoveredModule.ship.rotation);
-                  const sin = Math.sin(hoveredModule.ship.rotation);
-                  const moduleWorldX = hoveredModule.ship.position.x + 
-                    (hoveredModule.module.localPos.x * cos - hoveredModule.module.localPos.y * sin);
-                  const moduleWorldY = hoveredModule.ship.position.y + 
-                    (hoveredModule.module.localPos.x * sin + hoveredModule.module.localPos.y * cos);
-                  const moduleWorldPos = Vec2.from(moduleWorldX, moduleWorldY);
                   distance = player.position.sub(moduleWorldPos).length();
                 }
                 
@@ -160,9 +171,11 @@ export class ClientApplication {
                 
                 if (distance <= maxInteractDistance) {
                   console.log(`🎯 [INTERACTION] Player interacting with ${hoveredModule.module.kind.toUpperCase()} (ID: ${hoveredModule.module.id}) at distance ${distance.toFixed(1)}px`);
+                  console.log(`   Player world: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}), Module world: (${moduleWorldPos.x.toFixed(1)}, ${moduleWorldPos.y.toFixed(1)})`);
                   this.networkManager.sendModuleInteract(hoveredModule.module.id);
                 } else {
                   console.log(`❌ [INTERACTION] ${hoveredModule.module.kind.toUpperCase()} too far: ${distance.toFixed(1)}px > ${maxInteractDistance}px`);
+                  console.log(`   Player world: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}), Module world: (${moduleWorldPos.x.toFixed(1)}, ${moduleWorldPos.y.toFixed(1)})`);
                 }
               }
             }
@@ -650,11 +663,69 @@ export class ClientApplication {
           radius: PhysicsConfig.PLAYER_RADIUS,
           carrierId: 1, // On the demo ship
           deckId: 0,
-          onDeck: true
+          onDeck: true,
+          isMounted: false // Not mounted initially
         }
       ],
       cannonballs: [],
       carrierDetection: new Map()
     };
+  }
+  
+  /**
+   * Handle successful module mount from server
+   */
+  private handleModuleMountSuccess(moduleId: number, moduleKind: string, mountOffset?: Vec2): void {
+    console.log(`🎮 [MOUNT] Player mounted to ${moduleKind} (ID: ${moduleId})`);
+    
+    const playerId = this.networkManager.getAssignedPlayerId();
+    if (playerId === null) return;
+    
+    // Update player state in all world states
+    const updatePlayerMount = (worldState: WorldState | null) => {
+      if (!worldState) return;
+      
+      const player = worldState.players.find(p => p.id === playerId);
+      if (player) {
+        player.isMounted = true;
+        player.mountedModuleId = moduleId;
+        player.mountOffset = mountOffset;
+        
+        // Find the ship and module to set player position
+        const ship = worldState.ships.find(s => s.id === player.carrierId);
+        if (ship) {
+          const module = ship.modules.find(m => m.id === moduleId);
+          if (module && mountOffset) {
+            // Set player local position to module position + mount offset
+            const mountLocalPos = Vec2.from(
+              module.localPos.x + mountOffset.x,
+              module.localPos.y + mountOffset.y
+            );
+            player.localPosition = mountLocalPos;
+            
+            // Convert to world position
+            const cos = Math.cos(ship.rotation);
+            const sin = Math.sin(ship.rotation);
+            const worldX = ship.position.x + (mountLocalPos.x * cos - mountLocalPos.y * sin);
+            const worldY = ship.position.y + (mountLocalPos.x * sin + mountLocalPos.y * cos);
+            player.position = Vec2.from(worldX, worldY);
+            
+            console.log(`📍 [MOUNT] Player positioned at local (${mountLocalPos.x.toFixed(1)}, ${mountLocalPos.y.toFixed(1)})`);
+          }
+        }
+      }
+    };
+    
+    updatePlayerMount(this.authoritativeWorldState);
+    updatePlayerMount(this.predictedWorldState);
+    updatePlayerMount(this.demoWorldState);
+  }
+  
+  /**
+   * Handle failed module mount from server
+   */
+  private handleModuleMountFailure(reason: string): void {
+    console.log(`⚠️ [MOUNT] Mount failed: ${reason}`);
+    // Could show UI notification here
   }
 }
