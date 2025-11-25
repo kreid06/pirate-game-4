@@ -94,6 +94,10 @@ export class InputManager {
   private lastRudderState: { left: boolean; right: boolean } = { left: false, right: false };
   private lastSailOpenness: number = 100;
   private lastSailAngle: number = 0;
+  private lastSailOpennessChangeTime: number = 0; // Track last sail openness change
+  private lastSailAngleChangeTime: number = 0; // Track last sail angle change
+  private readonly SAIL_OPENNESS_COOLDOWN = 200; // 0.2s per 10% change
+  private readonly SAIL_ANGLE_COOLDOWN = 200; // 0.2s per 6° change
   
   // HYBRID PROTOCOL: Movement stop detection
   private playerVelocity: Vec2 = Vec2.zero();
@@ -299,6 +303,8 @@ export class InputManager {
       this.lastSailOpenness = 100;
       this.lastSailAngle = 0;
       this.lastRudderState = { left: false, right: false };
+      this.lastSailOpennessChangeTime = 0;
+      this.lastSailAngleChangeTime = 0;
     } else {
       console.log(`⚓ [INPUT] Player dismounted - player controls active`);
     }
@@ -326,44 +332,56 @@ export class InputManager {
       // Sail openness control (W/S without shift)
       const openSails = this.isActionActive('move_forward');   // W key
       const closeSails = this.isActionActive('move_backward'); // S key
+      const currentTime = Date.now();
       
-      if (openSails && this.currentSailOpenness < 100) {
-        this.currentSailOpenness = Math.min(100, this.currentSailOpenness + 10);
-        if (this.currentSailOpenness !== this.lastSailOpenness) {
-          if (this.onShipSailControl) {
-            this.onShipSailControl(this.currentSailOpenness);
+      // Check cooldown before allowing sail openness change
+      if (currentTime - this.lastSailOpennessChangeTime >= this.SAIL_OPENNESS_COOLDOWN) {
+        if (openSails && this.currentSailOpenness < 100) {
+          this.currentSailOpenness = Math.min(100, this.currentSailOpenness + 10);
+          if (this.currentSailOpenness !== this.lastSailOpenness) {
+            if (this.onShipSailControl) {
+              this.onShipSailControl(this.currentSailOpenness);
+            }
+            this.lastSailOpenness = this.currentSailOpenness;
+            this.lastSailOpennessChangeTime = currentTime;
           }
-          this.lastSailOpenness = this.currentSailOpenness;
-        }
-      } else if (closeSails && this.currentSailOpenness > 0) {
-        this.currentSailOpenness = Math.max(0, this.currentSailOpenness - 10);
-        if (this.currentSailOpenness !== this.lastSailOpenness) {
-          if (this.onShipSailControl) {
-            this.onShipSailControl(this.currentSailOpenness);
+        } else if (closeSails && this.currentSailOpenness > 0) {
+          this.currentSailOpenness = Math.max(0, this.currentSailOpenness - 10);
+          if (this.currentSailOpenness !== this.lastSailOpenness) {
+            if (this.onShipSailControl) {
+              this.onShipSailControl(this.currentSailOpenness);
+            }
+            this.lastSailOpenness = this.currentSailOpenness;
+            this.lastSailOpennessChangeTime = currentTime;
           }
-          this.lastSailOpenness = this.currentSailOpenness;
         }
       }
     } else {
       // Sail angle control (Shift+A/D)
       const rotateLeft = this.isActionActive('move_left');   // Shift+A
       const rotateRight = this.isActionActive('move_right'); // Shift+D
+      const currentTime = Date.now();
       
-      if (rotateLeft && this.currentSailAngle > -60) {
-        this.currentSailAngle = Math.max(-60, this.currentSailAngle - 6);
-        if (this.currentSailAngle !== this.lastSailAngle) {
-          if (this.onShipSailAngleControl) {
-            this.onShipSailAngleControl(this.currentSailAngle);
+      // Check cooldown before allowing sail angle change
+      if (currentTime - this.lastSailAngleChangeTime >= this.SAIL_ANGLE_COOLDOWN) {
+        if (rotateLeft && this.currentSailAngle > -60) {
+          this.currentSailAngle = Math.max(-60, this.currentSailAngle - 6);
+          if (this.currentSailAngle !== this.lastSailAngle) {
+            if (this.onShipSailAngleControl) {
+              this.onShipSailAngleControl(this.currentSailAngle);
+            }
+            this.lastSailAngle = this.currentSailAngle;
+            this.lastSailAngleChangeTime = currentTime;
           }
-          this.lastSailAngle = this.currentSailAngle;
-        }
-      } else if (rotateRight && this.currentSailAngle < 60) {
-        this.currentSailAngle = Math.min(60, this.currentSailAngle + 6);
-        if (this.currentSailAngle !== this.lastSailAngle) {
-          if (this.onShipSailAngleControl) {
-            this.onShipSailAngleControl(this.currentSailAngle);
+        } else if (rotateRight && this.currentSailAngle < 60) {
+          this.currentSailAngle = Math.min(60, this.currentSailAngle + 6);
+          if (this.currentSailAngle !== this.lastSailAngle) {
+            if (this.onShipSailAngleControl) {
+              this.onShipSailAngleControl(this.currentSailAngle);
+            }
+            this.lastSailAngle = this.currentSailAngle;
+            this.lastSailAngleChangeTime = currentTime;
           }
-          this.lastSailAngle = this.currentSailAngle;
         }
       }
     }
