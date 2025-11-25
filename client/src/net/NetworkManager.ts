@@ -49,6 +49,11 @@ export enum MessageType {
   ACTION_EVENT = 'action_event',
   MODULE_INTERACT = 'module_interact',
   
+  // Ship control messages (when mounted to helm)
+  SHIP_SAIL_CONTROL = 'ship_sail_control',
+  SHIP_RUDDER_CONTROL = 'ship_rudder_control',
+  SHIP_SAIL_ANGLE_CONTROL = 'ship_sail_angle_control',
+  
   PING = 'ping',
   
   // Server to Client  
@@ -189,7 +194,35 @@ interface ModuleInteractFailureMessage extends NetworkMessage {
   reason: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | PingPongMessage | WorldStateMessage | AckMessage;
+/**
+ * Ship sail control message (when mounted to helm)
+ * W/S keys control sail openness
+ */
+interface ShipSailControlMessage extends NetworkMessage {
+  type: MessageType.SHIP_SAIL_CONTROL;
+  desired_openness: number; // 0-100 in increments of 10
+}
+
+/**
+ * Ship rudder control message (when mounted to helm)
+ * A/D keys control rudder direction
+ */
+interface ShipRudderControlMessage extends NetworkMessage {
+  type: MessageType.SHIP_RUDDER_CONTROL;
+  turning_left: boolean;
+  turning_right: boolean;
+}
+
+/**
+ * Ship sail angle control message (when mounted to helm)
+ * Shift+A/D keys control sail rotation angle
+ */
+interface ShipSailAngleControlMessage extends NetworkMessage {
+  type: MessageType.SHIP_SAIL_ANGLE_CONTROL;
+  desired_angle: number; // -60 to +60 degrees in increments of 6
+}
+
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | PingPongMessage | WorldStateMessage | AckMessage;
 
 /**
  * Main network manager class
@@ -566,6 +599,70 @@ export class NetworkManager {
     };
 
     console.log(`⚡ Action: ${action}${target ? ` at (${target.x.toFixed(1)}, ${target.y.toFixed(1)})` : ''}`);
+    this.sendMessage(message);
+  }
+
+  /**
+   * Send ship sail control (when mounted to helm)
+   * W/S keys adjust desired sail openness
+   */
+  sendShipSailControl(desiredOpenness: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      return;
+    }
+
+    // Clamp to 0-100 and round to nearest 10
+    const clampedOpenness = Math.max(0, Math.min(100, Math.round(desiredOpenness / 10) * 10));
+
+    const message: ShipSailControlMessage = {
+      type: MessageType.SHIP_SAIL_CONTROL,
+      timestamp: Date.now(),
+      desired_openness: clampedOpenness
+    };
+
+    console.log(`⛵ Sail control: ${clampedOpenness}% openness`);
+    this.sendMessage(message);
+  }
+
+  /**
+   * Send ship rudder control (when mounted to helm)
+   * A/D keys control turning
+   */
+  sendShipRudderControl(turningLeft: boolean, turningRight: boolean): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      return;
+    }
+
+    const message: ShipRudderControlMessage = {
+      type: MessageType.SHIP_RUDDER_CONTROL,
+      timestamp: Date.now(),
+      turning_left: turningLeft,
+      turning_right: turningRight
+    };
+
+    console.log(`🚢 Rudder: ${turningLeft ? 'LEFT' : turningRight ? 'RIGHT' : 'STRAIGHT'}`);
+    this.sendMessage(message);
+  }
+
+  /**
+   * Send ship sail angle control (when mounted to helm)
+   * Shift+A/D keys rotate sails
+   */
+  sendShipSailAngleControl(desiredAngle: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      return;
+    }
+
+    // Clamp to -60 to +60 and round to nearest 6
+    const clampedAngle = Math.max(-60, Math.min(60, Math.round(desiredAngle / 6) * 6));
+
+    const message: ShipSailAngleControlMessage = {
+      type: MessageType.SHIP_SAIL_ANGLE_CONTROL,
+      timestamp: Date.now(),
+      desired_angle: clampedAngle
+    };
+
+    console.log(`🌀 Sail angle: ${clampedAngle}°`);
     this.sendMessage(message);
   }
   

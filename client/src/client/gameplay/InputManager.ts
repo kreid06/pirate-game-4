@@ -77,10 +77,23 @@ export class InputManager {
   public onRotationUpdate: ((rotation: number) => void) | null = null;
   public onActionEvent: ((action: string, target?: Vec2) => void) | null = null;
   
+  // Ship control callbacks (when mounted to helm)
+  public onShipSailControl: ((desiredOpenness: number) => void) | null = null;
+  public onShipRudderControl: ((turningLeft: boolean, turningRight: boolean) => void) | null = null;
+  public onShipSailAngleControl: ((desiredAngle: number) => void) | null = null;
+  
   // HYBRID PROTOCOL: State tracking for change detection
   private previousMovementState: Vec2 = Vec2.zero();
   private lastSentRotation: number = 0;
   private readonly ROTATION_THRESHOLD = 0.0524; // 3 degrees in radians
+  
+  // Ship control state tracking
+  private isMountedToHelm: boolean = false;
+  private currentSailOpenness: number = 100; // Start at 100% (full sails)
+  private currentSailAngle: number = 0; // Start at 0 degrees
+  private lastRudderState: { left: boolean; right: boolean } = { left: false, right: false };
+  private lastSailOpenness: number = 100;
+  private lastSailAngle: number = 0;
   
   // HYBRID PROTOCOL: Movement stop detection
   private playerVelocity: Vec2 = Vec2.zero();
@@ -145,6 +158,13 @@ export class InputManager {
   update(deltaTime: number): void {
     // Update gamepad input
     this.updateGamepad();
+    
+    // If mounted to helm, handle ship controls instead of player movement
+    if (this.isMountedToHelm) {
+      this.handleShipControls();
+      this.resetFrameFlags();
+      return; // Skip normal player input processing
+    }
     
     // Generate current input frame
     this.generateInputFrame();
@@ -263,6 +283,97 @@ export class InputManager {
       console.log('🔥 Switching to CRITICAL input tier (60Hz) - combat detected');
     } else if (!inCombat && this.currentTier === InputTier.CRITICAL) {
       this.updateInputTier();
+    }
+  }
+
+  /**
+   * Set mount state (called when player mounts/dismounts helm)
+   */
+  setMountState(mounted: boolean, shipId?: number): void {
+    this.isMountedToHelm = mounted;
+    if (mounted) {
+      console.log(`⚓ [INPUT] Player mounted to helm on ship ${shipId} - ship controls active`);
+      // Reset ship control state
+      this.currentSailOpenness = 100;
+      this.currentSailAngle = 0;
+      this.lastSailOpenness = 100;
+      this.lastSailAngle = 0;
+      this.lastRudderState = { left: false, right: false };
+    } else {
+      console.log(`⚓ [INPUT] Player dismounted - player controls active`);
+    }
+  }
+
+  /**
+   * Handle ship controls when mounted to helm
+   */
+  private handleShipControls(): void {
+    const shiftPressed = this.inputState.pressedKeys.has('ShiftLeft') || this.inputState.pressedKeys.has('ShiftRight');
+    
+    // Rudder control (A/D without shift)
+    if (!shiftPressed) {
+      const turningLeft = this.isActionActive('move_left');   // A key
+      const turningRight = this.isActionActive('move_right'); // D key
+      
+      // Send rudder control if state changed
+      if (turningLeft !== this.lastRudderState.left || turningRight !== this.lastRudderState.right) {
+        if (this.onShipRudderControl) {
+          this.onShipRudderControl(turningLeft, turningRight);
+        }
+        this.lastRudderState = { left: turningLeft, right: turningRight };
+      }
+      
+      // Sail openness control (W/S without shift)
+      const openSails = this.isActionActive('move_forward');   // W key
+      const closeSails = this.isActionActive('move_backward'); // S key
+      
+      if (openSails && this.currentSailOpenness < 100) {
+        this.currentSailOpenness = Math.min(100, this.currentSailOpenness + 10);
+        if (this.currentSailOpenness !== this.lastSailOpenness) {
+          if (this.onShipSailControl) {
+            this.onShipSailControl(this.currentSailOpenness);
+          }
+          this.lastSailOpenness = this.currentSailOpenness;
+        }
+      } else if (closeSails && this.currentSailOpenness > 0) {
+        this.currentSailOpenness = Math.max(0, this.currentSailOpenness - 10);
+        if (this.currentSailOpenness !== this.lastSailOpenness) {
+          if (this.onShipSailControl) {
+            this.onShipSailControl(this.currentSailOpenness);
+          }
+          this.lastSailOpenness = this.currentSailOpenness;
+        }
+      }
+    } else {
+      // Sail angle control (Shift+A/D)
+      const rotateLeft = this.isActionActive('move_left');   // Shift+A
+      const rotateRight = this.isActionActive('move_right'); // Shift+D
+      
+      if (rotateLeft && this.currentSailAngle > -60) {
+        this.currentSailAngle = Math.max(-60, this.currentSailAngle - 6);
+        if (this.currentSailAngle !== this.lastSailAngle) {
+          if (this.onShipSailAngleControl) {
+            this.onShipSailAngleControl(this.currentSailAngle);
+          }
+          this.lastSailAngle = this.currentSailAngle;
+        }
+      } else if (rotateRight && this.currentSailAngle < 60) {
+        this.currentSailAngle = Math.min(60, this.currentSailAngle + 6);
+        if (this.currentSailAngle !== this.lastSailAngle) {
+          if (this.onShipSailAngleControl) {
+            this.onShipSailAngleControl(this.currentSailAngle);
+          }
+          this.lastSailAngle = this.currentSailAngle;
+        }
+      }
+    }
+    
+    // Handle interact key (E) to dismount
+    if (this.isActionActive('interact') && this.canInteract()) {
+      this.lastInteractionTime = Date.now();
+      if (this.onActionEvent) {
+        this.onActionEvent('dismount');
+      }
     }
   }
   

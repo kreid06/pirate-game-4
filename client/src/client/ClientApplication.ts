@@ -188,6 +188,17 @@ export class ClientApplication {
         }
       };
       
+      // Ship control callbacks (when mounted to helm)
+      this.inputManager.onShipSailControl = (desiredOpenness) => {
+        this.networkManager.sendShipSailControl(desiredOpenness);
+      };
+      this.inputManager.onShipRudderControl = (turningLeft, turningRight) => {
+        this.networkManager.sendShipRudderControl(turningLeft, turningRight);
+      };
+      this.inputManager.onShipSailAngleControl = (desiredAngle) => {
+        this.networkManager.sendShipSailAngleControl(desiredAngle);
+      };
+      
       // Set up mouse tracking for mouse-relative movement
       this.setupMouseTracking();
       
@@ -458,6 +469,18 @@ export class ClientApplication {
   private onServerWorldState(worldState: WorldState): void {
     this.authoritativeWorldState = worldState;
     
+    // Check if player mount state changed (server can dismount player)
+    const playerId = this.networkManager.getAssignedPlayerId();
+    if (playerId !== null) {
+      const player = worldState.players.find(p => p.id === playerId);
+      if (player) {
+        // If player was mounted but server says not mounted, disable ship controls
+        if (!player.isMounted && this.inputManager) {
+          this.inputManager.setMountState(false);
+        }
+      }
+    }
+    
     // Mark that we've received at least one world state (suppresses early camera warnings)
     if (!this.hasReceivedWorldState && worldState.players.length > 0) {
       this.hasReceivedWorldState = true;
@@ -680,6 +703,22 @@ export class ClientApplication {
     
     const playerId = this.networkManager.getAssignedPlayerId();
     if (playerId === null) return;
+    
+    // Enable ship controls if mounting to helm
+    if (moduleKind.toUpperCase() === 'HELM') {
+      let shipId: number | undefined;
+      
+      // Find the ship the player is on
+      const worldState = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+      if (worldState) {
+        const player = worldState.players.find(p => p.id === playerId);
+        if (player) {
+          shipId = player.carrierId;
+        }
+      }
+      
+      this.inputManager.setMountState(true, shipId);
+    }
     
     // Update player state in all world states
     const updatePlayerMount = (worldState: WorldState | null) => {
