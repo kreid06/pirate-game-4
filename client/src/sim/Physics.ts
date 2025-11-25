@@ -285,7 +285,7 @@ function updatePlayerOnDeck(player: Player, ship: Ship, inputFrame: InputFrame, 
   const carriedPosition = ship.position.add(rotatedRelativePos);
   
   // Step 3: Apply player input (keep in world coordinates - this was working correctly!)
-  const inputLocal = inputFrame.movement.mul(PhysicsConfig.PLAYER_SPEED);
+  const inputLocal = inputFrame.movement.mul(PhysicsConfig.PLAYER_WALK_SPEED);
   // Input is already in world coordinates due to camera transformation - don't "enhance" what works!
   const inputWorld = inputLocal;
   
@@ -325,7 +325,7 @@ function updatePlayerOnDeck(player: Player, ship: Ship, inputFrame: InputFrame, 
       console.log(`Player ${player.id} jumping near ship edge - assisting exit`);
       // Apply outward force to help them clear the ship
       const awayFromShip = carriedPosition.sub(ship.position).normalize();
-      const exitBoost = awayFromShip.mul(PhysicsConfig.PLAYER_SPEED * 0.5 * dt);
+      const exitBoost = awayFromShip.mul(PhysicsConfig.PLAYER_WALK_SPEED * 0.5 * dt);
       player.position = carriedPosition.add(inputWorld.mul(dt)).add(exitBoost);
       return; // Skip collision detection to allow clean exit
     }
@@ -386,7 +386,7 @@ function isPlayerInsideShipBounds(playerPos: Vec2, ship: Ship): boolean {
  * Enhanced free movement when player is not on deck
  */
 function updatePlayerOffDeck(player: Player, ships: Ship[], inputFrame: InputFrame, dt: number): void {
-  const inputVel = inputFrame.movement.mul(PhysicsConfig.PLAYER_SPEED);
+  const inputVel = inputFrame.movement.mul(PhysicsConfig.PLAYER_SWIM_SPEED);
   
   // Enhanced water/swimming physics simulation
   const waterDrag = 0.85; // Higher drag in water
@@ -439,7 +439,7 @@ function updatePlayerOffDeck(player: Player, ships: Ship[], inputFrame: InputFra
   player.velocity = finalVelocity;
   
   // Clamp velocity to reasonable bounds for water movement
-  const maxWaterSpeed = PhysicsConfig.PLAYER_SPEED * 0.7; // Slower in water
+  const maxWaterSpeed = PhysicsConfig.PLAYER_SWIM_SPEED; // Use swim speed constant
   if (player.velocity.lengthSq() > maxWaterSpeed * maxWaterSpeed) {
     player.velocity = player.velocity.normalize().mul(maxWaterSpeed);
   }

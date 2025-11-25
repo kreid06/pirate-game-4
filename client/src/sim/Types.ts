@@ -110,8 +110,10 @@ export const PhysicsConfig = {
   // Ice-drift damping
   ICE_DRIFT_HALF_LIFE: 0.35, // seconds
   
-  // Player movement
-  PLAYER_SPEED: 200, // units/second
+  // Player movement speeds
+  PLAYER_WALK_SPEED: 1000, // units/second when walking on ship (5x faster: 200 * 5)
+  PLAYER_SWIM_SPEED: 140, // units/second when swimming (unchanged)
+  PLAYER_SPEED: 200, // Deprecated - use WALK_SPEED or SWIM_SPEED
   PLAYER_RADIUS: 8, // Match server radius for collision detection
   
   // Cannonball physics

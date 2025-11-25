@@ -91,12 +91,12 @@ export function updateCarrierDetection(
   const epsilon = DETECTION_CONFIG.EPSILON_FACTOR * player.radius;
   
   // Failsafe: If player is moving fast in water but still marked as on-deck, force exit
-  if (newState.currentCarrierId !== null && player.velocity.length() > PhysicsConfig.PLAYER_SPEED * 0.8) {
+  if (newState.currentCarrierId !== null && player.velocity.length() > PhysicsConfig.PLAYER_WALK_SPEED * 0.8) {
     const currentShip = ships.find(s => s.id === newState.currentCarrierId);
     if (currentShip) {
       // Check if player is actually swimming (moving fast relative to ship)
       const relativeVel = player.velocity.sub(currentShip.velocity);
-      if (relativeVel.length() > PhysicsConfig.PLAYER_SPEED * 0.6) {
+      if (relativeVel.length() > PhysicsConfig.PLAYER_SWIM_SPEED * 0.6) {
         console.log(`Player ${player.id} swimming fast but marked on-deck - forcing exit`);
         newState.candidateStates.delete(newState.currentCarrierId);
         events.push({
