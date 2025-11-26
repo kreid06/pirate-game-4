@@ -52,6 +52,8 @@ struct Ship {
     
     // Ship control state
     uint8_t desired_sail_openness;  // Target sail openness (0-100%)
+    float rudder_angle;             // Current rudder angle in degrees (-50 to +50)
+    float target_rudder_angle;      // Target rudder angle from player input (-50 to +50)
     
     // Ship state flags
     uint16_t flags;
@@ -136,6 +138,10 @@ struct Sim {
     q16_t water_friction;
     q16_t air_friction;
     q16_t buoyancy_factor;
+    
+    // Global wind state (affects all ships)
+    float wind_power;           // Wind strength (0.0 to 1.0, where 1.0 = full wind)
+    float wind_direction;       // Wind direction in radians (for future use)
 };
 
 // Simulation configuration

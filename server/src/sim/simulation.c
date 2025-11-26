@@ -51,6 +51,10 @@ int sim_init(struct Sim* sim, const struct SimConfig* config) {
     sim->air_friction = config->air_friction;
     sim->buoyancy_factor = config->buoyancy_factor;
     
+    // Initialize global wind (default moderate wind)
+    sim->wind_power = 0.5f;      // 50% wind power
+    sim->wind_direction = 0.0f;  // East direction (for future use)
+    
     // Initialize entity counts
     sim->ship_count = 0;
     sim->player_count = 0;
@@ -219,6 +223,8 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
     ship->bounding_radius = Q16_FROM_FLOAT(10.0f); // 10m radius
     ship->hull_health = Q16_FROM_INT(100);
     ship->desired_sail_openness = 0;  // Sails start closed
+    ship->rudder_angle = 0.0f;        // Rudder centered
+    ship->target_rudder_angle = 0.0f; // No input
     
     // Create brigantine hull with curved bow/stern sections (47 vertices)
     // Matches client-side createCurvedShipHull() from ShipUtils.ts

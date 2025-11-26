@@ -110,6 +110,48 @@ static void ship_local_to_world(const SimpleShip* ship, float local_x, float loc
     *world_y = ship->y + (local_x * sin_r + local_y * cos_r);
 }
 
+// Update world positions of all players mounted to this ship
+static void update_mounted_players_on_ship(uint32_t ship_id) {
+    SimpleShip* ship = find_ship(ship_id);
+    if (!ship) return;
+    
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (players[i].active && players[i].is_mounted && players[i].parent_ship_id == ship_id) {
+            // Update player's world position based on their local position and ship transform
+            ship_local_to_world(ship, players[i].local_x, players[i].local_y, 
+                              &players[i].x, &players[i].y);
+        }
+    }
+}
+
+// Sync SimpleShip state from simulation ships (position, rotation, velocity)
+static void sync_simple_ships_from_simulation(void) {
+    if (!global_sim || global_sim->ship_count == 0) return;
+    
+    for (int s = 0; s < ship_count; s++) {
+        if (!ships[s].active) continue;
+        
+        // Find matching simulation ship by ID
+        for (uint32_t sim_idx = 0; sim_idx < global_sim->ship_count; sim_idx++) {
+            if (global_sim->ships[sim_idx].id == ships[s].ship_id) {
+                struct Ship* sim_ship = &global_sim->ships[sim_idx];
+                
+                // Sync position, rotation, velocity from simulation to SimpleShip
+                ships[s].x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->position.x));
+                ships[s].y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->position.y));
+                ships[s].rotation = Q16_TO_FLOAT(sim_ship->rotation);
+                ships[s].velocity_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->velocity.x));
+                ships[s].velocity_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->velocity.y));
+                ships[s].angular_velocity = Q16_TO_FLOAT(sim_ship->angular_velocity);
+                
+                // Update mounted players' world positions with new ship transform
+                update_mounted_players_on_ship(ships[s].ship_id);
+                break;
+            }
+        }
+    }
+}
+
 static void ship_clamp_to_deck(const SimpleShip* ship, float* local_x, float* local_y) {
     if (*local_x < ship->deck_min_x) *local_x = ship->deck_min_x;
     if (*local_x > ship->deck_max_x) *local_x = ship->deck_max_x;
@@ -861,25 +903,34 @@ static void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketCl
 
 /**
  * Handle rudder control from helm-mounted player
+ * Sets target rudder angle - actual angle will gradually adjust in tick
  */
 static void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, bool turning_left, bool turning_right) {
     const char* direction = "STRAIGHT";
+    float target_angle = 0.0f;
+    
     if (turning_left && !turning_right) {
         direction = "LEFT";
+        target_angle = -50.0f;  // Max left rudder angle
     } else if (turning_right && !turning_left) {
         direction = "RIGHT";
+        target_angle = 50.0f;   // Max right rudder angle
+    } else {
+        direction = "STRAIGHT";
+        target_angle = 0.0f;    // Center rudder
     }
     
-    log_info("🚢 Player %u rudder control on ship %u: %s", player->player_id, ship->ship_id, direction);
+    log_info("🚢 Player %u rudder control on ship %u: %s (target: %.1f°)", 
+             player->player_id, ship->ship_id, direction, target_angle);
     
-    // Store rudder state in ship (we'll add rudder fields to SimpleShip structure)
-    // For now, we'll apply angular velocity directly
-    if (turning_left && !turning_right) {
-        ship->angular_velocity = -0.5f; // Turn left (negative angular velocity)
-    } else if (turning_right && !turning_left) {
-        ship->angular_velocity = 0.5f;  // Turn right (positive angular velocity)
-    } else {
-        ship->angular_velocity *= 0.9f; // Gradually return to straight
+    // Update simulation ship target rudder angle
+    if (global_sim && global_sim->ship_count > 0) {
+        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+            if (global_sim->ships[s].id == ship->ship_id) {
+                global_sim->ships[s].target_rudder_angle = target_angle;
+                break;
+            }
+        }
     }
     
     // Send acknowledgment
@@ -907,13 +958,29 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
     
     // Convert to radians for Q16 storage
     float angle_radians = desired_angle * (3.14159f / 180.0f);
+    q16_t angle_q16 = Q16_FROM_FLOAT(angle_radians);
     
-    // Update all masts on the ship to the desired angle
+    // Update simulation ship masts (the ones we broadcast to clients)
+    if (global_sim && global_sim->ship_count > 0) {
+        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+            if (global_sim->ships[s].id == ship->ship_id) {
+                struct Ship* sim_ship = &global_sim->ships[s];
+                for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                    if (sim_ship->modules[m].type_id == MODULE_TYPE_MAST) {
+                        sim_ship->modules[m].data.mast.angle = angle_q16;
+                        log_info("  🌀 Mast %u angle set to %.1f° (%.3f rad)", 
+                                 sim_ship->modules[m].id, desired_angle, angle_radians);
+                    }
+                }
+                break;
+            }
+        }
+    }
+    
+    // Also update SimpleShip for compatibility
     for (int i = 0; i < ship->module_count; i++) {
         if (ship->modules[i].type_id == MODULE_TYPE_MAST) {
-            ship->modules[i].data.mast.angle = Q16_FROM_FLOAT(angle_radians);
-            log_info("  🌀 Mast %u angle set to %.1f° (%.3f rad)", 
-                     ship->modules[i].id, desired_angle, angle_radians);
+            ship->modules[i].data.mast.angle = angle_q16;
         }
     }
     
@@ -2440,6 +2507,7 @@ int websocket_server_update(struct Sim* sim) {
                 float vel_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->velocity.x));
                 float vel_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->velocity.y));
                 float ang_vel = Q16_TO_FLOAT(ship->angular_velocity);
+                float rudder_radians = ship->rudder_angle * (3.14159f / 180.0f); // Convert degrees to radians
                 
                 char ship_entry[4096];
                 int offset = snprintf(ship_entry, sizeof(ship_entry),
@@ -2447,9 +2515,9 @@ int websocket_server_update(struct Sim* sim) {
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                         "\"mass\":%.1f,\"moment_of_inertia\":%.1f,"
                         "\"max_speed\":%.1f,\"turn_rate\":%.2f,"
-                        "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"modules\":[",
+                        "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"rudder_angle\":%.3f,\"modules\":[",
                         ship->id, pos_x, pos_y, rotation, vel_x, vel_y, ang_vel,
-                        5000.0f, 500000.0f, 15.0f, 1.0f, 0.95f, 0.90f);
+                        5000.0f, 500000.0f, 15.0f, 1.0f, 0.95f, 0.90f, rudder_radians);
                 
                 // Add modules array
                 // Planks (100-109) and deck (200): only send health/ID, client generates positions
@@ -2523,12 +2591,12 @@ int websocket_server_update(struct Sim* sim) {
                             "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                             "\"mass\":%.1f,\"moment_of_inertia\":%.1f,"
                             "\"max_speed\":%.1f,\"turn_rate\":%.2f,"
-                            "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"modules\":[",
+                            "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"rudder_angle\":%.3f,\"modules\":[",
                             ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
                             ships[s].velocity_x, ships[s].velocity_y, ships[s].angular_velocity,
                             ships[s].mass, ships[s].moment_of_inertia,
                             ships[s].max_speed, ships[s].turn_rate,
-                            ships[s].water_drag, ships[s].angular_drag);
+                            ships[s].water_drag, ships[s].angular_drag, 0.0f);
                     
                     // Add modules from simple ships
                     for (int m = 0; m < ships[s].module_count && offset < (int)sizeof(ship_entry) - 200; m++) {
@@ -2720,6 +2788,10 @@ int websocket_server_get_players(WebSocketPlayer** out_players, int* out_count) 
 void websocket_server_tick(float dt) {
     static uint32_t last_tick_log_time = 0;
     uint32_t current_time = get_time_ms();
+    
+    // ===== SYNC SHIP STATE FROM SIMULATION =====
+    // This ensures SimpleShip has current position/rotation for mounted player updates
+    sync_simple_ships_from_simulation();
     
     int moving_players = 0;
     
@@ -2996,6 +3068,107 @@ void websocket_server_tick(float dt) {
         }
         
         last_sail_update = current_time;
+    }
+    
+    // ===== GRADUALLY ADJUST RUDDER ANGLE TO TARGET =====
+    // Rate: 5 degrees per 0.2 seconds = 25 degrees per second
+    const float RUDDER_ADJUST_RATE = 25.0f; // degrees per second
+    static uint32_t last_rudder_update = 0;
+    
+    if (current_time - last_rudder_update >= 200) {
+        float time_delta = (current_time - last_rudder_update) / 1000.0f;
+        float max_rudder_change = RUDDER_ADJUST_RATE * time_delta; // 5 degrees per 0.2s
+        
+        if (global_sim && global_sim->ship_count > 0) {
+            for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+                struct Ship* ship = &global_sim->ships[s];
+                
+                // Gradually move rudder to target angle
+                if (ship->rudder_angle != ship->target_rudder_angle) {
+                    float diff = ship->target_rudder_angle - ship->rudder_angle;
+                    float change = diff;
+                    
+                    // Clamp change to max rate
+                    if (change > max_rudder_change) change = max_rudder_change;
+                    if (change < -max_rudder_change) change = -max_rudder_change;
+                    
+                    ship->rudder_angle += change;
+                    
+                    // Clamp to valid range
+                    if (ship->rudder_angle > 50.0f) ship->rudder_angle = 50.0f;
+                    if (ship->rudder_angle < -50.0f) ship->rudder_angle = -50.0f;
+                }
+            }
+        }
+        
+        last_rudder_update = current_time;
+    }
+    
+    // ===== APPLY WIND-BASED SHIP MOVEMENT =====
+    if (global_sim && global_sim->ship_count > 0) {
+        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+            struct Ship* ship = &global_sim->ships[s];
+            
+            // Calculate average sail openness across all masts
+            float total_openness = 0.0f;
+            int mast_count = 0;
+            for (uint8_t m = 0; m < ship->module_count; m++) {
+                if (ship->modules[m].type_id == MODULE_TYPE_MAST) {
+                    total_openness += ship->modules[m].data.mast.openness;
+                    mast_count++;
+                }
+            }
+            float avg_sail_openness = (mast_count > 0) ? (total_openness / mast_count) : 0.0f;
+            
+            // Calculate forward force from wind and sails
+            // Wind power (0-1) * sail openness (0-100) * base speed
+            const float BASE_WIND_SPEED = 5.0f; // meters per second at full wind, full sails
+            float wind_force_factor = (global_sim->wind_power * avg_sail_openness / 100.0f);
+            float forward_speed = BASE_WIND_SPEED * wind_force_factor;
+            
+            // Get current ship speed (magnitude of velocity)
+            float vx = Q16_TO_FLOAT(ship->velocity.x);
+            float vy = Q16_TO_FLOAT(ship->velocity.y);
+            float current_speed = sqrtf(vx * vx + vy * vy);
+            
+            // Apply forward force in ship's facing direction
+            float ship_rot = Q16_TO_FLOAT(ship->rotation);
+            float forward_x = cosf(ship_rot) * forward_speed;
+            float forward_y = sinf(ship_rot) * forward_speed;
+            
+            // Blend current velocity with wind-driven velocity (smooth acceleration)
+            const float WIND_ACCEL_RATE = 0.1f; // How quickly ship accelerates to wind speed
+            vx += (forward_x - vx) * WIND_ACCEL_RATE * dt;
+            vy += (forward_y - vy) * WIND_ACCEL_RATE * dt;
+            
+            ship->velocity.x = Q16_FROM_FLOAT(vx);
+            ship->velocity.y = Q16_FROM_FLOAT(vy);
+            
+            // ===== APPLY RUDDER-BASED TURNING =====
+            // Turning effectiveness depends on ship speed
+            float speed_factor = current_speed / BASE_WIND_SPEED; // 0 = stopped, 1 = full speed
+            if (speed_factor < 0.01f) {
+                // Ship is stopped - can still turn slowly in place
+                speed_factor = 0.05f; // Minimum turning ability when stopped
+            }
+            
+            // Convert rudder angle to turning rate
+            // Max rudder (50°) at full speed = max turn rate
+            const float MAX_TURN_RATE = 0.5f; // radians per second at full speed
+            float rudder_factor = ship->rudder_angle / 50.0f; // -1 to +1
+            float turn_rate = rudder_factor * MAX_TURN_RATE * speed_factor;
+            
+            // Apply angular velocity
+            ship->angular_velocity = Q16_FROM_FLOAT(turn_rate);
+            
+            // Apply rotation from angular velocity
+            float new_rotation = ship_rot + (turn_rate * dt);
+            ship->rotation = Q16_FROM_FLOAT(new_rotation);
+            
+            // Apply velocity to position
+            ship->position.x += Q16_FROM_FLOAT(vx * dt);
+            ship->position.y += Q16_FROM_FLOAT(vy * dt);
+        }
     }
     
     // Tick processing complete
