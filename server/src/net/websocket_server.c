@@ -819,6 +819,111 @@ static void handle_module_unmount(WebSocketPlayer* player, struct WebSocketClien
     websocket_server_broadcast(broadcast);
 }
 
+// ============================================================================
+// SHIP CONTROL HANDLERS
+// ============================================================================
+
+/**
+ * Handle sail openness control from helm-mounted player
+ * Sets the desired openness - actual openness will gradually adjust in tick
+ */
+static void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, int desired_openness) {
+    if (desired_openness < 0) desired_openness = 0;
+    if (desired_openness > 100) desired_openness = 100;
+    
+    log_info("⛵ Player %u setting desired sail openness on ship %u: %d%%", player->player_id, ship->ship_id, desired_openness);
+    
+    // Store desired openness - will be gradually applied in tick
+    ship->desired_sail_openness = (uint8_t)desired_openness;
+    
+    // Send acknowledgment
+    char response[256];
+    snprintf(response, sizeof(response),
+             "{\"type\":\"ship_control_ack\",\"control\":\"sail\",\"value\":%d}",
+             desired_openness);
+    
+    char frame[512];
+    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0) {
+        send(client->fd, frame, frame_len, 0);
+    }
+}
+
+/**
+ * Handle rudder control from helm-mounted player
+ */
+static void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, bool turning_left, bool turning_right) {
+    const char* direction = "STRAIGHT";
+    if (turning_left && !turning_right) {
+        direction = "LEFT";
+    } else if (turning_right && !turning_left) {
+        direction = "RIGHT";
+    }
+    
+    log_info("🚢 Player %u rudder control on ship %u: %s", player->player_id, ship->ship_id, direction);
+    
+    // Store rudder state in ship (we'll add rudder fields to SimpleShip structure)
+    // For now, we'll apply angular velocity directly
+    if (turning_left && !turning_right) {
+        ship->angular_velocity = -0.5f; // Turn left (negative angular velocity)
+    } else if (turning_right && !turning_left) {
+        ship->angular_velocity = 0.5f;  // Turn right (positive angular velocity)
+    } else {
+        ship->angular_velocity *= 0.9f; // Gradually return to straight
+    }
+    
+    // Send acknowledgment
+    char response[256];
+    snprintf(response, sizeof(response),
+             "{\"type\":\"ship_control_ack\",\"control\":\"rudder\",\"direction\":\"%s\"}",
+             direction);
+    
+    char frame[512];
+    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0) {
+        send(client->fd, frame, frame_len, 0);
+    }
+}
+
+/**
+ * Handle sail angle control from helm-mounted player
+ */
+static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, float desired_angle) {
+    // Clamp to range -60 to +60 degrees
+    if (desired_angle < -60.0f) desired_angle = -60.0f;
+    if (desired_angle > 60.0f) desired_angle = 60.0f;
+    
+    log_info("🌀 Player %u adjusting sail angle on ship %u: %.1f°", player->player_id, ship->ship_id, desired_angle);
+    
+    // Convert to radians for Q16 storage
+    float angle_radians = desired_angle * (3.14159f / 180.0f);
+    
+    // Update all masts on the ship to the desired angle
+    for (int i = 0; i < ship->module_count; i++) {
+        if (ship->modules[i].type_id == MODULE_TYPE_MAST) {
+            ship->modules[i].data.mast.angle = Q16_FROM_FLOAT(angle_radians);
+            log_info("  🌀 Mast %u angle set to %.1f° (%.3f rad)", 
+                     ship->modules[i].id, desired_angle, angle_radians);
+        }
+    }
+    
+    // Send acknowledgment
+    char response[256];
+    snprintf(response, sizeof(response),
+             "{\"type\":\"ship_control_ack\",\"control\":\"sail_angle\",\"value\":%.1f}",
+             desired_angle);
+    
+    char frame[512];
+    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0) {
+        send(client->fd, frame, frame_len, 0);
+    }
+}
+
+// ============================================================================
+// END SHIP CONTROL HANDLERS
+// ============================================================================
+
 /**
  * Handle module interaction request from client
  */
@@ -1349,6 +1454,9 @@ int websocket_server_init(uint16_t port) {
     ships[0].deck_max_y = 6.0f;
     ships[0].active = true;
     
+    // Ship control state
+    ships[0].desired_sail_openness = 0;  // Sails start closed
+    
     // Initialize ship modules for brigantine
     ships[0].module_count = 0;
     uint16_t module_id_counter = 1000; // Start module IDs at 1000
@@ -1688,10 +1796,36 @@ int websocket_server_update(struct Sim* sim) {
                                                 float module_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
                                                 float module_rot = Q16_TO_FLOAT(module->local_rot);
                                                 
-                                                ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
-                                                    "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
-                                                    m > 0 ? "," : "", module->id, module->type_id, 
-                                                    module_x, module_y, module_rot);
+                                                // Add module-specific data based on type
+                                                if (module->type_id == MODULE_TYPE_MAST) {
+                                                    // Mast: include openness and sail angle
+                                                    float sail_angle = Q16_TO_FLOAT(module->data.mast.angle);
+                                                    ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
+                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f}",
+                                                        m > 0 ? "," : "", module->id, module->type_id, 
+                                                        module_x, module_y, module_rot, module->data.mast.openness, sail_angle);
+                                                } else if (module->type_id == MODULE_TYPE_CANNON) {
+                                                    // Cannon: include ammunition and aim direction
+                                                    float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
+                                                    ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
+                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"ammo\":%u,\"aimDir\":%.3f}",
+                                                        m > 0 ? "," : "", module->id, module->type_id, 
+                                                        module_x, module_y, module_rot, module->data.cannon.ammunition, aim_direction);
+                                                } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
+                                                    // Helm: include wheel rotation and occupied status
+                                                    float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
+                                                    ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
+                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s}",
+                                                        m > 0 ? "," : "", module->id, module->type_id, 
+                                                        module_x, module_y, module_rot, wheel_rot, 
+                                                        (module->data.helm.occupied_by != 0) ? "true" : "false");
+                                                } else {
+                                                    // Generic module: just transform data
+                                                    ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
+                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
+                                                        m > 0 ? "," : "", module->id, module->type_id, 
+                                                        module_x, module_y, module_rot);
+                                                }
                                             }
                                             
                                             ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "]}");
@@ -1994,6 +2128,123 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
+                        } else if (strstr(payload, "\"type\":\"ship_sail_control\"")) {
+                            // SHIP SAIL CONTROL message
+                            log_info("⛵ Processing SHIP_SAIL_CONTROL message");
+                            
+                            if (client->player_id == 0) {
+                                log_warn("Ship sail control from client with no player ID");
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player && player->is_mounted && player->controlling_ship_id != 0) {
+                                    // Find the ship being controlled
+                                    SimpleShip* ship = NULL;
+                                    for (int s = 0; s < ship_count; s++) {
+                                        if (ships[s].ship_id == player->controlling_ship_id) {
+                                            ship = &ships[s];
+                                            break;
+                                        }
+                                    }
+                                    
+                                    if (ship) {
+                                        // Parse desired_openness
+                                        int desired_openness = 50; // Default
+                                        char* openness_start = strstr(payload, "\"desired_openness\":");
+                                        if (openness_start) {
+                                            sscanf(openness_start + 19, "%d", &desired_openness);
+                                        }
+                                        
+                                        handle_ship_sail_control(player, client, ship, desired_openness);
+                                    } else {
+                                        log_warn("Player %u controlling non-existent ship %u", player->player_id, player->controlling_ship_id);
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                    }
+                                } else {
+                                    log_warn("Ship sail control from player %u not controlling a ship", client->player_id);
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_controlling_ship\"}");
+                                }
+                                handled = true;
+                            }
+                            
+                        } else if (strstr(payload, "\"type\":\"ship_rudder_control\"")) {
+                            // SHIP RUDDER CONTROL message
+                            log_info("🚢 Processing SHIP_RUDDER_CONTROL message");
+                            
+                            if (client->player_id == 0) {
+                                log_warn("Ship rudder control from client with no player ID");
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player && player->is_mounted && player->controlling_ship_id != 0) {
+                                    // Find the ship being controlled
+                                    SimpleShip* ship = NULL;
+                                    for (int s = 0; s < ship_count; s++) {
+                                        if (ships[s].ship_id == player->controlling_ship_id) {
+                                            ship = &ships[s];
+                                            break;
+                                        }
+                                    }
+                                    
+                                    if (ship) {
+                                        // Parse turning_left and turning_right
+                                        bool turning_left = strstr(payload, "\"turning_left\":true") != NULL;
+                                        bool turning_right = strstr(payload, "\"turning_right\":true") != NULL;
+                                        
+                                        handle_ship_rudder_control(player, client, ship, turning_left, turning_right);
+                                    } else {
+                                        log_warn("Player %u controlling non-existent ship %u", player->player_id, player->controlling_ship_id);
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                    }
+                                } else {
+                                    log_warn("Ship rudder control from player %u not controlling a ship", client->player_id);
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_controlling_ship\"}");
+                                }
+                                handled = true;
+                            }
+                            
+                        } else if (strstr(payload, "\"type\":\"ship_sail_angle_control\"")) {
+                            // SHIP SAIL ANGLE CONTROL message
+                            log_info("🌀 Processing SHIP_SAIL_ANGLE_CONTROL message");
+                            
+                            if (client->player_id == 0) {
+                                log_warn("Ship sail angle control from client with no player ID");
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player && player->is_mounted && player->controlling_ship_id != 0) {
+                                    // Find the ship being controlled
+                                    SimpleShip* ship = NULL;
+                                    for (int s = 0; s < ship_count; s++) {
+                                        if (ships[s].ship_id == player->controlling_ship_id) {
+                                            ship = &ships[s];
+                                            break;
+                                        }
+                                    }
+                                    
+                                    if (ship) {
+                                        // Parse desired_angle
+                                        float desired_angle = 0.0f; // Default
+                                        char* angle_start = strstr(payload, "\"desired_angle\":");
+                                        if (angle_start) {
+                                            sscanf(angle_start + 16, "%f", &desired_angle);
+                                        }
+                                        
+                                        handle_ship_sail_angle_control(player, client, ship, desired_angle);
+                                    } else {
+                                        log_warn("Player %u controlling non-existent ship %u", player->player_id, player->controlling_ship_id);
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                    }
+                                } else {
+                                    log_warn("Ship sail angle control from player %u not controlling a ship", client->player_id);
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_controlling_ship\"}");
+                                }
+                                handled = true;
+                            }
+                            
                         } else if (strstr(payload, "\"type\":\"ping\"")) {
                             // JSON ping message
                             snprintf(response, sizeof(response),
@@ -2212,10 +2463,36 @@ int websocket_server_update(struct Sim* sim) {
                         float module_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
                         float module_rot = Q16_TO_FLOAT(module->local_rot);
                         
-                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
-                            m > 0 ? "," : "", module->id, module->type_id, 
-                            module_x, module_y, module_rot);
+                        // Add module-specific data based on type
+                        if (module->type_id == MODULE_TYPE_MAST) {
+                            // Mast: include openness and sail angle
+                            float sail_angle = Q16_TO_FLOAT(module->data.mast.angle);
+                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f}",
+                                m > 0 ? "," : "", module->id, module->type_id, 
+                                module_x, module_y, module_rot, module->data.mast.openness, sail_angle);
+                        } else if (module->type_id == MODULE_TYPE_CANNON) {
+                            // Cannon: include ammunition and aim direction
+                            float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
+                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"ammo\":%u,\"aimDir\":%.3f}",
+                                m > 0 ? "," : "", module->id, module->type_id, 
+                                module_x, module_y, module_rot, module->data.cannon.ammunition, aim_direction);
+                        } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
+                            // Helm: include wheel rotation and occupied status
+                            float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
+                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s}",
+                                m > 0 ? "," : "", module->id, module->type_id, 
+                                module_x, module_y, module_rot, wheel_rot, 
+                                (module->data.helm.occupied_by != 0) ? "true" : "false");
+                        } else {
+                            // Generic module: just transform data
+                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
+                                m > 0 ? "," : "", module->id, module->type_id, 
+                                module_x, module_y, module_rot);
+                        }
                     }
                 }
                 
@@ -2250,10 +2527,36 @@ int websocket_server_update(struct Sim* sim) {
                         float module_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
                         float module_rot = Q16_TO_FLOAT(module->local_rot);
                         
-                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
-                            m > 0 ? "," : "", module->id, module->type_id, 
-                            module_x, module_y, module_rot);
+                        // Add module-specific data based on type
+                        if (module->type_id == MODULE_TYPE_MAST) {
+                            // Mast: include openness and sail angle
+                            float sail_angle = Q16_TO_FLOAT(module->data.mast.angle);
+                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f}",
+                                m > 0 ? "," : "", module->id, module->type_id, 
+                                module_x, module_y, module_rot, module->data.mast.openness, sail_angle);
+                        } else if (module->type_id == MODULE_TYPE_CANNON) {
+                            // Cannon: include ammunition and aim direction
+                            float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
+                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"ammo\":%u,\"aimDir\":%.3f}",
+                                m > 0 ? "," : "", module->id, module->type_id, 
+                                module_x, module_y, module_rot, module->data.cannon.ammunition, aim_direction);
+                        } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
+                            // Helm: include wheel rotation and occupied status
+                            float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
+                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s}",
+                                m > 0 ? "," : "", module->id, module->type_id, 
+                                module_x, module_y, module_rot, wheel_rot, 
+                                (module->data.helm.occupied_by != 0) ? "true" : "false");
+                        } else {
+                            // Generic module: just transform data
+                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
+                                m > 0 ? "," : "", module->id, module->type_id, 
+                                module_x, module_y, module_rot);
+                        }
                     }
                     
                     offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
@@ -2632,6 +2935,54 @@ void websocket_server_tick(float dt) {
                 }
             }
         }
+    }
+    
+    // ===== GRADUALLY ADJUST SHIP SAILS TO DESIRED OPENNESS =====
+    // Rate: 10% per 0.2 seconds = 50% per second
+    const float SAIL_ADJUST_RATE = 50.0f; // percent per second
+    static uint32_t last_sail_update = 0;
+    
+    // Update sails at fixed intervals (200ms = 0.2s for 10% change)
+    if (current_time - last_sail_update >= 200) {
+        float time_delta = (current_time - last_sail_update) / 1000.0f; // Convert to seconds
+        float max_change = SAIL_ADJUST_RATE * time_delta; // How much we can change this update
+        
+        for (int s = 0; s < ship_count; s++) {
+            if (!ships[s].active) continue;
+            
+            // For each mast on the ship, gradually adjust to desired openness
+            for (int m = 0; m < ships[s].module_count; m++) {
+                if (ships[s].modules[m].type_id == MODULE_TYPE_MAST) {
+                    uint8_t current = ships[s].modules[m].data.mast.openness;
+                    uint8_t desired = ships[s].desired_sail_openness;
+                    
+                    if (current != desired) {
+                        float diff = (float)desired - (float)current;
+                        float change = diff;
+                        
+                        // Clamp change to max rate (10% per 0.2s)
+                        if (change > max_change) change = max_change;
+                        if (change < -max_change) change = -max_change;
+                        
+                        uint8_t new_openness = (uint8_t)((float)current + change);
+                        
+                        // Clamp to valid range
+                        if (new_openness > 100) new_openness = 100;
+                        
+                        ships[s].modules[m].data.mast.openness = new_openness;
+                        
+                        // Log only when there's a visible change
+                        if (new_openness != current) {
+                            log_info("⛵ Ship %u Mast %u: %u%% → %u%% (target: %u%%)",
+                                   ships[s].ship_id, ships[s].modules[m].id,
+                                   current, new_openness, desired);
+                        }
+                    }
+                }
+            }
+        }
+        
+        last_sail_update = current_time;
     }
     
     // Tick processing complete

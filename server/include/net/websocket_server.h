@@ -25,6 +25,9 @@ typedef struct SimpleShip {
     float deck_min_y, deck_max_y;
     bool active;
     
+    // Ship control state
+    uint8_t desired_sail_openness;  // Target sail openness (0-100%)
+    
     // Ship modules (cannons, masts, helm, seats, etc.)
     ShipModule modules[MAX_MODULES_PER_SHIP];
     uint8_t module_count;
