@@ -218,6 +218,7 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
     ship->moment_inertia = Q16_FROM_FLOAT(50000.0f); // kg⋅m²
     ship->bounding_radius = Q16_FROM_FLOAT(10.0f); // 10m radius
     ship->hull_health = Q16_FROM_INT(100);
+    ship->desired_sail_openness = 0;  // Sails start closed
     
     // Create brigantine hull with curved bow/stern sections (47 vertices)
     // Matches client-side createCurvedShipHull() from ShipUtils.ts

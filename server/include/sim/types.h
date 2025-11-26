@@ -50,6 +50,9 @@ struct Ship {
     ShipModule modules[MAX_MODULES_PER_SHIP];
     uint8_t module_count;
     
+    // Ship control state
+    uint8_t desired_sail_openness;  // Target sail openness (0-100%)
+    
     // Ship state flags
     uint16_t flags;
     uint8_t reserved[1];

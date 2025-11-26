@@ -833,7 +833,17 @@ static void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketCl
     
     log_info("⛵ Player %u setting desired sail openness on ship %u: %d%%", player->player_id, ship->ship_id, desired_openness);
     
-    // Store desired openness - will be gradually applied in tick
+    // Store desired openness in simulation ship (the source of truth for broadcasts)
+    if (global_sim && global_sim->ship_count > 0) {
+        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+            if (global_sim->ships[s].id == ship->ship_id) {
+                global_sim->ships[s].desired_sail_openness = (uint8_t)desired_openness;
+                break;
+            }
+        }
+    }
+    
+    // Also store in simple ship for compatibility
     ship->desired_sail_openness = (uint8_t)desired_openness;
     
     // Send acknowledgment
@@ -2947,35 +2957,38 @@ void websocket_server_tick(float dt) {
         float time_delta = (current_time - last_sail_update) / 1000.0f; // Convert to seconds
         float max_change = SAIL_ADJUST_RATE * time_delta; // How much we can change this update
         
-        for (int s = 0; s < ship_count; s++) {
-            if (!ships[s].active) continue;
-            
-            // For each mast on the ship, gradually adjust to desired openness
-            for (int m = 0; m < ships[s].module_count; m++) {
-                if (ships[s].modules[m].type_id == MODULE_TYPE_MAST) {
-                    uint8_t current = ships[s].modules[m].data.mast.openness;
-                    uint8_t desired = ships[s].desired_sail_openness;
-                    
-                    if (current != desired) {
-                        float diff = (float)desired - (float)current;
-                        float change = diff;
+        // Update simulation ships (the ones we broadcast to clients)
+        if (global_sim && global_sim->ship_count > 0) {
+            for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+                struct Ship* ship = &global_sim->ships[s];
+                uint8_t desired = ship->desired_sail_openness;
+                
+                // For each mast on the ship, gradually adjust to desired openness
+                for (uint8_t m = 0; m < ship->module_count; m++) {
+                    if (ship->modules[m].type_id == MODULE_TYPE_MAST) {
+                        uint8_t current = ship->modules[m].data.mast.openness;
                         
-                        // Clamp change to max rate (10% per 0.2s)
-                        if (change > max_change) change = max_change;
-                        if (change < -max_change) change = -max_change;
-                        
-                        uint8_t new_openness = (uint8_t)((float)current + change);
-                        
-                        // Clamp to valid range
-                        if (new_openness > 100) new_openness = 100;
-                        
-                        ships[s].modules[m].data.mast.openness = new_openness;
-                        
-                        // Log only when there's a visible change
-                        if (new_openness != current) {
-                            log_info("⛵ Ship %u Mast %u: %u%% → %u%% (target: %u%%)",
-                                   ships[s].ship_id, ships[s].modules[m].id,
-                                   current, new_openness, desired);
+                        if (current != desired) {
+                            float diff = (float)desired - (float)current;
+                            float change = diff;
+                            
+                            // Clamp change to max rate (10% per 0.2s)
+                            if (change > max_change) change = max_change;
+                            if (change < -max_change) change = -max_change;
+                            
+                            uint8_t new_openness = (uint8_t)((float)current + change);
+                            
+                            // Clamp to valid range
+                            if (new_openness > 100) new_openness = 100;
+                            
+                            ship->modules[m].data.mast.openness = new_openness;
+                            
+                            // Log only when there's a visible change
+                            if (new_openness != current) {
+                                log_info("⛵ Ship %u Mast %u: %u%% → %u%% (target: %u%%)",
+                                       ship->id, ship->modules[m].id,
+                                       current, new_openness, desired);
+                            }
                         }
                     }
                 }
