@@ -876,7 +876,7 @@ export class NetworkManager {
                     moduleData = {
                       kind: 'mast',
                       sailState: 'full',
-                      openness: mod.openness ?? 80,
+                      openness: mod.openness ?? 0,
                       angle: mod.sailAngle ?? 0,
                       radius: 15,
                       height: 120,
