@@ -2718,6 +2718,31 @@ int websocket_server_update(struct Sim* sim) {
         last_game_state_time = current_time;
     }
     
+    // ===== BROADCAST WORLD STATE (WIND, ETC.) =====
+    static uint32_t last_world_state_time = 0;
+    if (current_time - last_world_state_time >= 5000) { // Every 5 seconds
+        char world_state[256];
+        float wind_power = global_sim ? global_sim->wind_power : 0.0f;
+        float wind_direction = global_sim ? global_sim->wind_direction : 0.0f;
+        
+        snprintf(world_state, sizeof(world_state),
+                "{\"type\":\"WORLD_STATE\",\"windPower\":%.2f,\"windDirection\":%.2f}",
+                wind_power, wind_direction);
+        
+        // Broadcast to all connected clients
+        for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+            struct WebSocketClient* client = &ws_server.clients[i];
+            if (client->connected && client->handshake_complete) {
+                char frame[512];
+                size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, world_state, strlen(world_state), frame, sizeof(frame));
+                if (frame_len > 0) {
+                    send(client->fd, frame, frame_len, 0);
+                }
+            }
+        }
+        last_world_state_time = current_time;
+    }
+    
     return 0;
 }
 
@@ -3123,7 +3148,7 @@ void websocket_server_tick(float dt) {
             
             // Calculate forward force from wind and sails
             // Wind power (0-1) * sail openness (0-100) * base speed
-            const float BASE_WIND_SPEED = 5.0f; // meters per second at full wind, full sails
+            const float BASE_WIND_SPEED = 25.0f; // meters per second at full wind, full sails (5x increased)
             float wind_force_factor = (global_sim->wind_power * avg_sail_openness / 100.0f);
             float target_speed = BASE_WIND_SPEED * wind_force_factor;
             
