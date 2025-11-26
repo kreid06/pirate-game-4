@@ -27,7 +27,7 @@ ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t
             
         case MODULE_TYPE_MAST:
             module.data.mast.angle = 0;
-            module.data.mast.openness = 100; // Fully deployed
+            module.data.mast.openness = 0; // Sails start closed
             module.data.mast.wind_efficiency = Q16_ONE;
             break;
             

@@ -1511,7 +1511,7 @@ int websocket_server_init(uint16_t port) {
         ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(0.0f);
         ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE | MODULE_STATE_DEPLOYED;
         ships[0].modules[ships[0].module_count].data.mast.angle = Q16_FROM_FLOAT(0.0f);
-        ships[0].modules[ships[0].module_count].data.mast.openness = 100;
+        ships[0].modules[ships[0].module_count].data.mast.openness = 0;
         ships[0].modules[ships[0].module_count].data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
         ships[0].module_count++;
     }
