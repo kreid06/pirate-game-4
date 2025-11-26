@@ -945,18 +945,18 @@ export class RenderSystem {
     // Save context and apply rotation around mast position
     this.ctx.save();
     
-    // Translate to mast position, rotate, then translate back
+    // Translate to mast position and rotate (this rotates both sail and yard)
     this.ctx.translate(x, y);
-    this.ctx.rotate(angle * Math.PI / 180); // Convert degrees to radians
-    this.ctx.translate(-x, -y);
+    this.ctx.rotate(angle); // Angle is already in radians from server
     
-    const sailTopY = y - height * 1.4; // Top of sail attaches to yard
+    // Now draw everything relative to (0, 0) since we've translated to the mast position
+    const sailTopY = -height * 1.4; // Top of sail attaches to yard (negative = up)
     const sailPower = width * 1.2 * openness; // Adjust height based on openness
     
     // Create a gradient for the sail
     const gradient = this.ctx.createLinearGradient(
-      x - width / 2, sailTopY,
-      x + width / 2, sailTopY
+      -width / 2, sailTopY,
+      width / 2, sailTopY
     );
     gradient.addColorStop(0, '#E6E6E6');
     gradient.addColorStop(0.5, sailColor);
@@ -964,11 +964,11 @@ export class RenderSystem {
     
     // Draw sail shape
     this.ctx.beginPath();
-    this.ctx.moveTo(x, sailTopY);
-    this.ctx.lineTo(x, -sailTopY);
+    this.ctx.moveTo(0, sailTopY);
+    this.ctx.lineTo(0, -sailTopY);
     
     // Bottom of sail curves slightly
-    this.ctx.quadraticCurveTo(x+sailPower+25, y, x, sailTopY);
+    this.ctx.quadraticCurveTo(sailPower + 25, 0, 0, sailTopY);
    
     this.ctx.closePath();
     
@@ -983,16 +983,16 @@ export class RenderSystem {
     const lineCount = 3;
     const spacing = sailPower / (lineCount + 1);
     
-    
     this.ctx.beginPath();
+
+    // Draw the horizontal yard (mast pole) BEFORE restoring context so it rotates with the sail
+    this.ctx.fillStyle = '#8B4513';
+    this.ctx.strokeStyle = '#654321';
+    this.ctx.fillRect(-width / 20, sailTopY, width / 10, -sailTopY * 2);
+    this.ctx.strokeRect(-width / 20, sailTopY, width / 10, -sailTopY * 2);
 
     // Restore context after rotation
     this.ctx.restore();
-    this.ctx.fillStyle ='#8B4513';
-    this.ctx.strokeStyle = '#654321';
-    this.ctx.fillRect(x-width/20,sailTopY, width/10,-sailTopY*2);
-    this.ctx.strokeRect(x-width/20,sailTopY, width/10,-sailTopY*2);
-
   }
   
   private drawShipSailMasts(ship: Ship, camera: Camera): void {
