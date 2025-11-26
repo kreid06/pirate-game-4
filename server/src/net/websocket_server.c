@@ -1684,8 +1684,8 @@ int websocket_server_update(struct Sim* sim) {
                                             // Add modules
                                             for (int m = 0; m < ships[s].module_count && ships_offset < (int)sizeof(ships_str) - 200; m++) {
                                                 const ShipModule* module = &ships[s].modules[m];
-                                                float module_x = Q16_TO_FLOAT(module->local_pos.x);
-                                                float module_y = Q16_TO_FLOAT(module->local_pos.y);
+                                                float module_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+                                                float module_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
                                                 float module_rot = Q16_TO_FLOAT(module->local_rot);
                                                 
                                                 ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
@@ -2246,8 +2246,8 @@ int websocket_server_update(struct Sim* sim) {
                     // Add modules from simple ships
                     for (int m = 0; m < ships[s].module_count && offset < (int)sizeof(ship_entry) - 200; m++) {
                         const ShipModule* module = &ships[s].modules[m];
-                        float module_x = Q16_TO_FLOAT(module->local_pos.x);
-                        float module_y = Q16_TO_FLOAT(module->local_pos.y);
+                        float module_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+                        float module_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
                         float module_rot = Q16_TO_FLOAT(module->local_rot);
                         
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
@@ -2277,14 +2277,18 @@ int websocket_server_update(struct Sim* sim) {
                         "{\"id\":%u,\"name\":\"Player_%u\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
                         "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
-                        "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\"}",
+                        "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\","
+                        "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u}",
                         players[p].player_id, players[p].player_id, 
                         players[p].x, players[p].y, players[p].rotation,
                         players[p].velocity_x, players[p].velocity_y, 
                         players[p].is_moving ? "true" : "false",
                         players[p].movement_direction_x, players[p].movement_direction_y,
                         players[p].parent_ship_id, players[p].local_x, players[p].local_y,
-                        get_state_string(players[p].movement_state));
+                        get_state_string(players[p].movement_state),
+                        players[p].is_mounted ? "true" : "false",
+                        players[p].mounted_module_id,
+                        players[p].controlling_ship_id);
                 strcat(players_json, player_entry);
                 first_player = false;
                 active_count++;
