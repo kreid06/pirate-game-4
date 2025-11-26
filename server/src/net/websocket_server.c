@@ -3105,6 +3105,7 @@ void websocket_server_tick(float dt) {
     }
     
     // ===== APPLY WIND-BASED SHIP MOVEMENT =====
+    static uint32_t last_movement_log = 0;
     if (global_sim && global_sim->ship_count > 0) {
         for (uint32_t s = 0; s < global_sim->ship_count; s++) {
             struct Ship* ship = &global_sim->ships[s];
@@ -3124,7 +3125,7 @@ void websocket_server_tick(float dt) {
             // Wind power (0-1) * sail openness (0-100) * base speed
             const float BASE_WIND_SPEED = 5.0f; // meters per second at full wind, full sails
             float wind_force_factor = (global_sim->wind_power * avg_sail_openness / 100.0f);
-            float forward_speed = BASE_WIND_SPEED * wind_force_factor;
+            float target_speed = BASE_WIND_SPEED * wind_force_factor;
             
             // Get current ship speed (magnitude of velocity)
             float vx = Q16_TO_FLOAT(ship->velocity.x);
@@ -3133,16 +3134,31 @@ void websocket_server_tick(float dt) {
             
             // Apply forward force in ship's facing direction
             float ship_rot = Q16_TO_FLOAT(ship->rotation);
-            float forward_x = cosf(ship_rot) * forward_speed;
-            float forward_y = sinf(ship_rot) * forward_speed;
+            float target_vx = cosf(ship_rot) * target_speed;
+            float target_vy = sinf(ship_rot) * target_speed;
             
-            // Blend current velocity with wind-driven velocity (smooth acceleration)
-            const float WIND_ACCEL_RATE = 0.1f; // How quickly ship accelerates to wind speed
-            vx += (forward_x - vx) * WIND_ACCEL_RATE * dt;
-            vy += (forward_y - vy) * WIND_ACCEL_RATE * dt;
+            // Debug logging every 2 seconds
+            if (current_time - last_movement_log > 2000 && avg_sail_openness > 0) {
+                log_info("⛵ Ship %u: masts=%d, avg_openness=%.1f%%, wind=%.2f, target_speed=%.2f m/s, current_speed=%.2f m/s, pos=(%.1f,%.1f)",
+                         ship->id, mast_count, avg_sail_openness, global_sim->wind_power, target_speed, current_speed,
+                         SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x)), SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y)));
+                last_movement_log = current_time;
+            }
+            
+            // Smoothly accelerate toward target velocity
+            // Using exponential smoothing: vel += (target - vel) * blend_factor
+            // Higher blend factor = faster acceleration (1.0 = instant, 0.0 = no change)
+            const float WIND_ACCEL_RATE = 2.0f; // How many seconds to reach 63% of target speed
+            float blend_factor = 1.0f - expf(-dt / WIND_ACCEL_RATE);
+            
+            vx += (target_vx - vx) * blend_factor;
+            vy += (target_vy - vy) * blend_factor;
             
             ship->velocity.x = Q16_FROM_FLOAT(vx);
             ship->velocity.y = Q16_FROM_FLOAT(vy);
+            
+            // Recalculate current speed after velocity update (for turning calculation)
+            current_speed = sqrtf(vx * vx + vy * vy);
             
             // ===== APPLY RUDDER-BASED TURNING =====
             // Turning effectiveness depends on ship speed

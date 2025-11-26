@@ -389,6 +389,10 @@ static void init_simulation(struct ServerContext* ctx) {
     ctx->simulation.air_friction = Q16_FROM_FLOAT(0.99f);  
     ctx->simulation.buoyancy_factor = Q16_FROM_FLOAT(1.2f);
     
+    // Initialize global wind (default moderate wind)
+    ctx->simulation.wind_power = 0.5f;      // 50% wind power
+    ctx->simulation.wind_direction = 0.0f;  // East direction (for future use)
+    
     // Create the starting brigantine ship at spawn point (scaled from client coords)
     Vec2Q16 ship_spawn = {
         Q16_FROM_FLOAT(CLIENT_TO_SERVER(100.0f)), 
