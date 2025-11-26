@@ -646,7 +646,8 @@ export class UDPNetworkManager {
           maxSpeed: BRIGANTINE_PHYSICS.maxSpeed,
           turnRate: BRIGANTINE_PHYSICS.turnRate,
           waterDrag: BRIGANTINE_PHYSICS.waterDrag,
-          angularDrag: BRIGANTINE_PHYSICS.angularDrag
+          angularDrag: BRIGANTINE_PHYSICS.angularDrag,
+          rudderAngle: 0
         });
       } else {
         // Projectile entities  

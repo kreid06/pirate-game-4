@@ -345,7 +345,8 @@ export class BrigantineTestBuilder {
       angularVelocity: 0,
       hull,
       modules: this.getModules(),
-      ...BRIGANTINE_PHYSICS
+      ...BRIGANTINE_PHYSICS,
+      rudderAngle: 0
     };
   }
 

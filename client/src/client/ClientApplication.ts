@@ -686,7 +686,8 @@ export class ClientApplication {
           maxSpeed: 30,                  // m/s
           turnRate: 0.5,                 // rad/s
           waterDrag: 0.98,               // coefficient (0-1)
-          angularDrag: 0.95              // coefficient (0-1)
+          angularDrag: 0.95,             // coefficient (0-1)
+          rudderAngle: 0                 // radians
         }
       ],
       players: [

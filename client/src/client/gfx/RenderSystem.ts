@@ -441,6 +441,7 @@ export class RenderSystem {
     // Queue cannons and steering wheels (layers 4-5)
     for (const ship of worldState.ships) {
       this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
+      this.queueRenderItem(4, 'rudder', () => this.drawShipRudder(ship, camera));
       this.queueRenderItem(5, 'steering-wheels', () => this.drawShipSteeringWheels(ship, camera));
       this.queueRenderItem(5, 'ladders', () => this.drawShipLadders(ship, camera));
     }
@@ -851,6 +852,58 @@ export class RenderSystem {
     this.ctx.restore();
   }
   
+  private drawShipRudder(ship: Ship, camera: Camera): void {
+    // Check if ship is visible
+    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+      return;
+    }
+    
+    this.ctx.save();
+    
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+    
+    // Rudder position at the stern (slightly forward of the absolute tip)
+    // Brigantine stern tip is at x = -345, positioning rudder at -320 for better visual placement
+    const rudderX = -300; // Near the stern tip
+    const rudderY = 0; // Centered vertically
+    
+    // Rudder dimensions
+    const rudderWidth = 8;
+    const rudderLength = 30;
+    
+    // Get rudder angle from ship state (server provides this)
+    const rudderAngle = ship.rudderAngle || 0;
+    
+    // Move to rudder pivot point
+    this.ctx.save();
+    this.ctx.translate(rudderX, rudderY);
+    this.ctx.rotate(Math.PI / 2); // Rotate 90 degrees to make it perpendicular (pointing backward)
+    this.ctx.rotate(rudderAngle); // Apply rudder turning angle
+    
+    // Draw rudder as a rectangle extending backward from the stern
+    this.ctx.fillStyle = '#4A3020'; // Dark brown wood color
+    this.ctx.strokeStyle = '#2A1810';
+    this.ctx.lineWidth = 1;
+    
+    // Draw rudder rectangle (centered on pivot, extending in positive Y direction which is now backward)
+    this.ctx.fillRect(-rudderWidth / 2, 0, rudderWidth, rudderLength);
+    this.ctx.strokeRect(-rudderWidth / 2, 0, rudderWidth, rudderLength);
+    
+    // Draw pivot pin/hinge
+    this.ctx.fillStyle = '#888888'; // Gray metal
+    this.ctx.beginPath();
+    this.ctx.arc(0, 0, 3, 0, Math.PI * 2);
+    this.ctx.fill();
+    
+    this.ctx.restore();
+    this.ctx.restore();
+  }
+  
   private drawShipSailFibers(ship: Ship, camera: Camera): void {
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
@@ -881,9 +934,8 @@ export class RenderSystem {
       const angle = mastData.angle; // Sail angle in degrees
       
       // Only draw sail if openness > 0
-      if (mastData.openness > 0) {
         this.drawSailFiber(x, y, width, height, sailColor, mastData.openness / 100, angle);
-      }
+      
     }
     
     this.ctx.restore();
@@ -899,7 +951,7 @@ export class RenderSystem {
     this.ctx.translate(-x, -y);
     
     const sailTopY = y - height * 1.4; // Top of sail attaches to yard
-    const sailPower = height * 1.4 * openness; // Adjust height based on openness
+    const sailPower = width * 1.2 * openness; // Adjust height based on openness
     
     // Create a gradient for the sail
     const gradient = this.ctx.createLinearGradient(
@@ -916,7 +968,7 @@ export class RenderSystem {
     this.ctx.lineTo(x, -sailTopY);
     
     // Bottom of sail curves slightly
-    this.ctx.quadraticCurveTo(x+sailPower+10, y, x, sailTopY);
+    this.ctx.quadraticCurveTo(x+sailPower+25, y, x, sailTopY);
    
     this.ctx.closePath();
     

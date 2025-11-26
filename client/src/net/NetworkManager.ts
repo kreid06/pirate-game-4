@@ -855,12 +855,12 @@ export class NetworkManager {
                   if (kind === 'cannon') {
                     moduleData = {
                       kind: 'cannon',
-                      aimDirection: 0,
+                      aimDirection: mod.aimDir ?? 0,
                       maxAimSpeed: 1.0,
                       fireRange: 500,
                       reloadTime: 3.0,
                       timeSinceLastFire: 0,
-                      ammunition: 50,
+                      ammunition: mod.ammo ?? 50,
                       maxAmmunition: 50
                     };
                   } else if (kind === 'helm' || kind === 'steering-wheel') {
@@ -869,14 +869,15 @@ export class NetworkManager {
                       maxTurnRate: 1.0,
                       responsiveness: 0.8,
                       currentInput: Vec2.from(0, 0),
-                      wheelRotation: 0
+                      wheelRotation: mod.wheelRot ?? 0,
+                      occupied: mod.occupied ?? false
                     };
                   } else if (kind === 'mast') {
                     moduleData = {
                       kind: 'mast',
                       sailState: 'full',
-                      openness: 80,
-                      angle: 0,
+                      openness: mod.openness ?? 80,
+                      angle: mod.sailAngle ?? 0,
                       radius: 15,
                       height: 120,
                       sailWidth: 80,
@@ -939,6 +940,7 @@ export class NetworkManager {
               turnRate: ship.turn_rate ?? properShip.turnRate,
               waterDrag: ship.water_drag ?? properShip.waterDrag,
               angularDrag: ship.angular_drag ?? properShip.angularDrag,
+              rudderAngle: ship.rudder_angle ?? 0,
             };
           }),
           players: (message.players || []).map((player: any) => ({

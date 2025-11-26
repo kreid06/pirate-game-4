@@ -79,6 +79,7 @@ export function createShipAtPosition(position: Vec2, rotation: number): Ship {
     maxSpeed: BRIGANTINE_PHYSICS.maxSpeed,
     turnRate: BRIGANTINE_PHYSICS.turnRate,
     waterDrag: BRIGANTINE_PHYSICS.waterDrag,
-    angularDrag: BRIGANTINE_PHYSICS.angularDrag
+    angularDrag: BRIGANTINE_PHYSICS.angularDrag,
+    rudderAngle: 0
   };
 }
