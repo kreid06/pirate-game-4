@@ -34,8 +34,21 @@ Sent continuously while right-mouse is held and player is on a ship.
 {
   type: "cannon_aim",
   timestamp: 1732637892341,
-  aim_angle: 1.047  // Radians, world coordinates (player->mouse direction)
+  aim_angle: 0.524  // Radians, SHIP-RELATIVE angle (not world coordinates)
 }
+```
+
+**Client Calculation**:
+```typescript
+// World angle from player to mouse cursor
+const aimAngleWorld = Math.atan2(dy, dx);
+
+// Convert to ship-relative angle
+let aimAngleRelative = aimAngleWorld - shipRotation;
+
+// Normalize to [-π, π] range
+while (aimAngleRelative > Math.PI) aimAngleRelative -= 2 * Math.PI;
+while (aimAngleRelative < -Math.PI) aimAngleRelative += 2 * Math.PI;
 ```
 
 **Client Throttling**:
@@ -43,9 +56,10 @@ Sent continuously while right-mouse is held and player is on a ship.
 - Prevents network spam from minor mouse movements
 
 **Server Expected Behavior**:
-1. Convert world aim angle to ship-relative angle
+1. Receive ship-relative aim angle (already normalized)
 2. Update `aim_direction` for all cannons or player's aim state
 3. Track which cannons are "aimed" (within firing arc)
+4. No need for coordinate conversion - angle is already ship-relative
 
 ---
 
@@ -111,9 +125,28 @@ private readonly DOUBLE_CLICK_THRESHOLD = 300; // 300ms window
 **Aim Calculation**:
 ```typescript
 // In handleCannonAiming()
+// 1. Calculate world angle from player to mouse
 const dx = mouseWorldPosition.x - playerPosition.x;
 const dy = mouseWorldPosition.y - playerPosition.y;
 const aimAngleWorld = Math.atan2(dy, dx);
+
+// 2. Convert to ship-relative angle
+let aimAngleRelative = aimAngleWorld - currentShipRotation;
+
+// 3. Normalize to [-π, π] range
+while (aimAngleRelative > Math.PI) aimAngleRelative -= 2 * Math.PI;
+while (aimAngleRelative < -Math.PI) aimAngleRelative += 2 * Math.PI;
+```
+
+**Ship Rotation Tracking**:
+```typescript
+// In ClientApplication.updateWorldState()
+if (player.carrierId) {
+  const ship = worldState.ships.find(s => s.id === player.carrierId);
+  if (ship) {
+    this.inputManager.setCurrentShipRotation(ship.rotation);
+  }
+}
 ```
 
 **Double-Click Detection**:
@@ -205,15 +238,11 @@ else if (strstr(payload, "\"type\":\"cannon_fire\"")) {
 **Option A: Store per-player aim state**
 ```c
 void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
-    player->cannon_aim_angle = aim_angle;
+    // Angle is already ship-relative from client
+    player->cannon_aim_angle_relative = aim_angle;
     
-    // Optional: Convert to ship-relative angle if needed
-    if (player->parent_ship_id > 0) {
-        SimpleShip* ship = find_ship(player->parent_ship_id);
-        if (ship) {
-            player->cannon_aim_angle_relative = aim_angle - ship->rotation;
-        }
-    }
+    log_info("🎯 Player %u aiming cannons at %.2f° (ship-relative)", 
+             player->player_id, aim_angle * 180.0f / M_PI);
 }
 ```
 
@@ -225,12 +254,10 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship) return;
     
-    // Update all cannons with player's aim direction (ship-relative)
-    float ship_relative_angle = aim_angle - ship->rotation;
-    
+    // Angle is already ship-relative from client, just store it
     for (int i = 0; i < ship->module_count; i++) {
         if (ship->modules[i].type_id == MODULE_TYPE_CANNON) {
-            ship->modules[i].data.cannon.aim_direction = Q16_FROM_FLOAT(ship_relative_angle);
+            ship->modules[i].data.cannon.aim_direction = Q16_FROM_FLOAT(aim_angle);
         }
     }
 }
@@ -324,18 +351,19 @@ void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player) 
    - Client sets `currentShipId = 1`
 
 2. **Player holds right-click and moves mouse**
-   - Client calculates: `aim_angle = atan2(dy, dx) = 0.524 rad` (~30°)
-   - Client sends: `{"type":"cannon_aim","aim_angle":0.524}`
-   - Server updates player's `cannon_aim_angle = 0.524`
-   - Server converts to ship-relative: `0.524 - ship.rotation`
+   - Client calculates world angle: `aim_angle_world = atan2(dy, dx) = 0.524 rad` (~30°)
+   - Ship is facing: `ship.rotation = 1.57 rad` (~90°, pointing north)
+   - Client calculates ship-relative: `0.524 - 1.57 = -1.046 rad` (~-60°, starboard side)
+   - Client sends: `{"type":"cannon_aim","aim_angle":-1.046}`
+   - Server stores player's `cannon_aim_angle_relative = -1.046`
 
 3. **Player left-clicks**
    - Client detects single click (>300ms since last)
    - Client sends: `{"type":"cannon_fire","fire_all":false}`
-   - Server checks all cannons:
-     - Port cannons: aim = -1.57 rad, player aim = 0.524 rad → **skip** (difference > 15°)
-     - Starboard cannons: aim = 1.57 rad, player aim = 0.524 rad → **fire** (within tolerance)
-   - Server spawns 3 cannonball projectiles
+   - Server checks all cannons against player's aim (-1.046 rad = ~-60°):
+     - Port cannons: facing = -1.57 rad (~-90°), diff = 0.52 rad (~30°) → **fire** (within 15° tolerance with some leeway)
+     - Starboard cannons: facing = 1.57 rad (~90°), diff = 2.62 rad (~150°) → **skip** (wrong side)
+   - Server spawns cannonball projectiles from port side
    - Server broadcasts fire events
 
 4. **Player double-clicks**

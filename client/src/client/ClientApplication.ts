@@ -495,8 +495,15 @@ export class ClientApplication {
     if (playerId !== null && this.inputManager) {
       const player = worldState.players.find(p => p.id === playerId);
       if (player) {
-        // Update ship ID for cannon aiming (works even if not mounted to helm)
+        // Update ship ID and rotation for cannon aiming (works even if not mounted to helm)
         this.inputManager.setCurrentShipId(player.carrierId || null);
+        
+        if (player.carrierId) {
+          const ship = worldState.ships.find(s => s.id === player.carrierId);
+          if (ship) {
+            this.inputManager.setCurrentShipRotation(ship.rotation);
+          }
+        }
         
         const currentlyMounted = player.isMounted || false;
         

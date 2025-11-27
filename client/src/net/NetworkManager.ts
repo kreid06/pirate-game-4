@@ -1042,16 +1042,27 @@ export class NetworkManager {
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,
-            position: ball.position ? Vec2.from(ball.position.x || 0, ball.position.y || 0) : Vec2.zero(),
-            velocity: ball.velocity ? Vec2.from(ball.velocity.x || 0, ball.velocity.y || 0) : Vec2.zero(),
-            firingVelocity: ball.firingVelocity ? Vec2.from(ball.firingVelocity.x || 0, ball.firingVelocity.y || 0) : Vec2.zero(),
-            smokeTrail: (ball.smokeTrail || []).map((smoke: any) => ({
-              position: smoke.position ? Vec2.from(smoke.position.x || 0, smoke.position.y || 0) : Vec2.zero(),
-              age: smoke.age || 0
-            }))
+            position: Vec2.from(ball.x || 0, ball.y || 0),
+            velocity: Vec2.from(ball.vx || 0, ball.vy || 0),
+            firingVelocity: Vec2.from(ball.vx || 0, ball.vy || 0), // Server doesn't send separate firingVelocity
+            radius: 6, // Slightly less than cannon barrel width (~8-10 pixels)
+            maxRange: 800,
+            distanceTraveled: 0, // Server doesn't send this yet
+            timeAlive: 0, // Server doesn't send this yet
+            firedFrom: ball.owner || 0,
+            smokeTrail: [] // No smoke trail from server yet
           })),
           carrierDetection: new Map() // Will be populated as needed
         };
+        
+        // Debug: Log cannonballs received
+        if (worldState.cannonballs.length > 0) {
+          console.log(`💥 Received ${worldState.cannonballs.length} cannonballs:`, worldState.cannonballs.map(cb => ({
+            id: cb.id,
+            pos: `(${cb.position.x.toFixed(1)}, ${cb.position.y.toFixed(1)})`,
+            vel: `(${cb.velocity.x.toFixed(1)}, ${cb.velocity.y.toFixed(1)})`
+          })));
+        }
         
         
         // Debug: Log ship and player data

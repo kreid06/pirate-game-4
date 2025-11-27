@@ -1144,15 +1144,11 @@ export class RenderSystem {
     const cameraState = camera.getState();
     const scaledRadius = cannonball.radius * cameraState.zoom;
     
-    // Draw cannonball
-    this.ctx.fillStyle = '#333333'; // Dark gray
-    this.ctx.strokeStyle = '#000000';
-    this.ctx.lineWidth = 1;
-    
+    // Draw cannonball as solid black circle (simple and visible)
+    this.ctx.fillStyle = '#000000'; // Pure black
     this.ctx.beginPath();
     this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, 0, Math.PI * 2);
     this.ctx.fill();
-    this.ctx.stroke();
   }
   
   private drawLoadingSpinner(): void {

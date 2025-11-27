@@ -108,6 +108,7 @@ export class InputManager {
   private lastLeftClickTime: number = 0;
   private readonly DOUBLE_CLICK_THRESHOLD = 300; // 300ms for double-click detection
   private currentShipId: number | null = null; // Track which ship player is on for aim calculation
+  private currentShipRotation: number = 0; // Track ship's current rotation for relative aiming
   
   // HYBRID PROTOCOL: Movement stop detection
   private playerVelocity: Vec2 = Vec2.zero();
@@ -266,6 +267,13 @@ export class InputManager {
    */
   setCurrentShipId(shipId: number | null): void {
     this.currentShipId = shipId;
+  }
+  
+  /**
+   * Set current ship rotation (for ship-relative cannon aiming)
+   */
+  setCurrentShipRotation(rotation: number): void {
+    this.currentShipRotation = rotation;
   }
   
   /**
@@ -432,24 +440,29 @@ export class InputManager {
       return;
     }
     
-    // Calculate aim angle from player position to mouse position
+    // Calculate aim angle from player position to mouse position (world coordinates)
     const dx = this.inputState.mouseWorldPosition.x - this.playerPosition.x;
     const dy = this.inputState.mouseWorldPosition.y - this.playerPosition.y;
     const aimAngleWorld = Math.atan2(dy, dx);
     
-    // TODO: Get ship rotation from world state to make angle relative to ship
-    // For now, use absolute world angle (will be updated when we pass ship rotation)
-    const aimAngle = aimAngleWorld;
+    // Convert to ship-relative angle
+    // Ship rotation is the direction the ship is facing
+    // We want the angle relative to the ship's forward direction
+    let aimAngleRelative = aimAngleWorld - this.currentShipRotation;
+    
+    // Normalize to [-π, π] range
+    while (aimAngleRelative > Math.PI) aimAngleRelative -= 2 * Math.PI;
+    while (aimAngleRelative < -Math.PI) aimAngleRelative += 2 * Math.PI;
     
     // Only send if aim changed significantly (>1 degree)
     const ANGLE_THRESHOLD = 0.017; // ~1 degree in radians
-    const angleDelta = Math.abs(aimAngle - this.lastCannonAimAngle);
+    const angleDelta = Math.abs(aimAngleRelative - this.lastCannonAimAngle);
     
     if (angleDelta > ANGLE_THRESHOLD) {
       if (this.onCannonAim) {
-        this.onCannonAim(aimAngle);
+        this.onCannonAim(aimAngleRelative);
       }
-      this.lastCannonAimAngle = aimAngle;
+      this.lastCannonAimAngle = aimAngleRelative;
     }
   }
   
