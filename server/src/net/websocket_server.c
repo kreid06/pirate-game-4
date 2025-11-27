@@ -2480,7 +2480,9 @@ int websocket_server_update(struct Sim* sim) {
     
     if (current_time - last_game_state_time > update_interval) {
         // Build ships JSON array with physics properties and modules
-        char ships_json[8192] = "[";  // Increased buffer for module data
+        char ships_json[8192];
+        int ships_offset = 0;
+        ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "[");
         bool first_ship = true;
         
         // Log which ship source we're using
@@ -2498,7 +2500,9 @@ int websocket_server_update(struct Sim* sim) {
         if (sim && sim->ship_count > 0) {
             for (uint32_t s = 0; s < sim->ship_count; s++) {
                 const struct Ship* ship = &sim->ships[s];
-                if (!first_ship) strcat(ships_json, ",");
+                if (!first_ship) {
+                    ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, ",");
+                }
                 
                 // Convert ship physics to client units
                 float pos_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
@@ -2575,14 +2579,16 @@ int websocket_server_update(struct Sim* sim) {
                 }
                 
                 offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
-                strcat(ships_json, ship_entry);
+                ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "%s", ship_entry);
                 first_ship = false;
             }
         } else {
             // Fallback to simple ships array (backward compatibility)
             for (int s = 0; s < ship_count; s++) {
                 if (ships[s].active) {
-                    if (!first_ship) strcat(ships_json, ",");
+                    if (!first_ship) {
+                        ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, ",");
+                    }
                     
                     // Build ship entry with modules
                     char ship_entry[4096];
@@ -2638,21 +2644,25 @@ int websocket_server_update(struct Sim* sim) {
                     }
                     
                     offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
-                    strcat(ships_json, ship_entry);
+                    ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "%s", ship_entry);
                     first_ship = false;
                 }
             }
         }
-        strcat(ships_json, "]");
+        ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "]");
         
         // Build players JSON array with ship relationship data
-        char players_json[2048] = "[";
+        char players_json[2048];
+        int players_offset = 0;
+        players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "[");
         bool first_player = true;
         int active_count = 0;
         
         for (int p = 0; p < WS_MAX_CLIENTS; p++) {
             if (players[p].active) {
-                if (!first_player) strcat(players_json, ",");
+                if (!first_player) {
+                    players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, ",");
+                }
                 char player_entry[384];  // Increased size for additional fields
                 snprintf(player_entry, sizeof(player_entry),
                         "{\"id\":%u,\"name\":\"Player_%u\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
@@ -2670,12 +2680,12 @@ int websocket_server_update(struct Sim* sim) {
                         players[p].is_mounted ? "true" : "false",
                         players[p].mounted_module_id,
                         players[p].controlling_ship_id);
-                strcat(players_json, player_entry);
+                players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "%s", player_entry);
                 first_player = false;
                 active_count++;
             }
         }
-        strcat(players_json, "]");
+        players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "]");
         
         // Adaptive tick rate based on activity
         bool has_recent_movement = (current_time - g_last_movement_time) < 2000; // Movement in last 2 seconds
