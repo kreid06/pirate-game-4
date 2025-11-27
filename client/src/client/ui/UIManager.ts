@@ -96,6 +96,47 @@ export class UIManager {
         }
       }
     }
+    
+    // Always render FPS in top-right corner
+    this.renderFPS(ctx, context);
+  }
+  
+  /**
+   * Render FPS counter in top-right corner
+   */
+  private renderFPS(ctx: CanvasRenderingContext2D, context: UIRenderContext): void {
+    ctx.save();
+    
+    const fps = Math.round(context.fps);
+    const text = `${fps} FPS`;
+    
+    // Measure text width for background
+    ctx.font = 'bold 20px Consolas, monospace';
+    const textMetrics = ctx.measureText(text);
+    const textWidth = textMetrics.width;
+    const textHeight = 24;
+    
+    // Position in top-right corner
+    const padding = 10;
+    const x = ctx.canvas.width - textWidth - padding * 2;
+    const y = padding;
+    
+    // Draw semi-transparent background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(x, y, textWidth + padding * 2, textHeight + padding);
+    
+    // Draw border
+    ctx.strokeStyle = fps >= 60 ? '#00ff00' : fps >= 30 ? '#ffaa00' : '#ff0000';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, textWidth + padding * 2, textHeight + padding);
+    
+    // Draw FPS text
+    ctx.fillStyle = fps >= 60 ? '#00ff00' : fps >= 30 ? '#ffaa00' : '#ff0000';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(text, x + padding, y + padding);
+    
+    ctx.restore();
   }
   
   /**

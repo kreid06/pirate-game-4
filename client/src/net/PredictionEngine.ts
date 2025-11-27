@@ -88,6 +88,7 @@ export class PredictionEngine {
   
   // Timing and lag compensation
   private clientTick = 0;
+  private clientTickAtLastServerState = 0;
   private estimatedNetworkDelay = 0;
   private serverTickOffset = 0;
   
@@ -124,6 +125,34 @@ export class PredictionEngine {
   }
   
   /**
+   * Update network latency estimate for dynamic interpolation buffer
+   */
+  updateNetworkLatency(pingMs: number): void {
+    // One-way latency is half of round-trip time (ping)
+    const oneWayLatency = pingMs / 2;
+    
+    // Smooth the estimate with exponential moving average
+    const alpha = 0.1; // Smoothing factor
+    this.estimatedNetworkDelay = this.estimatedNetworkDelay * (1 - alpha) + oneWayLatency * alpha;
+    
+    // Calculate dynamic interpolation buffer
+    // Buffer = one-way latency + server tick time + jitter margin
+    const serverTickTime = 1000 / this.config.serverTickRate;
+    const jitterMargin = 30; // 30ms safety margin for network jitter
+    const dynamicBuffer = this.estimatedNetworkDelay + serverTickTime + jitterMargin;
+    
+    // Update config with dynamic buffer (but cap at reasonable limits)
+    const minBuffer = 50; // Minimum 50ms
+    const maxBuffer = 300; // Maximum 300ms
+    this.config.interpolationBuffer = Math.max(minBuffer, Math.min(maxBuffer, dynamicBuffer));
+    
+    // Log occasionally for debugging
+    if (Math.random() < 0.01) {
+      console.log(`📡 Network: ping=${pingMs.toFixed(0)}ms, buffer=${this.config.interpolationBuffer.toFixed(0)}ms`);
+    }
+  }
+  
+  /**
    * Initialize ring buffers for prediction and rewind
    */
   private initializeBuffers(): void {
@@ -136,6 +165,22 @@ export class PredictionEngine {
    */
   update(baseWorldState: WorldState, inputFrame: InputFrame, deltaTime: number): WorldState {
     this.clientTick++;
+    
+    // Calculate server tick: last server tick + number of client ticks / ratio
+    // Server runs at 30Hz, client at 120Hz, so every 4 client ticks = 1 server tick
+    const clientToServerRatio = this.config.clientTickRate / this.config.serverTickRate; // 120/30 = 4
+    
+    // If this is the first update after receiving server state, reset client tick base
+    if (!this.clientTickAtLastServerState) {
+      this.clientTickAtLastServerState = this.clientTick;
+    }
+    
+    const clientTicksSinceLastServer = this.clientTick - this.clientTickAtLastServerState;
+    const serverTickOffset = Math.floor(clientTicksSinceLastServer / clientToServerRatio);
+    const estimatedServerTick = this.lastAuthoritativeTick + serverTickOffset;
+    
+    // Override input frame tick with estimated server tick
+    inputFrame.tick = estimatedServerTick;
     
     // Ensure movement is a proper Vec2 object
     if (inputFrame.movement && typeof inputFrame.movement === 'object' && !('mul' in inputFrame.movement)) {
@@ -155,9 +200,6 @@ export class PredictionEngine {
     // Store in rewind buffer for lag compensation
     this.updateRewindBuffer(this.clientTick, baseWorldState, inputFrame, deltaTime);
     
-    // Store prediction state with enhanced tracking
-    this.storePredictionState(this.clientTick, baseWorldState, inputFrame);
-    
     if (!this.config.enablePrediction) {
       // Prediction disabled - just return authoritative state
       return baseWorldState;
@@ -165,6 +207,9 @@ export class PredictionEngine {
     
     // Perform client-side simulation step
     const predictedState = this.simulateStep(baseWorldState, inputFrame, deltaTime);
+    
+    // Store prediction state using the estimated server tick
+    this.storePredictionState(inputFrame.tick, predictedState, inputFrame);
     
     // Handle rollback if needed
     if (this.needsRollback) {
@@ -181,12 +226,29 @@ export class PredictionEngine {
     this.authoritativeState = serverState;
     this.lastAuthoritativeTick = serverState.tick;
     
+    // Reset client tick offset when we get a new server state
+    this.clientTickAtLastServerState = this.clientTick;
+    
     // Add to server state buffer for interpolation
     this.addServerState(serverState);
     
-    // Check if we need to rollback and re-predict
     const predictionState = this.findPredictionState(serverState.tick);
+    
     if (predictionState) {
+      const serverPlayer = serverState.players[0];
+      const predictedPlayer = predictionState.worldState.players[0];
+      
+      if (serverPlayer && predictedPlayer) {
+        const serverVel = serverPlayer.velocity.length();
+        const predictedVel = predictedPlayer.velocity.length();
+        const posDiff = serverPlayer.position.sub(predictedPlayer.position).length();
+        
+        // Only log significant differences
+        if (posDiff > 5.0 || Math.abs(serverVel - predictedVel) > 1.0) {
+          console.log(`⚠️ Prediction error | Tick ${serverState.tick} | Pos diff: ${posDiff.toFixed(2)}u | Vel diff: ${Math.abs(serverVel - predictedVel).toFixed(2)} | Server vel: (${serverPlayer.velocity.x.toFixed(2)}, ${serverPlayer.velocity.y.toFixed(2)}) = ${serverVel.toFixed(2)} | Predicted vel: (${predictedPlayer.velocity.x.toFixed(2)}, ${predictedPlayer.velocity.y.toFixed(2)}) = ${predictedVel.toFixed(2)}`);
+        }
+      }
+      
       // Compare server state with our prediction at the same tick
       if (this.statesDiffer(serverState, predictionState.worldState)) {
         console.log(`🔄 Server correction detected at tick ${serverState.tick}`);
@@ -227,43 +289,24 @@ export class PredictionEngine {
       }
     }
     
-    // Handle cases where we need extrapolation or fallback
+    // Handle cases where we can't find two states to interpolate between
     if (!fromState || !toState) {
       if (this.serverStateBuffer.length > 0) {
         const latestState = this.serverStateBuffer[this.serverStateBuffer.length - 1];
         const oldestState = this.serverStateBuffer[0];
         
-        // If we're ahead of the latest state, extrapolate forward
-        if (renderTime > latestState.receiveTime) {
-          const timeSinceLastUpdate = renderTime - latestState.receiveTime;
-          
-          // Only extrapolate up to the configured limit
-          if (timeSinceLastUpdate <= this.config.extrapolationLimit) {
-            // Occasional debug log for extrapolation
-            if (Math.random() < 0.01) {
-              console.log(`📊 Extrapolating ${timeSinceLastUpdate.toFixed(1)}ms ahead of latest server state`);
-            }
-            return this.extrapolateState(latestState.worldState, timeSinceLastUpdate / 1000);
-          } else {
-            // Warn if we're extrapolating too far (indicates server lag or packet loss)
-            if (Math.random() < 0.05) {
-              console.warn(`⚠️ Extrapolation limit exceeded: ${timeSinceLastUpdate.toFixed(1)}ms (limit: ${this.config.extrapolationLimit}ms) - using last state`);
-            }
-          }
-        }
-        
-        // Use most recent state if extrapolation limit exceeded
+        // If we're ahead of the latest state, just use the latest state (no extrapolation)
         if (renderTime >= latestState.receiveTime) {
           return latestState.worldState;
         }
         
-        // Warn if we're behind the buffer (shouldn't happen with proper buffering)
-        if (renderTime < oldestState.receiveTime && Math.random() < 0.05) {
-          console.warn(`⚠️ Render time ${renderTime.toFixed(1)} behind oldest state ${oldestState.receiveTime.toFixed(1)} - buffer underrun`);
+        // If we're behind the buffer, use oldest state
+        if (renderTime < oldestState.receiveTime) {
+          if (Math.random() < 0.05) {
+            console.warn(`⚠️ Render time ${renderTime.toFixed(1)} behind oldest state ${oldestState.receiveTime.toFixed(1)} - buffer underrun`);
+          }
+          return oldestState.worldState;
         }
-        
-        // Use oldest state if we're behind
-        return oldestState.worldState;
       }
       return this.authoritativeState;
     }
@@ -283,6 +326,11 @@ export class PredictionEngine {
     
     // Be conservative with alpha - stay within known data
     const clampedAlpha = Math.max(0, Math.min(1.0, alpha));
+    
+    // Debug log occasionally to confirm interpolation is happening
+    if (Math.random() < 0.002) { // ~0.2% chance per frame = once every few seconds
+      console.log(`🔄 Interpolating: alpha=${clampedAlpha.toFixed(3)}, from tick ${fromState.worldState.tick} to ${toState.worldState.tick}`);
+    }
     
     // Interpolate between the two states
     return this.interpolateStates(fromState.worldState, toState.worldState, clampedAlpha);
@@ -355,8 +403,8 @@ export class PredictionEngine {
     return {
       tick: Math.round(from.tick + (to.tick - from.tick) * alpha),
       timestamp: from.timestamp + (to.timestamp - from.timestamp) * alpha,
-      ships: this.interpolateShips(from.ships, to.ships, smoothAlpha),
-      players: this.interpolatePlayers(from.players, to.players, smoothAlpha),
+      ships: this.interpolateShips(from.ships, to.ships, alpha), // LINEAR - handles varying server intervals better
+      players: this.interpolatePlayers(from.players, to.players, alpha), // LINEAR - matches ship interpolation for mounted players
       cannonballs: this.interpolateCannonballs(from.cannonballs, to.cannonballs, smoothAlpha),
       carrierDetection: new Map(from.carrierDetection)
     };
@@ -379,21 +427,34 @@ export class PredictionEngine {
   private interpolateShips(fromShips: any[], toShips: any[], alpha: number): any[] {
     const result = [];
     
+    // DEBUG: Log ship count mismatch
+    if (fromShips.length !== toShips.length) {
+      console.warn(`⚠️ Ship count mismatch! From: ${fromShips.length}, To: ${toShips.length}`);
+    }
+    
     for (const toShip of toShips) {
       const fromShip = fromShips.find(s => s.id === toShip.id);
       
       if (!fromShip) {
+        console.warn(`⚠️ Ship ${toShip.id} missing in from state - can't interpolate, using toShip directly`);
         result.push(toShip);
         continue;
       }
       
-      result.push({
+      const interpolated = {
         ...toShip,
         position: this.lerpVec2(fromShip.position, toShip.position, alpha),
         velocity: this.lerpVec2(fromShip.velocity, toShip.velocity, alpha),
         rotation: this.lerpAngle(fromShip.rotation, toShip.rotation, alpha),
         angularVelocity: fromShip.angularVelocity + (toShip.angularVelocity - fromShip.angularVelocity) * alpha
-      });
+      };
+      
+      // Log interpolated ship state occasionally
+      if (Math.random() < 0.02) { // 2% sample
+        console.log(`🚢 Ship ${toShip.id} interpolated (α=${alpha.toFixed(3)}) | From pos: (${fromShip.position.x.toFixed(1)}, ${fromShip.position.y.toFixed(1)}) rot: ${fromShip.rotation.toFixed(2)} | To pos: (${toShip.position.x.toFixed(1)}, ${toShip.position.y.toFixed(1)}) rot: ${toShip.rotation.toFixed(2)} | Result pos: (${interpolated.position.x.toFixed(1)}, ${interpolated.position.y.toFixed(1)}) rot: ${interpolated.rotation.toFixed(2)}`);
+      }
+      
+      result.push(interpolated);
     }
     
     return result;
@@ -550,10 +611,25 @@ export class PredictionEngine {
       
       if (!player1 || !player2) return true;
       
-      // Check position difference (with tolerance for floating-point errors)
+      // Check position difference with velocity-based tolerance
       const positionDiff = player1.position.sub(player2.position).length();
-      if (positionDiff > 1.0) { // 1 unit tolerance
-        console.log(`Player ${player1.id} position diff: ${positionDiff}`);
+      
+      // Check velocity difference (important for detecting input desync)
+      const velocityDiff = player1.velocity.sub(player2.velocity).length();
+      
+      // Higher tolerance for moving players to prevent choppy rendering
+      const velocity1 = player1.velocity.length();
+      const velocity2 = player2.velocity.length();
+      const isMoving = velocity1 > 0.1 || velocity2 > 0.1;
+      
+      // Dynamic tolerance based on movement state
+      const baseTolerance = this.config.predictionErrorThreshold; // 5.0 units
+      const movementTolerance = isMoving ? baseTolerance * 2.0 : baseTolerance; // Double when moving
+      
+      // Trigger rollback if EITHER position OR velocity differs significantly
+      // Velocity threshold of 10.0 units/s to avoid constant corrections during normal deceleration
+      // (input lag causes ~7 units/s difference during stop, which is acceptable)
+      if (positionDiff > movementTolerance || velocityDiff > 10.0) {
         return true;
       }
       
@@ -574,7 +650,7 @@ export class PredictionEngine {
       if (!ship1 || !ship2) return true;
       
       const positionDiff = ship1.position.sub(ship2.position).length();
-      if (positionDiff > 2.0) { // 2 unit tolerance for ships
+      if (positionDiff > 5.0) { // Increased from 2.0 to 5.0 units tolerance for ships
         return true;
       }
     }
@@ -594,7 +670,7 @@ export class PredictionEngine {
       return currentPredictedState;
     }
     
-    console.log(`🎬 Performing rollback from tick ${this.rollbackTick}`);
+    console.log(`🎬 Performing rollback from tick ${this.rollbackTick} WITH SMOOTHING`);
     
     // Start from authoritative state
     let correctedState = this.cloneWorldState(this.authoritativeState);
@@ -608,11 +684,50 @@ export class PredictionEngine {
       correctedState = this.simulateStep(correctedState, state.inputFrame, deltaTime);
     }
     
+    // Apply smooth correction instead of instant snap
+    // Blend between current prediction and corrected state for smoother visual result
+    const smoothingFactor = 0.15; // 15% towards correction per frame for gentler corrections
+    const blendedState = this.blendWorldStates(currentPredictedState, correctedState, smoothingFactor);
+    
+    console.log(`🔄 Smoothed correction: ${smoothingFactor * 100}% blend applied`);
+    
     // Update prediction history with corrected states
-    this.updatePredictionHistory(rollbackStates, correctedState);
+    this.updatePredictionHistory(rollbackStates, blendedState);
     
     this.needsRollback = false;
-    return correctedState;
+    return blendedState;
+  }
+  
+  /**
+   * Blend between two world states for smooth corrections
+   */
+  private blendWorldStates(from: WorldState, to: WorldState, alpha: number): WorldState {
+    return {
+      tick: to.tick,
+      timestamp: to.timestamp,
+      ships: to.ships.map((toShip, i) => {
+        const fromShip = from.ships[i];
+        if (!fromShip) return toShip;
+        
+        return {
+          ...toShip,
+          position: fromShip.position.lerp(toShip.position, alpha),
+          velocity: fromShip.velocity.lerp(toShip.velocity, alpha),
+        };
+      }),
+      players: to.players.map((toPlayer, i) => {
+        const fromPlayer = from.players[i];
+        if (!fromPlayer) return toPlayer;
+        
+        return {
+          ...toPlayer,
+          position: fromPlayer.position.lerp(toPlayer.position, alpha),
+          velocity: fromPlayer.velocity.lerp(toPlayer.velocity, alpha),
+        };
+      }),
+      cannonballs: to.cannonballs, // Don't smooth projectiles
+      carrierDetection: to.carrierDetection,
+    };
   }
   
   private updatePredictionHistory(rollbackStates: PredictionState[], finalState: WorldState): void {

@@ -1030,14 +1030,21 @@ export class NetworkManager {
   }
   
   private handlePong(pongMessage: PingPongMessage): void {
-    if (!pongMessage.sequenceId) return;
-    
-    const sendTime = this.pendingPings.get(pongMessage.sequenceId);
-    if (sendTime) {
+    // Since server just sends "PONG" text, use the most recent ping timestamp
+    if (this.pendingPings.size > 0) {
+      // Get the most recent ping timestamp (should only be one)
+      const timestamps = Array.from(this.pendingPings.values());
+      const sendTime = timestamps[timestamps.length - 1];
+      
       // Calculate ping
       const ping = Date.now() - sendTime;
+      this.latency = ping; // Update latency field
       this.stats.ping = ping;
-      this.pendingPings.delete(pongMessage.sequenceId);
+      
+      // Clear all pending pings
+      this.pendingPings.clear();
+      
+      console.log(`🏓 Ping: ${ping}ms`);
     }
   }
   
@@ -1116,9 +1123,11 @@ export class NetworkManager {
     const timestamp = Date.now();
     
     // For now, send simple PING text that server expects
-    // TODO: Use JSON format when server fully supports it
+    // Store the timestamp for the most recent ping
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       this.socket.send('PING');
+      // Clear old pings and store only the latest
+      this.pendingPings.clear();
       this.pendingPings.set(sequenceId, timestamp);
       this.stats.messagesSent++;
       this.stats.bytesSent += 4; // PING length

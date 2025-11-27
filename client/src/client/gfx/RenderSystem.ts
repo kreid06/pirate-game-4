@@ -430,7 +430,7 @@ export class RenderSystem {
     
     // Queue players (layer 2)
     for (const player of worldState.players) {
-      this.queueRenderItem(2, 'players', () => this.drawPlayer(player, camera));
+      this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
     }
     
     // Queue ship planks (layer 3)
@@ -1035,7 +1035,7 @@ export class RenderSystem {
     this.ctx.restore();
   }
   
-  private drawPlayer(player: Player, camera: Camera): void {
+  private drawPlayer(player: Player, worldState: WorldState, camera: Camera): void {
     // Check if player is visible
     if (!camera.isWorldPositionVisible(player.position, 50)) {
       return; // Skip off-screen players

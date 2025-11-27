@@ -416,21 +416,45 @@ function isPlayerInsideShipBounds(playerPos: Vec2, ship: Ship): boolean {
  * Enhanced free movement when player is not on deck
  */
 function updatePlayerOffDeck(player: Player, ships: Ship[], inputFrame: InputFrame, dt: number): void {
-  const inputVel = inputFrame.movement.mul(PhysicsConfig.PLAYER_SWIM_SPEED);
+  // Match server physics EXACTLY
+  const SWIM_ACCELERATION = 160.0; // units/s² - MUST match server
+  const SWIM_DECELERATION = 120.0; // units/s² - MUST match server
+  const SWIM_MAX_SPEED = 30.0; // units/s - MUST match server
   
-  // Enhanced water/swimming physics simulation
-  const waterDrag = 0.85; // Higher drag in water
-  const inputResponsiveness = 8.0; // How quickly player responds to input
+  const isMoving = inputFrame.movement.lengthSq() > 0.01;
   
-  // Apply water drag and input
-  player.velocity = player.velocity.mul(waterDrag).add(inputVel.mul(dt * inputResponsiveness));
+  if (isMoving) {
+    // Apply acceleration (matching server formula exactly)
+    const acceleration = inputFrame.movement.mul(SWIM_ACCELERATION * dt);
+    player.velocity = player.velocity.add(acceleration);
+    
+    // HARD CLAMP to max speed (server does this immediately after acceleration)
+    const currentSpeed = player.velocity.length();
+    if (currentSpeed > SWIM_MAX_SPEED) {
+      console.log(`⚠️ CLAMP | Speed ${currentSpeed.toFixed(2)} → ${SWIM_MAX_SPEED} | accel: ${acceleration.length().toFixed(2)} | dt: ${dt.toFixed(4)}`);
+      player.velocity = player.velocity.normalize().mul(SWIM_MAX_SPEED);
+    }
+  } else {
+    // Apply deceleration when stopped (match server)
+    const currentSpeed = player.velocity.length();
+    if (currentSpeed > 0.1) {
+      const decelAmount = SWIM_DECELERATION * dt;
+      if (decelAmount >= currentSpeed) {
+        // Stop completely
+        player.velocity = Vec2.zero();
+      } else {
+        // Reduce speed
+        const scale = (currentSpeed - decelAmount) / currentSpeed;
+        player.velocity = player.velocity.mul(scale);
+      }
+    }
+  }
   
-  // Add small current/drift for more interesting water movement
-  const currentStrength = 10; // units/s
-  const currentDir = Vec2.from(0.3, 0.1).normalize(); // Slight current
-  const current = currentDir.mul(currentStrength * dt);
-  
-  player.velocity = player.velocity.add(current);
+  // DON'T add water current - server doesn't have this, causes velocity mismatch
+  // const currentStrength = 10;
+  // const currentDir = Vec2.from(0.3, 0.1).normalize();
+  // const current = currentDir.mul(currentStrength * dt);
+  // player.velocity = player.velocity.add(current);
   
   // Calculate intended new position
   const intendedPosition = player.position.add(player.velocity.mul(dt));
@@ -468,10 +492,10 @@ function updatePlayerOffDeck(player: Player, ships: Ship[], inputFrame: InputFra
   player.position = finalPosition;
   player.velocity = finalVelocity;
   
-  // Clamp velocity to reasonable bounds for water movement
-  const maxWaterSpeed = PhysicsConfig.PLAYER_SWIM_SPEED; // Use swim speed constant
-  if (player.velocity.lengthSq() > maxWaterSpeed * maxWaterSpeed) {
-    player.velocity = player.velocity.normalize().mul(maxWaterSpeed);
+  // Final clamp to ensure we NEVER exceed max speed (match server exactly)
+  const finalSpeed = player.velocity.length();
+  if (finalSpeed > SWIM_MAX_SPEED) {
+    player.velocity = player.velocity.normalize().mul(SWIM_MAX_SPEED);
   }
 }
 

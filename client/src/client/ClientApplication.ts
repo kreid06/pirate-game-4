@@ -77,6 +77,7 @@ export class ClientApplication {
   private frameCount = 0;
   private fpsTimer = 0;
   private currentFPS = 0;
+  private lastRenderLogTime = 0;
   
   constructor(canvas: HTMLCanvasElement, config: ClientConfig) {
     this.canvas = canvas;
@@ -391,11 +392,16 @@ export class ClientApplication {
     const assignedPlayerId = this.networkManager.getAssignedPlayerId();
     let worldToRender = interpolatedState || this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
     
-    // If we have both predicted and interpolated states, create hybrid
-    if (assignedPlayerId !== null && this.predictedWorldState && interpolatedState) {
+    // Only use hybrid rendering if prediction is enabled
+    const predictionEnabled = this.config.prediction.enablePrediction;
+    
+    // If we have both predicted and interpolated states AND prediction is enabled, create hybrid
+    // Local player uses prediction (instant response), others use interpolation (smooth)
+    if (predictionEnabled && assignedPlayerId !== null && this.predictedWorldState && interpolatedState) {
       const predictedPlayer = this.predictedWorldState.players.find(p => p.id === assignedPlayerId);
+      const interpolatedPlayer = interpolatedState.players.find(p => p.id === assignedPlayerId);
       
-      if (predictedPlayer) {
+      if (predictedPlayer && interpolatedPlayer) {
         // Get current rotation from input manager
         const currentRotation = this.inputManager.getCurrentInputFrame().rotation;
         
@@ -469,6 +475,12 @@ export class ClientApplication {
    */
   private onServerWorldState(worldState: WorldState): void {
     this.authoritativeWorldState = worldState;
+    
+    // Update network latency for dynamic interpolation buffer
+    const networkStats = this.networkManager.getStats();
+    if (networkStats.ping > 0) {
+      this.predictionEngine.updateNetworkLatency(networkStats.ping);
+    }
     
     // Check if player mount state changed
     const playerId = this.networkManager.getAssignedPlayerId();
@@ -607,6 +619,22 @@ export class ClientApplication {
     // Update FPS every second
     if (this.fpsTimer >= 1000) {
       this.currentFPS = Math.round((this.frameCount * 1000) / this.fpsTimer);
+      const avgFrameTime = this.fpsTimer / this.frameCount;
+      
+      // Log FPS and frame time for diagnostics
+      console.log(`📊 Render FPS: ${this.currentFPS} | Avg frame time: ${avgFrameTime.toFixed(2)}ms | Client tick: ${this.clientTickDuration.toFixed(2)}ms (${(1000/this.clientTickDuration).toFixed(0)}Hz)`);
+      
+      // Detect capping
+      if (this.currentFPS >= 59 && this.currentFPS <= 61) {
+        console.warn('⚠️ Rendering capped at 60 FPS (likely VSync or monitor refresh rate)');
+      } else if (this.currentFPS >= 119 && this.currentFPS <= 121) {
+        console.log('✅ Rendering at 120 FPS - excellent!');
+      } else if (this.currentFPS >= 143 && this.currentFPS <= 145) {
+        console.log('✅ Rendering at 144 FPS - excellent!');
+      } else if (this.currentFPS >= 29 && this.currentFPS <= 31) {
+        console.warn('⚠️ Low FPS (30) - performance bottleneck detected');
+      }
+      
       this.frameCount = 0;
       this.fpsTimer = 0;
     }

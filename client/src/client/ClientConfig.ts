@@ -123,8 +123,8 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
   },
   
   graphics: {
-    targetFPS: 60,
-    vsync: true,
+    targetFPS: 144,
+    vsync: false,
     antialiasing: true,
     particleQuality: 'medium',
     shadowQuality: 'medium',
@@ -165,14 +165,14 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
   },
   
   prediction: {
-    clientTickRate: 60, // 60 Hz for smooth rendering (matches target FPS)
-    serverTickRate: 20, // 20 Hz server update rate
-    interpolationBuffer: 200, // 200ms buffer for jitter-free rendering (4 server frames)
-    interpolationDelay: 100, // 100ms render delay (2 server frames - ensures we always have data)
-    extrapolationLimit: 50, // 50ms max extrapolation (conservative to reduce snap-back)
+    clientTickRate: 120, // 120 Hz client prediction for ultra-smooth local player movement
+    serverTickRate: 30, // 30 Hz server GAME_STATE broadcast (33.3ms per frame)
+    interpolationBuffer: 100, // 100ms buffer (~3 server frames at 30Hz) for jitter-free rendering
+    interpolationDelay: 66, // 66ms render delay (~2 server frames at 30Hz - ensures we always have data)
+    extrapolationLimit: 66, // 66ms max extrapolation (~2 server frames - allows smooth rendering between updates)
     rollbackLimit: 10, // 10 ticks rollback for lag compensation
-    predictionErrorThreshold: 8.0, // 8 units position error threshold (very high to reduce jitter corrections)
-    enablePrediction: true,
+    predictionErrorThreshold: 999999.0, // DISABLED - no rollbacks
+    enablePrediction: false, // DISABLED - Using pure interpolation for now, prediction as future feature
     enableInterpolation: true
   },
   
