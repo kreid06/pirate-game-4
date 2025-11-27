@@ -54,6 +54,10 @@ export enum MessageType {
   SHIP_RUDDER_CONTROL = 'ship_rudder_control',
   SHIP_SAIL_ANGLE_CONTROL = 'ship_sail_angle_control',
   
+  // Cannon control messages
+  CANNON_AIM = 'cannon_aim',
+  CANNON_FIRE = 'cannon_fire',
+  
   PING = 'ping',
   
   // Server to Client  
@@ -195,6 +199,25 @@ interface ModuleInteractFailureMessage extends NetworkMessage {
 }
 
 /**
+ * Cannon aim message
+ */
+interface CannonAimMessage extends NetworkMessage {
+  type: MessageType.CANNON_AIM;
+  timestamp: number;
+  aim_angle: number; // Radians, relative to ship rotation
+}
+
+/**
+ * Cannon fire message
+ */
+interface CannonFireMessage extends NetworkMessage {
+  type: MessageType.CANNON_FIRE;
+  timestamp: number;
+  cannon_ids?: number[]; // Specific cannons to fire, or undefined for all aimed cannons
+  fire_all?: boolean;    // True if double-click (fire all cannons)
+}
+
+/**
  * Ship sail control message (when mounted to helm)
  * W/S keys control sail openness
  */
@@ -222,7 +245,7 @@ interface ShipSailAngleControlMessage extends NetworkMessage {
   desired_angle: number; // -60 to +60 degrees in increments of 6
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | PingPongMessage | WorldStateMessage | AckMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage;
 
 /**
  * Main network manager class
@@ -663,6 +686,49 @@ export class NetworkManager {
     };
 
     console.log(`🌀 Sail angle: ${clampedAngle}°`);
+    this.sendMessage(message);
+  }
+
+  /**
+   * Send cannon aim update (right-click hold + mouse move)
+   * Aim angle is relative to ship rotation
+   */
+  sendCannonAim(aimAngle: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      return;
+    }
+
+    const message: CannonAimMessage = {
+      type: MessageType.CANNON_AIM,
+      timestamp: Date.now(),
+      aim_angle: aimAngle
+    };
+
+    // Only log occasionally to avoid spam
+    if (Math.random() < 0.05) {
+      console.log(`🎯 Cannon aim: ${(aimAngle * 180 / Math.PI).toFixed(1)}°`);
+    }
+    this.sendMessage(message);
+  }
+
+  /**
+   * Send cannon fire command
+   * @param cannonIds - Specific cannon IDs to fire, or undefined for aimed cannons
+   * @param fireAll - True if double-click (fire all cannons)
+   */
+  sendCannonFire(cannonIds?: number[], fireAll: boolean = false): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      return;
+    }
+
+    const message: CannonFireMessage = {
+      type: MessageType.CANNON_FIRE,
+      timestamp: Date.now(),
+      cannon_ids: cannonIds,
+      fire_all: fireAll
+    };
+
+    console.log(`💥 Cannon fire: ${fireAll ? 'ALL' : cannonIds ? `IDs ${cannonIds.join(',')}` : 'aimed'}`);
     this.sendMessage(message);
   }
   

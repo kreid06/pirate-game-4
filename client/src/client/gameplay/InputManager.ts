@@ -82,6 +82,10 @@ export class InputManager {
   public onShipRudderControl: ((turningLeft: boolean, turningRight: boolean) => void) | null = null;
   public onShipSailAngleControl: ((desiredAngle: number) => void) | null = null;
   
+  // Cannon control callbacks
+  public onCannonAim: ((aimAngle: number) => void) | null = null;
+  public onCannonFire: ((cannonIds?: number[], fireAll?: boolean) => void) | null = null;
+  
   // HYBRID PROTOCOL: State tracking for change detection
   private previousMovementState: Vec2 = Vec2.zero();
   private lastSentRotation: number = 0;
@@ -98,6 +102,12 @@ export class InputManager {
   private lastSailAngleChangeTime: number = 0; // Track last sail angle change
   private readonly SAIL_OPENNESS_COOLDOWN = 100; // 0.1s per 10% change
   private readonly SAIL_ANGLE_COOLDOWN = 100; // 0.1s per 6° change
+  
+  // Cannon aiming state
+  private lastCannonAimAngle: number = 0;
+  private lastLeftClickTime: number = 0;
+  private readonly DOUBLE_CLICK_THRESHOLD = 300; // 300ms for double-click detection
+  private currentShipId: number | null = null; // Track which ship player is on for aim calculation
   
   // HYBRID PROTOCOL: Movement stop detection
   private playerVelocity: Vec2 = Vec2.zero();
@@ -162,6 +172,9 @@ export class InputManager {
   update(deltaTime: number): void {
     // Update gamepad input
     this.updateGamepad();
+    
+    // Handle cannon aiming (works whether on ship or not)
+    this.handleCannonAiming();
     
     // If mounted to helm, handle ship controls instead of player movement
     if (this.isMountedToHelm) {
@@ -249,6 +262,13 @@ export class InputManager {
   }
   
   /**
+   * Set current ship ID (for cannon aiming calculations)
+   */
+  setCurrentShipId(shipId: number | null): void {
+    this.currentShipId = shipId;
+  }
+  
+  /**
    * Get current input frame
    */
   getCurrentInputFrame(): InputFrame {
@@ -295,6 +315,8 @@ export class InputManager {
    */
   setMountState(mounted: boolean, shipId?: number): void {
     this.isMountedToHelm = mounted;
+    this.currentShipId = shipId !== undefined ? shipId : null;
+    
     if (mounted) {
       console.log(`⚓ [INPUT] Player mounted to helm on ship ${shipId} - ship controls active`);
       // Reset ship control state
@@ -392,6 +414,42 @@ export class InputManager {
       if (this.onActionEvent) {
         this.onActionEvent('dismount');
       }
+    }
+  }
+  
+  /**
+   * Handle cannon aiming (right-click + mouse movement)
+   * Calculates aim angle relative to ship rotation
+   */
+  private handleCannonAiming(): void {
+    // Only send aiming updates when right mouse is held
+    if (!this.inputState.rightMouseDown) {
+      return;
+    }
+    
+    // Need to be on a ship to aim cannons
+    if (this.currentShipId === null) {
+      return;
+    }
+    
+    // Calculate aim angle from player position to mouse position
+    const dx = this.inputState.mouseWorldPosition.x - this.playerPosition.x;
+    const dy = this.inputState.mouseWorldPosition.y - this.playerPosition.y;
+    const aimAngleWorld = Math.atan2(dy, dx);
+    
+    // TODO: Get ship rotation from world state to make angle relative to ship
+    // For now, use absolute world angle (will be updated when we pass ship rotation)
+    const aimAngle = aimAngleWorld;
+    
+    // Only send if aim changed significantly (>1 degree)
+    const ANGLE_THRESHOLD = 0.017; // ~1 degree in radians
+    const angleDelta = Math.abs(aimAngle - this.lastCannonAimAngle);
+    
+    if (angleDelta > ANGLE_THRESHOLD) {
+      if (this.onCannonAim) {
+        this.onCannonAim(aimAngle);
+      }
+      this.lastCannonAimAngle = aimAngle;
     }
   }
   
@@ -756,12 +814,29 @@ export class InputManager {
     if (event.button === 0) { // Left mouse button
       this.inputState.leftMouseDown = true;
       
-      // HYBRID PROTOCOL: Send fire action event
-      if (this.onActionEvent) {
-        this.onActionEvent('fire_cannon', this.inputState.mouseWorldPosition);
+      const now = Date.now();
+      const timeSinceLastClick = now - this.lastLeftClickTime;
+      const isDoubleClick = timeSinceLastClick < this.DOUBLE_CLICK_THRESHOLD;
+      
+      if (isDoubleClick) {
+        // Double-click: Fire all cannons
+        console.log('💥💥 Double-click: Fire ALL cannons!');
+        if (this.onCannonFire) {
+          this.onCannonFire(undefined, true); // fireAll = true
+        }
+      } else {
+        // Single click: Fire aimed cannons
+        console.log('💥 Single-click: Fire aimed cannons');
+        if (this.onCannonFire) {
+          this.onCannonFire(); // Fire aimed cannons only
+        }
       }
+      
+      this.lastLeftClickTime = now;
+      
     } else if (event.button === 2) { // Right mouse button
       this.inputState.rightMouseDown = true;
+      // Aiming will be handled in update() while right mouse is held
     }
   }
   

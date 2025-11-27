@@ -201,6 +201,14 @@ export class ClientApplication {
         this.networkManager.sendShipSailAngleControl(desiredAngle);
       };
       
+      // Cannon control callbacks
+      this.inputManager.onCannonAim = (aimAngle) => {
+        this.networkManager.sendCannonAim(aimAngle);
+      };
+      this.inputManager.onCannonFire = (cannonIds, fireAll) => {
+        this.networkManager.sendCannonFire(cannonIds, fireAll);
+      };
+      
       // Set up mouse tracking for mouse-relative movement
       this.setupMouseTracking();
       
@@ -487,6 +495,9 @@ export class ClientApplication {
     if (playerId !== null && this.inputManager) {
       const player = worldState.players.find(p => p.id === playerId);
       if (player) {
+        // Update ship ID for cannon aiming (works even if not mounted to helm)
+        this.inputManager.setCurrentShipId(player.carrierId || null);
+        
         const currentlyMounted = player.isMounted || false;
         
         // Only update if mount state actually changed
