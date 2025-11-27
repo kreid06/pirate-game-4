@@ -988,7 +988,10 @@ void handle_projectile_collisions(struct Sim* sim) {
         // Check collision with players
         for (uint16_t j = 0; j < cell->player_count; j++) {
             struct Player* player = cell->players[j];
-            if (player->id == proj->owner_id) continue; // Can't hit self
+            
+            // Skip if player is on the same ship as the projectile owner
+            if (player->id == proj->owner_id) continue; // Can't hit self (manually fired)
+            if (player->ship_id == proj->owner_id) continue; // Can't hit crew on same ship (helm fired)
             
             q16_t dx = player->position.x - proj->position.x;
             q16_t dy = player->position.y - proj->position.y;

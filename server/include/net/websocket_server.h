@@ -68,6 +68,10 @@ typedef struct WebSocketPlayer {
     bool is_mounted;               // Is player mounted to a module
     uint32_t mounted_module_id;    // ID of mounted module (0 if not mounted)
     uint32_t controlling_ship_id;  // ID of ship being controlled (helm only, 0 if not controlling)
+    
+    // Cannon aiming state
+    float cannon_aim_angle;        // World coordinates aim angle (radians)
+    float cannon_aim_angle_relative; // Ship-relative aim angle (radians)
 } WebSocketPlayer;
 
 struct WebSocketStats {

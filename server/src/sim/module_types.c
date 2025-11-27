@@ -22,7 +22,7 @@ ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t
             module.data.cannon.aim_direction = 0;
             module.data.cannon.ammunition = 10;
             module.data.cannon.time_since_fire = 0;
-            module.data.cannon.reload_time = Q16_FROM_FLOAT(3.0f); // 3 second reload
+            module.data.cannon.reload_time = 5000; // 5 seconds in milliseconds
             break;
             
         case MODULE_TYPE_MAST:
@@ -69,8 +69,8 @@ void module_update(ShipModule* module, q16_t dt) {
             if (module->state_bits & MODULE_STATE_RELOADING) {
                 module->data.cannon.time_since_fire += Q16_TO_INT(q16_mul(dt, Q16_FROM_INT(1000)));
                 
-                // Check if reload complete
-                if (Q16_FROM_INT(module->data.cannon.time_since_fire) >= module->data.cannon.reload_time) {
+                // Check if reload complete (both values are in milliseconds)
+                if (module->data.cannon.time_since_fire >= module->data.cannon.reload_time) {
                     module->state_bits &= ~MODULE_STATE_RELOADING;
                     module->state_bits &= ~MODULE_STATE_FIRING;
                 }

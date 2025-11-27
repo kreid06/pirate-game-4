@@ -998,7 +998,299 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
 }
 
 // ============================================================================
-// END SHIP CONTROL HANDLERS
+// CANNON CONTROL HANDLERS
+// ============================================================================
+
+// Forward declarations
+static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float world_x, float world_y, 
+                                  float angle, entity_id projectile_id);
+
+/**
+ * Handle cannon aim from player
+ * Updates player's aim angle and cannon aim_direction for all cannons within range
+ */
+static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
+    if (player->parent_ship_id == 0) {
+        return; // Player not on a ship
+    }
+    
+    // Store world aim angle
+    player->cannon_aim_angle = aim_angle;
+    
+    // Convert to ship-relative angle
+    SimpleShip* ship = find_ship(player->parent_ship_id);
+    if (!ship) return;
+    
+    player->cannon_aim_angle_relative = aim_angle - ship->rotation;
+    
+    // Normalize to -PI to +PI range
+    while (player->cannon_aim_angle_relative > M_PI) player->cannon_aim_angle_relative -= 2.0f * M_PI;
+    while (player->cannon_aim_angle_relative < -M_PI) player->cannon_aim_angle_relative += 2.0f * M_PI;
+    
+    // Update cannon aim_direction for all cannons within ±30° range
+    const float CANNON_AIM_RANGE = 30.0f * (M_PI / 180.0f); // ±30 degrees
+    
+    // Get simulation ship to update cannon modules
+    struct Ship* sim_ship = NULL;
+    if (global_sim && global_sim->ship_count > 0) {
+        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+            if (global_sim->ships[s].id == ship->ship_id) {
+                sim_ship = &global_sim->ships[s];
+                break;
+            }
+        }
+    }
+    
+    if (!sim_ship) return;
+    
+    // Update each cannon's aim_direction if it can reach the player's target
+    for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+        if (sim_ship->modules[m].type_id != MODULE_TYPE_CANNON) continue;
+        
+        ShipModule* cannon = &sim_ship->modules[m];
+        float cannon_base_angle = Q16_TO_FLOAT(cannon->local_rot); // Base rotation relative to ship
+        
+        // Calculate desired aim offset (player's aim - cannon's base)
+        float desired_offset = player->cannon_aim_angle_relative - cannon_base_angle;
+        
+        // Normalize
+        while (desired_offset > M_PI) desired_offset -= 2.0f * M_PI;
+        while (desired_offset < -M_PI) desired_offset += 2.0f * M_PI;
+        
+        // Clamp to cannon's ±30° range
+        if (desired_offset > CANNON_AIM_RANGE) desired_offset = CANNON_AIM_RANGE;
+        if (desired_offset < -CANNON_AIM_RANGE) desired_offset = -CANNON_AIM_RANGE;
+        
+        // Update cannon's aim_direction
+        cannon->data.cannon.aim_direction = Q16_FROM_FLOAT(desired_offset);
+        
+        // Also update simple ship for sync
+        for (int i = 0; i < ship->module_count; i++) {
+            if (ship->modules[i].id == cannon->id) {
+                ship->modules[i].data.cannon.aim_direction = Q16_FROM_FLOAT(desired_offset);
+                break;
+            }
+        }
+    }
+}
+
+/**
+ * Fire a single cannon, spawning projectile
+ */
+static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired) {
+    // Consume ammo
+    if (cannon->data.cannon.ammunition > 0) {
+        cannon->data.cannon.ammunition--;
+    }
+    cannon->data.cannon.time_since_fire = 0;
+    
+    // Calculate cannon world position (ship transform + cannon local position)
+    float cos_rot = cosf(ship->rotation);
+    float sin_rot = sinf(ship->rotation);
+    
+    float cannon_local_x = Q16_TO_FLOAT(cannon->local_pos.x);
+    float cannon_local_y = Q16_TO_FLOAT(cannon->local_pos.y);
+    
+    float cannon_world_x = ship->x + (cannon_local_x * cos_rot - cannon_local_y * sin_rot);
+    float cannon_world_y = ship->y + (cannon_local_x * sin_rot + cannon_local_y * cos_rot);
+    
+    // Calculate projectile direction (ship rotation + cannon's base rotation + aim offset)
+    float cannon_local_rot = Q16_TO_FLOAT(cannon->local_rot);
+    float aim_offset = Q16_TO_FLOAT(cannon->data.cannon.aim_direction);
+    float projectile_angle = ship->rotation + cannon_local_rot + aim_offset;
+    
+    // Spawn projectile at the end of the cannon barrel (outside the ship)
+    const float BARREL_LENGTH = CLIENT_TO_SERVER(30.0f); // 30 pixels barrel extension in server units
+    float barrel_offset_x = cosf(projectile_angle) * BARREL_LENGTH;
+    float barrel_offset_y = sinf(projectile_angle) * BARREL_LENGTH;
+    
+    float spawn_x = cannon_world_x + barrel_offset_x;
+    float spawn_y = cannon_world_y + barrel_offset_y;
+    
+    // Cannonball base speed
+    const float CANNONBALL_SPEED = CLIENT_TO_SERVER(500.0f); // Convert from client pixels/s to server units/s
+    
+    // Calculate projectile velocity (inherit ship velocity + cannon velocity)
+    float projectile_vx = cosf(projectile_angle) * CANNONBALL_SPEED + ship->velocity_x;
+    float projectile_vy = sinf(projectile_angle) * CANNONBALL_SPEED + ship->velocity_y;
+    
+    // Determine owner for projectile tracking
+    uint32_t owner_id = manually_fired ? player->player_id : ship->ship_id;
+    
+    // Spawn projectile in simulation
+    if (global_sim) {
+        Vec2Q16 proj_pos = {
+            Q16_FROM_FLOAT(spawn_x),
+            Q16_FROM_FLOAT(spawn_y)
+        };
+        Vec2Q16 proj_vel = {
+            Q16_FROM_FLOAT(projectile_vx),
+            Q16_FROM_FLOAT(projectile_vy)
+        };
+        
+        log_info("🎯 Before spawn: projectile_count=%u, max=%d", global_sim->projectile_count, MAX_PROJECTILES);
+        
+        entity_id projectile_id = sim_create_projectile(global_sim, proj_pos, proj_vel, owner_id);
+        
+        log_info("🎯 After spawn: projectile_count=%u, projectile_id=%u", global_sim->projectile_count, projectile_id);
+        
+        if (projectile_id != INVALID_ENTITY_ID) {
+            log_info("💥 Cannon %u fired! ship_pos=(%.1f,%.1f) cannon_pos=(%.1f,%.1f) projectile_id=%u spawn_pos=(%.1f,%.1f) angle=%.2f° vel=(%.1f,%.1f) owner=%u manual=%s",
+                     cannon->id,
+                     ship->x, ship->y,
+                     cannon_world_x, cannon_world_y,
+                     projectile_id,
+                     spawn_x, spawn_y,
+                     projectile_angle * (180.0f / M_PI),
+                     SERVER_TO_CLIENT(projectile_vx), SERVER_TO_CLIENT(projectile_vy),
+                     owner_id, manually_fired ? "yes" : "no");
+            
+            // Broadcast cannon fire event to all clients (use cannon position for visual effect)
+            broadcast_cannon_fire(cannon->id, ship->ship_id, cannon_world_x, cannon_world_y, 
+                                projectile_angle, projectile_id);
+        } else {
+            log_warn("Failed to spawn projectile for cannon %u (max projectiles reached)", cannon->id);
+        }
+    } else {
+        log_error("❌ Cannot spawn projectile - global_sim is NULL!");
+    }
+}
+
+/**
+ * Broadcast cannon fire event to all connected clients
+ */
+static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float world_x, float world_y, 
+                                  float angle, entity_id projectile_id) {
+    char message[512];
+    snprintf(message, sizeof(message),
+            "{\"type\":\"CANNON_FIRE_EVENT\",\"cannonId\":%u,\"shipId\":%u,"
+            "\"x\":%.1f,\"y\":%.1f,\"angle\":%.3f,\"projectileId\":%u}",
+            cannon_id, ship_id, world_x, world_y, angle, projectile_id);
+    
+    char frame[1024];
+    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, message, strlen(message), frame, sizeof(frame));
+    
+    if (frame_len > 0) {
+        // Send to all connected clients
+        for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+            struct WebSocketClient* client = &ws_server.clients[i];
+            if (client->connected && client->handshake_complete) {
+                send(client->fd, frame, frame_len, 0);
+            }
+        }
+    }
+}
+
+/**
+ * Handle cannon fire from player
+ * Single click: Fire cannons currently being aimed (within player's aim angle ±30°)
+ * Double click: Fire ALL cannons on the ship (broadside)
+ */
+static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all) {
+    if (player->parent_ship_id == 0) {
+        log_warn("Player %u tried to fire cannons while not on a ship", player->player_id);
+        return;
+    }
+    
+    SimpleShip* ship = find_ship(player->parent_ship_id);
+    if (!ship) {
+        log_warn("Player %u parent ship %u not found", player->player_id, player->parent_ship_id);
+        return;
+    }
+    
+    int cannons_fired = 0;
+    bool manually_fired = !player->is_mounted; // If not mounted to helm, it's manual fire
+    
+    // Get simulation ship for up-to-date cannon data
+    struct Ship* sim_ship = NULL;
+    if (global_sim && global_sim->ship_count > 0) {
+        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+            if (global_sim->ships[s].id == ship->ship_id) {
+                sim_ship = &global_sim->ships[s];
+                break;
+            }
+        }
+    }
+    
+    if (!sim_ship) {
+        log_warn("Simulation ship %u not found", ship->ship_id);
+        return;
+    }
+    
+    // Iterate through all modules to find cannons
+    for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+        ShipModule* module = &sim_ship->modules[m];
+        
+        if (module->type_id != MODULE_TYPE_CANNON) continue;
+        
+        // Check ammo and reload status
+        if (module->data.cannon.ammunition == 0) {
+            log_info("  ⚠️  Cannon %u: No ammo", module->id);
+            continue;
+        }
+        
+        if (module->data.cannon.time_since_fire < module->data.cannon.reload_time) {
+            log_info("  ⚠️  Cannon %u: Reloading (%.1fs remaining)", 
+                     module->id,
+                     (module->data.cannon.reload_time - module->data.cannon.time_since_fire) / 1000.0f);
+            continue;
+        }
+        
+        bool should_fire = fire_all;
+        
+        if (!fire_all) {
+            // Single click: Only fire cannons within aim range
+            // Cannon can aim ±30° from base rotation
+            float cannon_base_angle = Q16_TO_FLOAT(module->local_rot); // Cannon's base rotation relative to ship
+            float cannon_current_aim = Q16_TO_FLOAT(module->data.cannon.aim_direction); // Current aim offset
+            float cannon_absolute_aim = cannon_base_angle + cannon_current_aim; // Total cannon direction (ship-relative)
+            
+            // Player's aim direction (ship-relative)
+            float player_aim = player->cannon_aim_angle_relative;
+            
+            // Calculate difference
+            float aim_difference = fabsf(cannon_absolute_aim - player_aim);
+            
+            // Normalize to -PI to +PI
+            while (aim_difference > M_PI) aim_difference -= 2.0f * M_PI;
+            while (aim_difference < -M_PI) aim_difference += 2.0f * M_PI;
+            aim_difference = fabsf(aim_difference);
+            
+            // Check if cannon is currently aimed at player's target
+            // Cannons have ±30° range, so check if player's aim is within that cone
+            const float CANNON_AIM_RANGE = 30.0f * (M_PI / 180.0f); // ±30 degrees
+            const float AIM_TOLERANCE = 0.35f; // ~20 degrees tolerance for "being aimed"
+            
+            should_fire = (aim_difference < AIM_TOLERANCE);
+            
+            if (!should_fire) {
+                log_info("  ⏭️  Cannon %u: Not aimed (diff=%.1f°, tolerance=±%.1f°)", 
+                         module->id, aim_difference * (180.0f / M_PI), AIM_TOLERANCE * (180.0f / M_PI));
+            }
+        }
+        
+        if (should_fire) {
+            fire_cannon(ship, module, player, manually_fired);
+            cannons_fired++;
+            
+            // Also update simple ship module for sync
+            for (int i = 0; i < ship->module_count; i++) {
+                if (ship->modules[i].id == module->id) {
+                    ship->modules[i].data.cannon.ammunition = module->data.cannon.ammunition;
+                    ship->modules[i].data.cannon.time_since_fire = 0;
+                    break;
+                }
+            }
+        }
+    }
+    
+    log_info("💥 Player %u fired %d cannon(s) on ship %u (%s)", 
+             player->player_id, cannons_fired, ship->ship_id,
+             fire_all ? "BROADSIDE" : "AIMED");
+}
+
+// ============================================================================
+// END CANNON CONTROL HANDLERS
 // ============================================================================
 
 /**
@@ -2322,6 +2614,50 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
+                        } else if (strstr(payload, "\"type\":\"cannon_aim\"")) {
+                            // CANNON AIM message
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player && player->parent_ship_id != 0) {
+                                    // Parse aim_angle
+                                    float aim_angle = 0.0f;
+                                    char* angle_start = strstr(payload, "\"aim_angle\":");
+                                    if (angle_start) {
+                                        sscanf(angle_start + 12, "%f", &aim_angle);
+                                    }
+                                    
+                                    handle_cannon_aim(player, aim_angle);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"aim_updated\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                }
+                                handled = true;
+                            }
+                            
+                        } else if (strstr(payload, "\"type\":\"cannon_fire\"")) {
+                            // CANNON FIRE message
+                            log_info("💥 Processing CANNON_FIRE message");
+                            
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player && player->parent_ship_id != 0) {
+                                    // Parse fire_all flag
+                                    bool fire_all = strstr(payload, "\"fire_all\":true") != NULL;
+                                    
+                                    handle_cannon_fire(player, fire_all);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"cannons_fired\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                }
+                                handled = true;
+                            }
+                            
                         } else if (strstr(payload, "\"type\":\"ping\"")) {
                             // JSON ping message
                             snprintf(response, sizeof(response),
@@ -2687,6 +3023,42 @@ int websocket_server_update(struct Sim* sim) {
         }
         players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "]");
         
+        // Build projectiles JSON array
+        char projectiles_json[2048];
+        int projectiles_offset = 0;
+        projectiles_offset += snprintf(projectiles_json + projectiles_offset, sizeof(projectiles_json) - projectiles_offset, "[");
+        bool first_projectile = true;
+        
+        // Debug: Log projectile count
+        static uint32_t last_projectile_log = 0;
+        if (current_time - last_projectile_log > 2000 && global_sim) {
+            log_info("🎯 Projectile count: %u", global_sim->projectile_count);
+            last_projectile_log = current_time;
+        }
+        
+        if (global_sim && global_sim->projectile_count > 0) {
+            for (uint16_t p = 0; p < global_sim->projectile_count; p++) {
+                struct Projectile* proj = &global_sim->projectiles[p];
+                
+                if (!first_projectile) {
+                    projectiles_offset += snprintf(projectiles_json + projectiles_offset, 
+                                                  sizeof(projectiles_json) - projectiles_offset, ",");
+                }
+                
+                float proj_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
+                float proj_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
+                float proj_vx = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->velocity.x));
+                float proj_vy = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->velocity.y));
+                
+                projectiles_offset += snprintf(projectiles_json + projectiles_offset, 
+                                              sizeof(projectiles_json) - projectiles_offset,
+                                              "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"vx\":%.1f,\"vy\":%.1f,\"type\":%u,\"owner\":%u}",
+                                              proj->id, proj_x, proj_y, proj_vx, proj_vy, proj->type, proj->owner_id);
+                first_projectile = false;
+            }
+        }
+        projectiles_offset += snprintf(projectiles_json + projectiles_offset, sizeof(projectiles_json) - projectiles_offset, "]");
+        
         // Adaptive tick rate based on activity
         bool has_recent_movement = (current_time - g_last_movement_time) < 2000; // Movement in last 2 seconds
         
@@ -2706,16 +3078,16 @@ int websocket_server_update(struct Sim* sim) {
         
         // Broadcasting game state
         
-        char game_state[4096];  // Increased buffer size for ships + players
+        char game_state[6144];  // Increased buffer size for ships + players + projectiles
         snprintf(game_state, sizeof(game_state),
-                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":%s,\"projectiles\":[]}",
-                current_time / 33, current_time, ships_json, players_json);
+                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":%s,\"projectiles\":%s}",
+                current_time / 33, current_time, ships_json, players_json, projectiles_json);
         
         // Broadcast to all connected clients
         for (int i = 0; i < WS_MAX_CLIENTS; i++) {
             struct WebSocketClient* client = &ws_server.clients[i];
             if (client->connected && client->handshake_complete) {
-                char frame[2048];  // Increased to handle module data in game state
+                char frame[8192];  // Large enough for game state with ships + players + projectiles + modules
                 size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state, strlen(game_state), frame, sizeof(frame));
                 if (frame_len > 0) {
                     ssize_t sent = send(client->fd, frame, frame_len, 0);
@@ -3137,6 +3509,38 @@ void websocket_server_tick(float dt) {
         }
         
         last_rudder_update = current_time;
+    }
+    
+    // ===== UPDATE CANNON RELOAD TIMERS =====
+    // Track time since last fire for each cannon
+    static uint32_t last_cannon_update = 0;
+    
+    if (current_time - last_cannon_update >= 100) { // Update every 100ms
+        uint32_t time_elapsed = current_time - last_cannon_update;
+        
+        if (global_sim && global_sim->ship_count > 0) {
+            for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+                struct Ship* ship = &global_sim->ships[s];
+                
+                for (uint8_t m = 0; m < ship->module_count; m++) {
+                    if (ship->modules[m].type_id == MODULE_TYPE_CANNON) {
+                        ShipModule* cannon = &ship->modules[m];
+                        
+                        // Increment time since fire (capped at reload time)
+                        if (cannon->data.cannon.time_since_fire < cannon->data.cannon.reload_time) {
+                            cannon->data.cannon.time_since_fire += time_elapsed;
+                            
+                            // Clamp to reload time
+                            if (cannon->data.cannon.time_since_fire > cannon->data.cannon.reload_time) {
+                                cannon->data.cannon.time_since_fire = cannon->data.cannon.reload_time;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        last_cannon_update = current_time;
     }
     
     // ===== APPLY WIND-BASED SHIP MOVEMENT =====

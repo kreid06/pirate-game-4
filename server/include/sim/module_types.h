@@ -42,7 +42,7 @@ typedef struct {
     q16_t aim_direction;        // Angle the cannon is aimed at
     uint8_t ammunition;         // Remaining ammunition
     uint32_t time_since_fire;   // Time since last fire (ms)
-    q16_t reload_time;          // Time required to reload (ms)
+    uint32_t reload_time;       // Time required to reload (ms)
 } CannonModuleData;
 
 /**
