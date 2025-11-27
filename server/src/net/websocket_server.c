@@ -1085,12 +1085,15 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
     cannon->data.cannon.time_since_fire = 0;
     
     // Calculate cannon world position (ship transform + cannon local position)
+    // NOTE: ship->x/y are in CLIENT PIXELS, cannon->local_pos is in SERVER UNITS (Q16)
     float cos_rot = cosf(ship->rotation);
     float sin_rot = sinf(ship->rotation);
     
-    float cannon_local_x = Q16_TO_FLOAT(cannon->local_pos.x);
-    float cannon_local_y = Q16_TO_FLOAT(cannon->local_pos.y);
+    // Convert cannon local position from server units to client pixels
+    float cannon_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
+    float cannon_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
     
+    // Transform to world space (in client pixels)
     float cannon_world_x = ship->x + (cannon_local_x * cos_rot - cannon_local_y * sin_rot);
     float cannon_world_y = ship->y + (cannon_local_x * sin_rot + cannon_local_y * cos_rot);
     
@@ -1100,7 +1103,8 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
     float projectile_angle = ship->rotation + cannon_local_rot + aim_offset;
     
     // Spawn projectile at the end of the cannon barrel (outside the ship)
-    const float BARREL_LENGTH = CLIENT_TO_SERVER(30.0f); // 30 pixels barrel extension in server units
+    // All positions in CLIENT PIXELS at this point
+    const float BARREL_LENGTH = 30.0f; // 30 pixels barrel extension
     float barrel_offset_x = cosf(projectile_angle) * BARREL_LENGTH;
     float barrel_offset_y = sinf(projectile_angle) * BARREL_LENGTH;
     
@@ -1117,11 +1121,11 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
     // Determine owner for projectile tracking
     uint32_t owner_id = manually_fired ? player->player_id : ship->ship_id;
     
-    // Spawn projectile in simulation
+    // Spawn projectile in simulation (convert from client pixels to server units)
     if (global_sim) {
         Vec2Q16 proj_pos = {
-            Q16_FROM_FLOAT(spawn_x),
-            Q16_FROM_FLOAT(spawn_y)
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(spawn_x)),
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(spawn_y))
         };
         Vec2Q16 proj_vel = {
             Q16_FROM_FLOAT(projectile_vx),
