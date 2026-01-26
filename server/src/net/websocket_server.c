@@ -152,6 +152,7 @@ static void sync_simple_ships_from_simulation(void) {
     }
 }
 
+__attribute__((unused))
 static void ship_clamp_to_deck(const SimpleShip* ship, float* local_x, float* local_y) {
     if (*local_x < ship->deck_min_x) *local_x = ship->deck_min_x;
     if (*local_x > ship->deck_max_x) *local_x = ship->deck_max_x;
@@ -160,6 +161,7 @@ static void ship_clamp_to_deck(const SimpleShip* ship, float* local_x, float* lo
 }
 
 // Helper to convert world coordinates to ship-local coordinates
+__attribute__((unused))
 static void ship_world_to_local(const SimpleShip* ship, float world_x, float world_y, float* local_x, float* local_y) {
     float dx = world_x - ship->x;
     float dy = world_y - ship->y;
@@ -559,6 +561,7 @@ static const char* get_module_type_name(ModuleTypeId type_id) {
 /**
  * Find ship by ID
  */
+__attribute__((unused))
 static SimpleShip* find_ship_by_id(uint32_t ship_id) {
     for (int i = 0; i < ship_count; i++) {
         if (ships[i].active && ships[i].ship_id == ship_id) {
@@ -1262,7 +1265,6 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all) {
             
             // Check if cannon is currently aimed at player's target
             // Cannons have ±30° range, so check if player's aim is within that cone
-            const float CANNON_AIM_RANGE = 30.0f * (M_PI / 180.0f); // ±30 degrees
             const float AIM_TOLERANCE = 0.35f; // ~20 degrees tolerance for "being aimed"
             
             should_fire = (aim_difference < AIM_TOLERANCE);
@@ -1468,6 +1470,7 @@ static void debug_player_state(void) {
 }
 
 // HYBRID APPROACH: Apply player movement state every tick (called from server loop)
+__attribute__((unused))
 static void apply_player_movement_state(WebSocketPlayer* player, float dt) {
     const float WALK_SPEED = 30.0f;   // m/s when walking on deck (10x faster)
     const float SWIM_SPEED = 15.0f;   // m/s when swimming (10x faster)
@@ -1562,6 +1565,7 @@ static void apply_player_movement_state(WebSocketPlayer* player, float dt) {
 }
 
 // LEGACY: Old per-message movement update (for backward compatibility with input_frame)
+__attribute__((unused))
 static void update_player_movement(WebSocketPlayer* player, float rotation, float movement_x, float movement_y, float dt) {
     const float WALK_SPEED = 30.0f;   // m/s when walking on deck (10x faster)
     const float SWIM_SPEED = 15.0f;   // m/s when swimming (10x faster)
@@ -2049,20 +2053,19 @@ int websocket_server_update(struct Sim* sim) {
                     // Log raw data for debugging
                     char hex_dump[256] = {0};
                     int offset = 0;
-                    for (size_t i = 0; i < received && i < 32; i++) {
+                    for (size_t i = 0; i < (size_t)received && i < 32; i++) {
                         offset += snprintf(hex_dump + offset, sizeof(hex_dump) - offset, "%02X ", (unsigned char)buffer[i]);
                     }
                     log_warn("Raw bytes (first 32): %s", hex_dump);
                     continue;
                 }
                 
-                // Debug: Log all WebSocket frame information
-                const char* opcode_name = "UNKNOWN";
+                // Debug: Log all WebSocket frame information (opcode handled below)
                 switch(opcode) {
-                    case WS_OPCODE_TEXT: opcode_name = "TEXT"; break;
-                    case WS_OPCODE_BINARY: opcode_name = "BINARY"; break;
-                    case WS_OPCODE_CLOSE: opcode_name = "CLOSE"; break;
-                    case WS_OPCODE_PING: opcode_name = "PING"; break;
+                    case WS_OPCODE_TEXT: break;
+                    case WS_OPCODE_BINARY: break;
+                    case WS_OPCODE_CLOSE: break;
+                    case WS_OPCODE_PING: break;
                     case WS_OPCODE_PONG: opcode_name = "PONG"; break;
                     default: opcode_name = "UNKNOWN"; break;
                 }
@@ -2772,7 +2775,7 @@ int websocket_server_update(struct Sim* sim) {
                     char frame[64];
                     size_t frame_len = websocket_create_frame(WS_OPCODE_PONG, payload, payload_len, frame, sizeof(frame));
                     if (frame_len > 0) {
-                        ssize_t sent = send(client->fd, frame, frame_len, 0);
+                        (void)send(client->fd, frame, frame_len, 0);
                         // PONG sent
                     }
                 } else if (opcode == WS_OPCODE_PONG) {
@@ -3082,7 +3085,7 @@ int websocket_server_update(struct Sim* sim) {
         
         // Broadcasting game state
         
-        char game_state[6144];  // Increased buffer size for ships + players + projectiles
+        char game_state[16384];  // Large buffer for ships + players + projectiles
         snprintf(game_state, sizeof(game_state),
                 "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":%s,\"projectiles\":%s}",
                 current_time / 33, current_time, ships_json, players_json, projectiles_json);
@@ -3197,7 +3200,6 @@ int websocket_server_get_players(WebSocketPlayer** out_players, int* out_count) 
 
 // HYBRID: Apply movement state to all active players (called every server tick)
 void websocket_server_tick(float dt) {
-    static uint32_t last_tick_log_time = 0;
     uint32_t current_time = get_time_ms();
     
     // ===== SYNC SHIP STATE FROM SIMULATION =====
@@ -3220,9 +3222,7 @@ void websocket_server_tick(float dt) {
         const float SWIM_MAX_SPEED = CLIENT_TO_SERVER(30.0f);     // Maximum swimming speed (server units/s)
         const float SWIM_DECELERATION = CLIENT_TO_SERVER(120.0f); // Deceleration when stopping (server units/s²)
         
-        const float WALK_ACCELERATION = CLIENT_TO_SERVER(240.0f); // Acceleration when walking on deck (server units/s²)
         const float WALK_MAX_SPEED = CLIENT_TO_SERVER(40.0f);     // Maximum walking speed on deck (server units/s)
-        const float WALK_DECELERATION = CLIENT_TO_SERVER(180.0f); // Deceleration when stopping on deck (server units/s²)
         
         for (uint16_t i = 0; i < global_sim->player_count; i++) {
             struct Player* sim_player = &global_sim->players[i];
