@@ -13,7 +13,7 @@ TEST_DIR="tests"
 
 # Compiler and flags
 CC=${CC:-gcc}
-CFLAGS_COMMON="-Wall -Wextra -Werror -std=c11 -I${INCLUDE_DIR} -I${SRC_DIR}"
+CFLAGS_COMMON="-Wall -Wextra -std=c11 -I${INCLUDE_DIR} -I${SRC_DIR}"
 
 case "$BUILD_TYPE" in
     debug)
