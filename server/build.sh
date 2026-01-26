@@ -46,10 +46,13 @@ CORE_SOURCES="
     src/core/math.c
     src/core/rng.c
     src/core/hash.c
+    src/core/rewind_buffer.c
+    src/core/input_validation.c
 "
 
 SIM_SOURCES="
     src/sim/simulation.c
+    src/sim/module_types.c
 "
 
 NET_SOURCES="
