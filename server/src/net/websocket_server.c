@@ -2060,16 +2060,6 @@ int websocket_server_update(struct Sim* sim) {
                     continue;
                 }
                 
-                // Debug: Log all WebSocket frame information (opcode handled below)
-                switch(opcode) {
-                    case WS_OPCODE_TEXT: break;
-                    case WS_OPCODE_BINARY: break;
-                    case WS_OPCODE_CLOSE: break;
-                    case WS_OPCODE_PING: break;
-                    case WS_OPCODE_PONG: opcode_name = "PONG"; break;
-                    default: opcode_name = "UNKNOWN"; break;
-                }
-                
                 // Frame received - processing
                 
                 if (opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY) {
@@ -3631,5 +3621,4 @@ void websocket_server_tick(float dt) {
     }
     
     // Tick processing complete
-    last_tick_log_time = current_time;
 }
