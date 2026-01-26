@@ -1,22 +1,6 @@
 #define _DEFAULT_SOURCE
 #include "server.h"
 #include "sim/simulation.h"
-// Initialize network layer (UDP) on port 8080
-    if (network_init(&server->network, 8080) != 0) {
-        log_error("Failed to initialize network manager");
-        simulation_cleanup(&server->simulation);
-        free(server);
-        return -1;
-    }
-    
-    // Initialize admin server on port 8081
-    if (admin_server_init(&server->admin, 8081) != 0) {/types.h
-        log_error("Failed to initialize admin server");
-        network_cleanup(&server->network);
-        simulation_cleanup(&server->simulation);
-        free(server);
-        return -1;
-    }
 #include "net/network.h"
 #include "net/websocket_server.h"
 #include "admin/admin_server.h"

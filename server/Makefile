@@ -1,8 +1,8 @@
 # Compiler
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c99 -O2 -g
-INCLUDES = -Iinclude
-LIBS = -lwebsockets -ljson-c -lm -lpthread
+INCLUDES = -Iinclude -I/opt/homebrew/opt/openssl@3/include
+LIBS = -lwebsockets -ljson-c -lm -lpthread -L/opt/homebrew/opt/openssl@3/lib -lssl -lcrypto
 
 # Directories
 SRCDIR = src
@@ -32,9 +32,7 @@ $(BINDIR):
 	mkdir -p $(BINDIR)
 
 # Build target
-# Libraries 
-LIBS = -lm -lpthread -lssl -lcrypto
-OPTIONAL_LIBS = -lwebsockets -ljson-c
+# Libraries (now included in main LIBS above)
 
 # Link the target
 $(TARGET): $(OBJECTS) | $(BINDIR)

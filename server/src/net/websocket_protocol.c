@@ -198,6 +198,8 @@ int websocket_udp_to_json(const uint8_t* udp_packet, size_t packet_size, char* j
     }
     
     return 0;
+}
+
 /**
  * Handle WebSocket message and forward to UDP network layer
  */
@@ -283,5 +285,4 @@ int websocket_send_response(int websocket_fd, const uint8_t* udp_packet, size_t 
     }
     
     return 0;
-}
 }

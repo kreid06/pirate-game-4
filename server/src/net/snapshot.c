@@ -13,14 +13,14 @@ static void quantize_entity_data(const struct Ship* ship, struct EntitySnapshot*
 static void quantize_player_data(const struct Player* player, struct EntitySnapshot* snap);
 static void quantize_projectile_data(const struct Projectile* proj, struct EntitySnapshot* snap);
 static uint16_t calculate_delta_size(const struct EntityDelta* delta);
+/* Unused - reserved for future delta compression implementation
 static bool entities_differ(const struct EntitySnapshot* a, const struct EntitySnapshot* b);
-// Forward declarations
-// create_entity_delta is defined in header
 static size_t apply_delta_compression(const struct EntitySnapshot* baseline, 
                                       const struct EntitySnapshot* entities, 
                                       uint16_t entity_count,
                                       uint8_t* output_buffer,
                                       size_t buffer_size);
+*/
 
 int snapshot_manager_init(struct SnapshotManager* mgr) {
     if (!mgr) return -1;
@@ -440,6 +440,7 @@ static uint16_t calculate_delta_size(const struct EntityDelta* delta) {
     return size;
 }
 
+/* Unused - reserved for future delta compression implementation
 static bool entities_differ(const struct EntitySnapshot* a, const struct EntitySnapshot* b) {
     if (!a || !b || a->id != b->id) return true;
     
@@ -517,3 +518,4 @@ static size_t apply_delta_compression(const struct EntitySnapshot* baseline,
     
     return bytes_written;
 }
+*/

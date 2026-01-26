@@ -22,6 +22,7 @@ static entity_id allocate_entity_id(struct Sim* sim);
  * Allocate a new unique entity ID
  */
 static entity_id allocate_entity_id(struct Sim* sim) {
+    (void)sim; // Mark as intentionally unused
     static entity_id next_id = 1;
     
     // Simple sequential allocation
