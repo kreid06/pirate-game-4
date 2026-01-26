@@ -2291,7 +2291,7 @@ int websocket_server_update(struct Sim* sim) {
                                         
                                         // Log player input
                                         log_info("🎮 INPUT[P%u]: movement(%.2f, %.2f) rotation=%.2f° moving=%d",
-                                                player->id, x, y, rotation * (180.0f / M_PI), player->is_moving);
+                                                player->player_id, x, y, rotation * (180.0f / M_PI), player->is_moving);
                                         
                                         // Track movement for adaptive tick rate
                                         if (player->is_moving) {
@@ -2353,7 +2353,7 @@ int websocket_server_update(struct Sim* sim) {
                                     
                                     // Log movement state change
                                     log_info("🚶 MOVEMENT_STATE[P%u]: direction(%.2f, %.2f) is_moving=%d",
-                                            player->id, x, y, is_moving);
+                                            player->player_id, x, y, is_moving);
                                     
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"state_updated\"}");
                                 } else {
@@ -2391,7 +2391,7 @@ int websocket_server_update(struct Sim* sim) {
                                     
                                     // Log rotation update
                                     log_info("🔄 ROTATION[P%u]: %.2f° (%.4f rad)",
-                                            player->id, rotation * (180.0f / M_PI), rotation);
+                                            player->player_id, rotation * (180.0f / M_PI), rotation);
                                     
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"rotation_updated\"}");
                                 } else {

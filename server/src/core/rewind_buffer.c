@@ -133,6 +133,7 @@ hit_validation_result_t rewind_buffer_validate_hit(const rewind_buffer_t* buffer
     if (client_id < MAX_CLIENTS) {
         client_delay = historical_state->network_delays[client_id];
     }
+    (void)client_delay; // Reserved for future use
     
     // Validate the hit against all ships in historical state
     rewind_vec2_t hit_point;
@@ -244,6 +245,7 @@ void rewind_buffer_get_stats(const rewind_buffer_t* buffer,
  * Clean up old entries (called periodically)
  */
 void rewind_buffer_cleanup(rewind_buffer_t* buffer, uint32_t current_tick) {
+    (void)current_tick; // Use timestamp instead
     // Mark entries older than MAX_REWIND_TIME_MS as invalid
     uint64_t current_time = get_time_ms();
     uint64_t cutoff_time = current_time - MAX_REWIND_TIME_MS;
@@ -300,7 +302,7 @@ static bool raycast_ship_hit(rewind_vec2_t ray_origin, rewind_vec2_t ray_directi
     }
     
     // More detailed hull intersection check
-    rewind_vec2_t ray_end = rewind_vec2_add(ray_origin, rewind_vec2_scale(ray_direction, ray_length));
+    // Ray endpoint not needed for bounding box test
     
     // Check intersection with ship's bounding box (simplified)
     rewind_vec2_t ship_min = rewind_vec2_sub(ship->position, rewind_vec2_create(ship_radius, ship_radius));

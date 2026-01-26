@@ -270,6 +270,7 @@ input_validation_result_t input_validation_validate(input_validator_t* validator
 void input_validation_update_delay(input_validator_t* validator,
                                   uint32_t client_id,
                                   float network_delay_ms) {
+    (void)validator; // Reserved for future use
     if (client_id >= MAX_CLIENTS) return;
     
     // Use network delay to adjust validation tolerances
