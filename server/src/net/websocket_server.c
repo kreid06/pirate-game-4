@@ -1053,8 +1053,10 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
         ShipModule* cannon = &sim_ship->modules[m];
         float cannon_base_angle = Q16_TO_FLOAT(cannon->local_rot); // Base rotation relative to ship
         
-        // Calculate desired aim offset (player's aim - cannon's base)
-        float desired_offset = player->cannon_aim_angle_relative - cannon_base_angle;
+        // Calculate desired aim offset.
+        // cannon_base_angle is in rendering convention; add PI/2 to shift into physics convention
+        // so that aim_direction=0 means the cannon fires along its natural barrel direction.
+        float desired_offset = player->cannon_aim_angle_relative - cannon_base_angle + (float)(M_PI / 2.0);
         
         // Normalize
         while (desired_offset > M_PI) desired_offset -= 2.0f * M_PI;
@@ -1100,10 +1102,13 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
     float cannon_world_x = ship->x + (cannon_local_x * cos_rot - cannon_local_y * sin_rot);
     float cannon_world_y = ship->y + (cannon_local_x * sin_rot + cannon_local_y * cos_rot);
     
-    // Calculate projectile direction (ship rotation + cannon's base rotation + aim offset)
+    // Calculate projectile direction.
+    // cannon->local_rot is stored in "rendering convention" (0 = barrel faces -Y/up, rotated from there).
+    // cos/sin physics use "math convention" (0 = +X/right).
+    // Converting: physics_angle = rendering_angle - PI/2
     float cannon_local_rot = Q16_TO_FLOAT(cannon->local_rot);
     float aim_offset = Q16_TO_FLOAT(cannon->data.cannon.aim_direction);
-    float projectile_angle = ship->rotation + cannon_local_rot + aim_offset;
+    float projectile_angle = ship->rotation + (cannon_local_rot - (float)(M_PI / 2.0)) + aim_offset;
     
     // Spawn projectile at the end of the cannon barrel (outside the ship)
     // All positions in CLIENT PIXELS at this point
@@ -1250,7 +1255,8 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all) {
             // Cannon can aim ±30° from base rotation
             float cannon_base_angle = Q16_TO_FLOAT(module->local_rot); // Cannon's base rotation relative to ship
             float cannon_current_aim = Q16_TO_FLOAT(module->data.cannon.aim_direction); // Current aim offset
-            float cannon_absolute_aim = cannon_base_angle + cannon_current_aim; // Total cannon direction (ship-relative)
+            // Convert base angle from rendering convention to physics convention (subtract PI/2)
+            float cannon_absolute_aim = (cannon_base_angle - (float)(M_PI / 2.0)) + cannon_current_aim;
             
             // Player's aim direction (ship-relative)
             float player_aim = player->cannon_aim_angle_relative;
