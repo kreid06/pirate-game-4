@@ -1,8 +1,8 @@
 # Compiler
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c99 -O2 -g
-INCLUDES = -Iinclude -I/opt/homebrew/opt/openssl@3/include
-LIBS = -lwebsockets -ljson-c -lm -lpthread -L/opt/homebrew/opt/openssl@3/lib -lssl -lcrypto
+INCLUDES = -Iinclude $(shell pkg-config --cflags openssl 2>/dev/null)
+LIBS = -lwebsockets -ljson-c -lm -lpthread $(shell pkg-config --libs openssl 2>/dev/null || echo "-lssl -lcrypto")
 
 # Directories
 SRCDIR = src
