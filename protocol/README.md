@@ -2,7 +2,7 @@
 
 This directory contains the shared protocol definitions between the client and server.
 
-> 📋 **See [PROTOCOL_SPECIFICATION.md](../docs/PROTOCOL_SPECIFICATION.md) for complete protocol documentation**
+> 📋 **See [PROTOCOL.md](../docs/PROTOCOL.md) for complete protocol documentation**
 
 ## Quick Reference
 

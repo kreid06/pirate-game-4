@@ -1017,14 +1017,14 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
         return; // Player not on a ship
     }
     
-    // Store world aim angle
+    // Client already sends a ship-relative angle (worldAngle - shipRotation)
     player->cannon_aim_angle = aim_angle;
     
-    // Convert to ship-relative angle
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship) return;
     
-    player->cannon_aim_angle_relative = aim_angle - ship->rotation;
+    // Use directly — do NOT subtract ship->rotation again (client already did so)
+    player->cannon_aim_angle_relative = aim_angle;
     
     // Normalize to -PI to +PI range
     while (player->cannon_aim_angle_relative > M_PI) player->cannon_aim_angle_relative -= 2.0f * M_PI;
