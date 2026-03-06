@@ -1026,7 +1026,11 @@ void handle_projectile_collisions(struct Sim* sim) {
             float dy = Q16_TO_FLOAT(ship->position.y) - Q16_TO_FLOAT(proj->position.y);
             float dist_sq = dx*dx + dy*dy;
             float brad = Q16_TO_FLOAT(ship->bounding_radius);
-            if (dist_sq > brad * brad) continue;
+            if (dist_sq > brad * brad) {
+                // Ball is outside bounding circle - clear breach flag if it was set for this ship
+                if (proj->inside_ship_id == ship->id) proj->inside_ship_id = 0;
+                continue;
+            }
 
             // ---- Narrow-phase: transform projectile into ship-local coords ----
             float rot = Q16_TO_FLOAT(ship->rotation);
@@ -1035,8 +1039,50 @@ void handle_projectile_collisions(struct Sim* sim) {
             float lx = rel_x * cosf(-rot) - rel_y * sinf(-rot);
             float ly = rel_x * sinf(-rot) + rel_y * cosf(-rot);
 
-            // Point-in-polygon test: hit only when ball is inside the hull polygon
-            if (!point_in_hull(lx, ly, ship->hull_vertices, ship->hull_vertex_count)) continue;
+            // Point-in-polygon test
+            bool inside_hull = point_in_hull(lx, ly, ship->hull_vertices, ship->hull_vertex_count);
+
+            // If ball was marked as breaching this ship but has now exited the hull, clear it
+            if (proj->inside_ship_id == ship->id && !inside_hull) {
+                proj->inside_ship_id = 0;
+                continue;
+            }
+
+            if (!inside_hull) continue;
+
+            // ---- Ball is inside the hull polygon ----
+
+            if (proj->inside_ship_id == ship->id) {
+                // Ball already breached this hull — check for interior module hits at current position
+                int hit_m = find_module_hit(ship, lx, ly);
+                if (hit_m >= 0) {
+                    ShipModule* hit_mod = &ship->modules[hit_m];
+                    hit_mod->state_bits |= MODULE_STATE_DESTROYED;
+                    hit_mod->state_bits &= ~MODULE_STATE_ACTIVE;
+
+                    log_info("💥 Projectile %u (traveling inside hull) destroyed module %u (idx %d) on ship %u",
+                             proj->id, hit_mod->id, hit_m, ship->id);
+
+                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                        ev->ship_id    = ship->id;
+                        ev->plank_id   = 0;
+                        ev->module_idx = (uint8_t)hit_m;
+                        ev->hit_x      = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y      = Q16_TO_FLOAT(proj->position.y);
+                    }
+
+                    // Remove projectile on interior module hit
+                    memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                            (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                    sim->projectile_count--;
+                    removed = true;
+                }
+                // No module hit yet — ball keeps traveling, do NOT remove
+                continue;
+            }
+
+            // ---- Ball is entering the hull for the first time — check entry plank ----
 
             // Find nearest hull vertex to determine which plank was hit
             int nearest_v = 0;
@@ -1062,7 +1108,7 @@ void handle_projectile_collisions(struct Sim* sim) {
             }
 
             if (hit_plank && !(hit_plank->state_bits & MODULE_STATE_DESTROYED)) {
-                // --- Plank is intact: destroy it ---
+                // --- Plank is intact: destroy it and absorb the ball ---
                 hit_plank->data.plank.health = 0;
                 hit_plank->state_bits |= MODULE_STATE_DESTROYED;
                 hit_plank->state_bits &= ~MODULE_STATE_ACTIVE;
@@ -1074,37 +1120,24 @@ void handle_projectile_collisions(struct Sim* sim) {
                     struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
                     ev->ship_id    = ship->id;
                     ev->plank_id   = plank_module_id;
-                    ev->module_idx = 255; // no interior module
+                    ev->module_idx = 255;
                     ev->hit_x      = Q16_TO_FLOAT(proj->position.x);
                     ev->hit_y      = Q16_TO_FLOAT(proj->position.y);
                 }
+
+                // Remove projectile — plank absorbed it
+                memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                        (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                sim->projectile_count--;
+                removed = true;
             } else {
-                // --- Plank already destroyed: ball breaches the hull ---
-                int hit_m = find_module_hit(ship, lx, ly);
-                if (hit_m >= 0) {
-                    ShipModule* hit_mod = &ship->modules[hit_m];
-                    hit_mod->state_bits |= MODULE_STATE_DESTROYED;
-                    hit_mod->state_bits &= ~MODULE_STATE_ACTIVE;
-
-                    log_info("💥 Projectile %u breached plank %u, destroyed module %u (idx %d) on ship %u",
-                             proj->id, plank_module_id, hit_mod->id, hit_m, ship->id);
-
-                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
-                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
-                        ev->ship_id    = ship->id;
-                        ev->plank_id   = 0;
-                        ev->module_idx = (uint8_t)hit_m;
-                        ev->hit_x      = Q16_TO_FLOAT(proj->position.x);
-                        ev->hit_y      = Q16_TO_FLOAT(proj->position.y);
-                    }
-                }
+                // --- Plank already destroyed: ball passes through the breach ---
+                // Mark the ball as inside this ship; do NOT remove it.
+                // On subsequent ticks it will be checked via the interior-module path above.
+                proj->inside_ship_id = ship->id;
+                log_info("🕳️  Projectile %u entered breach at plank %u on ship %u — traveling inside",
+                         proj->id, plank_module_id, ship->id);
             }
-
-            // Remove projectile immediately
-            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
-                    (sim->projectile_count - i - 1) * sizeof(struct Projectile));
-            sim->projectile_count--;
-            removed = true;
         }
 
         // ---- Player collision (unchanged) ----

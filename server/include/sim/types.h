@@ -87,7 +87,8 @@ struct Projectile {
     uint32_t spawn_time;    // Server tick when created
     uint16_t flags;         // Projectile flags
     uint8_t type;           // Cannonball, grapeshot, etc
-    uint8_t reserved;
+    uint8_t _pad;
+    entity_id inside_ship_id; // 0 = not inside any hull; set when ball passes through a breach
 };
 
 // Input command from client
