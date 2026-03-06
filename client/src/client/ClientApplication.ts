@@ -28,6 +28,7 @@ import { AudioManager } from './audio/AudioManager.js';
 
 // Core Simulation Types
 import { WorldState, InputFrame } from '../sim/Types.js';
+import { createEmptyInventory } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
 
 /**
@@ -270,6 +271,18 @@ export class ClientApplication {
       };
       this.inputManager.onCannonFire = (cannonIds, fireAll) => {
         this.networkManager.sendCannonFire(cannonIds, fireAll);
+      };
+
+      // Hotbar slot selection — update locally for instant UI feedback, then sync server
+      this.inputManager.onSlotSelect = (slot) => {
+        const playerId = this.networkManager.getAssignedPlayerId();
+        if (playerId !== null) {
+          for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+            const p = ws?.players.find(pl => pl.id === playerId);
+            if (p) p.inventory.activeSlot = slot;
+          }
+        }
+        this.networkManager.sendSlotSelect(slot);
       };
       
       // Set up scroll-wheel zoom
@@ -839,7 +852,8 @@ export class ClientApplication {
           carrierId: 1, // On the demo ship
           deckId: 0,
           onDeck: true,
-          isMounted: false // Not mounted initially
+          isMounted: false, // Not mounted initially
+          inventory: createEmptyInventory()
         }
       ],
       cannonballs: [],

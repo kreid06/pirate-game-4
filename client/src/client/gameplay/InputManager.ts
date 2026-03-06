@@ -86,6 +86,9 @@ export class InputManager {
   public onCannonAim: ((aimAngle: number) => void) | null = null;
   public onCannonFire: ((cannonIds?: number[], fireAll?: boolean) => void) | null = null;
 
+  // Inventory callback
+  public onSlotSelect: ((slot: number) => void) | null = null;
+
   // Camera zoom callback
   public onZoom: ((factor: number, screenPoint: Vec2) => void) | null = null;
   
@@ -801,6 +804,14 @@ export class InputManager {
         break;
       case 'KeyC':
         // Camera mode toggle handled by client application
+        break;
+      // Hotbar slots: Digit1-Digit9 → slots 0-8, Digit0 → slot 9
+      case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
+      case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
+        if (this.onSlotSelect) this.onSlotSelect(parseInt(event.code.replace('Digit', '')) - 1);
+        break;
+      case 'Digit0':
+        if (this.onSlotSelect) this.onSlotSelect(9);
         break;
     }
   }

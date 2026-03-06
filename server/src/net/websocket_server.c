@@ -573,7 +573,17 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].is_mounted = false;
             players[i].mounted_module_id = 0;
             players[i].controlling_ship_id = 0;
-            
+
+            // Initialize inventory — give starter items for testing
+            memset(&players[i].inventory, 0, sizeof(PlayerInventory));
+            players[i].inventory.active_slot = 0;
+            players[i].inventory.slots[0].item     = ITEM_PLANK;
+            players[i].inventory.slots[0].quantity = 10;
+            players[i].inventory.slots[1].item     = ITEM_HAMMER;
+            players[i].inventory.slots[1].quantity = 1;
+            players[i].inventory.slots[2].item     = ITEM_REPAIR_KIT;
+            players[i].inventory.slots[2].quantity = 3;
+
             return &players[i];
         }
     }
@@ -2904,7 +2914,52 @@ int websocket_server_update(struct Sim* sim) {
                                     "{\"type\":\"pong\",\"timestamp\":%u,\"server_time\":%u}",
                                     get_time_ms(), get_time_ms());
                             handled = true;
-                            
+
+                        } else if (strstr(payload, "\"type\":\"slot_select\"")) {
+                            // INVENTORY: player changed active hotbar slot
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    int slot = 0;
+                                    char* slot_ptr = strstr(payload, "\"slot\":");
+                                    if (slot_ptr) sscanf(slot_ptr + 7, "%d", &slot);
+                                    if (slot >= 0 && slot < INVENTORY_SLOTS)
+                                        player->inventory.active_slot = (uint8_t)slot;
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"slot_selected\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
+                        } else if (strstr(payload, "\"type\":\"give_item\"")) {
+                            // INVENTORY: server-side item grant (used by admin/tests)
+                            // {"type":"give_item","slot":0,"item":1,"quantity":10}
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    int slot = 0, item_id = 0, qty = 1;
+                                    char* p_slot = strstr(payload, "\"slot\":");
+                                    char* p_item = strstr(payload, "\"item\":");
+                                    char* p_qty  = strstr(payload, "\"quantity\":");
+                                    if (p_slot) sscanf(p_slot + 7,  "%d", &slot);
+                                    if (p_item) sscanf(p_item + 7,  "%d", &item_id);
+                                    if (p_qty)  sscanf(p_qty  + 11, "%d", &qty);
+                                    if (slot >= 0 && slot < INVENTORY_SLOTS) {
+                                        player->inventory.slots[slot].item     = (ItemKind)item_id;
+                                        player->inventory.slots[slot].quantity = (uint8_t)(qty > 99 ? 99 : qty);
+                                    }
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"item_given\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
                         } else {
                             // Unknown JSON message
                             ws_server.unknown_messages_received++;
@@ -3262,23 +3317,44 @@ int websocket_server_update(struct Sim* sim) {
                 if (!first_player) {
                     players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, ",");
                 }
-                char player_entry[384];  // Increased size for additional fields
+
+                // Build inventory JSON
+                char inv_buf[220];
+                int inv_off = 0;
+                inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
+                                    ",\"inventory\":{\"slots\":[");
+                for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                    if (s > 0 && inv_off < (int)sizeof(inv_buf) - 1)
+                        inv_buf[inv_off++] = ',';
+                    inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
+                                        "[%d,%d]",
+                                        (int)players[p].inventory.slots[s].item,
+                                        (int)players[p].inventory.slots[s].quantity);
+                }
+                inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
+                                    "],\"armor\":%d,\"shield\":%d,\"activeSlot\":%d}",
+                                    (int)players[p].inventory.armor,
+                                    (int)players[p].inventory.shield,
+                                    (int)players[p].inventory.active_slot);
+
+                char player_entry[640];
                 snprintf(player_entry, sizeof(player_entry),
                         "{\"id\":%u,\"name\":\"Player_%u\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
                         "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
                         "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\","
-                        "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u}",
-                        players[p].player_id, players[p].player_id, 
+                        "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u%s}",
+                        players[p].player_id, players[p].player_id,
                         players[p].x, players[p].y, players[p].rotation,
-                        players[p].velocity_x, players[p].velocity_y, 
+                        players[p].velocity_x, players[p].velocity_y,
                         players[p].is_moving ? "true" : "false",
                         players[p].movement_direction_x, players[p].movement_direction_y,
                         players[p].parent_ship_id, players[p].local_x, players[p].local_y,
                         get_state_string(players[p].movement_state),
                         players[p].is_mounted ? "true" : "false",
                         players[p].mounted_module_id,
-                        players[p].controlling_ship_id);
+                        players[p].controlling_ship_id,
+                        inv_buf);
                 players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "%s", player_entry);
                 first_player = false;
                 active_count++;

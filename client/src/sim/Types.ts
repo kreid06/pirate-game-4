@@ -1,6 +1,7 @@
 import { Vec2 } from '../common/Vec2.js';
 import { ShipModule } from './modules.js';
 import { CarrierDetectionState } from './CarrierDetection.js';
+import { PlayerInventory } from './Inventory.js';
 
 /**
  * Player input frame for deterministic simulation
@@ -66,6 +67,9 @@ export interface Player {
   // Enhanced movement data from server (for reconciliation & debugging)
   isMoving?: boolean; // Is player actively moving (from hybrid protocol)
   movementDirection?: Vec2; // Server's stored movement direction (normalized)
+
+  // Inventory
+  inventory: PlayerInventory;
 }
 
 /**

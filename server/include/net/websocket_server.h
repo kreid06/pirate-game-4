@@ -68,6 +68,37 @@ typedef struct NpcAgent {
 
 #define MAX_NPC_AGENTS 64
 
+// ── Player Inventory ────────────────────────────────────────────────────────
+#define INVENTORY_SLOTS 10
+
+typedef enum {
+    ITEM_NONE          = 0,
+    ITEM_PLANK         = 1,
+    ITEM_REPAIR_KIT    = 2,
+    ITEM_CANNON_BALL   = 3,
+    ITEM_SWORD         = 4,
+    ITEM_PISTOL        = 5,
+    ITEM_HAMMER        = 6,
+    ITEM_CLOTH_ARMOR   = 10,
+    ITEM_LEATHER_ARMOR = 11,
+    ITEM_IRON_ARMOR    = 12,
+    ITEM_WOODEN_SHIELD = 20,
+    ITEM_IRON_SHIELD   = 21,
+} ItemKind;
+
+typedef struct {
+    ItemKind item;
+    uint8_t  quantity; // 0 = empty; 1 for weapons/tools; 1-99 for stackables
+} InventorySlot;
+
+typedef struct {
+    InventorySlot slots[INVENTORY_SLOTS];
+    ItemKind armor;       // Equipped armor (ITEM_NONE if bare)
+    ItemKind shield;      // Equipped shield (ITEM_NONE if none)
+    uint8_t  active_slot; // Currently selected hotbar slot (0-9)
+} PlayerInventory;
+// ────────────────────────────────────────────────────────────────────────────
+
 typedef enum {
     PLAYER_STATE_IDLE,
     PLAYER_STATE_WALKING,   // On ship deck
@@ -107,6 +138,9 @@ typedef struct WebSocketPlayer {
     // Cannon aiming state
     float cannon_aim_angle;        // World coordinates aim angle (radians)
     float cannon_aim_angle_relative; // Ship-relative aim angle (radians)
+
+    // Inventory
+    PlayerInventory inventory;
 } WebSocketPlayer;
 
 struct WebSocketStats {

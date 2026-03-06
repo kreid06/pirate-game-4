@@ -10,6 +10,7 @@ import { WorldState, InputFrame } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { createShipAtPosition } from '../sim/ShipUtils.js';
 import { ShipModule, ModuleKind, MODULE_TYPE_MAP } from '../sim/modules.js';
+import { parseInventoryFromServer, createEmptyInventory } from '../sim/Inventory.js';
 
 /**
  * Network connection states
@@ -734,6 +735,23 @@ export class NetworkManager {
     console.log(`💥 Cannon fire: ${fireAll ? 'ALL' : cannonIds ? `IDs ${cannonIds.join(',')}` : 'aimed'}`);
     this.sendMessage(message);
   }
+
+  /**
+   * Notify the server that the player selected a different hotbar slot.
+   */
+  sendSlotSelect(slot: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: 'slot_select', timestamp: Date.now(), slot });
+  }
+
+  /**
+   * Give an item directly to the local player (admin/test helper).
+   * Sends a give_item message to the server.
+   */
+  sendGiveItem(slot: number, itemId: number, quantity: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: 'give_item', timestamp: Date.now(), slot, item: itemId, quantity });
+  }
   
   /**
    * Get current network statistics
@@ -1058,7 +1076,17 @@ export class NetworkManager {
             mountedModuleId: player.mounted_module_id || undefined,
             mountOffset: (player.mount_offset_x !== undefined && player.mount_offset_y !== undefined)
               ? Vec2.from(player.mount_offset_x, player.mount_offset_y)
-              : undefined
+              : undefined,
+
+            // Inventory from server
+            inventory: player.inventory
+              ? parseInventoryFromServer(
+                  player.inventory.slots,
+                  player.inventory.activeSlot ?? 0,
+                  player.inventory.armor ?? 0,
+                  player.inventory.shield ?? 0,
+                )
+              : createEmptyInventory(),
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,

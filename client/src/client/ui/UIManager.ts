@@ -9,6 +9,7 @@ import { ClientConfig } from '../ClientConfig.js';
 import { WorldState } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
+import { ITEM_DEFS, INVENTORY_SLOTS, ItemKind } from '../../sim/Inventory.js';
 
 /**
  * UI render context
@@ -289,6 +290,161 @@ class HUDElement implements UIElement {
     if (playerShip !== undefined && playerShip !== null) {
       this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100);
     }
+
+    // Hotbar
+    this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot);
+
+    // Equipment panel (armor + shield)
+    this.renderEquipmentPanel(ctx, ctx.canvas, player.inventory.equipment.armor, player.inventory.equipment.shield);
+  }
+
+  private renderHotbar(
+    ctx: CanvasRenderingContext2D,
+    canvas: HTMLCanvasElement,
+    slots: { item: ItemKind; quantity: number }[],
+    activeSlot: number
+  ): void {
+    const SLOT_SIZE = 48;
+    const SLOT_GAP = 4;
+    const PADDING = 6;
+    const LABEL_H = 16;
+    const totalW = INVENTORY_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+    const startX = Math.round((canvas.width - totalW) / 2);
+    const startY = canvas.height - totalH - 8;
+
+    // Background panel
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.fillRect(startX, startY, totalW, totalH);
+    ctx.strokeStyle = '#556';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(startX, startY, totalW, totalH);
+
+    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+      const slot = slots[i] ?? { item: 'none' as ItemKind, quantity: 0 };
+      const def  = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
+      const sx   = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+      const sy   = startY + PADDING;
+      const isActive = i === activeSlot;
+
+      // Slot background
+      ctx.fillStyle = isActive ? 'rgba(255,220,60,0.18)' : 'rgba(30,30,40,0.9)';
+      ctx.fillRect(sx, sy, SLOT_SIZE, SLOT_SIZE);
+
+      // Slot border (bright gold when active)
+      ctx.strokeStyle = isActive ? '#ffd700' : def.borderColor;
+      ctx.lineWidth = isActive ? 2.5 : 1;
+      ctx.strokeRect(sx, sy, SLOT_SIZE, SLOT_SIZE);
+
+      // Item fill color swatch
+      if (slot.item !== 'none') {
+        const swatchPad = 6;
+        ctx.fillStyle = def.color;
+        ctx.fillRect(sx + swatchPad, sy + swatchPad, SLOT_SIZE - swatchPad * 2, SLOT_SIZE - swatchPad * 2);
+        ctx.strokeStyle = def.borderColor;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(sx + swatchPad, sy + swatchPad, SLOT_SIZE - swatchPad * 2, SLOT_SIZE - swatchPad * 2);
+
+        // Symbol
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 18px Consolas, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
+
+        // Stack count (bottom-right, only for stackables > 1)
+        if (slot.quantity > 1) {
+          ctx.fillStyle = '#ffee88';
+          ctx.font = 'bold 11px Consolas, monospace';
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(String(slot.quantity), sx + SLOT_SIZE - 3, sy + SLOT_SIZE - 3);
+        }
+      }
+
+      // Slot number label below slot
+      ctx.fillStyle = isActive ? '#ffd700' : '#778';
+      ctx.font = '11px Consolas, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(String(i === 9 ? 0 : i + 1), sx + SLOT_SIZE / 2, sy + SLOT_SIZE + 2);
+    }
+
+    ctx.restore();
+  }
+
+  private renderEquipmentPanel(
+    ctx: CanvasRenderingContext2D,
+    canvas: HTMLCanvasElement,
+    armor: ItemKind,
+    shield: ItemKind
+  ): void {
+    const SLOT_SIZE = 44;
+    const SLOT_GAP = 6;
+    const PADDING = 8;
+    const panelW = 2 * SLOT_SIZE + SLOT_GAP + PADDING * 2;
+    const panelH = SLOT_SIZE + PADDING * 2 + 16 + 14; // slots + labels + header
+    const px = canvas.width - panelW - 8;
+    const py = canvas.height - panelH - 8;
+
+    ctx.save();
+
+    // Background
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.fillRect(px, py, panelW, panelH);
+    ctx.strokeStyle = '#556';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(px, py, panelW, panelH);
+
+    // Header
+    ctx.fillStyle = '#aaa';
+    ctx.font = 'bold 11px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText('EQUIP', px + panelW / 2, py + 4);
+
+    const slots: { item: ItemKind; label: string }[] = [
+      { item: armor,  label: 'Armor'  },
+      { item: shield, label: 'Shield' },
+    ];
+
+    for (let i = 0; i < 2; i++) {
+      const { item, label } = slots[i];
+      const def = ITEM_DEFS[item] ?? ITEM_DEFS['none'];
+      const sx = px + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+      const sy = py + 4 + 14; // below header
+
+      // Background
+      ctx.fillStyle = item !== 'none' ? 'rgba(50,40,20,0.9)' : 'rgba(30,30,40,0.9)';
+      ctx.fillRect(sx, sy, SLOT_SIZE, SLOT_SIZE);
+      ctx.strokeStyle = def.borderColor;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(sx, sy, SLOT_SIZE, SLOT_SIZE);
+
+      if (item !== 'none') {
+        const swatchPad = 5;
+        ctx.fillStyle = def.color;
+        ctx.fillRect(sx + swatchPad, sy + swatchPad, SLOT_SIZE - swatchPad * 2, SLOT_SIZE - swatchPad * 2);
+        ctx.strokeStyle = def.borderColor;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(sx + swatchPad, sy + swatchPad, SLOT_SIZE - swatchPad * 2, SLOT_SIZE - swatchPad * 2);
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 16px Consolas, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
+      }
+
+      // Label
+      ctx.fillStyle = '#778';
+      ctx.font = '10px Consolas, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(label, sx + SLOT_SIZE / 2, sy + SLOT_SIZE + 3);
+    }
+
+    ctx.restore();
   }
 
   private renderWaterMeter(
