@@ -1375,27 +1375,44 @@ export class RenderSystem {
     lines.push(`Type: ${moduleData.kind.toUpperCase()}`);
     lines.push(`ID: ${module.id}`);
     
+    // Quality helper: map material to quality tier
+    const qualityFromMaterial = (mat: string): string => {
+      switch (mat) {
+        case 'iron':  return 'Uncommon';
+        case 'steel': return 'Rare';
+        default:      return 'Common';
+      }
+    };
+
     // Add type-specific info
     if (moduleData.kind === 'plank') {
-      const healthPercent = moduleData.health.toFixed(1);
-      lines.push(`Health: ${healthPercent}%`);
-      lines.push(`Material: ${moduleData.material}`);
+      const hp = Math.round(moduleData.health);
+      const maxHp = moduleData.maxHealth ?? 10000;
+      lines.push(`Health: ${hp} / ${maxHp}`);
+      lines.push(`Quality: ${qualityFromMaterial(moduleData.material)}`);
       if (moduleData.sectionName) {
         lines.push(`Section: ${moduleData.sectionName}`);
       }
-      if (moduleData.isCurved) {
-        lines.push(`Type: CURVED`);
-      }
     } else if (moduleData.kind === 'cannon') {
-      lines.push(`Reload: ${moduleData.timeSinceLastFire.toFixed(1)}s`);
+      const hp = Math.round(moduleData.health);
+      const maxHp = (moduleData as any).maxHealth ?? 8000;
+      lines.push(`Health: ${hp} / ${maxHp}`);
+      lines.push(`Dmg: 3000`);
+      lines.push(`Reload: ${(moduleData as any).reloadTime ?? 3.0}s`);
+      lines.push(`Quality: Common`);
     } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
+      const hp = Math.round((moduleData as any).health ?? 10000);
+      const maxHp = (moduleData as any).maxHealth ?? 10000;
+      lines.push(`Health: ${hp} / ${maxHp}`);
       lines.push(`Turn Rate: ${moduleData.maxTurnRate.toFixed(2)}`);
       lines.push(`Responsiveness: ${(moduleData.responsiveness * 100).toFixed(0)}%`);
     } else if (moduleData.kind === 'mast') {
+      const hp = Math.round((moduleData as any).health ?? 15000);
+      const maxHp = (moduleData as any).maxHealth ?? 15000;
+      lines.push(`Health: ${hp} / ${maxHp}`);
       lines.push(`Sail State: ${moduleData.sailState.toUpperCase()}`);
       lines.push(`Openness: ${moduleData.openness.toFixed(0)}%`);
       lines.push(`Wind Efficiency: ${(moduleData.windEfficiency * 100).toFixed(0)}%`);
-      lines.push(`Height: ${moduleData.height.toFixed(0)}`);
     }
     
     // Add interaction hint

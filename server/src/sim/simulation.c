@@ -1097,20 +1097,26 @@ void handle_projectile_collisions(struct Sim* sim) {
                     ShipModule* hit_mod = &ship->modules[hit_m];
                     uint16_t mod_id = hit_mod->id;
 
+                    float dmg_before = (float)hit_mod->health;
                     module_apply_damage(hit_mod, proj->damage);
+                    float damage_dealt = dmg_before - (float)hit_mod->health;
+                    if (damage_dealt < 0) damage_dealt = 0;
 
                     if (hit_mod->health <= 0) {
-                        // Module destroyed — remove it
+                        // Module destroyed — emit event and remove it
                         log_info("💥 Projectile %u (inside hull) destroyed module %u on ship %u",
                                  proj->id, mod_id, ship->id);
 
                         if (sim->hit_event_count < MAX_HIT_EVENTS) {
                             struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
-                            ev->ship_id   = ship->id;
-                            ev->module_id = mod_id;
-                            ev->is_breach = true;
-                            ev->hit_x     = Q16_TO_FLOAT(proj->position.x);
-                            ev->hit_y     = Q16_TO_FLOAT(proj->position.y);
+                            ev->ship_id      = ship->id;
+                            ev->module_id    = mod_id;
+                            ev->is_breach    = true;
+                            ev->is_sink      = false;
+                            ev->destroyed    = true;
+                            ev->damage_dealt = damage_dealt;
+                            ev->hit_x        = Q16_TO_FLOAT(proj->position.x);
+                            ev->hit_y        = Q16_TO_FLOAT(proj->position.y);
                         }
 
                         memmove(&ship->modules[hit_m], &ship->modules[hit_m + 1],
@@ -1119,6 +1125,19 @@ void handle_projectile_collisions(struct Sim* sim) {
                     } else {
                         log_info("💥 Projectile %u hit module %u on ship %u — %d HP remaining",
                                  proj->id, mod_id, ship->id, (int)hit_mod->health);
+
+                        // Non-fatal hit — still emit event for damage numbers
+                        if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                            struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                            ev->ship_id      = ship->id;
+                            ev->module_id    = mod_id;
+                            ev->is_breach    = true;
+                            ev->is_sink      = false;
+                            ev->destroyed    = false;
+                            ev->damage_dealt = damage_dealt;
+                            ev->hit_x        = Q16_TO_FLOAT(proj->position.x);
+                            ev->hit_y        = Q16_TO_FLOAT(proj->position.y);
+                        }
                     }
 
                     // Projectile absorbed regardless of whether module was destroyed
@@ -1159,7 +1178,10 @@ void handle_projectile_collisions(struct Sim* sim) {
             if (hit_plank_idx >= 0 && !(ship->modules[hit_plank_idx].state_bits & MODULE_STATE_DESTROYED)) {
                 ShipModule* hit_plank = &ship->modules[hit_plank_idx];
 
+                float plank_hp_before = (float)hit_plank->health;
                 module_apply_damage(hit_plank, proj->damage);
+                float plank_damage_dealt = plank_hp_before - (float)hit_plank->health;
+                if (plank_damage_dealt < 0) plank_damage_dealt = 0;
 
                 if (hit_plank->health <= 0) {
                     // Plank destroyed — emit event and remove it
@@ -1168,11 +1190,14 @@ void handle_projectile_collisions(struct Sim* sim) {
 
                     if (sim->hit_event_count < MAX_HIT_EVENTS) {
                         struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
-                        ev->ship_id   = ship->id;
-                        ev->module_id = plank_module_id;
-                        ev->is_breach = false;
-                        ev->hit_x     = Q16_TO_FLOAT(proj->position.x);
-                        ev->hit_y     = Q16_TO_FLOAT(proj->position.y);
+                        ev->ship_id      = ship->id;
+                        ev->module_id    = plank_module_id;
+                        ev->is_breach    = false;
+                        ev->is_sink      = false;
+                        ev->destroyed    = true;
+                        ev->damage_dealt = plank_damage_dealt;
+                        ev->hit_x        = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y        = Q16_TO_FLOAT(proj->position.y);
                     }
 
                     memmove(&ship->modules[hit_plank_idx], &ship->modules[hit_plank_idx + 1],
@@ -1181,6 +1206,19 @@ void handle_projectile_collisions(struct Sim* sim) {
                 } else {
                     log_info("🎯 Projectile %u hit plank %u on ship %u — %d HP remaining",
                              proj->id, plank_module_id, ship->id, (int)hit_plank->health);
+
+                    // Non-fatal hit — emit event for damage numbers
+                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                        ev->ship_id      = ship->id;
+                        ev->module_id    = plank_module_id;
+                        ev->is_breach    = false;
+                        ev->is_sink      = false;
+                        ev->destroyed    = false;
+                        ev->damage_dealt = plank_damage_dealt;
+                        ev->hit_x        = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y        = Q16_TO_FLOAT(proj->position.y);
+                    }
                 }
 
                 // Projectile absorbed by plank (intact or destroyed)

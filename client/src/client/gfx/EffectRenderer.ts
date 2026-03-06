@@ -113,8 +113,8 @@ export class EffectRenderer {
     this.ctx.save();
     
     for (const effect of this.effects) {
-      // Check if effect is visible
-      if (!camera.isWorldPositionVisible(effect.position, 100)) continue;
+      // Check if effect is visible (generous margin for nearby off-screen effects)
+      if (!camera.isWorldPositionVisible(effect.position, 500)) continue;
       
       // Render based on effect type
       switch (effect.type) {
@@ -304,8 +304,8 @@ export class EffectRenderer {
     // Fade: hold full for first 60%, then fade out over remaining 40%
     const alpha = t < 0.6 ? 1.0 : 1.0 - (t - 0.6) / 0.4;
 
-    // Scale: pop in quickly then stay
-    const scale = t < 0.08 ? t / 0.08 : 1.0;
+    // Scale: pop in quickly then stay (min 0.3 so text is never 0px)
+    const scale = t < 0.08 ? 0.3 + 0.7 * (t / 0.08) : 1.0;
 
     const x = screenPos.x;
     const y = screenPos.y;

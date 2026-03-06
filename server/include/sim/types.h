@@ -127,9 +127,11 @@ struct SpatialCell {
 #define MAX_HIT_EVENTS 64
 struct HitEvent {
     entity_id ship_id;
-    uint16_t  module_id;  // ID of the module that was destroyed (0 for SHIP_SINK)
-    bool      is_breach;  // false = plank destroyed / sink; true = interior module hit through breach
-    bool      is_sink;    // true = ship hull_health reached 0
+    uint16_t  module_id;   // ID of the module hit (0 for SHIP_SINK)
+    bool      is_breach;   // false = plank hit / sink; true = interior module hit through breach
+    bool      is_sink;     // true = ship hull_health reached 0
+    bool      destroyed;   // true = module was destroyed by this hit
+    float     damage_dealt; // how much damage this hit dealt (in HP units)
     float     hit_x;
     float     hit_y;
 };

@@ -3334,41 +3334,59 @@ void websocket_server_tick(float dt) {
                     sunk_id,
                     SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
             } else if (ev->is_breach) {
-                // Breach hit: remove the interior module from SimpleShip and broadcast
-                SimpleShip* simple = find_ship(ev->ship_id);
-                if (simple) {
-                    for (int m = 0; m < simple->module_count; m++) {
-                        if (simple->modules[m].id == ev->module_id) {
-                            memmove(&simple->modules[m], &simple->modules[m + 1],
-                                    (simple->module_count - m - 1) * sizeof(ShipModule));
-                            simple->module_count--;
-                            break;
+                if (ev->destroyed) {
+                    // Interior module destroyed through breach: remove from SimpleShip and broadcast MODULE_HIT
+                    SimpleShip* simple = find_ship(ev->ship_id);
+                    if (simple) {
+                        for (int m = 0; m < simple->module_count; m++) {
+                            if (simple->modules[m].id == ev->module_id) {
+                                memmove(&simple->modules[m], &simple->modules[m + 1],
+                                        (simple->module_count - m - 1) * sizeof(ShipModule));
+                                simple->module_count--;
+                                break;
+                            }
                         }
                     }
+                    snprintf(msg, sizeof(msg),
+                        "{\"type\":\"MODULE_HIT\",\"shipId\":%u,\"moduleId\":%u,"
+                        "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                        ev->ship_id, ev->module_id, ev->damage_dealt,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                } else {
+                    // Non-fatal interior module hit: just broadcast MODULE_DAMAGED for damage numbers
+                    snprintf(msg, sizeof(msg),
+                        "{\"type\":\"MODULE_DAMAGED\",\"shipId\":%u,\"moduleId\":%u,"
+                        "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                        ev->ship_id, ev->module_id, ev->damage_dealt,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
                 }
-                snprintf(msg, sizeof(msg),
-                    "{\"type\":\"MODULE_HIT\",\"shipId\":%u,\"moduleId\":%u,"
-                    "\"x\":%.1f,\"y\":%.1f}",
-                    ev->ship_id, ev->module_id,
-                    SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
             } else {
-                // Plank hit: remove the plank module from SimpleShip and broadcast
-                SimpleShip* simple = find_ship(ev->ship_id);
-                if (simple) {
-                    for (int m = 0; m < simple->module_count; m++) {
-                        if (simple->modules[m].id == ev->module_id) {
-                            memmove(&simple->modules[m], &simple->modules[m + 1],
-                                    (simple->module_count - m - 1) * sizeof(ShipModule));
-                            simple->module_count--;
-                            break;
+                if (ev->destroyed) {
+                    // Plank destroyed: remove from SimpleShip and broadcast PLANK_HIT
+                    SimpleShip* simple = find_ship(ev->ship_id);
+                    if (simple) {
+                        for (int m = 0; m < simple->module_count; m++) {
+                            if (simple->modules[m].id == ev->module_id) {
+                                memmove(&simple->modules[m], &simple->modules[m + 1],
+                                        (simple->module_count - m - 1) * sizeof(ShipModule));
+                                simple->module_count--;
+                                break;
+                            }
                         }
                     }
+                    snprintf(msg, sizeof(msg),
+                        "{\"type\":\"PLANK_HIT\",\"shipId\":%u,\"plankId\":%u,"
+                        "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                        ev->ship_id, ev->module_id, ev->damage_dealt,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                } else {
+                    // Non-fatal plank hit: just broadcast PLANK_DAMAGED for damage numbers
+                    snprintf(msg, sizeof(msg),
+                        "{\"type\":\"PLANK_DAMAGED\",\"shipId\":%u,\"plankId\":%u,"
+                        "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                        ev->ship_id, ev->module_id, ev->damage_dealt,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
                 }
-                snprintf(msg, sizeof(msg),
-                    "{\"type\":\"PLANK_HIT\",\"shipId\":%u,\"plankId\":%u,"
-                    "\"x\":%.1f,\"y\":%.1f}",
-                    ev->ship_id, ev->module_id,
-                    SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
             }
 
             size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, msg, strlen(msg), frame, sizeof(frame));
