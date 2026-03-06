@@ -85,6 +85,9 @@ export class InputManager {
   // Cannon control callbacks
   public onCannonAim: ((aimAngle: number) => void) | null = null;
   public onCannonFire: ((cannonIds?: number[], fireAll?: boolean) => void) | null = null;
+
+  // Camera zoom callback
+  public onZoom: ((factor: number, screenPoint: Vec2) => void) | null = null;
   
   // HYBRID PROTOCOL: State tracking for change detection
   private previousMovementState: Vec2 = Vec2.zero();
@@ -866,7 +869,17 @@ export class InputManager {
   
   private onMouseWheel(event: WheelEvent): void {
     event.preventDefault();
-    // Mouse wheel zoom is handled by camera system
+    if (!this.onZoom) return;
+
+    const rect = this.canvas.getBoundingClientRect();
+    const screenPoint = Vec2.from(
+      event.clientX - rect.left,
+      event.clientY - rect.top
+    );
+
+    // deltaY > 0 = scroll down = zoom out, < 0 = scroll up = zoom in
+    const zoomFactor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
+    this.onZoom(zoomFactor, screenPoint);
   }
   
   private onContextMenu(event: Event): void {

@@ -209,6 +209,11 @@ export class ClientApplication {
         this.networkManager.sendCannonFire(cannonIds, fireAll);
       };
       
+      // Set up scroll-wheel zoom
+      this.inputManager.onZoom = (factor, _screenPoint) => {
+        this.camera.setZoom(this.camera.getState().zoom * factor);
+      };
+
       // Set up mouse tracking for mouse-relative movement
       this.setupMouseTracking();
       
@@ -232,7 +237,10 @@ export class ClientApplication {
       
       // Set up canvas resize handler
       this.setupCanvasResizeHandler();
-      
+
+      // Set up zoom buttons
+      this.setupZoomButtons();
+
       console.log('✅ All client systems initialized successfully');
       
     } catch (error) {
@@ -584,6 +592,25 @@ export class ClientApplication {
   /**
    * Set up debug keyboard shortcuts
    */
+  /**
+   * Setup +/- zoom buttons in the HTML overlay
+   */
+  private setupZoomButtons(): void {
+    const zoomIn = document.getElementById('zoom-in-btn');
+    const zoomOut = document.getElementById('zoom-out-btn');
+
+    if (zoomIn) {
+      zoomIn.addEventListener('click', () => {
+        this.camera.setZoom(this.camera.getState().zoom * 1.2);
+      });
+    }
+    if (zoomOut) {
+      zoomOut.addEventListener('click', () => {
+        this.camera.setZoom(this.camera.getState().zoom / 1.2);
+      });
+    }
+  }
+
   private setupDebugKeys(): void {
     window.addEventListener('keydown', (e) => {
       // Only handle if not typing in an input field
