@@ -1119,12 +1119,16 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
     float spawn_x = cannon_world_x + barrel_offset_x;
     float spawn_y = cannon_world_y + barrel_offset_y;
     
-    // Cannonball base speed
-    const float CANNONBALL_SPEED = CLIENT_TO_SERVER(500.0f); // Convert from client pixels/s to server units/s
+    // Cannonball base speed (server units/s)
+    const float CANNONBALL_SPEED = CLIENT_TO_SERVER(500.0f);
     
-    // Calculate projectile velocity (inherit ship velocity + cannon velocity)
-    float projectile_vx = cosf(projectile_angle) * CANNONBALL_SPEED + ship->velocity_x;
-    float projectile_vy = sinf(projectile_angle) * CANNONBALL_SPEED + ship->velocity_y;
+    // ship->velocity_x/y is stored in client pixels/s — convert to server units/s before adding
+    float ship_vx = CLIENT_TO_SERVER(ship->velocity_x);
+    float ship_vy = CLIENT_TO_SERVER(ship->velocity_y);
+    
+    // Calculate projectile velocity (inherit ship velocity + cannon muzzle velocity)
+    float projectile_vx = cosf(projectile_angle) * CANNONBALL_SPEED + ship_vx;
+    float projectile_vy = sinf(projectile_angle) * CANNONBALL_SPEED + ship_vy;
     
     // Determine owner for projectile tracking
     uint32_t owner_id = manually_fired ? player->player_id : ship->ship_id;
