@@ -2503,6 +2503,14 @@ int websocket_server_update(struct Sim* sim) {
                                         } else {
                                             log_info("🦘 Player %u jumped (already in water)", player->player_id);
                                         }
+                                    } else if (strcmp(action, "dismount") == 0) {
+                                        // Dismount from helm / cannon / seat
+                                        if (player->is_mounted) {
+                                            handle_module_unmount(player, client);
+                                        } else {
+                                            log_info("🔓 Player %u dismount request ignored (not mounted)", player->player_id);
+                                            send_interaction_failure(client, "not_mounted");
+                                        }
                                     } else if (strcmp(action, "interact") == 0) {
                                         // TODO: Implement interaction
                                         log_info("🤝 Player %u interacted!", player->player_id);
