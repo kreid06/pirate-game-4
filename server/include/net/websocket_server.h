@@ -27,7 +27,11 @@ typedef struct SimpleShip {
     
     // Ship control state
     uint8_t desired_sail_openness;  // Target sail openness (0-100%)
-    
+
+    // Ship-level ammunition (shared pool for all cannons)
+    uint16_t cannon_ammo;    // Remaining cannonballs (unused when infinite_ammo is true)
+    bool infinite_ammo;      // When true, cannons never consume ammo
+
     // Ship modules (cannons, masts, helm, seats, etc.)
     ShipModule modules[MAX_MODULES_PER_SHIP];
     uint8_t module_count;

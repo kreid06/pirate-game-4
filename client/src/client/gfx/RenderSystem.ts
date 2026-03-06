@@ -460,6 +460,11 @@ export class RenderSystem {
     for (const cannonball of worldState.cannonballs) {
       this.queueRenderItem(8, 'cannonballs', () => this.drawCannonball(cannonball, camera));
     }
+
+    // Queue ship ammo labels (layer 9 - HUD overlay above all ship elements)
+    for (const ship of worldState.ships) {
+      this.queueRenderItem(9, 'ship-ammo-hud', () => this.drawShipAmmoLabel(ship, camera));
+    }
   }
   
   private queueRenderItem(layer: number, layerName: string, renderFn: () => void, priority: number = 0): void {
@@ -995,6 +1000,37 @@ export class RenderSystem {
     this.ctx.restore();
   }
   
+  private drawShipAmmoLabel(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const screenPos = camera.worldToScreen(ship.position);
+    const zoom = camera.getState().zoom;
+
+    const ammoText = ship.infiniteAmmo ? '∞ ammo' : `⚫ ${ship.cannonAmmo}`;
+    const labelY = screenPos.y - 120 * zoom;
+
+    this.ctx.save();
+    this.ctx.font = `bold ${Math.max(11, 13 * zoom)}px Arial`;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'middle';
+
+    // Background pill
+    const metrics = this.ctx.measureText(ammoText);
+    const pad = 5;
+    this.ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    this.ctx.beginPath();
+    const rx = screenPos.x - metrics.width / 2 - pad;
+    const ry = labelY - 9;
+    const rw = metrics.width + pad * 2;
+    const rh = 18;
+    this.ctx.roundRect(rx, ry, rw, rh, 4);
+    this.ctx.fill();
+
+    this.ctx.fillStyle = ship.infiniteAmmo ? '#aaffaa' : '#ffdd88';
+    this.ctx.fillText(ammoText, screenPos.x, labelY);
+    this.ctx.restore();
+  }
+
   private drawShipSailMasts(ship: Ship, camera: Camera): void {
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
@@ -1344,7 +1380,6 @@ export class RenderSystem {
         lines.push(`Type: CURVED`);
       }
     } else if (moduleData.kind === 'cannon') {
-      lines.push(`Ammo: ${moduleData.ammunition}/${moduleData.maxAmmunition}`);
       lines.push(`Reload: ${moduleData.timeSinceLastFire.toFixed(1)}s`);
     } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
       lines.push(`Turn Rate: ${moduleData.maxTurnRate.toFixed(2)}`);

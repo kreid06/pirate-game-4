@@ -704,8 +704,8 @@ static void broadcast_player_mounted(WebSocketPlayer* player, ShipModule* module
 
 // Module-specific interaction handlers
 static void handle_cannon_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
-    // Check if cannon is already occupied
-    if (module->data.cannon.ammunition > 0 && module->state_bits & MODULE_STATE_OCCUPIED) {
+    // Check if cannon is already occupied by someone else
+    if (module->state_bits & MODULE_STATE_OCCUPIED) {
         uint16_t occupier_id = 0; // TODO: Track which player occupies
         if (occupier_id != 0 && occupier_id != player->player_id) {
             log_info("Cannon %u already occupied by player %u", module->id, occupier_id);
@@ -1138,9 +1138,10 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
  * Fire a single cannon, spawning projectile
  */
 static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired) {
-    // Consume ammo
-    if (cannon->data.cannon.ammunition > 0) {
-        cannon->data.cannon.ammunition--;
+    // Consume ship-level ammo (unless infinite ammo mode is on)
+    if (!ship->infinite_ammo) {
+        if (ship->cannon_ammo == 0) return; // No ammo — should have been caught earlier
+        ship->cannon_ammo--;
     }
     cannon->data.cannon.time_since_fire = 0;
     
@@ -1295,9 +1296,9 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all) {
         if (module->type_id != MODULE_TYPE_CANNON) continue;
         
         // Check ammo and reload status
-        if (module->data.cannon.ammunition == 0) {
-            log_info("  ⚠️  Cannon %u: No ammo", module->id);
-            continue;
+        if (!ship->infinite_ammo && ship->cannon_ammo == 0) {
+            log_info("  ⚠️  Ship %u: No ammo", ship->ship_id);
+            break; // No point checking remaining cannons
         }
         
         if (module->data.cannon.time_since_fire < module->data.cannon.reload_time) {
@@ -1860,6 +1861,9 @@ static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t
     s->deck_max_y =   8.0f;
 
     s->module_count = 0;
+    s->cannon_ammo  = 0;       // unused — infinite_ammo is on
+    s->infinite_ammo = true;
+
     uint16_t mid = module_id_base;
 
     // Helm
@@ -2219,10 +2223,11 @@ int websocket_server_update(struct Sim* sim) {
                                     for (int s = 0; s < ship_count && ships_offset < (int)sizeof(ships_str) - 512; s++) {
                                         if (ships[s].active) {
                                             ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
-                                                    "%s{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"modules\":[",
+                                                    "%s{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                                                     first_ship ? "" : ",",
                                                     ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
-                                                    ships[s].velocity_x, ships[s].velocity_y);
+                                                    ships[s].velocity_x, ships[s].velocity_y,
+                                                    ships[s].cannon_ammo, ships[s].infinite_ammo ? "true" : "false");
                                             
                                             // Add modules
                                             for (int m = 0; m < ships[s].module_count && ships_offset < (int)sizeof(ships_str) - 200; m++) {
@@ -2240,12 +2245,12 @@ int websocket_server_update(struct Sim* sim) {
                                                         m > 0 ? "," : "", module->id, module->type_id, 
                                                         module_x, module_y, module_rot, module->data.mast.openness, sail_angle);
                                                 } else if (module->type_id == MODULE_TYPE_CANNON) {
-                                                    // Cannon: include ammunition, aim direction, state
+                                                    // Cannon: include aim direction and state (ammo is ship-level now)
                                                     float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
                                                     ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
-                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"ammo\":%u,\"aimDir\":%.3f,\"state\":%u}",
+                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
                                                         m > 0 ? "," : "", module->id, module->type_id,
-                                                        module_x, module_y, module_rot, module->data.cannon.ammunition, aim_direction,
+                                                        module_x, module_y, module_rot, aim_direction,
                                                         (unsigned)module->state_bits);
                                                 } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                                                     // Helm: include wheel rotation, occupied status, state
@@ -2936,16 +2941,25 @@ int websocket_server_update(struct Sim* sim) {
                 float vel_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->velocity.y));
                 float ang_vel = Q16_TO_FLOAT(ship->angular_velocity);
                 float rudder_radians = ship->rudder_angle * (3.14159f / 180.0f); // Convert degrees to radians
-                
+
+                // Look up matching SimpleShip for ammo data
+                const SimpleShip* simple_ship = NULL;
+                for (int ss = 0; ss < ship_count; ss++) {
+                    if (ships[ss].ship_id == ship->id) { simple_ship = &ships[ss]; break; }
+                }
+
                 char ship_entry[4096];
                 int offset = snprintf(ship_entry, sizeof(ship_entry),
                         "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                         "\"mass\":%.1f,\"moment_of_inertia\":%.1f,"
                         "\"max_speed\":%.1f,\"turn_rate\":%.2f,"
-                        "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"rudder_angle\":%.3f,\"modules\":[",
+                        "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"rudder_angle\":%.3f,"
+                        "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                         ship->id, pos_x, pos_y, rotation, vel_x, vel_y, ang_vel,
-                        5000.0f, 500000.0f, 15.0f, 1.0f, 0.95f, 0.90f, rudder_radians);
+                        5000.0f, 500000.0f, 15.0f, 1.0f, 0.95f, 0.90f, rudder_radians,
+                        simple_ship ? simple_ship->cannon_ammo : 0,
+                        (simple_ship && simple_ship->infinite_ammo) ? "true" : "false");
                 
                 // Add modules array
                 // Planks (100-109) and deck (200): only send health/ID, client generates positions
@@ -2978,12 +2992,12 @@ int websocket_server_update(struct Sim* sim) {
                                 m > 0 ? "," : "", module->id, module->type_id, 
                                 module_x, module_y, module_rot, module->data.mast.openness, sail_angle);
                         } else if (module->type_id == MODULE_TYPE_CANNON) {
-                            // Cannon: include ammunition, aim direction, state
+                            // Cannon: include aim direction, state (ammo is ship-level)
                             float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"ammo\":%u,\"aimDir\":%.3f,\"state\":%u}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
                                 m > 0 ? "," : "", module->id, module->type_id,
-                                module_x, module_y, module_rot, module->data.cannon.ammunition, aim_direction,
+                                module_x, module_y, module_rot, aim_direction,
                                 (unsigned)module->state_bits);
                         } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                             // Helm: include wheel rotation, occupied status, state
@@ -3023,12 +3037,14 @@ int websocket_server_update(struct Sim* sim) {
                             "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                             "\"mass\":%.1f,\"moment_of_inertia\":%.1f,"
                             "\"max_speed\":%.1f,\"turn_rate\":%.2f,"
-                            "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"rudder_angle\":%.3f,\"modules\":[",
+                            "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"rudder_angle\":%.3f,"
+                            "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                             ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
                             ships[s].velocity_x, ships[s].velocity_y, ships[s].angular_velocity,
                             ships[s].mass, ships[s].moment_of_inertia,
                             ships[s].max_speed, ships[s].turn_rate,
-                            ships[s].water_drag, ships[s].angular_drag, 0.0f);
+                            ships[s].water_drag, ships[s].angular_drag, 0.0f,
+                            ships[s].cannon_ammo, ships[s].infinite_ammo ? "true" : "false");
                     
                     // Add modules from simple ships
                     for (int m = 0; m < ships[s].module_count && offset < (int)sizeof(ship_entry) - 200; m++) {
@@ -3046,12 +3062,12 @@ int websocket_server_update(struct Sim* sim) {
                                 m > 0 ? "," : "", module->id, module->type_id, 
                                 module_x, module_y, module_rot, module->data.mast.openness, sail_angle);
                         } else if (module->type_id == MODULE_TYPE_CANNON) {
-                            // Cannon: include ammunition, aim direction, state
+                            // Cannon: include aim direction, state (ammo is ship-level)
                             float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"ammo\":%u,\"aimDir\":%.3f,\"state\":%u}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
                                 m > 0 ? "," : "", module->id, module->type_id,
-                                module_x, module_y, module_rot, module->data.cannon.ammunition, aim_direction,
+                                module_x, module_y, module_rot, aim_direction,
                                 (unsigned)module->state_bits);
                         } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                             // Helm: include wheel rotation, occupied status, state

@@ -32,6 +32,10 @@ export interface Ship {
   waterDrag: number;         // 0-1 coefficient (multiply velocity each frame)
   angularDrag: number;       // 0-1 coefficient (multiply angular velocity each frame)
   rudderAngle: number;       // Radians - visual indicator for turning (-π/4 to π/4)
+
+  // Ship-level ammunition
+  cannonAmmo: number;        // Remaining cannonballs (shared pool)
+  infiniteAmmo: boolean;     // When true, cannons never run out
 }
 
 /**

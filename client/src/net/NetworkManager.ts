@@ -1008,6 +1008,8 @@ export class NetworkManager {
               waterDrag: ship.water_drag ?? properShip.waterDrag,
               angularDrag: ship.angular_drag ?? properShip.angularDrag,
               rudderAngle: ship.rudder_angle ?? 0,
+              cannonAmmo: ship.ammo ?? 0,
+              infiniteAmmo: ship.infiniteAmmo ?? true,
             };
           }),
           players: (message.players || []).map((player: any) => ({
