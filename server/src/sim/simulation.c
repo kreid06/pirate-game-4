@@ -965,6 +965,20 @@ static int hull_vertex_to_plank_index(int v) {
     return 9;              // port_front
 }
 
+// Ray-casting point-in-polygon test (works for convex or concave polygons).
+// Vertices are in server units (Q16 float values).
+static bool point_in_hull(float px, float py, const Vec2Q16* verts, int n) {
+    bool inside = false;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+        float xi = Q16_TO_FLOAT(verts[i].x), yi = Q16_TO_FLOAT(verts[i].y);
+        float xj = Q16_TO_FLOAT(verts[j].x), yj = Q16_TO_FLOAT(verts[j].y);
+        if (((yi > py) != (yj > py)) &&
+            (px < (xj - xi) * (py - yi) / (yj - yi) + xi))
+            inside = !inside;
+    }
+    return inside;
+}
+
 void handle_projectile_collisions(struct Sim* sim) {
     // Clear hit events from last tick
     sim->hit_event_count = 0;
@@ -993,7 +1007,10 @@ void handle_projectile_collisions(struct Sim* sim) {
             float lx = rel_x * cosf(-rot) - rel_y * sinf(-rot);
             float ly = rel_x * sinf(-rot) + rel_y * cosf(-rot);
 
-            // Find nearest hull vertex
+            // Point-in-polygon test: hit only when ball is inside the hull polygon
+            if (!point_in_hull(lx, ly, ship->hull_vertices, ship->hull_vertex_count)) continue;
+
+            // Find nearest hull vertex to determine which plank was hit
             int nearest_v = 0;
             float nearest_d2 = 1e30f;
             for (int v = 0; v < ship->hull_vertex_count; v++) {
@@ -1002,10 +1019,6 @@ void handle_projectile_collisions(struct Sim* sim) {
                 float d2 = vx*vx + vy*vy;
                 if (d2 < nearest_d2) { nearest_d2 = d2; nearest_v = v; }
             }
-
-            // Only register a hit if the ball is close enough to the hull surface
-            // (nearest vertex within ~8 server units ≈ 80 client px = hull thickness margin)
-            if (nearest_d2 > 8.0f * 8.0f) continue;
 
             // Map vertex → plank module
             int plank_idx = hull_vertex_to_plank_index(nearest_v);
@@ -1025,8 +1038,8 @@ void handle_projectile_collisions(struct Sim* sim) {
                 hit_plank->state_bits |= MODULE_STATE_DESTROYED;
                 hit_plank->state_bits &= ~MODULE_STATE_ACTIVE;
 
-                log_info("🎯 Projectile %u destroyed plank %u on ship %u (vertex %d, dist %.1f)",
-                         proj->id, plank_module_id, ship->id, nearest_v, sqrtf(nearest_d2));
+                log_info("🎯 Projectile %u destroyed plank %u on ship %u (vertex %d)",
+                         proj->id, plank_module_id, ship->id, nearest_v);
 
                 // Queue hit event for websocket broadcast
                 if (sim->hit_event_count < MAX_HIT_EVENTS) {
