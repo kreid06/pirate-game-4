@@ -823,7 +823,10 @@ export class ClientApplication {
           turnRate: 0.5,                 // rad/s
           waterDrag: 0.98,               // coefficient (0-1)
           angularDrag: 0.95,             // coefficient (0-1)
-          rudderAngle: 0                 // radians
+          rudderAngle: 0,                // radians
+          cannonAmmo: 0,
+          infiniteAmmo: true,
+          hullHealth: 100
         }
       ],
       players: [
