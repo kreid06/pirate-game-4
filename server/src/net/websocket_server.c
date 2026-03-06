@@ -219,6 +219,61 @@ static bool is_outside_deck(uint32_t ship_id, float local_x, float local_y) {
     return !inside; // Return true if OUTSIDE
 }
 
+// Collision radii (client pixels) for module types that block player movement
+static float module_collision_radius(ModuleTypeId type) {
+    switch (type) {
+        case MODULE_TYPE_HELM:
+        case MODULE_TYPE_STEERING_WHEEL: return 18.0f;
+        case MODULE_TYPE_MAST:           return 14.0f;
+        case MODULE_TYPE_CANNON:         return 20.0f;
+        default:                         return 0.0f; // ladder/plank/deck/seat — passable
+    }
+}
+
+/**
+ * Resolve player-vs-module collisions in ship-local space.
+ * Pushes (new_local_x, new_local_y) out of any module it overlaps.
+ * Skips the module the player is currently mounted to.
+ */
+static void resolve_player_module_collisions(const SimpleShip* ship,
+                                             uint32_t mounted_module_id,
+                                             float* new_local_x, float* new_local_y)
+{
+    const float PLAYER_RADIUS = 8.0f; // client pixels — matches sim radius
+
+    for (uint8_t m = 0; m < ship->module_count; m++) {
+        const ShipModule* mod = &ship->modules[m];
+
+        // Skip modules the player is mounted to
+        if (mod->id == mounted_module_id) continue;
+
+        float mod_radius = module_collision_radius(mod->type_id);
+        if (mod_radius <= 0.0f) continue; // passable
+
+        // Module position in ship-local client pixels
+        float mod_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+        float mod_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+
+        float dx = *new_local_x - mod_x;
+        float dy = *new_local_y - mod_y;
+        float dist_sq = dx * dx + dy * dy;
+        float min_dist = PLAYER_RADIUS + mod_radius;
+
+        if (dist_sq < min_dist * min_dist) {
+            float dist = sqrtf(dist_sq);
+            if (dist < 0.001f) {
+                // Exact overlap — push sideways
+                *new_local_x += min_dist;
+            } else {
+                // Push player out along the collision normal
+                float overlap = min_dist - dist;
+                *new_local_x += (dx / dist) * overlap;
+                *new_local_y += (dy / dist) * overlap;
+            }
+        }
+    }
+}
+
 // Helper to board a player onto a ship
 static void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y) {
     player->parent_ship_id = ship->ship_id;
@@ -1507,6 +1562,11 @@ static void apply_player_movement_state(WebSocketPlayer* player, float dt) {
                 float new_local_x = player->local_x + movement_x * WALK_SPEED * dt;
                 float new_local_y = player->local_y + movement_y * WALK_SPEED * dt;
                 
+                // Resolve collisions with ship modules (helm, mast, cannon)
+                resolve_player_module_collisions(ship,
+                    player->is_mounted ? player->mounted_module_id : 0,
+                    &new_local_x, &new_local_y);
+
                 // Check if player would walk off the deck (hull boundary)
                 if (is_outside_deck(ship->ship_id, new_local_x, new_local_y)) {
                     // Player walked off the edge - dismount into water
@@ -1600,6 +1660,11 @@ static void update_player_movement(WebSocketPlayer* player, float rotation, floa
                 float new_local_x = player->local_x + movement_x * WALK_SPEED * dt;
                 float new_local_y = player->local_y + movement_y * WALK_SPEED * dt;
                 
+                // Resolve collisions with ship modules (helm, mast, cannon)
+                resolve_player_module_collisions(ship,
+                    player->is_mounted ? player->mounted_module_id : 0,
+                    &new_local_x, &new_local_y);
+
                 // Check if player would walk off the deck (hull boundary)
                 if (is_outside_deck(ship->ship_id, new_local_x, new_local_y)) {
                     // Player walked off the edge - dismount into water
@@ -1835,10 +1900,10 @@ int websocket_server_init(uint16_t port) {
     ships[0].water_drag = BRIGANTINE_WATER_DRAG;
     ships[0].angular_drag = BRIGANTINE_ANGULAR_DRAG;
     
-    ships[0].deck_min_x = -8.0f;  // Deck boundaries (in ship-local coords)
-    ships[0].deck_max_x = 8.0f;
-    ships[0].deck_min_y = -6.0f;
-    ships[0].deck_max_y = 6.0f;
+    ships[0].deck_min_x = -31.0f; // Deck boundaries (in server units = client px / 10)
+    ships[0].deck_max_x = 30.0f;  // x = fore/aft: bow ~+300, stern/ladder ~-310
+    ships[0].deck_min_y = -8.0f;  // y = port/starboard: cannons at ±75px (±7.5), slight margin
+    ships[0].deck_max_y = 8.0f;
     ships[0].active = true;
     
     // Ship control state
@@ -1859,16 +1924,21 @@ int websocket_server_init(uint16_t port) {
     ships[0].modules[ships[0].module_count].data.helm.wheel_rotation = Q16_FROM_FLOAT(0.0f);
     ships[0].module_count++;
     
-    // Add 6 cannons (3 port, 3 starboard)
+    // Add 6 cannons matching BROADSIDE loadout (BrigantineTestBuilder.ts)
+    // Coordinate convention: x = fore/aft (bow = +x), y = port/starboard (port = +y)
+    // Port cannons (y=+75): x = -35, 65, -135  rotation = PI (barrel faces +y/port)
+    // Stbd cannons (y=-75): x = -35, 65, -135  rotation = 0  (barrel faces -y/starboard)
+    float cannon_x_positions[3] = { -35.0f, 65.0f, -135.0f };
     for (int i = 0; i < 6; i++) {
-        float side = (i < 3) ? -70.0f : 70.0f;  // Port vs starboard (client pixels)
-        float y_pos = -30.0f + (i % 3) * 30.0f; // Spacing along ship (client pixels)
+        float x_pos = cannon_x_positions[i % 3];
+        float y_pos = (i < 3) ? 75.0f : -75.0f;   // Port (+75) vs starboard (-75) client pixels
+        float rot   = (i < 3) ? (float)M_PI : 0.0f; // Port = PI, starboard = 0
         
         ships[0].modules[ships[0].module_count].id = module_id_counter++;
         ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_CANNON;
-        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(side));
+        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(x_pos));
         ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(y_pos));
-        ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT((i < 3) ? -M_PI/2 : M_PI/2);
+        ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(rot);
         ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE;
         ships[0].modules[ships[0].module_count].data.cannon.aim_direction = Q16_FROM_FLOAT(0.0f);
         ships[0].modules[ships[0].module_count].data.cannon.ammunition = 10;
@@ -1877,14 +1947,13 @@ int websocket_server_init(uint16_t port) {
         ships[0].module_count++;
     }
     
-    // Add 3 masts
+    // Add 3 masts matching BROADSIDE loadout: front x=165, middle x=-35, back x=-235 (all y=0)
+    float mast_x_positions[3] = { 165.0f, -35.0f, -235.0f };
     for (int i = 0; i < 3; i++) {
-        float y_pos = -40.0f + i * 40.0f;  // Client pixels
-        
         ships[0].modules[ships[0].module_count].id = module_id_counter++;
         ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_MAST;
-        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
-        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(y_pos));
+        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(mast_x_positions[i]));
+        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
         ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(0.0f);
         ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE | MODULE_STATE_DEPLOYED;
         ships[0].modules[ships[0].module_count].data.mast.angle = Q16_FROM_FLOAT(0.0f);
@@ -3314,6 +3383,11 @@ void websocket_server_tick(float dt) {
                                      ws_player->local_x, ws_player->local_y,
                                      new_local_x, new_local_y);
                             
+                            // Resolve collisions with ship modules (helm, mast, cannon)
+                            resolve_player_module_collisions(player_ship,
+                                ws_player->is_mounted ? ws_player->mounted_module_id : 0,
+                                &new_local_x, &new_local_y);
+
                             // Check if player would walk off the deck (hull boundary)
                             if (is_outside_deck(player_ship->ship_id, new_local_x, new_local_y)) {
                                 // Player walked off the edge - dismount into water
