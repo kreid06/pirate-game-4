@@ -333,8 +333,8 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
             if (module->type_id == MODULE_TYPE_PLANK) {
                 // Plank: send only ID and health (client has hard-coded positions)
                 offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
-                    "{\"id\":%u,\"typeId\":%u,\"health\":%u}%s",
-                    module->id, module->type_id, module->data.plank.health,
+                    "{\"id\":%u,\"typeId\":%u,\"health\":%d,\"maxHealth\":%d}%s",
+                    module->id, module->type_id, (int)module->health, (int)module->max_health,
                     (m + 1 < ship->module_count) ? "," : ""
                 );
             } else if (module->type_id == MODULE_TYPE_DECK) {
