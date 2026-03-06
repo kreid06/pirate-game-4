@@ -86,6 +86,11 @@ static const char* get_state_string(PlayerMovementState state) {
 static WebSocketPlayer players[WS_MAX_CLIENTS] = {0};
 static int next_player_id = 1000;
 
+// NPC agents
+static NpcAgent npc_agents[MAX_NPC_AGENTS] = {0};
+static int npc_count = 0;
+static uint32_t next_npc_id = 5000;
+
 // Global ship data (simple ships for testing)
 #define MAX_SIMPLE_SHIPS 16
 static SimpleShip ships[MAX_SIMPLE_SHIPS] = {0};
@@ -1062,6 +1067,135 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
 // Forward declarations
 static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float world_x, float world_y, 
                                   float angle, entity_id projectile_id);
+static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired);
+
+/**
+ * Find a module on a SimpleShip by module ID.
+ * Returns a pointer into ship->modules[], or NULL if not found.
+ */
+static ShipModule* find_module_on_ship(SimpleShip* ship, uint32_t module_id) {
+    for (int m = 0; m < ship->module_count; m++) {
+        if (ship->modules[m].id == module_id)
+            return &ship->modules[m];
+    }
+    return NULL;
+}
+
+/**
+ * Aim a specific cannon on a ship toward a world-space target (CLIENT pixel coords).
+ * Sets aim_direction on both SimpleShip and sim-ship cannon modules.
+ */
+static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float target_x, float target_y) {
+    const float CANNON_AIM_RANGE = 30.0f * (float)(M_PI / 180.0);
+
+    // World angle from cannon toward target (client-pixel space — same coord system as ship->x/y)
+    float dx = target_x - ship->x;
+    float dy = target_y - ship->y;
+    float world_angle = atan2f(dy, dx);
+
+    // Convert to ship-relative angle
+    float relative_angle = world_angle - ship->rotation;
+    while (relative_angle >  (float)M_PI) relative_angle -= 2.0f * (float)M_PI;
+    while (relative_angle < -(float)M_PI) relative_angle += 2.0f * (float)M_PI;
+
+    // desired_offset is the delta from the cannon's natural barrel direction
+    float cannon_base_angle = Q16_TO_FLOAT(cannon->local_rot);
+    float desired_offset = relative_angle - cannon_base_angle + (float)(M_PI / 2.0);
+    while (desired_offset >  (float)M_PI) desired_offset -= 2.0f * (float)M_PI;
+    while (desired_offset < -(float)M_PI) desired_offset += 2.0f * (float)M_PI;
+
+    if (desired_offset >  CANNON_AIM_RANGE) desired_offset =  CANNON_AIM_RANGE;
+    if (desired_offset < -CANNON_AIM_RANGE) desired_offset = -CANNON_AIM_RANGE;
+
+    cannon->data.cannon.aim_direction = Q16_FROM_FLOAT(desired_offset);
+
+    // Mirror into sim-ship so fire_cannon reads the correct value
+    if (global_sim) {
+        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+            if (global_sim->ships[s].id == ship->ship_id) {
+                struct Ship* sim_ship = &global_sim->ships[s];
+                for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                    if (sim_ship->modules[m].id == cannon->id) {
+                        sim_ship->modules[m].data.cannon.aim_direction = Q16_FROM_FLOAT(desired_offset);
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
+/**
+ * Tick all active NPC agents — gunners aim/fire, helmsmen steer, riggers adjust sails.
+ */
+static void tick_npc_agents(float dt) {
+    for (int i = 0; i < npc_count; i++) {
+        NpcAgent* npc = &npc_agents[i];
+        if (!npc->active) continue;
+
+        SimpleShip* ship = find_ship(npc->ship_id);
+        if (!ship) continue;
+
+        ShipModule* module = find_module_on_ship(ship, npc->module_id);
+        if (!module) continue;
+
+        switch (npc->role) {
+            case NPC_ROLE_GUNNER: {
+                npc->fire_cooldown -= dt;
+                if (npc->target_ship_id == 0) break;
+
+                SimpleShip* target = find_ship(npc->target_ship_id);
+                if (!target) break;
+
+                // Point the cannon toward the target ship's current position
+                npc_aim_cannon_at_world(ship, module, target->x, target->y);
+
+                // Fire when cooldown expires (infinite ammo for NPCs)
+                if (npc->fire_cooldown <= 0.0f) {
+                    bool saved_infinite = ship->infinite_ammo;
+                    ship->infinite_ammo = true;
+                    fire_cannon(ship, module, NULL, false);
+                    ship->infinite_ammo = saved_infinite;
+                    npc->fire_cooldown = npc->fire_interval;
+                }
+                break;
+            }
+
+            case NPC_ROLE_RIGGER: {
+                // Set sail openness to desired level
+                if (module->type_id == MODULE_TYPE_MAST) {
+                    module->data.mast.openness = npc->desired_openness;
+                    if (npc->desired_openness > 0)
+                        module->state_bits |=  MODULE_STATE_DEPLOYED;
+                    else
+                        module->state_bits &= ~MODULE_STATE_DEPLOYED;
+                }
+                break;
+            }
+
+            case NPC_ROLE_HELMSMAN: {
+                // Steer the ship toward the desired heading
+                if (module->type_id == MODULE_TYPE_HELM ||
+                    module->type_id == MODULE_TYPE_STEERING_WHEEL) {
+                    float diff = npc->desired_heading - ship->rotation;
+                    while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+                    while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+
+                    const float TURN_RATE = 0.5f; // rad/s max
+                    float turn = diff;
+                    if (turn >  TURN_RATE * dt) turn =  TURN_RATE * dt;
+                    if (turn < -TURN_RATE * dt) turn = -TURN_RATE * dt;
+                    ship->rotation += turn;
+                }
+                break;
+            }
+
+            default:
+                break;
+        }
+    }
+}
 
 /**
  * Handle cannon aim from player
@@ -1186,8 +1320,8 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
     float projectile_vx = cosf(projectile_angle) * CANNONBALL_SPEED + ship_vx;
     float projectile_vy = sinf(projectile_angle) * CANNONBALL_SPEED + ship_vy;
     
-    // Determine owner for projectile tracking
-    uint32_t owner_id = manually_fired ? player->player_id : ship->ship_id;
+    // Determine owner for projectile tracking (player can be NULL for NPC-fired cannons)
+    uint32_t owner_id = (manually_fired && player != NULL) ? player->player_id : ship->ship_id;
     
     // Spawn projectile in simulation (convert from client pixels to server units)
     if (global_sim) {
@@ -1977,6 +2111,19 @@ int websocket_server_init(uint16_t port) {
     
     log_info("🚢 Initialized ship 1 (ID: %u) at (%.1f, %.1f)", ships[0].ship_id, ships[0].x, ships[0].y);
     log_info("🚢 Initialized ship 2 (ID: %u) at (%.1f, %.1f)", ships[1].ship_id, ships[1].x, ships[1].y);
+
+    // Spawn NPC gunners on ship 2 (module IDs 2001-2006 are its 6 cannons).
+    // They will target ship 1 automatically.  Fire every 5s; initial delay 2s.
+    {
+        uint32_t ship2_id = ships[1].ship_id;
+        uint32_t ship1_id = ships[0].ship_id;
+        // Port-side cannon (2001) and starboard-side cannon (2004)
+        uint32_t npc1 = websocket_server_create_npc(ship2_id, 2001, NPC_ROLE_GUNNER);
+        uint32_t npc2 = websocket_server_create_npc(ship2_id, 2004, NPC_ROLE_GUNNER);
+        if (npc1) websocket_server_npc_set_target(npc1, ship1_id);
+        if (npc2) websocket_server_npc_set_target(npc2, ship1_id);
+        log_info("🤖 NPC gunners %u and %u spawned on ship 2, targeting ship 1", npc1, npc2);
+    }
 
     // Enhanced startup message
     printf("\n🌐 ═══════════════════════════════════════════════════════════════\n");
@@ -3241,6 +3388,71 @@ int websocket_server_update(struct Sim* sim) {
     return 0;
 }
 
+/* =========================================================================
+ * NPC Public API
+ * ========================================================================= */
+
+uint32_t websocket_server_create_npc(uint32_t ship_id, uint32_t module_id, NpcRole role) {
+    if (npc_count >= MAX_NPC_AGENTS) {
+        log_warn("Cannot create NPC: MAX_NPC_AGENTS (%d) reached", MAX_NPC_AGENTS);
+        return 0;
+    }
+    SimpleShip* ship = find_ship(ship_id);
+    if (!ship) {
+        log_warn("Cannot create NPC: ship %u not found", ship_id);
+        return 0;
+    }
+
+    NpcAgent* npc = &npc_agents[npc_count++];
+    memset(npc, 0, sizeof(NpcAgent));
+    npc->npc_id       = next_npc_id++;
+    npc->ship_id      = ship_id;
+    npc->module_id    = module_id;
+    npc->role         = role;
+    npc->active       = true;
+    npc->fire_interval = 5.0f;
+    npc->fire_cooldown = 2.0f; // Small initial delay before first shot
+
+    // Mark the module as occupied so players cannot mount it
+    ShipModule* mod = find_module_on_ship(ship, module_id);
+    if (mod) mod->state_bits |= MODULE_STATE_OCCUPIED;
+
+    log_info("🤖 NPC %u created: role=%d ship=%u module=%u",
+             npc->npc_id, (int)role, ship_id, module_id);
+    return npc->npc_id;
+}
+
+void websocket_server_remove_npc(uint32_t npc_id) {
+    for (int i = 0; i < npc_count; i++) {
+        if (npc_agents[i].npc_id == npc_id) {
+            // Release the module
+            SimpleShip* ship = find_ship(npc_agents[i].ship_id);
+            if (ship) {
+                ShipModule* mod = find_module_on_ship(ship, npc_agents[i].module_id);
+                if (mod) mod->state_bits &= ~MODULE_STATE_OCCUPIED;
+            }
+            // Compact the array
+            memmove(&npc_agents[i], &npc_agents[i + 1],
+                    (npc_count - i - 1) * sizeof(NpcAgent));
+            npc_count--;
+            log_info("🤖 NPC %u removed", npc_id);
+            return;
+        }
+    }
+    log_warn("websocket_server_remove_npc: NPC %u not found", npc_id);
+}
+
+void websocket_server_npc_set_target(uint32_t npc_id, uint32_t target_ship_id) {
+    for (int i = 0; i < npc_count; i++) {
+        if (npc_agents[i].npc_id == npc_id) {
+            npc_agents[i].target_ship_id = target_ship_id;
+            log_info("🤖 NPC %u: target set to ship %u", npc_id, target_ship_id);
+            return;
+        }
+    }
+    log_warn("websocket_server_npc_set_target: NPC %u not found", npc_id);
+}
+
 void websocket_server_broadcast(const char* message) {
     if (!ws_server.running || !message) return;
     
@@ -3400,6 +3612,9 @@ void websocket_server_tick(float dt) {
         }
         global_sim->hit_event_count = 0;
     }
+
+    // ===== TICK NPC AGENTS =====
+    tick_npc_agents(dt);
 
     int moving_players = 0;
     

@@ -37,8 +37,39 @@ typedef struct SimpleShip {
     uint8_t module_count;
 } SimpleShip;
 
-// Player movement states
+// NPC behavior types
 typedef enum {
+    NPC_ROLE_NONE      = 0,
+    NPC_ROLE_GUNNER    = 1,  // Mans a cannon: aims at enemy ship and fires
+    NPC_ROLE_HELMSMAN  = 2,  // Controls the helm: steers toward/away from target
+    NPC_ROLE_RIGGER    = 3,  // Manages a mast: sets sail openness based on orders
+} NpcRole;
+
+// NPC agent — server-side autonomous crew member mounted to a module
+typedef struct NpcAgent {
+    uint32_t npc_id;             // Unique NPC ID (starts at 5000)
+    uint32_t ship_id;            // Ship this NPC belongs to
+    uint32_t module_id;          // Module this NPC is mounted to (0 = unmounted)
+    NpcRole  role;               // What this NPC does each tick
+    bool     active;
+
+    // Gunner state
+    uint32_t target_ship_id;     // Enemy ship to aim at (0 = no target)
+    float    fire_cooldown;      // Seconds remaining before next shot (counts down each tick)
+    float    fire_interval;      // Seconds between shots (default 5.0)
+
+    // Helmsman state
+    float    desired_heading;    // Target heading in radians
+    bool     intercept_mode;     // true = steer toward target; false = flee
+
+    // Rigger state
+    uint8_t  desired_openness;   // 0-100 sail openness to maintain
+} NpcAgent;
+
+#define MAX_NPC_AGENTS 64
+
+typedef enum {
+    PLAYER_STATE_IDLE,
     PLAYER_STATE_WALKING,   // On ship deck
     PLAYER_STATE_SWIMMING,  // In water
     PLAYER_STATE_FALLING    // Airborne (jumped off ship)
@@ -142,6 +173,26 @@ int websocket_server_get_stats(struct WebSocketStats* stats);
  * @return 0 on success, -1 on error
  */
 int websocket_server_get_ships(SimpleShip** out_ships, int* out_count);
+
+/**
+ * Create an NPC agent and mount it to a module on a ship.
+ * @param ship_id   Ship the NPC belongs to
+ * @param module_id Module to mount (cannon, mast, helm)
+ * @param role      NPC_ROLE_GUNNER / NPC_ROLE_HELMSMAN / NPC_ROLE_RIGGER
+ * @return NPC ID on success, 0 on failure
+ */
+uint32_t websocket_server_create_npc(uint32_t ship_id, uint32_t module_id, NpcRole role);
+
+/**
+ * Remove an NPC agent by ID.
+ */
+void websocket_server_remove_npc(uint32_t npc_id);
+
+/**
+ * Set the target ship for a gunner or helmsman NPC.
+ */
+void websocket_server_npc_set_target(uint32_t npc_id, uint32_t target_ship_id);
+
 
 /**
  * Get WebSocket players data for admin panel
