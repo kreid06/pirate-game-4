@@ -36,6 +36,9 @@ export interface Ship {
   // Ship-level ammunition
   cannonAmmo: number;        // Remaining cannonballs (shared pool)
   infiniteAmmo: boolean;     // When true, cannons never run out
+
+  // Hull integrity / water ingress (0–100; 100 = intact, 0 = sinking)
+  hullHealth: number;
 }
 
 /**

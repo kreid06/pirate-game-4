@@ -279,6 +279,89 @@ class HUDElement implements UIElement {
     });
     
     ctx.restore();
+
+    // --- Water meter ---
+    // Find the ship this player is on (or any ship if spectating)
+    const playerShip = player.onDeck
+      ? context.worldState.ships.find(s => s.id === player.carrierId)
+      : null;
+
+    if (playerShip !== undefined && playerShip !== null) {
+      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100);
+    }
+  }
+
+  private renderWaterMeter(
+    ctx: CanvasRenderingContext2D,
+    canvas: HTMLCanvasElement,
+    hullHealth: number
+  ): void {
+    // waterFill: 0 = dry hull, 1 = ship sinking (inverse of hull health)
+    const waterFill = Math.max(0, Math.min(1, 1 - hullHealth / 100));
+
+    // Only show meter when there is water ingress
+    if (waterFill <= 0) return;
+
+    ctx.save();
+
+    const barW = 240;
+    const barH = 22;
+    const padding = 8;
+    const labelW = 58; // space for "WATER" label
+    const totalW = labelW + barW + padding * 3;
+    const totalH = barH + padding * 2;
+    const x = 10;
+    const y = canvas.height - totalH - 10;
+
+    // Background panel
+    ctx.fillStyle = 'rgba(0,0,0,0.85)';
+    ctx.fillRect(x, y, totalW, totalH);
+
+    // Border — red pulse when critical (>90%)
+    const isCritical = waterFill > 0.9;
+    ctx.strokeStyle = isCritical ? '#ff2222' : '#446688';
+    ctx.lineWidth = isCritical ? 2 : 1;
+    ctx.strokeRect(x, y, totalW, totalH);
+
+    // "WATER" label
+    ctx.fillStyle = isCritical ? '#ff4444' : '#aaccee';
+    ctx.font = 'bold 12px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('WATER', x + padding + labelW / 2, y + totalH / 2);
+
+    // Bar track (dark bg)
+    const barX = x + padding * 2 + labelW;
+    const barY = y + padding;
+    ctx.fillStyle = '#111111';
+    ctx.fillRect(barX, barY, barW, barH);
+
+    // Bar fill color: blue → purple at >90%
+    const fillPx = Math.round(waterFill * barW);
+    if (fillPx > 0) {
+      const fillColor = isCritical ? '#8800cc' : '#1166dd';
+      ctx.fillStyle = fillColor;
+      ctx.fillRect(barX, barY, fillPx, barH);
+
+      // Shimmer highlight on top third of bar
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      ctx.fillRect(barX, barY, fillPx, Math.round(barH / 3));
+    }
+
+    // Bar border
+    ctx.strokeStyle = '#224466';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX, barY, barW, barH);
+
+    // Percentage text inside/beside the bar
+    const pct = Math.round(waterFill * 100);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 12px Consolas, monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${pct}%`, barX + fillPx + 4, y + totalH / 2);
+
+    ctx.restore();
   }
 }
 

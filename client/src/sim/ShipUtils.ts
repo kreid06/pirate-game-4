@@ -82,6 +82,7 @@ export function createShipAtPosition(position: Vec2, rotation: number): Ship {
     angularDrag: BRIGANTINE_PHYSICS.angularDrag,
     rudderAngle: 0,
     cannonAmmo: 0,
-    infiniteAmmo: true
+    infiniteAmmo: true,
+    hullHealth: 100
   };
 }

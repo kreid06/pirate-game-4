@@ -73,6 +73,10 @@ export class GameEngine {
       turnRate: 0.5,
       waterDrag: 0.98,
       angularDrag: 0.95,
+      rudderAngle: 0,
+      cannonAmmo: 0,
+      infiniteAmmo: true,
+      hullHealth: 100,
       modules: [
         // Ship deck (interior floor)
         ModuleUtils.createShipDeckFromPolygon(shipHull, 200),

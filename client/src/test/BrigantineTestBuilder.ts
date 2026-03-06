@@ -346,7 +346,10 @@ export class BrigantineTestBuilder {
       hull,
       modules: this.getModules(),
       ...BRIGANTINE_PHYSICS,
-      rudderAngle: 0
+      rudderAngle: 0,
+      cannonAmmo: 0,
+      infiniteAmmo: true,
+      hullHealth: 100
     };
   }
 

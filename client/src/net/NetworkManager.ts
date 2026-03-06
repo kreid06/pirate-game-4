@@ -1026,6 +1026,7 @@ export class NetworkManager {
               rudderAngle: ship.rudder_angle ?? 0,
               cannonAmmo: ship.ammo ?? 0,
               infiniteAmmo: ship.infiniteAmmo ?? true,
+              hullHealth: ship.hullHealth ?? 100,
             };
           }),
           players: (message.players || []).map((player: any) => ({
