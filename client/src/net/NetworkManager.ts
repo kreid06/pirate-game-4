@@ -977,9 +977,13 @@ export class NetworkManager {
               // Merge: Keep client-generated planks/deck, add server gameplay modules
               const clientPlanks = properShip.modules.filter(m => m.kind === 'plank');
               const clientDeck = properShip.modules.filter(m => m.kind === 'deck');
-              
-              // Update plank health from server data
-              for (const plank of clientPlanks) {
+
+              // Only include planks the server still reports — absence means destroyed
+              const serverPlankIds = new Set(plankHealthUpdates.keys());
+              const activePlanks = clientPlanks.filter(p => serverPlankIds.has(p.id));
+
+              // Update health on surviving planks
+              for (const plank of activePlanks) {
                 const serverHealth = plankHealthUpdates.get(plank.id);
                 if (serverHealth !== undefined && plank.moduleData && plank.moduleData.kind === 'plank') {
                   plank.moduleData.health = serverHealth;
@@ -987,7 +991,7 @@ export class NetworkManager {
               }
               
               // Combine: client planks/deck + server gameplay modules
-              serverModules = [...clientDeck, ...clientPlanks, ...gameplayModules];
+              serverModules = [...clientDeck, ...activePlanks, ...gameplayModules];
             }
             
             // Override with server's authoritative state

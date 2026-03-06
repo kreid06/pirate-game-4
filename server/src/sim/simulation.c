@@ -88,6 +88,9 @@ void sim_cleanup(struct Sim* sim) {
 
 void sim_step(struct Sim* sim, q16_t dt) {
     if (!sim) return;
+
+    // Clear hit events from the previous tick before any subsystem runs
+    sim->hit_event_count = 0;
     
     // Increment simulation tick
     sim->tick++;
@@ -1044,8 +1047,9 @@ static bool point_in_hull(float px, float py, const Vec2Q16* verts, int n) {
 }
 
 void handle_projectile_collisions(struct Sim* sim) {
-    // Clear hit events from last tick
-    sim->hit_event_count = 0;
+    // NOTE: hit_event_count is NOT reset here — sim_update_ships may have already
+    // queued SHIP_SINK events this tick. The count is reset at the start of the
+    // next tick by the caller (websocket_server.c drains events after sim_step).
 
     uint32_t i = 0;
     while (i < sim->projectile_count) {
