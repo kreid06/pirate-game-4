@@ -287,6 +287,7 @@ export class NetworkManager {
   public onConnectionStateChanged: ((state: ConnectionState) => void) | null = null;
   public onModuleMountSuccess: ((moduleId: number, moduleKind: string, mountOffset?: Vec2) => void) | null = null;
   public onModuleMountFailure: ((reason: string) => void) | null = null;
+  public onModuleDestroyed: ((shipId: number, moduleId: number) => void) | null = null;
   
   constructor(config: NetworkConfig) {
     this.config = config;
@@ -966,7 +967,7 @@ export class NetworkManager {
                     localPos: Vec2.from(mod.x || 0, mod.y || 0),
                     localRot: mod.rotation || 0,
                     occupiedBy: null,
-                    stateBits: 0,
+                    stateBits: mod.state ?? 0,
                     moduleData: moduleData
                   } as ShipModule);
                 }
@@ -1099,7 +1100,19 @@ export class NetworkManager {
       case MessageType.MODULE_INTERACT_FAILURE:
         this.handleModuleInteractFailure(message as ModuleInteractFailureMessage);
         break;
-        
+
+      case 'MODULE_HIT': {
+        const shipId: number = message.shipId || 0;
+        const moduleId: number = message.moduleId || 0;
+        console.log(`💥 MODULE_HIT: ship ${shipId} module ${moduleId} destroyed`);
+        this.onModuleDestroyed?.(shipId, moduleId);
+        break;
+      }
+
+      case 'PLANK_HIT':
+        // Plank health is updated via GAME_STATE, no extra action needed here
+        break;
+
       default:
         console.log('📦 Received message:', message.type, message);
         break;

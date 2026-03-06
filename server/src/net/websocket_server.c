@@ -2240,26 +2240,28 @@ int websocket_server_update(struct Sim* sim) {
                                                         m > 0 ? "," : "", module->id, module->type_id, 
                                                         module_x, module_y, module_rot, module->data.mast.openness, sail_angle);
                                                 } else if (module->type_id == MODULE_TYPE_CANNON) {
-                                                    // Cannon: include ammunition and aim direction
+                                                    // Cannon: include ammunition, aim direction, state
                                                     float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
                                                     ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
-                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"ammo\":%u,\"aimDir\":%.3f}",
-                                                        m > 0 ? "," : "", module->id, module->type_id, 
-                                                        module_x, module_y, module_rot, module->data.cannon.ammunition, aim_direction);
+                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"ammo\":%u,\"aimDir\":%.3f,\"state\":%u}",
+                                                        m > 0 ? "," : "", module->id, module->type_id,
+                                                        module_x, module_y, module_rot, module->data.cannon.ammunition, aim_direction,
+                                                        (unsigned)module->state_bits);
                                                 } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
-                                                    // Helm: include wheel rotation and occupied status
+                                                    // Helm: include wheel rotation, occupied status, state
                                                     float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
                                                     ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
-                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s}",
-                                                        m > 0 ? "," : "", module->id, module->type_id, 
-                                                        module_x, module_y, module_rot, wheel_rot, 
-                                                        (module->data.helm.occupied_by != 0) ? "true" : "false");
+                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u}",
+                                                        m > 0 ? "," : "", module->id, module->type_id,
+                                                        module_x, module_y, module_rot, wheel_rot,
+                                                        (module->data.helm.occupied_by != 0) ? "true" : "false",
+                                                        (unsigned)module->state_bits);
                                                 } else {
-                                                    // Generic module: just transform data
+                                                    // Generic module (mast, ladder, etc.): transform + state
                                                     ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
-                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
-                                                        m > 0 ? "," : "", module->id, module->type_id, 
-                                                        module_x, module_y, module_rot);
+                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u}",
+                                                        m > 0 ? "," : "", module->id, module->type_id,
+                                                        module_x, module_y, module_rot, (unsigned)module->state_bits);
                                                 }
                                             }
                                             
@@ -2976,26 +2978,28 @@ int websocket_server_update(struct Sim* sim) {
                                 m > 0 ? "," : "", module->id, module->type_id, 
                                 module_x, module_y, module_rot, module->data.mast.openness, sail_angle);
                         } else if (module->type_id == MODULE_TYPE_CANNON) {
-                            // Cannon: include ammunition and aim direction
+                            // Cannon: include ammunition, aim direction, state
                             float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"ammo\":%u,\"aimDir\":%.3f}",
-                                m > 0 ? "," : "", module->id, module->type_id, 
-                                module_x, module_y, module_rot, module->data.cannon.ammunition, aim_direction);
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"ammo\":%u,\"aimDir\":%.3f,\"state\":%u}",
+                                m > 0 ? "," : "", module->id, module->type_id,
+                                module_x, module_y, module_rot, module->data.cannon.ammunition, aim_direction,
+                                (unsigned)module->state_bits);
                         } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
-                            // Helm: include wheel rotation and occupied status
+                            // Helm: include wheel rotation, occupied status, state
                             float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s}",
-                                m > 0 ? "," : "", module->id, module->type_id, 
-                                module_x, module_y, module_rot, wheel_rot, 
-                                (module->data.helm.occupied_by != 0) ? "true" : "false");
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u}",
+                                m > 0 ? "," : "", module->id, module->type_id,
+                                module_x, module_y, module_rot, wheel_rot,
+                                (module->data.helm.occupied_by != 0) ? "true" : "false",
+                                (unsigned)module->state_bits);
                         } else {
-                            // Generic module: just transform data
+                            // Generic module (mast, ladder, etc.): transform + state
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
-                                m > 0 ? "," : "", module->id, module->type_id, 
-                                module_x, module_y, module_rot);
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u}",
+                                m > 0 ? "," : "", module->id, module->type_id,
+                                module_x, module_y, module_rot, (unsigned)module->state_bits);
                         }
                     }
                 }
@@ -3042,26 +3046,28 @@ int websocket_server_update(struct Sim* sim) {
                                 m > 0 ? "," : "", module->id, module->type_id, 
                                 module_x, module_y, module_rot, module->data.mast.openness, sail_angle);
                         } else if (module->type_id == MODULE_TYPE_CANNON) {
-                            // Cannon: include ammunition and aim direction
+                            // Cannon: include ammunition, aim direction, state
                             float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"ammo\":%u,\"aimDir\":%.3f}",
-                                m > 0 ? "," : "", module->id, module->type_id, 
-                                module_x, module_y, module_rot, module->data.cannon.ammunition, aim_direction);
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"ammo\":%u,\"aimDir\":%.3f,\"state\":%u}",
+                                m > 0 ? "," : "", module->id, module->type_id,
+                                module_x, module_y, module_rot, module->data.cannon.ammunition, aim_direction,
+                                (unsigned)module->state_bits);
                         } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
-                            // Helm: include wheel rotation and occupied status
+                            // Helm: include wheel rotation, occupied status, state
                             float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s}",
-                                m > 0 ? "," : "", module->id, module->type_id, 
-                                module_x, module_y, module_rot, wheel_rot, 
-                                (module->data.helm.occupied_by != 0) ? "true" : "false");
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u}",
+                                m > 0 ? "," : "", module->id, module->type_id,
+                                module_x, module_y, module_rot, wheel_rot,
+                                (module->data.helm.occupied_by != 0) ? "true" : "false",
+                                (unsigned)module->state_bits);
                         } else {
-                            // Generic module: just transform data
+                            // Generic module (mast, ladder, etc.): transform + state
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f}",
-                                m > 0 ? "," : "", module->id, module->type_id, 
-                                module_x, module_y, module_rot);
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u}",
+                                m > 0 ? "," : "", module->id, module->type_id,
+                                module_x, module_y, module_rot, (unsigned)module->state_bits);
                         }
                     }
                     
@@ -3291,11 +3297,31 @@ void websocket_server_tick(float dt) {
         for (uint8_t e = 0; e < global_sim->hit_event_count; e++) {
             const struct HitEvent* ev = &global_sim->hit_events[e];
             char msg[256];
-            snprintf(msg, sizeof(msg),
-                "{\"type\":\"PLANK_HIT\",\"shipId\":%u,\"plankId\":%u,"
-                "\"x\":%.1f,\"y\":%.1f}",
-                ev->ship_id, ev->plank_id,
-                SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+
+            if (ev->module_idx != 255) {
+                // Breach hit: a ball passed through a destroyed plank and hit an interior module
+                SimpleShip* simple = find_ship(ev->ship_id);
+                uint16_t client_module_id = 0;
+                if (simple && ev->module_idx < simple->module_count) {
+                    ShipModule* sm = &simple->modules[ev->module_idx];
+                    sm->state_bits |= MODULE_STATE_DESTROYED;
+                    sm->state_bits &= ~MODULE_STATE_ACTIVE;
+                    client_module_id = sm->id;
+                }
+                snprintf(msg, sizeof(msg),
+                    "{\"type\":\"MODULE_HIT\",\"shipId\":%u,\"moduleId\":%u,"
+                    "\"x\":%.1f,\"y\":%.1f}",
+                    ev->ship_id, client_module_id,
+                    SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+            } else {
+                // Normal plank hit
+                snprintf(msg, sizeof(msg),
+                    "{\"type\":\"PLANK_HIT\",\"shipId\":%u,\"plankId\":%u,"
+                    "\"x\":%.1f,\"y\":%.1f}",
+                    ev->ship_id, ev->plank_id,
+                    SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+            }
+
             size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, msg, strlen(msg), frame, sizeof(frame));
             if (frame_len > 0) {
                 for (int i = 0; i < WS_MAX_CLIENTS; i++) {

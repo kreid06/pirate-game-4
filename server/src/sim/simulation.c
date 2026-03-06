@@ -300,8 +300,10 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
     
     // Initialize BROADSIDE loadout modules
     // Matches BrigantineLoadouts.BROADSIDE from BrigantineTestBuilder.ts
+    // Module IDs are based on ship entity ID so two ships have distinct IDs
+    // (ship 1 → 1000-1010, ship 2 → 2000-2010, etc.)
     ship->module_count = 0;
-    uint16_t module_id = 1000;
+    uint16_t module_id = (uint16_t)(ship->id * 1000);
     
     // Helm
     ship->modules[ship->module_count++] = module_create(
@@ -965,6 +967,32 @@ static int hull_vertex_to_plank_index(int v) {
     return 9;              // port_front
 }
 
+// Find the simulation module index that a breaching cannonball hits.
+// lx/ly are in ship-local server units.  Returns -1 if no module is close enough.
+static int find_module_hit(const struct Ship* ship, float lx, float ly) {
+    for (int m = 0; m < ship->module_count; m++) {
+        const ShipModule* mod = &ship->modules[m];
+        if (mod->type_id != MODULE_TYPE_CANNON &&
+            mod->type_id != MODULE_TYPE_MAST   &&
+            mod->type_id != MODULE_TYPE_HELM)   continue;
+        if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
+
+        float radius;
+        switch (mod->type_id) {
+            case MODULE_TYPE_CANNON: radius = CLIENT_TO_SERVER(20.0f); break;
+            case MODULE_TYPE_MAST:   radius = CLIENT_TO_SERVER(30.0f); break;
+            case MODULE_TYPE_HELM:   radius = CLIENT_TO_SERVER(20.0f); break;
+            default:                 radius = 0.0f;                    break;
+        }
+        float mx = Q16_TO_FLOAT(mod->local_pos.x);
+        float my = Q16_TO_FLOAT(mod->local_pos.y);
+        float dx = mx - lx, dy = my - ly;
+        if (dx*dx + dy*dy < radius*radius)
+            return m;
+    }
+    return -1;
+}
+
 // Ray-casting point-in-polygon test (works for convex or concave polygons).
 // Vertices are in server units (Q16 float values).
 static bool point_in_hull(float px, float py, const Vec2Q16* verts, int n) {
@@ -1034,6 +1062,7 @@ void handle_projectile_collisions(struct Sim* sim) {
             }
 
             if (hit_plank && !(hit_plank->state_bits & MODULE_STATE_DESTROYED)) {
+                // --- Plank is intact: destroy it ---
                 hit_plank->data.plank.health = 0;
                 hit_plank->state_bits |= MODULE_STATE_DESTROYED;
                 hit_plank->state_bits &= ~MODULE_STATE_ACTIVE;
@@ -1041,13 +1070,33 @@ void handle_projectile_collisions(struct Sim* sim) {
                 log_info("🎯 Projectile %u destroyed plank %u on ship %u (vertex %d)",
                          proj->id, plank_module_id, ship->id, nearest_v);
 
-                // Queue hit event for websocket broadcast
                 if (sim->hit_event_count < MAX_HIT_EVENTS) {
                     struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
-                    ev->ship_id  = ship->id;
-                    ev->plank_id = plank_module_id;
-                    ev->hit_x    = Q16_TO_FLOAT(proj->position.x);
-                    ev->hit_y    = Q16_TO_FLOAT(proj->position.y);
+                    ev->ship_id    = ship->id;
+                    ev->plank_id   = plank_module_id;
+                    ev->module_idx = 255; // no interior module
+                    ev->hit_x      = Q16_TO_FLOAT(proj->position.x);
+                    ev->hit_y      = Q16_TO_FLOAT(proj->position.y);
+                }
+            } else {
+                // --- Plank already destroyed: ball breaches the hull ---
+                int hit_m = find_module_hit(ship, lx, ly);
+                if (hit_m >= 0) {
+                    ShipModule* hit_mod = &ship->modules[hit_m];
+                    hit_mod->state_bits |= MODULE_STATE_DESTROYED;
+                    hit_mod->state_bits &= ~MODULE_STATE_ACTIVE;
+
+                    log_info("💥 Projectile %u breached plank %u, destroyed module %u (idx %d) on ship %u",
+                             proj->id, plank_module_id, hit_mod->id, hit_m, ship->id);
+
+                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                        ev->ship_id    = ship->id;
+                        ev->plank_id   = 0;
+                        ev->module_idx = (uint8_t)hit_m;
+                        ev->hit_x      = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y      = Q16_TO_FLOAT(proj->position.y);
+                    }
                 }
             }
 

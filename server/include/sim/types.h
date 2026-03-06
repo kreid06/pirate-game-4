@@ -115,12 +115,13 @@ struct SpatialCell {
     uint8_t reserved;
 };
 
-// Hit event emitted when a cannonball damages a plank
+// Hit event emitted when a cannonball damages a plank or breaches to hit a module
 #define MAX_HIT_EVENTS 64
 struct HitEvent {
     entity_id ship_id;
-    uint16_t  plank_id;   // Module ID (100-109)
-    float     hit_x;     // World position (server units) where ball hit
+    uint16_t  plank_id;    // Module ID (100-109) for plank hit; 0 on breach
+    uint8_t   module_idx;  // Index in ship->modules[] for breach hit; 255 = no module
+    float     hit_x;       // World position (server units) where ball hit
     float     hit_y;
 };
 
