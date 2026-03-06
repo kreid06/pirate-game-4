@@ -1111,9 +1111,13 @@ export class NetworkManager {
         break;
       }
 
-      case 'PLANK_HIT':
-        // Plank health is updated via GAME_STATE, no extra action needed here
+      case 'PLANK_HIT': {
+        // Remove the plank immediately so it disappears before the next GAME_STATE
+        const plankShipId: number = message.shipId || 0;
+        const plankId: number = message.plankId || 0;
+        this.onModuleDestroyed?.(plankShipId, plankId);
         break;
+      }
 
       default:
         console.log('📦 Received message:', message.type, message);

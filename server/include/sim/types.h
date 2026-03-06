@@ -120,9 +120,9 @@ struct SpatialCell {
 #define MAX_HIT_EVENTS 64
 struct HitEvent {
     entity_id ship_id;
-    uint16_t  plank_id;    // Module ID (100-109) for plank hit; 0 on breach
-    uint8_t   module_idx;  // Index in ship->modules[] for breach hit; 255 = no module
-    float     hit_x;       // World position (server units) where ball hit
+    uint16_t  module_id;  // ID of the module that was destroyed
+    bool      is_breach;  // false = plank destroyed; true = interior module hit through breach
+    float     hit_x;      // World position (server units) where ball hit
     float     hit_y;
 };
 

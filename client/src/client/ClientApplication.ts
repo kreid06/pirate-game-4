@@ -117,6 +117,17 @@ export class ClientApplication {
       this.networkManager.onModuleMountFailure = (reason) => {
         this.handleModuleMountFailure(reason);
       };
+      this.networkManager.onModuleDestroyed = (shipId, moduleId) => {
+        // Remove the destroyed module immediately from world state so it disappears
+        // before the next GAME_STATE update arrives
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const ship = ws.ships.find(s => s.id === shipId);
+          if (ship) {
+            ship.modules = ship.modules.filter(m => m.id !== moduleId);
+          }
+        }
+      };
       
       // Initialize Prediction Engine
       this.predictionEngine = new PredictionEngine(this.config.prediction);

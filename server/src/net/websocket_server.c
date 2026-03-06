@@ -3314,27 +3314,41 @@ void websocket_server_tick(float dt) {
             const struct HitEvent* ev = &global_sim->hit_events[e];
             char msg[256];
 
-            if (ev->module_idx != 255) {
-                // Breach hit: a ball passed through a destroyed plank and hit an interior module
+            if (ev->is_breach) {
+                // Breach hit: remove the interior module from SimpleShip and broadcast
                 SimpleShip* simple = find_ship(ev->ship_id);
-                uint16_t client_module_id = 0;
-                if (simple && ev->module_idx < simple->module_count) {
-                    ShipModule* sm = &simple->modules[ev->module_idx];
-                    sm->state_bits |= MODULE_STATE_DESTROYED;
-                    sm->state_bits &= ~MODULE_STATE_ACTIVE;
-                    client_module_id = sm->id;
+                if (simple) {
+                    for (int m = 0; m < simple->module_count; m++) {
+                        if (simple->modules[m].id == ev->module_id) {
+                            memmove(&simple->modules[m], &simple->modules[m + 1],
+                                    (simple->module_count - m - 1) * sizeof(ShipModule));
+                            simple->module_count--;
+                            break;
+                        }
+                    }
                 }
                 snprintf(msg, sizeof(msg),
                     "{\"type\":\"MODULE_HIT\",\"shipId\":%u,\"moduleId\":%u,"
                     "\"x\":%.1f,\"y\":%.1f}",
-                    ev->ship_id, client_module_id,
+                    ev->ship_id, ev->module_id,
                     SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
             } else {
-                // Normal plank hit
+                // Plank hit: remove the plank module from SimpleShip and broadcast
+                SimpleShip* simple = find_ship(ev->ship_id);
+                if (simple) {
+                    for (int m = 0; m < simple->module_count; m++) {
+                        if (simple->modules[m].id == ev->module_id) {
+                            memmove(&simple->modules[m], &simple->modules[m + 1],
+                                    (simple->module_count - m - 1) * sizeof(ShipModule));
+                            simple->module_count--;
+                            break;
+                        }
+                    }
+                }
                 snprintf(msg, sizeof(msg),
                     "{\"type\":\"PLANK_HIT\",\"shipId\":%u,\"plankId\":%u,"
                     "\"x\":%.1f,\"y\":%.1f}",
-                    ev->ship_id, ev->plank_id,
+                    ev->ship_id, ev->module_id,
                     SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
             }
 
