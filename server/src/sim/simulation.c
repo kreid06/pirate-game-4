@@ -946,71 +946,129 @@ void spatial_hash_add_projectile(struct Sim* sim, struct Projectile* projectile)
 }
 
 // Enhanced collision detection functions
+// Map a hull vertex index (0..hull_vertex_count-1) to a plank index (0-9).
+// Hull layout for brigantine (47 vertices):
+//   0-12  : bow curve  (0-6 = bow_port plank 0, 7-12 = bow_stbd plank 1)
+//   13-24 : stbd straight side split into 3 sections (planks 2,3,4)
+//   25-36 : stern curve (25-30 = stern_stbd plank 5, 31-36 = stern_port plank 6)
+//   37-47 : port straight side split into 3 sections (planks 7,8,9)
+static int hull_vertex_to_plank_index(int v) {
+    if (v <= 6)  return 0; // bow_port
+    if (v <= 12) return 1; // bow_stbd
+    if (v <= 16) return 2; // stbd_front
+    if (v <= 20) return 3; // stbd_mid
+    if (v <= 24) return 4; // stbd_rear
+    if (v <= 30) return 5; // stern_stbd
+    if (v <= 36) return 6; // stern_port
+    if (v <= 39) return 7; // port_rear
+    if (v <= 43) return 8; // port_mid
+    return 9;              // port_front
+}
+
 void handle_projectile_collisions(struct Sim* sim) {
-    for (uint32_t i = 0; i < sim->projectile_count; i++) {
+    // Clear hit events from last tick
+    sim->hit_event_count = 0;
+
+    uint32_t i = 0;
+    while (i < sim->projectile_count) {
         struct Projectile* proj = &sim->projectiles[i];
-        
-        // Get spatial cell for projectile
-        int32_t cell_x = Q16_TO_INT(proj->position.x) / 1024;
-        int32_t cell_y = Q16_TO_INT(proj->position.y) / 1024;
-        
-        if (cell_x < 0 || cell_y < 0 || cell_x >= SPATIAL_HASH_SIZE || cell_y >= SPATIAL_HASH_SIZE) {
-            continue; // Out of bounds
+        bool removed = false;
+
+        // ---- Broad-phase: iterate all ships (small count, skip spatial hash) ----
+        for (uint16_t s = 0; s < sim->ship_count && !removed; s++) {
+            struct Ship* ship = &sim->ships[s];
+            if (ship->id == proj->owner_id) continue;
+
+            // Broad-phase bounding radius
+            float dx = Q16_TO_FLOAT(ship->position.x) - Q16_TO_FLOAT(proj->position.x);
+            float dy = Q16_TO_FLOAT(ship->position.y) - Q16_TO_FLOAT(proj->position.y);
+            float dist_sq = dx*dx + dy*dy;
+            float brad = Q16_TO_FLOAT(ship->bounding_radius);
+            if (dist_sq > brad * brad) continue;
+
+            // ---- Narrow-phase: transform projectile into ship-local coords ----
+            float rot = Q16_TO_FLOAT(ship->rotation);
+            float rel_x = Q16_TO_FLOAT(proj->position.x) - Q16_TO_FLOAT(ship->position.x);
+            float rel_y = Q16_TO_FLOAT(proj->position.y) - Q16_TO_FLOAT(ship->position.y);
+            float lx = rel_x * cosf(-rot) - rel_y * sinf(-rot);
+            float ly = rel_x * sinf(-rot) + rel_y * cosf(-rot);
+
+            // Find nearest hull vertex
+            int nearest_v = 0;
+            float nearest_d2 = 1e30f;
+            for (int v = 0; v < ship->hull_vertex_count; v++) {
+                float vx = Q16_TO_FLOAT(ship->hull_vertices[v].x) - lx;
+                float vy = Q16_TO_FLOAT(ship->hull_vertices[v].y) - ly;
+                float d2 = vx*vx + vy*vy;
+                if (d2 < nearest_d2) { nearest_d2 = d2; nearest_v = v; }
+            }
+
+            // Only register a hit if the ball is close enough to the hull surface
+            // (nearest vertex within ~8 server units ≈ 80 client px = hull thickness margin)
+            if (nearest_d2 > 8.0f * 8.0f) continue;
+
+            // Map vertex → plank module
+            int plank_idx = hull_vertex_to_plank_index(nearest_v);
+            uint16_t plank_module_id = (uint16_t)(100 + plank_idx);
+
+            // Find and destroy the plank module
+            ShipModule* hit_plank = NULL;
+            for (uint8_t m = 0; m < ship->module_count; m++) {
+                if (ship->modules[m].id == plank_module_id) {
+                    hit_plank = &ship->modules[m];
+                    break;
+                }
+            }
+
+            if (hit_plank && !(hit_plank->state_bits & MODULE_STATE_DESTROYED)) {
+                hit_plank->data.plank.health = 0;
+                hit_plank->state_bits |= MODULE_STATE_DESTROYED;
+                hit_plank->state_bits &= ~MODULE_STATE_ACTIVE;
+
+                log_info("🎯 Projectile %u destroyed plank %u on ship %u (vertex %d, dist %.1f)",
+                         proj->id, plank_module_id, ship->id, nearest_v, sqrtf(nearest_d2));
+
+                // Queue hit event for websocket broadcast
+                if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                    struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                    ev->ship_id  = ship->id;
+                    ev->plank_id = plank_module_id;
+                    ev->hit_x    = Q16_TO_FLOAT(proj->position.x);
+                    ev->hit_y    = Q16_TO_FLOAT(proj->position.y);
+                }
+            }
+
+            // Remove projectile immediately
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
         }
-        
-        uint32_t hash_index __attribute__((unused)) = cell_y * SPATIAL_HASH_SIZE + cell_x;
-        struct SpatialCell* cell = &sim->spatial_hash[hash_index];
-        
-        // Check collision with ships in this cell
-        for (uint16_t j = 0; j < cell->ship_count; j++) {
-            struct Ship* ship = cell->ships[j];
-            if (ship->id == proj->owner_id) continue; // Can't hit own ship
-            
-            // Simple distance check (ship radius ~50 units)
-            q16_t dx = ship->position.x - proj->position.x;
-            q16_t dy = ship->position.y - proj->position.y;
-            q16_t dist_sq = q16_mul(dx, dx) + q16_mul(dy, dy);
-            q16_t hit_radius_sq = Q16_FROM_INT(50 * 50); // 50 unit radius
-            
-            if (dist_sq < hit_radius_sq) {
-                // Hit! Apply damage and remove projectile
-                ship->hull_health = ship->hull_health > proj->damage ? 
-                                   ship->hull_health - proj->damage : 0;
-                
-                log_info("🎯 Projectile %u hit ship %u for %d damage (hull: %d)", 
-                        proj->id, ship->id, Q16_TO_INT(proj->damage), 
-                        Q16_TO_INT(ship->hull_health));
-                
-                // Mark projectile for removal
-                proj->lifetime = 0;
+
+        // ---- Player collision (unchanged) ----
+        for (uint16_t j = 0; j < sim->player_count && !removed; j++) {
+            struct Player* player = &sim->players[j];
+            if (player->id == proj->owner_id) continue;
+            if (player->ship_id == proj->owner_id) continue;
+
+            float dx = Q16_TO_FLOAT(player->position.x) - Q16_TO_FLOAT(proj->position.x);
+            float dy = Q16_TO_FLOAT(player->position.y) - Q16_TO_FLOAT(proj->position.y);
+            float dist_sq = dx*dx + dy*dy;
+            const float player_r = CLIENT_TO_SERVER(16.0f);
+            if (dist_sq < player_r * player_r) {
+                player->health = player->health > Q16_TO_INT(proj->damage) ?
+                                 player->health - Q16_TO_INT(proj->damage) : 0;
+                log_info("💀 Projectile %u hit player %u for %d damage (health: %d)",
+                         proj->id, player->id, Q16_TO_INT(proj->damage), player->health);
+
+                memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                        (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                sim->projectile_count--;
+                removed = true;
             }
         }
-        
-        // Check collision with players
-        for (uint16_t j = 0; j < cell->player_count; j++) {
-            struct Player* player = cell->players[j];
-            
-            // Skip if player is on the same ship as the projectile owner
-            if (player->id == proj->owner_id) continue; // Can't hit self (manually fired)
-            if (player->ship_id == proj->owner_id) continue; // Can't hit crew on same ship (helm fired)
-            
-            q16_t dx = player->position.x - proj->position.x;
-            q16_t dy = player->position.y - proj->position.y;
-            q16_t dist_sq = q16_mul(dx, dx) + q16_mul(dy, dy);
-            q16_t hit_radius_sq = Q16_FROM_INT(16 * 16); // Smaller player radius
-            
-            if (dist_sq < hit_radius_sq) {
-                // Player hit! Apply damage
-                player->health = player->health > proj->damage ? 
-                                player->health - proj->damage : 0;
-                
-                log_info("💀 Projectile %u hit player %u for %d damage (health: %d)", 
-                        proj->id, player->id, Q16_TO_INT(proj->damage), 
-                        Q16_TO_INT(player->health));
-                
-                proj->lifetime = 0; // Remove projectile
-            }
-        }
+
+        if (!removed) i++;
     }
 }
 

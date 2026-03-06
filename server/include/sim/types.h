@@ -115,6 +115,15 @@ struct SpatialCell {
     uint8_t reserved;
 };
 
+// Hit event emitted when a cannonball damages a plank
+#define MAX_HIT_EVENTS 64
+struct HitEvent {
+    entity_id ship_id;
+    uint16_t  plank_id;   // Module ID (100-109)
+    float     hit_x;     // World position (server units) where ball hit
+    float     hit_y;
+};
+
 // Complete simulation state
 struct Sim {
     uint32_t tick;               // Current simulation tick
@@ -142,6 +151,10 @@ struct Sim {
     // Global wind state (affects all ships)
     float wind_power;           // Wind strength (0.0 to 1.0, where 1.0 = full wind)
     float wind_direction;       // Wind direction in radians (for future use)
+
+    // Hit events produced this tick; drained by websocket layer for broadcast
+    struct HitEvent hit_events[MAX_HIT_EVENTS];
+    uint8_t         hit_event_count;
 };
 
 // Simulation configuration

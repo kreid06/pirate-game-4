@@ -1835,6 +1835,90 @@ void websocket_server_set_simulation(struct Sim* sim) {
     log_info("✅ WebSocket server linked to simulation for collision detection");
 }
 
+// Initialize a brigantine ship at the given slot index, world position (client pixels), and module ID base
+static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t module_id_base) {
+    SimpleShip* s = &ships[idx];
+    memset(s, 0, sizeof(SimpleShip));
+
+    s->ship_id  = next_ship_id++;
+    s->ship_type = 3;  // Brigantine
+    s->x = world_x;
+    s->y = world_y;
+    s->active = true;
+
+    s->mass             = BRIGANTINE_MASS;
+    s->moment_of_inertia = BRIGANTINE_MOMENT_OF_INERTIA;
+    s->max_speed        = BRIGANTINE_MAX_SPEED;
+    s->turn_rate        = BRIGANTINE_TURN_RATE;
+    s->water_drag       = BRIGANTINE_WATER_DRAG;
+    s->angular_drag     = BRIGANTINE_ANGULAR_DRAG;
+
+    // Deck bounds (server units = client px / 10)
+    s->deck_min_x = -31.0f;
+    s->deck_max_x =  30.0f;
+    s->deck_min_y =  -8.0f;
+    s->deck_max_y =   8.0f;
+
+    s->module_count = 0;
+    uint16_t mid = module_id_base;
+
+    // Helm
+    s->modules[s->module_count].id           = mid++;
+    s->modules[s->module_count].type_id      = MODULE_TYPE_HELM;
+    s->modules[s->module_count].local_pos.x  = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-90.0f));
+    s->modules[s->module_count].local_pos.y  = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
+    s->modules[s->module_count].local_rot    = Q16_FROM_FLOAT(0.0f);
+    s->modules[s->module_count].state_bits   = MODULE_STATE_ACTIVE;
+    s->modules[s->module_count].data.helm.occupied_by    = 0;
+    s->modules[s->module_count].data.helm.wheel_rotation = Q16_FROM_FLOAT(0.0f);
+    s->module_count++;
+
+    // 6 cannons — BROADSIDE loadout (x=fore/aft, y=port/starboard)
+    float cannon_xs[3] = { -35.0f, 65.0f, -135.0f };
+    for (int i = 0; i < 6; i++) {
+        float cx  = cannon_xs[i % 3];
+        float cy  = (i < 3) ? 75.0f : -75.0f;
+        float rot = (i < 3) ? (float)M_PI : 0.0f;
+        s->modules[s->module_count].id          = mid++;
+        s->modules[s->module_count].type_id     = MODULE_TYPE_CANNON;
+        s->modules[s->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cx));
+        s->modules[s->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cy));
+        s->modules[s->module_count].local_rot   = Q16_FROM_FLOAT(rot);
+        s->modules[s->module_count].state_bits  = MODULE_STATE_ACTIVE;
+        s->modules[s->module_count].data.cannon.aim_direction  = Q16_FROM_FLOAT(0.0f);
+        s->modules[s->module_count].data.cannon.ammunition     = 10;
+        s->modules[s->module_count].data.cannon.time_since_fire = 0;
+        s->modules[s->module_count].data.cannon.reload_time    = Q16_FROM_FLOAT(3000.0f);
+        s->module_count++;
+    }
+
+    // 3 masts — front x=165, middle x=-35, back x=-235
+    float mast_xs[3] = { 165.0f, -35.0f, -235.0f };
+    for (int i = 0; i < 3; i++) {
+        s->modules[s->module_count].id          = mid++;
+        s->modules[s->module_count].type_id     = MODULE_TYPE_MAST;
+        s->modules[s->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(mast_xs[i]));
+        s->modules[s->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
+        s->modules[s->module_count].local_rot   = Q16_FROM_FLOAT(0.0f);
+        s->modules[s->module_count].state_bits  = MODULE_STATE_ACTIVE | MODULE_STATE_DEPLOYED;
+        s->modules[s->module_count].data.mast.angle          = Q16_FROM_FLOAT(0.0f);
+        s->modules[s->module_count].data.mast.openness       = 0;
+        s->modules[s->module_count].data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
+        s->module_count++;
+    }
+
+    // Ladder at stern
+    s->modules[s->module_count].id          = mid++;
+    s->modules[s->module_count].type_id     = MODULE_TYPE_LADDER;
+    s->modules[s->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-305.0f));
+    s->modules[s->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
+    s->modules[s->module_count].local_rot   = Q16_FROM_FLOAT(0.0f);
+    s->modules[s->module_count].state_bits  = MODULE_STATE_ACTIVE;
+    s->module_count++;
+
+    log_info("🔧 Ship slot %d (ID %u): %d modules, pos=(%.0f,%.0f)", idx, s->ship_id, s->module_count, world_x, world_y);
+}
+
 int websocket_server_init(uint16_t port) {
     memset(&ws_server, 0, sizeof(ws_server));
     ws_server.port = port;
@@ -1882,116 +1966,22 @@ int websocket_server_init(uint16_t port) {
     ws_server.running = true;
     log_info("WebSocket server initialized on port %u", port);
     
-    // Initialize a test ship away from origin (using brigantine physics from protocol/ship_definitions.h)
-    ships[0].ship_id = next_ship_id++;
-    ships[0].ship_type = 3;  // Brigantine
-    ships[0].x = 100.0f;  // Spawn ship away from center
-    ships[0].y = 100.0f;
-    ships[0].rotation = 0.0f;
-    ships[0].velocity_x = 0.0f;
-    ships[0].velocity_y = 0.0f;
-    ships[0].angular_velocity = 0.0f;
+    // Spawn two brigantine ships: ship 1 at (100, 100), ship 2 at (100, 700) — 600px south
+    init_brigantine_ship(0, 100.0f, 100.0f,  1000);
+    init_brigantine_ship(1, 100.0f, 700.0f,  2000);
+    ship_count = 2;
     
-    // Physics properties from brigantine ship definition
-    ships[0].mass = BRIGANTINE_MASS;
-    ships[0].moment_of_inertia = BRIGANTINE_MOMENT_OF_INERTIA;
-    ships[0].max_speed = BRIGANTINE_MAX_SPEED;
-    ships[0].turn_rate = BRIGANTINE_TURN_RATE;
-    ships[0].water_drag = BRIGANTINE_WATER_DRAG;
-    ships[0].angular_drag = BRIGANTINE_ANGULAR_DRAG;
-    
-    ships[0].deck_min_x = -31.0f; // Deck boundaries (in server units = client px / 10)
-    ships[0].deck_max_x = 30.0f;  // x = fore/aft: bow ~+300, stern/ladder ~-310
-    ships[0].deck_min_y = -8.0f;  // y = port/starboard: cannons at ±75px (±7.5), slight margin
-    ships[0].deck_max_y = 8.0f;
-    ships[0].active = true;
-    
-    // Ship control state
-    ships[0].desired_sail_openness = 0;  // Sails start closed
-    
-    // Initialize ship modules for brigantine
-    ships[0].module_count = 0;
-    uint16_t module_id_counter = 1000; // Start module IDs at 1000
-    
-    // Add helm at standard position matching client (-90, 0 pixels)
-    ships[0].modules[ships[0].module_count].id = module_id_counter++;
-    ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_HELM;
-    ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-90.0f));
-    ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
-    ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(0.0f);
-    ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE;
-    ships[0].modules[ships[0].module_count].data.helm.occupied_by = 0;
-    ships[0].modules[ships[0].module_count].data.helm.wheel_rotation = Q16_FROM_FLOAT(0.0f);
-    ships[0].module_count++;
-    
-    // Add 6 cannons matching BROADSIDE loadout (BrigantineTestBuilder.ts)
-    // Coordinate convention: x = fore/aft (bow = +x), y = port/starboard (port = +y)
-    // Port cannons (y=+75): x = -35, 65, -135  rotation = PI (barrel faces +y/port)
-    // Stbd cannons (y=-75): x = -35, 65, -135  rotation = 0  (barrel faces -y/starboard)
-    float cannon_x_positions[3] = { -35.0f, 65.0f, -135.0f };
-    for (int i = 0; i < 6; i++) {
-        float x_pos = cannon_x_positions[i % 3];
-        float y_pos = (i < 3) ? 75.0f : -75.0f;   // Port (+75) vs starboard (-75) client pixels
-        float rot   = (i < 3) ? (float)M_PI : 0.0f; // Port = PI, starboard = 0
-        
-        ships[0].modules[ships[0].module_count].id = module_id_counter++;
-        ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_CANNON;
-        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(x_pos));
-        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(y_pos));
-        ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(rot);
-        ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE;
-        ships[0].modules[ships[0].module_count].data.cannon.aim_direction = Q16_FROM_FLOAT(0.0f);
-        ships[0].modules[ships[0].module_count].data.cannon.ammunition = 10;
-        ships[0].modules[ships[0].module_count].data.cannon.time_since_fire = 0;
-        ships[0].modules[ships[0].module_count].data.cannon.reload_time = Q16_FROM_FLOAT(3000.0f);
-        ships[0].module_count++;
-    }
-    
-    // Add 3 masts matching BROADSIDE loadout: front x=165, middle x=-35, back x=-235 (all y=0)
-    float mast_x_positions[3] = { 165.0f, -35.0f, -235.0f };
-    for (int i = 0; i < 3; i++) {
-        ships[0].modules[ships[0].module_count].id = module_id_counter++;
-        ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_MAST;
-        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(mast_x_positions[i]));
-        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
-        ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(0.0f);
-        ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE | MODULE_STATE_DEPLOYED;
-        ships[0].modules[ships[0].module_count].data.mast.angle = Q16_FROM_FLOAT(0.0f);
-        ships[0].modules[ships[0].module_count].data.mast.openness = 0;
-        ships[0].modules[ships[0].module_count].data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
-        ships[0].module_count++;
-    }
-    
-    // Add 4 ladders (port/starboard sides, front/back) plus one at the specified position
-    float ladder_positions[1][2] = {
- 
-        {-305.0f, 0.0f}   // Special ladder at requested position
-    };
-    
-    for (int i = 0; i < 1; i++) {
-        ships[0].modules[ships[0].module_count].id = module_id_counter++;
-        ships[0].modules[ships[0].module_count].type_id = MODULE_TYPE_LADDER;
-        ships[0].modules[ships[0].module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ladder_positions[i][0]));
-        ships[0].modules[ships[0].module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ladder_positions[i][1]));
-        ships[0].modules[ships[0].module_count].local_rot = Q16_FROM_FLOAT(0.0f);
-        ships[0].modules[ships[0].module_count].state_bits = MODULE_STATE_ACTIVE;
-        ships[0].module_count++;
-    }
-    
-    log_info("🔧 Initialized %d modules for ship %u (1 helm, 6 cannons, 3 masts, 1 ladder)", 
-             ships[0].module_count, ships[0].ship_id);
-    
-    ship_count = 1;
-    log_info("🚢 Initialized test ship (ID: %u, Type: Brigantine, Mass: %.0f kg, Inertia: %.0f kg⋅m²) at (%.1f, %.1f)", 
-             ships[0].ship_id, ships[0].mass, ships[0].moment_of_inertia, ships[0].x, ships[0].y);
-    
+    log_info("🚢 Initialized ship 1 (ID: %u) at (%.1f, %.1f)", ships[0].ship_id, ships[0].x, ships[0].y);
+    log_info("🚢 Initialized ship 2 (ID: %u) at (%.1f, %.1f)", ships[1].ship_id, ships[1].x, ships[1].y);
+
     // Enhanced startup message
     printf("\n🌐 ═══════════════════════════════════════════════════════════════\n");
     printf("🔌 WebSocket Server Ready for Browser Clients!\n");
     printf("🌍 WebSocket listening on 0.0.0.0:%u\n", port);
     printf("🔄 Protocol bridge: WebSocket ↔ UDP translation active\n");
     printf("🎯 Browser clients can now connect via WebSocket\n");
-    printf("🚢 Test ship spawned at (%.1f, %.1f)\n", ships[0].x, ships[0].y);
+    printf("🚢 Ship 1 at (%.1f, %.1f)  Ship 2 at (%.1f, %.1f)\n",
+           ships[0].x, ships[0].y, ships[1].x, ships[1].y);
     printf("═══════════════════════════════════════════════════════════════\n\n");
     
     return 0;
@@ -3294,7 +3284,30 @@ void websocket_server_tick(float dt) {
     // ===== SYNC SHIP STATE FROM SIMULATION =====
     // This ensures SimpleShip has current position/rotation for mounted player updates
     sync_simple_ships_from_simulation();
-    
+
+    // ===== BROADCAST HIT EVENTS FROM SIMULATION =====
+    if (global_sim && global_sim->hit_event_count > 0) {
+        char frame[512];
+        for (uint8_t e = 0; e < global_sim->hit_event_count; e++) {
+            const struct HitEvent* ev = &global_sim->hit_events[e];
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                "{\"type\":\"PLANK_HIT\",\"shipId\":%u,\"plankId\":%u,"
+                "\"x\":%.1f,\"y\":%.1f}",
+                ev->ship_id, ev->plank_id,
+                SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+            size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, msg, strlen(msg), frame, sizeof(frame));
+            if (frame_len > 0) {
+                for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+                    struct WebSocketClient* client = &ws_server.clients[i];
+                    if (client->connected && client->handshake_complete)
+                        send(client->fd, frame, frame_len, 0);
+                }
+            }
+        }
+        global_sim->hit_event_count = 0;
+    }
+
     int moving_players = 0;
     
     // Count moving players (for adaptive tick rate)
