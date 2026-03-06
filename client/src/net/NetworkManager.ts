@@ -288,6 +288,7 @@ export class NetworkManager {
   public onModuleMountSuccess: ((moduleId: number, moduleKind: string, mountOffset?: Vec2) => void) | null = null;
   public onModuleMountFailure: ((reason: string) => void) | null = null;
   public onModuleDestroyed: ((shipId: number, moduleId: number) => void) | null = null;
+  public onShipSunk: ((shipId: number) => void) | null = null;
   
   constructor(config: NetworkConfig) {
     this.config = config;
@@ -1116,6 +1117,13 @@ export class NetworkManager {
         const plankShipId: number = message.shipId || 0;
         const plankId: number = message.plankId || 0;
         this.onModuleDestroyed?.(plankShipId, plankId);
+        break;
+      }
+
+      case 'SHIP_SINK': {
+        const sunkShipId: number = message.shipId || 0;
+        console.log(`🌊 SHIP_SINK: ship ${sunkShipId} has sunk!`);
+        this.onShipSunk?.(sunkShipId);
         break;
       }
 

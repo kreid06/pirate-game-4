@@ -3314,7 +3314,21 @@ void websocket_server_tick(float dt) {
             const struct HitEvent* ev = &global_sim->hit_events[e];
             char msg[256];
 
-            if (ev->is_breach) {
+            if (ev->is_sink) {
+                // Ship sunk: remove from SimpleShip array and sim, broadcast SHIP_SINK
+                entity_id sunk_id = ev->ship_id;
+                for (int s = 0; s < ship_count; s++) {
+                    if (ships[s].active && ships[s].ship_id == sunk_id) {
+                        ships[s].active = false;
+                        break;
+                    }
+                }
+                if (global_sim) sim_destroy_entity(global_sim, sunk_id);
+                snprintf(msg, sizeof(msg),
+                    "{\"type\":\"SHIP_SINK\",\"shipId\":%u,\"x\":%.1f,\"y\":%.1f}",
+                    sunk_id,
+                    SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+            } else if (ev->is_breach) {
                 // Breach hit: remove the interior module from SimpleShip and broadcast
                 SimpleShip* simple = find_ship(ev->ship_id);
                 if (simple) {

@@ -107,7 +107,6 @@ void sim_step(struct Sim* sim, q16_t dt) {
 
 void sim_update_ships(struct Sim* sim, q16_t dt) {
     // Sort ships by ID to ensure deterministic order
-    // Simple bubble sort is fine for small counts
     for (uint16_t i = 0; i < sim->ship_count; i++) {
         for (uint16_t j = i + 1; j < sim->ship_count; j++) {
             if (sim->ships[i].id > sim->ships[j].id) {
@@ -117,10 +116,46 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
             }
         }
     }
-    
-    // Update each ship's physics
+
+    float dt_secs = Q16_TO_FLOAT(dt);
+
+    // Update each ship's physics and sinking
     for (uint16_t i = 0; i < sim->ship_count; i++) {
-        update_ship_physics(&sim->ships[i], dt);
+        struct Ship* ship = &sim->ships[i];
+        update_ship_physics(ship, dt);
+
+        // ---- Sinking mechanic ----
+        // Count remaining planks
+        int planks_remaining = 0;
+        for (uint8_t m = 0; m < ship->module_count; m++) {
+            if (ship->modules[m].type_id == MODULE_TYPE_PLANK) planks_remaining++;
+        }
+        int missing = (int)ship->initial_plank_count - planks_remaining;
+
+        if (missing > 0 && ship->hull_health > 0) {
+            // drain_rate (HP/s) = (1/1.2) * 2^(missing-1)
+            // Use integer shift to avoid libm dependency: 2^(missing-1) = 1 << (missing-1), capped at 16 planks
+            int shift = missing - 1;
+            if (shift > 15) shift = 15;
+            float drain_rate = (1.0f / 1.2f) * (float)(1 << shift);
+            float drain = drain_rate * dt_secs;
+
+            float health = Q16_TO_FLOAT(ship->hull_health) - drain;
+            if (health <= 0.0f) {
+                health = 0.0f;
+                // Fire a SHIP_SINK event (once, when health first hits 0)
+                if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                    struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                    ev->ship_id   = ship->id;
+                    ev->module_id = 0;
+                    ev->is_breach = false;
+                    ev->is_sink   = true;
+                    ev->hit_x     = Q16_TO_FLOAT(ship->position.x);
+                    ev->hit_y     = Q16_TO_FLOAT(ship->position.y);
+                }
+            }
+            ship->hull_health = Q16_FROM_FLOAT(health);
+        }
     }
 }
 
@@ -383,6 +418,7 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         plank.data.plank.health = 100;
         ship->modules[ship->module_count++] = plank;
     }
+    ship->initial_plank_count = 10;
     
     // Deck module (ID 200) - position not used, client generates from hull polygon
     ship->modules[ship->module_count++] = module_create(

@@ -128,6 +128,12 @@ export class ClientApplication {
           }
         }
       };
+      this.networkManager.onShipSunk = (shipId) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          ws.ships = ws.ships.filter(s => s.id !== shipId);
+        }
+      };
       
       // Initialize Prediction Engine
       this.predictionEngine = new PredictionEngine(this.config.prediction);

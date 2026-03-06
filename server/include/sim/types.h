@@ -58,6 +58,13 @@ struct Ship {
     // Ship state flags
     uint16_t flags;
     uint8_t reserved[1];
+
+    // Sinking mechanics
+    // Each missing plank halves the time to sink:
+    //   1 plank missing -> 120s to drain 100 HP -> 0.833 HP/s
+    //   2 planks        ->  60s                 -> 1.667 HP/s
+    //   N planks        ->  (1/1.2) * 2^(N-1) HP/s
+    uint8_t initial_plank_count; // Set once when ship is created (typically 10)
 };
 
 // Player state  
@@ -120,9 +127,10 @@ struct SpatialCell {
 #define MAX_HIT_EVENTS 64
 struct HitEvent {
     entity_id ship_id;
-    uint16_t  module_id;  // ID of the module that was destroyed
-    bool      is_breach;  // false = plank destroyed; true = interior module hit through breach
-    float     hit_x;      // World position (server units) where ball hit
+    uint16_t  module_id;  // ID of the module that was destroyed (0 for SHIP_SINK)
+    bool      is_breach;  // false = plank destroyed / sink; true = interior module hit through breach
+    bool      is_sink;    // true = ship hull_health reached 0
+    float     hit_x;
     float     hit_y;
 };
 
