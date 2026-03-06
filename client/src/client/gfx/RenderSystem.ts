@@ -78,6 +78,13 @@ export class RenderSystem {
   }
   
   /**
+   * Spawn a floating damage number at a world position
+   */
+  spawnDamageNumber(worldPos: Vec2, damage: number, isKill: boolean = false): void {
+    this.effectRenderer.createDamageNumber(worldPos, damage, isKill);
+  }
+
+  /**
    * Update render system (particles, effects, etc.)
    */
   update(deltaTime: number): void {

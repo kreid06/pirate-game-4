@@ -15,7 +15,8 @@ export enum EffectType {
   MUZZLE_FLASH = 'muzzle_flash',
   WATER_WAKE = 'water_wake',
   SHIP_FOAM = 'ship_foam',
-  EXPLOSION_FLASH = 'explosion_flash'
+  EXPLOSION_FLASH = 'explosion_flash',
+  DAMAGE_NUMBER = 'damage_number'
 }
 
 /**
@@ -50,9 +51,19 @@ interface WaterWakeEffect extends Effect {
 }
 
 /**
+ * Damage number floating text effect
+ */
+interface DamageNumberEffect extends Effect {
+  type: EffectType.DAMAGE_NUMBER;
+  damage: number;
+  isKill: boolean;     // true = plank/module destroyed
+  floatOffset: number; // pixels floated upward so far (screen space)
+}
+
+/**
  * Effect union type
  */
-type VisualEffect = MuzzleFlashEffect | WaterWakeEffect | Effect;
+type VisualEffect = MuzzleFlashEffect | WaterWakeEffect | DamageNumberEffect | Effect;
 
 /**
  * Effect renderer system
@@ -77,7 +88,7 @@ export class EffectRenderer {
    * Update all effects
    */
   update(deltaTime: number): void {
-    const dt = deltaTime / 1000; // Convert to seconds
+    const dt = deltaTime; // deltaTime is already in seconds
     
     // Update all effects
     for (let i = this.effects.length - 1; i >= 0; i--) {
@@ -115,6 +126,9 @@ export class EffectRenderer {
           break;
         case EffectType.EXPLOSION_FLASH:
           this.renderExplosionFlash(effect, camera);
+          break;
+        case EffectType.DAMAGE_NUMBER:
+          this.renderDamageNumber(effect as DamageNumberEffect, camera);
           break;
       }
     }
@@ -160,6 +174,24 @@ export class EffectRenderer {
   }
   
   /**
+   * Create a floating damage number at a world position
+   */
+  createDamageNumber(position: Vec2, damage: number, isKill: boolean = false): void {
+    const effect: DamageNumberEffect = {
+      id: this.nextEffectId++,
+      type: EffectType.DAMAGE_NUMBER,
+      position: position.clone(),
+      damage: Math.round(damage),
+      isKill,
+      floatOffset: 0,
+      age: 0,
+      maxAge: 3.0,
+      intensity: 1.0
+    };
+    this.effects.push(effect);
+  }
+
+  /**
    * Create explosion flash effect
    */
   createExplosionFlash(position: Vec2, intensity: number = 1.0): void {
@@ -190,7 +222,9 @@ export class EffectRenderer {
       case EffectType.WATER_WAKE:
         this.updateWaterWake(effect as WaterWakeEffect, deltaTime);
         break;
-      // Other effect types don't need special updates
+      case EffectType.DAMAGE_NUMBER:
+        // no float
+        break;
     }
   }
   
@@ -263,6 +297,38 @@ export class EffectRenderer {
     this.ctx.stroke();
   }
   
+  private renderDamageNumber(effect: DamageNumberEffect, camera: Camera): void {
+    const screenPos = camera.worldToScreen(effect.position);
+    const t = effect.age / effect.maxAge; // 0→1 over lifetime
+
+    // Fade: hold full for first 60%, then fade out over remaining 40%
+    const alpha = t < 0.6 ? 1.0 : 1.0 - (t - 0.6) / 0.4;
+
+    // Scale: pop in quickly then stay
+    const scale = t < 0.08 ? t / 0.08 : 1.0;
+
+    const x = screenPos.x;
+    const y = screenPos.y;
+
+    const label = effect.isKill ? `💥 -${effect.damage}` : `-${effect.damage}`;
+    const fontSize = effect.isKill ? 28 : 24;
+
+    this.ctx.save();
+    this.ctx.globalAlpha = alpha;
+    this.ctx.font = `bold ${Math.round(fontSize * scale)}px Arial`;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'middle';
+
+    // Shadow for readability
+    this.ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    this.ctx.fillText(label, x + 1, y + 1);
+
+    // Main text: red for kill, orange for damage
+    this.ctx.fillStyle = effect.isKill ? '#ff3030' : '#ffaa00';
+    this.ctx.fillText(label, x, y);
+    this.ctx.restore();
+  }
+
   private renderExplosionFlash(effect: Effect, camera: Camera): void {
     const screenPos = camera.worldToScreen(effect.position);
     const cameraState = camera.getState();

@@ -117,7 +117,38 @@ export class ClientApplication {
       this.networkManager.onModuleMountFailure = (reason) => {
         this.handleModuleMountFailure(reason);
       };
-      this.networkManager.onModuleDestroyed = (shipId, moduleId) => {
+      this.networkManager.onModuleDestroyed = (shipId, moduleId, hitX, hitY) => {
+        // Spawn a damage number before removing the module
+        const ws = this.authoritativeWorldState || this.predictedWorldState;
+        if (ws) {
+          const ship = ws.ships.find(s => s.id === shipId);
+          if (ship) {
+            const mod = ship.modules.find(m => m.id === moduleId);
+            if (mod) {
+              // Determine position: prefer server-provided hit coords, fall back to module world pos
+              let worldX: number;
+              let worldY: number;
+              if (hitX !== undefined && hitY !== undefined) {
+                worldX = hitX;
+                worldY = hitY;
+              } else {
+                const cos = Math.cos(ship.rotation);
+                const sin = Math.sin(ship.rotation);
+                worldX = ship.position.x + mod.localPos.x * cos - mod.localPos.y * sin;
+                worldY = ship.position.y + mod.localPos.x * sin + mod.localPos.y * cos;
+              }
+
+              // Damage = remaining health before destruction (plank = health%, others = 100)
+              let damage = 100;
+              if (mod.moduleData?.kind === 'plank') {
+                damage = Math.round(mod.moduleData.health) || 100;
+              }
+
+              this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage, true);
+            }
+          }
+        }
+
         // Remove the destroyed module immediately from world state so it disappears
         // before the next GAME_STATE update arrives
         for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {

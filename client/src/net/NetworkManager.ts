@@ -287,7 +287,7 @@ export class NetworkManager {
   public onConnectionStateChanged: ((state: ConnectionState) => void) | null = null;
   public onModuleMountSuccess: ((moduleId: number, moduleKind: string, mountOffset?: Vec2) => void) | null = null;
   public onModuleMountFailure: ((reason: string) => void) | null = null;
-  public onModuleDestroyed: ((shipId: number, moduleId: number) => void) | null = null;
+  public onModuleDestroyed: ((shipId: number, moduleId: number, hitX?: number, hitY?: number) => void) | null = null;
   public onShipSunk: ((shipId: number) => void) | null = null;
   
   constructor(config: NetworkConfig) {
@@ -1107,8 +1107,10 @@ export class NetworkManager {
       case 'MODULE_HIT': {
         const shipId: number = message.shipId || 0;
         const moduleId: number = message.moduleId || 0;
+        const hitX: number | undefined = message.x;
+        const hitY: number | undefined = message.y;
         console.log(`💥 MODULE_HIT: ship ${shipId} module ${moduleId} destroyed`);
-        this.onModuleDestroyed?.(shipId, moduleId);
+        this.onModuleDestroyed?.(shipId, moduleId, hitX, hitY);
         break;
       }
 
@@ -1116,7 +1118,9 @@ export class NetworkManager {
         // Remove the plank immediately so it disappears before the next GAME_STATE
         const plankShipId: number = message.shipId || 0;
         const plankId: number = message.plankId || 0;
-        this.onModuleDestroyed?.(plankShipId, plankId);
+        const plankHitX: number | undefined = message.x;
+        const plankHitY: number | undefined = message.y;
+        this.onModuleDestroyed?.(plankShipId, plankId, plankHitX, plankHitY);
         break;
       }
 
