@@ -113,6 +113,8 @@ export interface HelmModuleData {
   maxTurnRate: number;          // Maximum turning rate in rad/s
   responsiveness: number;       // How quickly ship responds to input (0-1)
   currentInput: Vec2;           // Current steering input (-1 to 1 for each axis)
+  health: number;               // Current HP (base max: 10000)
+  maxHealth: number;            // Max HP
   
   // Rendering properties
   wheelRotation: number;        // Current wheel rotation for visual feedback (radians)
@@ -130,6 +132,8 @@ export interface CannonModuleData {
   timeSinceLastFire: number;    // Time since last shot (for reload tracking)
   ammunition: number;           // Remaining ammunition count
   maxAmmunition: number;        // Maximum ammunition capacity
+  health: number;               // Current HP (base max: 8000)
+  maxHealth: number;            // Max HP
 }
 
 /**
@@ -144,6 +148,8 @@ export interface MastModuleData {
   radius: number;              // Mast pole radius for rendering
   sailWidth: number;           // Width of the sail
   sailColor: string;           // Color of the sail fabric
+  health: number;               // Current HP (base max: 15000)
+  maxHealth: number;            // Max HP
   
   // Rendering properties
   openness: number;            // Sail openness (0-100) - how much the sail is deployed
@@ -178,7 +184,8 @@ export interface PlankModuleData {
   kind: 'plank';
   length: number;              // Length of the plank segment
   width: number;               // Width/thickness of the plank
-  health: number;              // Structural integrity (0-100)
+  health: number;              // Current HP (base max: 10000)
+  maxHealth: number;           // Max HP
   material: 'wood' | 'iron' | 'steel'; // Plank material type
   segmentIndex: number;        // Which segment of the ship hull (0-11)
   sectionName?: string;        // Section name (e.g., "port_bow", "starboard_side")
@@ -352,7 +359,8 @@ export class ModuleUtils {
           kind: 'plank',
           length: 16,              // Default plank length
           width: 4,                // Default plank thickness
-          health: 100,             // Full health
+          health: 10000,           // Full health
+          maxHealth: 10000,
           material: 'wood',        // Default wooden planks
           segmentIndex: 0,         // Default to first segment
         } as PlankModuleData;
@@ -546,7 +554,8 @@ export class ModuleUtils {
       if (plank.moduleData && plank.moduleData.kind === 'plank') {
         plank.moduleData.length = Math.max(length, 15); // Ensure minimum length
         plank.moduleData.width = segment.thickness;
-        plank.moduleData.health = 100;
+        plank.moduleData.health = 10000;
+        plank.moduleData.maxHealth = 10000;
         plank.moduleData.material = 'wood';
         plank.moduleData.segmentIndex = segment.index;
         plank.moduleData.sectionName = segment.sectionName;

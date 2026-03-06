@@ -172,7 +172,8 @@ export function createShipPlanksFromSegments(startId: number = 100): ShipModule[
     if (plank.moduleData && plank.moduleData.kind === 'plank') {
       plank.moduleData.length = length;
       plank.moduleData.width = segment.thickness;
-      plank.moduleData.health = 100;
+      plank.moduleData.health = 10000;
+      plank.moduleData.maxHealth = 10000;
       plank.moduleData.material = 'wood';
       plank.moduleData.segmentIndex = segment.index;
       plank.localRot = angle;

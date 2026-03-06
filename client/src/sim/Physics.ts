@@ -1086,7 +1086,7 @@ function applyRadialPlankDamage(
  */
 function calculateCollisionPlankDamage(ship1: Ship, ship2: Ship, collision: any): void {
   const impactForce = collision.penetration * 10; // Convert penetration to damage force
-  const baseDamage = Math.min(impactForce * 2, 15); // Cap collision damage at 15 per hit
+  const baseDamage = Math.min(impactForce * 200, 1500); // Cap collision damage at 1500 per hit (scaled to 10000 HP)
   
   // Use radial angle-based damage instead of distance-based
   // Apply to both ships at their respective collision points

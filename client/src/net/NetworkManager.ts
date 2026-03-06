@@ -905,14 +905,17 @@ export class NetworkManager {
             if (ship.modules && Array.isArray(ship.modules)) {
               // Separate gameplay modules from structural modules
               const gameplayModules: ShipModule[] = [];
-              const plankHealthUpdates = new Map<number, number>();
+              const plankHealthUpdates = new Map<number, { health: number; maxHealth: number }>();
               
               for (const mod of ship.modules) {
                 const kind = MODULE_TYPE_MAP.toKind(mod.typeId);
                 
                 if (kind === 'plank') {
                   // Plank: Server only sends health, client generates positions
-                  plankHealthUpdates.set(mod.id, mod.health ?? 100);
+                  plankHealthUpdates.set(mod.id, {
+                    health: mod.health ?? 10000,
+                    maxHealth: mod.maxHealth ?? 10000,
+                  });
                 } else if (kind === 'deck') {
                   // Deck: Client generates from hull, server sends ID only
                   // Skip - client already has deck module
@@ -929,7 +932,9 @@ export class NetworkManager {
                       reloadTime: 3.0,
                       timeSinceLastFire: 0,
                       ammunition: mod.ammo ?? 50,
-                      maxAmmunition: 50
+                      maxAmmunition: 50,
+                      health: mod.health ?? 8000,
+                      maxHealth: mod.maxHealth ?? 8000,
                     };
                   } else if (kind === 'helm' || kind === 'steering-wheel') {
                     moduleData = {
@@ -938,7 +943,9 @@ export class NetworkManager {
                       responsiveness: 0.8,
                       currentInput: Vec2.from(0, 0),
                       wheelRotation: mod.wheelRot ?? 0,
-                      occupied: mod.occupied ?? false
+                      occupied: mod.occupied ?? false,
+                      health: mod.health ?? 10000,
+                      maxHealth: mod.maxHealth ?? 10000,
                     };
                   } else if (kind === 'mast') {
                     moduleData = {
@@ -949,7 +956,9 @@ export class NetworkManager {
                       radius: 15,
                       height: 120,
                       sailWidth: 80,
-                      sailColor: '#F5F5DC'
+                      sailColor: '#F5F5DC',
+                      health: mod.health ?? 15000,
+                      maxHealth: mod.maxHealth ?? 15000,
                     };
                   } else if (kind === 'ladder') {
                     moduleData = {
@@ -984,9 +993,10 @@ export class NetworkManager {
 
               // Update health on surviving planks
               for (const plank of activePlanks) {
-                const serverHealth = plankHealthUpdates.get(plank.id);
-                if (serverHealth !== undefined && plank.moduleData && plank.moduleData.kind === 'plank') {
-                  plank.moduleData.health = serverHealth;
+                const serverData = plankHealthUpdates.get(plank.id);
+                if (serverData !== undefined && plank.moduleData && plank.moduleData.kind === 'plank') {
+                  plank.moduleData.health = serverData.health;
+                  plank.moduleData.maxHealth = serverData.maxHealth;
                 }
               }
               

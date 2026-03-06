@@ -2970,8 +2970,9 @@ int websocket_server_update(struct Sim* sim) {
                     if (module->type_id == MODULE_TYPE_PLANK) {
                         // Plank: only health data (client has hard-coded positions from hull)
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"health\":%u}",
-                            m > 0 ? "," : "", module->id, module->type_id, module->data.plank.health);
+                            "%s{\"id\":%u,\"typeId\":%u,\"health\":%d,\"maxHealth\":%d}",
+                            m > 0 ? "," : "", module->id, module->type_id,
+                            (int)module->health, (int)module->max_health);
                     } else if (module->type_id == MODULE_TYPE_DECK) {
                         // Deck: only ID/type (client generates polygon from hull)
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
@@ -2985,35 +2986,39 @@ int websocket_server_update(struct Sim* sim) {
                         
                         // Add module-specific data based on type
                         if (module->type_id == MODULE_TYPE_MAST) {
-                            // Mast: include openness and sail angle
+                            // Mast: include openness, sail angle, and health
                             float sail_angle = Q16_TO_FLOAT(module->data.mast.angle);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"health\":%d,\"maxHealth\":%d}",
                                 m > 0 ? "," : "", module->id, module->type_id, 
-                                module_x, module_y, module_rot, module->data.mast.openness, sail_angle);
+                                module_x, module_y, module_rot, module->data.mast.openness, sail_angle,
+                                (int)module->health, (int)module->max_health);
                         } else if (module->type_id == MODULE_TYPE_CANNON) {
-                            // Cannon: include aim direction, state (ammo is ship-level)
+                            // Cannon: include aim direction, state, and health
                             float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"maxHealth\":%d}",
                                 m > 0 ? "," : "", module->id, module->type_id,
                                 module_x, module_y, module_rot, aim_direction,
-                                (unsigned)module->state_bits);
+                                (unsigned)module->state_bits,
+                                (int)module->health, (int)module->max_health);
                         } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
-                            // Helm: include wheel rotation, occupied status, state
+                            // Helm: include wheel rotation, occupied status, state, and health
                             float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u,\"health\":%d,\"maxHealth\":%d}",
                                 m > 0 ? "," : "", module->id, module->type_id,
                                 module_x, module_y, module_rot, wheel_rot,
                                 (module->data.helm.occupied_by != 0) ? "true" : "false",
-                                (unsigned)module->state_bits);
+                                (unsigned)module->state_bits,
+                                (int)module->health, (int)module->max_health);
                         } else {
-                            // Generic module (mast, ladder, etc.): transform + state
+                            // Generic module (ladder, etc.): transform + state + health
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d}",
                                 m > 0 ? "," : "", module->id, module->type_id,
-                                module_x, module_y, module_rot, (unsigned)module->state_bits);
+                                module_x, module_y, module_rot, (unsigned)module->state_bits,
+                                (int)module->health, (int)module->max_health);
                         }
                     }
                 }

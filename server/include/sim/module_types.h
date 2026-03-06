@@ -73,8 +73,7 @@ typedef struct {
  * Plank-specific module data
  */
 typedef struct {
-    q16_t health;               // Plank structural health
-    q16_t max_health;           // Maximum health
+    // Health is tracked at the ShipModule level (module.health / module.max_health)
 } PlankModuleData;
 
 /**
@@ -87,6 +86,10 @@ typedef struct {
     Vec2Q16 local_pos;          // Position relative to ship center
     q16_t local_rot;            // Rotation relative to ship
     uint8_t state_bits;         // Compact state flags
+    q16_t health;               // Current HP (all module types)
+    q16_t max_health;           // Maximum HP:
+                                //   plank: 10000, cannon: 8000
+                                //   mast: 15000, helm: 10000
     
     // Type-specific data (union to save memory)
     union {

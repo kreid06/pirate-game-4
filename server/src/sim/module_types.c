@@ -23,18 +23,24 @@ ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t
             module.data.cannon.ammunition = 10;
             module.data.cannon.time_since_fire = 0;
             module.data.cannon.reload_time = 5000; // 5 seconds in milliseconds
+            module.health     = 8000;
+            module.max_health = 8000;
             break;
             
         case MODULE_TYPE_MAST:
             module.data.mast.angle = 0;
             module.data.mast.openness = 0; // Sails start closed
             module.data.mast.wind_efficiency = Q16_ONE;
+            module.health     = 15000;
+            module.max_health = 15000;
             break;
             
         case MODULE_TYPE_HELM:
         case MODULE_TYPE_STEERING_WHEEL:
             module.data.helm.wheel_rotation = 0;
             module.data.helm.occupied_by = 0;
+            module.health     = 10000;
+            module.max_health = 10000;
             break;
             
         case MODULE_TYPE_SEAT:
@@ -42,8 +48,8 @@ ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t
             break;
             
         case MODULE_TYPE_PLANK:
-            module.data.plank.health = Q16_FROM_INT(100);
-            module.data.plank.max_health = Q16_FROM_INT(100);
+            module.health     = 10000;
+            module.max_health = 10000;
             break;
             
         case MODULE_TYPE_DECK:
@@ -99,7 +105,7 @@ bool module_is_functional(const ShipModule* module) {
     
     // Check plank health
     if (module->type_id == MODULE_TYPE_PLANK) {
-        return module->data.plank.health > 0;
+        return module->health > 0;
     }
     
     return true;
@@ -114,15 +120,14 @@ void module_apply_damage(ShipModule* module, q16_t damage) {
     // Mark as damaged
     module->state_bits |= MODULE_STATE_DAMAGED;
     
-    // Apply damage to plank health
-    if (module->type_id == MODULE_TYPE_PLANK) {
-        module->data.plank.health = q16_sub_sat(module->data.plank.health, damage);
-        
-        if (module->data.plank.health <= 0) {
-            module->state_bits |= MODULE_STATE_DESTROYED;
-            module->state_bits &= ~MODULE_STATE_ACTIVE;
-            log_info("💥 Module %u (plank) destroyed!", module->id);
-        }
+    // Reduce health; clamp to 0
+    if (module->health > damage) {
+        module->health -= damage;
+    } else {
+        module->health = 0;
+        module->state_bits |= MODULE_STATE_DESTROYED;
+        module->state_bits &= ~MODULE_STATE_ACTIVE;
+        log_info("💥 Module %u (type %u) destroyed!", module->id, module->type_id);
     }
 }
 
