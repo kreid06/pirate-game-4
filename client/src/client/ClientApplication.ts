@@ -783,9 +783,12 @@ export class ClientApplication {
    */
   private syncBuildModeState(): void {
     const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
-    const sailCount = ws?.ships
-      .flatMap(s => s.modules)
-      .filter(m => m.kind === 'mast').length ?? 0;
+
+    // Count masts only on the player's own ship to avoid summing across all world ships
+    const playerId = this.networkManager?.getAssignedPlayerId();
+    const player   = ws?.players.find(p => p.id === playerId);
+    const playerShip = ws?.ships.find(s => s.id === player?.carrierId);
+    const sailCount = playerShip?.modules.filter(m => m.kind === 'mast').length ?? 0;
 
     this.uiManager?.setBuildModeState(
       this.explicitBuildMode ? {
@@ -851,18 +854,35 @@ export class ClientApplication {
 
     const rotationRad = (this.buildRotationDeg * Math.PI) / 180;
 
+    // Optimistically add the module to all local world states so it appears immediately.
+    // In online mode the server's next authoritative tick will include (or exclude) it.
+    // In demo/offline mode this IS the only placement path.
+    const tempId = Date.now() % 100000 + 10000; // temporary ID
+    const shipRef = nearestShip; // capture before potential async
+
     if (this.buildSelectedItem === 'cannon') {
-      console.log(`🔨 [BUILD] Placing cannon at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${this.buildRotationDeg}° on ship ${nearestShip.id}`);
-      this.networkManager.sendPlaceCannonAt(nearestShip.id, localX, localY, rotationRad);
+      console.log(`🔨 [BUILD] Placing cannon at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${this.buildRotationDeg}° on ship ${shipRef.id}`);
+      const newCannon = ModuleUtils.createDefaultModule(tempId, 'cannon', Vec2.from(localX, localY));
+      newCannon.localRot = rotationRad;
+      for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
+        const s = state?.ships.find(sh => sh.id === shipRef.id);
+        if (s) s.modules.push(newCannon);
+      }
+      this.networkManager.sendPlaceCannonAt(shipRef.id, localX, localY, rotationRad);
     } else {
       // Sail — check for max 3 masts
-      const mastCount = nearestShip.modules.filter(m => m.kind === 'mast').length;
+      const mastCount = shipRef.modules.filter(m => m.kind === 'mast').length;
       if (mastCount >= 3) {
         console.log(`❌ [BUILD] Max sails reached (${mastCount}/3)`);
         return;
       }
-      console.log(`⛵ [BUILD] Placing sail at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) on ship ${nearestShip.id}`);
-      this.networkManager.sendPlaceMastAt(nearestShip.id, localX, localY);
+      console.log(`⛵ [BUILD] Placing sail at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) on ship ${shipRef.id}`);
+      const newMast = ModuleUtils.createDefaultModule(tempId, 'mast', Vec2.from(localX, localY));
+      for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
+        const s = state?.ships.find(sh => sh.id === shipRef.id);
+        if (s) s.modules.push(newMast);
+      }
+      this.networkManager.sendPlaceMastAt(shipRef.id, localX, localY);
     }
   }
 
