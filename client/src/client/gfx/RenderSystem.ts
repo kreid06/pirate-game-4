@@ -1020,7 +1020,9 @@ export class RenderSystem {
     for (const player of worldState.players) {
       if (player.mountedModuleId != null) mountedCannonIds.add(player.mountedModuleId);
     }
-    if (mountedCannonIds.size === 0) return;
+    // If nobody is mounted (e.g. offline/demo), show guides on all cannons for dev preview.
+    // If players are mounted, show only their cannons.
+    const showAll = mountedCannonIds.size === 0;
 
     this.ctx.save();
 
@@ -1033,7 +1035,7 @@ export class RenderSystem {
     for (const cannon of ship.modules) {
       if (cannon.kind !== 'cannon') continue;
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
-      if (!mountedCannonIds.has(cannon.id)) continue;
+      if (!showAll && !mountedCannonIds.has(cannon.id)) continue;
 
       const cannonData  = cannon.moduleData;
       const cx          = cannon.localPos.x;
