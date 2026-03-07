@@ -12,6 +12,8 @@ import { NetworkStats } from '../../net/NetworkManager.js';
 import { ITEM_DEFS, INVENTORY_SLOTS, ItemKind } from '../../sim/Inventory.js';
 import { ManningPriorityPanel } from './ManningPriorityPanel.js';
 import { CompanyMenu } from './CompanyMenu.js';
+import { PlayerMenu } from './PlayerMenu.js';
+import { ShipMenu } from './ShipMenu.js';
 
 /**
  * UI render context
@@ -59,6 +61,10 @@ export class UIManager {
 
   // Company menu (toggled by [L])
   private companyMenu = new CompanyMenu();
+  // Player character menu (toggled by [E] when menu is open)
+  private playerMenu = new PlayerMenu();
+  // Ship status menu (toggled by [F])
+  private shipMenu = new ShipMenu();
 
   // UI State
   private showDebugOverlay = false;
@@ -116,6 +122,8 @@ export class UIManager {
 
     // Company menu renders last so it sits above all other UI
     this.companyMenu.render(ctx, context.worldState, context.assignedPlayerId);
+    this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId);
+    this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
   }
   
   /**
@@ -174,6 +182,14 @@ export class UIManager {
     // Log-term: route internal clicks to menu sub-elements here.
     if (this.companyMenu.visible) {
       this.companyMenu.close();
+      return true;
+    }
+    if (this.playerMenu.visible) {
+      this.playerMenu.close();
+      return true;
+    }
+    if (this.shipMenu.visible) {
+      this.shipMenu.close();
       return true;
     }
     return this.manningPanel.handleClick(x, y);
@@ -258,22 +274,45 @@ export class UIManager {
   }
   
   private onKeyDown(event: KeyboardEvent): void {
+    // Close any open modal on Escape first
+    if (event.code === 'Escape') {
+      if (this.companyMenu.visible) { this.companyMenu.close(); event.preventDefault(); event.stopPropagation(); return; }
+      if (this.playerMenu.visible)  { this.playerMenu.close();  event.preventDefault(); event.stopPropagation(); return; }
+      if (this.shipMenu.visible)    { this.shipMenu.close();    event.preventDefault(); event.stopPropagation(); return; }
+      return;
+    }
+
     switch (event.code) {
       case 'KeyL':
         // [L] toggles (opens or closes) the company ledger menu
         this.companyMenu.toggle();
-        if (this.companyMenu.visible) {
+        // Close sibling menus so only one is open at a time
+        if (this.companyMenu.visible) { this.playerMenu.close(); this.shipMenu.close(); }
+        if (this.companyMenu.visible) { event.preventDefault(); event.stopPropagation(); }
+        break;
+
+      case 'KeyI':
+        // [I] opens the player character sheet.
+        // Only intercept if the menu is already open (so normal I key still fires when closed).
+        if (this.playerMenu.visible) {
+          this.playerMenu.close();
           event.preventDefault();
           event.stopPropagation();
-        }
-        break;
-      case 'Escape':
-        if (this.companyMenu.visible) {
+        } else {
+          this.playerMenu.open();
           this.companyMenu.close();
+          this.shipMenu.close();
           event.preventDefault();
           event.stopPropagation();
         }
         break;
+
+      case 'KeyF':
+        this.shipMenu.toggle();
+        if (this.shipMenu.visible) { this.companyMenu.close(); this.playerMenu.close(); }
+        if (this.shipMenu.visible) { event.preventDefault(); event.stopPropagation(); }
+        break;
+
       case 'F1':
         this.showControlHints = !this.showControlHints;
         this.updateElementVisibility();
@@ -644,6 +683,8 @@ class DebugOverlayElement implements UIElement {
       `Cannonballs: ${context.worldState.cannonballs.length}`,
       '',
       '=== CONTROLS ===',
+      'I - Character sheet',
+      'F - Ship status',
       'L - Company Ledger menu',
       '] - Toggle hover boundaries',
       'F1 - Toggle control hints',
