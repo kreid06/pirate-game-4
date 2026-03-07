@@ -585,7 +585,7 @@ export class RenderSystem {
 
     // Queue NPCs (layer 2 - same as players)
     for (const npc of (worldState.npcs || [])) {
-      this.queueRenderItem(2, 'npcs', () => this.drawNpc(npc, camera));
+      this.queueRenderItem(2, 'npcs', () => this.drawNpc(npc, worldState, camera));
     }
 
     // Queue ship ammo labels (layer 9 - HUD overlay above all ship elements)
@@ -1656,10 +1656,25 @@ export class RenderSystem {
     this.ctx.stroke();
   }
 
-  private drawNpc(npc: Npc, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(npc.position, 60)) return;
+  private drawNpc(npc: Npc, worldState: WorldState, camera: Camera): void {
+    // If on a ship, derive world position from the ship's current (interpolated) transform
+    // so the NPC moves smoothly with the ship between server ticks.
+    let worldPos = npc.position;
+    if (npc.shipId) {
+      const ship = worldState.ships.find(s => s.id === npc.shipId);
+      if (ship && npc.localPosition) {
+        const cosR = Math.cos(ship.rotation);
+        const sinR = Math.sin(ship.rotation);
+        worldPos = Vec2.from(
+          ship.position.x + npc.localPosition.x * cosR - npc.localPosition.y * sinR,
+          ship.position.y + npc.localPosition.x * sinR + npc.localPosition.y * cosR
+        );
+      }
+    }
 
-    const screenPos = camera.worldToScreen(npc.position);
+    if (!camera.isWorldPositionVisible(worldPos, 60)) return;
+
+    const screenPos = camera.worldToScreen(worldPos);
     const cameraState = camera.getState();
     const radius = 8 * cameraState.zoom;
     const isMoving = npc.state === NPC_STATE_MOVING;

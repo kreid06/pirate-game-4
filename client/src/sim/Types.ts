@@ -108,7 +108,8 @@ export interface Npc {
   id: number;
   name: string;
   type: number;           // Always NPC_TYPE_SAILOR (0) for now
-  position: Vec2;
+  position: Vec2;         // World position (fallback when not on a ship)
+  localPosition: Vec2;    // Ship-local position in client pixels (used when shipId != 0)
   rotation: number;       // Facing direction in radians
   interactRadius: number; // Distance within which the player can press E
   shipId: number;         // 0 = free-standing in the world

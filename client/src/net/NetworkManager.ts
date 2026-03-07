@@ -1157,6 +1157,7 @@ export class NetworkManager {
             name: n.name || 'Sailor',
             type: n.type ?? 0,
             position: Vec2.from(n.x || 0, n.y || 0),
+            localPosition: Vec2.from(n.local_x || 0, n.local_y || 0),
             rotation: n.rotation || 0,
             interactRadius: n.interact_radius ?? 40,
             shipId: n.ship_id || 0,
