@@ -61,6 +61,7 @@ export enum MessageType {
 
   SLOT_SELECT = 'slot_select',
   GIVE_ITEM = 'give_item',
+  PLACE_PLANK = 'place_plank',
 
   PING = 'ping',
   
@@ -263,7 +264,15 @@ interface GiveItemMessage extends NetworkMessage {
   quantity: number;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage;
+interface PlacePlankMessage extends NetworkMessage {
+  type: MessageType.PLACE_PLANK;
+  timestamp: number;
+  shipId: number;
+  sectionName: string;
+  segmentIndex: number;
+}
+
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage;
 
 /**
  * Main network manager class
@@ -768,6 +777,14 @@ export class NetworkManager {
   sendGiveItem(slot: number, itemId: number, quantity: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.GIVE_ITEM, timestamp: Date.now(), slot, item: itemId, quantity });
+  }
+
+  /**
+   * Request the server to place a plank in a missing hull slot.
+   */
+  sendPlacePlank(shipId: number, sectionName: string, segmentIndex: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_PLANK, timestamp: Date.now(), shipId, sectionName, segmentIndex });
   }
   
   /**

@@ -89,6 +89,10 @@ export class InputManager {
   // Inventory callback
   public onSlotSelect: ((slot: number) => void) | null = null;
 
+  // Build mode — set when a buildable item (e.g. plank) is in the active hotbar slot
+  public buildMode: boolean = false;
+  public onBuildPlace: ((worldPos: Vec2) => void) | null = null;
+
   // Camera zoom callback
   public onZoom: ((factor: number, screenPoint: Vec2) => void) | null = null;
   
@@ -841,6 +845,14 @@ export class InputManager {
     if (event.button === 0) { // Left mouse button
       this.inputState.leftMouseDown = true;
       
+      if (this.buildMode) {
+        // Build mode: left click places a building item (e.g. plank) at cursor
+        if (this.onBuildPlace) {
+          this.onBuildPlace(this.inputState.mouseWorldPosition);
+        }
+        return;
+      }
+
       const now = Date.now();
       const timeSinceLastClick = now - this.lastLeftClickTime;
       const isDoubleClick = timeSinceLastClick < this.DOUBLE_CLICK_THRESHOLD;

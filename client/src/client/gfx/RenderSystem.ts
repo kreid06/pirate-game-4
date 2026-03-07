@@ -10,7 +10,7 @@ import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer } from './EffectRenderer.js';
 import { WorldState, Ship, Player, Cannonball } from '../../sim/Types.js';
-import { ShipModule } from '../../sim/modules.js';
+import { ShipModule, createCompleteHullSegments, PlankSegment } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { ClientState } from '../ClientApplication.js';
 
@@ -42,6 +42,11 @@ export class RenderSystem {
   // Hover state
   private mouseWorldPos: Vec2 | null = null;
   private hoveredModule: { ship: Ship; module: any } | null = null;
+
+  // Build mode state
+  private buildMode: boolean = false;
+  private hoveredPlankSlot: { ship: Ship; sectionName: string; segmentIndex: number } | null = null;
+  private plankTemplate: PlankSegment[] | null = null;
   
   // Debug flags
   private showHoverBoundaries: boolean = false;
@@ -99,6 +104,101 @@ export class RenderSystem {
     this.mouseWorldPos = worldPos;
   }
   
+  /**
+   * Enable or disable plank build mode
+   */
+  setBuildMode(active: boolean): void {
+    this.buildMode = active;
+    if (!active) this.hoveredPlankSlot = null;
+  }
+
+  /**
+   * Whether build mode is currently active
+   */
+  isInBuildMode(): boolean {
+    return this.buildMode;
+  }
+
+  /**
+   * Get the plank slot currently under the cursor (only in build mode)
+   */
+  getHoveredPlankSlot(): { ship: Ship; sectionName: string; segmentIndex: number } | null {
+    return this.hoveredPlankSlot;
+  }
+
+  /**
+   * Lazily build the static plank slot template (all 10 hull segments)
+   */
+  private getPlankTemplate(): PlankSegment[] {
+    if (!this.plankTemplate) {
+      this.plankTemplate = createCompleteHullSegments(10);
+    }
+    return this.plankTemplate;
+  }
+
+  /**
+   * Detect which missing plank slot (if any) the cursor is over
+   */
+  private detectHoveredPlankSlot(worldState: WorldState): void {
+    this.hoveredPlankSlot = null;
+    if (!this.mouseWorldPos) return;
+
+    const template = this.getPlankTemplate();
+
+    for (const ship of worldState.ships) {
+      // Collect all present plank slots
+      const presentKeys = new Set<string>();
+      for (const mod of ship.modules) {
+        if (mod.kind === 'plank' && mod.moduleData?.kind === 'plank') {
+          presentKeys.add(`${mod.moduleData.sectionName}_${mod.moduleData.segmentIndex}`);
+        }
+      }
+
+      // Transform mouse to ship-local space
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const localX = dx * cos - dy * sin;
+      const localY = dx * sin + dy * cos;
+
+      for (const seg of template) {
+        if (presentKeys.has(`${seg.sectionName}_${seg.index}`)) continue;
+
+        let hit = false;
+        if (seg.isCurved && seg.curveStart && seg.curveControl && seg.curveEnd && seg.t1 !== undefined && seg.t2 !== undefined) {
+          hit = this.isPointInCurvedPlank(localX, localY, {
+            start: seg.curveStart,
+            control: seg.curveControl,
+            end: seg.curveEnd,
+            t1: seg.t1,
+            t2: seg.t2
+          }, seg.thickness);
+        } else {
+          // Straight plank rect test
+          const cx = (seg.start.x + seg.end.x) / 2;
+          const cy = (seg.start.y + seg.end.y) / 2;
+          const ddx = seg.end.x - seg.start.x;
+          const ddy = seg.end.y - seg.start.y;
+          const len = Math.sqrt(ddx * ddx + ddy * ddy);
+          const ang = Math.atan2(ddy, ddx);
+          const sdx = localX - cx;
+          const sdy = localY - cy;
+          const sc = Math.cos(-ang);
+          const ss = Math.sin(-ang);
+          const sx = sdx * sc - sdy * ss;
+          const sy = sdx * ss + sdy * sc;
+          hit = Math.abs(sx) <= len / 2 + 5 && Math.abs(sy) <= seg.thickness / 2 + 5;
+        }
+
+        if (hit) {
+          this.hoveredPlankSlot = { ship, sectionName: seg.sectionName, segmentIndex: seg.index };
+          return;
+        }
+      }
+    }
+  }
+
   /**
    * Toggle hover boundary debug visualization
    */
@@ -258,7 +358,14 @@ export class RenderSystem {
     
     // Detect hovered module
     this.detectHoveredModule(worldState);
-    
+
+    // In build mode, detect which missing plank slot is under the cursor
+    if (this.buildMode) {
+      this.detectHoveredPlankSlot(worldState);
+    } else {
+      this.hoveredPlankSlot = null;
+    }
+
     // Draw background elements
     this.drawWater(camera);
     this.drawGrid(camera);
@@ -443,6 +550,13 @@ export class RenderSystem {
     // Queue ship planks (layer 3)
     for (const ship of worldState.ships) {
       this.queueRenderItem(3, 'ship-planks', () => this.drawShipPlanks(ship, camera));
+    }
+
+    // In build mode, overlay missing plank ghost shapes (layer 3, priority 1 = after real planks)
+    if (this.buildMode) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(3, 'plank-ghosts', () => this.drawMissingPlankGhosts(ship, camera), 1);
+      }
     }
     
     // Queue cannons and steering wheels (layers 4-5)
@@ -633,7 +747,104 @@ export class RenderSystem {
     
     this.ctx.restore();
   }
-  
+
+  /**
+   * Draw green ghost shapes for all missing plank slots — build mode overlay.
+   * A brighter ghost is shown for the slot currently under the cursor.
+   */
+  private drawMissingPlankGhosts(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    // Build set of present plank slot keys
+    const presentKeys = new Set<string>();
+    for (const mod of ship.modules) {
+      if (mod.kind === 'plank' && mod.moduleData?.kind === 'plank') {
+        presentKeys.add(`${mod.moduleData.sectionName}_${mod.moduleData.segmentIndex}`);
+      }
+    }
+
+    const template = this.getPlankTemplate();
+    const missing = template.filter(seg => !presentKeys.has(`${seg.sectionName}_${seg.index}`));
+    if (missing.length === 0) return;
+
+    this.ctx.save();
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    for (const seg of missing) {
+      const isHovered =
+        this.hoveredPlankSlot?.ship === ship &&
+        this.hoveredPlankSlot?.sectionName === seg.sectionName &&
+        this.hoveredPlankSlot?.segmentIndex === seg.index;
+
+      const fillColor  = isHovered ? 'rgba(0, 230, 80, 0.70)' : 'rgba(0, 180, 60, 0.35)';
+      const strokeColor = isHovered ? '#00ff55' : '#00cc44';
+      const lineWidth  = isHovered ? 2.5 : 1.5;
+
+      this.ctx.fillStyle   = fillColor;
+      this.ctx.strokeStyle = strokeColor;
+      this.ctx.lineWidth   = lineWidth;
+
+      if (
+        seg.isCurved &&
+        seg.curveStart && seg.curveControl && seg.curveEnd &&
+        seg.t1 !== undefined && seg.t2 !== undefined
+      ) {
+        this.ctx.save();
+        this.drawCurvedPlank(
+          { start: seg.curveStart, control: seg.curveControl, end: seg.curveEnd, t1: seg.t1, t2: seg.t2 },
+          seg.thickness,
+          fillColor,
+          strokeColor
+        );
+        this.ctx.restore();
+
+        // Hovered: add a pulsing bright inner highlight
+        if (isHovered) {
+          this.ctx.save();
+          this.ctx.globalAlpha = 0.35;
+          this.drawCurvedPlank(
+            { start: seg.curveStart, control: seg.curveControl, end: seg.curveEnd, t1: seg.t1, t2: seg.t2 },
+            seg.thickness * 0.5,
+            '#aaffcc',
+            'transparent'
+          );
+          this.ctx.globalAlpha = 1.0;
+          this.ctx.restore();
+        }
+      } else {
+        const cx  = (seg.start.x + seg.end.x) / 2;
+        const cy  = (seg.start.y + seg.end.y) / 2;
+        const ddx = seg.end.x - seg.start.x;
+        const ddy = seg.end.y - seg.start.y;
+        const len = Math.sqrt(ddx * ddx + ddy * ddy);
+        const ang = Math.atan2(ddy, ddx);
+        const halfLen   = len / 2;
+        const halfThick = seg.thickness / 2;
+
+        this.ctx.save();
+        this.ctx.translate(cx, cy);
+        this.ctx.rotate(ang);
+        this.ctx.fillRect(-halfLen, -halfThick, len, seg.thickness);
+        this.ctx.strokeRect(-halfLen, -halfThick, len, seg.thickness);
+
+        if (isHovered) {
+          this.ctx.globalAlpha = 0.35;
+          this.ctx.fillStyle = '#aaffcc';
+          this.ctx.fillRect(-halfLen, -halfThick * 0.5, len, seg.thickness * 0.5);
+          this.ctx.globalAlpha = 1.0;
+        }
+
+        this.ctx.restore();
+      }
+    }
+
+    this.ctx.restore();
+  }
+
   private drawCurvedPlank(
     curveData: { start: any; control: any; end: any; t1: number; t2: number },
     width: number,

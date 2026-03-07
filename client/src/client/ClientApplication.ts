@@ -283,6 +283,17 @@ export class ClientApplication {
           }
         }
         this.networkManager.sendSlotSelect(slot);
+        // Re-evaluate build mode: plank in active slot → build mode on
+        this.checkBuildMode();
+      };
+
+      // Build placement: left-click in build mode → send place_plank to server
+      this.inputManager.onBuildPlace = (_worldPos) => {
+        const slot = this.renderSystem.getHoveredPlankSlot();
+        if (slot) {
+          console.log(`🔨 [BUILD] Placing plank in slot ${slot.sectionName}[${slot.segmentIndex}] on ship ${slot.ship.id}`);
+          this.networkManager.sendPlacePlank(slot.ship.id, slot.sectionName, slot.segmentIndex);
+        }
       };
       
       // Set up scroll-wheel zoom
@@ -614,6 +625,9 @@ export class ClientApplication {
     
     // Update prediction engine with authoritative state
     this.predictionEngine.onAuthoritativeState(worldState);
+
+    // Re-evaluate build mode whenever world state arrives (inventory may have changed)
+    this.checkBuildMode();
     
     // Update game state if we just entered the game
     if (this.state === ClientState.CONNECTED) {
@@ -640,6 +654,23 @@ export class ClientApplication {
     }
   }
   
+  /**
+   * Check whether the active hotbar item puts the player in build mode.
+   * Plank in active slot → build mode on. Anything else → build mode off.
+   */
+  private checkBuildMode(): void {
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    const playerId = this.networkManager?.getAssignedPlayerId();
+    const player   = ws?.players.find(p => p.id === playerId);
+
+    const activeSlot  = player?.inventory?.activeSlot ?? 0;
+    const activeItem  = player?.inventory?.slots[activeSlot]?.item ?? 'none';
+    const inBuildMode = activeItem === 'plank';
+
+    this.renderSystem.setBuildMode(inBuildMode);
+    this.inputManager.buildMode = inBuildMode;
+  }
+
   /**
    * Set up mouse tracking for mouse-relative movement
    */
