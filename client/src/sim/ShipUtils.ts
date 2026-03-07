@@ -83,6 +83,7 @@ export function createShipAtPosition(position: Vec2, rotation: number): Ship {
     rudderAngle: 0,
     cannonAmmo: 0,
     infiniteAmmo: true,
-    hullHealth: 100
+    hullHealth: 100,
+    companyId: 0
   };
 }

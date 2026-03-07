@@ -349,7 +349,8 @@ export class BrigantineTestBuilder {
       rudderAngle: 0,
       cannonAmmo: 0,
       infiniteAmmo: true,
-      hullHealth: 100
+      hullHealth: 100,
+      companyId: 0
     };
   }
 

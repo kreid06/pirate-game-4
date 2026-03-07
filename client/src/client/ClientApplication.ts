@@ -891,6 +891,7 @@ export class ClientApplication {
       cannonAmmo: 0,
       infiniteAmmo: true,
       hullHealth: 100,
+      companyId: 0,
       modules: [
         // Deck — walkable interior polygon inset from hull
         ModuleUtils.createShipDeckFromPolygon(hull),
@@ -936,6 +937,7 @@ export class ClientApplication {
           deckId: ship.modules[0].id,
           onDeck: true,
           isMounted: false,
+          companyId: 0,
           inventory: createEmptyInventory()
         }
       ],

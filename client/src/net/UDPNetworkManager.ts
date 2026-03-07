@@ -650,7 +650,8 @@ export class UDPNetworkManager {
           rudderAngle: 0,
           cannonAmmo: 0,
           infiniteAmmo: true,
-          hullHealth: 100
+          hullHealth: 100,
+          companyId: 0
         });
       } else {
         // Projectile entities  
@@ -674,6 +675,7 @@ export class UDPNetworkManager {
       ships,
       cannonballs,
       players,
+      npcs: [],
       timestamp: header.serverTime,
       carrierDetection: new Map()
     };

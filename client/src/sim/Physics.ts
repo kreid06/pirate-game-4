@@ -32,6 +32,7 @@ export function simulate(prevWorld: WorldState, inputFrame: InputFrame, dt: numb
     ships: prevWorld.ships.map(ship => ({ ...ship })),
     players: prevWorld.players.map(player => ({ ...player })),
     cannonballs: prevWorld.cannonballs.map(cb => ({ ...cb })),
+    npcs: prevWorld.npcs ?? [],
     timestamp: prevWorld.timestamp + dt * 1000,
     carrierDetection: new Map(prevWorld.carrierDetection)
   };
