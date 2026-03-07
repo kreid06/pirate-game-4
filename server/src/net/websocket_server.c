@@ -1434,25 +1434,20 @@ static uint32_t spawn_ship_gunner(uint32_t ship_id, const char* name,
     npc->starboard_cannon_id = starboard_cannon_id;
     npc->move_speed          = 80.0f;
     npc->interact_radius     = 40.0f;
-    npc->state               = WORLD_NPC_STATE_AT_CANNON;
+    /* Start idle at deck centre — player assigns tasks via manning panel */
+    npc->state               = WORLD_NPC_STATE_IDLE;
+    npc->assigned_cannon_id  = 0;
     strncpy(npc->name, name, sizeof(npc->name) - 1);
     strncpy(npc->dialogue, "Aye aye, Captain!", sizeof(npc->dialogue) - 1);
 
-    // Start at port cannon — same mount offset a player would use (behind the breech)
-    ShipModule* cannon = find_module_by_id(ship, port_cannon_id);
-    if (cannon) {
-        float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
-        float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
-        float barrel_angle = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
-        const float CANNON_MOUNT_DIST = 25.0f;
-        npc->assigned_cannon_id = port_cannon_id;
-        npc->local_x        = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
-        npc->local_y        = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
-        npc->target_local_x = npc->local_x;
-        npc->target_local_y = npc->local_y;
-    }
+    /* Stagger idle positions along ship centreline so NPCs aren't piled up */
+    int slot_idx = (int)(npc->id % 6);
+    npc->local_x        = -100.0f + slot_idx * 50.0f;
+    npc->local_y        = 0.0f;
+    npc->target_local_x = npc->local_x;
+    npc->target_local_y = npc->local_y;
     ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
-    log_info("🧑 Gunner '%s' (id %u) on ship %u — port cannon %u / stbd cannon %u",
+    log_info("🧑 Gunner '%s' (id %u) on ship %u — port cannon %u / stbd cannon %u (idle)",
              npc->name, npc->id, ship_id, port_cannon_id, starboard_cannon_id);
     return npc->id;
 }
@@ -1489,22 +1484,20 @@ static uint32_t spawn_ship_rigger(uint32_t ship_id, const char* name, uint32_t m
     npc->assigned_cannon_id  = mast_module_id;
     npc->move_speed          = 80.0f;
     npc->interact_radius     = 40.0f;
-    npc->state               = WORLD_NPC_STATE_AT_CANNON;
+    /* Start idle at deck centre — player assigns tasks via manning panel */
+    npc->state               = WORLD_NPC_STATE_IDLE;
+    npc->assigned_cannon_id  = 0;  /* will be set to mast_module_id by crew_assign */
     strncpy(npc->name, name, sizeof(npc->name) - 1);
     strncpy(npc->dialogue, "Adjusting the sails!", sizeof(npc->dialogue) - 1);
 
-    // Mount position matches player mast interact: mast_pos + (0, +20)
-    ShipModule* mast = find_module_by_id(ship, mast_module_id);
-    if (mast) {
-        float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mast->local_pos.x));
-        float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(mast->local_pos.y));
-        npc->local_x        = mx;
-        npc->local_y        = my + 20.0f;
-        npc->target_local_x = npc->local_x;
-        npc->target_local_y = npc->local_y;
-    }
+    /* Stagger idle positions along ship centreline so NPCs aren't piled up */
+    int slot_idx = (int)(npc->id % 6);
+    npc->local_x        = -100.0f + slot_idx * 50.0f;
+    npc->local_y        = 0.0f;
+    npc->target_local_x = npc->local_x;
+    npc->target_local_y = npc->local_y;
     ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
-    log_info("⛵ Rigger '%s' (id %u) on ship %u — mast %u",
+    log_info("⛵ Rigger '%s' (id %u) on ship %u — mast %u (idle)",
              npc->name, npc->id, ship_id, mast_module_id);
     return npc->id;
 }
@@ -2616,7 +2609,7 @@ int websocket_server_init(uint16_t port) {
     //     Middle mast (base+8) is left free for player interaction.
     {
         static const char* gunner_names[6] = { "Bo", "Mack", "Finn", "Ray", "Cole", "Sven" };
-        static const char* rigger_names[4] = { "Ned", "Hank", "Lars", "Tam" };
+        static const char* rigger_names[6] = { "Ned", "Hank", "Jim", "Lars", "Tam", "Bren" };
         int gunner_idx = 0;
         for (int s = 0; s < 2; s++) {
             uint32_t sid  = ships[s].ship_id;
@@ -2627,12 +2620,13 @@ int websocket_server_init(uint16_t port) {
                 uint32_t stbd_id = base + (uint32_t)slot + 4;
                 spawn_ship_gunner(sid, gunner_names[gunner_idx++], port_id, stbd_id);
             }
-            // Two riggers: front mast (base+7) and back mast (base+9)
-            spawn_ship_rigger(sid, rigger_names[s * 2],     base + 7);
-            spawn_ship_rigger(sid, rigger_names[s * 2 + 1], base + 9);
+            // Three riggers: front mast (base+7), middle mast (base+8), back mast (base+9)
+            spawn_ship_rigger(sid, rigger_names[s * 3],     base + 7);
+            spawn_ship_rigger(sid, rigger_names[s * 3 + 1], base + 8);
+            spawn_ship_rigger(sid, rigger_names[s * 3 + 2], base + 9);
         }
         log_info("🧑 %d crew NPCs spawned across 2 ships (%d gunners, %d riggers)",
-                 world_npc_count, 6, 4);
+                 world_npc_count, 6, 6);
     }
 
     // Enhanced startup message

@@ -42,10 +42,10 @@ export class ManningPriorityPanel {
   // Mutable priority order (index 0 = highest priority)
   private priorityOrder: ManningTask[] = ['Sails', 'Cannons', 'Repairs', 'Combat'];
 
-  // How many NPC slots to fill for each task
+  // How many NPC slots to fill for each task (all start at 0 — crew begins idle)
   private assignedCounts: Map<ManningTask, number> = new Map([
-    ['Sails',   2],
-    ['Cannons', 1],
+    ['Sails',   0],
+    ['Cannons', 0],
     ['Repairs', 0],
     ['Combat',  0],
   ]);
