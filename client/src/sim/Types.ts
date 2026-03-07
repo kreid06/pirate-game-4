@@ -92,25 +92,27 @@ export interface Cannonball {
   }>;
 }
 
-/**
- * NPC type identifiers (must match server WorldNpcType enum)
- */
-export const NPC_TYPE_MERCHANT    = 0;
-export const NPC_TYPE_QUEST_GIVER = 1;
-export const NPC_TYPE_GUARD       = 2;
-export const NPC_TYPE_SAILOR      = 3;
+// All NPCs are sailors for now — company/alliance system will handle friend/foe later.
+// NPC_TYPE_SAILOR is always 0 from the server; kept for future protocol compatibility.
+export const NPC_TYPE_SAILOR = 0;
+
+// NPC movement/AI state (mirrors server WorldNpcState enum)
+export const NPC_STATE_IDLE      = 0;
+export const NPC_STATE_MOVING    = 1;
+export const NPC_STATE_AT_CANNON = 2;
 
 /**
- * Visible world NPC entity
+ * Visible world NPC entity (sailor crew member)
  */
 export interface Npc {
   id: number;
   name: string;
-  type: number; // NPC_TYPE_* constant
+  type: number;           // Always NPC_TYPE_SAILOR (0) for now
   position: Vec2;
-  rotation: number;      // Facing direction in radians
+  rotation: number;       // Facing direction in radians
   interactRadius: number; // Distance within which the player can press E
-  shipId: number;        // 0 = free-standing in the world
+  shipId: number;         // 0 = free-standing in the world
+  state: number;          // NPC_STATE_* — used for movement animation
 }
 
 /**

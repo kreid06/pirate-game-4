@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_TYPE_MERCHANT, NPC_TYPE_QUEST_GIVER, NPC_TYPE_GUARD } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { ClientState } from '../ClientApplication.js';
@@ -1432,22 +1432,13 @@ export class RenderSystem {
     const screenPos = camera.worldToScreen(npc.position);
     const cameraState = camera.getState();
     const radius = 8 * cameraState.zoom;
+    const isMoving = npc.state === NPC_STATE_MOVING;
 
-    // Pick colour by NPC type
-    let fillColor: string;
-    let icon: string;
-    if (npc.type === NPC_TYPE_MERCHANT) {
-      fillColor = '#FFD700'; icon = '🛒'; // Gold — merchant
-    } else if (npc.type === NPC_TYPE_QUEST_GIVER) {
-      fillColor = '#FF8C00'; icon = '❗'; // Orange — quest
-    } else if (npc.type === NPC_TYPE_GUARD) {
-      fillColor = '#8B0000'; icon = '⚔'; // Dark red — guard
-    } else {
-      fillColor = '#4682B4'; icon = '⚓'; // Blue — sailor / default
-    }
+    this.ctx.save();
+    this.ctx.globalAlpha = isMoving ? 0.7 : 1.0;
 
-    // Draw body circle
-    this.ctx.fillStyle = fillColor;
+    // Sailor: warm gold; slightly darker while crossing the deck
+    this.ctx.fillStyle = isMoving ? '#B8860B' : '#DAA520';
     this.ctx.strokeStyle = '#ffffff';
     this.ctx.lineWidth = 2;
     this.ctx.beginPath();
@@ -1466,18 +1457,21 @@ export class RenderSystem {
     );
     this.ctx.stroke();
 
-    // Name label
-    this.ctx.font = `${12 * Math.min(cameraState.zoom, 1.5)}px Arial`;
-    this.ctx.textAlign = 'center';
-    this.ctx.textBaseline = 'bottom';
-    const nameY = screenPos.y - radius - 4;
-    const textMetrics = this.ctx.measureText(npc.name);
-    const tw = textMetrics.width;
-    const th = 14;
-    this.ctx.fillStyle = 'rgba(0,0,0,0.65)';
-    this.ctx.fillRect(screenPos.x - tw / 2 - 4, nameY - th, tw + 8, th + 4);
-    this.ctx.fillStyle = '#ffe066';
-    this.ctx.fillText(`${icon} ${npc.name}`, screenPos.x, nameY);
+    this.ctx.restore();
+
+    // Name label only when standing still (avoid visual noise during movement)
+    if (!isMoving) {
+      const fontSize = Math.max(10, Math.min(14, 12 * cameraState.zoom));
+      this.ctx.font = `${fontSize}px Arial`;
+      this.ctx.textAlign = 'center';
+      this.ctx.textBaseline = 'bottom';
+      const nameY = screenPos.y - radius - 3;
+      const tw = this.ctx.measureText(npc.name).width;
+      this.ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      this.ctx.fillRect(screenPos.x - tw / 2 - 3, nameY - fontSize, tw + 6, fontSize + 2);
+      this.ctx.fillStyle = '#ffe066';
+      this.ctx.fillText(npc.name, screenPos.x, nameY);
+    }
   }
 
   /**

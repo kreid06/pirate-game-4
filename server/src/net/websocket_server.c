@@ -1255,55 +1255,110 @@ static void tick_npc_agents(float dt) {
 }
 
 /**
- * Create a world NPC entity.
- * If ship_id != 0 the NPC is placed on that ship's deck (local_x, local_y are ship-relative).
- * Returns the new NPC's id, or 0 on failure.
+ * Spawn a sailor NPC on a ship, paired with one port and one starboard cannon.
+ * stand_offset: small y-shift (client units) so two NPCs at the same cannon don't overlap.
+ * Returns the new NPC id, or 0 on failure.
  */
-static uint32_t create_world_npc(WorldNpcType type, const char* name, const char* dialogue,
-                                  float x, float y,
-                                  uint32_t ship_id, float local_x, float local_y) {
+static uint32_t spawn_ship_sailor(uint32_t ship_id, const char* name,
+                                  uint32_t port_cannon_id, uint32_t starboard_cannon_id,
+                                  float stand_offset) {
     if (world_npc_count >= MAX_WORLD_NPCS) {
-        log_warn("create_world_npc: MAX_WORLD_NPCS (%d) reached", MAX_WORLD_NPCS);
+        log_warn("spawn_ship_sailor: MAX_WORLD_NPCS reached");
+        return 0;
+    }
+    SimpleShip* ship = find_ship(ship_id);
+    if (!ship) {
+        log_warn("spawn_ship_sailor: ship %u not found", ship_id);
         return 0;
     }
     WorldNpc* npc = &world_npcs[world_npc_count++];
     memset(npc, 0, sizeof(WorldNpc));
-    npc->id              = next_world_npc_id++;
-    npc->type            = type;
-    npc->active          = true;
-    npc->ship_id         = ship_id;
-    npc->interact_radius = 40.0f;
-    npc->rotation        = 0.0f;
+    npc->id                  = next_world_npc_id++;
+    npc->active              = true;
+    npc->ship_id             = ship_id;
+    npc->port_cannon_id      = port_cannon_id;
+    npc->starboard_cannon_id = starboard_cannon_id;
+    npc->stand_offset        = stand_offset;
+    npc->move_speed          = 80.0f; // client units/second
+    npc->interact_radius     = 40.0f;
+    npc->state               = WORLD_NPC_STATE_AT_CANNON;
     strncpy(npc->name, name, sizeof(npc->name) - 1);
-    strncpy(npc->dialogue, dialogue, sizeof(npc->dialogue) - 1);
+    strncpy(npc->dialogue, "Aye aye, Captain!", sizeof(npc->dialogue) - 1);
 
-    if (ship_id != 0) {
-        npc->local_x = local_x;
-        npc->local_y = local_y;
-        // World position is computed in tick_world_npcs; set a sensible initial value
-        SimpleShip* ship = find_ship(ship_id);
-        if (ship) {
-            ship_local_to_world(ship, local_x, local_y, &npc->x, &npc->y);
-        } else {
-            npc->x = x; npc->y = y;
-        }
-    } else {
-        npc->x = x; npc->y = y;
+    // Start on the port side (ship defaults to active_cannon_side = 0 = port)
+    ShipModule* cannon = find_module_by_id(ship, port_cannon_id);
+    if (cannon) {
+        float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
+        float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
+        npc->assigned_cannon_id = port_cannon_id;
+        npc->local_x            = cx;
+        npc->local_y            = cy + stand_offset;
+        npc->target_local_x     = npc->local_x;
+        npc->target_local_y     = npc->local_y;
     }
-    log_info("🧑 World NPC %u ('%s') spawned at (%.1f, %.1f) ship=%u", npc->id, npc->name, npc->x, npc->y, ship_id);
+    ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
+    log_info("🧑 Sailor '%s' (id %u) on ship %u — port cannon %u / stbd cannon %u",
+             npc->name, npc->id, ship_id, port_cannon_id, starboard_cannon_id);
     return npc->id;
 }
 
 /**
- * Update world positions of ship-mounted world NPCs each tick.
+ * Reassign all world NPCs on a ship to the given broadside and start them walking there.
+ * new_side: 0 = port (local_y > 0), 1 = starboard (local_y < 0).
  */
-static void tick_world_npcs(void) {
+static void trigger_npc_side_switch(uint32_t ship_id, uint8_t new_side) {
+    SimpleShip* ship = find_ship(ship_id);
+    if (!ship) return;
+    if (ship->active_cannon_side == new_side) return; // No change
+    ship->active_cannon_side = new_side;
+
     for (int i = 0; i < world_npc_count; i++) {
         WorldNpc* npc = &world_npcs[i];
-        if (!npc->active || npc->ship_id == 0) continue;
-        SimpleShip* ship = find_ship(npc->ship_id);
-        if (!ship) continue;
-        ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
+        if (!npc->active || npc->ship_id != ship_id) continue;
+        uint32_t target_id = (new_side == 0) ? npc->port_cannon_id : npc->starboard_cannon_id;
+        if (target_id == 0 || target_id == npc->assigned_cannon_id) continue;
+        ShipModule* cannon = find_module_by_id(ship, target_id);
+        if (!cannon) continue;
+        float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
+        float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
+        npc->assigned_cannon_id = target_id;
+        npc->target_local_x     = cx;
+        npc->target_local_y     = cy + npc->stand_offset;
+        npc->state              = WORLD_NPC_STATE_MOVING;
+    }
+    log_info("⚓ Ship %u crew switching to %s broadside",
+             ship_id, new_side == 0 ? "PORT" : "STARBOARD");
+}
+
+/**
+ * Tick world NPCs: animate movement across deck, then update world positions.
+ */
+static void tick_world_npcs(float dt) {
+    for (int i = 0; i < world_npc_count; i++) {
+        WorldNpc* npc = &world_npcs[i];
+        if (!npc->active) continue;
+
+        if (npc->state == WORLD_NPC_STATE_MOVING) {
+            float dx   = npc->target_local_x - npc->local_x;
+            float dy   = npc->target_local_y - npc->local_y;
+            float dist = sqrtf(dx * dx + dy * dy);
+            float step = npc->move_speed * dt;
+            if (dist <= step || dist < 0.5f) {
+                npc->local_x = npc->target_local_x;
+                npc->local_y = npc->target_local_y;
+                npc->state   = WORLD_NPC_STATE_AT_CANNON;
+            } else {
+                npc->local_x += (dx / dist) * step;
+                npc->local_y += (dy / dist) * step;
+                npc->rotation = atan2f(dy, dx); // Face direction of travel
+            }
+        }
+
+        // Keep world position in sync with ship transform
+        if (npc->ship_id != 0) {
+            SimpleShip* ship = find_ship(npc->ship_id);
+            if (ship) ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
+        }
     }
 }
 
@@ -1342,6 +1397,16 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
     // Normalize to -PI to +PI range
     while (player->cannon_aim_angle_relative > M_PI) player->cannon_aim_angle_relative -= 2.0f * M_PI;
     while (player->cannon_aim_angle_relative < -M_PI) player->cannon_aim_angle_relative += 2.0f * M_PI;
+
+    // Detect aimed broadside and switch crew if needed.
+    // Port cannons have local_rot ≈ π  → player aim ≈ ±π → |aim| > π/2
+    // Starboard cannons have local_rot ≈ 0 → player aim ≈ 0 → |aim| < π/2
+    {
+        uint8_t aimed_side = (fabsf(player->cannon_aim_angle_relative) > (float)(M_PI / 2.0f)) ? 0 : 1;
+        if (aimed_side != ship->active_cannon_side) {
+            trigger_npc_side_switch(ship->ship_id, aimed_side);
+        }
+    }
 
     // Update cannon aim_direction for all cannons within ±30° range
     const float CANNON_AIM_RANGE = 30.0f * (M_PI / 180.0f); // ±30 degrees
@@ -2280,29 +2345,23 @@ int websocket_server_init(uint16_t port) {
         log_info("🤖 NPC gunners %u and %u spawned on ship 2, targeting ship 1", npc1, npc2);
     }
 
-    // Spawn world NPC characters — one on each ship deck, one in open water
+    // Spawn 6 sailor NPCs per ship — two per cannon slot (3 port + 3 starboard cannons each).
+    // Each NPC holds a port_cannon_id and starboard_cannon_id so they can cross the deck when
+    // the player aims the opposite broadside.  Module IDs: base+1..3 = port, base+4..6 = starboard.
+    // stand_offset ±12 px separates the two NPCs at the same cannon so they don't overlap.
     {
-        uint32_t s1 = ships[0].ship_id;
-        uint32_t s2 = ships[1].ship_id;
-        // Merchant on ship 1 (near the stern, ship-local coords)
-        create_world_npc(WORLD_NPC_TYPE_MERCHANT,    "Old Pete",
-                         "Fine goods, sailor! Check me wares.",
-                         0, 0, s1, 0.0f, 30.0f);
-        // Quest-giver on ship 1 (near the bow)
-        create_world_npc(WORLD_NPC_TYPE_QUEST_GIVER, "Captain Isla",
-                         "I need someone brave to retrieve me lost cargo!",
-                         0, 0, s1, 0.0f, -30.0f);
-        // Sailor NPC on ship 2
-        create_world_npc(WORLD_NPC_TYPE_SAILOR,      "Deck Hand",
-                         "Aye, she's a fine vessel. Watch yer step.",
-                         0, 0, s2, 15.0f, 10.0f);
-        // Guard NPC standing in open water (between the two ships)
-        create_world_npc(WORLD_NPC_TYPE_GUARD,       "Harbor Watch",
-                         "These waters belong to the Crown. Move along.",
-                         (ships[0].x + ships[1].x) * 0.5f,
-                         (ships[0].y + ships[1].y) * 0.5f,
-                         0, 0.0f, 0.0f);
-        log_info("🧑 World NPCs spawned");
+        static const char* sailor_names[6] = { "Bo", "Mack", "Finn", "Ray", "Cole", "Sven" };
+        for (int s = 0; s < 2; s++) {
+            uint32_t sid  = ships[s].ship_id;
+            uint32_t base = (s == 0) ? 1000u : 2000u;
+            for (int slot = 0; slot < 3; slot++) {
+                uint32_t port_id = base + (uint32_t)slot + 1;
+                uint32_t stbd_id = base + (uint32_t)slot + 4;
+                spawn_ship_sailor(sid, sailor_names[slot],     port_id, stbd_id, -12.0f);
+                spawn_ship_sailor(sid, sailor_names[slot + 3], port_id, stbd_id,  12.0f);
+            }
+        }
+        log_info("🧑 %d sailor NPCs spawned across 2 ships", world_npc_count);
     }
 
     // Enhanced startup message
@@ -3770,7 +3829,7 @@ int websocket_server_update(struct Sim* sim) {
         projectiles_offset += snprintf(projectiles_json + projectiles_offset, sizeof(projectiles_json) - projectiles_offset, "]");
 
         // Build world NPCs JSON array
-        char npcs_json[2048];
+        char npcs_json[4096];
         int npcs_offset = 0;
         npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "[");
         bool first_npc = true;
@@ -3780,12 +3839,12 @@ int websocket_server_update(struct Sim* sim) {
             if (!first_npc)
                 npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, ",");
             npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset,
-                "{\"id\":%u,\"name\":\"%s\",\"type\":%u,"
+                "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
                 "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
-                "\"ship_id\":%u,\"interact_radius\":%.1f}",
-                npc->id, npc->name, (unsigned)npc->type,
+                "\"ship_id\":%u,\"interact_radius\":%.1f,\"state\":%u}",
+                npc->id, npc->name,
                 npc->x, npc->y, npc->rotation,
-                npc->ship_id, npc->interact_radius);
+                npc->ship_id, npc->interact_radius, (unsigned)npc->state);
             first_npc = false;
         }
         npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "]");
@@ -4086,7 +4145,7 @@ void websocket_server_tick(float dt) {
 
     // ===== TICK NPC AGENTS =====
     tick_npc_agents(dt);
-    tick_world_npcs();
+    tick_world_npcs(dt);
 
     int moving_players = 0;
     

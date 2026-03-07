@@ -1154,12 +1154,13 @@ export class NetworkManager {
           })),
           npcs: (message.npcs || []).map((n: any): Npc => ({
             id: n.id || 0,
-            name: n.name || 'NPC',
+            name: n.name || 'Sailor',
             type: n.type ?? 0,
             position: Vec2.from(n.x || 0, n.y || 0),
             rotation: n.rotation || 0,
             interactRadius: n.interact_radius ?? 40,
             shipId: n.ship_id || 0,
+            state: n.state ?? 0,
           })),
           carrierDetection: new Map() // Will be populated as needed
         };

@@ -32,6 +32,9 @@ typedef struct SimpleShip {
     uint16_t cannon_ammo;    // Remaining cannonballs (unused when infinite_ammo is true)
     bool infinite_ammo;      // When true, cannons never consume ammo
 
+    // Crew AI — current active broadside (updated when a player aims cannons)
+    uint8_t active_cannon_side; // 0 = port (cannon local_y > 0), 1 = starboard (local_y < 0)
+
     // Ship modules (cannons, masts, helm, seats, etc.)
     ShipModule modules[MAX_MODULES_PER_SHIP];
     uint8_t module_count;
@@ -69,30 +72,45 @@ typedef struct NpcAgent {
 #define MAX_NPC_AGENTS 64
 
 // ── World NPCs ───────────────────────────────────────────────────────────────
-// Visible, interactable character entities in the world (separate from NpcAgent AI controllers)
-typedef enum {
-    WORLD_NPC_TYPE_MERCHANT    = 0,
-    WORLD_NPC_TYPE_QUEST_GIVER = 1,
-    WORLD_NPC_TYPE_GUARD       = 2,
-    WORLD_NPC_TYPE_SAILOR      = 3,
-} WorldNpcType;
+// Visible, interactable character entities in the world (separate from NpcAgent AI controllers).
+// All crews are sailors for now; a company/alliance system will sort friend from foe later.
+#define MAX_WORLD_NPCS 64
 
-#define MAX_WORLD_NPCS 32
+// NPC movement/AI state machine
+typedef enum {
+    WORLD_NPC_STATE_IDLE      = 0, // Resting at or near assigned cannon
+    WORLD_NPC_STATE_MOVING    = 1, // Walking across deck to a new cannon after a side switch
+    WORLD_NPC_STATE_AT_CANNON = 2, // Arrived — ready to fire
+} WorldNpcState;
 
 typedef struct WorldNpc {
-    uint32_t     id;               // Unique ID (starts at 9000)
-    char         name[32];         // Display name
-    WorldNpcType type;
-    bool         active;
+    uint32_t      id;
+    char          name[32];
+    bool          active;
 
-    // Position — if ship_id != 0 the NPC rides the ship and x/y are recomputed each tick
-    float        x, y;             // World position (authoritative for broadcasting)
-    uint32_t     ship_id;          // 0 = free-standing; otherwise mounted to this ship's deck
-    float        local_x, local_y; // Ship-relative position (used when ship_id != 0)
-    float        rotation;         // Facing direction in radians
+    // World position (client units, updated and broadcast every tick)
+    float         x, y;
+    float         rotation;
 
-    float        interact_radius;  // Distance within which a player can interact (default 40 px)
-    char         dialogue[128];    // Text sent to player on interaction
+    // Ship attachment
+    uint32_t      ship_id;         // 0 = free-standing
+    float         local_x, local_y; // Ship-local position in CLIENT units
+
+    // Cannon assignment — each NPC has a port and starboard cannon pair.
+    // The ship's active_cannon_side determines which is targeted.
+    uint32_t      port_cannon_id;       // Module ID of this NPC's port-side cannon
+    uint32_t      starboard_cannon_id;  // Module ID of this NPC's starboard cannon
+    float         stand_offset;         // Small y-offset (client units) to avoid stacking
+    uint32_t      assigned_cannon_id;   // Currently targeted cannon (0 = none)
+
+    // Movement / state machine
+    WorldNpcState state;
+    float         target_local_x;
+    float         target_local_y;
+    float         move_speed; // Client units / second (default 80)
+
+    float         interact_radius;
+    char          dialogue[64];
 } WorldNpc;
 // ────────────────────────────────────────────────────────────────────────────
 
