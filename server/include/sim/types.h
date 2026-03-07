@@ -65,6 +65,7 @@ struct Ship {
     //   2 planks        ->  60s                 -> 1.667 HP/s
     //   N planks        ->  (1/1.2) * 2^(N-1) HP/s
     uint8_t initial_plank_count; // Set once when ship is created (typically 10)
+    uint8_t company_id;           // 0=neutral; set by websocket layer to enable friendly-fire skip
 };
 
 // Player state  
@@ -94,7 +95,7 @@ struct Projectile {
     uint32_t spawn_time;    // Server tick when created
     uint16_t flags;         // Projectile flags
     uint8_t type;           // Cannonball, grapeshot, etc
-    uint8_t _pad;
+    uint8_t firing_company; // Company owning this projectile (0=unset; skip if == target ship company)
     entity_id inside_ship_id; // 0 = not inside any hull; set when ball passes through a breach
 };
 

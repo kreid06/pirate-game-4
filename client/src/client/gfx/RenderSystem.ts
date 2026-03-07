@@ -58,6 +58,8 @@ export class RenderSystem {
   public playerIsAiming: boolean = false;
   /** The assigned local player ID, so guides only draw for that player's cannon. */
   public localPlayerId: number | null = null;
+  /** Cached local player company for the current frame — set at start of queueWorldObjects. */
+  private _localCompanyId: number = 0;
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
   public playerAimAngleRelative: number = 0;
   /** npcId → task name map set each frame by ClientApplication; used to colour NPCs by task. */
@@ -543,6 +545,12 @@ export class RenderSystem {
   private queueWorldObjects(worldState: WorldState, camera: Camera, alpha: number): void {
     // Clear render queue
     this.renderQueue = [];
+
+    // Cache local player's company for enemy-coloring this frame
+    const localPlayer = this.localPlayerId != null
+      ? worldState.players.find(p => p.id === this.localPlayerId)
+      : null;
+    this._localCompanyId = localPlayer?.companyId ?? 0;
     
     // Render order (from lowest to highest):
     // 0: water, gridlines (drawn before this queue)
@@ -657,6 +665,14 @@ export class RenderSystem {
     
     this.ctx.strokeStyle = '#8B4513'; // Brown
     this.ctx.fillStyle = '#DEB887'; // BurlyWood
+
+    // Enemy ship: dark blue hull
+    const isEnemy = this._localCompanyId !== 0 && ship.companyId !== 0
+      && ship.companyId !== this._localCompanyId;
+    if (isEnemy) {
+      this.ctx.strokeStyle = '#1a1a4a';
+      this.ctx.fillStyle = '#1e3a6e';
+    }
     this.ctx.lineWidth = 2 / cameraState.zoom;
     
     this.ctx.beginPath();
@@ -1747,7 +1763,12 @@ export class RenderSystem {
     
     // Draw player circle
     // Color: Green if on deck, Blue if mounted, Red if swimming
-    if (player.isMounted) {
+    // Enemy-company players are always tinted red regardless of mount state.
+    const isEnemyPlayer = this._localCompanyId !== 0 && player.companyId !== 0
+      && player.companyId !== this._localCompanyId;
+    if (isEnemyPlayer) {
+      this.ctx.fillStyle = '#cc2222';
+    } else if (player.isMounted) {
       this.ctx.fillStyle = '#0099ff'; // Blue for mounted
     } else {
       this.ctx.fillStyle = player.onDeck ? '#00ff00' : '#ff0000';

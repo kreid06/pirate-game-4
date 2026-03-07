@@ -4,6 +4,14 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// ── Company / Alliance system ─────────────────────────────────────────────
+// A company groups ships, players, and NPCs into a faction.
+// Two companies that share an alliance_id are friendly to each other;
+// entities of different companies are hostile.
+#define COMPANY_NEUTRAL  0   // Unclaimed/neutral — no friendly-fire protection
+#define COMPANY_PIRATES  1   // Player's company
+#define COMPANY_NAVY     2   // Enemy AI company
+
 // Simple ship structure for WebSocket server
 typedef struct SimpleShip {
     uint32_t ship_id;
@@ -34,6 +42,8 @@ typedef struct SimpleShip {
 
     // Crew AI — last aim angle (ship-local radians) used to compute sector of fire
     float active_aim_angle; // drives update_npc_cannon_sector(); default 0 = forward
+
+    uint8_t company_id;      // COMPANY_* — which faction owns this ship
 
     // Ship modules (cannons, masts, helm, seats, etc.)
     ShipModule modules[MAX_MODULES_PER_SHIP];
@@ -115,6 +125,8 @@ typedef struct WorldNpc {
 
     float         interact_radius;
     char          dialogue[64];
+
+    uint8_t       company_id;     // Inherited from ship at spawn time (COMPANY_*)
 } WorldNpc;
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -188,6 +200,8 @@ typedef struct WebSocketPlayer {
     // Cannon aiming state
     float cannon_aim_angle;        // World coordinates aim angle (radians)
     float cannon_aim_angle_relative; // Ship-relative aim angle (radians)
+
+    uint8_t company_id;            // Inherited from the ship this player boards
 
     // Inventory
     PlayerInventory inventory;

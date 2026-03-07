@@ -72,6 +72,30 @@ static struct WebSocketServer ws_server = {0};
 // Global simulation pointer for player collision detection
 static struct Sim* global_sim = NULL;
 
+// ── Company / Alliance registry ───────────────────────────────────────────
+typedef struct { uint8_t id; const char* name; uint8_t alliance_id; } Company;
+static const Company g_companies[] = {
+    { COMPANY_NEUTRAL, "Neutral", 0 },
+    { COMPANY_PIRATES, "Pirates", 1 },
+    { COMPANY_NAVY,    "Navy",    2 },
+};
+// Returns true if companies a and b are in the same non-zero alliance (i.e. friendly).
+static bool is_allied(uint8_t a, uint8_t b) {
+    if (a == COMPANY_NEUTRAL || b == COMPANY_NEUTRAL) return false;
+    if (a == b) return true;
+    uint8_t a_al = 0, b_al = 0;
+    for (int i = 0; i < 3; i++) {
+        if (g_companies[i].id == a) a_al = g_companies[i].alliance_id;
+        if (g_companies[i].id == b) b_al = g_companies[i].alliance_id;
+    }
+    return a_al != 0 && a_al == b_al;
+}
+static const char* company_name(uint8_t id) {
+    for (int i = 0; i < 3; i++)
+        if (g_companies[i].id == id) return g_companies[i].name;
+    return "Unknown";
+}
+
 // Helper function to get movement state string
 static const char* get_state_string(PlayerMovementState state) {
     switch (state) {
@@ -153,6 +177,8 @@ static void sync_simple_ships_from_simulation(void) {
                 ships[s].velocity_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->velocity.x));
                 ships[s].velocity_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->velocity.y));
                 ships[s].angular_velocity = Q16_TO_FLOAT(sim_ship->angular_velocity);
+                // Propagate company to sim layer for projectile friendly-fire checks
+                sim_ship->company_id = ships[s].company_id;
                 
                 // Update mounted players' world positions with new ship transform
                 update_mounted_players_on_ship(ships[s].ship_id);
@@ -320,6 +346,7 @@ static void resolve_player_npc_collisions(const SimpleShip* ship,
 // Helper to board a player onto a ship
 static void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y) {
     player->parent_ship_id = ship->ship_id;
+    player->company_id     = ship->company_id;  // inherit faction from ship
     player->local_x = local_x;
     player->local_y = local_y;
     player->movement_state = PLAYER_STATE_WALKING;
@@ -1382,6 +1409,8 @@ static void tick_npc_agents(float dt) {
 
                 SimpleShip* target = find_ship(npc->target_ship_id);
                 if (!target) break;
+                // Don't fire on allied ships
+                if (is_allied(ship->company_id, target->company_id)) break;
 
                 // Only aim/fire while the WorldNpc gunner is stationary at this cannon.
                 // Find the corresponding WorldNpc for this module and check its state.
@@ -1457,6 +1486,7 @@ static uint32_t spawn_ship_crew(uint32_t ship_id, const char* name) {
     npc->active         = true;
     npc->role           = NPC_ROLE_NONE;  /* assigned dynamically by manning panel */
     npc->ship_id        = ship_id;
+    npc->company_id     = ship->company_id; /* inherit faction from ship */
     npc->wants_cannon   = false;
     npc->move_speed     = 80.0f;
     npc->interact_radius= 40.0f;
@@ -1826,6 +1856,12 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
         log_info("🎯 Before spawn: projectile_count=%u, max=%d", global_sim->projectile_count, MAX_PROJECTILES);
         
         entity_id projectile_id = sim_create_projectile(global_sim, proj_pos, proj_vel, owner_id);
+        
+        // Stamp the firing ship's company so the sim can skip friendly-fire collisions
+        if (projectile_id != INVALID_ENTITY_ID) {
+            struct Projectile* proj = sim_get_projectile(global_sim, projectile_id);
+            if (proj) proj->firing_company = ship->company_id;
+        }
         
         log_info("🎯 After spawn: projectile_count=%u, projectile_id=%u", global_sim->projectile_count, projectile_id);
         
@@ -2516,13 +2552,14 @@ void websocket_server_set_simulation(struct Sim* sim) {
     log_info("✅ WebSocket server linked to simulation for collision detection");
 }
 
-// Initialize a brigantine ship at the given slot index, world position (client pixels), and module ID base
-static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t module_id_base) {
+// Initialize a brigantine ship at the given slot index, world position (client pixels), module ID base, and company
+static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t module_id_base, uint8_t company_id) {
     SimpleShip* s = &ships[idx];
     memset(s, 0, sizeof(SimpleShip));
 
     s->ship_id  = next_ship_id++;
     s->ship_type = 3;  // Brigantine
+    s->company_id = company_id;
     s->x = world_x;
     s->y = world_y;
     s->active = true;
@@ -2651,12 +2688,12 @@ int websocket_server_init(uint16_t port) {
     log_info("WebSocket server initialized on port %u", port);
     
     // Spawn two brigantine ships: ship 1 at (100, 100), ship 2 at (100, 700) — 600px south
-    init_brigantine_ship(0, 100.0f, 100.0f,  1000);
-    init_brigantine_ship(1, 100.0f, 700.0f,  2000);
+    init_brigantine_ship(0, 100.0f, 100.0f,  1000, COMPANY_PIRATES);
+    init_brigantine_ship(1, 100.0f, 700.0f,  2000, COMPANY_NAVY);
     ship_count = 2;
     
-    log_info("🚢 Initialized ship 1 (ID: %u) at (%.1f, %.1f)", ships[0].ship_id, ships[0].x, ships[0].y);
-    log_info("🚢 Initialized ship 2 (ID: %u) at (%.1f, %.1f)", ships[1].ship_id, ships[1].x, ships[1].y);
+    log_info("🚢 Ship 1 (ID: %u) — company: %s", ships[0].ship_id, company_name(ships[0].company_id));
+    log_info("🚢 Ship 2 (ID: %u) — company: %s", ships[1].ship_id, company_name(ships[1].company_id));
 
     // Spawn NPC gunners on ship 2 (module IDs 2001-2006 are its 6 cannons).
     // They will target ship 1 automatically.  Fire every 5s; initial delay 2s.
@@ -3932,11 +3969,12 @@ int websocket_server_update(struct Sim* sim) {
                         "\"mass\":%.1f,\"moment_of_inertia\":%.1f,"
                         "\"max_speed\":%.1f,\"turn_rate\":%.2f,"
                         "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"rudder_angle\":%.3f,"
-                        "\"hullHealth\":%.2f,"
+                        "\"hullHealth\":%.2f,\"company\":%u,"
                         "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                         ship->id, pos_x, pos_y, rotation, vel_x, vel_y, ang_vel,
                         5000.0f, 500000.0f, 15.0f, 1.0f, 0.95f, 0.90f, rudder_radians,
                         hull_health_pct,
+                        simple_ship ? simple_ship->company_id : COMPANY_NEUTRAL,
                         simple_ship ? simple_ship->cannon_ammo : 0,
                         (simple_ship && simple_ship->infinite_ammo) ? "true" : "false");
                 
@@ -4117,7 +4155,8 @@ int websocket_server_update(struct Sim* sim) {
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
                         "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
                         "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\","
-                        "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u%s}",
+                        "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
+                        "\"company\":%u%s}",
                         players[p].player_id, players[p].player_id,
                         players[p].x, players[p].y, players[p].rotation,
                         players[p].velocity_x, players[p].velocity_y,
@@ -4128,6 +4167,7 @@ int websocket_server_update(struct Sim* sim) {
                         players[p].is_mounted ? "true" : "false",
                         players[p].mounted_module_id,
                         players[p].controlling_ship_id,
+                        players[p].company_id,
                         inv_buf);
                 players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "%s", player_entry);
                 first_player = false;
@@ -4186,11 +4226,11 @@ int websocket_server_update(struct Sim* sim) {
                 "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
                 "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                 "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
-                "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u}",
+                "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u}",
                 npc->id, npc->name,
                 npc->x, npc->y, npc->rotation,
                 npc->ship_id, npc->local_x, npc->local_y,
-                npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role);
+                npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id);
             first_npc = false;
         }
         npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "]");

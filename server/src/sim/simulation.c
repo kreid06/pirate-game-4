@@ -1105,6 +1105,8 @@ void handle_projectile_collisions(struct Sim* sim) {
         for (uint16_t s = 0; s < sim->ship_count && !removed; s++) {
             struct Ship* ship = &sim->ships[s];
             if (ship->id == proj->owner_id) continue;
+            // Skip friendly-fire (same company, both non-neutral)
+            if (proj->firing_company != 0 && proj->firing_company == ship->company_id) continue;
 
             // Broad-phase bounding radius
             float dx = Q16_TO_FLOAT(ship->position.x) - Q16_TO_FLOAT(proj->position.x);

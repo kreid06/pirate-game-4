@@ -40,6 +40,9 @@ export interface Ship {
 
   // Hull integrity / water ingress (0–100; 100 = intact, 0 = sinking)
   hullHealth: number;
+
+  // Company/faction (COMPANY_* constants)
+  companyId: number;
 }
 
 /**
@@ -70,6 +73,9 @@ export interface Player {
 
   // Inventory
   inventory: PlayerInventory;
+
+  // Company/faction (COMPANY_* constants)
+  companyId: number;
 }
 
 /**
@@ -91,6 +97,11 @@ export interface Cannonball {
     maxAge: number;
   }>;
 }
+
+// Company identifiers (mirror server COMPANY_* constants)
+export const COMPANY_NEUTRAL = 0;
+export const COMPANY_PIRATES = 1;
+export const COMPANY_NAVY    = 2;
 
 // All NPCs are sailors for now — company/alliance system will handle friend/foe later.
 // NPC_TYPE_SAILOR is always 0 from the server; kept for future protocol compatibility.
@@ -115,6 +126,7 @@ export interface Npc {
   shipId: number;         // 0 = free-standing in the world
   state: number;          // NPC_STATE_* — used for movement animation
   role: number;           // NPC_ROLE_* — 1=gunner, 3=rigger
+  companyId: number;      // COMPANY_* — faction this NPC belongs to
 }
 
 /**

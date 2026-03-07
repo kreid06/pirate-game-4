@@ -1123,6 +1123,7 @@ export class NetworkManager {
               cannonAmmo: ship.ammo ?? 0,
               infiniteAmmo: ship.infiniteAmmo ?? true,
               hullHealth: ship.hullHealth ?? 100,
+              companyId: ship.company ?? 0,
             };
           }),
           players: (message.players || []).map((player: any) => ({
@@ -1165,6 +1166,8 @@ export class NetworkManager {
                   player.inventory.shield ?? 0,
                 )
               : createEmptyInventory(),
+
+            companyId: player.company ?? 0,
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,
@@ -1189,6 +1192,7 @@ export class NetworkManager {
             shipId: n.ship_id || 0,
             state: n.state ?? 0,
             role: n.role ?? 0,
+            companyId: n.company ?? 0,
           })),
           carrierDetection: new Map() // Will be populated as needed
         };
