@@ -565,6 +565,7 @@ export class RenderSystem {
       this.queueRenderItem(4, 'rudder', () => this.drawShipRudder(ship, camera));
       this.queueRenderItem(5, 'steering-wheels', () => this.drawShipSteeringWheels(ship, camera));
       this.queueRenderItem(5, 'ladders', () => this.drawShipLadders(ship, camera));
+      this.queueRenderItem(5, 'sail-ropes', () => this.drawShipSailRopes(ship, camera));
     }
     
     // Queue sail fibers (layer 6)
@@ -1132,6 +1133,199 @@ export class RenderSystem {
     this.ctx.restore();
   }
   
+  /**
+   * Draw sail rigging ropes for each mast.
+   *
+   * Ship-local coordinate convention:
+   *   X = fore (+) / aft (-)   — the long axis
+   *   Y = port (+) / stbd (-)  — perpendicular to long axis
+   *
+   * Design per mast per side:
+   *
+   *           apex (mx, 0)
+   *          / |  | \
+   *         /  |  |  \         ← 4 downlines: outer diagonals + 2 inner verticals
+   *        /---+--+---\        ← horizontal cross-rope at t = 1/3
+   *       /----+--+----\       ← horizontal cross-rope at t = 2/3
+   *      [==x0=x1] [x2=x3==]  ← base rail-rope + 2 elongated cleats
+   *       x0   x1   x2   x3
+   *
+   * x0 = mx-halfBase, x1 = mx-step, x2 = mx+step, x3 = mx+halfBase
+   * step = halfBase / 3
+   * 2 cleats: one spanning x0→x1, one spanning x2→x3
+   */
+  private drawShipSailRopes(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    this.ctx.save();
+
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const masts = ship.modules.filter(m => m.kind === 'mast');
+
+    for (const mast of masts) {
+      if (!mast.moduleData || mast.moduleData.kind !== 'mast') continue;
+
+      const mastData = mast.moduleData;
+      const mx = mast.localPos.x;
+      const my = mast.localPos.y;
+
+      // Half-base = half sail width → triangle base spans full sail width
+      const halfBase = mastData.sailWidth * 0.5;
+      // 4 rope X-positions evenly across the base: x0, x1, x2, x3
+      const step = halfBase / 3;
+      const x0 = mx - halfBase;       // aft outer
+      const x1 = mx - step;           // aft inner
+      const x2 = mx + step;           // fore inner
+      const x3 = mx + halfBase;       // fore outer
+
+      // Rail at Y=±90 — matches the plank centre line on each side
+      const railDist = 90;
+
+      // Rope style — hemp tan
+      this.ctx.strokeStyle = '#8B7355';
+      this.ctx.lineWidth = 1.2;
+      this.ctx.lineCap = 'round';
+
+      for (const side of [1, -1] as const) { // +1 = port, -1 = stbd
+        const ry = my + side * railDist;
+
+        // ── Outer diagonal braces: apex → x0 and apex → x3 ──
+        this.ctx.beginPath();
+        this.ctx.moveTo(mx, my);
+        this.ctx.lineTo(x0, ry);
+        this.ctx.stroke();
+
+        this.ctx.beginPath();
+        this.ctx.moveTo(mx, my);
+        this.ctx.lineTo(x3, ry);
+        this.ctx.stroke();
+
+        // ── 2 inner shrouds: from mast apex down to x1 and x2 on the rail ──
+        this.ctx.beginPath();
+        this.ctx.moveTo(mx, my);
+        this.ctx.lineTo(x1, ry);
+        this.ctx.stroke();
+
+        this.ctx.beginPath();
+        this.ctx.moveTo(mx, my);
+        this.ctx.lineTo(x2, ry);
+        this.ctx.stroke();
+
+        // ── 2 horizontal cross-ropes at t = 1/3 and 2/3 of the outer triangle ──
+        for (const t of [1 / 3, 2 / 3]) {
+          const crossY  = my + side * railDist * t;
+          const crossXL = mx - halfBase * t; // outer diagonal at this t
+          const crossXR = mx + halfBase * t;
+          this.ctx.beginPath();
+          this.ctx.moveTo(crossXL, crossY);
+          this.ctx.lineTo(crossXR, crossY);
+          this.ctx.stroke();
+        }
+
+        // ── Base rail-rope connecting all 4 rope endpoints along X ──
+        this.ctx.beginPath();
+        this.ctx.moveTo(x0, ry);
+        this.ctx.lineTo(x3, ry);
+        this.ctx.stroke();
+
+        // ── 2 elongated cleats: aft pair (x0→x1) and fore pair (x2→x3) ──
+        // Cleats are deck hardware running parallel to the long axis — no tilt needed.
+        this.drawSailRopeCleat(x0, x1, ry);
+        this.drawSailRopeCleat(x2, x3, ry);
+      }
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw a long-blocky wooden cleat whose body spans exactly from xA to xB at y.
+   * The body is elongated along X (long axis of the rail) and shallow in Y —
+   * a 5:1 aspect ratio gives the "long plank" look.
+   * The cleat is rotated by `angle` to follow the local hull plank tangent.
+   *
+   *   |       body (long bar)       |
+   *   [█]═════════════════════════[█]
+   *   horn                        horn
+   *   (at xA)                  (at xB)
+   */
+  private drawSailRopeCleat(xA: number, xB: number, y: number, angle: number = 0): void {
+    const cx    = (xA + xB) / 2;
+    const bodyW = Math.abs(xB - xA);  // full span — body reaches both rope positions
+    const bodyH = bodyW * 0.20;       // 5 : 1 long-blocky ratio
+    const hornW = bodyH * 1.20;       // horn is wider than body is tall (square-ish block)
+    const hornH = bodyH * 1.30;       // horn projects 1.3× body height beyond rail
+
+    this.ctx.save();
+    this.ctx.translate(cx, y);
+    this.ctx.rotate(angle);           // follow local hull plank tangent
+
+    this.ctx.fillStyle   = '#4A3728';
+    this.ctx.strokeStyle = '#2C1F14';
+    this.ctx.lineWidth   = 0.9;
+
+    // Long central bar
+    this.ctx.fillRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
+    this.ctx.strokeRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
+
+    // Aft horn — upright block at the xA end, centred on the bar
+    this.ctx.fillRect(-bodyW / 2, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+    this.ctx.strokeRect(-bodyW / 2, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+
+    // Fore horn — upright block at the xB end, centred on the bar
+    this.ctx.fillRect(bodyW / 2 - hornW, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+    this.ctx.strokeRect(bodyW / 2 - hornW, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Return the angle of the hull-plank tangent at ship-local x position.
+   *
+   * Hull geometry (from ShipUtils / BRIGANTINE_SPECIFICATION):
+   *   Straight port/stbd sides: x ∈ [−260, 190]  →  angle = 0  (horizontal)
+   *   Bow Bézier:  P0=(190,90) P1=(415,0) P2=(190,−90)
+   *     Bx(t) = 190 + 450·t·(1−t)   →   tangent = (450(1−2t), ±180)
+   *   Stern Bézier: P0=(−260,−90) P1=(−345,0) P2=(−260,90)
+   *     Bx(t) = −260 − 170·t·(1−t)  →   tangent = (170(2t−1), ±180)
+   *
+   * `side` = +1 for port (upper half of bow/stern curves), −1 for starboard.
+   */
+  private hullTangentAngle(x: number, side: 1 | -1): number {
+    // ── Straight side (vast majority of rail positions) ──
+    if (x >= -260 && x <= 190) return 0;
+
+    // ── Bow curve: Bx = 190 + 450·t·(1−t),  t ∈ [0, 1] ──
+    if (x > 190) {
+      // Solve 450t² − 450t + (x−190) = 0
+      const disc = 450 * 450 - 4 * 450 * (x - 190);
+      if (disc < 0) return 0;
+      // port uses t ∈ [0, 0.5] (y positive), stbd uses t ∈ [0.5, 1]
+      const sqrtDisc = Math.sqrt(disc);
+      const t = side === 1
+        ? (450 - sqrtDisc) / (2 * 450)   // smaller root → port half
+        : (450 + sqrtDisc) / (2 * 450);  // larger root  → stbd half
+      return Math.atan2(-180 * side, 450 * (1 - 2 * t));
+    }
+
+    // ── Stern curve: Bx = −260 − 170·t·(1−t),  t ∈ [0, 1] ──
+    // Solve 170t² − 170t − (x + 260) = 0  (x + 260 < 0)
+    const disc = 170 * 170 + 4 * 170 * (x + 260); // note: (x+260) < 0
+    if (disc < 0) return 0;
+    const sqrtDisc = Math.sqrt(disc);
+    // stbd uses t ∈ [0, 0.5], port uses t ∈ [0.5, 1]
+    const t = side === -1
+      ? (170 - sqrtDisc) / (2 * 170)
+      : (170 + sqrtDisc) / (2 * 170);
+    return Math.atan2(180 * side, 170 * (2 * t - 1));
+  }
+
   private drawShipSailFibers(ship: Ship, camera: Camera): void {
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
