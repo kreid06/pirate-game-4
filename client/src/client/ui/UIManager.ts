@@ -11,6 +11,7 @@ import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
 import { ITEM_DEFS, INVENTORY_SLOTS, ItemKind } from '../../sim/Inventory.js';
 import { ManningPriorityPanel } from './ManningPriorityPanel.js';
+import { CompanyMenu } from './CompanyMenu.js';
 
 /**
  * UI render context
@@ -55,7 +56,10 @@ export class UIManager {
   
   // Manning priority panel
   private manningPanel = new ManningPriorityPanel();
-  
+
+  // Company menu (toggled by [L])
+  private companyMenu = new CompanyMenu();
+
   // UI State
   private showDebugOverlay = false;
   private showNetworkStats = false;
@@ -109,6 +113,9 @@ export class UIManager {
     
     // Always render FPS in top-right corner
     this.renderFPS(ctx, context);
+
+    // Company menu renders last so it sits above all other UI
+    this.companyMenu.render(ctx, context.worldState, context.assignedPlayerId);
   }
   
   /**
@@ -163,6 +170,12 @@ export class UIManager {
    * Handle a canvas click — returns true if the UI consumed it.
    */
   handleClick(x: number, y: number): boolean {
+    // If company menu is open, clicks anywhere close it (the menu itself has no buttons yet).
+    // Log-term: route internal clicks to menu sub-elements here.
+    if (this.companyMenu.visible) {
+      this.companyMenu.close();
+      return true;
+    }
     return this.manningPanel.handleClick(x, y);
   }
 
@@ -247,7 +260,19 @@ export class UIManager {
   private onKeyDown(event: KeyboardEvent): void {
     switch (event.code) {
       case 'KeyL':
-        this.toggleDebugOverlay();
+        // [L] toggles (opens or closes) the company ledger menu
+        this.companyMenu.toggle();
+        if (this.companyMenu.visible) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        break;
+      case 'Escape':
+        if (this.companyMenu.visible) {
+          this.companyMenu.close();
+          event.preventDefault();
+          event.stopPropagation();
+        }
         break;
       case 'F1':
         this.showControlHints = !this.showControlHints;
@@ -619,7 +644,8 @@ class DebugOverlayElement implements UIElement {
       `Cannonballs: ${context.worldState.cannonballs.length}`,
       '',
       '=== CONTROLS ===',
-      'L - Toggle this overlay',
+      'L - Company Ledger menu',
+      '] - Toggle hover boundaries',
       'F1 - Toggle control hints',
       'WASD - Movement',
       'Space - Jump off ship',

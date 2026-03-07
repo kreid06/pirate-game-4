@@ -765,15 +765,14 @@ export class ClientApplication {
       }
       
       switch (e.key) {
-        case 'l':
-        case 'L':
+        case ']':
           this.renderSystem.toggleHoverBoundaries();
           e.preventDefault();
           break;
       }
     });
     
-    console.log('⌨️ Debug keys initialized (L = toggle hover boundaries)');
+    console.log('⌨️ Debug keys initialized (] = toggle hover boundaries)');
   }
   
   /**
