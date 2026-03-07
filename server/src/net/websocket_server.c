@@ -737,8 +737,22 @@ static void handle_cannon_interact(WebSocketPlayer* player, struct WebSocketClie
     module->state_bits |= MODULE_STATE_OCCUPIED;
     player->is_mounted = true;
     player->mounted_module_id = module->id;
-    
-    log_info("🎯 Player %u mounted to cannon %u", player->player_id, module->id);
+
+    // Snap player directly behind the cannon barrel.
+    // The barrel's natural firing angle in ship-local space is (local_rot - PI/2).
+    // "Behind" = opposite direction, offset CANNON_MOUNT_DIST px away from barrel tip.
+    {
+        float cannon_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+        float cannon_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+        float barrel_angle   = Q16_TO_FLOAT(module->local_rot) - (float)(M_PI / 2.0);
+        const float CANNON_MOUNT_DIST = 25.0f; // client pixels behind breech
+        player->local_x = cannon_local_x - cosf(barrel_angle) * CANNON_MOUNT_DIST;
+        player->local_y = cannon_local_y - sinf(barrel_angle) * CANNON_MOUNT_DIST;
+        ship_local_to_world(ship, player->local_x, player->local_y, &player->x, &player->y);
+    }
+
+    log_info("🎯 Player %u mounted to cannon %u at local (%.1f, %.1f)",
+             player->player_id, module->id, player->local_x, player->local_y);
     
     send_mount_success(client, module);
     broadcast_player_mounted(player, module, ship);
@@ -784,25 +798,49 @@ static void handle_helm_interact(WebSocketPlayer* player, struct WebSocketClient
 }
 
 static void handle_mast_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
-    // Toggle sail state (raised/lowered)
-    if (module->state_bits & MODULE_STATE_DEPLOYED) {
-        module->state_bits &= ~MODULE_STATE_DEPLOYED;
-        module->data.mast.openness = 0;
-        log_info("⛵ Player %u furled mast %u sail", player->player_id, module->id);
-    } else {
-        module->state_bits |= MODULE_STATE_DEPLOYED;
-        module->data.mast.openness = 100;
-        log_info("⛵ Player %u deployed mast %u sail", player->player_id, module->id);
+    // If already mounted here, treat a second interact as a sail toggle
+    if (player->is_mounted && player->mounted_module_id == module->id) {
+        if (module->state_bits & MODULE_STATE_DEPLOYED) {
+            module->state_bits &= ~MODULE_STATE_DEPLOYED;
+            module->data.mast.openness = 0;
+            log_info("⛵ Player %u furled mast %u sail", player->player_id, module->id);
+        } else {
+            module->state_bits |= MODULE_STATE_DEPLOYED;
+            module->data.mast.openness = 100;
+            log_info("⛵ Player %u deployed mast %u sail", player->player_id, module->id);
+        }
+        send_interaction_success(client, "sail_toggled");
+        char message[256];
+        snprintf(message, sizeof(message),
+                 "{\"type\":\"sail_state\",\"ship_id\":%u,\"module_id\":%u,\"deployed\":%s}",
+                 ship->ship_id, module->id, (module->state_bits & MODULE_STATE_DEPLOYED) ? "true" : "false");
+        websocket_server_broadcast(message);
+        return;
     }
-    
-    send_interaction_success(client, "sail_toggled");
-    
-    // Broadcast sail state change
-    char message[256];
-    snprintf(message, sizeof(message),
-             "{\"type\":\"sail_state\",\"ship_id\":%u,\"module_id\":%u,\"deployed\":%s}",
-             ship->ship_id, module->id, (module->state_bits & MODULE_STATE_DEPLOYED) ? "true" : "false");
-    websocket_server_broadcast(message);
+
+    // Check if already occupied by someone else
+    if ((module->state_bits & MODULE_STATE_OCCUPIED) && !(player->is_mounted && player->mounted_module_id == module->id)) {
+        send_interaction_failure(client, "module_occupied");
+        return;
+    }
+
+    // Mount the player to the mast
+    module->state_bits |= MODULE_STATE_OCCUPIED;
+    player->is_mounted = true;
+    player->mounted_module_id = module->id;
+
+    // Snap player to port side of the mast (offset +20px in local Y)
+    float mast_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+    float mast_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+    player->local_x = mast_local_x;
+    player->local_y = mast_local_y + 20.0f;
+    ship_local_to_world(ship, player->local_x, player->local_y, &player->x, &player->y);
+
+    log_info("⛵ Player %u mounted to mast %u at local (%.1f, %.1f)",
+             player->player_id, module->id, player->local_x, player->local_y);
+
+    send_mount_success(client, module);
+    broadcast_player_mounted(player, module, ship);
 }
 
 static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
