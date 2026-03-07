@@ -898,17 +898,42 @@ function sweptCircleVsHealthyHull(
   let hasGaps = segments.length < ship.hull.length;
   
   if (!hasGaps) {
-    // All planks healthy - use full hull polygon (faster)
-    const hullWorld = ship.hull.map(p => p.rotate(ship.rotation).add(ship.position));
-    return CollisionSystem.sweptCircleVsPolygon({
-      startPos: startPos,
-      endPos: endPos,
-      radius: radius,
-      velocity: velocity,
-      polygon: hullWorld,
-      epsilon: epsilon,
-      dt: dt
+    // All planks healthy — run the swept-circle test in ship-local space so that
+    // the hull polygon never changes shape due to floating-point trig at different
+    // rotation values.  We un-rotate inputs, test against the static local hull,
+    // then rotate the result back to world space.
+    const cos = Math.cos(-ship.rotation);
+    const sin = Math.sin(-ship.rotation);
+    const toLocal = (v: Vec2) =>
+      Vec2.from(
+        (v.x - ship.position.x) * cos - (v.y - ship.position.y) * sin,
+        (v.x - ship.position.x) * sin + (v.y - ship.position.y) * cos
+      );
+    const toWorld = (v: Vec2) =>
+      Vec2.from(
+        v.x * Math.cos(ship.rotation) - v.y * Math.sin(ship.rotation) + ship.position.x,
+        v.x * Math.sin(ship.rotation) + v.y * Math.cos(ship.rotation) + ship.position.y
+      );
+
+    const localResult = CollisionSystem.sweptCircleVsPolygon({
+      startPos:  toLocal(startPos),
+      endPos:    toLocal(endPos),
+      radius:    radius,
+      velocity:  velocity.rotate(-ship.rotation),
+      polygon:   ship.hull,          // static local-space vertices
+      epsilon:   epsilon,
+      dt:        dt
     });
+
+    return {
+      newPosition:      toWorld(localResult.newPosition),
+      newVelocity:      localResult.newVelocity.rotate(ship.rotation),
+      collided:         localResult.collided,
+      normal:           localResult.normal.rotate(ship.rotation),
+      penetrationDepth: localResult.penetrationDepth,
+      contactPoint:     toWorld(localResult.contactPoint),
+      slideDistance:    localResult.slideDistance
+    };
   }
   
   // Has gaps - check if player path crosses any healthy segment

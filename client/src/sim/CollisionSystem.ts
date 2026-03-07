@@ -234,15 +234,15 @@ export class CollisionSystem {
       const toP1 = startPos.sub(p1);
       const distanceToEdgeLine = toP1.dot(edgeNormal);
       
-      // Time to reach edge (if moving towards it)
+      // timeToEdge is the distance along movementDir (world-units) to reach the expanded edge
       const timeToEdge = (distanceToEdgeLine - expandedRadius) / approachSpeed;
       
-      if (timeToEdge < 0 || timeToEdge > movementLength / velocity.length()) {
-        continue; // Already past edge or won't reach it
+      if (timeToEdge < 0 || timeToEdge > movementLength) {
+        continue; // Already past edge or won't reach it this frame
       }
       
-      // Position at collision time
-      const collisionPos = startPos.add(movementDir.mul(timeToEdge * velocity.length()));
+      // Position at collision (move timeToEdge world-units along movementDir from start)
+      const collisionPos = startPos.add(movementDir.mul(timeToEdge));
       
       // Check if collision point is within the edge segment
       const toCollision = collisionPos.sub(p1);
@@ -315,18 +315,12 @@ export class CollisionSystem {
   
   /**
    * Handle entry into polygon
+   * Player moved from outside to inside the hull in one frame — block it.
    */
   private static handleEntry(input: SweptCollisionInput): CollisionResult {
-    // Allow entry with simple position
-    return {
-      newPosition: input.endPos,
-      newVelocity: input.velocity,
-      collided: false,
-      normal: Vec2.zero(),
-      penetrationDepth: 0,
-      contactPoint: input.endPos,
-      slideDistance: 0
-    };
+    // Treat the same as sliding along the boundary from outside; this catches
+    // fast-moving swimmers that tunnel through the hull in a single frame.
+    return this.handleEntryOrSlide(input);
   }
   
   /**
@@ -405,7 +399,8 @@ export class CollisionSystem {
     const s = (toLineStart.x * rayNorm.y - toLineStart.y * rayNorm.x) / det;
     
     // Check if intersection is within line segment
-    if (s >= 0 && s <= lineLength && t >= 0) {
+    // s is a dimensionless [0,1] parameter along the edge (NOT compared to lineLength in world-units)
+    if (s >= 0 && s <= 1 && t >= 0) {
       return {
         t: t / rayLength, // Normalize to [0,1]
         normal: lineNormal.mul(-1) // Point inward
