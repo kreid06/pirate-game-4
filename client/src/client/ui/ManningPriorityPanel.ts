@@ -1,10 +1,11 @@
 /**
  * Manning Priority Panel
  *
- * Left-side HUD panel for assigning NPC crew to tasks by priority.
- * Tasks: Sails, Cannons, Repairs, Combat.
- * NPCs are allocated top-to-bottom through the priority list;
- * available NPCs (not currently busy) are assigned first, ties broken by ID.
+ * Left-side HUD panel for assigning NPC crew to tasks.
+ * Each task holds an explicit list of NPC IDs (taskNpcs).
+ * + picks one idle NPC and pins it to the task.
+ * − releases the last NPC back to idle.
+ * No implicit re-allocation — a task never steals from another.
  */
 
 import { Npc } from '../../sim/Types.js';
@@ -13,18 +14,6 @@ export type ManningTask = 'Sails' | 'Cannons' | 'Repairs' | 'Combat';
 
 /** NPC state constants (mirror server WorldNpcState) */
 const NPC_STATE_AT_CANNON = 2;
-
-/** NPC role constants (mirror server NpcRole) */
-const NPC_ROLE_GUNNER = 1;
-const NPC_ROLE_RIGGER = 3;
-
-/** Which role is preferred for each task (0 = any) */
-const TASK_PREFERRED_ROLE: Record<ManningTask, number> = {
-  Sails:   NPC_ROLE_RIGGER,
-  Cannons: NPC_ROLE_GUNNER,
-  Repairs: 0,
-  Combat:  NPC_ROLE_GUNNER,
-};
 
 const TASK_COLORS: Record<ManningTask, string> = {
   Sails:   '#5aafff',
@@ -42,12 +31,13 @@ export class ManningPriorityPanel {
   // Mutable priority order (index 0 = highest priority)
   private priorityOrder: ManningTask[] = ['Sails', 'Cannons', 'Repairs', 'Combat'];
 
-  // How many NPC slots to fill for each task (all start at 0 — crew begins idle)
-  private assignedCounts: Map<ManningTask, number> = new Map([
-    ['Sails',   0],
-    ['Cannons', 0],
-    ['Repairs', 0],
-    ['Combat',  0],
+  // Explicit NPC ID lists per task. The only way an NPC enters a task is via + picking
+  // from the idle pool. The only way it leaves is via −. Never implicitly re-allocated.
+  private taskNpcs: Map<ManningTask, number[]> = new Map([
+    ['Sails',   []],
+    ['Cannons', []],
+    ['Repairs', []],
+    ['Combat',  []],
   ]);
 
   private hitAreas: HitArea[] = [];
@@ -104,8 +94,9 @@ export class ManningPriorityPanel {
 
     // Store shipId + npcs for use in action callbacks
     if (this._currentShipId !== shipId) {
-      // Ship changed — clear stale sent-assignment cache so the new ship gets a full sync
+      // Ship changed — reset everything so the new ship gets a full sync
       this.lastSentAssignment.clear();
+      for (const list of this.taskNpcs.values()) list.length = 0;
     }
     this._currentShipId = shipId;
     this._currentNpcs = npcs;
@@ -135,10 +126,18 @@ export class ManningPriorityPanel {
     ctx.textBaseline = 'middle';
     ctx.fillText('CREW PRIORITY', px + pw / 2, py + HEADER_H / 2);
 
-    // ---- NPC pool: sort by ID (stable — prevents active NPCs from being displaced on re-compute) ----
+    // ---- NPC pool: sort by ID (stable) ----
     const shipNpcs = npcs
       .filter(n => n.shipId === shipId)
       .sort((a, b) => a.id - b.id);
+
+    // Prune stale NPC IDs (left ship / disconnected)
+    const shipNpcIdSet = new Set(shipNpcs.map(n => n.id));
+    for (const list of this.taskNpcs.values()) {
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (!shipNpcIdSet.has(list[i])) list.splice(i, 1);
+      }
+    }
 
     const assignments = this.computeAssignments(shipNpcs);
 
@@ -151,14 +150,15 @@ export class ManningPriorityPanel {
       if (!this.lastTaskMap.has(n.id)) this.lastTaskMap.set(n.id, 'Idle');
     }
 
-    const totalAssigned = Array.from(this.assignedCounts.values()).reduce((a, b) => a + b, 0);
-    const canIncrement = shipNpcs.length > 0 && totalAssigned < shipNpcs.length;
+    // + is only enabled when at least one NPC is genuinely idle (not pinned to any task)
+    const assignedIdSet = new Set(Array.from(this.taskNpcs.values()).flat());
+    const canIncrement = shipNpcs.some(n => !assignedIdSet.has(n.id));
 
     let rowY = py + HEADER_H + 3;
 
     for (let i = 0; i < tasks.length; i++) {
       const task = tasks[i];
-      const count = this.assignedCounts.get(task) ?? 0;
+      const count = this.taskNpcs.get(task)?.length ?? 0;
       const assignedNpcs = assignments.get(task) ?? [];
       const color = TASK_COLORS[task];
 
@@ -244,21 +244,11 @@ export class ManningPriorityPanel {
   // -------------------------------------------------------------------------
 
   private computeAssignments(npcs: Npc[]): Map<ManningTask, Npc[]> {
+    const npcById = new Map(npcs.map(n => [n.id, n]));
     const result = new Map<ManningTask, Npc[]>();
-    const used = new Set<number>();
-
     for (const task of this.priorityOrder) {
-      const want = this.assignedCounts.get(task) ?? 0;
-      const assigned: Npc[] = [];
-
-      for (const npc of npcs) {
-        if (used.has(npc.id)) continue;
-        if (assigned.length >= want) break;
-        assigned.push(npc);
-        used.add(npc.id);
-      }
-
-      result.set(task, assigned);
+      const ids = this.taskNpcs.get(task) ?? [];
+      result.set(task, ids.map(id => npcById.get(id)).filter((n): n is Npc => n !== undefined));
     }
     return result;
   }
@@ -267,27 +257,34 @@ export class ManningPriorityPanel {
     if (i <= 0) return;
     [this.priorityOrder[i - 1], this.priorityOrder[i]] =
       [this.priorityOrder[i], this.priorityOrder[i - 1]];
-    this.notifyAssignment();
+    // Display-only reorder — pinned NPC assignments don't change, no server message needed
   }
 
   private moveDown(i: number): void {
     if (i >= this.priorityOrder.length - 1) return;
     [this.priorityOrder[i], this.priorityOrder[i + 1]] =
       [this.priorityOrder[i + 1], this.priorityOrder[i]];
-    this.notifyAssignment();
+    // Display-only reorder — pinned NPC assignments don't change, no server message needed
   }
 
   private increment(task: ManningTask): void {
-    const shipNpcs = this._currentNpcs.filter(n => n.shipId === this._currentShipId);
-    const totalAssigned = Array.from(this.assignedCounts.values()).reduce((a, b) => a + b, 0);
-    if (totalAssigned >= shipNpcs.length) return;
-
-    this.assignedCounts.set(task, (this.assignedCounts.get(task) ?? 0) + 1);
+    const shipNpcs = this._currentNpcs
+      .filter(n => n.shipId === this._currentShipId)
+      .sort((a, b) => a.id - b.id);
+    const assigned = new Set(Array.from(this.taskNpcs.values()).flat());
+    // Only pick from genuinely idle NPCs — never steal from another task
+    const idle = shipNpcs.filter(n => !assigned.has(n.id));
+    if (idle.length === 0) return;
+    // Prefer a non-stationed NPC (state !== AT_CANNON) to avoid interrupting active work
+    const pick = idle.find(n => n.state !== NPC_STATE_AT_CANNON) ?? idle[0];
+    this.taskNpcs.get(task)!.push(pick.id);
     this.notifyAssignment();
   }
 
   private decrement(task: ManningTask): void {
-    this.assignedCounts.set(task, Math.max(0, (this.assignedCounts.get(task) ?? 0) - 1));
+    const list = this.taskNpcs.get(task);
+    if (!list || list.length === 0) return;
+    list.pop();
     this.notifyAssignment();
   }
 
