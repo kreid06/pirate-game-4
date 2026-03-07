@@ -1023,9 +1023,28 @@ static void handle_module_unmount(WebSocketPlayer* player, struct WebSocketClien
  * Sets the desired openness - actual openness will gradually adjust in tick
  */
 static void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, int desired_openness) {
+    /* Gate: at least one rigger must be stationed at a mast (AT_CANNON with assigned_cannon_id)
+       before the player can control sail openness. */
+    bool rigger_at_mast = false;
+    for (int i = 0; i < world_npc_count; i++) {
+        WorldNpc* w = &world_npcs[i];
+        if (!w->active || w->ship_id != ship->ship_id) continue;
+        if (w->role == NPC_ROLE_RIGGER &&
+            w->assigned_cannon_id != 0 &&
+            w->state == WORLD_NPC_STATE_AT_CANNON) {
+            rigger_at_mast = true;
+            break;
+        }
+    }
+    if (!rigger_at_mast) {
+        log_info("⛵ Sail control rejected for player %u — no rigger manning a mast on ship %u",
+                 player->player_id, ship->ship_id);
+        return;
+    }
+
     if (desired_openness < 0) desired_openness = 0;
     if (desired_openness > 100) desired_openness = 100;
-    
+
     log_info("⛵ Player %u setting desired sail openness on ship %u: %d%%", player->player_id, ship->ship_id, desired_openness);
     
     // Store desired openness in simulation ship (the source of truth for broadcasts)
@@ -1289,28 +1308,9 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
         log_info("💤 NPC %u (%s) going idle — walking to centre (task=%s role=%d)",
                  npc->id, npc->name, task, (int)npc->role);
     }
-
-    /* After any assignment change, count riggers that are actively
-       stationed at a mast and update desired sail openness accordingly. */
-    int active_sail_riggers = 0;
-    for (int i = 0; i < world_npc_count; i++) {
-        WorldNpc* w = &world_npcs[i];
-        if (!w->active || w->ship_id != ship_id) continue;
-        if (w->role == NPC_ROLE_RIGGER && w->assigned_cannon_id != 0)
-            active_sail_riggers++;
-    }
-    uint8_t new_desired = (active_sail_riggers > 0) ? 100 : 0;
-    ship->desired_sail_openness = new_desired;
-    if (global_sim && global_sim->ship_count > 0) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                global_sim->ships[s].desired_sail_openness = new_desired;
-                break;
-            }
-        }
-    }
-    log_info("⛵ Ship %u sail desire: %d active riggers → %u%%",
-             ship_id, active_sail_riggers, (unsigned)new_desired);
+    /* NOTE: sail openness is NOT changed here; it is player-controlled only.
+       NPCs manning masts allow the player to issue sail commands; they do not
+       open/close sails automatically. */
 }
 
 /**
@@ -1517,6 +1517,8 @@ static void trigger_npc_side_switch(uint32_t ship_id, uint8_t new_side) {
         if (!npc->active || npc->ship_id != ship_id) continue;
         // Riggers stay at their mast regardless of broadside changes
         if (npc->role != NPC_ROLE_GUNNER) continue;
+        // Idle gunners (not assigned to any cannon) do not auto-switch on broadside change
+        if (npc->assigned_cannon_id == 0) continue;
         uint32_t target_id = (new_side == 0) ? npc->port_cannon_id : npc->starboard_cannon_id;
         if (target_id == 0 || target_id == npc->assigned_cannon_id) continue;
         ShipModule* cannon = find_module_by_id(ship, target_id);
@@ -1550,7 +1552,10 @@ static void tick_world_npcs(float dt) {
             if (dist <= step || dist < 0.5f) {
                 npc->local_x = npc->target_local_x;
                 npc->local_y = npc->target_local_y;
-                npc->state   = WORLD_NPC_STATE_AT_CANNON;
+                /* Arrived at a post → AT_CANNON; arrived at idle position → IDLE */
+                npc->state = (npc->assigned_cannon_id != 0)
+                           ? WORLD_NPC_STATE_AT_CANNON
+                           : WORLD_NPC_STATE_IDLE;
             } else {
                 npc->local_x += (dx / dist) * step;
                 npc->local_y += (dy / dist) * step;

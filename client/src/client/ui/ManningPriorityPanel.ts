@@ -259,16 +259,6 @@ export class ManningPriorityPanel {
         used.add(npc.id);
       }
 
-      // Second pass: fill remaining slots with any available NPC
-      if (assigned.length < want) {
-        for (const npc of npcs) {
-          if (used.has(npc.id)) continue;
-          if (assigned.length >= want) break;
-          assigned.push(npc);
-          used.add(npc.id);
-        }
-      }
-
       result.set(task, assigned);
     }
     return result;
@@ -289,9 +279,17 @@ export class ManningPriorityPanel {
   }
 
   private increment(task: ManningTask): void {
-    const shipNpcCount = this._currentNpcs.filter(n => n.shipId === this._currentShipId).length;
+    const shipNpcs = this._currentNpcs.filter(n => n.shipId === this._currentShipId);
     const totalAssigned = Array.from(this.assignedCounts.values()).reduce((a, b) => a + b, 0);
-    if (totalAssigned >= shipNpcCount) return;
+    if (totalAssigned >= shipNpcs.length) return;
+
+    // For role-specific tasks, cap at the number of matching-role NPCs on the ship
+    const preferRole = TASK_PREFERRED_ROLE[task];
+    if (preferRole !== 0) {
+      const roleCount = shipNpcs.filter(n => n.role === preferRole).length;
+      if ((this.assignedCounts.get(task) ?? 0) >= roleCount) return;
+    }
+
     this.assignedCounts.set(task, (this.assignedCounts.get(task) ?? 0) + 1);
     this.notifyAssignment();
   }
