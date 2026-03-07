@@ -69,6 +69,11 @@ export class ClientApplication {
   private camera!: Camera;
   private hasReceivedWorldState = false; // Track if we've received at least one world state
   private previousMountState = false; // Track previous mount state to detect changes
+
+  // Explicit build mode (B key) — independent of hotbar item build modes
+  private explicitBuildMode = false;
+  private buildSelectedItem: 'cannon' | 'sail' = 'cannon';
+  private buildRotationDeg = 0;
   
   // Timing
   private running = false;
@@ -300,7 +305,12 @@ export class ClientApplication {
       };
 
       // Build placement: left-click in build mode → send place_plank / place_cannon / place_mast / replace_helm
-      this.inputManager.onBuildPlace = (_worldPos) => {
+      this.inputManager.onBuildPlace = (worldPos) => {
+        // Explicit B-key build mode takes priority
+        if (this.explicitBuildMode) {
+          this.handleExplicitBuildPlace(worldPos);
+          return;
+        }
         // Helm replacement (highest priority — only one helm per ship)
         const helmSlot = this.renderSystem.getHoveredHelmSlot();
         if (helmSlot) {
@@ -329,6 +339,26 @@ export class ClientApplication {
           this.networkManager.sendPlacePlank(slot.ship.id, slot.sectionName, slot.segmentIndex);
         }
       };
+
+      // Explicit build mode toggle (B key)
+      this.inputManager.onBuildModeToggle = () => {
+        this.explicitBuildMode = !this.explicitBuildMode;
+        if (!this.explicitBuildMode) {
+          // Reset when exiting
+          this.buildRotationDeg = 0;
+          this.buildSelectedItem = 'cannon';
+        }
+        // In explicit build mode, buildMode flag must be true so clicks are routed to onBuildPlace
+        this.inputManager.buildMode = this.explicitBuildMode || this.inputManager.buildMode;
+        this.syncBuildModeState();
+        console.log(`🔨 [BUILD MODE] ${this.explicitBuildMode ? 'ENTERED' : 'EXITED'}`);
+      };
+
+      // Build rotation (R key in explicit build mode)
+      this.inputManager.onBuildRotate = (deltaDeg: number) => {
+        this.buildRotationDeg = (this.buildRotationDeg + deltaDeg + 360) % 360;
+        this.syncBuildModeState();
+      };
       
       // Set up scroll-wheel zoom
       this.inputManager.onZoom = (factor, _screenPoint) => {
@@ -353,6 +383,12 @@ export class ClientApplication {
       this.uiManager.setCrewAssignmentCallback((shipId, assignments) => {
         this.networkManager.sendCrewAssign(shipId, assignments);
       });
+
+      // Build mode item selection (cannon/sail buttons in build mode panel)
+      this.uiManager.onBuildItemSelect = (item) => {
+        this.buildSelectedItem = item;
+        this.syncBuildModeState();
+      };
       
       // Initialize Audio System  
       this.audioManager = new AudioManager(this.config.audio);
@@ -571,6 +607,10 @@ export class ClientApplication {
       this.renderSystem.localPlayerId = this.networkManager.getAssignedPlayerId();
       this.renderSystem.playerAimAngleRelative = this.inputManager?.cannonAimAngleRelative ?? 0;
       this.renderSystem.npcTaskMap = this.uiManager.getNpcTaskMap();
+
+      // Keep explicit build mode UI in sync with latest world state (sail count may change)
+      if (this.explicitBuildMode) this.syncBuildModeState();
+
       // Render game world with hybrid state
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
       
@@ -735,7 +775,95 @@ export class ClientApplication {
     this.renderSystem.setCannonBuildMode(inCannonBuildMode);
     this.renderSystem.setMastBuildMode(inMastBuildMode);
     this.renderSystem.setHelmBuildMode(inHelmBuildMode);
-    this.inputManager.buildMode = inBuildMode || inCannonBuildMode || inMastBuildMode || inHelmBuildMode;
+    this.inputManager.buildMode = this.explicitBuildMode || inBuildMode || inCannonBuildMode || inMastBuildMode || inHelmBuildMode;
+  }
+
+  /**
+   * Propagate explicit build mode state to UIManager and RenderSystem.
+   */
+  private syncBuildModeState(): void {
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    const sailCount = ws?.ships
+      .flatMap(s => s.modules)
+      .filter(m => m.kind === 'mast').length ?? 0;
+
+    this.uiManager?.setBuildModeState(
+      this.explicitBuildMode ? {
+        active: true,
+        selectedItem: this.buildSelectedItem,
+        rotationDeg: this.buildRotationDeg,
+        sailCount,
+        maxSails: 3,
+      } : null
+    );
+    this.renderSystem?.setExplicitBuildMode(
+      this.explicitBuildMode ? {
+        item: this.buildSelectedItem,
+        rotationDeg: this.buildRotationDeg,
+      } : null
+    );
+    // In explicit build mode inputManager.buildMode must stay true
+    if (this.inputManager) {
+      this.inputManager.explicitBuildMode = this.explicitBuildMode;
+      if (this.explicitBuildMode) this.inputManager.buildMode = true;
+    }
+  }
+
+  /**
+   * Handle a left-click placement in explicit B-key build mode.
+   * Finds the nearest ship under the cursor and sends a placement message.
+   */
+  private handleExplicitBuildPlace(worldPos: Vec2): void {
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    if (!ws) return;
+
+    // Find the nearest ship to the cursor
+    let nearestShip = null;
+    let nearestDist = Infinity;
+    for (const ship of ws.ships) {
+      const dist = worldPos.sub(ship.position).length();
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearestShip = ship;
+      }
+    }
+    if (!nearestShip || nearestDist > 400) return; // Too far from any ship
+
+    // Convert world position to ship-local coordinates
+    const dx = worldPos.x - nearestShip.position.x;
+    const dy = worldPos.y - nearestShip.position.y;
+    const cos = Math.cos(-nearestShip.rotation);
+    const sin = Math.sin(-nearestShip.rotation);
+    const localX = dx * cos - dy * sin;
+    const localY = dx * sin + dy * cos;
+
+    // Check for overlap with existing non-plank, non-deck modules
+    const MIN_DIST = 40;
+    for (const mod of nearestShip.modules) {
+      if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+      const ddx = mod.localPos.x - localX;
+      const ddy = mod.localPos.y - localY;
+      if (Math.sqrt(ddx * ddx + ddy * ddy) < MIN_DIST) {
+        console.log(`❌ [BUILD] Placement blocked: overlaps ${mod.kind} at (${mod.localPos.x.toFixed(0)}, ${mod.localPos.y.toFixed(0)})`);
+        return;
+      }
+    }
+
+    const rotationRad = (this.buildRotationDeg * Math.PI) / 180;
+
+    if (this.buildSelectedItem === 'cannon') {
+      console.log(`🔨 [BUILD] Placing cannon at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${this.buildRotationDeg}° on ship ${nearestShip.id}`);
+      this.networkManager.sendPlaceCannonAt(nearestShip.id, localX, localY, rotationRad);
+    } else {
+      // Sail — check for max 3 masts
+      const mastCount = nearestShip.modules.filter(m => m.kind === 'mast').length;
+      if (mastCount >= 3) {
+        console.log(`❌ [BUILD] Max sails reached (${mastCount}/3)`);
+        return;
+      }
+      console.log(`⛵ [BUILD] Placing sail at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) on ship ${nearestShip.id}`);
+      this.networkManager.sendPlaceMastAt(nearestShip.id, localX, localY);
+    }
   }
 
   /**

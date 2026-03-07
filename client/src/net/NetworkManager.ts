@@ -64,7 +64,9 @@ export enum MessageType {
   PLACE_PLANK = 'place_plank',
   REPAIR_PLANK = 'repair_plank',
   PLACE_CANNON = 'place_cannon',
+  PLACE_CANNON_AT = 'place_cannon_at',
   PLACE_MAST = 'place_mast',
+  PLACE_MAST_AT = 'place_mast_at',
   REPLACE_HELM = 'replace_helm',
   CREW_ASSIGN = 'crew_assign',
 
@@ -289,10 +291,27 @@ interface PlaceCannonMessage extends NetworkMessage {
   shipId: number;
 }
 
+interface PlaceCannonAtMessage extends NetworkMessage {
+  type: MessageType.PLACE_CANNON_AT;
+  timestamp: number;
+  shipId: number;
+  localX: number;
+  localY: number;
+  rotation: number; // radians, ship-relative
+}
+
 interface PlaceMastMessage extends NetworkMessage {
   type: MessageType.PLACE_MAST;
   timestamp: number;
   shipId: number;
+}
+
+interface PlaceMastAtMessage extends NetworkMessage {
+  type: MessageType.PLACE_MAST_AT;
+  timestamp: number;
+  shipId: number;
+  localX: number;
+  localY: number;
 }
 
 interface ReplaceHelmMessage extends NetworkMessage {
@@ -309,7 +328,7 @@ interface CrewAssignMessage extends NetworkMessage {
   task: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceMastMessage | ReplaceHelmMessage | RepairPlankMessage | CrewAssignMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | RepairPlankMessage | CrewAssignMessage;
 
 /**
  * Main network manager class
@@ -846,6 +865,16 @@ export class NetworkManager {
   }
 
   /**
+   * Request the server to place a new cannon at an arbitrary ship-local position.
+   * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
+   * Consumes 1 ITEM_CANNON from the player's inventory.
+   */
+  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_CANNON_AT, timestamp: Date.now(), shipId, localX, localY, rotation });
+  }
+
+  /**
    * Request the server to replace a destroyed mast on the player's ship.
    * Server finds the first missing mast slot (base+7..base+9) and recreates it,
    * consuming 1 ITEM_SAIL from the player's inventory.
@@ -853,6 +882,16 @@ export class NetworkManager {
   sendPlaceMast(shipId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_MAST, timestamp: Date.now(), shipId });
+  }
+
+  /**
+   * Request the server to place a new mast at an arbitrary ship-local position.
+   * localX/localY are ship-relative coordinates.
+   * Consumes 1 ITEM_SAIL from the player's inventory.
+   */
+  sendPlaceMastAt(shipId: number, localX: number, localY: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_MAST_AT, timestamp: Date.now(), shipId, localX, localY });
   }
 
   /**

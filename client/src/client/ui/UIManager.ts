@@ -70,6 +70,23 @@ export class UIManager {
   private showDebugOverlay = false;
   private showNetworkStats = false;
   private showControlHints = true;
+
+  // Explicit build mode (B key) overlay state
+  private buildModeState: {
+    active: boolean;
+    selectedItem: 'cannon' | 'sail';
+    rotationDeg: number;
+    sailCount: number;
+    maxSails: number;
+  } | null = null;
+
+  /** Called when the player clicks a build item button (cannon/sail). */
+  public onBuildItemSelect: ((item: 'cannon' | 'sail') => void) | null = null;
+
+  // Layout constants for build mode buttons (used by handleClick too)
+  private readonly BUILD_BTN_W = 120;
+  private readonly BUILD_BTN_H = 44;
+  private readonly BUILD_BTN_GAP = 10;
   
   constructor(_canvas: HTMLCanvasElement, config: ClientConfig) {
     this.config = config;
@@ -124,6 +141,11 @@ export class UIManager {
     this.companyMenu.render(ctx, context.worldState, context.assignedPlayerId);
     this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId);
     this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
+
+    // Explicit build mode overlay (renders on top of everything, including menus)
+    if (this.buildModeState?.active) {
+      this.renderBuildModeOverlay(ctx, ctx.canvas);
+    }
   }
   
   /**
@@ -175,9 +197,28 @@ export class UIManager {
   }
 
   /**
+   * Update explicit build mode state (called by ClientApplication each frame / on change).
+   * Pass null to hide the build mode overlay.
+   */
+  setBuildModeState(state: {
+    active: boolean;
+    selectedItem: 'cannon' | 'sail';
+    rotationDeg: number;
+    sailCount: number;
+    maxSails: number;
+  } | null): void {
+    this.buildModeState = state;
+  }
+
+  /**
    * Handle a canvas click — returns true if the UI consumed it.
    */
   handleClick(x: number, y: number): boolean {
+    // Build mode item selection buttons (highest priority — always shown when in build mode)
+    if (this.buildModeState?.active) {
+      const consumed = this.handleBuildModeClick(x, y);
+      if (consumed) return true;
+    }
     // If company menu is open, clicks anywhere close it (the menu itself has no buttons yet).
     // Log-term: route internal clicks to menu sub-elements here.
     if (this.companyMenu.visible) {
@@ -198,6 +239,44 @@ export class UIManager {
   /** Returns the current npcId → task name map for colouring NPCs in the render system. */
   getNpcTaskMap(): ReadonlyMap<number, string> {
     return this.manningPanel.getTaskMap();
+  }
+
+  // -----------------------------------------------------------------------
+  // Build mode helpers
+  // -----------------------------------------------------------------------
+
+  /**
+   * Test whether a click hits one of the build mode item buttons.
+   * Returns true and fires the callback if so.
+   */
+  private handleBuildModeClick(x: number, y: number): boolean {
+    if (!this.buildModeState) return false;
+    const btnW = this.BUILD_BTN_W;
+    const btnH = this.BUILD_BTN_H;
+    const gap  = this.BUILD_BTN_GAP;
+
+    // Same layout as renderBuildPanel: two buttons centred horizontally, just below the top banner
+    const BANNER_H = 48;
+    const totalBtnW = btnW * 2 + gap;
+    // We need a canvas width reference — use window dimensions (no canvas ref here)
+    const cw = window.innerWidth;
+    const bx0 = Math.round((cw - totalBtnW) / 2);
+    const bx1 = bx0 + btnW + gap;
+    const by  = BANNER_H + 8;
+
+    if (y >= by && y <= by + btnH) {
+      if (x >= bx0 && x < bx0 + btnW) {
+        this.buildModeState = { ...this.buildModeState, selectedItem: 'cannon' };
+        if (this.onBuildItemSelect) this.onBuildItemSelect('cannon');
+        return true;
+      }
+      if (x >= bx1 && x < bx1 + btnW) {
+        this.buildModeState = { ...this.buildModeState, selectedItem: 'sail' };
+        if (this.onBuildItemSelect) this.onBuildItemSelect('sail');
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -239,7 +318,181 @@ export class UIManager {
   }
   
   // Private methods
-  
+
+  // -----------------------------------------------------------------------
+  // Build mode rendering (called only when explicitBuildMode active)
+  // -----------------------------------------------------------------------
+
+  private renderBuildModeOverlay(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    if (!this.buildModeState) return;
+    const { selectedItem, rotationDeg, sailCount, maxSails } = this.buildModeState;
+
+    ctx.save();
+
+    // ================================================================
+    // 1) TOP BANNER — vivid amber, clearly not repair-mode (repair is teal/blue)
+    // ================================================================
+    const BANNER_H = 48;
+    const cw = canvas.width;
+
+    // Amber-gold gradient banner
+    const bannerGrad = ctx.createLinearGradient(0, 0, 0, BANNER_H);
+    bannerGrad.addColorStop(0, '#c87800');
+    bannerGrad.addColorStop(1, '#7a4800');
+    ctx.fillStyle = bannerGrad;
+    ctx.fillRect(0, 0, cw, BANNER_H);
+
+    // Bottom edge glow
+    ctx.strokeStyle = '#ffcc44';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, BANNER_H);
+    ctx.lineTo(cw, BANNER_H);
+    ctx.stroke();
+
+    // Banner text  
+    ctx.font = 'bold 22px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff8e0';
+    ctx.fillText('⚒  BUILD MODE  —  [B] Exit  |  [R] Rotate  |  [Click] Place', cw / 2, BANNER_H / 2);
+
+    // ================================================================
+    // 2) ITEM SELECTION PANEL — two buttons below the banner
+    // ================================================================
+    const btnW = this.BUILD_BTN_W;
+    const btnH = this.BUILD_BTN_H;
+    const gap  = this.BUILD_BTN_GAP;
+    const totalBtnW = btnW * 2 + gap;
+    const bx0 = Math.round((cw - totalBtnW) / 2);
+    const bx1 = bx0 + btnW + gap;
+    const by  = BANNER_H + 8;
+
+    const sailMaxed = sailCount >= maxSails;
+
+    // Draw each button
+    const buttons: Array<{ x: number; label: string; key: 'cannon' | 'sail'; disabled?: boolean }> = [
+      { x: bx0, label: `🔫  CANNON`,        key: 'cannon' },
+      { x: bx1, label: `⛵  SAIL (${sailCount}/${maxSails})`, key: 'sail', disabled: sailMaxed },
+    ];
+
+    for (const btn of buttons) {
+      const isSelected = selectedItem === btn.key;
+      const isDisabled = !!btn.disabled;
+
+      // Background
+      if (isDisabled) {
+        ctx.fillStyle = 'rgba(80,20,20,0.85)';
+      } else if (isSelected) {
+        ctx.fillStyle = 'rgba(200,130,0,0.90)';
+      } else {
+        ctx.fillStyle = 'rgba(30,30,50,0.85)';
+      }
+      ctx.fillRect(btn.x, by, btnW, btnH);
+
+      // Border
+      ctx.strokeStyle = isDisabled ? '#772222' : isSelected ? '#ffcc44' : '#556';
+      ctx.lineWidth   = isSelected ? 2.5 : 1.5;
+      ctx.strokeRect(btn.x, by, btnW, btnH);
+
+      // Label
+      ctx.font = isSelected ? 'bold 15px Consolas, monospace' : '14px Consolas, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = isDisabled ? '#aa4444' : isSelected ? '#fff8e0' : '#aaa';
+      ctx.fillText(btn.label, btn.x + btnW / 2, by + btnH / 2);
+    }
+
+    // ================================================================
+    // 3) ROTATION DIAL — above the hotbar, centered
+    // ================================================================
+    this.renderRotationDial(ctx, canvas, rotationDeg);
+
+    ctx.restore();
+  }
+
+  /**
+   * Render a horizontal compass-strip rotation dial above the hotbar.
+   */
+  private renderRotationDial(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, angleDeg: number): void {
+    const SLOT_SIZE = 48;
+    const SLOT_GAP  = 4;
+    const PADDING   = 6;
+    const LABEL_H   = 16;
+    const DIAL_H    = 38;
+    const DIAL_W    = 320;
+    const MARGIN    = 6;
+    const INVENTORY_SLOTS_COUNT = 10;
+    const hotbarTotalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+    const hotbarStartY = canvas.height - hotbarTotalH - 8;
+    const dialY = hotbarStartY - DIAL_H - MARGIN;
+    const dialX = Math.round((canvas.width - DIAL_W) / 2);
+
+    ctx.save();
+
+    // Background
+    ctx.fillStyle = 'rgba(0,0,0,0.80)';
+    ctx.fillRect(dialX, dialY, DIAL_W, DIAL_H);
+    ctx.strokeStyle = '#ffcc44';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(dialX, dialY, DIAL_W, DIAL_H);
+
+    // Clip to dial area so tick marks don’t overflow
+    ctx.beginPath();
+    ctx.rect(dialX + 1, dialY + 1, DIAL_W - 2, DIAL_H - 2);
+    ctx.clip();
+
+    // The strip shows ±90° around the current angle
+    const DEG_PER_PX = 180 / DIAL_W; // 180° visible across the full width
+    const centerX = dialX + DIAL_W / 2;
+
+    // Draw tick marks around the current angle (± 100° range)
+    for (let dOff = -100; dOff <= 100; dOff++) {
+      const tickDeg = (angleDeg + dOff + 360) % 360;
+      const px = centerX + dOff / DEG_PER_PX;
+      const is45  = tickDeg % 45 === 0;
+      const is15  = tickDeg % 15 === 0;
+      if (!is15) continue;
+      const tickH = is45 ? 14 : 7;
+      ctx.strokeStyle = is45 ? '#ffcc44' : '#887744';
+      ctx.lineWidth = is45 ? 1.5 : 1;
+      ctx.beginPath();
+      ctx.moveTo(px, dialY + DIAL_H - 4);
+      ctx.lineTo(px, dialY + DIAL_H - 4 - tickH);
+      ctx.stroke();
+      if (is45) {
+        ctx.fillStyle = '#ffcc44';
+        ctx.font = '9px Consolas, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(`${tickDeg}°`, px, dialY + DIAL_H - 4 - tickH - 1);
+      }
+    }
+
+    ctx.restore();
+    ctx.save();
+
+    // Center pointer triangle (pointing DOWN from top)
+    const triX = centerX;
+    const triY = dialY + 2;
+    ctx.fillStyle = '#ffcc44';
+    ctx.beginPath();
+    ctx.moveTo(triX - 6, triY);
+    ctx.lineTo(triX + 6, triY);
+    ctx.lineTo(triX, triY + 10);
+    ctx.closePath();
+    ctx.fill();
+
+    // Current angle label (centered in dial)
+    ctx.font = 'bold 15px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(`${Math.round(angleDeg)}°`, centerX, dialY + 3);
+
+    ctx.restore();
+  }
+
   private initializeUIElements(): void {
     // Initialize HUD
     this.elements.set(UIElementType.HUD, new HUDElement());

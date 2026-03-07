@@ -96,6 +96,11 @@ export class InputManager {
   public buildMode: boolean = false;
   public onBuildPlace: ((worldPos: Vec2) => void) | null = null;
 
+  // Explicit build mode (toggled with B key — independent of hotbar items)
+  public explicitBuildMode: boolean = false;
+  public onBuildModeToggle: (() => void) | null = null;
+  public onBuildRotate: ((deltaDeg: number) => void) | null = null;
+
   // Camera zoom callback
   public onZoom: ((factor: number, screenPoint: Vec2) => void) | null = null;
   
@@ -856,8 +861,18 @@ export class InputManager {
         break;
       case 'KeyC':
         // Camera mode toggle handled by client application
+        break;      case 'KeyB':
+        // Toggle explicit build mode
+        if (this.onBuildModeToggle) this.onBuildModeToggle();
+        event.preventDefault();
         break;
-      // Hotbar slots: Digit1-Digit9 → slots 0-8, Digit0 → slot 9
+      case 'KeyR':
+        // In explicit build mode: rotate the placement ghost by 15 degrees
+        if (this.explicitBuildMode && this.onBuildRotate) {
+          this.onBuildRotate(15);
+          event.preventDefault();
+        }
+        break;      // Hotbar slots: Digit1-Digit9 → slots 0-8, Digit0 → slot 9
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
         if (this.onSlotSelect) this.onSlotSelect(parseInt(event.code.replace('Digit', '')) - 1);

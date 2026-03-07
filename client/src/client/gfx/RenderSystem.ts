@@ -209,11 +209,20 @@ export class RenderSystem {
     return this.hoveredCannonSlot;
   }
 
-  /**
-   * Whether build mode is currently active
-   */
+  /** Whether build mode is currently active */
   isInBuildMode(): boolean {
     return this.buildMode;
+  }
+
+  // Explicit B-key build mode ghost preview state
+  private explicitBuildState: { item: 'cannon' | 'sail'; rotationDeg: number } | null = null;
+
+  /**
+   * Set explicit build mode state for ghost preview rendering.
+   * Pass null to disable.
+   */
+  setExplicitBuildMode(state: { item: 'cannon' | 'sail'; rotationDeg: number } | null): void {
+    this.explicitBuildState = state;
   }
 
   /**
@@ -493,7 +502,12 @@ export class RenderSystem {
     
     // Execute render queue in layer order
     this.executeRenderQueue();
-    
+
+    // Draw explicit B-key build mode ghost (always on top of world objects)
+    if (this.explicitBuildState) {
+      this.drawExplicitBuildGhost(worldState, camera);
+    }
+
     // Draw effects and particles (always on top)
     this.particleSystem.render(camera);
     this.effectRenderer.render(camera);
@@ -2710,6 +2724,130 @@ export class RenderSystem {
       }
     }
     
+    this.ctx.restore();
+  }
+
+  // -----------------------------------------------------------------------
+  // Explicit build mode ghost preview
+  // -----------------------------------------------------------------------
+
+  /**
+   * Draw a semi-transparent ghost cannon or mast at the cursor world position.
+   * Tinted green when placement is valid, red when invalid (overlap or max sails).
+   */
+  private drawExplicitBuildGhost(worldState: WorldState, camera: Camera): void {
+    if (!this.explicitBuildState || !this.mouseWorldPos) return;
+    const { item, rotationDeg } = this.explicitBuildState;
+
+    // Find nearest ship
+    let nearestShip: Ship | null = null;
+    let nearestDist = Infinity;
+    for (const ship of worldState.ships) {
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < nearestDist) { nearestDist = dist; nearestShip = ship; }
+    }
+
+    const onShip = nearestShip !== null && nearestDist < 400;
+
+    // Compute ship-local cursor position
+    let localX = 0;
+    let localY = 0;
+    if (nearestShip) {
+      const dx = this.mouseWorldPos.x - nearestShip.position.x;
+      const dy = this.mouseWorldPos.y - nearestShip.position.y;
+      const cos = Math.cos(-nearestShip.rotation);
+      const sin = Math.sin(-nearestShip.rotation);
+      localX = dx * cos - dy * sin;
+      localY = dx * sin + dy * cos;
+    }
+
+    // Validate placement
+    const MIN_MODULE_DIST = 40;
+    let overlaps = false;
+    if (nearestShip) {
+      for (const mod of nearestShip.modules) {
+        if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+        const ddx = mod.localPos.x - localX;
+        const ddy = mod.localPos.y - localY;
+        if (Math.sqrt(ddx * ddx + ddy * ddy) < MIN_MODULE_DIST) { overlaps = true; break; }
+      }
+    }
+    const sailMaxed = item === 'sail' &&
+      (nearestShip?.modules.filter(m => m.kind === 'mast').length ?? 0) >= 3;
+
+    const valid = onShip && !overlaps && !sailMaxed;
+
+    // Screen position of cursor
+    const screenPos = camera.worldToScreen(this.mouseWorldPos);
+    const zoom = camera.getState().zoom;
+    const cameraRot = camera.getState().rotation;
+    const shipRot = nearestShip?.rotation ?? 0;
+
+    const rotRad = (rotationDeg * Math.PI) / 180;
+    const totalRot = shipRot - cameraRot + rotRad;
+
+    this.ctx.save();
+    this.ctx.globalAlpha = 0.65;
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(totalRot);
+
+    if (item === 'cannon') {
+      // -- Cannon base --
+      this.ctx.fillStyle   = valid ? '#336633' : '#663333';
+      this.ctx.strokeStyle = valid ? '#88ff88' : '#ff8888';
+      this.ctx.lineWidth   = 1 / zoom;
+      this.ctx.fillRect(-15, -10, 30, 20);
+      this.ctx.strokeRect(-15, -10, 30, 20);
+
+      // -- Barrel (pointing up / forward) --
+      this.ctx.fillStyle   = valid ? '#225522' : '#552222';
+      this.ctx.strokeStyle = valid ? '#55ee55' : '#ee5555';
+      this.ctx.fillRect(-8, -38, 16, 30);
+      this.ctx.strokeRect(-8, -38, 16, 30);
+    } else {
+      // -- Mast pole --
+      const radius = 15;
+      this.ctx.beginPath();
+      this.ctx.arc(0, 0, radius, 0, Math.PI * 2);
+      this.ctx.fillStyle   = valid ? '#334433' : '#443333';
+      this.ctx.strokeStyle = valid ? '#88ff88' : '#ff8888';
+      this.ctx.lineWidth   = 1 / zoom;
+      this.ctx.fill();
+      this.ctx.stroke();
+
+      // -- Sail outline --
+      const sailW = 80;
+      this.ctx.beginPath();
+      this.ctx.rect(-sailW / 2, -5, sailW, 10);
+      this.ctx.fillStyle   = valid ? 'rgba(180,240,180,0.35)' : 'rgba(240,180,180,0.35)';
+      this.ctx.strokeStyle = valid ? '#66dd66' : '#dd6666';
+      this.ctx.lineWidth   = 1 / zoom;
+      this.ctx.fill();
+      this.ctx.stroke();
+    }
+
+    this.ctx.restore();
+
+    // Status label in screen space (below ghost)
+    const label = valid
+      ? (item === 'cannon' ? 'Place Cannon' : 'Place Sail')
+      : overlaps ? 'Blocked!'  
+      : sailMaxed ? 'Max Sails (3/3)'
+      : 'Not on ship';
+    const labelColor = valid ? '#88ff88' : '#ff8888';
+
+    this.ctx.save();
+    this.ctx.font = 'bold 13px Consolas, monospace';
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'top';
+    this.ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    const tw = this.ctx.measureText(label).width + 10;
+    this.ctx.fillRect(screenPos.x - tw / 2, screenPos.y + 28, tw, 18);
+    this.ctx.fillStyle = labelColor;
+    this.ctx.fillText(label, screenPos.x, screenPos.y + 30);
     this.ctx.restore();
   }
 }
