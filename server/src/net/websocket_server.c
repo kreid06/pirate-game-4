@@ -284,6 +284,39 @@ static void resolve_player_module_collisions(const SimpleShip* ship,
     }
 }
 
+/*
+ * Pushes (new_local_x, new_local_y) out of any active WorldNpc on the same ship.
+ * NPCs are treated as solid obstacles; only the player position is adjusted.
+ */
+static void resolve_player_npc_collisions(const SimpleShip* ship,
+                                          float* new_local_x, float* new_local_y)
+{
+    const float PLAYER_RADIUS = 8.0f;
+    const float NPC_RADIUS    = 8.0f;
+    const float MIN_DIST      = PLAYER_RADIUS + NPC_RADIUS;
+
+    for (int i = 0; i < world_npc_count; i++) {
+        WorldNpc* npc = &world_npcs[i];
+        if (!npc->active) continue;
+        if (npc->ship_id != ship->ship_id) continue;
+
+        float dx = *new_local_x - npc->local_x;
+        float dy = *new_local_y - npc->local_y;
+        float dist_sq = dx * dx + dy * dy;
+
+        if (dist_sq < MIN_DIST * MIN_DIST) {
+            float dist = sqrtf(dist_sq);
+            if (dist < 0.001f) {
+                *new_local_x += MIN_DIST;
+            } else {
+                float overlap = MIN_DIST - dist;
+                *new_local_x += (dx / dist) * overlap;
+                *new_local_y += (dy / dist) * overlap;
+            }
+        }
+    }
+}
+
 // Helper to board a player onto a ship
 static void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y) {
     player->parent_ship_id = ship->ship_id;
@@ -4363,6 +4396,7 @@ void websocket_server_tick(float dt) {
                             resolve_player_module_collisions(player_ship,
                                 ws_player->is_mounted ? ws_player->mounted_module_id : 0,
                                 &new_local_x, &new_local_y);
+                            resolve_player_npc_collisions(player_ship, &new_local_x, &new_local_y);
 
                             // Check if player would walk off the deck (hull boundary)
                             if (is_outside_deck(player_ship->ship_id, new_local_x, new_local_y)) {
