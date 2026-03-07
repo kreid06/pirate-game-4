@@ -536,6 +536,7 @@ export class ClientApplication {
     } else {
       // Pass aiming state so cannon aim guides only draw when actively aiming
       this.renderSystem.playerAiming = this.inputManager?.isCannonAiming ?? false;
+      this.renderSystem.playerAimingCannonId = this.inputManager?.mountedCannonModuleId ?? null;
       // Render game world with hybrid state
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
       
@@ -628,7 +629,7 @@ export class ClientApplication {
               const mod = ship.modules.find(m => m.id === player.mountedModuleId);
               if (mod) moduleKind = mod.kind.toLowerCase();
             }
-            this.inputManager.setMountState(true, player.carrierId, moduleKind);
+            this.inputManager.setMountState(true, player.carrierId, moduleKind, player.mountedModuleId);
           } else {
             // Player is now dismounted - disable ship controls
             console.log(`⚓ [MOUNT STATE] Server says player is dismounted`);
@@ -949,7 +950,7 @@ export class ClientApplication {
         }
       }
       
-      this.inputManager.setMountState(true, shipId, moduleKind);
+      this.inputManager.setMountState(true, shipId, moduleKind, moduleId);
     }
     
     // Update player state in all world states

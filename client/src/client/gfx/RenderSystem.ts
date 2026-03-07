@@ -47,6 +47,8 @@ export class RenderSystem {
   private buildMode: boolean = false;
   /** Set by ClientApplication each frame — true when the local player is holding right-mouse on a cannon. */
   public playerAiming: boolean = false;
+  /** The cannon module ID the local player is currently mounted to (null if not on a cannon). */
+  public playerAimingCannonId: number | null = null;
   private hoveredPlankSlot: { ship: Ship; sectionName: string; segmentIndex: number } | null = null;
   private plankTemplate: PlankSegment[] | null = null;
   
@@ -1020,12 +1022,6 @@ export class RenderSystem {
     // Only draw when the local player is actively right-click aiming a cannon.
     if (!this.playerAiming) return;
 
-    // Build the set of cannon IDs currently mounted by any player.
-    const mountedCannonIds = new Set<number>();
-    for (const player of worldState.players) {
-      if (player.mountedModuleId != null) mountedCannonIds.add(player.mountedModuleId);
-    }
-
     this.ctx.save();
 
     const screenPos   = camera.worldToScreen(ship.position);
@@ -1037,7 +1033,9 @@ export class RenderSystem {
     for (const cannon of ship.modules) {
       if (cannon.kind !== 'cannon') continue;
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
-      if (!mountedCannonIds.has(cannon.id)) continue;
+      // Show guide only for the cannon the local player is mounted to.
+      // Fall back to all cannons if the ID isn't known yet (e.g. before server confirmation).
+      if (this.playerAimingCannonId != null && cannon.id !== this.playerAimingCannonId) continue;
 
       const cannonData = cannon.moduleData;
       const cx         = cannon.localPos.x;

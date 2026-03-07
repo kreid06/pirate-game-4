@@ -119,6 +119,8 @@ export class InputManager {
   public get isCannonAiming(): boolean {
     return this.mountKind === 'cannon' && this.inputState.rightMouseDown;
   }
+  /** ID of the cannon module the player is currently mounted to, or null. */
+  public mountedCannonModuleId: number | null = null;
   private lastCannonAimAngle: number = 0;
   private lastLeftClickTime: number = 0;
   private readonly DOUBLE_CLICK_THRESHOLD = 300; // 300ms for double-click detection
@@ -351,9 +353,10 @@ export class InputManager {
   /**
    * Set mount state (called when player mounts/dismounts a module)
    */
-  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none'): void {
+  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number): void {
     this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast') : 'none';
     this.currentShipId = shipId !== undefined ? shipId : null;
+    this.mountedCannonModuleId = (mounted && moduleKind.toLowerCase() === 'cannon' && moduleId != null) ? moduleId : null;
 
     if (mounted) {
       console.log(`⚓ [INPUT] Player mounted to ${moduleKind} on ship ${shipId}`);
