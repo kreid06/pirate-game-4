@@ -1280,9 +1280,13 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
                  npc->id, npc->name, npc->assigned_cannon_id);
 
     } else {
-        /* Stand down — NPC holds current position without acting */
-        npc->state = WORLD_NPC_STATE_IDLE;
-        log_info("💤 NPC %u (%s) set idle (task=%s role=%d)",
+        /* Stand down — clear cannon assignment and walk to deck centre so the NPC
+           physically leaves the cannon/mast position and the occupancy check clears. */
+        npc->assigned_cannon_id = 0;
+        npc->target_local_x     = 0.0f;
+        npc->target_local_y     = 0.0f;
+        npc->state              = WORLD_NPC_STATE_MOVING;
+        log_info("💤 NPC %u (%s) going idle — walking to centre (task=%s role=%d)",
                  npc->id, npc->name, task, (int)npc->role);
     }
 }

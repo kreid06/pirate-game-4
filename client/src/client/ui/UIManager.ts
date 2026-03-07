@@ -166,6 +166,11 @@ export class UIManager {
     return this.manningPanel.handleClick(x, y);
   }
 
+  /** Returns the current npcId → task name map for colouring NPCs in the render system. */
+  getNpcTaskMap(): ReadonlyMap<number, string> {
+    return this.manningPanel.getTaskMap();
+  }
+
   /**
    * Toggle debug overlay visibility
    */

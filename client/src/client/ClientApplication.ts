@@ -548,6 +548,7 @@ export class ClientApplication {
       this.renderSystem.playerIsAiming = this.inputManager?.isRightMouseDown ?? false;
       this.renderSystem.localPlayerId = this.networkManager.getAssignedPlayerId();
       this.renderSystem.playerAimAngleRelative = this.inputManager?.cannonAimAngleRelative ?? 0;
+      this.renderSystem.npcTaskMap = this.uiManager.getNpcTaskMap();
       // Render game world with hybrid state
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
       

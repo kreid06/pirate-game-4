@@ -40,7 +40,8 @@ export class ManningPriorityPanel {
 
   private hitAreas: HitArea[] = [];
 
-  // Cached from latest render() call so action callbacks can reference them
+  // npcId → task name for the most-recently rendered frame (fed to RenderSystem for NPC colours)
+  private lastTaskMap: Map<number, string> = new Map();
   private _currentShipId = 0;
   private _currentNpcs: Npc[] = [];
 
@@ -50,6 +51,9 @@ export class ManningPriorityPanel {
    * Set this before calling render() — it needs access to the current NPC list.
    */
   public onAssignmentChanged: ((shipId: number, assignments: Array<{ npcId: number; task: string }>) => void) | null = null;
+
+  /** Returns the most-recently-computed npcId → task name map (read-only). */
+  getTaskMap(): ReadonlyMap<number, string> { return this.lastTaskMap; }
 
   // Panel geometry (screen-space, fixed on left side)
   private readonly PX = 10;
@@ -124,6 +128,18 @@ export class ManningPriorityPanel {
 
     const assignments = this.computeAssignments(shipNpcs);
 
+    // Update lastTaskMap so RenderSystem can tint NPCs by assigned task
+    this.lastTaskMap.clear();
+    for (const [task, assigned] of assignments) {
+      for (const n of assigned) this.lastTaskMap.set(n.id, task);
+    }
+    for (const n of shipNpcs) {
+      if (!this.lastTaskMap.has(n.id)) this.lastTaskMap.set(n.id, 'Idle');
+    }
+
+    const totalAssigned = Array.from(this.assignedCounts.values()).reduce((a, b) => a + b, 0);
+    const canIncrement = shipNpcs.length > 0 && totalAssigned < shipNpcs.length;
+
     let rowY = py + HEADER_H + 3;
 
     for (let i = 0; i < tasks.length; i++) {
@@ -186,7 +202,7 @@ export class ManningPriorityPanel {
       const minusBtn = { x: right - 36, y: rowY + 14, w: 16, h: 17 };
       const badgeX   = right - 52;
 
-      this.drawCountBtn(ctx, plusBtn,  '+', true);
+      this.drawCountBtn(ctx, plusBtn,  '+', canIncrement);
       this.drawCountBtn(ctx, minusBtn, '−', count > 0);
 
       // Count badge background
@@ -246,6 +262,9 @@ export class ManningPriorityPanel {
   }
 
   private increment(task: ManningTask): void {
+    const shipNpcCount = this._currentNpcs.filter(n => n.shipId === this._currentShipId).length;
+    const totalAssigned = Array.from(this.assignedCounts.values()).reduce((a, b) => a + b, 0);
+    if (totalAssigned >= shipNpcCount) return;
     this.assignedCounts.set(task, (this.assignedCounts.get(task) ?? 0) + 1);
     this.notifyAssignment();
   }

@@ -14,6 +14,15 @@ import { ShipModule, createCompleteHullSegments, PlankSegment } from '../../sim/
 import { Vec2 } from '../../common/Vec2.js';
 import { ClientState } from '../ClientApplication.js';
 
+/** NPC fill colours keyed by assigned task name (matches ManningPriorityPanel task colours). */
+const NPC_TASK_COLORS: Record<string, string> = {
+  Sails:   '#5aafff',
+  Cannons: '#ffaa44',
+  Repairs: '#55dd66',
+  Combat:  '#ff5555',
+  Idle:    '#DAA520',
+};
+
 /**
  * Render queue item for layered rendering
  */
@@ -51,6 +60,8 @@ export class RenderSystem {
   public localPlayerId: number | null = null;
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
   public playerAimAngleRelative: number = 0;
+  /** npcId → task name map set each frame by ClientApplication; used to colour NPCs by task. */
+  public npcTaskMap: ReadonlyMap<number, string> = new Map();
   private hoveredPlankSlot: { ship: Ship; sectionName: string; segmentIndex: number } | null = null;
   private plankTemplate: PlankSegment[] | null = null;
   
@@ -1882,8 +1893,9 @@ export class RenderSystem {
     this.ctx.save();
     this.ctx.globalAlpha = isMoving ? 0.7 : 1.0;
 
-    // Sailor: warm gold; slightly darker while crossing the deck
-    this.ctx.fillStyle = isMoving ? '#B8860B' : '#DAA520';
+    // Colour NPC by their current task assignment (darkened via globalAlpha when moving)
+    const npcTask = this.npcTaskMap.get(npc.id) ?? 'Idle';
+    this.ctx.fillStyle = NPC_TASK_COLORS[npcTask] ?? '#DAA520';
     this.ctx.strokeStyle = '#ffffff';
     this.ctx.lineWidth = 2;
     this.ctx.beginPath();
