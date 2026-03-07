@@ -32,8 +32,8 @@ typedef struct SimpleShip {
     uint16_t cannon_ammo;    // Remaining cannonballs (unused when infinite_ammo is true)
     bool infinite_ammo;      // When true, cannons never consume ammo
 
-    // Crew AI — current active broadside (updated when a player aims cannons)
-    uint8_t active_cannon_side; // 0 = port (cannon local_y > 0), 1 = starboard (local_y < 0)
+    // Crew AI — last aim angle (ship-local radians) used to compute sector of fire
+    float active_aim_angle; // drives update_npc_cannon_sector(); default 0 = forward
 
     // Ship modules (cannons, masts, helm, seats, etc.)
     ShipModule modules[MAX_MODULES_PER_SHIP];
@@ -97,12 +97,13 @@ typedef struct WorldNpc {
     uint32_t      ship_id;         // 0 = free-standing
     float         local_x, local_y; // Ship-local position in CLIENT units
 
-    // Module ownership — each NPC exclusively owns one port/starboard module pair.
-    // For gunners: port and starboard cannon IDs (NPC walks between them on side-switch).
-    // For riggers: both fields point to the same mast module ID (no switching).
-    uint32_t      port_cannon_id;       // Owned port-side module ID
-    uint32_t      starboard_cannon_id;  // Owned starboard-side module ID
-    uint32_t      assigned_cannon_id;   // Currently targeted module (0 = none)
+    // Module associations
+    // Rigger: port_cannon_id = mast module ID (starboard_cannon_id mirrors it).
+    // Gunner: port_cannon_id = future locked-cannon preference (0 = any; player-set later).
+    uint32_t      port_cannon_id;       // Rigger: mast ID.  Gunner: locked preference (0=free)
+    uint32_t      starboard_cannon_id;  // Rigger: mast ID (mirrors port).  Gunner: unused (0)
+    uint32_t      assigned_cannon_id;   // Module the NPC is currently heading to / stationed at
+    bool          wants_cannon;         // Gunner: true = on cannon duty via manning panel
 
     // Movement / state machine
     WorldNpcState state;

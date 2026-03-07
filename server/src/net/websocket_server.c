@@ -1192,6 +1192,7 @@ static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float wo
                                   float angle, entity_id projectile_id);
 static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired);
 static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task);
+static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle);
 
 /**
  * Find a module on a SimpleShip by module ID.
@@ -1294,29 +1295,22 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
                  npc->id, npc->name, npc->assigned_cannon_id);
 
     } else if (want_cannons && npc->role == NPC_ROLE_GUNNER) {
-        /* Gunner → walk to their dedicated cannon */
-        uint32_t target_cannon = npc->port_cannon_id;
-        ShipModule* cannon = find_module_by_id(ship, target_cannon);
-        if (cannon) {
-            float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
-            float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
-            float barrel_angle = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
-            const float CANNON_MOUNT_DIST = 25.0f;
-            npc->assigned_cannon_id = target_cannon;
-            npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
-            npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
-        }
-        npc->state = WORLD_NPC_STATE_MOVING;
-        log_info("🔫 NPC %u (%s) assigned to Cannons — walking to cannon %u",
-                 npc->id, npc->name, npc->assigned_cannon_id);
+        /* Mark on cannon duty; sector system places them at the right cannon */
+        npc->wants_cannon       = true;
+        npc->assigned_cannon_id = 0; /* sector update will assign */
+        update_npc_cannon_sector(ship, ship->active_aim_angle);
+        log_info("🔫 NPC %u (%s) on cannon duty — sector dispatch issued", npc->id, npc->name);
 
     } else {
-        /* Stand down — clear cannon assignment and walk to deck centre so the NPC
-           physically leaves the cannon/mast position and the occupancy check clears. */
+        /* Stand down — clear cannon duty and walk to deck centre */
+        npc->wants_cannon       = false;
         npc->assigned_cannon_id = 0;
         npc->target_local_x     = 0.0f;
         npc->target_local_y     = 0.0f;
         npc->state              = WORLD_NPC_STATE_MOVING;
+        /* Re-run sector so remaining duty gunners can claim the vacated cannon */
+        if (npc->role == NPC_ROLE_GUNNER)
+            update_npc_cannon_sector(ship, ship->active_aim_angle);
         log_info("💤 NPC %u (%s) going idle — walking to centre (task=%s role=%d)",
                  npc->id, npc->name, task, (int)npc->role);
     }
@@ -1415,18 +1409,14 @@ static bool is_module_owned_by_npc(uint32_t module_id) {
 }
 
 /**
- * Spawn a gunner NPC dedicated to a single cannon.
- * The NPC walks to that cannon when assigned Cannons via the manning panel.
+ * Spawn a gunner NPC for aim-based sector-of-fire assignment.
+ * The NPC starts idle; the sector system dispatches it to a cannon when the
+ * player assigns it to Cannons via the manning panel and aims at a broadside.
  * Returns the new NPC id, or 0 on failure.
  */
-static uint32_t spawn_ship_gunner(uint32_t ship_id, const char* name,
-                                  uint32_t cannon_id) {
+static uint32_t spawn_ship_gunner(uint32_t ship_id, const char* name) {
     if (world_npc_count >= MAX_WORLD_NPCS) {
         log_warn("spawn_ship_gunner: MAX_WORLD_NPCS reached");
-        return 0;
-    }
-    if (is_module_owned_by_npc(cannon_id)) {
-        log_warn("spawn_ship_gunner: cannon %u already owned by another NPC", cannon_id);
         return 0;
     }
     SimpleShip* ship = find_ship(ship_id);
@@ -1440,8 +1430,9 @@ static uint32_t spawn_ship_gunner(uint32_t ship_id, const char* name,
     npc->active              = true;
     npc->role                = NPC_ROLE_GUNNER;
     npc->ship_id             = ship_id;
-    npc->port_cannon_id      = cannon_id;
-    npc->starboard_cannon_id = cannon_id;  /* same — single dedicated cannon */
+    npc->port_cannon_id      = 0;  /* future: player-locked preferred cannon */
+    npc->starboard_cannon_id = 0;
+    npc->wants_cannon        = false;
     npc->move_speed          = 80.0f;
     npc->interact_radius     = 40.0f;
     /* Start idle at deck centre — player assigns tasks via manning panel */
@@ -1457,8 +1448,8 @@ static uint32_t spawn_ship_gunner(uint32_t ship_id, const char* name,
     npc->target_local_x = npc->local_x;
     npc->target_local_y = npc->local_y;
     ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
-    log_info("🧑 Gunner '%s' (id %u) on ship %u — cannon %u (idle)",
-             npc->name, npc->id, ship_id, cannon_id);
+    log_info("🧑 Gunner '%s' (id %u) on ship %u — idle, ready for sector dispatch",
+             npc->name, npc->id, ship_id);
     return npc->id;
 }
 
@@ -1512,38 +1503,108 @@ static uint32_t spawn_ship_rigger(uint32_t ship_id, const char* name, uint32_t m
     return npc->id;
 }
 
-/**
- * Reassign all world NPCs on a ship to the given broadside and start them walking there.
- * new_side: 0 = port (local_y > 0), 1 = starboard (local_y < 0).
- */
-static void trigger_npc_side_switch(uint32_t ship_id, uint8_t new_side) {
-    SimpleShip* ship = find_ship(ship_id);
-    if (!ship) return;
-    if (ship->active_cannon_side == new_side) return; // No change
-    ship->active_cannon_side = new_side;
+/* ============================================================================
+ * NPC CANNON SECTOR-OF-FIRE SYSTEM
+ *
+ * Dispatches on-duty gunners (wants_cannon=true) to the cannons that fall
+ * within the player's aimed sector.  Priority = closest to the aim angle.
+ *
+ * Called from:
+ *   handle_cannon_aim()  — when the aimed half-plane changes
+ *   handle_crew_assign() — when a gunner is added to or removed from duty
+ * ============================================================================*/
+#define SECTOR_HALF_ANGLE (75.0f * ((float)M_PI / 180.0f))   /* ±75° arc */
 
+static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
+    if (!ship) return;
+
+    /* ─ Step 1: collect and sort cannons in the aimed sector (closest first) ─ */
+    uint32_t sector_ids [MAX_MODULES_PER_SHIP];
+    float    sector_diff[MAX_MODULES_PER_SHIP];
+    int      sector_count = 0;
+
+    for (int m = 0; m < ship->module_count; m++) {
+        ShipModule* mod = &ship->modules[m];
+        if (mod->type_id != MODULE_TYPE_CANNON) continue;
+
+        float fire_dir = Q16_TO_FLOAT(mod->local_rot) - (float)(M_PI / 2.0f);
+        float diff = aim_angle - fire_dir;
+        while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+        while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+        if (fabsf(diff) > SECTOR_HALF_ANGLE) continue;
+
+        /* Insertion sort: low |diff| (most on-target) first = highest priority */
+        float abs_diff = fabsf(diff);
+        int pos = sector_count;
+        while (pos > 0 && sector_diff[pos - 1] > abs_diff) {
+            sector_ids [pos] = sector_ids [pos - 1];
+            sector_diff[pos] = sector_diff[pos - 1];
+            pos--;
+        }
+        sector_ids [pos] = mod->id;
+        sector_diff[pos] = abs_diff;
+        sector_count++;
+    }
+
+    /* ─ Step 2: free gunners whose assigned cannon left the sector ─ */
     for (int i = 0; i < world_npc_count; i++) {
         WorldNpc* npc = &world_npcs[i];
-        if (!npc->active || npc->ship_id != ship_id) continue;
-        // Riggers stay at their mast regardless of broadside changes
-        if (npc->role != NPC_ROLE_GUNNER) continue;
-        // Idle gunners (not assigned to any cannon) do not auto-switch on broadside change
+        if (!npc->active || npc->ship_id != ship->ship_id) continue;
+        if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
         if (npc->assigned_cannon_id == 0) continue;
-        uint32_t target_id = (new_side == 0) ? npc->port_cannon_id : npc->starboard_cannon_id;
-        if (target_id == 0 || target_id == npc->assigned_cannon_id) continue;
-        ShipModule* cannon = find_module_by_id(ship, target_id);
-        if (!cannon) continue;
-        float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
-        float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
-        float barrel_angle = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
-        const float CANNON_MOUNT_DIST = 25.0f;
-        npc->assigned_cannon_id = target_id;
-        npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
-        npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
-        npc->state              = WORLD_NPC_STATE_MOVING;
+        bool in_sector = false;
+        for (int c = 0; c < sector_count; c++)
+            if (sector_ids[c] == npc->assigned_cannon_id) { in_sector = true; break; }
+        if (!in_sector) npc->assigned_cannon_id = 0; /* re-dispatch below */
     }
-    log_info("⚓ Ship %u crew switching to %s broadside",
-             ship_id, new_side == 0 ? "PORT" : "STARBOARD");
+
+    /* ─ Step 3: fill empty sector cannons in priority order ─ */
+    for (int c = 0; c < sector_count; c++) {
+        uint32_t cid = sector_ids[c];
+        bool occupied = false;
+        for (int i = 0; i < world_npc_count; i++) {
+            WorldNpc* npc = &world_npcs[i];
+            if (!npc->active || npc->ship_id != ship->ship_id) continue;
+            if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
+            if (npc->assigned_cannon_id == cid) { occupied = true; break; }
+        }
+        if (occupied) continue;
+
+        for (int i = 0; i < world_npc_count; i++) {
+            WorldNpc* npc = &world_npcs[i];
+            if (!npc->active || npc->ship_id != ship->ship_id) continue;
+            if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
+            if (npc->assigned_cannon_id != 0) continue; /* already dispatched */
+            ShipModule* cannon = find_module_by_id(ship, cid);
+            if (!cannon) break;
+            float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
+            float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
+            float barrel_angle = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
+            const float CANNON_MOUNT_DIST = 25.0f;
+            npc->assigned_cannon_id = cid;
+            npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
+            npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
+            npc->state              = WORLD_NPC_STATE_MOVING;
+            log_info("🔫 NPC %u (%s) → cannon %u (%.0f° off aim)",
+                     npc->id, npc->name, cid,
+                     sector_diff[c] * 180.0f / (float)M_PI);
+            break;
+        }
+    }
+
+    /* ─ Step 4: on-duty gunners with no cannon in sector → standby at centre ─ */
+    for (int i = 0; i < world_npc_count; i++) {
+        WorldNpc* npc = &world_npcs[i];
+        if (!npc->active || npc->ship_id != ship->ship_id) continue;
+        if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
+        if (npc->assigned_cannon_id != 0) continue;
+        npc->target_local_x = 0.0f;
+        npc->target_local_y = 0.0f;
+        npc->state = WORLD_NPC_STATE_MOVING;
+    }
+
+    log_info("⚓ Ship %u sector update: aim=%.0f°, %d cannon(s) in sector",
+             ship->ship_id, aim_angle * 180.0f / (float)M_PI, sector_count);
 }
 
 /**
@@ -1617,13 +1678,13 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
     while (player->cannon_aim_angle_relative > M_PI) player->cannon_aim_angle_relative -= 2.0f * M_PI;
     while (player->cannon_aim_angle_relative < -M_PI) player->cannon_aim_angle_relative += 2.0f * M_PI;
 
-    // Detect aimed broadside and switch crew if needed.
-    // Port cannons fire along +Y in ship-local space (sin > 0).
-    // Starboard cannons fire along -Y (sin < 0).
+    /* Update sector-of-fire dispatch when the aimed half-plane changes */
     {
         uint8_t aimed_side = (sinf(player->cannon_aim_angle_relative) > 0.0f) ? 0 : 1;
-        if (aimed_side != ship->active_cannon_side) {
-            trigger_npc_side_switch(ship->ship_id, aimed_side);
+        uint8_t prev_side  = (sinf(ship->active_aim_angle)              > 0.0f) ? 0 : 1;
+        ship->active_aim_angle = player->cannon_aim_angle_relative;
+        if (aimed_side != prev_side) {
+            update_npc_cannon_sector(ship, ship->active_aim_angle);
         }
     }
 
@@ -2622,26 +2683,27 @@ int websocket_server_init(uint16_t port) {
     //     Module IDs: base+1..3 = port cannons, base+4..6 = starboard cannons.
     //   - 3 riggers per ship: one per mast (base+7, base+8, base+9).
     {
-        static const char* gunner_names[12] = {
-            "Bo", "Mack", "Finn", "Ray", "Cole", "Sven",
-            "Dirk", "Walt", "Hal", "Cruz", "Ike", "Rex"
+        /* 3 gunners per ship — sector system dispatches them to any cannon in
+         * the player's aimed arc at runtime; no static cannon ownership. */
+        static const char* gunner_names[6] = {
+            "Bo",  "Mack", "Finn",
+            "Ray", "Cole", "Sven"
         };
         static const char* rigger_names[6] = { "Ned", "Hank", "Jim", "Lars", "Tam", "Bren" };
         int gunner_idx = 0;
         for (int s = 0; s < 2; s++) {
             uint32_t sid  = ships[s].ship_id;
             uint32_t base = (s == 0) ? 1000u : 2000u;
-            /* One dedicated gunner per cannon (6 total per ship: base+1..base+6) */
-            for (int slot = 1; slot <= 6; slot++) {
-                spawn_ship_gunner(sid, gunner_names[gunner_idx++], base + (uint32_t)slot);
-            }
+            spawn_ship_gunner(sid, gunner_names[gunner_idx++]);
+            spawn_ship_gunner(sid, gunner_names[gunner_idx++]);
+            spawn_ship_gunner(sid, gunner_names[gunner_idx++]);
             // Three riggers: front mast (base+7), middle mast (base+8), back mast (base+9)
             spawn_ship_rigger(sid, rigger_names[s * 3],     base + 7);
             spawn_ship_rigger(sid, rigger_names[s * 3 + 1], base + 8);
             spawn_ship_rigger(sid, rigger_names[s * 3 + 2], base + 9);
         }
         log_info("🧑 %d crew NPCs spawned across 2 ships (%d gunners, %d riggers)",
-                 world_npc_count, 12, 6);
+                 world_npc_count, 6, 6);
     }
 
     // Enhanced startup message
