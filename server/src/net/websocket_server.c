@@ -3764,6 +3764,172 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strstr(payload, "\"type\":\"place_cannon_at\"")) {
+                            // FREE-PLACE CANNON: place a cannon at an arbitrary ship-local position.
+                            // Payload: {"type":"place_cannon_at","shipId":N,"localX":F,"localY":F,"rotation":F}
+                            // Consumes 1 ITEM_CANNON from the placing player's inventory.
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    // Locate cannon in inventory
+                                    int cannon_slot = -1;
+                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                        if (player->inventory.slots[s].item == ITEM_CANNON &&
+                                            player->inventory.slots[s].quantity > 0) {
+                                            cannon_slot = s; break;
+                                        }
+                                    }
+                                    if (cannon_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_cannon\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        // Find the sim ship (use shipId from payload, fallback to player ship)
+                                        uint32_t target_ship_id = player->parent_ship_id;
+                                        const char* p_sid = strstr(payload, "\"shipId\":");
+                                        if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = sid; }
+
+                                        struct Ship* sim_ship = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == target_ship_id) {
+                                                sim_ship = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        if (!sim_ship) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                        } else {
+                                            // Parse local position and rotation (client px → server units)
+                                            float local_x = 0.0f, local_y = 0.0f, rotation = 0.0f;
+                                            const char* px = strstr(payload, "\"localX\":");
+                                            const char* py = strstr(payload, "\"localY\":");
+                                            const char* pr = strstr(payload, "\"rotation\":");
+                                            if (px) sscanf(px + 9,  "%f", &local_x);
+                                            if (py) sscanf(py + 9,  "%f", &local_y);
+                                            if (pr) sscanf(pr + 11, "%f", &rotation);
+
+                                            // Allocate a unique module ID (scan max existing + 1)
+                                            uint16_t max_id = 0;
+                                            for (uint8_t m = 0; m < sim_ship->module_count; m++)
+                                                if (sim_ship->modules[m].id > max_id) max_id = sim_ship->modules[m].id;
+                                            uint16_t new_id = max_id + 1;
+
+                                            ShipModule* nc = &sim_ship->modules[sim_ship->module_count];
+                                            memset(nc, 0, sizeof(ShipModule));
+                                            nc->id          = new_id;
+                                            nc->type_id     = MODULE_TYPE_CANNON;
+                                            nc->local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_x));
+                                            nc->local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
+                                            nc->local_rot   = Q16_FROM_FLOAT(rotation);
+                                            nc->state_bits  = MODULE_STATE_ACTIVE;
+                                            nc->health      = Q16_FROM_FLOAT(8000.0f);
+                                            nc->max_health  = Q16_FROM_FLOAT(8000.0f);
+                                            nc->data.cannon.aim_direction   = Q16_FROM_FLOAT(0.0f);
+                                            nc->data.cannon.ammunition      = 10;
+                                            nc->data.cannon.time_since_fire = 0;
+                                            nc->data.cannon.reload_time     = Q16_FROM_FLOAT(3000.0f);
+                                            sim_ship->module_count++;
+
+                                            // Consume 1 cannon from inventory
+                                            player->inventory.slots[cannon_slot].quantity--;
+                                            if (player->inventory.slots[cannon_slot].quantity == 0)
+                                                player->inventory.slots[cannon_slot].item = ITEM_NONE;
+
+                                            log_info("🔨 Player %u placed cannon %u at (%.1f,%.1f) rot=%.2f on ship %u",
+                                                     player->player_id, new_id, local_x, local_y, rotation, sim_ship->id);
+                                            snprintf(response, sizeof(response),
+                                                "{\"type\":\"message_ack\",\"status\":\"cannon_placed_at\",\"cannon_id\":%u}",
+                                                new_id);
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strstr(payload, "\"type\":\"place_mast_at\"")) {
+                            // FREE-PLACE MAST: place a mast at an arbitrary ship-local position.
+                            // Payload: {"type":"place_mast_at","shipId":N,"localX":F,"localY":F}
+                            // Consumes 1 ITEM_SAIL from the placing player's inventory.
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    int sail_slot = -1;
+                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                        if (player->inventory.slots[s].item == ITEM_SAIL &&
+                                            player->inventory.slots[s].quantity > 0) {
+                                            sail_slot = s; break;
+                                        }
+                                    }
+                                    if (sail_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_sail\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        uint32_t target_ship_id = player->parent_ship_id;
+                                        const char* p_sid = strstr(payload, "\"shipId\":");
+                                        if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = sid; }
+
+                                        struct Ship* sim_ship = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == target_ship_id) {
+                                                sim_ship = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        if (!sim_ship) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                        } else {
+                                            float local_x = 0.0f, local_y = 0.0f;
+                                            const char* px = strstr(payload, "\"localX\":");
+                                            const char* py = strstr(payload, "\"localY\":");
+                                            if (px) sscanf(px + 9, "%f", &local_x);
+                                            if (py) sscanf(py + 9, "%f", &local_y);
+
+                                            uint16_t max_id = 0;
+                                            for (uint8_t m = 0; m < sim_ship->module_count; m++)
+                                                if (sim_ship->modules[m].id > max_id) max_id = sim_ship->modules[m].id;
+                                            uint16_t new_id = max_id + 1;
+
+                                            ShipModule* nm = &sim_ship->modules[sim_ship->module_count];
+                                            memset(nm, 0, sizeof(ShipModule));
+                                            nm->id          = new_id;
+                                            nm->type_id     = MODULE_TYPE_MAST;
+                                            nm->local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_x));
+                                            nm->local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
+                                            nm->local_rot   = Q16_FROM_FLOAT(0.0f);
+                                            nm->state_bits  = MODULE_STATE_ACTIVE | MODULE_STATE_DEPLOYED;
+                                            nm->health      = Q16_FROM_FLOAT(15000.0f);
+                                            nm->max_health  = Q16_FROM_FLOAT(15000.0f);
+                                            nm->data.mast.angle           = Q16_FROM_FLOAT(0.0f);
+                                            nm->data.mast.openness        = 0;
+                                            nm->data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
+                                            sim_ship->module_count++;
+
+                                            player->inventory.slots[sail_slot].quantity--;
+                                            if (player->inventory.slots[sail_slot].quantity == 0)
+                                                player->inventory.slots[sail_slot].item = ITEM_NONE;
+
+                                            log_info("⛵ Player %u placed mast %u at (%.1f,%.1f) on ship %u",
+                                                     player->player_id, new_id, local_x, local_y, sim_ship->id);
+                                            snprintf(response, sizeof(response),
+                                                "{\"type\":\"message_ack\",\"status\":\"mast_placed_at\",\"mast_id\":%u}",
+                                                new_id);
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
                         } else if (strstr(payload, "\"type\":\"place_cannon\"")) {
                             // PLACE CANNON: re-install a destroyed cannon on the player's ship.
                             // Consumes 1 ITEM_CANNON. Server finds the first missing cannon slot
