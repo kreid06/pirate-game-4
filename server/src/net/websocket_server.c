@@ -1289,6 +1289,28 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
         log_info("💤 NPC %u (%s) going idle — walking to centre (task=%s role=%d)",
                  npc->id, npc->name, task, (int)npc->role);
     }
+
+    /* After any assignment change, count riggers that are actively
+       stationed at a mast and update desired sail openness accordingly. */
+    int active_sail_riggers = 0;
+    for (int i = 0; i < world_npc_count; i++) {
+        WorldNpc* w = &world_npcs[i];
+        if (!w->active || w->ship_id != ship_id) continue;
+        if (w->role == NPC_ROLE_RIGGER && w->assigned_cannon_id != 0)
+            active_sail_riggers++;
+    }
+    uint8_t new_desired = (active_sail_riggers > 0) ? 100 : 0;
+    ship->desired_sail_openness = new_desired;
+    if (global_sim && global_sim->ship_count > 0) {
+        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+            if (global_sim->ships[s].id == ship->ship_id) {
+                global_sim->ships[s].desired_sail_openness = new_desired;
+                break;
+            }
+        }
+    }
+    log_info("⛵ Ship %u sail desire: %d active riggers → %u%%",
+             ship_id, active_sail_riggers, (unsigned)new_desired);
 }
 
 /**
@@ -4105,11 +4127,11 @@ int websocket_server_update(struct Sim* sim) {
                 "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
                 "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                 "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
-                "\"interact_radius\":%.1f,\"state\":%u}",
+                "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u}",
                 npc->id, npc->name,
                 npc->x, npc->y, npc->rotation,
                 npc->ship_id, npc->local_x, npc->local_y,
-                npc->interact_radius, (unsigned)npc->state);
+                npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role);
             first_npc = false;
         }
         npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "]");

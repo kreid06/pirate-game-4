@@ -1188,6 +1188,7 @@ export class NetworkManager {
             interactRadius: n.interact_radius ?? 40,
             shipId: n.ship_id || 0,
             state: n.state ?? 0,
+            role: n.role ?? 0,
           })),
           carrierDetection: new Map() // Will be populated as needed
         };

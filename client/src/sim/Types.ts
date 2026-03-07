@@ -114,6 +114,7 @@ export interface Npc {
   interactRadius: number; // Distance within which the player can press E
   shipId: number;         // 0 = free-standing in the world
   state: number;          // NPC_STATE_* — used for movement animation
+  role: number;           // NPC_ROLE_* — 1=gunner, 3=rigger
 }
 
 /**

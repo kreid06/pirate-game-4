@@ -14,6 +14,18 @@ export type ManningTask = 'Sails' | 'Cannons' | 'Repairs' | 'Combat';
 /** NPC state constants (mirror server WorldNpcState) */
 const NPC_STATE_AT_CANNON = 2;
 
+/** NPC role constants (mirror server NpcRole) */
+const NPC_ROLE_GUNNER = 1;
+const NPC_ROLE_RIGGER = 3;
+
+/** Which role is preferred for each task (0 = any) */
+const TASK_PREFERRED_ROLE: Record<ManningTask, number> = {
+  Sails:   NPC_ROLE_RIGGER,
+  Cannons: NPC_ROLE_GUNNER,
+  Repairs: 0,
+  Combat:  NPC_ROLE_GUNNER,
+};
+
 const TASK_COLORS: Record<ManningTask, string> = {
   Sails:   '#5aafff',
   Cannons: '#ffaa44',
@@ -235,13 +247,28 @@ export class ManningPriorityPanel {
 
     for (const task of this.priorityOrder) {
       const want = this.assignedCounts.get(task) ?? 0;
+      const preferRole = TASK_PREFERRED_ROLE[task];
       const assigned: Npc[] = [];
+
+      // First pass: role-matching NPCs (available ones come first due to outer sort)
       for (const npc of npcs) {
         if (used.has(npc.id)) continue;
         if (assigned.length >= want) break;
+        if (preferRole !== 0 && npc.role !== preferRole) continue;
         assigned.push(npc);
         used.add(npc.id);
       }
+
+      // Second pass: fill remaining slots with any available NPC
+      if (assigned.length < want) {
+        for (const npc of npcs) {
+          if (used.has(npc.id)) continue;
+          if (assigned.length >= want) break;
+          assigned.push(npc);
+          used.add(npc.id);
+        }
+      }
+
       result.set(task, assigned);
     }
     return result;
