@@ -138,6 +138,7 @@ typedef enum {
     ITEM_PLANK         = 1,
     ITEM_REPAIR_KIT    = 2,
     ITEM_CANNON_BALL   = 3,
+    ITEM_CANNON        = 7,
     ITEM_SWORD         = 4,
     ITEM_PISTOL        = 5,
     ITEM_HAMMER        = 6,

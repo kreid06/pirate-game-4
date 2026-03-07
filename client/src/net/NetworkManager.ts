@@ -63,6 +63,7 @@ export enum MessageType {
   GIVE_ITEM = 'give_item',
   PLACE_PLANK = 'place_plank',
   REPAIR_PLANK = 'repair_plank',
+  PLACE_CANNON = 'place_cannon',
   CREW_ASSIGN = 'crew_assign',
 
   PING = 'ping',
@@ -280,6 +281,12 @@ interface PlacePlankMessage extends NetworkMessage {
   segmentIndex: number;
 }
 
+interface PlaceCannonMessage extends NetworkMessage {
+  type: MessageType.PLACE_CANNON;
+  timestamp: number;
+  shipId: number;
+}
+
 interface CrewAssignMessage extends NetworkMessage {
   type: MessageType.CREW_ASSIGN;
   timestamp: number;
@@ -288,7 +295,7 @@ interface CrewAssignMessage extends NetworkMessage {
   task: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | RepairPlankMessage | CrewAssignMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | RepairPlankMessage | CrewAssignMessage;
 
 /**
  * Main network manager class
@@ -812,6 +819,16 @@ export class NetworkManager {
   sendRepairPlank(shipId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.REPAIR_PLANK, timestamp: Date.now(), shipId });
+  }
+
+  /**
+   * Request the server to replace a destroyed cannon on the player's ship.
+   * Server finds the first missing cannon slot (base+1..base+6) and recreates it,
+   * consuming 1 ITEM_CANNON from the player's inventory.
+   */
+  sendPlaceCannon(shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_CANNON, timestamp: Date.now(), shipId });
   }
 
   /**

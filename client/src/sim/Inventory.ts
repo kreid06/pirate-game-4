@@ -15,6 +15,7 @@ export type ItemKind =
   | 'plank'
   | 'repair_kit'
   | 'cannon_ball'
+  | 'cannon'
   | 'sword'
   | 'pistol'
   | 'hammer'
@@ -46,6 +47,7 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   plank:         { kind: 'plank',         name: 'Plank',         category: 'building', maxStack: 99, color: '#b8832b', borderColor: '#7a5520', symbol: 'P' },
   repair_kit:    { kind: 'repair_kit',    name: 'Repair Kit',    category: 'repair',   maxStack: 99, color: '#2577e3', borderColor: '#1a4fa0', symbol: 'R' },
   cannon_ball:   { kind: 'cannon_ball',   name: 'Cannonball',    category: 'ammo',     maxStack: 99, color: '#555',    borderColor: '#333',    symbol: 'C' },
+  cannon:        { kind: 'cannon',        name: 'Cannon',        category: 'building', maxStack: 9,  color: '#333333', borderColor: '#111',    symbol: '⚫' },
   sword:         { kind: 'sword',         name: 'Sword',         category: 'weapon',   maxStack: 1,  color: '#c0c0c0', borderColor: '#777',    symbol: 'S' },
   pistol:        { kind: 'pistol',        name: 'Pistol',        category: 'weapon',   maxStack: 1,  color: '#8b4513', borderColor: '#5a2d0c', symbol: 'G' },
   hammer:        { kind: 'hammer',        name: 'Hammer',        category: 'tool',     maxStack: 1,  color: '#c07830', borderColor: '#885020', symbol: 'H' },
@@ -65,6 +67,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   1:  'plank',
   2:  'repair_kit',
   3:  'cannon_ball',
+  7:  'cannon',
   4:  'sword',
   5:  'pistol',
   6:  'hammer',

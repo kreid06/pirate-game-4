@@ -54,6 +54,10 @@ export class RenderSystem {
 
   // Build mode state
   private buildMode: boolean = false;
+  /** Whether cannon replacement build mode is active (cannon item held). */
+  private cannonBuildMode: boolean = false;
+  /** The cannon slot (index+ship) currently under the cursor in cannon build mode. */
+  private hoveredCannonSlot: { ship: Ship; cannonIndex: number } | null = null;
   /** Set by ClientApplication each frame — true when the local player is holding right-mouse. */
   public playerIsAiming: boolean = false;
   /** The assigned local player ID, so guides only draw for that player's cannon. */
@@ -129,6 +133,28 @@ export class RenderSystem {
   setBuildMode(active: boolean): void {
     this.buildMode = active;
     if (!active) this.hoveredPlankSlot = null;
+  }
+
+  /**
+   * Enable or disable cannon replacement build mode
+   */
+  setCannonBuildMode(active: boolean): void {
+    this.cannonBuildMode = active;
+    if (!active) this.hoveredCannonSlot = null;
+  }
+
+  /**
+   * Whether cannon build mode is currently active
+   */
+  isInCannonBuildMode(): boolean {
+    return this.cannonBuildMode;
+  }
+
+  /**
+   * Get the cannon slot currently under the cursor (only in cannon build mode)
+   */
+  getHoveredCannonSlot(): { ship: Ship; cannonIndex: number } | null {
+    return this.hoveredCannonSlot;
   }
 
   /**
@@ -385,6 +411,13 @@ export class RenderSystem {
       this.hoveredPlankSlot = null;
     }
 
+    // In cannon build mode, detect which missing cannon slot is under the cursor
+    if (this.cannonBuildMode) {
+      this.detectHoveredCannonSlot(worldState);
+    } else {
+      this.hoveredCannonSlot = null;
+    }
+
     // Draw background elements
     this.drawWater(camera);
     this.drawGrid(camera);
@@ -581,6 +614,13 @@ export class RenderSystem {
     if (this.buildMode) {
       for (const ship of worldState.ships) {
         this.queueRenderItem(3, 'plank-ghosts', () => this.drawMissingPlankGhosts(ship, camera), 1);
+      }
+    }
+
+    // In cannon build mode, overlay ghost cannons at destroyed slots (layer 4, after real cannons)
+    if (this.cannonBuildMode) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(4, 'cannon-ghosts', () => this.drawMissingCannonGhosts(ship, camera), 1);
       }
     }
     
@@ -964,6 +1004,115 @@ export class RenderSystem {
     return { x, y };
   }
   
+  // Brigantine cannon layout: cannon_xs[3] = {-35, 65, -135}
+  // Port side (i < 3): y = +75, rot = PI; Starboard (i >= 3): y = -75, rot = 0
+  private static readonly CANNON_XS = [-35, 65, -135];
+
+  /**
+   * Detect which missing cannon slot the cursor is over (cannon build mode only).
+   * Hover is within 22px of the cannon center in ship-local space.
+   */
+  private detectHoveredCannonSlot(worldState: WorldState): void {
+    this.hoveredCannonSlot = null;
+    if (!this.mouseWorldPos) return;
+
+    for (const ship of worldState.ships) {
+      const helm = ship.modules.find(m => m.kind === 'helm');
+      if (!helm) continue;
+      const base = helm.id;
+
+      const presentIds = new Set(ship.modules.map(m => m.id));
+
+      // Transform mouse to ship-local space
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const localX = dx * cos - dy * sin;
+      const localY = dx * sin + dy * cos;
+
+      for (let i = 0; i < 6; i++) {
+        if (presentIds.has(base + 1 + i)) continue; // cannon present
+
+        const cx = RenderSystem.CANNON_XS[i % 3];
+        const cy = i < 3 ? 75 : -75;
+        const ddx = localX - cx;
+        const ddy = localY - cy;
+        if (Math.sqrt(ddx * ddx + ddy * ddy) <= 22) {
+          this.hoveredCannonSlot = { ship, cannonIndex: i };
+          return;
+        }
+      }
+    }
+  }
+
+  /**
+   * Draw ghost outlines at missing cannon positions (cannon build mode).
+   */
+  private drawMissingCannonGhosts(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const helm = ship.modules.find(m => m.kind === 'helm');
+    if (!helm) return;
+    const base = helm.id;
+
+    const presentIds = new Set(ship.modules.map(m => m.id));
+
+    this.ctx.save();
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const lw = 1.5 / cameraState.zoom;
+
+    for (let i = 0; i < 6; i++) {
+      if (presentIds.has(base + 1 + i)) continue;
+
+      const cx = RenderSystem.CANNON_XS[i % 3];
+      const cy = i < 3 ? 75 : -75;
+      const rot = i < 3 ? Math.PI : 0;
+
+      const isHovered = this.hoveredCannonSlot?.ship === ship &&
+                        this.hoveredCannonSlot?.cannonIndex === i;
+
+      this.ctx.save();
+      this.ctx.translate(cx, cy);
+      this.ctx.rotate(rot);
+
+      // Ghost cannon base rect (matches real cannon 30×20)
+      this.ctx.strokeStyle = isHovered ? '#ffaa00' : 'rgba(255,160,0,0.55)';
+      this.ctx.fillStyle   = isHovered ? 'rgba(255,180,0,0.35)' : 'rgba(255,140,0,0.15)';
+      this.ctx.lineWidth   = isHovered ? lw * 2 : lw;
+      this.ctx.beginPath();
+      this.ctx.rect(-15, -10, 30, 20);
+      this.ctx.fill();
+      this.ctx.stroke();
+
+      // Ghost barrel stub
+      this.ctx.strokeStyle = isHovered ? '#ffcc44' : 'rgba(255,200,50,0.45)';
+      this.ctx.fillStyle   = 'transparent';
+      this.ctx.lineWidth   = lw;
+      this.ctx.beginPath();
+      this.ctx.rect(-8, -40, 16, 40);
+      this.ctx.stroke();
+
+      // Hovered: bright highlight circle
+      if (isHovered) {
+        this.ctx.strokeStyle = '#ffff00';
+        this.ctx.lineWidth = lw * 1.5;
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, 22, 0, Math.PI * 2);
+        this.ctx.stroke();
+      }
+
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
   private drawShipCannons(ship: Ship, camera: Camera): void {
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, 200)) {

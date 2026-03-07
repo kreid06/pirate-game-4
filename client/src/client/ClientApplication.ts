@@ -299,8 +299,16 @@ export class ClientApplication {
         this.checkBuildMode();
       };
 
-      // Build placement: left-click in build mode → send place_plank to server
+      // Build placement: left-click in build mode → send place_plank or place_cannon to server
       this.inputManager.onBuildPlace = (_worldPos) => {
+        // Cannon replacement build mode
+        const cannonSlot = this.renderSystem.getHoveredCannonSlot();
+        if (cannonSlot) {
+          console.log(`🔧 [BUILD] Placing cannon in slot ${cannonSlot.cannonIndex} on ship ${cannonSlot.ship.id}`);
+          this.networkManager.sendPlaceCannon(cannonSlot.ship.id);
+          return;
+        }
+        // Plank placement build mode
         const slot = this.renderSystem.getHoveredPlankSlot();
         if (slot) {
           console.log(`🔨 [BUILD] Placing plank in slot ${slot.sectionName}[${slot.segmentIndex}] on ship ${slot.ship.id}`);
@@ -704,10 +712,12 @@ export class ClientApplication {
 
     const activeSlot  = player?.inventory?.activeSlot ?? 0;
     const activeItem  = player?.inventory?.slots[activeSlot]?.item ?? 'none';
-    const inBuildMode = activeItem === 'plank';
+    const inBuildMode       = activeItem === 'plank';
+    const inCannonBuildMode = activeItem === 'cannon';
 
     this.renderSystem.setBuildMode(inBuildMode);
-    this.inputManager.buildMode = inBuildMode;
+    this.renderSystem.setCannonBuildMode(inCannonBuildMode);
+    this.inputManager.buildMode = inBuildMode || inCannonBuildMode;
   }
 
   /**
