@@ -281,13 +281,13 @@ class HUDElement implements UIElement {
     
     ctx.restore();
 
-    // --- Water meter ---
-    // Find the ship this player is on (or any ship if spectating)
+    // --- Water meter (top-right boat icon) ---
+    // Show whenever the player is aboard any ship
     const playerShip = player.onDeck
       ? context.worldState.ships.find(s => s.id === player.carrierId)
       : null;
 
-    if (playerShip !== undefined && playerShip !== null) {
+    if (playerShip != null) {
       this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100);
     }
 
@@ -452,70 +452,101 @@ class HUDElement implements UIElement {
     canvas: HTMLCanvasElement,
     hullHealth: number
   ): void {
-    // waterFill: 0 = dry hull, 1 = ship sinking (inverse of hull health)
+    // waterFill: 0 = completely dry, 1 = ship fully flooded
     const waterFill = Math.max(0, Math.min(1, 1 - hullHealth / 100));
-
-    // Only show meter when there is water ingress
-    if (waterFill <= 0) return;
+    const isCritical = waterFill > 0.9;
 
     ctx.save();
 
-    const barW = 240;
-    const barH = 22;
-    const padding = 8;
-    const labelW = 58; // space for "WATER" label
-    const totalW = labelW + barW + padding * 3;
-    const totalH = barH + padding * 2;
-    const x = 10;
-    const y = canvas.height - totalH - 10;
+    // ── Dimensions & position (top-right corner) ─────────────────────────
+    const iW   = 88;   // icon width
+    const iH   = 66;   // icon height (hull cross-section)
+    const marg = 14;   // margin from canvas edge
+    const ix   = canvas.width - iW - marg;
+    const iy   = marg;
 
-    // Background panel
-    ctx.fillStyle = 'rgba(0,0,0,0.85)';
-    ctx.fillRect(x, y, totalW, totalH);
+    // ── Hull cross-section path ───────────────────────────────────────────
+    // Wide at the deck, tapering slightly, with a curved bottom
+    const deckY  = iy + 10;          // y of the deck rail
+    const sideBot = iy + iH - 6;     // y where sides meet the curved keel
+    const hullPath = new Path2D();
+    hullPath.moveTo(ix + 2,      deckY);              // port (left) rail
+    hullPath.lineTo(ix + iW - 2, deckY);              // starboard (right) rail
+    hullPath.lineTo(ix + iW - 9, sideBot);            // starboard lower side
+    // Curved keel bottom
+    hullPath.quadraticCurveTo(
+      ix + iW / 2, iy + iH + 4,                       // control: below center
+      ix + 9,      sideBot                             // port lower side
+    );
+    hullPath.closePath();
 
-    // Border — red pulse when critical (>90%)
-    const isCritical = waterFill > 0.9;
-    ctx.strokeStyle = isCritical ? '#ff2222' : '#446688';
-    ctx.lineWidth = isCritical ? 2 : 1;
-    ctx.strokeRect(x, y, totalW, totalH);
+    // ── Water fill (clipped to hull interior) ────────────────────────────
+    ctx.save();
+    ctx.clip(hullPath);
 
-    // "WATER" label
-    ctx.fillStyle = isCritical ? '#ff4444' : '#aaccee';
-    ctx.font = 'bold 12px Consolas, monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('WATER', x + padding + labelW / 2, y + totalH / 2);
+    // Fill water from the bottom of the keel up
+    const interiorH = sideBot - deckY;
+    const fillH     = waterFill * (interiorH + 12); // +12 to cover the curved keel
+    const fillY     = sideBot - waterFill * interiorH;
 
-    // Bar track (dark bg)
-    const barX = x + padding * 2 + labelW;
-    const barY = y + padding;
-    ctx.fillStyle = '#111111';
-    ctx.fillRect(barX, barY, barW, barH);
+    if (waterFill > 0) {
+      // Main water body
+      ctx.fillStyle = isCritical ? '#bb1111' : '#1155cc';
+      ctx.fillRect(ix, fillY, iW, fillH + 8);
 
-    // Bar fill color: blue → purple at >90%
-    const fillPx = Math.round(waterFill * barW);
-    if (fillPx > 0) {
-      const fillColor = isCritical ? '#8800cc' : '#1166dd';
-      ctx.fillStyle = fillColor;
-      ctx.fillRect(barX, barY, fillPx, barH);
+      // Animated-looking wave bands (lighter stripes)
+      const waveColor = isCritical ? 'rgba(255,140,140,0.20)' : 'rgba(120,200,255,0.22)';
+      const bandH = 4;
+      for (let by = fillY + 4; by < sideBot; by += 12) {
+        ctx.fillStyle = waveColor;
+        ctx.fillRect(ix, by, iW, bandH);
+      }
 
-      // Shimmer highlight on top third of bar
-      ctx.fillStyle = 'rgba(255,255,255,0.15)';
-      ctx.fillRect(barX, barY, fillPx, Math.round(barH / 3));
+      // Surface shimmer line at water top
+      ctx.fillStyle = isCritical ? 'rgba(255,160,160,0.50)' : 'rgba(170,230,255,0.55)';
+      ctx.fillRect(ix, fillY, iW, 3);
     }
 
-    // Bar border
-    ctx.strokeStyle = '#224466';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(barX, barY, barW, barH);
+    ctx.restore(); // remove clip
 
-    // Percentage text inside/beside the bar
-    const pct = Math.round(waterFill * 100);
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 12px Consolas, monospace';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(`${pct}%`, barX + fillPx + 4, y + totalH / 2);
+    // ── Hull outline (white / red-tinted when critical) ───────────────────
+    ctx.strokeStyle = isCritical ? '#ff5555' : '#ffffff';
+    ctx.lineWidth   = isCritical ? 2.5 : 2;
+    ctx.stroke(hullPath);
+
+    // ── Deck rail (horizontal line at top of hull) ────────────────────────
+    ctx.beginPath();
+    ctx.moveTo(ix + 2,      deckY);
+    ctx.lineTo(ix + iW - 2, deckY);
+    ctx.strokeStyle = isCritical ? '#ff8888' : '#dddddd';
+    ctx.lineWidth   = 1.5;
+    ctx.stroke();
+
+    // Small deck posts / bollards for a nautical feel
+    for (const bx of [ix + 10, ix + iW / 2 - 1, ix + iW - 10]) {
+      ctx.beginPath();
+      ctx.moveTo(bx, deckY);
+      ctx.lineTo(bx, deckY - 5);
+      ctx.strokeStyle = isCritical ? '#ff8888' : '#bbbbbb';
+      ctx.lineWidth   = 1.5;
+      ctx.stroke();
+    }
+
+    // ── Percentage label + "WATER" tag below icon ─────────────────────────
+    const pct       = Math.round(waterFill * 100);
+    const labelY    = iy + iH + 7;
+    const labelColor = isCritical ? '#ff5555' : '#88bbee';
+
+    ctx.font          = 'bold 12px Consolas, monospace';
+    ctx.textAlign     = 'center';
+    ctx.textBaseline  = 'top';
+    ctx.fillStyle     = labelColor;
+    ctx.fillText(`${pct}%`, ix + iW / 2, labelY);
+
+    // Tiny "WATER" subtitle
+    ctx.font      = '9px Consolas, monospace';
+    ctx.fillStyle = isCritical ? '#ff7777' : '#557799';
+    ctx.fillText('WATER', ix + iW / 2, labelY + 14);
 
     ctx.restore();
   }
