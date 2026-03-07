@@ -114,6 +114,11 @@ export class InputManager {
   private readonly SAIL_OPENNESS_COOLDOWN = 100; // 0.1s per 10% change
   private readonly SAIL_ANGLE_COOLDOWN = 100; // 0.1s per 6° change
   
+  /** True while right mouse button is held down. */
+  public get isRightMouseDown(): boolean {
+    return this.inputState.rightMouseDown;
+  }
+
   // Cannon aiming state
   /** True while the player is mounted to a cannon and holding right-mouse to aim. */
   public get isCannonAiming(): boolean {
@@ -122,6 +127,8 @@ export class InputManager {
   /** ID of the cannon module the player is currently mounted to, or null. */
   public mountedCannonModuleId: number | null = null;
   private lastCannonAimAngle: number = 0;
+  /** Current aim angle relative to ship — updated every frame while right-mouse is held. */
+  public get cannonAimAngleRelative(): number { return this.lastCannonAimAngle; }
   private lastLeftClickTime: number = 0;
   private readonly DOUBLE_CLICK_THRESHOLD = 300; // 300ms for double-click detection
   private currentShipId: number | null = null; // Track which ship player is on for aim calculation

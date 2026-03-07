@@ -45,10 +45,12 @@ export class RenderSystem {
 
   // Build mode state
   private buildMode: boolean = false;
-  /** Set by ClientApplication each frame — true when the local player is holding right-mouse on a cannon. */
-  public playerAiming: boolean = false;
-  /** The cannon module ID the local player is currently mounted to (null if not on a cannon). */
-  public playerAimingCannonId: number | null = null;
+  /** Set by ClientApplication each frame — true when the local player is holding right-mouse. */
+  public playerIsAiming: boolean = false;
+  /** The assigned local player ID, so guides only draw for that player's cannon. */
+  public localPlayerId: number | null = null;
+  /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
+  public playerAimAngleRelative: number = 0;
   private hoveredPlankSlot: { ship: Ship; sectionName: string; segmentIndex: number } | null = null;
   private plankTemplate: PlankSegment[] | null = null;
   
@@ -1018,66 +1020,80 @@ export class RenderSystem {
    */
   private drawCannonAimGuides(ship: Ship, worldState: WorldState, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!this.playerIsAiming) return;
 
-    // Only draw when the local player is actively right-click aiming a cannon.
-    if (!this.playerAiming) return;
+    // Determine which cannons to show guides for based on what the local player is mounted to.
+    const localPlayer = this.localPlayerId != null
+      ? worldState.players.find(p => p.id === this.localPlayerId)
+      : null;
+
+    // Player must be mounted and on this ship
+    if (!localPlayer || !localPlayer.isMounted || localPlayer.carrierId !== ship.id) return;
+
+    let cannonsToShow: typeof ship.modules = [];
+
+    if (localPlayer.mountedModuleId != null) {
+      const mountedMod = ship.modules.find(m => m.id === localPlayer.mountedModuleId);
+      if (mountedMod?.kind === 'cannon') {
+        // Mounted directly on a cannon — show just that one
+        cannonsToShow = [mountedMod];
+      } else if (mountedMod?.kind === 'helm' || mountedMod?.kind === 'steering-wheel') {
+        // On the helm — only show cannons whose outward-facing sector contains the aim direction.
+        // Sector check: sin(cannon.localRot - aimAngleRelative) > 0 means the cannon's barrel
+        // faces the same general half-plane as the player is aiming toward.
+        const aim = this.playerAimAngleRelative;
+        cannonsToShow = ship.modules.filter(m =>
+          m.kind === 'cannon' &&
+          Math.sin((m.localRot || 0) - aim) > 0
+        );
+      }
+    }
+
+    if (cannonsToShow.length === 0) return;
 
     this.ctx.save();
-
     const screenPos   = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
     this.ctx.translate(screenPos.x, screenPos.y);
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
 
-    for (const cannon of ship.modules) {
-      if (cannon.kind !== 'cannon') continue;
+    const cosR = Math.cos(ship.rotation);
+    const sinR = Math.sin(ship.rotation);
+
+    for (const cannon of cannonsToShow) {
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
-      // Show guide only for the cannon the local player is mounted to.
-      // Fall back to all cannons if the ID isn't known yet (e.g. before server confirmation).
-      if (this.playerAimingCannonId != null && cannon.id !== this.playerAimingCannonId) continue;
-
       const cannonData = cannon.moduleData;
-      const cx         = cannon.localPos.x;
-      const cy         = cannon.localPos.y;
-      const totalAngle = (cannon.localRot || 0) + (cannonData.aimDirection || 0);
 
-      // Barrel tip in ship-local space
+      const totalAngle = (cannon.localRot || 0) + (cannonData.aimDirection || 0);
+      const cx = cannon.localPos.x;
+      const cy = cannon.localPos.y;
+
       const barrelTipX = cx + 40 * Math.sin(totalAngle);
       const barrelTipY = cy - 40 * Math.cos(totalAngle);
-
-      // Unit fire direction in ship-local space
       const dirX = Math.sin(totalAngle);
       const dirY = -Math.cos(totalAngle);
-
-      // Cap guide at fireRange, but no more than 500 units for clarity
       const range = Math.min(cannonData.fireRange || 400, 500);
 
-      // ── Trajectory intersection check in world space ──
-      // Convert barrel tip and direction to world space
-      const cosR = Math.cos(ship.rotation);
-      const sinR = Math.sin(ship.rotation);
+      // Intersection check in world space
       const wBarrelX = ship.position.x + barrelTipX * cosR - barrelTipY * sinR;
       const wBarrelY = ship.position.y + barrelTipX * sinR + barrelTipY * cosR;
       const wDirX = dirX * cosR - dirY * sinR;
       const wDirY = dirX * sinR + dirY * cosR;
 
-      // Check if any OTHER ship's centre lies within ~80 units of the trajectory line
       let hitShip = false;
       for (const other of worldState.ships) {
         if (other.id === ship.id) continue;
         const dx = other.position.x - wBarrelX;
         const dy = other.position.y - wBarrelY;
-        const t  = dx * wDirX + dy * wDirY; // projection along trajectory
+        const t  = dx * wDirX + dy * wDirY;
         if (t < 0 || t > range) continue;
-        const perpDist = Math.abs(dx * wDirY - dy * wDirX);
-        if (perpDist < 80) { hitShip = true; break; }
+        if (Math.abs(dx * wDirY - dy * wDirX) < 80) { hitShip = true; break; }
       }
 
-      // Grey normally; yellow when a ship is in the line of fire
       const guideColor = hitShip ? '#FFD700' : '#AAAAAA';
 
-      // ── Dashed trajectory line — single uniform draw, no fade ──
+      // ── Dashed trajectory line ──
       this.ctx.save();
       this.ctx.globalAlpha = 0.80;
       this.ctx.strokeStyle = guideColor;
@@ -1093,44 +1109,36 @@ export class RenderSystem {
 
       // ── Range-bracket tick marks at 1/3 and 2/3 ──
       for (const frac of [1 / 3, 2 / 3]) {
-        const bx      = barrelTipX + dirX * range * frac;
-        const by      = barrelTipY + dirY * range * frac;
-        const perpX   = -dirY;
-        const perpY   =  dirX;
-        const tickLen = 7;
-
+        const bx    = barrelTipX + dirX * range * frac;
+        const by    = barrelTipY + dirY * range * frac;
+        const perpX = -dirY;
+        const perpY =  dirX;
         this.ctx.save();
         this.ctx.globalAlpha = 0.55;
         this.ctx.strokeStyle = guideColor;
         this.ctx.lineWidth   = 3.5;
         this.ctx.lineCap     = 'round';
         this.ctx.beginPath();
-        this.ctx.moveTo(bx - perpX * tickLen, by - perpY * tickLen);
-        this.ctx.lineTo(bx + perpX * tickLen, by + perpY * tickLen);
+        this.ctx.moveTo(bx - perpX * 7, by - perpY * 7);
+        this.ctx.lineTo(bx + perpX * 7, by + perpY * 7);
         this.ctx.stroke();
         this.ctx.restore();
       }
 
-      // ── Terminal reticle — 4-arc circle with gaps, hollow centre ──
-      const impactX  = barrelTipX + dirX * range;
-      const impactY  = barrelTipY + dirY * range;
-      const reticleR = 13;           // radius of the reticle ring
-      const arcSpan  = Math.PI * 0.44; // ~80° per arc
-      const gapHalf  = Math.PI * 0.06; // ~10° gap on each side
-
+      // ── Terminal reticle — 4 arcs, hollow centre ──
+      const impactX = barrelTipX + dirX * range;
+      const impactY = barrelTipY + dirY * range;
+      const arcSpan = Math.PI * 0.44;
+      const gapHalf = Math.PI * 0.06;
       this.ctx.save();
       this.ctx.globalAlpha = 0.75;
       this.ctx.strokeStyle = guideColor;
       this.ctx.lineWidth   = 3.5;
       this.ctx.lineCap     = 'round';
-
-      // Four arcs centred at 0, π/2, π, 3π/2
       for (let i = 0; i < 4; i++) {
         const centre = (Math.PI / 2) * i;
         this.ctx.beginPath();
-        this.ctx.arc(impactX, impactY, reticleR,
-          centre + gapHalf,
-          centre + arcSpan - gapHalf);
+        this.ctx.arc(impactX, impactY, 13, centre + gapHalf, centre + arcSpan - gapHalf);
         this.ctx.stroke();
       }
       this.ctx.restore();
