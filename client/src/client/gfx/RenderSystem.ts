@@ -10,7 +10,7 @@ import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer } from './EffectRenderer.js';
 import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING } from '../../sim/Types.js';
-import { ShipModule, createCompleteHullSegments, PlankSegment } from '../../sim/modules.js';
+import { ShipModule, createCompleteHullSegments, PlankSegment, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { ClientState } from '../ClientApplication.js';
 
@@ -2763,15 +2763,19 @@ export class RenderSystem {
       localY = dx * sin + dy * cos;
     }
 
-    // Validate placement
-    const MIN_MODULE_DIST = 40;
+    // Validate placement using geometry (OBB/circle) overlap — not a simple radius check
+    const rotRad = (rotationDeg * Math.PI) / 180;
+    const newKind = item === 'cannon' ? 'cannon' as const : 'mast' as const;
+    const newFp = getModuleFootprint(newKind);
     let overlaps = false;
     if (nearestShip) {
       for (const mod of nearestShip.modules) {
         if (mod.kind === 'plank' || mod.kind === 'deck') continue;
-        const ddx = mod.localPos.x - localX;
-        const ddy = mod.localPos.y - localY;
-        if (Math.sqrt(ddx * ddx + ddy * ddy) < MIN_MODULE_DIST) { overlaps = true; break; }
+        const existingFp = getModuleFootprint(mod.kind);
+        if (footprintsOverlap(newFp, localX, localY, rotRad,
+                              existingFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
+          overlaps = true; break;
+        }
       }
     }
     const sailMaxed = item === 'sail' &&
@@ -2785,7 +2789,6 @@ export class RenderSystem {
     const cameraRot = camera.getState().rotation;
     const shipRot = nearestShip?.rotation ?? 0;
 
-    const rotRad = (rotationDeg * Math.PI) / 180;
     const totalRot = shipRot - cameraRot + rotRad;
 
     this.ctx.save();

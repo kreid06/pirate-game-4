@@ -821,3 +821,89 @@ function createCurvedSegmentRange(
     t2: t2
   }];
 }
+
+// ─── Module geometry ──────────────────────────────────────────────────────────
+
+export type ModuleFootprint =
+  | { kind: 'box'; hw: number; hh: number }
+  | { kind: 'circle'; radius: number };
+
+/**
+ * Returns the bounding footprint for a module kind (ship-local units).
+ * Used for geometry-based overlap detection when placing modules.
+ */
+export function getModuleFootprint(kind: ModuleKind): ModuleFootprint {
+  switch (kind) {
+    case 'cannon':
+    case 'steering-wheel': return { kind: 'box', hw: 16, hh: 25 };
+    case 'mast':           return { kind: 'circle', radius: 16 };
+    case 'helm':           return { kind: 'box', hw: 14, hh: 14 };
+    case 'seat':           return { kind: 'box', hw: 10, hh: 10 };
+    case 'ladder':         return { kind: 'box', hw: 10, hh: 15 };
+    default:               return { kind: 'circle', radius: 10 };
+  }
+}
+
+/**
+ * Returns true if two module footprints (same 2-D space) overlap.
+ * @param margin extra clearance in pixels added uniformly to each footprint
+ */
+export function footprintsOverlap(
+  fp1: ModuleFootprint, x1: number, y1: number, rot1: number,
+  fp2: ModuleFootprint, x2: number, y2: number, rot2: number,
+  margin = 4
+): boolean {
+  if (fp1.kind === 'circle' && fp2.kind === 'circle') {
+    const dx = x2 - x1, dy = y2 - y1;
+    const r = fp1.radius + fp2.radius + margin;
+    return dx * dx + dy * dy < r * r;
+  }
+  if (fp1.kind === 'circle') {
+    const b = fp2 as { kind: 'box'; hw: number; hh: number };
+    return _circleBoxOverlap(x1, y1, fp1.radius + margin, x2, y2, b.hw, b.hh, rot2);
+  }
+  if (fp2.kind === 'circle') {
+    const b = fp1 as { kind: 'box'; hw: number; hh: number };
+    return _circleBoxOverlap(x2, y2, fp2.radius + margin, x1, y1, b.hw, b.hh, rot1);
+  }
+  // box vs box — separating axis theorem
+  const b1 = fp1 as { kind: 'box'; hw: number; hh: number };
+  const b2 = fp2 as { kind: 'box'; hw: number; hh: number };
+  return _obbOverlap(
+    x1, y1, b1.hw + margin / 2, b1.hh + margin / 2, rot1,
+    x2, y2, b2.hw + margin / 2, b2.hh + margin / 2, rot2
+  );
+}
+
+function _circleBoxOverlap(
+  cx: number, cy: number, r: number,
+  bx: number, by: number, hw: number, hh: number, bRot: number
+): boolean {
+  const cos = Math.cos(-bRot), sin = Math.sin(-bRot);
+  const dx = cx - bx, dy = cy - by;
+  const lx = dx * cos - dy * sin;
+  const ly = dx * sin + dy * cos;
+  const nearX = Math.max(-hw, Math.min(hw, lx));
+  const nearY = Math.max(-hh, Math.min(hh, ly));
+  return (lx - nearX) * (lx - nearX) + (ly - nearY) * (ly - nearY) < r * r;
+}
+
+function _obbOverlap(
+  ax: number, ay: number, ahw: number, ahh: number, aRot: number,
+  bx: number, by: number, bhw: number, bhh: number, bRot: number
+): boolean {
+  const cosA = Math.cos(aRot), sinA = Math.sin(aRot);
+  const cosB = Math.cos(bRot), sinB = Math.sin(bRot);
+  const axes: [number, number][] = [
+    [cosA, sinA], [-sinA, cosA],
+    [cosB, sinB], [-sinB, cosB],
+  ];
+  for (const [nx, ny] of axes) {
+    const pa = ax * nx + ay * ny;
+    const pb = bx * nx + by * ny;
+    const ra = Math.abs(ahw * (cosA * nx + sinA * ny)) + Math.abs(ahh * (-sinA * nx + cosA * ny));
+    const rb = Math.abs(bhw * (cosB * nx + sinB * ny)) + Math.abs(bhh * (-sinB * nx + cosB * ny));
+    if (Math.abs(pa - pb) > ra + rb) return false; // separating axis found
+  }
+  return true; // no separating axis → overlapping
+}

@@ -82,11 +82,6 @@ export class UIManager {
 
   /** Called when the player clicks a build item button (cannon/sail). */
   public onBuildItemSelect: ((item: 'cannon' | 'sail') => void) | null = null;
-
-  // Layout constants for build mode buttons (used by handleClick too)
-  private readonly BUILD_BTN_W = 120;
-  private readonly BUILD_BTN_H = 44;
-  private readonly BUILD_BTN_GAP = 10;
   
   constructor(_canvas: HTMLCanvasElement, config: ClientConfig) {
     this.config = config;
@@ -248,34 +243,10 @@ export class UIManager {
   /**
    * Test whether a click hits one of the build mode item buttons.
    * Returns true and fires the callback if so.
+   * (Buttons removed — item type is determined by hotbar. Kept as stub so
+   * handleClick can still check buildMode before other panels.)
    */
-  private handleBuildModeClick(x: number, y: number): boolean {
-    if (!this.buildModeState) return false;
-    const btnW = this.BUILD_BTN_W;
-    const btnH = this.BUILD_BTN_H;
-    const gap  = this.BUILD_BTN_GAP;
-
-    // Same layout as renderBuildPanel: two buttons centred horizontally, just below the top banner
-    const BANNER_H = 48;
-    const totalBtnW = btnW * 2 + gap;
-    // We need a canvas width reference — use window dimensions (no canvas ref here)
-    const cw = window.innerWidth;
-    const bx0 = Math.round((cw - totalBtnW) / 2);
-    const bx1 = bx0 + btnW + gap;
-    const by  = BANNER_H + 8;
-
-    if (y >= by && y <= by + btnH) {
-      if (x >= bx0 && x < bx0 + btnW) {
-        this.buildModeState = { ...this.buildModeState, selectedItem: 'cannon' };
-        if (this.onBuildItemSelect) this.onBuildItemSelect('cannon');
-        return true;
-      }
-      if (x >= bx1 && x < bx1 + btnW) {
-        this.buildModeState = { ...this.buildModeState, selectedItem: 'sail' };
-        if (this.onBuildItemSelect) this.onBuildItemSelect('sail');
-        return true;
-      }
-    }
+  private handleBuildModeClick(_x: number, _y: number): boolean {
     return false;
   }
 
@@ -330,19 +301,18 @@ export class UIManager {
     ctx.save();
 
     // ================================================================
-    // 1) TOP BANNER — vivid amber, clearly not repair-mode (repair is teal/blue)
+    // 1) TOP BANNER — amber, clearly not repair-mode (repair is teal/blue)
+    //    Shows which item is selected (comes from hotbar, not a button).
     // ================================================================
     const BANNER_H = 48;
     const cw = canvas.width;
 
-    // Amber-gold gradient banner
     const bannerGrad = ctx.createLinearGradient(0, 0, 0, BANNER_H);
     bannerGrad.addColorStop(0, '#c87800');
     bannerGrad.addColorStop(1, '#7a4800');
     ctx.fillStyle = bannerGrad;
     ctx.fillRect(0, 0, cw, BANNER_H);
 
-    // Bottom edge glow
     ctx.strokeStyle = '#ffcc44';
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -350,61 +320,20 @@ export class UIManager {
     ctx.lineTo(cw, BANNER_H);
     ctx.stroke();
 
-    // Banner text  
+    const itemLabel = selectedItem === 'cannon'
+      ? '🔫 CANNON'
+      : `⛵ SAIL (${sailCount}/${maxSails})`;
     ctx.font = 'bold 22px Consolas, monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff8e0';
-    ctx.fillText('⚒  BUILD MODE  —  [B] Exit  |  [R] Rotate  |  [Click] Place', cw / 2, BANNER_H / 2);
+    ctx.fillText(
+      `⚒  BUILD MODE — ${itemLabel}  |  [B] Exit  |  [R] Rotate  |  [Click] Place`,
+      cw / 2, BANNER_H / 2
+    );
 
     // ================================================================
-    // 2) ITEM SELECTION PANEL — two buttons below the banner
-    // ================================================================
-    const btnW = this.BUILD_BTN_W;
-    const btnH = this.BUILD_BTN_H;
-    const gap  = this.BUILD_BTN_GAP;
-    const totalBtnW = btnW * 2 + gap;
-    const bx0 = Math.round((cw - totalBtnW) / 2);
-    const bx1 = bx0 + btnW + gap;
-    const by  = BANNER_H + 8;
-
-    const sailMaxed = sailCount >= maxSails;
-
-    // Draw each button
-    const buttons: Array<{ x: number; label: string; key: 'cannon' | 'sail'; disabled?: boolean }> = [
-      { x: bx0, label: `🔫  CANNON`,        key: 'cannon' },
-      { x: bx1, label: `⛵  SAIL (${sailCount}/${maxSails})`, key: 'sail', disabled: sailMaxed },
-    ];
-
-    for (const btn of buttons) {
-      const isSelected = selectedItem === btn.key;
-      const isDisabled = !!btn.disabled;
-
-      // Background
-      if (isDisabled) {
-        ctx.fillStyle = 'rgba(80,20,20,0.85)';
-      } else if (isSelected) {
-        ctx.fillStyle = 'rgba(200,130,0,0.90)';
-      } else {
-        ctx.fillStyle = 'rgba(30,30,50,0.85)';
-      }
-      ctx.fillRect(btn.x, by, btnW, btnH);
-
-      // Border
-      ctx.strokeStyle = isDisabled ? '#772222' : isSelected ? '#ffcc44' : '#556';
-      ctx.lineWidth   = isSelected ? 2.5 : 1.5;
-      ctx.strokeRect(btn.x, by, btnW, btnH);
-
-      // Label
-      ctx.font = isSelected ? 'bold 15px Consolas, monospace' : '14px Consolas, monospace';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = isDisabled ? '#aa4444' : isSelected ? '#fff8e0' : '#aaa';
-      ctx.fillText(btn.label, btn.x + btnW / 2, by + btnH / 2);
-    }
-
-    // ================================================================
-    // 3) ROTATION DIAL — above the hotbar, centered
+    // 2) ROTATION DIAL — above the hotbar, centered
     // ================================================================
     this.renderRotationDial(ctx, canvas, rotationDeg);
 

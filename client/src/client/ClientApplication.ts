@@ -30,7 +30,7 @@ import { AudioManager } from './audio/AudioManager.js';
 import { WorldState, Ship, InputFrame } from '../sim/Types.js';
 import { createEmptyInventory } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
-import { ModuleUtils, ShipModule } from '../sim/modules.js';
+import { ModuleUtils, ShipModule, getModuleFootprint, footprintsOverlap } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
 
 /**
@@ -74,6 +74,9 @@ export class ClientApplication {
   private explicitBuildMode = false;
   private buildSelectedItem: 'cannon' | 'sail' = 'cannon';
   private buildRotationDeg = 0;
+  // Optimistic modules placed locally, keyed by ship ID, with expiry timestamp.
+  // Overlaid on top of worldToRender every frame so they appear in online mode.
+  private localPendingModules = new Map<number, { module: ShipModule; expiry: number }[]>();
   
   // Timing
   private running = false;
@@ -341,17 +344,29 @@ export class ClientApplication {
       };
 
       // Explicit build mode toggle (B key)
+      // Only activates when a buildable item (cannon / sail) is in the active hotbar slot.
+      // The active item determines what will be placed — no separate button needed.
       this.inputManager.onBuildModeToggle = () => {
-        this.explicitBuildMode = !this.explicitBuildMode;
         if (!this.explicitBuildMode) {
-          // Reset when exiting
+          // Entering build mode — check that a buildable item is selected
+          const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+          const playerId = this.networkManager?.getAssignedPlayerId();
+          const player = ws?.players.find(p => p.id === playerId);
+          const activeSlot = player?.inventory?.activeSlot ?? 0;
+          const activeItem = player?.inventory?.slots[activeSlot]?.item ?? 'none';
+          if (activeItem !== 'cannon' && activeItem !== 'sail') {
+            console.log('🔨 [BUILD MODE] Cannot enter — no buildable item selected (need cannon or sail)');
+            return;
+          }
+          this.buildSelectedItem = activeItem as 'cannon' | 'sail';
+        } else {
+          // Exiting — reset rotation
           this.buildRotationDeg = 0;
-          this.buildSelectedItem = 'cannon';
         }
-        // In explicit build mode, buildMode flag must be true so clicks are routed to onBuildPlace
+        this.explicitBuildMode = !this.explicitBuildMode;
         this.inputManager.buildMode = this.explicitBuildMode || this.inputManager.buildMode;
         this.syncBuildModeState();
-        console.log(`🔨 [BUILD MODE] ${this.explicitBuildMode ? 'ENTERED' : 'EXITED'}`);
+        console.log(`🔨 [BUILD MODE] ${this.explicitBuildMode ? `ENTERED (${this.buildSelectedItem})` : 'EXITED'}`);
       };
 
       // Build rotation (R key in explicit build mode)
@@ -598,6 +613,32 @@ export class ClientApplication {
       }
     }
     
+    // Overlay any locally-placed optimistic modules (needed in online mode where
+    // worldToRender comes from the interpolation engine and wouldn't include them)
+    if (worldToRender && this.localPendingModules.size > 0) {
+      const now = Date.now();
+      let anyPending = false;
+      const overlaid = worldToRender.ships.map(ship => {
+        let entries = this.localPendingModules.get(ship.id);
+        if (!entries) return ship;
+        // Expire old entries
+        entries = entries.filter(e => e.expiry > now);
+        if (entries.length === 0) { this.localPendingModules.delete(ship.id); return ship; }
+        this.localPendingModules.set(ship.id, entries);
+        anyPending = true;
+        // Don't add duplicates — skip if server already sent a module at same spot
+        const newMods = entries
+          .map(e => e.module)
+          .filter(pm => !ship.modules.some(m =>
+            Math.abs(m.localPos.x - pm.localPos.x) < 5 &&
+            Math.abs(m.localPos.y - pm.localPos.y) < 5
+          ));
+        if (newMods.length === 0) return ship;
+        return { ...ship, modules: [...ship.modules, ...newMods] };
+      });
+      if (anyPending) worldToRender = { ...worldToRender, ships: overlaid };
+    }
+
     if (!worldToRender) {
       // Render loading/connection screen
       this.renderSystem.renderLoadingScreen(this.state, this.camera);
@@ -771,10 +812,29 @@ export class ClientApplication {
     const inMastBuildMode   = activeItem === 'sail';
     const inHelmBuildMode   = activeItem === 'helm_kit';
 
-    this.renderSystem.setBuildMode(inBuildMode);
-    this.renderSystem.setCannonBuildMode(inCannonBuildMode);
-    this.renderSystem.setMastBuildMode(inMastBuildMode);
-    this.renderSystem.setHelmBuildMode(inHelmBuildMode);
+    // Track whether the active item changed while in explicit build mode
+    if (this.explicitBuildMode) {
+      if (activeItem === 'cannon' || activeItem === 'sail') {
+        // Keep item type in sync with hotbar
+        if (this.buildSelectedItem !== activeItem) {
+          this.buildSelectedItem = activeItem;
+          this.syncBuildModeState();
+        }
+      } else {
+        // Player switched to a non-buildable item — auto-exit build mode
+        this.explicitBuildMode = false;
+        this.buildRotationDeg = 0;
+        this.syncBuildModeState();
+        console.log('🔨 [BUILD MODE] EXITED (item changed)');
+      }
+    }
+
+    // When explicit build mode is active, suppress the old snap-point ghost modes
+    // so they don't render confusingly alongside the free-placement ghost.
+    this.renderSystem.setBuildMode(!this.explicitBuildMode && inBuildMode);
+    this.renderSystem.setCannonBuildMode(!this.explicitBuildMode && inCannonBuildMode);
+    this.renderSystem.setMastBuildMode(!this.explicitBuildMode && inMastBuildMode);
+    this.renderSystem.setHelmBuildMode(!this.explicitBuildMode && inHelmBuildMode);
     this.inputManager.buildMode = this.explicitBuildMode || inBuildMode || inCannonBuildMode || inMastBuildMode || inHelmBuildMode;
   }
 
@@ -840,19 +900,20 @@ export class ClientApplication {
     const localX = dx * cos - dy * sin;
     const localY = dx * sin + dy * cos;
 
-    // Check for overlap with existing non-plank, non-deck modules
-    const MIN_DIST = 40;
+    const rotationRad = (this.buildRotationDeg * Math.PI) / 180;
+
+    // Geometry-based overlap check against existing non-plank, non-deck modules
+    const newKind = this.buildSelectedItem === 'cannon' ? 'cannon' as const : 'mast' as const;
+    const newFp = getModuleFootprint(newKind);
     for (const mod of nearestShip.modules) {
       if (mod.kind === 'plank' || mod.kind === 'deck') continue;
-      const ddx = mod.localPos.x - localX;
-      const ddy = mod.localPos.y - localY;
-      if (Math.sqrt(ddx * ddx + ddy * ddy) < MIN_DIST) {
+      const existingFp = getModuleFootprint(mod.kind);
+      if (footprintsOverlap(newFp, localX, localY, rotationRad,
+                            existingFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
         console.log(`❌ [BUILD] Placement blocked: overlaps ${mod.kind} at (${mod.localPos.x.toFixed(0)}, ${mod.localPos.y.toFixed(0)})`);
         return;
       }
     }
-
-    const rotationRad = (this.buildRotationDeg * Math.PI) / 180;
 
     // Optimistically add the module to all local world states so it appears immediately.
     // In online mode the server's next authoritative tick will include (or exclude) it.
@@ -868,6 +929,10 @@ export class ClientApplication {
         const s = state?.ships.find(sh => sh.id === shipRef.id);
         if (s) s.modules.push(newCannon);
       }
+      // Also overlay onto interpolated / any worldToRender source
+      const pending = this.localPendingModules.get(shipRef.id) ?? [];
+      pending.push({ module: newCannon, expiry: Date.now() + 5000 });
+      this.localPendingModules.set(shipRef.id, pending);
       this.networkManager.sendPlaceCannonAt(shipRef.id, localX, localY, rotationRad);
     } else {
       // Sail — check for max 3 masts
@@ -882,6 +947,10 @@ export class ClientApplication {
         const s = state?.ships.find(sh => sh.id === shipRef.id);
         if (s) s.modules.push(newMast);
       }
+      // Also overlay onto interpolated / any worldToRender source
+      const pending = this.localPendingModules.get(shipRef.id) ?? [];
+      pending.push({ module: newMast, expiry: Date.now() + 5000 });
+      this.localPendingModules.set(shipRef.id, pending);
       this.networkManager.sendPlaceMastAt(shipRef.id, localX, localY);
     }
   }
