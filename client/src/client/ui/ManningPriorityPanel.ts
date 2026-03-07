@@ -283,13 +283,6 @@ export class ManningPriorityPanel {
     const totalAssigned = Array.from(this.assignedCounts.values()).reduce((a, b) => a + b, 0);
     if (totalAssigned >= shipNpcs.length) return;
 
-    // For role-specific tasks, cap at the number of matching-role NPCs on the ship
-    const preferRole = TASK_PREFERRED_ROLE[task];
-    if (preferRole !== 0) {
-      const roleCount = shipNpcs.filter(n => n.role === preferRole).length;
-      if ((this.assignedCounts.get(task) ?? 0) >= roleCount) return;
-    }
-
     this.assignedCounts.set(task, (this.assignedCounts.get(task) ?? 0) + 1);
     this.notifyAssignment();
   }

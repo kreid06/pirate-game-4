@@ -1504,24 +1504,43 @@ static uint32_t spawn_ship_rigger(uint32_t ship_id, const char* name, uint32_t m
 }
 
 /* ============================================================================
- * NPC CANNON SECTOR-OF-FIRE SYSTEM
+ * NPC CANNON PRIORITY SYSTEM
  *
- * Dispatches on-duty gunners (wants_cannon=true) to the cannons that fall
- * within the player's aimed sector.  Priority = closest to the aim angle.
+ * All cannons on the ship are ranked by angular distance from the player's
+ * aim angle (closest = highest priority).  There is NO arc cutoff — even a
+ * cannon pointing straight aft gets ranked, just last.  On-duty gunners
+ * (wants_cannon=true) are always assigned to the N closest cannons.
  *
- * Called from:
- *   handle_cannon_aim()  — when the aimed half-plane changes
- *   handle_crew_assign() — when a gunner is added to or removed from duty
+ * Hysteresis: a gunner won't swap cannons unless the candidate is at least
+ * SWAP_HYSTERESIS radians closer than their current cannon, preventing
+ * constant jitter as the player micro-adjusts aim.
  * ============================================================================*/
-#define SECTOR_HALF_ANGLE (75.0f * ((float)M_PI / 180.0f))   /* ±75° arc */
+#define SWAP_HYSTERESIS (10.0f * ((float)M_PI / 180.0f))  /* 10° dead-band */
+
+/* Walk a gunner to the given cannon module. */
+static void dispatch_gunner_to_cannon(WorldNpc* npc, SimpleShip* ship,
+                                      uint32_t cannon_id, float abs_diff_deg) {
+    ShipModule* cannon = find_module_by_id(ship, cannon_id);
+    if (!cannon) return;
+    float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
+    float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
+    float barrel_angle = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
+    const float CANNON_MOUNT_DIST = 25.0f;
+    npc->assigned_cannon_id = cannon_id;
+    npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
+    npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
+    npc->state              = WORLD_NPC_STATE_MOVING;
+    log_info("🔫 NPC %u (%s) → cannon %u (%.0f° off aim)",
+             npc->id, npc->name, cannon_id, abs_diff_deg);
+}
 
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
     if (!ship) return;
 
-    /* ─ Step 1: collect and sort cannons in the aimed sector (closest first) ─ */
-    uint32_t sector_ids [MAX_MODULES_PER_SHIP];
-    float    sector_diff[MAX_MODULES_PER_SHIP];
-    int      sector_count = 0;
+    /* ─ Step 1: rank ALL cannons by angular distance from aim (no cutoff) ─ */
+    uint32_t sorted_ids [MAX_MODULES_PER_SHIP];
+    float    sorted_diff[MAX_MODULES_PER_SHIP]; /* absolute angle diff, radians */
+    int      cannon_count = 0;
 
     for (int m = 0; m < ship->module_count; m++) {
         ShipModule* mod = &ship->modules[m];
@@ -1531,80 +1550,77 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
         float diff = aim_angle - fire_dir;
         while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
         while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
-        if (fabsf(diff) > SECTOR_HALF_ANGLE) continue;
-
-        /* Insertion sort: low |diff| (most on-target) first = highest priority */
         float abs_diff = fabsf(diff);
-        int pos = sector_count;
-        while (pos > 0 && sector_diff[pos - 1] > abs_diff) {
-            sector_ids [pos] = sector_ids [pos - 1];
-            sector_diff[pos] = sector_diff[pos - 1];
+
+        /* Insertion sort: smallest diff first */
+        int pos = cannon_count;
+        while (pos > 0 && sorted_diff[pos - 1] > abs_diff) {
+            sorted_ids [pos] = sorted_ids [pos - 1];
+            sorted_diff[pos] = sorted_diff[pos - 1];
             pos--;
         }
-        sector_ids [pos] = mod->id;
-        sector_diff[pos] = abs_diff;
-        sector_count++;
+        sorted_ids [pos] = mod->id;
+        sorted_diff[pos] = abs_diff;
+        cannon_count++;
     }
+    if (cannon_count == 0) return;
 
-    /* ─ Step 2: free gunners whose assigned cannon left the sector ─ */
+    /* ─ Step 2: for each on-duty gunner, move them if a significantly closer
+     *           cannon is available (hysteresis prevents jitter) ─ */
     for (int i = 0; i < world_npc_count; i++) {
         WorldNpc* npc = &world_npcs[i];
         if (!npc->active || npc->ship_id != ship->ship_id) continue;
         if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
-        if (npc->assigned_cannon_id == 0) continue;
-        bool in_sector = false;
-        for (int c = 0; c < sector_count; c++)
-            if (sector_ids[c] == npc->assigned_cannon_id) { in_sector = true; break; }
-        if (!in_sector) npc->assigned_cannon_id = 0; /* re-dispatch below */
-    }
 
-    /* ─ Step 3: fill empty sector cannons in priority order ─ */
-    for (int c = 0; c < sector_count; c++) {
-        uint32_t cid = sector_ids[c];
-        bool occupied = false;
-        for (int i = 0; i < world_npc_count; i++) {
-            WorldNpc* npc = &world_npcs[i];
-            if (!npc->active || npc->ship_id != ship->ship_id) continue;
-            if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
-            if (npc->assigned_cannon_id == cid) { occupied = true; break; }
+        /* Find a locked preference first */
+        if (npc->port_cannon_id != 0) {
+            if (npc->assigned_cannon_id != npc->port_cannon_id) {
+                float diff_deg = 0.0f;
+                for (int c = 0; c < cannon_count; c++)
+                    if (sorted_ids[c] == npc->port_cannon_id)
+                        { diff_deg = sorted_diff[c] * 180.0f / (float)M_PI; break; }
+                dispatch_gunner_to_cannon(npc, ship, npc->port_cannon_id, diff_deg);
+            }
+            continue;
         }
-        if (occupied) continue;
 
-        for (int i = 0; i < world_npc_count; i++) {
-            WorldNpc* npc = &world_npcs[i];
-            if (!npc->active || npc->ship_id != ship->ship_id) continue;
-            if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
-            if (npc->assigned_cannon_id != 0) continue; /* already dispatched */
-            ShipModule* cannon = find_module_by_id(ship, cid);
-            if (!cannon) break;
-            float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
-            float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
-            float barrel_angle = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
-            const float CANNON_MOUNT_DIST = 25.0f;
-            npc->assigned_cannon_id = cid;
-            npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
-            npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
-            npc->state              = WORLD_NPC_STATE_MOVING;
-            log_info("🔫 NPC %u (%s) → cannon %u (%.0f° off aim)",
-                     npc->id, npc->name, cid,
-                     sector_diff[c] * 180.0f / (float)M_PI);
-            break;
+        /* Find the closest cannon not already assigned to someone else */
+        uint32_t best_id   = 0;
+        float    best_diff = (float)M_PI * 2.0f;
+        for (int c = 0; c < cannon_count; c++) {
+            uint32_t cid = sorted_ids[c];
+            /* Check if another on-duty gunner (not this one) already holds it */
+            bool taken = false;
+            for (int j = 0; j < world_npc_count; j++) {
+                if (j == i) continue;
+                WorldNpc* other = &world_npcs[j];
+                if (!other->active || other->ship_id != ship->ship_id) continue;
+                if (other->role != NPC_ROLE_GUNNER || !other->wants_cannon) continue;
+                if (other->assigned_cannon_id == cid) { taken = true; break; }
+            }
+            if (!taken) { best_id = cid; best_diff = sorted_diff[c]; break; }
         }
+        if (best_id == 0) continue; /* no free cannon */
+
+        /* Only move if not already there AND (unassigned OR new cannon is
+         * meaningfully closer than the current one) */
+        if (npc->assigned_cannon_id == best_id) continue;
+
+        float current_diff = (float)M_PI * 2.0f;
+        for (int c = 0; c < cannon_count; c++)
+            if (sorted_ids[c] == npc->assigned_cannon_id)
+                { current_diff = sorted_diff[c]; break; }
+
+        if (npc->assigned_cannon_id != 0 &&
+            current_diff - best_diff < SWAP_HYSTERESIS) continue;
+
+        dispatch_gunner_to_cannon(npc, ship, best_id,
+                                  best_diff * 180.0f / (float)M_PI);
     }
 
-    /* ─ Step 4: on-duty gunners with no cannon in sector → standby at centre ─ */
-    for (int i = 0; i < world_npc_count; i++) {
-        WorldNpc* npc = &world_npcs[i];
-        if (!npc->active || npc->ship_id != ship->ship_id) continue;
-        if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
-        if (npc->assigned_cannon_id != 0) continue;
-        npc->target_local_x = 0.0f;
-        npc->target_local_y = 0.0f;
-        npc->state = WORLD_NPC_STATE_MOVING;
-    }
-
-    log_info("⚓ Ship %u sector update: aim=%.0f°, %d cannon(s) in sector",
-             ship->ship_id, aim_angle * 180.0f / (float)M_PI, sector_count);
+    log_info("⚓ Ship %u priority dispatch: aim=%.0f°, top cannon %u (%.0f° off)",
+             ship->ship_id, aim_angle * 180.0f / (float)M_PI,
+             sorted_ids[0], sorted_diff[0] * 180.0f / (float)M_PI);
 }
 
 /**
@@ -1678,12 +1694,14 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
     while (player->cannon_aim_angle_relative > M_PI) player->cannon_aim_angle_relative -= 2.0f * M_PI;
     while (player->cannon_aim_angle_relative < -M_PI) player->cannon_aim_angle_relative += 2.0f * M_PI;
 
-    /* Update sector-of-fire dispatch when the aimed half-plane changes */
+    /* Update cannon priority dispatch on any meaningful aim change (>3°) */
     {
-        uint8_t aimed_side = (sinf(player->cannon_aim_angle_relative) > 0.0f) ? 0 : 1;
-        uint8_t prev_side  = (sinf(ship->active_aim_angle)              > 0.0f) ? 0 : 1;
+        float prev = ship->active_aim_angle;
         ship->active_aim_angle = player->cannon_aim_angle_relative;
-        if (aimed_side != prev_side) {
+        float delta = ship->active_aim_angle - prev;
+        while (delta >  (float)M_PI) delta -= 2.0f * (float)M_PI;
+        while (delta < -(float)M_PI) delta += 2.0f * (float)M_PI;
+        if (fabsf(delta) > (3.0f * (float)M_PI / 180.0f)) {
             update_npc_cannon_sector(ship, ship->active_aim_angle);
         }
     }
