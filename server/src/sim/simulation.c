@@ -716,16 +716,7 @@ static void update_player_physics(struct Player* player, struct Sim* sim, q16_t 
 static void update_projectile_physics(struct Projectile* projectile, q16_t dt) {
     if (!projectile) return;
     
-    // Apply gravity
-    Vec2Q16 gravity_acc = {0, GRAVITY_Q16};
-    projectile->velocity = vec2_add(projectile->velocity, 
-                                   vec2_mul_scalar(gravity_acc, dt));
-    
-    // Apply air friction
-    q16_t air_friction = Q16_FROM_FLOAT(0.999f);
-    projectile->velocity = vec2_mul_scalar(projectile->velocity, air_friction);
-    
-    // Integrate position
+    // Integrate position (straight-line travel — no gravity in top-down view)
     Vec2Q16 displacement = vec2_mul_scalar(projectile->velocity, dt);
     projectile->position = vec2_add(projectile->position, displacement);
 }

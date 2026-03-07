@@ -1175,6 +1175,7 @@ static ShipModule* find_module_on_ship(SimpleShip* ship, uint32_t module_id) {
  * Aim a specific cannon on a ship toward a world-space target (CLIENT pixel coords).
  * Sets aim_direction on both SimpleShip and sim-ship cannon modules.
  */
+__attribute__((unused))
 static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float target_x, float target_y) {
     const float CANNON_AIM_RANGE = 30.0f * (float)(M_PI / 180.0);
 
@@ -1253,8 +1254,6 @@ static void tick_npc_agents(float dt) {
                 }
                 if (!npc_at_cannon) break;
 
-                // Point the cannon toward the target ship's current position
-                npc_aim_cannon_at_world(ship, module, target->x, target->y);
                 break;
             }
 
