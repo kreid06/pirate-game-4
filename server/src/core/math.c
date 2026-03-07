@@ -125,8 +125,8 @@ q16_t q16_sin(q16_t angle) {
     }
     
     // Convert to table index
-    q32_t index_q32 = ((q32_t)angle * TRIG_TABLE_SIZE) / Q16_FROM_FLOAT(2.0f * M_PI);
-    int index = (int)(index_q32 >> 16);
+    // Note: (Q16_angle * integer) / Q16_2pi cancels the Q16 scaling → plain integer [0, 1023]
+    int index = (int)(((q32_t)angle * TRIG_TABLE_SIZE) / Q16_FROM_FLOAT(2.0f * M_PI));
     
     // Clamp to valid range
     if (index >= TRIG_TABLE_SIZE) index = TRIG_TABLE_SIZE - 1;
@@ -149,10 +149,10 @@ q16_t q16_cos(q16_t angle) {
     }
     
     // Convert to table index
-    q32_t index_q32 = ((q32_t)angle * TRIG_TABLE_SIZE) / Q16_FROM_FLOAT(2.0f * M_PI);
-    int index = (int)(index_q32 >> 16);
+    // Note: (Q16_angle * integer) / Q16_2pi cancels the Q16 scaling → plain integer [0, 1023]
+    int index = (int)(((q32_t)angle * TRIG_TABLE_SIZE) / Q16_FROM_FLOAT(2.0f * M_PI));
     
-    // Clamp to valid range  
+    // Clamp to valid range
     if (index >= TRIG_TABLE_SIZE) index = TRIG_TABLE_SIZE - 1;
     if (index < 0) index = 0;
     
