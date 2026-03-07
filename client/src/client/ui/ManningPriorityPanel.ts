@@ -54,6 +54,8 @@ export class ManningPriorityPanel {
 
   // npcId → task name for the most-recently rendered frame (fed to RenderSystem for NPC colours)
   private lastTaskMap: Map<number, string> = new Map();
+  // npcId → task last SENT to the server (delta tracking — prevents re-sending unchanged assignments)
+  private lastSentAssignment: Map<number, string> = new Map();
   private _currentShipId = 0;
   private _currentNpcs: Npc[] = [];
 
@@ -101,6 +103,10 @@ export class ManningPriorityPanel {
     if (shipId === 0) return; // Not on a ship — nothing to manage
 
     // Store shipId + npcs for use in action callbacks
+    if (this._currentShipId !== shipId) {
+      // Ship changed — clear stale sent-assignment cache so the new ship gets a full sync
+      this.lastSentAssignment.clear();
+    }
     this._currentShipId = shipId;
     this._currentNpcs = npcs;
 
@@ -129,14 +135,10 @@ export class ManningPriorityPanel {
     ctx.textBaseline = 'middle';
     ctx.fillText('CREW PRIORITY', px + pw / 2, py + HEADER_H / 2);
 
-    // ---- NPC pool: sort available first, then by ID ----
+    // ---- NPC pool: sort by ID (stable — prevents active NPCs from being displaced on re-compute) ----
     const shipNpcs = npcs
       .filter(n => n.shipId === shipId)
-      .sort((a, b) => {
-        const aAvail = a.state !== NPC_STATE_AT_CANNON ? 0 : 1;
-        const bAvail = b.state !== NPC_STATE_AT_CANNON ? 0 : 1;
-        return aAvail !== bAvail ? aAvail - bAvail : a.id - b.id;
-      });
+      .sort((a, b) => a.id - b.id);
 
     const assignments = this.computeAssignments(shipNpcs);
 
@@ -291,27 +293,37 @@ export class ManningPriorityPanel {
 
   private notifyAssignment(): void {
     if (!this.onAssignmentChanged || this._currentShipId === 0) return;
+    // Use the same stable ID-only sort so computed assignments match the displayed panel
     const shipNpcs = this._currentNpcs
       .filter(n => n.shipId === this._currentShipId)
-      .sort((a, b) => {
-        const aAvail = a.state !== NPC_STATE_AT_CANNON ? 0 : 1;
-        const bAvail = b.state !== NPC_STATE_AT_CANNON ? 0 : 1;
-        return aAvail !== bAvail ? aAvail - bAvail : a.id - b.id;
-      });
+      .sort((a, b) => a.id - b.id);
     const assignments = this.computeAssignments(shipNpcs);
+
+    // Only send assignments that CHANGED since the last send (delta) to avoid
+    // displacing active NPCs with re-sent conflicting instructions.
     const out: Array<{ npcId: number; task: string }> = [];
     const assigned = new Set<number>();
     for (const [task, npcs] of assignments) {
       for (const npc of npcs) {
-        out.push({ npcId: npc.id, task });
+        if (this.lastSentAssignment.get(npc.id) !== task) {
+          out.push({ npcId: npc.id, task });
+          this.lastSentAssignment.set(npc.id, task);
+        }
         assigned.add(npc.id);
       }
     }
-    // Unassigned NPCs get task "Idle"
+    // Unassigned NPCs get task "Idle" — only send if previously had a different task
     for (const npc of shipNpcs) {
-      if (!assigned.has(npc.id)) out.push({ npcId: npc.id, task: 'Idle' });
+      if (!assigned.has(npc.id)) {
+        if (this.lastSentAssignment.get(npc.id) !== 'Idle') {
+          out.push({ npcId: npc.id, task: 'Idle' });
+          this.lastSentAssignment.set(npc.id, 'Idle');
+        }
+      }
     }
-    this.onAssignmentChanged(this._currentShipId, out);
+    if (out.length > 0) {
+      this.onAssignmentChanged(this._currentShipId, out);
+    }
   }
 
   private drawArrowBtn(

@@ -1193,6 +1193,7 @@ static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float wo
 static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired);
 static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task);
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle);
+static void dismount_npc(WorldNpc* npc, SimpleShip* ship);
 
 /**
  * Find a module on a SimpleShip by module ID.
@@ -1258,8 +1259,28 @@ static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float 
  * task == "Sails"   → become RIGGER, walk to the next free mast
  * task == "Cannons" → become GUNNER,  sector system places at closest cannon
  * task == "Combat"  → same as Cannons
- * anything else     → become NONE,    walk to deck centre
+ * anything else     → become NONE,    walk back to idle spawn position
  */
+
+/* Dismount the NPC from whatever module/role it currently holds, freeing that
+ * slot for other crew.  Does NOT set a new target or role — caller does that. */
+static void dismount_npc(WorldNpc* npc, SimpleShip* ship) {
+    if (npc->role == NPC_ROLE_GUNNER) {
+        npc->wants_cannon       = false;
+        npc->assigned_cannon_id = 0;
+        /* Re-run sector so remaining gunners can claim the vacated cannon */
+        if (ship) update_npc_cannon_sector(ship, ship->active_aim_angle);
+
+    } else if (npc->role == NPC_ROLE_RIGGER) {
+        /* Free the mast — clear id so is_mast_manned() returns false immediately */
+        npc->assigned_cannon_id = 0;
+        npc->port_cannon_id     = 0;
+        npc->starboard_cannon_id= 0;
+    }
+    npc->role  = NPC_ROLE_NONE;
+    npc->state = WORLD_NPC_STATE_MOVING; /* will be overridden by caller if needed */
+}
+
 static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task) {
     SimpleShip* ship = find_ship(ship_id);
     if (!ship) return;
@@ -1276,9 +1297,8 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
         return;
     }
 
-    /* Clear previous role state before applying new assignment */
-    npc->wants_cannon       = false;
-    npc->assigned_cannon_id = 0;
+    /* Dismount from current module before applying new role */
+    dismount_npc(npc, ship);
 
     bool want_sails   = (strncmp(task, "Sails",   5) == 0);
     bool want_cannons = (strncmp(task, "Cannons", 7) == 0 || strncmp(task, "Combat", 6) == 0);
@@ -1328,13 +1348,14 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
         log_info("🔫 NPC %u (%s) → GUNNER, sector dispatch issued", npc->id, npc->name);
 
     } else {
-        /* Stand down — return to crew pool */
+        /* Stand down — return to crew pool at spawn-time idle position */
         npc->role           = NPC_ROLE_NONE;
-        npc->target_local_x = 0.0f;
-        npc->target_local_y = 0.0f;
+        npc->target_local_x = npc->idle_local_x;
+        npc->target_local_y = npc->idle_local_y;
         npc->state          = WORLD_NPC_STATE_MOVING;
         update_npc_cannon_sector(ship, ship->active_aim_angle);
-        log_info("💤 NPC %u (%s) → IDLE (task=%s)", npc->id, npc->name, task);
+        log_info("💤 NPC %u (%s) → IDLE, returning to spawn pos (%.0f, %.0f)",
+                 npc->id, npc->name, npc->idle_local_x, npc->idle_local_y);
         return;
     }
     /* NOTE: sail openness is NOT changed here; it is player-controlled only. */
@@ -1448,6 +1469,8 @@ static uint32_t spawn_ship_crew(uint32_t ship_id, const char* name) {
     int slot_idx = (int)(npc->id % 9);
     npc->local_x        = -200.0f + slot_idx * 50.0f;
     npc->local_y        = 0.0f;
+    npc->idle_local_x   = npc->local_x;   /* remembered for life */
+    npc->idle_local_y   = npc->local_y;
     npc->target_local_x = npc->local_x;
     npc->target_local_y = npc->local_y;
     ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);

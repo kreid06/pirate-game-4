@@ -109,6 +109,8 @@ typedef struct WorldNpc {
     WorldNpcState state;
     float         target_local_x;
     float         target_local_y;
+    float         idle_local_x;   // Spawn-time resting position (returned to when idle)
+    float         idle_local_y;
     float         move_speed; // Client units / second (default 80)
 
     float         interact_radius;
