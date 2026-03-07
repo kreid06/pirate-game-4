@@ -615,9 +615,16 @@ export class ClientApplication {
         // Only update if mount state actually changed
         if (currentlyMounted !== this.previousMountState) {
           if (currentlyMounted) {
-            // Player is now mounted - enable ship controls
+            // Player is now mounted - enable controls
             console.log(`⚓ [MOUNT STATE] Server says player is mounted to module ${player.mountedModuleId}`);
-            this.inputManager.setMountState(true, player.carrierId);
+            // Look up the module kind from the ship
+            let moduleKind = 'helm'; // default fallback
+            const ship = worldState.ships.find(s => s.id === player.carrierId);
+            if (ship && player.mountedModuleId) {
+              const mod = ship.modules.find(m => m.id === player.mountedModuleId);
+              if (mod) moduleKind = mod.kind.toLowerCase();
+            }
+            this.inputManager.setMountState(true, player.carrierId, moduleKind);
           } else {
             // Player is now dismounted - disable ship controls
             console.log(`⚓ [MOUNT STATE] Server says player is dismounted`);
@@ -911,8 +918,8 @@ export class ClientApplication {
     const playerId = this.networkManager.getAssignedPlayerId();
     if (playerId === null) return;
     
-    // Enable ship controls if mounting to helm
-    if (moduleKind.toUpperCase() === 'HELM') {
+    // Enable ship/cannon/mast controls
+    if (moduleKind.toUpperCase() === 'HELM' || moduleKind.toUpperCase() === 'CANNON' || moduleKind.toUpperCase() === 'MAST') {
       let shipId: number | undefined;
       
       // Find the ship the player is on
@@ -924,7 +931,7 @@ export class ClientApplication {
         }
       }
       
-      this.inputManager.setMountState(true, shipId);
+      this.inputManager.setMountState(true, shipId, moduleKind);
     }
     
     // Update player state in all world states

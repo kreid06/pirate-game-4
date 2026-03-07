@@ -102,7 +102,8 @@ export class InputManager {
   private readonly ROTATION_THRESHOLD = 0.0524; // 3 degrees in radians
   
   // Ship control state tracking
-  private isMountedToHelm: boolean = false;
+  private mountKind: 'none' | 'helm' | 'cannon' | 'mast' = 'none';
+  private get isMountedToHelm(): boolean { return this.mountKind === 'helm'; }
   private currentSailOpenness: number = 100; // Start at 100% (full sails)
   private currentSailAngle: number = 0; // Start at 0 degrees
   private lastRudderState: { left: boolean; right: boolean } = { left: false, right: false };
@@ -188,10 +189,20 @@ export class InputManager {
     this.handleCannonAiming();
     
     // If mounted to helm, handle ship controls instead of player movement
-    if (this.isMountedToHelm) {
+    if (this.mountKind === 'helm') {
       this.handleShipControls();
       this.resetFrameFlags();
       return; // Skip normal player input processing
+    }
+
+    // If mounted to cannon/mast, handle interact-to-dismount only
+    if (this.mountKind === 'cannon' || this.mountKind === 'mast') {
+      if (this.isActionActive('interact') && this.canInteract()) {
+        this.lastInteractionTime = Date.now();
+        if (this.onActionEvent) this.onActionEvent('dismount');
+      }
+      this.resetFrameFlags();
+      return; // Locked to mount position
     }
     
     // Generate current input frame
@@ -247,6 +258,11 @@ export class InputManager {
       }
     }
     
+    // Walking right-click = block
+    if (this.inputState.rightMouseDown && this.mountKind === 'none') {
+      if (this.onActionEvent) this.onActionEvent('block');
+    }
+
     // Reset per-frame flags
     this.resetFrameFlags();
   }
@@ -329,22 +345,24 @@ export class InputManager {
   }
 
   /**
-   * Set mount state (called when player mounts/dismounts helm)
+   * Set mount state (called when player mounts/dismounts a module)
    */
-  setMountState(mounted: boolean, shipId?: number): void {
-    this.isMountedToHelm = mounted;
+  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none'): void {
+    this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast') : 'none';
     this.currentShipId = shipId !== undefined ? shipId : null;
-    
+
     if (mounted) {
-      console.log(`⚓ [INPUT] Player mounted to helm on ship ${shipId} - ship controls active`);
-      // Reset ship control state
-      this.currentSailOpenness = 100;
-      this.currentSailAngle = 0;
-      this.lastSailOpenness = 100;
-      this.lastSailAngle = 0;
-      this.lastRudderState = { left: false, right: false };
-      this.lastSailOpennessChangeTime = 0;
-      this.lastSailAngleChangeTime = 0;
+      console.log(`⚓ [INPUT] Player mounted to ${moduleKind} on ship ${shipId}`);
+      if (this.mountKind === 'helm') {
+        // Reset helm/sail control state
+        this.currentSailOpenness = 100;
+        this.currentSailAngle = 0;
+        this.lastSailOpenness = 100;
+        this.lastSailAngle = 0;
+        this.lastRudderState = { left: false, right: false };
+        this.lastSailOpennessChangeTime = 0;
+        this.lastSailAngleChangeTime = 0;
+      }
     } else {
       console.log(`⚓ [INPUT] Player dismounted - player controls active`);
     }
@@ -444,7 +462,12 @@ export class InputManager {
     if (!this.inputState.rightMouseDown) {
       return;
     }
-    
+
+    // Only aim when mounted to helm or cannon
+    if (this.mountKind !== 'helm' && this.mountKind !== 'cannon') {
+      return;
+    }
+
     // Need to be on a ship to aim cannons
     if (this.currentShipId === null) {
       return;
@@ -856,21 +879,23 @@ export class InputManager {
       const now = Date.now();
       const timeSinceLastClick = now - this.lastLeftClickTime;
       const isDoubleClick = timeSinceLastClick < this.DOUBLE_CLICK_THRESHOLD;
-      
-      if (isDoubleClick) {
-        // Double-click: Fire all cannons
-        console.log('💥💥 Double-click: Fire ALL cannons!');
-        if (this.onCannonFire) {
-          this.onCannonFire(undefined, true); // fireAll = true
+
+      if (this.mountKind === 'none') {
+        // Walking: left-click = attack toward mouse
+        if (this.onActionEvent) {
+          this.onActionEvent('attack', this.inputState.mouseWorldPosition);
         }
       } else {
-        // Single click: Fire aimed cannons
-        console.log('💥 Single-click: Fire aimed cannons');
-        if (this.onCannonFire) {
-          this.onCannonFire(); // Fire aimed cannons only
+        // Mounted to helm or cannon: fire cannon(s)
+        if (isDoubleClick) {
+          console.log('💥💥 Double-click: Fire ALL cannons!');
+          if (this.onCannonFire) this.onCannonFire(undefined, true);
+        } else {
+          console.log('💥 Single-click: Fire aimed cannons');
+          if (this.onCannonFire) this.onCannonFire();
         }
       }
-      
+
       this.lastLeftClickTime = now;
       
     } else if (event.button === 2) { // Right mouse button

@@ -1257,23 +1257,37 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
     if (player->parent_ship_id == 0) {
         return; // Player not on a ship
     }
-    
+
+    // Only helm-mounted or cannon-mounted players may aim cannons.
+    bool at_helm   = player->is_mounted &&
+                     (find_ship(player->parent_ship_id) != NULL) &&
+                     ({  ShipModule* _m = find_module_by_id(find_ship(player->parent_ship_id), player->mounted_module_id);
+                         _m && (_m->type_id == MODULE_TYPE_HELM || _m->type_id == MODULE_TYPE_STEERING_WHEEL); });
+    bool at_cannon = player->is_mounted &&
+                     (find_ship(player->parent_ship_id) != NULL) &&
+                     ({  ShipModule* _m = find_module_by_id(find_ship(player->parent_ship_id), player->mounted_module_id);
+                         _m && _m->type_id == MODULE_TYPE_CANNON; });
+
+    if (!at_helm && !at_cannon) {
+        return; // Not at a valid control station
+    }
+
     // Client already sends a ship-relative angle (worldAngle - shipRotation)
     player->cannon_aim_angle = aim_angle;
-    
+
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship) return;
-    
+
     // Use directly — do NOT subtract ship->rotation again (client already did so)
     player->cannon_aim_angle_relative = aim_angle;
-    
+
     // Normalize to -PI to +PI range
     while (player->cannon_aim_angle_relative > M_PI) player->cannon_aim_angle_relative -= 2.0f * M_PI;
     while (player->cannon_aim_angle_relative < -M_PI) player->cannon_aim_angle_relative += 2.0f * M_PI;
-    
+
     // Update cannon aim_direction for all cannons within ±30° range
     const float CANNON_AIM_RANGE = 30.0f * (M_PI / 180.0f); // ±30 degrees
-    
+
     // Get simulation ship to update cannon modules
     struct Ship* sim_ship = NULL;
     if (global_sim && global_sim->ship_count > 0) {
@@ -1284,32 +1298,38 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
             }
         }
     }
-    
+
     if (!sim_ship) return;
-    
-    // Update each cannon's aim_direction if it can reach the player's target
+
+    // Update cannon(s) depending on how the player is mounted:
+    //   - helm → update all cannons (broadside targeting)
+    //   - cannon mount → update only the mounted cannon
     for (uint8_t m = 0; m < sim_ship->module_count; m++) {
         if (sim_ship->modules[m].type_id != MODULE_TYPE_CANNON) continue;
-        
+
         ShipModule* cannon = &sim_ship->modules[m];
-        float cannon_base_angle = Q16_TO_FLOAT(cannon->local_rot); // Base rotation relative to ship
-        
+
+        // If mounted to a specific cannon, skip all others
+        if (at_cannon && cannon->id != player->mounted_module_id) continue;
+
+        float cannon_base_angle = Q16_TO_FLOAT(cannon->local_rot);
+
         // Calculate desired aim offset.
         // cannon_base_angle is in rendering convention; add PI/2 to shift into physics convention
         // so that aim_direction=0 means the cannon fires along its natural barrel direction.
         float desired_offset = player->cannon_aim_angle_relative - cannon_base_angle + (float)(M_PI / 2.0);
-        
+
         // Normalize
         while (desired_offset > M_PI) desired_offset -= 2.0f * M_PI;
         while (desired_offset < -M_PI) desired_offset += 2.0f * M_PI;
-        
+
         // Clamp to cannon's ±30° range
         if (desired_offset > CANNON_AIM_RANGE) desired_offset = CANNON_AIM_RANGE;
         if (desired_offset < -CANNON_AIM_RANGE) desired_offset = -CANNON_AIM_RANGE;
-        
+
         // Update cannon's aim_direction
         cannon->data.cannon.aim_direction = Q16_FROM_FLOAT(desired_offset);
-        
+
         // Also update simple ship for sync
         for (int i = 0; i < ship->module_count; i++) {
             if (ship->modules[i].id == cannon->id) {
@@ -1449,15 +1469,39 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all) {
         log_warn("Player %u tried to fire cannons while not on a ship", player->player_id);
         return;
     }
-    
+
+    // Determine what the player is currently mounted to
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship) {
         log_warn("Player %u parent ship %u not found", player->player_id, player->parent_ship_id);
         return;
     }
-    
+
+    bool at_helm = false;
+    bool at_cannon = false;
+    uint32_t mounted_cannon_id = 0;
+
+    if (player->is_mounted) {
+        ShipModule* mmod = find_module_by_id(ship, player->mounted_module_id);
+        if (mmod) {
+            if (mmod->type_id == MODULE_TYPE_HELM || mmod->type_id == MODULE_TYPE_STEERING_WHEEL) {
+                at_helm = true;
+            } else if (mmod->type_id == MODULE_TYPE_CANNON) {
+                at_cannon = true;
+                mounted_cannon_id = mmod->id;
+            }
+        }
+    }
+
+    if (!at_helm && !at_cannon) {
+        log_warn("Player %u tried to fire cannons but is not at helm or cannon", player->player_id);
+        return;
+    }
+
     int cannons_fired = 0;
-    bool manually_fired = !player->is_mounted; // If not mounted to helm, it's manual fire
+    // Helm-triggered shots are considered automated (broadside volleys);
+    // cannon-mounted shots are manually aimed.
+    bool manually_fired = at_cannon;
     
     // Get simulation ship for up-to-date cannon data
     struct Ship* sim_ship = NULL;
@@ -1480,7 +1524,10 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all) {
         ShipModule* module = &sim_ship->modules[m];
         
         if (module->type_id != MODULE_TYPE_CANNON) continue;
-        
+
+        // If mounted to a specific cannon, skip every other cannon
+        if (at_cannon && module->id != mounted_cannon_id) continue;
+
         // Check ammo and reload status
         if (!ship->infinite_ammo && ship->cannon_ammo == 0) {
             log_info("  ⚠️  Ship %u: No ammo", ship->ship_id);
@@ -2777,6 +2824,42 @@ int websocket_server_update(struct Sim* sim) {
                                     } else if (strcmp(action, "interact") == 0) {
                                         // TODO: Implement interaction
                                         log_info("🤝 Player %u interacted!", player->player_id);
+                                    } else if (strcmp(action, "attack") == 0) {
+                                        // Walking melee attack — reject if mounted
+                                        if (player->is_mounted) {
+                                            log_warn("⚔️ Player %u attack rejected (mounted)", player->player_id);
+                                        } else {
+                                            // Parse optional target position from "target":{x,y}
+                                            float target_x = player->x;
+                                            float target_y = player->y;
+                                            char* target_start = strstr(payload, "\"target\":{");
+                                            if (target_start) {
+                                                char* xp = strstr(target_start, "\"x\":");
+                                                char* yp = strstr(target_start, "\"y\":");
+                                                if (xp) target_x = strtof(xp + 4, NULL);
+                                                if (yp) target_y = strtof(yp + 4, NULL);
+                                            }
+                                            log_info("⚔️ Player %u attacked toward (%.1f, %.1f)",
+                                                     player->player_id, target_x, target_y);
+                                            // Broadcast attack event to all players nearby
+                                            char attack_msg[256];
+                                            snprintf(attack_msg, sizeof(attack_msg),
+                                                "{\"type\":\"player_attack\",\"player_id\":%u,\"target_x\":%.2f,\"target_y\":%.2f}",
+                                                player->player_id, target_x, target_y);
+                                            websocket_server_broadcast(attack_msg);
+                                        }
+                                    } else if (strcmp(action, "block") == 0) {
+                                        // Walking block — reject if mounted
+                                        if (player->is_mounted) {
+                                            log_warn("🛡️ Player %u block rejected (mounted)", player->player_id);
+                                        } else {
+                                            log_info("🛡️ Player %u is blocking!", player->player_id);
+                                            char block_msg[128];
+                                            snprintf(block_msg, sizeof(block_msg),
+                                                "{\"type\":\"player_block\",\"player_id\":%u}",
+                                                player->player_id);
+                                            websocket_server_broadcast(block_msg);
+                                        }
                                     }
                                     
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"action_processed\"}");
