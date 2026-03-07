@@ -63,6 +63,7 @@ export enum MessageType {
   GIVE_ITEM = 'give_item',
   PLACE_PLANK = 'place_plank',
   REPAIR_PLANK = 'repair_plank',
+  CREW_ASSIGN = 'crew_assign',
 
   PING = 'ping',
   
@@ -279,7 +280,15 @@ interface PlacePlankMessage extends NetworkMessage {
   segmentIndex: number;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | RepairPlankMessage;
+interface CrewAssignMessage extends NetworkMessage {
+  type: MessageType.CREW_ASSIGN;
+  timestamp: number;
+  ship_id: number;
+  npc_id: number;
+  task: string;
+}
+
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | RepairPlankMessage | CrewAssignMessage;
 
 /**
  * Main network manager class
@@ -803,6 +812,23 @@ export class NetworkManager {
   sendRepairPlank(shipId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.REPAIR_PLANK, timestamp: Date.now(), shipId });
+  }
+
+  /**
+   * Send crew task assignments from the manning-priority panel.
+   * One message per NPC — server uses task to drive WorldNpc state transitions.
+   */
+  sendCrewAssign(shipId: number, assignments: Array<{ npcId: number; task: string }>): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    for (const { npcId, task } of assignments) {
+      this.sendMessage({
+        type: MessageType.CREW_ASSIGN,
+        timestamp: Date.now(),
+        ship_id: shipId,
+        npc_id: npcId,
+        task,
+      });
+    }
   }
   
   /**

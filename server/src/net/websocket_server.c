@@ -1158,6 +1158,7 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
 static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float world_x, float world_y, 
                                   float angle, entity_id projectile_id);
 static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired);
+static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task);
 
 /**
  * Find a module on a SimpleShip by module ID.
@@ -1214,6 +1215,75 @@ static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float 
                 break;
             }
         }
+    }
+}
+
+/**
+ * Apply a single crew task assignment from the client manning-priority panel.
+ *
+ * task == "Sails"   + NPC_ROLE_RIGGER  → walk to mast, set AT_CANNON (active)
+ * task == "Cannons" + NPC_ROLE_GUNNER  → walk to active-side cannon, set MOVING/AT_CANNON
+ * task == "Combat"  + NPC_ROLE_GUNNER  → same as Cannons
+ * anything else (Repairs, Idle, role mismatch) → set IDLE — NPC stands down
+ */
+static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task) {
+    SimpleShip* ship = find_ship(ship_id);
+    if (!ship) return;
+
+    WorldNpc* npc = NULL;
+    for (int i = 0; i < world_npc_count; i++) {
+        if (world_npcs[i].active && world_npcs[i].id == npc_id && world_npcs[i].ship_id == ship_id) {
+            npc = &world_npcs[i];
+            break;
+        }
+    }
+    if (!npc) {
+        log_warn("crew_assign: NPC %u not found on ship %u", npc_id, ship_id);
+        return;
+    }
+
+    bool want_sails   = (strncmp(task, "Sails",   5) == 0);
+    bool want_cannons = (strncmp(task, "Cannons", 7) == 0 || strncmp(task, "Combat", 6) == 0);
+
+    if (want_sails && npc->role == NPC_ROLE_RIGGER) {
+        /* Rigger → back to mast */
+        uint32_t mast_id = npc->port_cannon_id; /* riggers store mast in both fields */
+        ShipModule* mast = find_module_by_id(ship, mast_id);
+        if (mast) {
+            float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mast->local_pos.x));
+            float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(mast->local_pos.y));
+            npc->target_local_x = mx;
+            npc->target_local_y = my + 20.0f;
+            npc->assigned_cannon_id = mast_id;
+        }
+        npc->state = WORLD_NPC_STATE_MOVING;
+        log_info("⛵ NPC %u (%s) assigned to Sails — walking to mast %u",
+                 npc->id, npc->name, npc->assigned_cannon_id);
+
+    } else if (want_cannons && npc->role == NPC_ROLE_GUNNER) {
+        /* Gunner → walk to the currently-active broadside cannon */
+        uint8_t side = ship->active_cannon_side;
+        uint32_t target_cannon = (side == 0) ? npc->port_cannon_id : npc->starboard_cannon_id;
+        if (target_cannon == 0) target_cannon = npc->port_cannon_id;
+        ShipModule* cannon = find_module_by_id(ship, target_cannon);
+        if (cannon) {
+            float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
+            float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
+            float barrel_angle = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
+            const float CANNON_MOUNT_DIST = 25.0f;
+            npc->assigned_cannon_id = target_cannon;
+            npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
+            npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
+        }
+        npc->state = WORLD_NPC_STATE_MOVING;
+        log_info("🔫 NPC %u (%s) assigned to Cannons — walking to cannon %u",
+                 npc->id, npc->name, npc->assigned_cannon_id);
+
+    } else {
+        /* Stand down — NPC holds current position without acting */
+        npc->state = WORLD_NPC_STATE_IDLE;
+        log_info("💤 NPC %u (%s) set idle (task=%s role=%d)",
+                 npc->id, npc->name, task, (int)npc->role);
     }
 }
 
@@ -3565,8 +3635,22 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strstr(payload, "\"type\":\"crew_assign\"")) {
+                            // CREW ASSIGN: player sets a WorldNpc's manning task.
+                            // {"type":"crew_assign","ship_id":N,"npc_id":N,"task":"Sails|Cannons|Repairs|Combat|Idle"}
+                            uint32_t ca_ship = 0, ca_npc = 0;
+                            char ca_task[16] = "Idle";
+                            char* p;
+                            p = strstr(payload, "\"ship_id\":"); if (p) sscanf(p + 10, "%u", &ca_ship);
+                            p = strstr(payload, "\"npc_id\":");  if (p) sscanf(p +  9, "%u", &ca_npc);
+                            p = strstr(payload, "\"task\":\"");
+                            if (p) sscanf(p + 8, "%15[^\"]s", ca_task);
+                            if (ca_ship != 0 && ca_npc != 0)
+                                handle_crew_assign(ca_ship, ca_npc, ca_task);
+                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"crew_assigned\"}");
+                            handled = true;
+
                         } else {
-                            // Unknown JSON message
                             ws_server.unknown_messages_received++;
                             ws_server.last_unknown_time = get_time_ms();
                             

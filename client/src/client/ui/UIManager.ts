@@ -150,6 +150,16 @@ export class UIManager {
   }
   
   /**
+   * Set callback for crew assignment changes from the manning priority panel.
+   * The callback receives the player's ship ID and the full assignment list.
+   */
+  setCrewAssignmentCallback(
+    cb: (shipId: number, assignments: Array<{ npcId: number; task: string }>) => void
+  ): void {
+    this.manningPanel.onAssignmentChanged = cb;
+  }
+
+  /**
    * Handle a canvas click — returns true if the UI consumed it.
    */
   handleClick(x: number, y: number): boolean {

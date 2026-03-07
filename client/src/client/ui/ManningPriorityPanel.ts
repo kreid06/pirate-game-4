@@ -40,6 +40,17 @@ export class ManningPriorityPanel {
 
   private hitAreas: HitArea[] = [];
 
+  // Cached from latest render() call so action callbacks can reference them
+  private _currentShipId = 0;
+  private _currentNpcs: Npc[] = [];
+
+  /**
+   * Fires whenever assignments change. Carries the full list of {npcId, task} including
+   * "Idle" for any NPC not allocated to an active task.
+   * Set this before calling render() — it needs access to the current NPC list.
+   */
+  public onAssignmentChanged: ((shipId: number, assignments: Array<{ npcId: number; task: string }>) => void) | null = null;
+
   // Panel geometry (screen-space, fixed on left side)
   private readonly PX = 10;
   private readonly PY = 60;
@@ -72,6 +83,10 @@ export class ManningPriorityPanel {
   render(ctx: CanvasRenderingContext2D, npcs: Npc[], shipId: number): void {
     this.hitAreas = [];
     if (shipId === 0) return; // Not on a ship — nothing to manage
+
+    // Store shipId + npcs for use in action callbacks
+    this._currentShipId = shipId;
+    this._currentNpcs = npcs;
 
     const tasks = this.priorityOrder;
     const { PX: px, PY: py, PW: pw, HEADER_H, ROW_H } = this;
@@ -220,20 +235,49 @@ export class ManningPriorityPanel {
     if (i <= 0) return;
     [this.priorityOrder[i - 1], this.priorityOrder[i]] =
       [this.priorityOrder[i], this.priorityOrder[i - 1]];
+    this.notifyAssignment();
   }
 
   private moveDown(i: number): void {
     if (i >= this.priorityOrder.length - 1) return;
     [this.priorityOrder[i], this.priorityOrder[i + 1]] =
       [this.priorityOrder[i + 1], this.priorityOrder[i]];
+    this.notifyAssignment();
   }
 
   private increment(task: ManningTask): void {
     this.assignedCounts.set(task, (this.assignedCounts.get(task) ?? 0) + 1);
+    this.notifyAssignment();
   }
 
   private decrement(task: ManningTask): void {
     this.assignedCounts.set(task, Math.max(0, (this.assignedCounts.get(task) ?? 0) - 1));
+    this.notifyAssignment();
+  }
+
+  private notifyAssignment(): void {
+    if (!this.onAssignmentChanged || this._currentShipId === 0) return;
+    const shipNpcs = this._currentNpcs
+      .filter(n => n.shipId === this._currentShipId)
+      .sort((a, b) => {
+        const aAvail = a.state !== NPC_STATE_AT_CANNON ? 0 : 1;
+        const bAvail = b.state !== NPC_STATE_AT_CANNON ? 0 : 1;
+        return aAvail !== bAvail ? aAvail - bAvail : a.id - b.id;
+      });
+    const assignments = this.computeAssignments(shipNpcs);
+    const out: Array<{ npcId: number; task: string }> = [];
+    const assigned = new Set<number>();
+    for (const [task, npcs] of assignments) {
+      for (const npc of npcs) {
+        out.push({ npcId: npc.id, task });
+        assigned.add(npc.id);
+      }
+    }
+    // Unassigned NPCs get task "Idle"
+    for (const npc of shipNpcs) {
+      if (!assigned.has(npc.id)) out.push({ npcId: npc.id, task: 'Idle' });
+    }
+    this.onAssignmentChanged(this._currentShipId, out);
   }
 
   private drawArrowBtn(

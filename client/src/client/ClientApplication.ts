@@ -326,6 +326,11 @@ export class ClientApplication {
       
       // Initialize UI System
       this.uiManager = new UIManager(this.canvas, this.config);
+
+      // Wire crew assignment changes from the manning panel to the server
+      this.uiManager.setCrewAssignmentCallback((shipId, assignments) => {
+        this.networkManager.sendCrewAssign(shipId, assignments);
+      });
       
       // Initialize Audio System  
       this.audioManager = new AudioManager(this.config.audio);
