@@ -1019,35 +1019,47 @@ static void handle_module_unmount(WebSocketPlayer* player, struct WebSocketClien
 // ============================================================================
 
 /**
+ * Returns true if a WorldNpc rigger is stationed at this specific mast module
+ * (assigned_cannon_id == mast_id AND state == AT_CANNON).
+ */
+static bool is_mast_manned(uint32_t ship_id, uint32_t mast_id) {
+    for (int i = 0; i < world_npc_count; i++) {
+        WorldNpc* w = &world_npcs[i];
+        if (!w->active || w->ship_id != ship_id) continue;
+        if (w->role == NPC_ROLE_RIGGER &&
+            w->assigned_cannon_id == mast_id &&
+            w->state == WORLD_NPC_STATE_AT_CANNON)
+            return true;
+    }
+    return false;
+}
+
+/**
  * Handle sail openness control from helm-mounted player
  * Sets the desired openness - actual openness will gradually adjust in tick
  */
 static void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, int desired_openness) {
-    /* Gate: at least one rigger must be stationed at a mast (AT_CANNON with assigned_cannon_id)
-       before the player can control sail openness. */
-    bool rigger_at_mast = false;
-    for (int i = 0; i < world_npc_count; i++) {
-        WorldNpc* w = &world_npcs[i];
-        if (!w->active || w->ship_id != ship->ship_id) continue;
-        if (w->role == NPC_ROLE_RIGGER &&
-            w->assigned_cannon_id != 0 &&
-            w->state == WORLD_NPC_STATE_AT_CANNON) {
-            rigger_at_mast = true;
-            break;
+    /* Gate: at least one rigger must be stationed at a mast before allowing sail control. */
+    {
+        bool any_rigger = false;
+        for (int m = 0; m < ship->module_count && !any_rigger; m++) {
+            if (ship->modules[m].type_id == MODULE_TYPE_MAST)
+                any_rigger = is_mast_manned(ship->ship_id, ship->modules[m].id);
         }
-    }
-    if (!rigger_at_mast) {
-        log_info("⛵ Sail control rejected for player %u — no rigger manning a mast on ship %u",
-                 player->player_id, ship->ship_id);
-        return;
+        if (!any_rigger) {
+            log_info("⛵ Sail control rejected for player %u — no rigger manning any mast on ship %u",
+                     player->player_id, ship->ship_id);
+            return;
+        }
     }
 
     if (desired_openness < 0) desired_openness = 0;
     if (desired_openness > 100) desired_openness = 100;
 
-    log_info("⛵ Player %u setting desired sail openness on ship %u: %d%%", player->player_id, ship->ship_id, desired_openness);
-    
-    // Store desired openness in simulation ship (the source of truth for broadcasts)
+    log_info("⛵ Player %u setting desired sail openness on ship %u: %d%% (applies to manned masts only)",
+             player->player_id, ship->ship_id, desired_openness);
+
+    // Store desired openness — the tick will only apply it to individually manned masts
     if (global_sim && global_sim->ship_count > 0) {
         for (uint32_t s = 0; s < global_sim->ship_count; s++) {
             if (global_sim->ships[s].id == ship->ship_id) {
@@ -1056,7 +1068,7 @@ static void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketCl
             }
         }
     }
-    
+
     // Also store in simple ship for compatibility
     ship->desired_sail_openness = (uint8_t)desired_openness;
     
@@ -1125,22 +1137,23 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
     // Clamp to range -60 to +60 degrees
     if (desired_angle < -60.0f) desired_angle = -60.0f;
     if (desired_angle > 60.0f) desired_angle = 60.0f;
-    
-    log_info("🌀 Player %u adjusting sail angle on ship %u: %.1f°", player->player_id, ship->ship_id, desired_angle);
-    
+
+    log_info("🌀 Player %u adjusting sail angle on ship %u: %.1f° (manned masts only)", player->player_id, ship->ship_id, desired_angle);
+
     // Convert to radians for Q16 storage
     float angle_radians = desired_angle * (3.14159f / 180.0f);
     q16_t angle_q16 = Q16_FROM_FLOAT(angle_radians);
-    
-    // Update simulation ship masts (the ones we broadcast to clients)
+
+    // Update simulation ship masts — only those with a rigger stationed at them
     if (global_sim && global_sim->ship_count > 0) {
         for (uint32_t s = 0; s < global_sim->ship_count; s++) {
             if (global_sim->ships[s].id == ship->ship_id) {
                 struct Ship* sim_ship = &global_sim->ships[s];
                 for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                    if (sim_ship->modules[m].type_id == MODULE_TYPE_MAST) {
+                    if (sim_ship->modules[m].type_id == MODULE_TYPE_MAST &&
+                        is_mast_manned(ship->ship_id, sim_ship->modules[m].id)) {
                         sim_ship->modules[m].data.mast.angle = angle_q16;
-                        log_info("  🌀 Mast %u angle set to %.1f° (%.3f rad)", 
+                        log_info("  🌀 Mast %u angle set to %.1f° (%.3f rad)",
                                  sim_ship->modules[m].id, desired_angle, angle_radians);
                     }
                 }
@@ -1148,10 +1161,11 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
             }
         }
     }
-    
-    // Also update SimpleShip for compatibility
+
+    // Also update SimpleShip for compatibility (manned masts only)
     for (int i = 0; i < ship->module_count; i++) {
-        if (ship->modules[i].type_id == MODULE_TYPE_MAST) {
+        if (ship->modules[i].type_id == MODULE_TYPE_MAST &&
+            is_mast_manned(ship->ship_id, ship->modules[i].id)) {
             ship->modules[i].data.mast.angle = angle_q16;
         }
     }
@@ -1280,10 +1294,8 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
                  npc->id, npc->name, npc->assigned_cannon_id);
 
     } else if (want_cannons && npc->role == NPC_ROLE_GUNNER) {
-        /* Gunner → walk to the currently-active broadside cannon */
-        uint8_t side = ship->active_cannon_side;
-        uint32_t target_cannon = (side == 0) ? npc->port_cannon_id : npc->starboard_cannon_id;
-        if (target_cannon == 0) target_cannon = npc->port_cannon_id;
+        /* Gunner → walk to their dedicated cannon */
+        uint32_t target_cannon = npc->port_cannon_id;
         ShipModule* cannon = find_module_by_id(ship, target_cannon);
         if (cannon) {
             float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
@@ -1403,20 +1415,18 @@ static bool is_module_owned_by_npc(uint32_t module_id) {
 }
 
 /**
- * Spawn a gunner NPC paired with a port and starboard cannon.
- * The NPC walks between the two cannons when the ship's active broadside changes.
- * Position matches the player cannon-mount offset (25px behind the breech).
+ * Spawn a gunner NPC dedicated to a single cannon.
+ * The NPC walks to that cannon when assigned Cannons via the manning panel.
  * Returns the new NPC id, or 0 on failure.
  */
 static uint32_t spawn_ship_gunner(uint32_t ship_id, const char* name,
-                                  uint32_t port_cannon_id, uint32_t starboard_cannon_id) {
+                                  uint32_t cannon_id) {
     if (world_npc_count >= MAX_WORLD_NPCS) {
         log_warn("spawn_ship_gunner: MAX_WORLD_NPCS reached");
         return 0;
     }
-    if (is_module_owned_by_npc(port_cannon_id) || is_module_owned_by_npc(starboard_cannon_id)) {
-        log_warn("spawn_ship_gunner: cannon %u or %u already owned by another NPC",
-                 port_cannon_id, starboard_cannon_id);
+    if (is_module_owned_by_npc(cannon_id)) {
+        log_warn("spawn_ship_gunner: cannon %u already owned by another NPC", cannon_id);
         return 0;
     }
     SimpleShip* ship = find_ship(ship_id);
@@ -1430,8 +1440,8 @@ static uint32_t spawn_ship_gunner(uint32_t ship_id, const char* name,
     npc->active              = true;
     npc->role                = NPC_ROLE_GUNNER;
     npc->ship_id             = ship_id;
-    npc->port_cannon_id      = port_cannon_id;
-    npc->starboard_cannon_id = starboard_cannon_id;
+    npc->port_cannon_id      = cannon_id;
+    npc->starboard_cannon_id = cannon_id;  /* same — single dedicated cannon */
     npc->move_speed          = 80.0f;
     npc->interact_radius     = 40.0f;
     /* Start idle at deck centre — player assigns tasks via manning panel */
@@ -1441,14 +1451,14 @@ static uint32_t spawn_ship_gunner(uint32_t ship_id, const char* name,
     strncpy(npc->dialogue, "Aye aye, Captain!", sizeof(npc->dialogue) - 1);
 
     /* Stagger idle positions along ship centreline so NPCs aren't piled up */
-    int slot_idx = (int)(npc->id % 6);
-    npc->local_x        = -100.0f + slot_idx * 50.0f;
+    int slot_idx = (int)(npc->id % 9);
+    npc->local_x        = -200.0f + slot_idx * 50.0f;
     npc->local_y        = 0.0f;
     npc->target_local_x = npc->local_x;
     npc->target_local_y = npc->local_y;
     ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
-    log_info("🧑 Gunner '%s' (id %u) on ship %u — port cannon %u / stbd cannon %u (idle)",
-             npc->name, npc->id, ship_id, port_cannon_id, starboard_cannon_id);
+    log_info("🧑 Gunner '%s' (id %u) on ship %u — cannon %u (idle)",
+             npc->name, npc->id, ship_id, cannon_id);
     return npc->id;
 }
 
@@ -2608,22 +2618,22 @@ int websocket_server_init(uint16_t port) {
     }
 
     // Spawn crew NPCs across both ships:
-    //   - 3 gunners per ship: one per cannon pair (port+stbd), exclusive module ownership.
+    //   - 6 gunners per ship: one per individual cannon.
     //     Module IDs: base+1..3 = port cannons, base+4..6 = starboard cannons.
-    //   - 2 riggers per ship: front mast (base+7) and back mast (base+9).
-    //     Middle mast (base+8) is left free for player interaction.
+    //   - 3 riggers per ship: one per mast (base+7, base+8, base+9).
     {
-        static const char* gunner_names[6] = { "Bo", "Mack", "Finn", "Ray", "Cole", "Sven" };
+        static const char* gunner_names[12] = {
+            "Bo", "Mack", "Finn", "Ray", "Cole", "Sven",
+            "Dirk", "Walt", "Hal", "Cruz", "Ike", "Rex"
+        };
         static const char* rigger_names[6] = { "Ned", "Hank", "Jim", "Lars", "Tam", "Bren" };
         int gunner_idx = 0;
         for (int s = 0; s < 2; s++) {
             uint32_t sid  = ships[s].ship_id;
             uint32_t base = (s == 0) ? 1000u : 2000u;
-            // One gunner per cannon slot — each exclusively owns one port+stbd pair
-            for (int slot = 0; slot < 3; slot++) {
-                uint32_t port_id = base + (uint32_t)slot + 1;
-                uint32_t stbd_id = base + (uint32_t)slot + 4;
-                spawn_ship_gunner(sid, gunner_names[gunner_idx++], port_id, stbd_id);
+            /* One dedicated gunner per cannon (6 total per ship: base+1..base+6) */
+            for (int slot = 1; slot <= 6; slot++) {
+                spawn_ship_gunner(sid, gunner_names[gunner_idx++], base + (uint32_t)slot);
             }
             // Three riggers: front mast (base+7), middle mast (base+8), back mast (base+9)
             spawn_ship_rigger(sid, rigger_names[s * 3],     base + 7);
@@ -2631,7 +2641,7 @@ int websocket_server_init(uint16_t port) {
             spawn_ship_rigger(sid, rigger_names[s * 3 + 2], base + 9);
         }
         log_info("🧑 %d crew NPCs spawned across 2 ships (%d gunners, %d riggers)",
-                 world_npc_count, 6, 6);
+                 world_npc_count, 12, 6);
     }
 
     // Enhanced startup message
@@ -4694,8 +4704,10 @@ void websocket_server_tick(float dt) {
                 uint8_t desired = ship->desired_sail_openness;
                 
                 // For each mast on the ship, gradually adjust to desired openness
+                // — only masts that have a rigger physically stationed there respond.
                 for (uint8_t m = 0; m < ship->module_count; m++) {
-                    if (ship->modules[m].type_id == MODULE_TYPE_MAST) {
+                    if (ship->modules[m].type_id == MODULE_TYPE_MAST &&
+                        is_mast_manned(ship->id, ship->modules[m].id)) {
                         uint8_t current = ship->modules[m].data.mast.openness;
                         
                         if (current != desired) {
