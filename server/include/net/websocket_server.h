@@ -87,6 +87,7 @@ typedef struct WorldNpc {
     uint32_t      id;
     char          name[32];
     bool          active;
+    NpcRole       role;          // NPC_ROLE_GUNNER (cannon) or NPC_ROLE_RIGGER (sail)
 
     // World position (client units, updated and broadcast every tick)
     float         x, y;
@@ -96,12 +97,12 @@ typedef struct WorldNpc {
     uint32_t      ship_id;         // 0 = free-standing
     float         local_x, local_y; // Ship-local position in CLIENT units
 
-    // Cannon assignment — each NPC has a port and starboard cannon pair.
-    // The ship's active_cannon_side determines which is targeted.
-    uint32_t      port_cannon_id;       // Module ID of this NPC's port-side cannon
-    uint32_t      starboard_cannon_id;  // Module ID of this NPC's starboard cannon
-    float         stand_offset;         // Small y-offset (client units) to avoid stacking
-    uint32_t      assigned_cannon_id;   // Currently targeted cannon (0 = none)
+    // Module ownership — each NPC exclusively owns one port/starboard module pair.
+    // For gunners: port and starboard cannon IDs (NPC walks between them on side-switch).
+    // For riggers: both fields point to the same mast module ID (no switching).
+    uint32_t      port_cannon_id;       // Owned port-side module ID
+    uint32_t      starboard_cannon_id;  // Owned starboard-side module ID
+    uint32_t      assigned_cannon_id;   // Currently targeted module (0 = none)
 
     // Movement / state machine
     WorldNpcState state;
