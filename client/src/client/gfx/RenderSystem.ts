@@ -1201,14 +1201,14 @@ export class RenderSystem {
         this.ctx.lineTo(x3, ry);
         this.ctx.stroke();
 
-        // ── 2 inner verticals: straight down at x1 and x2 (perpendicular to long axis) ──
+        // ── 2 inner shrouds: from mast apex down to x1 and x2 on the rail ──
         this.ctx.beginPath();
-        this.ctx.moveTo(x1, my);
+        this.ctx.moveTo(mx, my);
         this.ctx.lineTo(x1, ry);
         this.ctx.stroke();
 
         this.ctx.beginPath();
-        this.ctx.moveTo(x2, my);
+        this.ctx.moveTo(mx, my);
         this.ctx.lineTo(x2, ry);
         this.ctx.stroke();
 
