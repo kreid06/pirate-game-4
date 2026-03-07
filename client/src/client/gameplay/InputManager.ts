@@ -89,6 +89,9 @@ export class InputManager {
   // Inventory callback
   public onSlotSelect: ((slot: number) => void) | null = null;
 
+  // UI click intercept — return true to consume the click before game logic runs
+  public onUIClick: ((x: number, y: number) => boolean) | null = null;
+
   // Build mode — set when a buildable item (e.g. plank) is in the active hotbar slot
   public buildMode: boolean = false;
   public onBuildPlace: ((worldPos: Vec2) => void) | null = null;
@@ -888,6 +891,12 @@ export class InputManager {
     event.preventDefault();
     
     if (event.button === 0) { // Left mouse button
+      // Let UI panels consume the click first (e.g. manning priority panel)
+      if (this.onUIClick && this.onUIClick(event.offsetX, event.offsetY)) {
+        this.inputState.leftMouseDown = false;
+        return;
+      }
+
       this.inputState.leftMouseDown = true;
       
       if (this.buildMode) {

@@ -10,6 +10,7 @@ import { WorldState } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
 import { ITEM_DEFS, INVENTORY_SLOTS, ItemKind } from '../../sim/Inventory.js';
+import { ManningPriorityPanel } from './ManningPriorityPanel.js';
 
 /**
  * UI render context
@@ -21,6 +22,7 @@ export interface UIRenderContext {
   networkStats: NetworkStats;
   config: ClientConfig;
   assignedPlayerId?: number | null;
+  playerShipId?: number; // 0 or absent = not on a ship
 }
 
 /**
@@ -50,6 +52,9 @@ export class UIManager {
   
   // UI Elements
   private elements: Map<UIElementType, UIElement> = new Map();
+  
+  // Manning priority panel
+  private manningPanel = new ManningPriorityPanel();
   
   // UI State
   private showDebugOverlay = false;
@@ -98,6 +103,10 @@ export class UIManager {
       }
     }
     
+    // Render manning priority panel (always on top, left side)
+    const shipId = context.playerShipId ?? 0;
+    this.manningPanel.render(ctx, context.worldState.npcs ?? [], shipId);
+    
     // Always render FPS in top-right corner
     this.renderFPS(ctx, context);
   }
@@ -140,6 +149,13 @@ export class UIManager {
     ctx.restore();
   }
   
+  /**
+   * Handle a canvas click — returns true if the UI consumed it.
+   */
+  handleClick(x: number, y: number): boolean {
+    return this.manningPanel.handleClick(x, y);
+  }
+
   /**
    * Toggle debug overlay visibility
    */

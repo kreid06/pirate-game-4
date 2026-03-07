@@ -313,6 +313,11 @@ export class ClientApplication {
         this.camera.setZoom(this.camera.getState().zoom * factor);
       };
 
+      // Let UI panels (e.g. manning priority panel) consume clicks before game logic
+      this.inputManager.onUIClick = (x, y) => {
+        return this.uiManager?.handleClick(x, y) ?? false;
+      };
+
       // Set up mouse tracking for mouse-relative movement
       this.setupMouseTracking();
       
@@ -542,13 +547,18 @@ export class ClientApplication {
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
       
       // Render UI overlay
+      const assignedPlayerId = this.networkManager.getAssignedPlayerId();
+      const playerShipId = assignedPlayerId !== null
+        ? (worldToRender.players.find(p => p.id === assignedPlayerId)?.carrierId ?? 0)
+        : 0;
       this.uiManager.render(this.renderSystem.getContext(), {
         worldState: worldToRender,
         camera: this.camera,
         fps: this.currentFPS,
         networkStats: this.networkManager.getStats(),
         config: this.config,
-        assignedPlayerId: this.networkManager.getAssignedPlayerId()
+        assignedPlayerId,
+        playerShipId
       });
     }
   }
