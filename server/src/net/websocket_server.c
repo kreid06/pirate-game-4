@@ -1722,9 +1722,8 @@ static void apply_player_movement_state(WebSocketPlayer* player, float dt) {
                     log_info("🌊 Player %u walked off the deck of ship %u", 
                              player->player_id, ship->ship_id);
                     
-                    // Keep current position (at edge), then dismount
-                    // Convert to world position before dismounting
-                    ship_local_to_world(ship, player->local_x, player->local_y, 
+                    // Place player at the exit point (new_local_x/y is just outside the hull)
+                    ship_local_to_world(ship, new_local_x, new_local_y, 
                                       &player->x, &player->y);
                     
                     // Dismount player
@@ -1820,9 +1819,8 @@ static void update_player_movement(WebSocketPlayer* player, float rotation, floa
                     log_info("🌊 Player %u walked off the deck of ship %u", 
                              player->player_id, ship->ship_id);
                     
-                    // Keep current position (at edge), then dismount
-                    // Convert to world position before dismounting
-                    ship_local_to_world(ship, player->local_x, player->local_y, 
+                    // Place player at the exit point (new_local_x/y is just outside the hull)
+                    ship_local_to_world(ship, new_local_x, new_local_y, 
                                       &player->x, &player->y);
                     
                     // Dismount player
@@ -3947,10 +3945,13 @@ void websocket_server_tick(float dt) {
                                 log_info("🌊 Player %u walked off the deck of ship %u (tick movement)", 
                                          ws_player->player_id, player_ship->ship_id);
                                 
-                                // Keep current position (at edge), then dismount
-                                // Convert to world position before dismounting
-                                ship_local_to_world(player_ship, ws_player->local_x, ws_player->local_y, 
+                                // Place player at the exit point (new_local_x/y is just outside the hull)
+                                ship_local_to_world(player_ship, new_local_x, new_local_y, 
                                                   &ws_player->x, &ws_player->y);
+                                
+                                // Sync simulation position to the exit point
+                                sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->x));
+                                sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->y));
                                 
                                 // Dismount player
                                 dismount_player_from_ship(ws_player, "walked_off_deck");
