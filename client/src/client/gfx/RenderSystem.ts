@@ -1037,14 +1037,14 @@ export class RenderSystem {
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
       if (!showAll && !mountedCannonIds.has(cannon.id)) continue;
 
-      const cannonData  = cannon.moduleData;
-      const cx          = cannon.localPos.x;
-      const cy          = cannon.localPos.y;
-      const totalAngle  = (cannon.localRot || 0) + (cannonData.aimDirection || 0);
+      const cannonData = cannon.moduleData;
+      const cx         = cannon.localPos.x;
+      const cy         = cannon.localPos.y;
+      const totalAngle = (cannon.localRot || 0) + (cannonData.aimDirection || 0);
 
-      // Barrel tip — (0, −40) in the turret frame, projected to ship-local space
-      const barrelTipX  = cx + 40 * Math.sin(totalAngle);
-      const barrelTipY  = cy - 40 * Math.cos(totalAngle);
+      // Barrel tip in ship-local space
+      const barrelTipX = cx + 40 * Math.sin(totalAngle);
+      const barrelTipY = cy - 40 * Math.cos(totalAngle);
 
       // Unit fire direction in ship-local space
       const dirX = Math.sin(totalAngle);
@@ -1053,46 +1053,57 @@ export class RenderSystem {
       // Cap guide at fireRange, but no more than 500 units for clarity
       const range = Math.min(cannonData.fireRange || 400, 500);
 
-      // ── Dashed trajectory line ──
-      // Three fading segments to give a depth-of-field feel
-      const segments: Array<{ start: number; end: number; alpha: number; dash: number[] }> = [
-        { start: 0,         end: range * 0.4, alpha: 0.85, dash: [8, 6]  },
-        { start: range * 0.4, end: range * 0.7, alpha: 0.50, dash: [6, 8]  },
-        { start: range * 0.7, end: range,       alpha: 0.25, dash: [4, 10] },
-      ];
+      // ── Trajectory intersection check in world space ──
+      // Convert barrel tip and direction to world space
+      const cosR = Math.cos(ship.rotation);
+      const sinR = Math.sin(ship.rotation);
+      const wBarrelX = ship.position.x + barrelTipX * cosR - barrelTipY * sinR;
+      const wBarrelY = ship.position.y + barrelTipX * sinR + barrelTipY * cosR;
+      const wDirX = dirX * cosR - dirY * sinR;
+      const wDirY = dirX * sinR + dirY * cosR;
 
-      for (const seg of segments) {
-        const x1 = barrelTipX + dirX * seg.start;
-        const y1 = barrelTipY + dirY * seg.start;
-        const x2 = barrelTipX + dirX * seg.end;
-        const y2 = barrelTipY + dirY * seg.end;
-
-        this.ctx.save();
-        this.ctx.globalAlpha = seg.alpha;
-        this.ctx.strokeStyle = '#FF4422';
-        this.ctx.lineWidth   = 1.5;
-        this.ctx.lineCap     = 'round';
-        this.ctx.setLineDash(seg.dash);
-        this.ctx.beginPath();
-        this.ctx.moveTo(x1, y1);
-        this.ctx.lineTo(x2, y2);
-        this.ctx.stroke();
-        this.ctx.restore();
+      // Check if any OTHER ship's centre lies within ~80 units of the trajectory line
+      let hitShip = false;
+      for (const other of worldState.ships) {
+        if (other.id === ship.id) continue;
+        const dx = other.position.x - wBarrelX;
+        const dy = other.position.y - wBarrelY;
+        const t  = dx * wDirX + dy * wDirY; // projection along trajectory
+        if (t < 0 || t > range) continue;
+        const perpDist = Math.abs(dx * wDirY - dy * wDirX);
+        if (perpDist < 80) { hitShip = true; break; }
       }
+
+      // Grey normally; yellow when a ship is in the line of fire
+      const guideColor = hitShip ? '#FFD700' : '#AAAAAA';
+
+      // ── Dashed trajectory line — single uniform draw, no fade ──
+      this.ctx.save();
+      this.ctx.globalAlpha = 0.80;
+      this.ctx.strokeStyle = guideColor;
+      this.ctx.lineWidth   = 3.5;
+      this.ctx.lineCap     = 'round';
+      this.ctx.setLineDash([10, 7]);
+      this.ctx.beginPath();
+      this.ctx.moveTo(barrelTipX, barrelTipY);
+      this.ctx.lineTo(barrelTipX + dirX * range, barrelTipY + dirY * range);
+      this.ctx.stroke();
+      this.ctx.restore();
       this.ctx.setLineDash([]);
 
       // ── Range-bracket tick marks at 1/3 and 2/3 ──
       for (const frac of [1 / 3, 2 / 3]) {
-        const bx    = barrelTipX + dirX * range * frac;
-        const by    = barrelTipY + dirY * range * frac;
-        const perpX = -dirY;   // perpendicular (rotated 90°)
-        const perpY =  dirX;
-        const tickLen = 6;
+        const bx      = barrelTipX + dirX * range * frac;
+        const by      = barrelTipY + dirY * range * frac;
+        const perpX   = -dirY;
+        const perpY   =  dirX;
+        const tickLen = 7;
 
         this.ctx.save();
         this.ctx.globalAlpha = 0.55;
-        this.ctx.strokeStyle = '#FF4422';
-        this.ctx.lineWidth   = 1.2;
+        this.ctx.strokeStyle = guideColor;
+        this.ctx.lineWidth   = 3.5;
+        this.ctx.lineCap     = 'round';
         this.ctx.beginPath();
         this.ctx.moveTo(bx - perpX * tickLen, by - perpY * tickLen);
         this.ctx.lineTo(bx + perpX * tickLen, by + perpY * tickLen);
@@ -1100,21 +1111,28 @@ export class RenderSystem {
         this.ctx.restore();
       }
 
-      // ── Terminal impact cross at max range ──
-      const impactX = barrelTipX + dirX * range;
-      const impactY = barrelTipY + dirY * range;
-      const cs = 7; // cross half-size
+      // ── Terminal reticle — 4-arc circle with gaps, hollow centre ──
+      const impactX  = barrelTipX + dirX * range;
+      const impactY  = barrelTipY + dirY * range;
+      const reticleR = 13;           // radius of the reticle ring
+      const arcSpan  = Math.PI * 0.44; // ~80° per arc
+      const gapHalf  = Math.PI * 0.06; // ~10° gap on each side
 
       this.ctx.save();
-      this.ctx.globalAlpha = 0.35;
-      this.ctx.strokeStyle = '#FF4422';
-      this.ctx.lineWidth   = 1.5;
-      this.ctx.beginPath();
-      this.ctx.moveTo(impactX - cs, impactY - cs);
-      this.ctx.lineTo(impactX + cs, impactY + cs);
-      this.ctx.moveTo(impactX + cs, impactY - cs);
-      this.ctx.lineTo(impactX - cs, impactY + cs);
-      this.ctx.stroke();
+      this.ctx.globalAlpha = 0.75;
+      this.ctx.strokeStyle = guideColor;
+      this.ctx.lineWidth   = 3.5;
+      this.ctx.lineCap     = 'round';
+
+      // Four arcs centred at 0, π/2, π, 3π/2
+      for (let i = 0; i < 4; i++) {
+        const centre = (Math.PI / 2) * i;
+        this.ctx.beginPath();
+        this.ctx.arc(impactX, impactY, reticleR,
+          centre + gapHalf,
+          centre + arcSpan - gapHalf);
+        this.ctx.stroke();
+      }
       this.ctx.restore();
     }
 
