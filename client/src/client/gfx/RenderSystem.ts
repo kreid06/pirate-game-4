@@ -1120,7 +1120,7 @@ export class RenderSystem {
       const barrelTipY = cy - 40 * Math.cos(totalAngle);
       const dirX = Math.sin(totalAngle);
       const dirY = -Math.cos(totalAngle);
-      const range = Math.min(cannonData.fireRange || 400, 500);
+      const range = cannonData.fireRange || 2000;
 
       // ── Hull-accurate impact detection in world space ──
       // Convert barrel tip and direction into world space for the intersection test.
