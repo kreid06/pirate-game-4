@@ -1184,60 +1184,66 @@ export class RenderSystem {
       const x2 = mx + step;           // fore inner
       const x3 = mx + halfBase;       // fore outer
 
-      // Rail at Y=±90 — matches the plank centre line on each side
-      const railDist = 90;
-
       // Rope style — hemp tan
       this.ctx.strokeStyle = '#8B7355';
       this.ctx.lineWidth = 1.2;
       this.ctx.lineCap = 'round';
 
       for (const side of [1, -1] as const) { // +1 = port, -1 = stbd
-        const ry = my + side * railDist;
+        // Each rope column gets its own rail Y — follows the hull curve at bow/stern
+        const ry0 = my + this.hullRailY(x0, side);
+        const ry1 = my + this.hullRailY(x1, side);
+        const ry2 = my + this.hullRailY(x2, side);
+        const ry3 = my + this.hullRailY(x3, side);
 
         // ── Outer diagonal braces: apex → x0 and apex → x3 ──
         this.ctx.beginPath();
         this.ctx.moveTo(mx, my);
-        this.ctx.lineTo(x0, ry);
+        this.ctx.lineTo(x0, ry0);
         this.ctx.stroke();
 
         this.ctx.beginPath();
         this.ctx.moveTo(mx, my);
-        this.ctx.lineTo(x3, ry);
+        this.ctx.lineTo(x3, ry3);
         this.ctx.stroke();
 
         // ── 2 inner shrouds: from mast apex down to x1 and x2 on the rail ──
         this.ctx.beginPath();
         this.ctx.moveTo(mx, my);
-        this.ctx.lineTo(x1, ry);
+        this.ctx.lineTo(x1, ry1);
         this.ctx.stroke();
 
         this.ctx.beginPath();
         this.ctx.moveTo(mx, my);
-        this.ctx.lineTo(x2, ry);
+        this.ctx.lineTo(x2, ry2);
         this.ctx.stroke();
 
-        // ── 2 horizontal cross-ropes at t = 1/3 and 2/3 of the outer triangle ──
+        // ── 2 horizontal cross-ropes at t = 1/3 and 2/3 along the outer diagonals ──
         for (const t of [1 / 3, 2 / 3]) {
-          const crossY  = my + side * railDist * t;
-          const crossXL = mx - halfBase * t; // outer diagonal at this t
-          const crossXR = mx + halfBase * t;
+          // Interpolate along the outer diagonals to get cross-rope endpoints
+          const crossXL = mx + (x0 - mx) * t;
+          const crossYL = my + (ry0 - my) * t;
+          const crossXR = mx + (x3 - mx) * t;
+          const crossYR = my + (ry3 - my) * t;
           this.ctx.beginPath();
-          this.ctx.moveTo(crossXL, crossY);
-          this.ctx.lineTo(crossXR, crossY);
+          this.ctx.moveTo(crossXL, crossYL);
+          this.ctx.lineTo(crossXR, crossYR);
           this.ctx.stroke();
         }
 
-        // ── Base rail-rope connecting all 4 rope endpoints along X ──
+        // ── Base rail-rope following the hull edge through all 4 rope endpoints ──
         this.ctx.beginPath();
-        this.ctx.moveTo(x0, ry);
-        this.ctx.lineTo(x3, ry);
+        this.ctx.moveTo(x0, ry0);
+        this.ctx.lineTo(x1, ry1);
+        this.ctx.lineTo(x2, ry2);
+        this.ctx.lineTo(x3, ry3);
         this.ctx.stroke();
 
         // ── 2 elongated cleats: aft pair (x0→x1) and fore pair (x2→x3) ──
-        // Cleats are deck hardware running parallel to the long axis — no tilt needed.
-        this.drawSailRopeCleat(x0, x1, ry);
-        this.drawSailRopeCleat(x2, x3, ry);
+        // Angle is derived directly from the two endpoint positions so the cleat
+        // naturally follows the hull tangent on both straight and curved sections.
+        this.drawSailRopeCleat(x0, x1, (ry0 + ry1) / 2, Math.atan2(ry1 - ry0, x1 - x0));
+        this.drawSailRopeCleat(x2, x3, (ry2 + ry3) / 2, Math.atan2(ry3 - ry2, x3 - x2));
       }
     }
 
@@ -1283,6 +1289,36 @@ export class RenderSystem {
     this.ctx.strokeRect(bodyW / 2 - hornW, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
 
     this.ctx.restore();
+  }
+
+  /**
+   * Return the actual hull rail Y at ship-local x position for a given side.
+   * Straight section (x ∈ [−260, 190]) → ±90.
+   * Bow/stern Bézier curves return the interpolated Y on the hull boundary.
+   */
+  private hullRailY(x: number, side: 1 | -1): number {
+    // Straight sides
+    if (x >= -260 && x <= 190) return side * 90;
+
+    // Bow Bézier: Bx = 190 + 450·t·(1−t),  By = 90·(1−2t)
+    if (x > 190) {
+      const disc = 450 * 450 - 4 * 450 * (x - 190);
+      if (disc < 0) return 0;
+      const sqrtDisc = Math.sqrt(disc);
+      const t = side === 1
+        ? (450 - sqrtDisc) / (2 * 450)   // port half (t ∈ [0,0.5], By > 0)
+        : (450 + sqrtDisc) / (2 * 450);  // stbd half (t ∈ [0.5,1], By < 0)
+      return 90 * (1 - 2 * t);
+    }
+
+    // Stern Bézier: Bx = −260 − 170·t·(1−t),  By = 90·(2t−1)
+    const disc = 170 * 170 + 4 * 170 * (x + 260);
+    if (disc < 0) return 0;
+    const sqrtDisc = Math.sqrt(disc);
+    const t = side === -1
+      ? (170 - sqrtDisc) / (2 * 170)   // stbd half (t ∈ [0,0.5], By < 0)
+      : (170 + sqrtDisc) / (2 * 170);  // port half (t ∈ [0.5,1], By > 0)
+    return 90 * (2 * t - 1);
   }
 
   /**
