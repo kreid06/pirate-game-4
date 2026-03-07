@@ -1799,6 +1799,38 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all) {
                      (module->data.cannon.reload_time - module->data.cannon.time_since_fire) / 1000.0f);
             continue;
         }
+
+        // Require a player or NPC to be mounted at this cannon before it can fire.
+        // When the firing player is already mounted to this cannon (at_cannon), it counts.
+        // Otherwise check for a WorldNpc gunner stationed here.
+        if (!at_cannon || module->id != mounted_cannon_id) {
+            bool cannon_occupied = false;
+            // Check if another player is mounted here
+            for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+                WebSocketPlayer* op = &players[pi];
+                if (op->active && op->is_mounted && op->mounted_module_id == module->id) {
+                    cannon_occupied = true;
+                    break;
+                }
+            }
+            // Check if a WorldNpc gunner is stationed here
+            if (!cannon_occupied) {
+                for (int wn = 0; wn < world_npc_count; wn++) {
+                    WorldNpc* wnpc = &world_npcs[wn];
+                    if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
+                        wnpc->ship_id == ship->ship_id &&
+                        wnpc->assigned_cannon_id == module->id &&
+                        wnpc->state == WORLD_NPC_STATE_AT_CANNON) {
+                        cannon_occupied = true;
+                        break;
+                    }
+                }
+            }
+            if (!cannon_occupied) {
+                log_info("  ⏭️  Cannon %u: No crew mounted — skipping", module->id);
+                continue;
+            }
+        }
         
         bool should_fire = fire_all;
         
