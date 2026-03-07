@@ -534,6 +534,8 @@ export class ClientApplication {
       // Render loading/connection screen
       this.renderSystem.renderLoadingScreen(this.state, this.camera);
     } else {
+      // Pass aiming state so cannon aim guides only draw when actively aiming
+      this.renderSystem.playerAiming = this.inputManager?.isCannonAiming ?? false;
       // Render game world with hybrid state
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
       

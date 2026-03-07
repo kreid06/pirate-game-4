@@ -115,6 +115,10 @@ export class InputManager {
   private readonly SAIL_ANGLE_COOLDOWN = 100; // 0.1s per 6° change
   
   // Cannon aiming state
+  /** True while the player is mounted to a cannon and holding right-mouse to aim. */
+  public get isCannonAiming(): boolean {
+    return this.mountKind === 'cannon' && this.inputState.rightMouseDown;
+  }
   private lastCannonAimAngle: number = 0;
   private lastLeftClickTime: number = 0;
   private readonly DOUBLE_CLICK_THRESHOLD = 300; // 300ms for double-click detection
