@@ -1205,6 +1205,21 @@ static void tick_npc_agents(float dt) {
                 SimpleShip* target = find_ship(npc->target_ship_id);
                 if (!target) break;
 
+                // Only aim/fire while the WorldNpc gunner is stationary at this cannon.
+                // Find the corresponding WorldNpc for this module and check its state.
+                bool npc_at_cannon = false;
+                for (int wn = 0; wn < world_npc_count; wn++) {
+                    WorldNpc* wnpc = &world_npcs[wn];
+                    if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
+                        wnpc->ship_id == ship->ship_id &&
+                        wnpc->assigned_cannon_id == module->id &&
+                        wnpc->state == WORLD_NPC_STATE_AT_CANNON) {
+                        npc_at_cannon = true;
+                        break;
+                    }
+                }
+                if (!npc_at_cannon) break;
+
                 // Point the cannon toward the target ship's current position
                 npc_aim_cannon_at_world(ship, module, target->x, target->y);
 
@@ -1476,10 +1491,10 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
     while (player->cannon_aim_angle_relative < -M_PI) player->cannon_aim_angle_relative += 2.0f * M_PI;
 
     // Detect aimed broadside and switch crew if needed.
-    // Port cannons have local_rot ≈ π  → player aim ≈ ±π → |aim| > π/2
-    // Starboard cannons have local_rot ≈ 0 → player aim ≈ 0 → |aim| < π/2
+    // Port cannons fire along +Y in ship-local space (sin > 0).
+    // Starboard cannons fire along -Y (sin < 0).
     {
-        uint8_t aimed_side = (fabsf(player->cannon_aim_angle_relative) > (float)(M_PI / 2.0f)) ? 0 : 1;
+        uint8_t aimed_side = (sinf(player->cannon_aim_angle_relative) > 0.0f) ? 0 : 1;
         if (aimed_side != ship->active_cannon_side) {
             trigger_npc_side_switch(ship->ship_id, aimed_side);
         }
@@ -1512,6 +1527,24 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
         // If mounted to a specific cannon, skip all others
         if (at_cannon && cannon->id != player->mounted_module_id) continue;
 
+        // Only move a cannon if it is occupied (player or WorldNpc gunner).
+        // Skip cannons with no occupant so they don't track the mouse.
+        bool cannon_has_occupant = (cannon->state_bits & MODULE_STATE_OCCUPIED) != 0;
+        if (!cannon_has_occupant) {
+            // Check if a WorldNpc gunner is stationed here
+            for (int ni = 0; ni < world_npc_count; ni++) {
+                WorldNpc* wnpc = &world_npcs[ni];
+                if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
+                    wnpc->ship_id == ship->ship_id &&
+                    wnpc->assigned_cannon_id == cannon->id &&
+                    wnpc->state == WORLD_NPC_STATE_AT_CANNON) {
+                    cannon_has_occupant = true;
+                    break;
+                }
+            }
+        }
+        if (!cannon_has_occupant) continue;
+
         float cannon_base_angle = Q16_TO_FLOAT(cannon->local_rot);
 
         // Calculate desired aim offset.
@@ -1523,9 +1556,12 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
         while (desired_offset > M_PI) desired_offset -= 2.0f * M_PI;
         while (desired_offset < -M_PI) desired_offset += 2.0f * M_PI;
 
-        // Clamp to cannon's ±30° range
-        if (desired_offset > CANNON_AIM_RANGE) desired_offset = CANNON_AIM_RANGE;
-        if (desired_offset < -CANNON_AIM_RANGE) desired_offset = -CANNON_AIM_RANGE;
+        // Only update this cannon if the mouse aim falls within its ±30° arc.
+        // If the mouse is pointing away from this cannon's broadside, reset it to neutral
+        // so it doesn't visually strain toward its clamp limit.
+        if (desired_offset > CANNON_AIM_RANGE || desired_offset < -CANNON_AIM_RANGE) {
+            desired_offset = 0.0f; // Return to neutral, do not track out-of-arc targets
+        }
 
         // Update cannon's aim_direction
         cannon->data.cannon.aim_direction = Q16_FROM_FLOAT(desired_offset);
