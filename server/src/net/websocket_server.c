@@ -575,14 +575,18 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].controlling_ship_id = 0;
 
             // Initialize inventory — give starter items for testing
+            // Slot 0 must NOT be a plank or the client enters build mode and
+            // left-click places planks instead of firing cannons.
             memset(&players[i].inventory, 0, sizeof(PlayerInventory));
             players[i].inventory.active_slot = 0;
-            players[i].inventory.slots[0].item     = ITEM_PLANK;
+            players[i].inventory.slots[0].item     = ITEM_CANNON_BALL;
             players[i].inventory.slots[0].quantity = 10;
-            players[i].inventory.slots[1].item     = ITEM_HAMMER;
-            players[i].inventory.slots[1].quantity = 1;
-            players[i].inventory.slots[2].item     = ITEM_REPAIR_KIT;
-            players[i].inventory.slots[2].quantity = 3;
+            players[i].inventory.slots[1].item     = ITEM_PLANK;
+            players[i].inventory.slots[1].quantity = 10;
+            players[i].inventory.slots[2].item     = ITEM_HAMMER;
+            players[i].inventory.slots[2].quantity = 1;
+            players[i].inventory.slots[3].item     = ITEM_REPAIR_KIT;
+            players[i].inventory.slots[3].quantity = 3;
 
             return &players[i];
         }

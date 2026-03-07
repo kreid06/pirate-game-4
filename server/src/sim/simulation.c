@@ -127,27 +127,83 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
         struct Ship* ship = &sim->ships[i];
         update_ship_physics(ship, dt);
 
-        // ---- Sinking mechanic ----
-        // Count remaining planks
+        // ---- Sinking / water mechanic ----
+        // Count remaining planks and detect leaks (< 30% HP).
+        // Leaking planks also self-damage at 80 internal HP/s (= 0.8 display HP/s
+        // since max_health 10000 maps to 100 display HP).
+        int planks_to_remove[MAX_MODULES_PER_SHIP];
+        int remove_count = 0;
         int planks_remaining = 0;
+        int planks_leaking = 0;
+
         for (uint8_t m = 0; m < ship->module_count; m++) {
-            if (ship->modules[m].type_id == MODULE_TYPE_PLANK) planks_remaining++;
+            ShipModule* mod = &ship->modules[m];
+            if (mod->type_id != MODULE_TYPE_PLANK) continue;
+            if (mod->health <= 0) continue; // already destroyed elsewhere
+
+            bool is_leaking = (mod->health < mod->max_health * 30 / 100);
+
+            if (is_leaking) {
+                // Leaking plank deteriorates at 80 internal HP/s (0.8 display HP/s)
+                float ph = (float)mod->health - 80.0f * dt_secs;
+                if (ph <= 0.0f) {
+                    mod->health = 0;
+                    planks_to_remove[remove_count++] = (int)m;
+                    continue; // Don't count as remaining
+                }
+                mod->health = (q16_t)ph;
+                planks_leaking++;
+            }
+            planks_remaining++;
         }
+
+        // Remove planks that just drained to zero (iterate backwards to preserve indices)
+        for (int ri = remove_count - 1; ri >= 0; ri--) {
+            int m = planks_to_remove[ri];
+            ShipModule* mod = &ship->modules[m];
+            if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                ev->ship_id      = ship->id;
+                ev->module_id    = mod->id;
+                ev->is_breach    = false;
+                ev->is_sink      = false;
+                ev->destroyed    = true;
+                ev->damage_dealt = 0;
+                ev->hit_x        = Q16_TO_FLOAT(ship->position.x);
+                ev->hit_y        = Q16_TO_FLOAT(ship->position.y);
+            }
+            memmove(&ship->modules[m], &ship->modules[m + 1],
+                    (ship->module_count - m - 1) * sizeof(ShipModule));
+            ship->module_count--;
+        }
+
         int missing = (int)ship->initial_plank_count - planks_remaining;
 
-        if (missing > 0 && ship->hull_health > 0) {
-            // drain_rate (HP/s) = (1/1.2) * 2^(missing-1)
-            // Use integer shift to avoid libm dependency: 2^(missing-1) = 1 << (missing-1), capped at 16 planks
-            int shift = missing - 1;
-            if (shift > 15) shift = 15;
-            float drain_rate = (1.0f / 1.2f) * (float)(1 << shift);
-            float drain = drain_rate * dt_secs;
+        if (missing == 0 && planks_leaking == 0) {
+            // Full integrity: crew bails water — hull_health rises at 1 HP/s (capped at 100)
+            float health = Q16_TO_FLOAT(ship->hull_health) + 1.0f * dt_secs;
+            if (health > 100.0f) health = 100.0f;
+            ship->hull_health = Q16_FROM_FLOAT(health);
+        } else {
+            // Hull is compromised — compute drain rate
+            float drain_rate = 0.0f;
 
+            // Missing planks: exponential drain (1/1.2) * 2^(missing-1)
+            if (missing > 0) {
+                int shift = missing - 1;
+                if (shift > 15) shift = 15;
+                drain_rate += (1.0f / 1.2f) * (float)(1 << shift);
+            }
+
+            // Each leaking plank contributes half the single-missing-plank base rate
+            drain_rate += 0.5f * (1.0f / 1.2f) * (float)planks_leaking;
+
+            float drain  = drain_rate * dt_secs;
             float health = Q16_TO_FLOAT(ship->hull_health) - drain;
             if (health <= 0.0f) {
                 health = 0.0f;
-                // Fire a SHIP_SINK event (once, when health first hits 0)
-                if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                // Fire SHIP_SINK event (once, when health first hits 0)
+                if (ship->hull_health > 0 && sim->hit_event_count < MAX_HIT_EVENTS) {
                     struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
                     ev->ship_id   = ship->id;
                     ev->module_id = 0;
