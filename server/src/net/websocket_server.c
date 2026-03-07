@@ -2960,6 +2960,144 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strstr(payload, "\"type\":\"place_plank\"")) {
+                            // PLACE PLANK: re-insert a destroyed hull plank on the player's ship.
+                            // Consumes 1 ITEM_PLANK from the player's inventory.
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    // Find a plank in inventory
+                                    int plank_slot = -1;
+                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                        if (player->inventory.slots[s].item == ITEM_PLANK &&
+                                            player->inventory.slots[s].quantity > 0) {
+                                            plank_slot = s; break;
+                                        }
+                                    }
+                                    if (plank_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_planks\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        // Find player's sim ship
+                                        struct Ship* sim_ship = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == player->parent_ship_id) {
+                                                sim_ship = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        if (!sim_ship) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else {
+                                            // Determine which plank IDs (100-109) are present
+                                            bool present[10] = {false};
+                                            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                                                uint16_t mid = sim_ship->modules[m].id;
+                                                if (mid >= 100 && mid <= 109) present[mid - 100] = true;
+                                            }
+                                            // Find first missing plank
+                                            int missing_idx = -1;
+                                            for (int k = 0; k < 10; k++) {
+                                                if (!present[k]) { missing_idx = k; break; }
+                                            }
+                                            if (missing_idx < 0) {
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_missing_planks\"}");
+                                            } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
+                                                strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                            } else {
+                                                uint16_t plank_id = 100 + (uint16_t)missing_idx;
+                                                ShipModule new_plank = module_create(
+                                                    plank_id, MODULE_TYPE_PLANK,
+                                                    (Vec2Q16){0, 0}, 0);
+                                                sim_ship->modules[sim_ship->module_count++] = new_plank;
+                                                // Consume 1 plank
+                                                player->inventory.slots[plank_slot].quantity--;
+                                                if (player->inventory.slots[plank_slot].quantity == 0)
+                                                    player->inventory.slots[plank_slot].item = ITEM_NONE;
+                                                log_info("🔨 Player %u placed plank %u on ship %u (%d planks remain in slot %d)",
+                                                         player->player_id, plank_id, sim_ship->id,
+                                                         player->inventory.slots[plank_slot].quantity, plank_slot);
+                                                snprintf(response, sizeof(response),
+                                                    "{\"type\":\"message_ack\",\"status\":\"plank_placed\",\"plank_id\":%u}",
+                                                    plank_id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strstr(payload, "\"type\":\"repair_plank\"")) {
+                            // REPAIR PLANK: restore 5000 HP to the most damaged plank on the ship.
+                            // Consumes 1 ITEM_REPAIR_KIT from the player's inventory.
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    // Find a repair kit in inventory
+                                    int kit_slot = -1;
+                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                        if (player->inventory.slots[s].item == ITEM_REPAIR_KIT &&
+                                            player->inventory.slots[s].quantity > 0) {
+                                            kit_slot = s; break;
+                                        }
+                                    }
+                                    if (kit_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_repair_kits\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        struct Ship* sim_ship = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == player->parent_ship_id) {
+                                                sim_ship = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        if (!sim_ship) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else {
+                                            // Find most damaged plank
+                                            ShipModule* worst_plank = NULL;
+                                            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                                                ShipModule* mod = &sim_ship->modules[m];
+                                                if (mod->type_id == MODULE_TYPE_PLANK &&
+                                                    mod->health < mod->max_health) {
+                                                    if (!worst_plank || mod->health < worst_plank->health)
+                                                        worst_plank = mod;
+                                                }
+                                            }
+                                            if (!worst_plank) {
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"planks_full_health\"}");
+                                            } else {
+                                                // Restore 5000 HP (half a plank's max)
+                                                worst_plank->health += 5000;
+                                                if (worst_plank->health > worst_plank->max_health)
+                                                    worst_plank->health = worst_plank->max_health;
+                                                // Consume 1 repair kit
+                                                player->inventory.slots[kit_slot].quantity--;
+                                                if (player->inventory.slots[kit_slot].quantity == 0)
+                                                    player->inventory.slots[kit_slot].item = ITEM_NONE;
+                                                log_info("🔧 Player %u repaired plank %u on ship %u to %d/%d HP",
+                                                         player->player_id, worst_plank->id, sim_ship->id,
+                                                         (int)worst_plank->health, (int)worst_plank->max_health);
+                                                snprintf(response, sizeof(response),
+                                                    "{\"type\":\"message_ack\",\"status\":\"plank_repaired\","
+                                                    "\"plank_id\":%u,\"health\":%d,\"maxHealth\":%d}",
+                                                    worst_plank->id, (int)worst_plank->health, (int)worst_plank->max_health);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
                         } else {
                             // Unknown JSON message
                             ws_server.unknown_messages_received++;
