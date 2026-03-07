@@ -58,6 +58,14 @@ export class RenderSystem {
   private cannonBuildMode: boolean = false;
   /** The cannon slot (index+ship) currently under the cursor in cannon build mode. */
   private hoveredCannonSlot: { ship: Ship; cannonIndex: number } | null = null;
+  /** Whether mast replacement build mode is active (sail item held). */
+  private mastBuildMode: boolean = false;
+  /** The mast slot (mastIndex+ship) currently under the cursor in mast build mode. */
+  private hoveredMastSlot: { ship: Ship; mastIndex: number } | null = null;
+  /** Whether helm replacement build mode is active (helm_kit item held). */
+  private helmBuildMode: boolean = false;
+  /** Whether the helm ghost is hovered in helm build mode. */
+  private hoveredHelmSlot: { ship: Ship } | null = null;
   /** Set by ClientApplication each frame — true when the local player is holding right-mouse. */
   public playerIsAiming: boolean = false;
   /** The assigned local player ID, so guides only draw for that player's cannon. */
@@ -141,6 +149,50 @@ export class RenderSystem {
   setCannonBuildMode(active: boolean): void {
     this.cannonBuildMode = active;
     if (!active) this.hoveredCannonSlot = null;
+  }
+
+  /**
+   * Enable or disable mast replacement build mode
+   */
+  setMastBuildMode(active: boolean): void {
+    this.mastBuildMode = active;
+    if (!active) this.hoveredMastSlot = null;
+  }
+
+  /**
+   * Whether mast build mode is currently active
+   */
+  isInMastBuildMode(): boolean {
+    return this.mastBuildMode;
+  }
+
+  /**
+   * Get the mast slot currently under the cursor (only in mast build mode)
+   */
+  getHoveredMastSlot(): { ship: Ship; mastIndex: number } | null {
+    return this.hoveredMastSlot;
+  }
+
+  /**
+   * Enable or disable helm replacement build mode
+   */
+  setHelmBuildMode(active: boolean): void {
+    this.helmBuildMode = active;
+    if (!active) this.hoveredHelmSlot = null;
+  }
+
+  /**
+   * Whether helm build mode is currently active
+   */
+  isInHelmBuildMode(): boolean {
+    return this.helmBuildMode;
+  }
+
+  /**
+   * Get the helm ghost if hovered (only in helm build mode)
+   */
+  getHoveredHelmSlot(): { ship: Ship } | null {
+    return this.hoveredHelmSlot;
   }
 
   /**
@@ -418,6 +470,20 @@ export class RenderSystem {
       this.hoveredCannonSlot = null;
     }
 
+    // In mast build mode, detect which missing mast slot is under the cursor
+    if (this.mastBuildMode) {
+      this.detectHoveredMastSlot(worldState);
+    } else {
+      this.hoveredMastSlot = null;
+    }
+
+    // In helm build mode, detect whether the missing helm is under the cursor
+    if (this.helmBuildMode) {
+      this.detectHoveredHelmSlot(worldState);
+    } else {
+      this.hoveredHelmSlot = null;
+    }
+
     // Draw background elements
     this.drawWater(camera);
     this.drawGrid(camera);
@@ -621,6 +687,20 @@ export class RenderSystem {
     if (this.cannonBuildMode) {
       for (const ship of worldState.ships) {
         this.queueRenderItem(4, 'cannon-ghosts', () => this.drawMissingCannonGhosts(ship, camera), 1);
+      }
+    }
+
+    // In mast build mode, overlay ghost masts at destroyed slots (layer 7, after real masts)
+    if (this.mastBuildMode) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(7, 'mast-ghosts', () => this.drawMissingMastGhosts(ship, camera), 1);
+      }
+    }
+
+    // In helm build mode, overlay ghost helm if missing (layer 5, with steering wheels)
+    if (this.helmBuildMode) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(5, 'helm-ghost', () => this.drawMissingHelmGhost(ship, camera), 1);
       }
     }
     
@@ -1108,6 +1188,171 @@ export class RenderSystem {
       }
 
       this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
+  // Mast layout: mast_xs[3] = {165, -35, -235}, all at y=0
+  private static readonly MAST_XS = [165, -35, -235];
+  // Helm position: x=-90, y=0
+  private static readonly HELM_X = -90;
+
+  /**
+   * Detect which missing mast slot the cursor is over.
+   * Hover within 22px of the mast centre in ship-local space.
+   */
+  private detectHoveredMastSlot(worldState: WorldState): void {
+    this.hoveredMastSlot = null;
+    if (!this.mouseWorldPos) return;
+
+    for (const ship of worldState.ships) {
+      const helm = ship.modules.find(m => m.kind === 'helm');
+      if (!helm) continue;
+      const base = helm.id;
+
+      const presentIds = new Set(ship.modules.map(m => m.id));
+
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const localX = dx * cos - dy * sin;
+      const localY = dx * sin + dy * cos;
+
+      for (let i = 0; i < 3; i++) {
+        if (presentIds.has(base + 7 + i)) continue; // mast present
+
+        const mx = RenderSystem.MAST_XS[i];
+        const ddx = localX - mx;
+        const ddy = localY;
+        if (Math.sqrt(ddx * ddx + ddy * ddy) <= 22) {
+          this.hoveredMastSlot = { ship, mastIndex: i };
+          return;
+        }
+      }
+    }
+  }
+
+  /**
+   * Detect whether the missing helm is under the cursor.
+   */
+  private detectHoveredHelmSlot(worldState: WorldState): void {
+    this.hoveredHelmSlot = null;
+    if (!this.mouseWorldPos) return;
+
+    for (const ship of worldState.ships) {
+      // Only show ghost when helm is actually missing
+      const helmPresent = ship.modules.some(m => m.kind === 'helm');
+      if (helmPresent) continue;
+
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const localX = dx * cos - dy * sin;
+      const localY = dx * sin + dy * cos;
+
+      const ddx = localX - RenderSystem.HELM_X;
+      if (Math.sqrt(ddx * ddx + localY * localY) <= 18) {
+        this.hoveredHelmSlot = { ship };
+        return;
+      }
+    }
+  }
+
+  /**
+   * Draw ghost circles at missing mast positions (mast build mode).
+   */
+  private drawMissingMastGhosts(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const helm = ship.modules.find(m => m.kind === 'helm');
+    if (!helm) return;
+    const base = helm.id;
+
+    const presentIds = new Set(ship.modules.map(m => m.id));
+
+    this.ctx.save();
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const lw = 1.5 / cameraState.zoom;
+
+    for (let i = 0; i < 3; i++) {
+      if (presentIds.has(base + 7 + i)) continue;
+
+      const mx = RenderSystem.MAST_XS[i];
+      const isHovered = this.hoveredMastSlot?.ship === ship &&
+                        this.hoveredMastSlot?.mastIndex === i;
+
+      // Ghost mast circle (radius 14px, matching real mast)
+      this.ctx.beginPath();
+      this.ctx.arc(mx, 0, 14, 0, Math.PI * 2);
+      this.ctx.fillStyle   = isHovered ? 'rgba(0,210,210,0.35)' : 'rgba(0,160,160,0.15)';
+      this.ctx.strokeStyle = isHovered ? '#00dddd' : 'rgba(0,200,200,0.55)';
+      this.ctx.lineWidth   = isHovered ? lw * 2 : lw;
+      this.ctx.fill();
+      this.ctx.stroke();
+
+      // Ghost sail stub (vertical line up from mast)
+      this.ctx.strokeStyle = isHovered ? '#66eeee' : 'rgba(0,180,180,0.40)';
+      this.ctx.lineWidth   = lw;
+      this.ctx.beginPath();
+      this.ctx.moveTo(mx, 0);
+      this.ctx.lineTo(mx, -50);
+      this.ctx.stroke();
+
+      // Hovered: highlight ring
+      if (isHovered) {
+        this.ctx.beginPath();
+        this.ctx.arc(mx, 0, 22, 0, Math.PI * 2);
+        this.ctx.strokeStyle = '#00ffff';
+        this.ctx.lineWidth   = lw * 1.5;
+        this.ctx.stroke();
+      }
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw a ghost helm at its position if the helm is destroyed (helm build mode).
+   */
+  private drawMissingHelmGhost(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const helmPresent = ship.modules.some(m => m.kind === 'helm');
+    if (helmPresent) return; // Nothing to draw
+
+    this.ctx.save();
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const lw = 1.5 / cameraState.zoom;
+    const isHovered = this.hoveredHelmSlot?.ship === ship;
+
+    this.ctx.beginPath();
+    this.ctx.arc(RenderSystem.HELM_X, 0, 8, 0, Math.PI * 2);
+    this.ctx.fillStyle   = isHovered ? 'rgba(180,80,255,0.40)' : 'rgba(140,60,200,0.18)';
+    this.ctx.strokeStyle = isHovered ? '#cc44ff' : 'rgba(160,80,230,0.55)';
+    this.ctx.lineWidth   = isHovered ? lw * 2 : lw;
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    // Hovered: highlight ring
+    if (isHovered) {
+      this.ctx.beginPath();
+      this.ctx.arc(RenderSystem.HELM_X, 0, 18, 0, Math.PI * 2);
+      this.ctx.strokeStyle = '#ee88ff';
+      this.ctx.lineWidth   = lw * 1.5;
+      this.ctx.stroke();
     }
 
     this.ctx.restore();

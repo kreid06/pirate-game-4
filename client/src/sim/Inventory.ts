@@ -16,6 +16,8 @@ export type ItemKind =
   | 'repair_kit'
   | 'cannon_ball'
   | 'cannon'
+  | 'sail'
+  | 'helm_kit'
   | 'sword'
   | 'pistol'
   | 'hammer'
@@ -48,6 +50,8 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   repair_kit:    { kind: 'repair_kit',    name: 'Repair Kit',    category: 'repair',   maxStack: 99, color: '#2577e3', borderColor: '#1a4fa0', symbol: 'R' },
   cannon_ball:   { kind: 'cannon_ball',   name: 'Cannonball',    category: 'ammo',     maxStack: 99, color: '#555',    borderColor: '#333',    symbol: 'C' },
   cannon:        { kind: 'cannon',        name: 'Cannon',        category: 'building', maxStack: 9,  color: '#333333', borderColor: '#111',    symbol: '⚫' },
+  sail:          { kind: 'sail',          name: 'Sail',          category: 'building', maxStack: 9,  color: '#1e8c6e', borderColor: '#0f5c48', symbol: '⛵' },
+  helm_kit:      { kind: 'helm_kit',      name: 'Helm Kit',      category: 'building', maxStack: 3,  color: '#6a3d8f', borderColor: '#3d2060', symbol: 'W' },
   sword:         { kind: 'sword',         name: 'Sword',         category: 'weapon',   maxStack: 1,  color: '#c0c0c0', borderColor: '#777',    symbol: 'S' },
   pistol:        { kind: 'pistol',        name: 'Pistol',        category: 'weapon',   maxStack: 1,  color: '#8b4513', borderColor: '#5a2d0c', symbol: 'G' },
   hammer:        { kind: 'hammer',        name: 'Hammer',        category: 'tool',     maxStack: 1,  color: '#c07830', borderColor: '#885020', symbol: 'H' },
@@ -68,6 +72,8 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   2:  'repair_kit',
   3:  'cannon_ball',
   7:  'cannon',
+  8:  'sail',
+  9:  'helm_kit',
   4:  'sword',
   5:  'pistol',
   6:  'hammer',

@@ -64,6 +64,8 @@ export enum MessageType {
   PLACE_PLANK = 'place_plank',
   REPAIR_PLANK = 'repair_plank',
   PLACE_CANNON = 'place_cannon',
+  PLACE_MAST = 'place_mast',
+  REPLACE_HELM = 'replace_helm',
   CREW_ASSIGN = 'crew_assign',
 
   PING = 'ping',
@@ -287,6 +289,18 @@ interface PlaceCannonMessage extends NetworkMessage {
   shipId: number;
 }
 
+interface PlaceMastMessage extends NetworkMessage {
+  type: MessageType.PLACE_MAST;
+  timestamp: number;
+  shipId: number;
+}
+
+interface ReplaceHelmMessage extends NetworkMessage {
+  type: MessageType.REPLACE_HELM;
+  timestamp: number;
+  shipId: number;
+}
+
 interface CrewAssignMessage extends NetworkMessage {
   type: MessageType.CREW_ASSIGN;
   timestamp: number;
@@ -295,7 +309,7 @@ interface CrewAssignMessage extends NetworkMessage {
   task: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | RepairPlankMessage | CrewAssignMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceMastMessage | ReplaceHelmMessage | RepairPlankMessage | CrewAssignMessage;
 
 /**
  * Main network manager class
@@ -829,6 +843,25 @@ export class NetworkManager {
   sendPlaceCannon(shipId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_CANNON, timestamp: Date.now(), shipId });
+  }
+
+  /**
+   * Request the server to replace a destroyed mast on the player's ship.
+   * Server finds the first missing mast slot (base+7..base+9) and recreates it,
+   * consuming 1 ITEM_SAIL from the player's inventory.
+   */
+  sendPlaceMast(shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_MAST, timestamp: Date.now(), shipId });
+  }
+
+  /**
+   * Request the server to replace the helm if it was destroyed.
+   * Consumes 1 ITEM_HELM from the player's inventory.
+   */
+  sendReplaceHelm(shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.REPLACE_HELM, timestamp: Date.now(), shipId });
   }
 
   /**

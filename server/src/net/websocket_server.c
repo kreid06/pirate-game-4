@@ -654,6 +654,10 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].inventory.slots[3].quantity = 3;
             players[i].inventory.slots[4].item     = ITEM_CANNON;
             players[i].inventory.slots[4].quantity = 3;
+            players[i].inventory.slots[5].item     = ITEM_SAIL;
+            players[i].inventory.slots[5].quantity = 3;
+            players[i].inventory.slots[6].item     = ITEM_HELM;
+            players[i].inventory.slots[6].quantity = 1;
 
             return &players[i];
         }
@@ -2582,6 +2586,7 @@ static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t
     s->module_count = 0;
     s->cannon_ammo  = 0;       // unused — infinite_ammo is on
     s->infinite_ammo = true;
+    s->module_id_base = module_id_base;
 
     uint16_t mid = module_id_base;
 
@@ -3771,7 +3776,6 @@ int websocket_server_update(struct Sim* sim) {
                                 if (!player || player->parent_ship_id == 0) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 } else {
-                                    // Find a cannon item in inventory
                                     int cannon_slot = -1;
                                     for (int s = 0; s < INVENTORY_SLOTS; s++) {
                                         if (player->inventory.slots[s].item == ITEM_CANNON &&
@@ -3784,78 +3788,215 @@ int websocket_server_update(struct Sim* sim) {
                                     } else if (!global_sim) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                     } else {
+                                        SimpleShip* simple = find_ship(player->parent_ship_id);
                                         struct Ship* sim_ship = NULL;
                                         for (uint32_t si = 0; si < global_sim->ship_count; si++) {
                                             if (global_sim->ships[si].id == player->parent_ship_id) {
                                                 sim_ship = &global_sim->ships[si]; break;
                                             }
                                         }
-                                        if (!sim_ship) {
+                                        if (!sim_ship || !simple) {
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
                                         } else {
-                                            // The helm module always has ID = module_id_base
-                                            uint16_t base = 0;
-                                            bool found_helm = false;
+                                            uint16_t base = simple->module_id_base;
+                                            bool present[6] = {false};
+                                            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                                                uint16_t mid = sim_ship->modules[m].id;
+                                                if (mid >= base + 1 && mid <= base + 6)
+                                                    present[mid - base - 1] = true;
+                                            }
+                                            int missing_idx = -1;
+                                            for (int k = 0; k < 6; k++) {
+                                                if (!present[k]) { missing_idx = k; break; }
+                                            }
+                                            if (missing_idx < 0) {
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_missing_cannons\"}");
+                                            } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
+                                                strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                            } else {
+                                                static const float cannon_xs[3] = { -35.0f, 65.0f, -135.0f };
+                                                int i = missing_idx;
+                                                float cx  = cannon_xs[i % 3];
+                                                float cy  = (i < 3) ? 75.0f : -75.0f;
+                                                float rot = (i < 3) ? (float)M_PI : 0.0f;
+                                                uint16_t cannon_id = base + 1 + (uint16_t)i;
+                                                ShipModule* nc = &sim_ship->modules[sim_ship->module_count];
+                                                memset(nc, 0, sizeof(ShipModule));
+                                                nc->id          = cannon_id;
+                                                nc->type_id     = MODULE_TYPE_CANNON;
+                                                nc->local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cx));
+                                                nc->local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cy));
+                                                nc->local_rot   = Q16_FROM_FLOAT(rot);
+                                                nc->state_bits  = MODULE_STATE_ACTIVE;
+                                                nc->health      = Q16_FROM_FLOAT(8000.0f);
+                                                nc->max_health  = Q16_FROM_FLOAT(8000.0f);
+                                                nc->data.cannon.aim_direction   = Q16_FROM_FLOAT(0.0f);
+                                                nc->data.cannon.ammunition      = 10;
+                                                nc->data.cannon.time_since_fire = 0;
+                                                nc->data.cannon.reload_time     = Q16_FROM_FLOAT(3000.0f);
+                                                sim_ship->module_count++;
+                                                player->inventory.slots[cannon_slot].quantity--;
+                                                if (player->inventory.slots[cannon_slot].quantity == 0)
+                                                    player->inventory.slots[cannon_slot].item = ITEM_NONE;
+                                                log_info("🔧 Player %u placed cannon %u on ship %u",
+                                                         player->player_id, cannon_id, sim_ship->id);
+                                                snprintf(response, sizeof(response),
+                                                    "{\"type\":\"message_ack\",\"status\":\"cannon_placed\",\"cannon_id\":%u}",
+                                                    cannon_id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strstr(payload, "\"type\":\"place_mast\"")) {
+                            // PLACE MAST: re-install a destroyed mast on the player's ship.
+                            // Consumes 1 ITEM_SAIL. First missing mast slot (IDs base+7..base+9).
+                            // Layout: mast_xs[3]={165,-35,-235}, y=0, rot=0.
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    int sail_slot = -1;
+                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                        if (player->inventory.slots[s].item == ITEM_SAIL &&
+                                            player->inventory.slots[s].quantity > 0) {
+                                            sail_slot = s; break;
+                                        }
+                                    }
+                                    if (sail_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_sail\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        SimpleShip* simple = find_ship(player->parent_ship_id);
+                                        struct Ship* sim_ship = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == player->parent_ship_id) {
+                                                sim_ship = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        if (!sim_ship || !simple) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else {
+                                            uint16_t base = simple->module_id_base;
+                                            // Masts: base+7, base+8, base+9
+                                            bool present[3] = {false};
+                                            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                                                uint16_t mid = sim_ship->modules[m].id;
+                                                if (mid >= base + 7 && mid <= base + 9)
+                                                    present[mid - base - 7] = true;
+                                            }
+                                            int missing_idx = -1;
+                                            for (int k = 0; k < 3; k++) {
+                                                if (!present[k]) { missing_idx = k; break; }
+                                            }
+                                            if (missing_idx < 0) {
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_missing_masts\"}");
+                                            } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
+                                                strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                            } else {
+                                                static const float mast_xs[3] = { 165.0f, -35.0f, -235.0f };
+                                                uint16_t mast_id = base + 7 + (uint16_t)missing_idx;
+                                                ShipModule* nm = &sim_ship->modules[sim_ship->module_count];
+                                                memset(nm, 0, sizeof(ShipModule));
+                                                nm->id          = mast_id;
+                                                nm->type_id     = MODULE_TYPE_MAST;
+                                                nm->local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(mast_xs[missing_idx]));
+                                                nm->local_pos.y = Q16_FROM_FLOAT(0.0f);
+                                                nm->local_rot   = Q16_FROM_FLOAT(0.0f);
+                                                nm->state_bits  = MODULE_STATE_ACTIVE | MODULE_STATE_DEPLOYED;
+                                                nm->health      = Q16_FROM_FLOAT(15000.0f);
+                                                nm->max_health  = Q16_FROM_FLOAT(15000.0f);
+                                                nm->data.mast.angle           = Q16_FROM_FLOAT(0.0f);
+                                                nm->data.mast.openness        = 0;
+                                                nm->data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
+                                                sim_ship->module_count++;
+                                                player->inventory.slots[sail_slot].quantity--;
+                                                if (player->inventory.slots[sail_slot].quantity == 0)
+                                                    player->inventory.slots[sail_slot].item = ITEM_NONE;
+                                                log_info("⛵ Player %u placed mast %u on ship %u",
+                                                         player->player_id, mast_id, sim_ship->id);
+                                                snprintf(response, sizeof(response),
+                                                    "{\"type\":\"message_ack\",\"status\":\"mast_placed\",\"mast_id\":%u}",
+                                                    mast_id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strstr(payload, "\"type\":\"replace_helm\"")) {
+                            // REPLACE HELM: re-install the helm if destroyed.
+                            // Consumes 1 ITEM_HELM. Helm ID = base+0, pos (-90, 0).
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    int helm_slot = -1;
+                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                        if (player->inventory.slots[s].item == ITEM_HELM &&
+                                            player->inventory.slots[s].quantity > 0) {
+                                            helm_slot = s; break;
+                                        }
+                                    }
+                                    if (helm_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_helm_item\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        SimpleShip* simple = find_ship(player->parent_ship_id);
+                                        struct Ship* sim_ship = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == player->parent_ship_id) {
+                                                sim_ship = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        if (!sim_ship || !simple) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else {
+                                            uint16_t base = simple->module_id_base;
+                                            // Check if helm already present
+                                            bool helm_present = false;
                                             for (uint8_t m = 0; m < sim_ship->module_count; m++) {
                                                 if (sim_ship->modules[m].type_id == MODULE_TYPE_HELM) {
-                                                    base = sim_ship->modules[m].id;
-                                                    found_helm = true; break;
+                                                    helm_present = true; break;
                                                 }
                                             }
-                                            if (!found_helm) {
-                                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_helm\"}");
+                                            if (helm_present) {
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"helm_intact\"}");
+                                            } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
+                                                strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
                                             } else {
-                                                // Check which cannons (base+1..base+6) are present
-                                                bool present[6] = {false};
-                                                for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                                                    uint16_t mid = sim_ship->modules[m].id;
-                                                    if (mid >= base + 1 && mid <= base + 6)
-                                                        present[mid - base - 1] = true;
-                                                }
-                                                int missing_idx = -1;
-                                                for (int k = 0; k < 6; k++) {
-                                                    if (!present[k]) { missing_idx = k; break; }
-                                                }
-                                                if (missing_idx < 0) {
-                                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_missing_cannons\"}");
-                                                } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
-                                                    strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
-                                                } else {
-                                                    static const float cannon_xs[3] = { -35.0f, 65.0f, -135.0f };
-                                                    int i = missing_idx;
-                                                    float cx  = cannon_xs[i % 3];
-                                                    float cy  = (i < 3) ? 75.0f : -75.0f;
-                                                    float rot = (i < 3) ? (float)M_PI : 0.0f;
-                                                    uint16_t cannon_id = base + 1 + (uint16_t)i;
-
-                                                    ShipModule* nc = &sim_ship->modules[sim_ship->module_count];
-                                                    memset(nc, 0, sizeof(ShipModule));
-                                                    nc->id          = cannon_id;
-                                                    nc->type_id     = MODULE_TYPE_CANNON;
-                                                    nc->local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cx));
-                                                    nc->local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cy));
-                                                    nc->local_rot   = Q16_FROM_FLOAT(rot);
-                                                    nc->state_bits  = MODULE_STATE_ACTIVE;
-                                                    nc->health      = Q16_FROM_FLOAT(8000.0f);
-                                                    nc->max_health  = Q16_FROM_FLOAT(8000.0f);
-                                                    nc->data.cannon.aim_direction   = Q16_FROM_FLOAT(0.0f);
-                                                    nc->data.cannon.ammunition      = 10;
-                                                    nc->data.cannon.time_since_fire = 0;
-                                                    nc->data.cannon.reload_time     = Q16_FROM_FLOAT(3000.0f);
-                                                    sim_ship->module_count++;
-
-                                                    // Consume 1 cannon item
-                                                    player->inventory.slots[cannon_slot].quantity--;
-                                                    if (player->inventory.slots[cannon_slot].quantity == 0)
-                                                        player->inventory.slots[cannon_slot].item = ITEM_NONE;
-
-                                                    log_info("🔧 Player %u placed cannon %u on ship %u (%d cannons remain)",
-                                                             player->player_id, cannon_id, sim_ship->id,
-                                                             player->inventory.slots[cannon_slot].quantity);
-                                                    snprintf(response, sizeof(response),
-                                                        "{\"type\":\"message_ack\",\"status\":\"cannon_placed\",\"cannon_id\":%u}",
-                                                        cannon_id);
-                                                }
+                                                ShipModule* nh = &sim_ship->modules[sim_ship->module_count];
+                                                memset(nh, 0, sizeof(ShipModule));
+                                                nh->id          = base;   // base+0
+                                                nh->type_id     = MODULE_TYPE_HELM;
+                                                nh->local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-90.0f));
+                                                nh->local_pos.y = Q16_FROM_FLOAT(0.0f);
+                                                nh->local_rot   = Q16_FROM_FLOAT(0.0f);
+                                                nh->state_bits  = MODULE_STATE_ACTIVE;
+                                                nh->health      = Q16_FROM_FLOAT(10000.0f);
+                                                nh->max_health  = Q16_FROM_FLOAT(10000.0f);
+                                                nh->data.helm.occupied_by    = 0;
+                                                nh->data.helm.wheel_rotation = Q16_FROM_FLOAT(0.0f);
+                                                sim_ship->module_count++;
+                                                player->inventory.slots[helm_slot].quantity--;
+                                                if (player->inventory.slots[helm_slot].quantity == 0)
+                                                    player->inventory.slots[helm_slot].item = ITEM_NONE;
+                                                log_info("🔧 Player %u replaced helm %u on ship %u",
+                                                         player->player_id, base, sim_ship->id);
+                                                snprintf(response, sizeof(response),
+                                                    "{\"type\":\"message_ack\",\"status\":\"helm_placed\",\"helm_id\":%u}",
+                                                    base);
                                             }
                                         }
                                     }

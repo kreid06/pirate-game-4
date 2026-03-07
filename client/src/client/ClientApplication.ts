@@ -299,8 +299,22 @@ export class ClientApplication {
         this.checkBuildMode();
       };
 
-      // Build placement: left-click in build mode → send place_plank or place_cannon to server
+      // Build placement: left-click in build mode → send place_plank / place_cannon / place_mast / replace_helm
       this.inputManager.onBuildPlace = (_worldPos) => {
+        // Helm replacement (highest priority — only one helm per ship)
+        const helmSlot = this.renderSystem.getHoveredHelmSlot();
+        if (helmSlot) {
+          console.log(`🔧 [BUILD] Replacing helm on ship ${helmSlot.ship.id}`);
+          this.networkManager.sendReplaceHelm(helmSlot.ship.id);
+          return;
+        }
+        // Mast placement build mode
+        const mastSlot = this.renderSystem.getHoveredMastSlot();
+        if (mastSlot) {
+          console.log(`⛵ [BUILD] Placing mast ${mastSlot.mastIndex} on ship ${mastSlot.ship.id}`);
+          this.networkManager.sendPlaceMast(mastSlot.ship.id);
+          return;
+        }
         // Cannon replacement build mode
         const cannonSlot = this.renderSystem.getHoveredCannonSlot();
         if (cannonSlot) {
@@ -714,10 +728,14 @@ export class ClientApplication {
     const activeItem  = player?.inventory?.slots[activeSlot]?.item ?? 'none';
     const inBuildMode       = activeItem === 'plank';
     const inCannonBuildMode = activeItem === 'cannon';
+    const inMastBuildMode   = activeItem === 'sail';
+    const inHelmBuildMode   = activeItem === 'helm_kit';
 
     this.renderSystem.setBuildMode(inBuildMode);
     this.renderSystem.setCannonBuildMode(inCannonBuildMode);
-    this.inputManager.buildMode = inBuildMode || inCannonBuildMode;
+    this.renderSystem.setMastBuildMode(inMastBuildMode);
+    this.renderSystem.setHelmBuildMode(inHelmBuildMode);
+    this.inputManager.buildMode = inBuildMode || inCannonBuildMode || inMastBuildMode || inHelmBuildMode;
   }
 
   /**

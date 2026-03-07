@@ -15,6 +15,7 @@
 // Simple ship structure for WebSocket server
 typedef struct SimpleShip {
     uint32_t ship_id;
+    uint16_t module_id_base;  // ID of the helm module (= module_id_base passed to init_brigantine_ship)
     uint32_t ship_type;      // Ship type ID (1=sloop, 2=cutter, 3=brigantine, etc.)
     float x, y;              // World position
     float rotation;          // Radians
@@ -139,6 +140,8 @@ typedef enum {
     ITEM_REPAIR_KIT    = 2,
     ITEM_CANNON_BALL   = 3,
     ITEM_CANNON        = 7,
+    ITEM_SAIL          = 8,
+    ITEM_HELM          = 9,
     ITEM_SWORD         = 4,
     ITEM_PISTOL        = 5,
     ITEM_HAMMER        = 6,
