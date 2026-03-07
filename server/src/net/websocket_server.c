@@ -3793,15 +3793,17 @@ int websocket_server_update(struct Sim* sim) {
                                         const char* p_sid = strstr(payload, "\"shipId\":");
                                         if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = sid; }
 
+                                        SimpleShip* simple = find_ship(target_ship_id);
                                         struct Ship* sim_ship = NULL;
                                         for (uint32_t si = 0; si < global_sim->ship_count; si++) {
                                             if (global_sim->ships[si].id == target_ship_id) {
                                                 sim_ship = &global_sim->ships[si]; break;
                                             }
                                         }
-                                        if (!sim_ship) {
+                                        if (!sim_ship || !simple) {
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
-                                        } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
+                                        } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP ||
+                                                   simple->module_count >= MAX_MODULES_PER_SHIP) {
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
                                         } else {
                                             // Parse local position and rotation (client px → server units)
@@ -3813,32 +3815,44 @@ int websocket_server_update(struct Sim* sim) {
                                             if (py) sscanf(py + 9,  "%f", &local_y);
                                             if (pr) sscanf(pr + 11, "%f", &rotation);
 
-                                            // Allocate a unique module ID (scan max existing + 1)
+                                            // Allocate a unique module ID (scan max existing + 1 across both arrays)
                                             uint16_t max_id = 0;
                                             for (uint8_t m = 0; m < sim_ship->module_count; m++)
                                                 if (sim_ship->modules[m].id > max_id) max_id = sim_ship->modules[m].id;
+                                            for (uint8_t m = 0; m < simple->module_count; m++)
+                                                if (simple->modules[m].id > max_id) max_id = simple->modules[m].id;
                                             uint16_t new_id = max_id + 1;
 
-                                            ShipModule* nc = &sim_ship->modules[sim_ship->module_count];
-                                            memset(nc, 0, sizeof(ShipModule));
-                                            nc->id          = new_id;
-                                            nc->type_id     = MODULE_TYPE_CANNON;
-                                            nc->local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_x));
-                                            nc->local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
-                                            nc->local_rot   = Q16_FROM_FLOAT(rotation);
-                                            nc->state_bits  = MODULE_STATE_ACTIVE;
-                                            nc->health      = Q16_FROM_FLOAT(8000.0f);
-                                            nc->max_health  = Q16_FROM_FLOAT(8000.0f);
-                                            nc->data.cannon.aim_direction   = Q16_FROM_FLOAT(0.0f);
-                                            nc->data.cannon.ammunition      = 10;
-                                            nc->data.cannon.time_since_fire = 0;
-                                            nc->data.cannon.reload_time     = Q16_FROM_FLOAT(3000.0f);
-                                            sim_ship->module_count++;
+                                            // Build the module record once, copy into both arrays
+                                            ShipModule nc;
+                                            memset(&nc, 0, sizeof(ShipModule));
+                                            nc.id          = new_id;
+                                            nc.type_id     = MODULE_TYPE_CANNON;
+                                            nc.local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_x));
+                                            nc.local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
+                                            nc.local_rot   = Q16_FROM_FLOAT(rotation);
+                                            nc.state_bits  = MODULE_STATE_ACTIVE;
+                                            nc.health      = Q16_FROM_FLOAT(8000.0f);
+                                            nc.max_health  = Q16_FROM_FLOAT(8000.0f);
+                                            nc.data.cannon.aim_direction   = Q16_FROM_FLOAT(0.0f);
+                                            nc.data.cannon.ammunition      = 10;
+                                            nc.data.cannon.time_since_fire = 0;
+                                            nc.data.cannon.reload_time     = Q16_FROM_FLOAT(3000.0f);
+
+                                            // Add to physics simulation
+                                            sim_ship->modules[sim_ship->module_count++] = nc;
+                                            // Add to SimpleShip (network broadcast + NPC visibility)
+                                            simple->modules[simple->module_count++] = nc;
 
                                             // Consume 1 cannon from inventory
                                             player->inventory.slots[cannon_slot].quantity--;
                                             if (player->inventory.slots[cannon_slot].quantity == 0)
                                                 player->inventory.slots[cannon_slot].item = ITEM_NONE;
+
+                                            // Trigger NPC cannon sector re-dispatch so on-duty gunners
+                                            // can immediately adopt the newly placed cannon if it is
+                                            // closer to the current aim angle than their current post.
+                                            update_npc_cannon_sector(simple, simple->active_aim_angle);
 
                                             log_info("🔨 Player %u placed cannon %u at (%.1f,%.1f) rot=%.2f on ship %u",
                                                      player->player_id, new_id, local_x, local_y, rotation, sim_ship->id);
@@ -3878,15 +3892,17 @@ int websocket_server_update(struct Sim* sim) {
                                         const char* p_sid = strstr(payload, "\"shipId\":");
                                         if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = sid; }
 
+                                        SimpleShip* simple_mast = find_ship(target_ship_id);
                                         struct Ship* sim_ship = NULL;
                                         for (uint32_t si = 0; si < global_sim->ship_count; si++) {
                                             if (global_sim->ships[si].id == target_ship_id) {
                                                 sim_ship = &global_sim->ships[si]; break;
                                             }
                                         }
-                                        if (!sim_ship) {
+                                        if (!sim_ship || !simple_mast) {
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
-                                        } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
+                                        } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP ||
+                                                   simple_mast->module_count >= MAX_MODULES_PER_SHIP) {
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
                                         } else {
                                             float local_x = 0.0f, local_y = 0.0f;
@@ -3898,22 +3914,27 @@ int websocket_server_update(struct Sim* sim) {
                                             uint16_t max_id = 0;
                                             for (uint8_t m = 0; m < sim_ship->module_count; m++)
                                                 if (sim_ship->modules[m].id > max_id) max_id = sim_ship->modules[m].id;
+                                            for (uint8_t m = 0; m < simple_mast->module_count; m++)
+                                                if (simple_mast->modules[m].id > max_id) max_id = simple_mast->modules[m].id;
                                             uint16_t new_id = max_id + 1;
 
-                                            ShipModule* nm = &sim_ship->modules[sim_ship->module_count];
-                                            memset(nm, 0, sizeof(ShipModule));
-                                            nm->id          = new_id;
-                                            nm->type_id     = MODULE_TYPE_MAST;
-                                            nm->local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_x));
-                                            nm->local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
-                                            nm->local_rot   = Q16_FROM_FLOAT(0.0f);
-                                            nm->state_bits  = MODULE_STATE_ACTIVE | MODULE_STATE_DEPLOYED;
-                                            nm->health      = Q16_FROM_FLOAT(15000.0f);
-                                            nm->max_health  = Q16_FROM_FLOAT(15000.0f);
-                                            nm->data.mast.angle           = Q16_FROM_FLOAT(0.0f);
-                                            nm->data.mast.openness        = 0;
-                                            nm->data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
-                                            sim_ship->module_count++;
+                                            ShipModule nm;
+                                            memset(&nm, 0, sizeof(ShipModule));
+                                            nm.id          = new_id;
+                                            nm.type_id     = MODULE_TYPE_MAST;
+                                            nm.local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_x));
+                                            nm.local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
+                                            nm.local_rot   = Q16_FROM_FLOAT(0.0f);
+                                            nm.state_bits  = MODULE_STATE_ACTIVE | MODULE_STATE_DEPLOYED;
+                                            nm.health      = Q16_FROM_FLOAT(15000.0f);
+                                            nm.max_health  = Q16_FROM_FLOAT(15000.0f);
+                                            nm.data.mast.angle           = Q16_FROM_FLOAT(0.0f);
+                                            nm.data.mast.openness        = 0;
+                                            nm.data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
+
+                                            // Add to physics simulation and to SimpleShip (NPC + network)
+                                            sim_ship->modules[sim_ship->module_count++] = nm;
+                                            simple_mast->modules[simple_mast->module_count++] = nm;
 
                                             player->inventory.slots[sail_slot].quantity--;
                                             if (player->inventory.slots[sail_slot].quantity == 0)
