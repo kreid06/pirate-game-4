@@ -565,6 +565,7 @@ export class RenderSystem {
       this.queueRenderItem(4, 'rudder', () => this.drawShipRudder(ship, camera));
       this.queueRenderItem(5, 'steering-wheels', () => this.drawShipSteeringWheels(ship, camera));
       this.queueRenderItem(5, 'ladders', () => this.drawShipLadders(ship, camera));
+      this.queueRenderItem(5, 'sail-ropes', () => this.drawShipSailRopes(ship, camera));
     }
     
     // Queue sail fibers (layer 6)
@@ -1127,6 +1128,100 @@ export class RenderSystem {
     this.ctx.restore();
   }
   
+  /**
+   * Draw sail ropes (sheets) running perpendicular to the ship's long axis,
+   * from each mast out to port/starboard hull-rail cleats.
+   */
+  private drawShipSailRopes(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    this.ctx.save();
+
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const masts = ship.modules.filter(m => m.kind === 'mast');
+
+    for (const mast of masts) {
+      if (!mast.moduleData || mast.moduleData.kind !== 'mast') continue;
+
+      const mastData = mast.moduleData;
+      const mx = mast.localPos.x;
+      const my = mast.localPos.y;
+      const sailWidth = mastData.sailWidth;
+
+      // Sheet attachment points — perpendicular to ship's long axis (X direction)
+      const hullOffset = sailWidth * 0.92;
+      const portX  = mx - hullOffset;
+      const stbdX  = mx + hullOffset;
+
+      // Rope style — thin brownish hemp color
+      this.ctx.strokeStyle = '#8B7355';
+      this.ctx.lineWidth = 1.2;
+      this.ctx.lineCap = 'round';
+
+      // Port sheet
+      this.ctx.beginPath();
+      this.ctx.moveTo(mx, my);
+      this.ctx.lineTo(portX, my);
+      this.ctx.stroke();
+
+      // Starboard sheet
+      this.ctx.beginPath();
+      this.ctx.moveTo(mx, my);
+      this.ctx.lineTo(stbdX, my);
+      this.ctx.stroke();
+
+      // Cleats / bollards at hull rail
+      this.drawSailRopeCleat(portX, my);
+      this.drawSailRopeCleat(stbdX, my);
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw a small T-shaped cleat at the given ship-local position.
+   * The cleat body runs along Y (perpendicular to the rope / hull rail).
+   */
+  private drawSailRopeCleat(x: number, y: number): void {
+    const bodyH  = 7;   // height of cleat body (along Y / ship cross-axis)
+    const bodyW  = 3.5; // width of cleat body
+    const hornW  = bodyW * 2.4; // horn wingspan
+    const hornH  = 2.5; // horn thickness
+
+    this.ctx.save();
+    this.ctx.translate(x, y);
+
+    this.ctx.fillStyle   = '#5C4033';
+    this.ctx.strokeStyle = '#3A2518';
+    this.ctx.lineWidth   = 0.8;
+
+    // Body
+    this.ctx.beginPath();
+    this.ctx.roundRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH, 1);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    // Top horn
+    this.ctx.beginPath();
+    this.ctx.roundRect(-hornW / 2, -bodyH / 2 - hornH + 1, hornW, hornH, 1);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    // Bottom horn
+    this.ctx.beginPath();
+    this.ctx.roundRect(-hornW / 2, bodyH / 2 - 1, hornW, hornH, 1);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    this.ctx.restore();
+  }
+
   private drawShipSailFibers(ship: Ship, camera: Camera): void {
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
