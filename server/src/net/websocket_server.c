@@ -1222,15 +1222,6 @@ static void tick_npc_agents(float dt) {
 
                 // Point the cannon toward the target ship's current position
                 npc_aim_cannon_at_world(ship, module, target->x, target->y);
-
-                // Fire when cooldown expires (infinite ammo for NPCs)
-                if (npc->fire_cooldown <= 0.0f) {
-                    bool saved_infinite = ship->infinite_ammo;
-                    ship->infinite_ammo = true;
-                    fire_cannon(ship, module, NULL, false);
-                    ship->infinite_ammo = saved_infinite;
-                    npc->fire_cooldown = npc->fire_interval;
-                }
                 break;
             }
 
