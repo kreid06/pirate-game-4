@@ -1255,50 +1255,123 @@ static void tick_npc_agents(float dt) {
 }
 
 /**
- * Spawn a sailor NPC on a ship, paired with one port and one starboard cannon.
- * stand_offset: small y-shift (client units) so two NPCs at the same cannon don't overlap.
+ * Returns true if another active WorldNpc already owns this module ID
+ * (either as port or starboard assignment). Prevents double-occupancy.
+ */
+static bool is_module_owned_by_npc(uint32_t module_id) {
+    if (module_id == 0) return false;
+    for (int i = 0; i < world_npc_count; i++) {
+        if (!world_npcs[i].active) continue;
+        if (world_npcs[i].port_cannon_id == module_id) return true;
+        if (world_npcs[i].starboard_cannon_id == module_id) return true;
+    }
+    return false;
+}
+
+/**
+ * Spawn a gunner NPC paired with a port and starboard cannon.
+ * The NPC walks between the two cannons when the ship's active broadside changes.
+ * Position matches the player cannon-mount offset (25px behind the breech).
  * Returns the new NPC id, or 0 on failure.
  */
-static uint32_t spawn_ship_sailor(uint32_t ship_id, const char* name,
-                                  uint32_t port_cannon_id, uint32_t starboard_cannon_id,
-                                  float stand_offset) {
+static uint32_t spawn_ship_gunner(uint32_t ship_id, const char* name,
+                                  uint32_t port_cannon_id, uint32_t starboard_cannon_id) {
     if (world_npc_count >= MAX_WORLD_NPCS) {
-        log_warn("spawn_ship_sailor: MAX_WORLD_NPCS reached");
+        log_warn("spawn_ship_gunner: MAX_WORLD_NPCS reached");
+        return 0;
+    }
+    if (is_module_owned_by_npc(port_cannon_id) || is_module_owned_by_npc(starboard_cannon_id)) {
+        log_warn("spawn_ship_gunner: cannon %u or %u already owned by another NPC",
+                 port_cannon_id, starboard_cannon_id);
         return 0;
     }
     SimpleShip* ship = find_ship(ship_id);
     if (!ship) {
-        log_warn("spawn_ship_sailor: ship %u not found", ship_id);
+        log_warn("spawn_ship_gunner: ship %u not found", ship_id);
         return 0;
     }
     WorldNpc* npc = &world_npcs[world_npc_count++];
     memset(npc, 0, sizeof(WorldNpc));
     npc->id                  = next_world_npc_id++;
     npc->active              = true;
+    npc->role                = NPC_ROLE_GUNNER;
     npc->ship_id             = ship_id;
     npc->port_cannon_id      = port_cannon_id;
     npc->starboard_cannon_id = starboard_cannon_id;
-    npc->stand_offset        = stand_offset;
-    npc->move_speed          = 80.0f; // client units/second
+    npc->move_speed          = 80.0f;
     npc->interact_radius     = 40.0f;
     npc->state               = WORLD_NPC_STATE_AT_CANNON;
     strncpy(npc->name, name, sizeof(npc->name) - 1);
     strncpy(npc->dialogue, "Aye aye, Captain!", sizeof(npc->dialogue) - 1);
 
-    // Start on the port side (ship defaults to active_cannon_side = 0 = port)
+    // Start at port cannon — same mount offset a player would use (behind the breech)
     ShipModule* cannon = find_module_by_id(ship, port_cannon_id);
     if (cannon) {
         float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
         float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
+        float barrel_angle = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
+        const float CANNON_MOUNT_DIST = 25.0f;
         npc->assigned_cannon_id = port_cannon_id;
-        npc->local_x            = cx;
-        npc->local_y            = cy + stand_offset;
-        npc->target_local_x     = npc->local_x;
-        npc->target_local_y     = npc->local_y;
+        npc->local_x        = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
+        npc->local_y        = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
+        npc->target_local_x = npc->local_x;
+        npc->target_local_y = npc->local_y;
     }
     ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
-    log_info("🧑 Sailor '%s' (id %u) on ship %u — port cannon %u / stbd cannon %u",
+    log_info("🧑 Gunner '%s' (id %u) on ship %u — port cannon %u / stbd cannon %u",
              npc->name, npc->id, ship_id, port_cannon_id, starboard_cannon_id);
+    return npc->id;
+}
+
+/**
+ * Spawn a rigger NPC assigned to a single mast module.
+ * The NPC stays at the mast and never side-switches.
+ * Position matches the player mast-mount offset (+20px on local Y).
+ * Returns the new NPC id, or 0 on failure.
+ */
+static uint32_t spawn_ship_rigger(uint32_t ship_id, const char* name, uint32_t mast_module_id) {
+    if (world_npc_count >= MAX_WORLD_NPCS) {
+        log_warn("spawn_ship_rigger: MAX_WORLD_NPCS reached");
+        return 0;
+    }
+    if (is_module_owned_by_npc(mast_module_id)) {
+        log_warn("spawn_ship_rigger: mast %u already owned by another NPC", mast_module_id);
+        return 0;
+    }
+    SimpleShip* ship = find_ship(ship_id);
+    if (!ship) {
+        log_warn("spawn_ship_rigger: ship %u not found", ship_id);
+        return 0;
+    }
+    WorldNpc* npc = &world_npcs[world_npc_count++];
+    memset(npc, 0, sizeof(WorldNpc));
+    npc->id                  = next_world_npc_id++;
+    npc->active              = true;
+    npc->role                = NPC_ROLE_RIGGER;
+    npc->ship_id             = ship_id;
+    // Both ownership fields point to the same mast so is_module_owned_by_npc blocks re-use
+    npc->port_cannon_id      = mast_module_id;
+    npc->starboard_cannon_id = mast_module_id;
+    npc->assigned_cannon_id  = mast_module_id;
+    npc->move_speed          = 80.0f;
+    npc->interact_radius     = 40.0f;
+    npc->state               = WORLD_NPC_STATE_AT_CANNON;
+    strncpy(npc->name, name, sizeof(npc->name) - 1);
+    strncpy(npc->dialogue, "Adjusting the sails!", sizeof(npc->dialogue) - 1);
+
+    // Mount position matches player mast interact: mast_pos + (0, +20)
+    ShipModule* mast = find_module_by_id(ship, mast_module_id);
+    if (mast) {
+        float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mast->local_pos.x));
+        float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(mast->local_pos.y));
+        npc->local_x        = mx;
+        npc->local_y        = my + 20.0f;
+        npc->target_local_x = npc->local_x;
+        npc->target_local_y = npc->local_y;
+    }
+    ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
+    log_info("⛵ Rigger '%s' (id %u) on ship %u — mast %u",
+             npc->name, npc->id, ship_id, mast_module_id);
     return npc->id;
 }
 
@@ -1315,15 +1388,19 @@ static void trigger_npc_side_switch(uint32_t ship_id, uint8_t new_side) {
     for (int i = 0; i < world_npc_count; i++) {
         WorldNpc* npc = &world_npcs[i];
         if (!npc->active || npc->ship_id != ship_id) continue;
+        // Riggers stay at their mast regardless of broadside changes
+        if (npc->role != NPC_ROLE_GUNNER) continue;
         uint32_t target_id = (new_side == 0) ? npc->port_cannon_id : npc->starboard_cannon_id;
         if (target_id == 0 || target_id == npc->assigned_cannon_id) continue;
         ShipModule* cannon = find_module_by_id(ship, target_id);
         if (!cannon) continue;
         float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
         float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
+        float barrel_angle = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
+        const float CANNON_MOUNT_DIST = 25.0f;
         npc->assigned_cannon_id = target_id;
-        npc->target_local_x     = cx;
-        npc->target_local_y     = cy + npc->stand_offset;
+        npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
+        npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
         npc->state              = WORLD_NPC_STATE_MOVING;
     }
     log_info("⚓ Ship %u crew switching to %s broadside",
@@ -2345,23 +2422,30 @@ int websocket_server_init(uint16_t port) {
         log_info("🤖 NPC gunners %u and %u spawned on ship 2, targeting ship 1", npc1, npc2);
     }
 
-    // Spawn 6 sailor NPCs per ship — two per cannon slot (3 port + 3 starboard cannons each).
-    // Each NPC holds a port_cannon_id and starboard_cannon_id so they can cross the deck when
-    // the player aims the opposite broadside.  Module IDs: base+1..3 = port, base+4..6 = starboard.
-    // stand_offset ±12 px separates the two NPCs at the same cannon so they don't overlap.
+    // Spawn crew NPCs across both ships:
+    //   - 3 gunners per ship: one per cannon pair (port+stbd), exclusive module ownership.
+    //     Module IDs: base+1..3 = port cannons, base+4..6 = starboard cannons.
+    //   - 2 riggers per ship: front mast (base+7) and back mast (base+9).
+    //     Middle mast (base+8) is left free for player interaction.
     {
-        static const char* sailor_names[6] = { "Bo", "Mack", "Finn", "Ray", "Cole", "Sven" };
+        static const char* gunner_names[6] = { "Bo", "Mack", "Finn", "Ray", "Cole", "Sven" };
+        static const char* rigger_names[4] = { "Ned", "Hank", "Lars", "Tam" };
+        int gunner_idx = 0;
         for (int s = 0; s < 2; s++) {
             uint32_t sid  = ships[s].ship_id;
             uint32_t base = (s == 0) ? 1000u : 2000u;
+            // One gunner per cannon slot — each exclusively owns one port+stbd pair
             for (int slot = 0; slot < 3; slot++) {
                 uint32_t port_id = base + (uint32_t)slot + 1;
                 uint32_t stbd_id = base + (uint32_t)slot + 4;
-                spawn_ship_sailor(sid, sailor_names[slot],     port_id, stbd_id, -12.0f);
-                spawn_ship_sailor(sid, sailor_names[slot + 3], port_id, stbd_id,  12.0f);
+                spawn_ship_gunner(sid, gunner_names[gunner_idx++], port_id, stbd_id);
             }
+            // Two riggers: front mast (base+7) and back mast (base+9)
+            spawn_ship_rigger(sid, rigger_names[s * 2],     base + 7);
+            spawn_ship_rigger(sid, rigger_names[s * 2 + 1], base + 9);
         }
-        log_info("🧑 %d sailor NPCs spawned across 2 ships", world_npc_count);
+        log_info("🧑 %d crew NPCs spawned across 2 ships (%d gunners, %d riggers)",
+                 world_npc_count, 6, 4);
     }
 
     // Enhanced startup message
@@ -3877,7 +3961,7 @@ int websocket_server_update(struct Sim* sim) {
         for (int i = 0; i < WS_MAX_CLIENTS; i++) {
             struct WebSocketClient* client = &ws_server.clients[i];
             if (client->connected && client->handshake_complete) {
-                char frame[8192];  // Large enough for game state with ships + players + projectiles + modules
+                char frame[20490];  // Must be >= game_state size (20480) + WebSocket header (10)
                 size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state, strlen(game_state), frame, sizeof(frame));
                 if (frame_len > 0) {
                     ssize_t sent = send(client->fd, frame, frame_len, 0);

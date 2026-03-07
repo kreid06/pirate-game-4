@@ -476,6 +476,14 @@ export class InputManager {
     // Calculate aim angle from player position to mouse position (world coordinates)
     const dx = this.inputState.mouseWorldPosition.x - this.playerPosition.x;
     const dy = this.inputState.mouseWorldPosition.y - this.playerPosition.y;
+
+    // Only rotate cannons when the mouse is within effective cannonball range.
+    // Beyond this distance the aim angle is physically meaningless.
+    const CANNON_AIM_RANGE = 800; // client units — matches CANNONBALL_RANGE
+    if (dx * dx + dy * dy > CANNON_AIM_RANGE * CANNON_AIM_RANGE) {
+      return;
+    }
+
     const aimAngleWorld = Math.atan2(dy, dx);
     
     // Convert to ship-relative angle
