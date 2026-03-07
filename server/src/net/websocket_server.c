@@ -3883,6 +3883,17 @@ void websocket_server_tick(float dt) {
                     }
                 }
                 
+                // Auto-expire stale movement input: if no input received in 200ms, stop the player.
+                // This prevents "stuck key" when a keyup event is dropped (focus loss, network blip, etc.).
+                {
+                    uint32_t now = get_time_ms();
+                    if (ws_player->is_moving && (now - ws_player->last_input_time) > 200) {
+                        ws_player->is_moving = false;
+                        ws_player->movement_direction_x = 0.0f;
+                        ws_player->movement_direction_y = 0.0f;
+                    }
+                }
+
                 // Players who are mounted cannot move - they're locked to the module position
                 if (ws_player->is_mounted) {
                     // Mounted players stay at their mount position
