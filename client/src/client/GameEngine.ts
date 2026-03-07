@@ -118,6 +118,7 @@ export class GameEngine {
         inventory: createEmptyInventory()
       }],
       cannonballs: [],
+      npcs: [],
       carrierDetection: new Map()
     };
   }

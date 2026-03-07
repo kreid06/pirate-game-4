@@ -905,6 +905,7 @@ export class ClientApplication {
         }
       ],
       cannonballs: [],
+      npcs: [],
       carrierDetection: new Map()
     };
   }

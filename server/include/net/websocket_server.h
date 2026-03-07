@@ -68,6 +68,34 @@ typedef struct NpcAgent {
 
 #define MAX_NPC_AGENTS 64
 
+// ── World NPCs ───────────────────────────────────────────────────────────────
+// Visible, interactable character entities in the world (separate from NpcAgent AI controllers)
+typedef enum {
+    WORLD_NPC_TYPE_MERCHANT    = 0,
+    WORLD_NPC_TYPE_QUEST_GIVER = 1,
+    WORLD_NPC_TYPE_GUARD       = 2,
+    WORLD_NPC_TYPE_SAILOR      = 3,
+} WorldNpcType;
+
+#define MAX_WORLD_NPCS 32
+
+typedef struct WorldNpc {
+    uint32_t     id;               // Unique ID (starts at 9000)
+    char         name[32];         // Display name
+    WorldNpcType type;
+    bool         active;
+
+    // Position — if ship_id != 0 the NPC rides the ship and x/y are recomputed each tick
+    float        x, y;             // World position (authoritative for broadcasting)
+    uint32_t     ship_id;          // 0 = free-standing; otherwise mounted to this ship's deck
+    float        local_x, local_y; // Ship-relative position (used when ship_id != 0)
+    float        rotation;         // Facing direction in radians
+
+    float        interact_radius;  // Distance within which a player can interact (default 40 px)
+    char         dialogue[128];    // Text sent to player on interaction
+} WorldNpc;
+// ────────────────────────────────────────────────────────────────────────────
+
 // ── Player Inventory ────────────────────────────────────────────────────────
 #define INVENTORY_SLOTS 10
 

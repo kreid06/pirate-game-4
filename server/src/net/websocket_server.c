@@ -91,6 +91,11 @@ static NpcAgent npc_agents[MAX_NPC_AGENTS] = {0};
 static int npc_count = 0;
 static uint32_t next_npc_id = 5000;
 
+// World NPCs (visible, interactable entities)
+static WorldNpc world_npcs[MAX_WORLD_NPCS] = {0};
+static int world_npc_count = 0;
+static uint32_t next_world_npc_id = 9000;
+
 // Global ship data (simple ships for testing)
 #define MAX_SIMPLE_SHIPS 16
 static SimpleShip ships[MAX_SIMPLE_SHIPS] = {0};
@@ -1250,6 +1255,59 @@ static void tick_npc_agents(float dt) {
 }
 
 /**
+ * Create a world NPC entity.
+ * If ship_id != 0 the NPC is placed on that ship's deck (local_x, local_y are ship-relative).
+ * Returns the new NPC's id, or 0 on failure.
+ */
+static uint32_t create_world_npc(WorldNpcType type, const char* name, const char* dialogue,
+                                  float x, float y,
+                                  uint32_t ship_id, float local_x, float local_y) {
+    if (world_npc_count >= MAX_WORLD_NPCS) {
+        log_warn("create_world_npc: MAX_WORLD_NPCS (%d) reached", MAX_WORLD_NPCS);
+        return 0;
+    }
+    WorldNpc* npc = &world_npcs[world_npc_count++];
+    memset(npc, 0, sizeof(WorldNpc));
+    npc->id              = next_world_npc_id++;
+    npc->type            = type;
+    npc->active          = true;
+    npc->ship_id         = ship_id;
+    npc->interact_radius = 40.0f;
+    npc->rotation        = 0.0f;
+    strncpy(npc->name, name, sizeof(npc->name) - 1);
+    strncpy(npc->dialogue, dialogue, sizeof(npc->dialogue) - 1);
+
+    if (ship_id != 0) {
+        npc->local_x = local_x;
+        npc->local_y = local_y;
+        // World position is computed in tick_world_npcs; set a sensible initial value
+        SimpleShip* ship = find_ship(ship_id);
+        if (ship) {
+            ship_local_to_world(ship, local_x, local_y, &npc->x, &npc->y);
+        } else {
+            npc->x = x; npc->y = y;
+        }
+    } else {
+        npc->x = x; npc->y = y;
+    }
+    log_info("🧑 World NPC %u ('%s') spawned at (%.1f, %.1f) ship=%u", npc->id, npc->name, npc->x, npc->y, ship_id);
+    return npc->id;
+}
+
+/**
+ * Update world positions of ship-mounted world NPCs each tick.
+ */
+static void tick_world_npcs(void) {
+    for (int i = 0; i < world_npc_count; i++) {
+        WorldNpc* npc = &world_npcs[i];
+        if (!npc->active || npc->ship_id == 0) continue;
+        SimpleShip* ship = find_ship(npc->ship_id);
+        if (!ship) continue;
+        ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
+    }
+}
+
+/**
  * Handle cannon aim from player
  * Updates player's aim angle and cannon aim_direction for all cannons within range
  */
@@ -2222,6 +2280,31 @@ int websocket_server_init(uint16_t port) {
         log_info("🤖 NPC gunners %u and %u spawned on ship 2, targeting ship 1", npc1, npc2);
     }
 
+    // Spawn world NPC characters — one on each ship deck, one in open water
+    {
+        uint32_t s1 = ships[0].ship_id;
+        uint32_t s2 = ships[1].ship_id;
+        // Merchant on ship 1 (near the stern, ship-local coords)
+        create_world_npc(WORLD_NPC_TYPE_MERCHANT,    "Old Pete",
+                         "Fine goods, sailor! Check me wares.",
+                         0, 0, s1, 0.0f, 30.0f);
+        // Quest-giver on ship 1 (near the bow)
+        create_world_npc(WORLD_NPC_TYPE_QUEST_GIVER, "Captain Isla",
+                         "I need someone brave to retrieve me lost cargo!",
+                         0, 0, s1, 0.0f, -30.0f);
+        // Sailor NPC on ship 2
+        create_world_npc(WORLD_NPC_TYPE_SAILOR,      "Deck Hand",
+                         "Aye, she's a fine vessel. Watch yer step.",
+                         0, 0, s2, 15.0f, 10.0f);
+        // Guard NPC standing in open water (between the two ships)
+        create_world_npc(WORLD_NPC_TYPE_GUARD,       "Harbor Watch",
+                         "These waters belong to the Crown. Move along.",
+                         (ships[0].x + ships[1].x) * 0.5f,
+                         (ships[0].y + ships[1].y) * 0.5f,
+                         0, 0.0f, 0.0f);
+        log_info("🧑 World NPCs spawned");
+    }
+
     // Enhanced startup message
     printf("\n🌐 ═══════════════════════════════════════════════════════════════\n");
     printf("🔌 WebSocket Server Ready for Browser Clients!\n");
@@ -2822,8 +2905,35 @@ int websocket_server_update(struct Sim* sim) {
                                             send_interaction_failure(client, "not_mounted");
                                         }
                                     } else if (strcmp(action, "interact") == 0) {
-                                        // TODO: Implement interaction
-                                        log_info("🤝 Player %u interacted!", player->player_id);
+                                        // Check proximity to world NPCs
+                                        bool interacted = false;
+                                        for (int n = 0; n < world_npc_count && !interacted; n++) {
+                                            WorldNpc* npc = &world_npcs[n];
+                                            if (!npc->active) continue;
+                                            float dx = player->x - npc->x;
+                                            float dy = player->y - npc->y;
+                                            float dist_sq = dx * dx + dy * dy;
+                                            float r = npc->interact_radius;
+                                            if (dist_sq <= r * r) {
+                                                log_info("💬 Player %u interacted with NPC %u (%s)",
+                                                         player->player_id, npc->id, npc->name);
+                                                char npc_msg[312];
+                                                snprintf(npc_msg, sizeof(npc_msg),
+                                                    "{\"type\":\"npc_dialogue\",\"npc_id\":%u,"
+                                                    "\"npc_name\":\"%s\",\"text\":\"%s\"}",
+                                                    npc->id, npc->name, npc->dialogue);
+                                                char npc_frame[512];
+                                                size_t npc_len = websocket_create_frame(
+                                                    WS_OPCODE_TEXT, npc_msg, strlen(npc_msg),
+                                                    npc_frame, sizeof(npc_frame));
+                                                if (npc_len > 0)
+                                                    send(client->fd, npc_frame, npc_len, 0);
+                                                interacted = true;
+                                            }
+                                        }
+                                        if (!interacted) {
+                                            log_info("🤝 Player %u interacted (no NPC in range)", player->player_id);
+                                        }
                                     } else if (strcmp(action, "attack") == 0) {
                                         // Walking melee attack — reject if mounted
                                         if (player->is_mounted) {
@@ -3658,6 +3768,27 @@ int websocket_server_update(struct Sim* sim) {
             }
         }
         projectiles_offset += snprintf(projectiles_json + projectiles_offset, sizeof(projectiles_json) - projectiles_offset, "]");
+
+        // Build world NPCs JSON array
+        char npcs_json[2048];
+        int npcs_offset = 0;
+        npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "[");
+        bool first_npc = true;
+        for (int n = 0; n < world_npc_count; n++) {
+            const WorldNpc* npc = &world_npcs[n];
+            if (!npc->active) continue;
+            if (!first_npc)
+                npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, ",");
+            npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset,
+                "{\"id\":%u,\"name\":\"%s\",\"type\":%u,"
+                "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
+                "\"ship_id\":%u,\"interact_radius\":%.1f}",
+                npc->id, npc->name, (unsigned)npc->type,
+                npc->x, npc->y, npc->rotation,
+                npc->ship_id, npc->interact_radius);
+            first_npc = false;
+        }
+        npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "]");
         
         // Adaptive tick rate based on activity
         bool has_recent_movement = (current_time - g_last_movement_time) < 2000; // Movement in last 2 seconds
@@ -3678,10 +3809,10 @@ int websocket_server_update(struct Sim* sim) {
         
         // Broadcasting game state
         
-        char game_state[16384];  // Large buffer for ships + players + projectiles
+        char game_state[20480];  // Large buffer for ships + players + projectiles + npcs
         snprintf(game_state, sizeof(game_state),
-                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":%s,\"projectiles\":%s}",
-                current_time / 33, current_time, ships_json, players_json, projectiles_json);
+                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":%s,\"projectiles\":%s,\"npcs\":%s}",
+                current_time / 33, current_time, ships_json, players_json, projectiles_json, npcs_json);
         
         // Broadcast to all connected clients
         for (int i = 0; i < WS_MAX_CLIENTS; i++) {
@@ -3955,6 +4086,7 @@ void websocket_server_tick(float dt) {
 
     // ===== TICK NPC AGENTS =====
     tick_npc_agents(dt);
+    tick_world_npcs();
 
     int moving_players = 0;
     

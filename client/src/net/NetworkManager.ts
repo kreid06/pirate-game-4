@@ -6,7 +6,7 @@
  */
 
 import { NetworkConfig } from '../client/ClientConfig.js';
-import { WorldState, InputFrame } from '../sim/Types.js';
+import { WorldState, InputFrame, Npc } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { createShipAtPosition } from '../sim/ShipUtils.js';
 import { ShipModule, ModuleKind, MODULE_TYPE_MAP } from '../sim/modules.js';
@@ -324,6 +324,7 @@ export class NetworkManager {
   public onModuleDestroyed: ((shipId: number, moduleId: number, damage: number, hitX?: number, hitY?: number) => void) | null = null;
   public onModuleDamaged: ((shipId: number, moduleId: number, damage: number, hitX?: number, hitY?: number) => void) | null = null;
   public onShipSunk: ((shipId: number) => void) | null = null;
+  public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
   
   constructor(config: NetworkConfig) {
     this.config = config;
@@ -1151,6 +1152,15 @@ export class NetworkManager {
             firedFrom: ball.owner || 0,
             smokeTrail: [] // No smoke trail from server yet
           })),
+          npcs: (message.npcs || []).map((n: any): Npc => ({
+            id: n.id || 0,
+            name: n.name || 'NPC',
+            type: n.type ?? 0,
+            position: Vec2.from(n.x || 0, n.y || 0),
+            rotation: n.rotation || 0,
+            interactRadius: n.interact_radius ?? 40,
+            shipId: n.ship_id || 0,
+          })),
           carrierDetection: new Map() // Will be populated as needed
         };
         
@@ -1197,6 +1207,11 @@ export class NetworkManager {
         
       case MessageType.MODULE_INTERACT_FAILURE:
         this.handleModuleInteractFailure(message as ModuleInteractFailureMessage);
+        break;
+
+      case 'npc_dialogue':
+        console.log(`💬 [NPC] ${message.npc_name}: "${message.text}"`);
+        this.onNpcDialogue?.(message.npc_id, message.npc_name, message.text);
         break;
 
       case 'MODULE_HIT': {

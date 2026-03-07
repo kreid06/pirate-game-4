@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_TYPE_MERCHANT, NPC_TYPE_QUEST_GIVER, NPC_TYPE_GUARD } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { ClientState } from '../ClientApplication.js';
@@ -580,6 +580,11 @@ export class RenderSystem {
     // Queue cannonballs (layer 8 - on top of everything)  
     for (const cannonball of worldState.cannonballs) {
       this.queueRenderItem(8, 'cannonballs', () => this.drawCannonball(cannonball, camera));
+    }
+
+    // Queue NPCs (layer 2 - same as players)
+    for (const npc of (worldState.npcs || [])) {
+      this.queueRenderItem(2, 'npcs', () => this.drawNpc(npc, camera));
     }
 
     // Queue ship ammo labels (layer 9 - HUD overlay above all ship elements)
@@ -1420,7 +1425,61 @@ export class RenderSystem {
     this.ctx.arc(centerX, centerY, radius, time, time + Math.PI * 1.5);
     this.ctx.stroke();
   }
-  
+
+  private drawNpc(npc: Npc, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(npc.position, 60)) return;
+
+    const screenPos = camera.worldToScreen(npc.position);
+    const cameraState = camera.getState();
+    const radius = 8 * cameraState.zoom;
+
+    // Pick colour by NPC type
+    let fillColor: string;
+    let icon: string;
+    if (npc.type === NPC_TYPE_MERCHANT) {
+      fillColor = '#FFD700'; icon = '🛒'; // Gold — merchant
+    } else if (npc.type === NPC_TYPE_QUEST_GIVER) {
+      fillColor = '#FF8C00'; icon = '❗'; // Orange — quest
+    } else if (npc.type === NPC_TYPE_GUARD) {
+      fillColor = '#8B0000'; icon = '⚔'; // Dark red — guard
+    } else {
+      fillColor = '#4682B4'; icon = '⚓'; // Blue — sailor / default
+    }
+
+    // Draw body circle
+    this.ctx.fillStyle = fillColor;
+    this.ctx.strokeStyle = '#ffffff';
+    this.ctx.lineWidth = 2;
+    this.ctx.beginPath();
+    this.ctx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    // Facing direction indicator
+    this.ctx.strokeStyle = '#ffffff';
+    this.ctx.lineWidth = 2;
+    this.ctx.beginPath();
+    this.ctx.moveTo(screenPos.x, screenPos.y);
+    this.ctx.lineTo(
+      screenPos.x + Math.cos(npc.rotation) * radius * 1.5,
+      screenPos.y + Math.sin(npc.rotation) * radius * 1.5
+    );
+    this.ctx.stroke();
+
+    // Name label
+    this.ctx.font = `${12 * Math.min(cameraState.zoom, 1.5)}px Arial`;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'bottom';
+    const nameY = screenPos.y - radius - 4;
+    const textMetrics = this.ctx.measureText(npc.name);
+    const tw = textMetrics.width;
+    const th = 14;
+    this.ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    this.ctx.fillRect(screenPos.x - tw / 2 - 4, nameY - th, tw + 8, th + 4);
+    this.ctx.fillStyle = '#ffe066';
+    this.ctx.fillText(`${icon} ${npc.name}`, screenPos.x, nameY);
+  }
+
   /**
    * Debug visualization for hover boundaries
    */

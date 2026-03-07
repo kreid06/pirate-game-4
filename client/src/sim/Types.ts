@@ -93,6 +93,27 @@ export interface Cannonball {
 }
 
 /**
+ * NPC type identifiers (must match server WorldNpcType enum)
+ */
+export const NPC_TYPE_MERCHANT    = 0;
+export const NPC_TYPE_QUEST_GIVER = 1;
+export const NPC_TYPE_GUARD       = 2;
+export const NPC_TYPE_SAILOR      = 3;
+
+/**
+ * Visible world NPC entity
+ */
+export interface Npc {
+  id: number;
+  name: string;
+  type: number; // NPC_TYPE_* constant
+  position: Vec2;
+  rotation: number;      // Facing direction in radians
+  interactRadius: number; // Distance within which the player can press E
+  shipId: number;        // 0 = free-standing in the world
+}
+
+/**
  * Complete world state for deterministic simulation
  */
 export interface WorldState {
@@ -100,6 +121,7 @@ export interface WorldState {
   ships: Ship[];
   players: Player[];
   cannonballs: Cannonball[];
+  npcs: Npc[];
   timestamp: number;
   // Phase 2: Add carrier detection state per player
   carrierDetection: Map<number, CarrierDetectionState>; // playerId -> detection state
