@@ -1129,8 +1129,25 @@ export class RenderSystem {
   }
   
   /**
-   * Draw sail ropes (sheets) running perpendicular to the ship's long axis,
-   * from each mast out to port/starboard hull-rail cleats.
+   * Draw sail rigging ropes for each mast.
+   *
+   * Ship-local coordinate convention:
+   *   X = fore (+) / aft (-)   — the long axis
+   *   Y = port (+) / stbd (-)  — perpendicular to long axis
+   *
+   * Design per mast per side:
+   *
+   *           apex (mx, 0)
+   *          / |  | \
+   *         /  |  |  \         ← 4 downlines: outer diagonals + 2 inner verticals
+   *        /---+--+---\        ← horizontal cross-rope at t = 1/3
+   *       /----+--+----\       ← horizontal cross-rope at t = 2/3
+   *      [==x0=x1] [x2=x3==]  ← base rail-rope + 2 elongated cleats
+   *       x0   x1   x2   x3
+   *
+   * x0 = mx-halfBase, x1 = mx-step, x2 = mx+step, x3 = mx+halfBase
+   * step = halfBase / 3
+   * 2 cleats: one spanning x0→x1, one spanning x2→x3
    */
   private drawShipSailRopes(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
@@ -1152,74 +1169,153 @@ export class RenderSystem {
       const mastData = mast.moduleData;
       const mx = mast.localPos.x;
       const my = mast.localPos.y;
-      const sailWidth = mastData.sailWidth;
 
-      // Sheet attachment points — perpendicular to ship's long axis (X direction)
-      const hullOffset = sailWidth * 0.92;
-      const portX  = mx - hullOffset;
-      const stbdX  = mx + hullOffset;
+      // Half-base = half sail width → triangle base spans full sail width
+      const halfBase = mastData.sailWidth * 0.5;
+      // 4 rope X-positions evenly across the base: x0, x1, x2, x3
+      const step = halfBase / 3;
+      const x0 = mx - halfBase;       // aft outer
+      const x1 = mx - step;           // aft inner
+      const x2 = mx + step;           // fore inner
+      const x3 = mx + halfBase;       // fore outer
 
-      // Rope style — thin brownish hemp color
+      // Hull rail sits ~78 units from centreline (brigantine beam ~90, inset for planks)
+      const railDist = 78;
+
+      // Rope style — hemp tan
       this.ctx.strokeStyle = '#8B7355';
       this.ctx.lineWidth = 1.2;
       this.ctx.lineCap = 'round';
 
-      // Port sheet
-      this.ctx.beginPath();
-      this.ctx.moveTo(mx, my);
-      this.ctx.lineTo(portX, my);
-      this.ctx.stroke();
+      for (const side of [1, -1] as const) { // +1 = port, -1 = stbd
+        const ry = my + side * railDist;
 
-      // Starboard sheet
-      this.ctx.beginPath();
-      this.ctx.moveTo(mx, my);
-      this.ctx.lineTo(stbdX, my);
-      this.ctx.stroke();
+        // ── Outer diagonal braces: apex → x0 and apex → x3 ──
+        this.ctx.beginPath();
+        this.ctx.moveTo(mx, my);
+        this.ctx.lineTo(x0, ry);
+        this.ctx.stroke();
 
-      // Cleats / bollards at hull rail
-      this.drawSailRopeCleat(portX, my);
-      this.drawSailRopeCleat(stbdX, my);
+        this.ctx.beginPath();
+        this.ctx.moveTo(mx, my);
+        this.ctx.lineTo(x3, ry);
+        this.ctx.stroke();
+
+        // ── 2 inner verticals: straight down at x1 and x2 (perpendicular to long axis) ──
+        this.ctx.beginPath();
+        this.ctx.moveTo(x1, my);
+        this.ctx.lineTo(x1, ry);
+        this.ctx.stroke();
+
+        this.ctx.beginPath();
+        this.ctx.moveTo(x2, my);
+        this.ctx.lineTo(x2, ry);
+        this.ctx.stroke();
+
+        // ── 2 horizontal cross-ropes at t = 1/3 and 2/3 of the outer triangle ──
+        for (const t of [1 / 3, 2 / 3]) {
+          const crossY  = my + side * railDist * t;
+          const crossXL = mx - halfBase * t; // outer diagonal at this t
+          const crossXR = mx + halfBase * t;
+          this.ctx.beginPath();
+          this.ctx.moveTo(crossXL, crossY);
+          this.ctx.lineTo(crossXR, crossY);
+          this.ctx.stroke();
+        }
+
+        // ── Base rail-rope connecting all 4 rope endpoints along X ──
+        this.ctx.beginPath();
+        this.ctx.moveTo(x0, ry);
+        this.ctx.lineTo(x3, ry);
+        this.ctx.stroke();
+
+        // ── 2 elongated cleats: aft pair (x0→x1) and fore pair (x2→x3) ──
+        this.drawSailRopeCleat(x0, x1, ry, this.hullTangentAngle((x0 + x1) / 2, side));
+        this.drawSailRopeCleat(x2, x3, ry, this.hullTangentAngle((x2 + x3) / 2, side));
+      }
     }
 
     this.ctx.restore();
   }
 
   /**
-   * Draw a small T-shaped cleat at the given ship-local position.
-   * The cleat body runs along Y (perpendicular to the rope / hull rail).
+   * Draw a short, blocky cleat whose body spans between xA and xB at hull-rail y.
+   * The cleat is rotated by `angle` so its body aligns with the local hull plank.
+   *
+   * Body width = 70 % of the rope-pair span (shorter than the gap — doesn't reach the ropes).
+   * Aspect ratio ≈ 2 : 1  (wide × tall) — blocky/chunky appearance.
+   * Two upright horns at each end catch the downline ropes.
    */
-  private drawSailRopeCleat(x: number, y: number): void {
-    const bodyH  = 7;   // height of cleat body (along Y / ship cross-axis)
-    const bodyW  = 3.5; // width of cleat body
-    const hornW  = bodyW * 2.4; // horn wingspan
-    const hornH  = 2.5; // horn thickness
+  private drawSailRopeCleat(xA: number, xB: number, y: number, angle: number = 0): void {
+    const cx     = (xA + xB) / 2;
+    const span   = Math.abs(xB - xA);
+    const bodyW  = span * 0.70;   // shorter than the full gap
+    const bodyH  = bodyW * 0.50;  // blocky 2 : 1 ratio
+    const hornW  = bodyH * 0.90;  // horn thickness (square-ish)
+    const hornH  = bodyH * 0.80;  // horn height — stubby, close to body height
 
     this.ctx.save();
-    this.ctx.translate(x, y);
+    this.ctx.translate(cx, y);
+    this.ctx.rotate(angle);       // align body with local hull plank direction
 
-    this.ctx.fillStyle   = '#5C4033';
-    this.ctx.strokeStyle = '#3A2518';
-    this.ctx.lineWidth   = 0.8;
+    this.ctx.fillStyle   = '#4A3728';
+    this.ctx.strokeStyle = '#2C1F14';
+    this.ctx.lineWidth   = 0.9;
 
-    // Body
-    this.ctx.beginPath();
-    this.ctx.roundRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH, 1);
-    this.ctx.fill();
-    this.ctx.stroke();
+    // Central bar — blocky rectangular body along X
+    this.ctx.fillRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
+    this.ctx.strokeRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
 
-    // Top horn
-    this.ctx.beginPath();
-    this.ctx.roundRect(-hornW / 2, -bodyH / 2 - hornH + 1, hornW, hornH, 1);
-    this.ctx.fill();
-    this.ctx.stroke();
+    // Aft horn
+    this.ctx.fillRect(-bodyW / 2, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+    this.ctx.strokeRect(-bodyW / 2, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
 
-    // Bottom horn
-    this.ctx.beginPath();
-    this.ctx.roundRect(-hornW / 2, bodyH / 2 - 1, hornW, hornH, 1);
-    this.ctx.fill();
-    this.ctx.stroke();
+    // Fore horn
+    this.ctx.fillRect(bodyW / 2 - hornW, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+    this.ctx.strokeRect(bodyW / 2 - hornW, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
 
     this.ctx.restore();
+  }
+
+  /**
+   * Return the angle of the hull-plank tangent at ship-local x position.
+   *
+   * Hull geometry (from ShipUtils / BRIGANTINE_SPECIFICATION):
+   *   Straight port/stbd sides: x ∈ [−260, 190]  →  angle = 0  (horizontal)
+   *   Bow Bézier:  P0=(190,90) P1=(415,0) P2=(190,−90)
+   *     Bx(t) = 190 + 450·t·(1−t)   →   tangent = (450(1−2t), ±180)
+   *   Stern Bézier: P0=(−260,−90) P1=(−345,0) P2=(−260,90)
+   *     Bx(t) = −260 − 170·t·(1−t)  →   tangent = (170(2t−1), ±180)
+   *
+   * `side` = +1 for port (upper half of bow/stern curves), −1 for starboard.
+   */
+  private hullTangentAngle(x: number, side: 1 | -1): number {
+    // ── Straight side (vast majority of rail positions) ──
+    if (x >= -260 && x <= 190) return 0;
+
+    // ── Bow curve: Bx = 190 + 450·t·(1−t),  t ∈ [0, 1] ──
+    if (x > 190) {
+      // Solve 450t² − 450t + (x−190) = 0
+      const disc = 450 * 450 - 4 * 450 * (x - 190);
+      if (disc < 0) return 0;
+      // port uses t ∈ [0, 0.5] (y positive), stbd uses t ∈ [0.5, 1]
+      const sqrtDisc = Math.sqrt(disc);
+      const t = side === 1
+        ? (450 - sqrtDisc) / (2 * 450)   // smaller root → port half
+        : (450 + sqrtDisc) / (2 * 450);  // larger root  → stbd half
+      return Math.atan2(-180 * side, 450 * (1 - 2 * t));
+    }
+
+    // ── Stern curve: Bx = −260 − 170·t·(1−t),  t ∈ [0, 1] ──
+    // Solve 170t² − 170t − (x + 260) = 0  (x + 260 < 0)
+    const disc = 170 * 170 + 4 * 170 * (x + 260); // note: (x+260) < 0
+    if (disc < 0) return 0;
+    const sqrtDisc = Math.sqrt(disc);
+    // stbd uses t ∈ [0, 0.5], port uses t ∈ [0.5, 1]
+    const t = side === -1
+      ? (170 - sqrtDisc) / (2 * 170)
+      : (170 + sqrtDisc) / (2 * 170);
+    return Math.atan2(180 * side, 170 * (2 * t - 1));
   }
 
   private drawShipSailFibers(ship: Ship, camera: Camera): void {

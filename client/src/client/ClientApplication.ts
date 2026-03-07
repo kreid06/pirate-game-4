@@ -27,9 +27,11 @@ import { UIManager } from './ui/UIManager.js';
 import { AudioManager } from './audio/AudioManager.js';
 
 // Core Simulation Types
-import { WorldState, InputFrame } from '../sim/Types.js';
+import { WorldState, Ship, InputFrame } from '../sim/Types.js';
 import { createEmptyInventory } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
+import { ModuleUtils, ShipModule } from '../sim/modules.js';
+import { createCurvedShipHull } from '../sim/ShipUtils.js';
 
 /**
  * Application lifecycle states
@@ -841,66 +843,79 @@ export class ClientApplication {
    * Create demo world state for offline mode
    */
   private createDemoWorldState(): WorldState {
+    // Build the full 49-point Bezier hull used by the real brigantine
+    const hull = createCurvedShipHull();
+
+    // Helper: create a cannon module and set its local rotation
+    const mkCannon = (id: number, x: number, y: number, rot: number): ShipModule => {
+      const m = ModuleUtils.createDefaultModule(id, 'cannon', Vec2.from(x, y));
+      m.localRot = rot;
+      return m;
+    };
+
+    const ship: Ship = {
+      id: 1,
+      position: Vec2.from(600, 400),
+      rotation: 0,
+      velocity: Vec2.zero(),
+      angularVelocity: 0,
+      hull,
+      // Brigantine physics (matches server constants)
+      mass: 5000,
+      momentOfInertia: 500000,
+      maxSpeed: 30,
+      turnRate: 0.5,
+      waterDrag: 0.98,
+      angularDrag: 0.95,
+      rudderAngle: 0,
+      cannonAmmo: 0,
+      infiniteAmmo: true,
+      hullHealth: 100,
+      modules: [
+        // Deck — walkable interior polygon inset from hull
+        ModuleUtils.createShipDeckFromPolygon(hull),
+
+        // Hull planks — 24 segments covering the full hull perimeter
+        ...ModuleUtils.createShipPlanksFromSegments(100),
+
+        // Helm (stern-center)
+        ModuleUtils.createDefaultModule(1000, 'helm', Vec2.from(-90, 0)),
+
+        // Three masts: fore, main, mizzen
+        ModuleUtils.createDefaultModule(1001, 'mast', Vec2.from(165, 0)),
+        ModuleUtils.createDefaultModule(1002, 'mast', Vec2.from(-35, 0)),
+        ModuleUtils.createDefaultModule(1003, 'mast', Vec2.from(-235, 0)),
+
+        // Port side cannons — barrel faces +Y (port) → localRot = π
+        mkCannon(1004, -35,   75,  Math.PI),
+        mkCannon(1005,  65,   75,  Math.PI),
+        mkCannon(1006, -135,  75,  Math.PI),
+
+        // Starboard side cannons — barrel faces -Y (starboard) → localRot = 0
+        mkCannon(1007, -35,  -75,  0),
+        mkCannon(1008,  65,  -75,  0),
+        mkCannon(1009, -135, -75,  0),
+
+        // Boarding ladder at stern
+        ModuleUtils.createDefaultModule(1010, 'ladder', Vec2.from(-305, 0)),
+      ]
+    };
+
     return {
       tick: 0,
       timestamp: Date.now(),
-      ships: [
-        {
-          id: 1,
-          position: Vec2.from(600, 400), // Center of screen
-          velocity: Vec2.zero(),
-          rotation: 0,
-          angularVelocity: 0,
-          hull: [
-            Vec2.from(-60, -20),
-            Vec2.from(60, -20),
-            Vec2.from(60, 20),
-            Vec2.from(-60, 20)
-          ],
-          modules: [
-            {
-              id: 1,
-              kind: 'deck',
-              deckId: 0,
-              localPos: Vec2.zero(),
-              localRot: 0,
-              occupiedBy: null,
-              stateBits: 0
-            },
-            {
-              id: 2, 
-              kind: 'helm',
-              deckId: 0,
-              localPos: Vec2.from(0, -10),
-              localRot: 0,
-              occupiedBy: null,
-              stateBits: 0
-            }
-          ],
-          // Brigantine physics properties (match server)
-          mass: 5000,                    // kg
-          momentOfInertia: 500000,       // kg⋅m²
-          maxSpeed: 30,                  // m/s
-          turnRate: 0.5,                 // rad/s
-          waterDrag: 0.98,               // coefficient (0-1)
-          angularDrag: 0.95,             // coefficient (0-1)
-          rudderAngle: 0,                // radians
-          cannonAmmo: 0,
-          infiniteAmmo: true,
-          hullHealth: 100
-        }
-      ],
+      ships: [ship],
       players: [
         {
           id: 1,
-          position: Vec2.from(600, 400), // Same as ship position
+          position: Vec2.from(600, 400),
           velocity: Vec2.zero(),
-          rotation: 0, // Facing right
+          rotation: 0,
           radius: PhysicsConfig.PLAYER_RADIUS,
-          carrierId: 1, // On the demo ship
-          deckId: 0,
+          carrierId: ship.id,
+          deckId: ship.modules[0].id,
           onDeck: true,
-          isMounted: false, // Not mounted initially
+          isMounted: false,
           inventory: createEmptyInventory()
         }
       ],
