@@ -62,6 +62,7 @@ export enum MessageType {
   SLOT_SELECT = 'slot_select',
   GIVE_ITEM = 'give_item',
   PLACE_PLANK = 'place_plank',
+  REPAIR_PLANK = 'repair_plank',
 
   PING = 'ping',
   
@@ -264,6 +265,12 @@ interface GiveItemMessage extends NetworkMessage {
   quantity: number;
 }
 
+interface RepairPlankMessage extends NetworkMessage {
+  type: MessageType.REPAIR_PLANK;
+  timestamp: number;
+  shipId: number;
+}
+
 interface PlacePlankMessage extends NetworkMessage {
   type: MessageType.PLACE_PLANK;
   timestamp: number;
@@ -272,7 +279,7 @@ interface PlacePlankMessage extends NetworkMessage {
   segmentIndex: number;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | RepairPlankMessage;
 
 /**
  * Main network manager class
@@ -781,10 +788,20 @@ export class NetworkManager {
 
   /**
    * Request the server to place a plank in a missing hull slot.
+   * Server picks the first destroyed plank (100-109) and restores it, consuming 1 ITEM_PLANK.
    */
   sendPlacePlank(shipId: number, sectionName: string, segmentIndex: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_PLANK, timestamp: Date.now(), shipId, sectionName, segmentIndex });
+  }
+
+  /**
+   * Request the server to repair the most damaged plank on the player's ship.
+   * Consumes 1 ITEM_REPAIR_KIT from the player's inventory.
+   */
+  sendRepairPlank(shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.REPAIR_PLANK, timestamp: Date.now(), shipId });
   }
   
   /**

@@ -198,17 +198,27 @@ export class ClientApplication {
       };
       this.inputManager.onActionEvent = (action, target) => {
         if (action === 'interact') {
+          const playerId = this.networkManager.getAssignedPlayerId();
+          const worldState = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+          const player = playerId !== null ? worldState?.players.find(p => p.id === playerId) : null;
+
+          // Repair mode: active slot = repair_kit → repair most damaged plank on ship
+          const activeSlot = player?.inventory?.activeSlot ?? 0;
+          const activeItem = player?.inventory?.slots[activeSlot]?.item ?? 'none';
+          if (activeItem === 'repair_kit' && player && player.carrierId !== 0) {
+            console.log(`🔧 [REPAIR] Sending repair_plank for ship ${player.carrierId}`);
+            this.networkManager.sendRepairPlank(player.carrierId);
+            return;
+          }
+
           // Player pressed E - interact with hovered module
           const hoveredModule = this.renderSystem.getHoveredModule();
           
           if (hoveredModule) {
-            const playerId = this.networkManager.getAssignedPlayerId();
             if (playerId !== null) {
               // Check if player is close enough to the module
-              const worldState = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
               if (!worldState) return;
               
-              const player = worldState.players.find(p => p.id === playerId);
               
               if (player) {
                 let distance: number;
