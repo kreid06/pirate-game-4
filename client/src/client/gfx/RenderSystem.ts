@@ -45,6 +45,12 @@ export class RenderSystem {
 
   // Build mode state
   private buildMode: boolean = false;
+  /** Set by ClientApplication each frame — true when the local player is holding right-mouse. */
+  public playerIsAiming: boolean = false;
+  /** The assigned local player ID, so guides only draw for that player's cannon. */
+  public localPlayerId: number | null = null;
+  /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
+  public playerAimAngleRelative: number = 0;
   private hoveredPlankSlot: { ship: Ship; sectionName: string; segmentIndex: number } | null = null;
   private plankTemplate: PlankSegment[] | null = null;
   
@@ -1012,72 +1018,137 @@ export class RenderSystem {
    * A dashed line fans out from the barrel tip in the fire direction, with
    * range-brackets at 1/3 and 2/3 of fireRange and a terminal impact cross.
    */
+  /**
+   * Ray–convex-polygon intersection in world space using the target ship's hull polygon.
+   * Returns the smallest t ≥ 0 where the ray hits any edge of `hull` (in ship-local coords),
+   * or Infinity when the ray misses entirely within [0, maxT].
+   *
+   * The ray is specified in world space; the hull polygon is in ship-local space and
+   * is transformed back with (shipX, shipY, shipRot).
+   */
+  private rayHullIntersect(
+    rox: number, roy: number,   // ray origin (world)
+    rdx: number, rdy: number,   // ray direction (world, unit-ish, magnitude = range units)
+    hull: { x: number; y: number }[],
+    shipX: number, shipY: number, shipRot: number,
+    maxT: number
+  ): number {
+    if (hull.length < 3) return Infinity;
+
+    // Transform the ray origin and direction into ship-local space
+    const dx = rox - shipX;
+    const dy = roy - shipY;
+    const cosR = Math.cos(-shipRot);
+    const sinR = Math.sin(-shipRot);
+    const lox = dx * cosR - dy * sinR;
+    const loy = dx * sinR + dy * cosR;
+    const ldx = rdx * cosR - rdy * sinR;
+    const ldy = rdx * sinR + rdy * cosR;
+
+    let tMin = Infinity;
+    const n = hull.length;
+    for (let i = 0; i < n; i++) {
+      const ax = hull[i].x,       ay = hull[i].y;
+      const bx = hull[(i + 1) % n].x, by = hull[(i + 1) % n].y;
+      const ex = bx - ax,  ey = by - ay;
+
+      // Cramer's rule: lox + t*ldx = ax + s*ex,  loy + t*ldy = ay + s*ey
+      const denom = ldx * ey - ldy * ex;
+      if (Math.abs(denom) < 1e-10) continue; // parallel
+
+      const t = ((ax - lox) * ey - (ay - loy) * ex) / denom;
+      const s = ((ax - lox) * ldy - (ay - loy) * ldx) / denom;
+      if (t >= 0 && t <= maxT && s >= 0 && s <= 1) {
+        if (t < tMin) tMin = t;
+      }
+    }
+    return tMin;
+  }
+
   private drawCannonAimGuides(ship: Ship, worldState: WorldState, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!this.playerIsAiming) return;
 
-    // Build a set of cannon IDs that have a player currently mounted on them
-    const mountedCannonIds = new Set<number>();
-    for (const player of worldState.players) {
-      if (player.mountedModuleId != null) mountedCannonIds.add(player.mountedModuleId);
+    // Determine which cannons to show guides for based on what the local player is mounted to.
+    const localPlayer = this.localPlayerId != null
+      ? worldState.players.find(p => p.id === this.localPlayerId)
+      : null;
+
+    // Player must be mounted and on this ship
+    if (!localPlayer || !localPlayer.isMounted || localPlayer.carrierId !== ship.id) return;
+
+    let cannonsToShow: typeof ship.modules = [];
+
+    if (localPlayer.mountedModuleId != null) {
+      const mountedMod = ship.modules.find(m => m.id === localPlayer.mountedModuleId);
+      if (mountedMod?.kind === 'cannon') {
+        // Mounted directly on a cannon — show just that one
+        cannonsToShow = [mountedMod];
+      } else if (mountedMod?.kind === 'helm' || mountedMod?.kind === 'steering-wheel') {
+        // On the helm — only show cannons whose outward-facing sector contains the aim direction.
+        // Sector check: sin(cannon.localRot - aimAngleRelative) > 0 means the cannon's barrel
+        // faces the same general half-plane as the player is aiming toward.
+        const aim = this.playerAimAngleRelative;
+        cannonsToShow = ship.modules.filter(m =>
+          m.kind === 'cannon' &&
+          Math.sin((m.localRot || 0) - aim) > 0
+        );
+      }
     }
-    // If nobody is mounted (e.g. offline/demo), show guides on all cannons for dev preview.
-    // If players are mounted, show only their cannons.
-    const showAll = mountedCannonIds.size === 0;
+
+    if (cannonsToShow.length === 0) return;
 
     this.ctx.save();
-
     const screenPos   = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
     this.ctx.translate(screenPos.x, screenPos.y);
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
 
-    for (const cannon of ship.modules) {
-      if (cannon.kind !== 'cannon') continue;
+    const cosR = Math.cos(ship.rotation);
+    const sinR = Math.sin(ship.rotation);
+
+    for (const cannon of cannonsToShow) {
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
-      if (!showAll && !mountedCannonIds.has(cannon.id)) continue;
-
       const cannonData = cannon.moduleData;
-      const cx         = cannon.localPos.x;
-      const cy         = cannon.localPos.y;
-      const totalAngle = (cannon.localRot || 0) + (cannonData.aimDirection || 0);
 
-      // Barrel tip in ship-local space
+      const totalAngle = (cannon.localRot || 0) + (cannonData.aimDirection || 0);
+      const cx = cannon.localPos.x;
+      const cy = cannon.localPos.y;
+
       const barrelTipX = cx + 40 * Math.sin(totalAngle);
       const barrelTipY = cy - 40 * Math.cos(totalAngle);
-
-      // Unit fire direction in ship-local space
       const dirX = Math.sin(totalAngle);
       const dirY = -Math.cos(totalAngle);
-
-      // Cap guide at fireRange, but no more than 500 units for clarity
       const range = Math.min(cannonData.fireRange || 400, 500);
 
-      // ── Trajectory intersection check in world space ──
-      // Convert barrel tip and direction to world space
-      const cosR = Math.cos(ship.rotation);
-      const sinR = Math.sin(ship.rotation);
+      // ── Hull-accurate impact detection in world space ──
+      // Convert barrel tip and direction into world space for the intersection test.
       const wBarrelX = ship.position.x + barrelTipX * cosR - barrelTipY * sinR;
       const wBarrelY = ship.position.y + barrelTipX * sinR + barrelTipY * cosR;
       const wDirX = dirX * cosR - dirY * sinR;
       const wDirY = dirX * sinR + dirY * cosR;
 
-      // Check if any OTHER ship's centre lies within ~80 units of the trajectory line
-      let hitShip = false;
+      // Find the nearest enemy ship hull intersection.  tHit is in the same unit space
+      // as `range` (world units ≡ local canvas units at this transform level).
+      let tHit = Infinity;
       for (const other of worldState.ships) {
         if (other.id === ship.id) continue;
-        const dx = other.position.x - wBarrelX;
-        const dy = other.position.y - wBarrelY;
-        const t  = dx * wDirX + dy * wDirY; // projection along trajectory
-        if (t < 0 || t > range) continue;
-        const perpDist = Math.abs(dx * wDirY - dy * wDirX);
-        if (perpDist < 80) { hitShip = true; break; }
+        if (!other.hull || other.hull.length < 3) continue;
+        const t = this.rayHullIntersect(
+          wBarrelX, wBarrelY, wDirX, wDirY,
+          other.hull, other.position.x, other.position.y, other.rotation,
+          range
+        );
+        if (t < tHit) tHit = t;
       }
 
-      // Grey normally; yellow when a ship is in the line of fire
-      const guideColor = hitShip ? '#FFD700' : '#AAAAAA';
+      const didHit     = tHit < Infinity;
+      // Trajectory ends at hull-entry point, clamped to max range
+      const drawLength = didHit ? Math.min(tHit, range) : range;
+      const guideColor = didHit ? '#FFD700' : '#AAAAAA';
 
-      // ── Dashed trajectory line — single uniform draw, no fade ──
+      // ── Dashed trajectory line (stops at impact) ──
       this.ctx.save();
       this.ctx.globalAlpha = 0.80;
       this.ctx.strokeStyle = guideColor;
@@ -1086,51 +1157,47 @@ export class RenderSystem {
       this.ctx.setLineDash([10, 7]);
       this.ctx.beginPath();
       this.ctx.moveTo(barrelTipX, barrelTipY);
-      this.ctx.lineTo(barrelTipX + dirX * range, barrelTipY + dirY * range);
+      this.ctx.lineTo(barrelTipX + dirX * drawLength, barrelTipY + dirY * drawLength);
       this.ctx.stroke();
       this.ctx.restore();
       this.ctx.setLineDash([]);
 
-      // ── Range-bracket tick marks at 1/3 and 2/3 ──
+      // ── Range-bracket tick marks at 1/3 and 2/3 of max range (only if before impact) ──
+      const perpX = -dirY;
+      const perpY =  dirX;
       for (const frac of [1 / 3, 2 / 3]) {
-        const bx      = barrelTipX + dirX * range * frac;
-        const by      = barrelTipY + dirY * range * frac;
-        const perpX   = -dirY;
-        const perpY   =  dirX;
-        const tickLen = 7;
-
+        const tickDist = range * frac;
+        if (tickDist >= drawLength) continue; // past (or at) impact — skip
+        const bx = barrelTipX + dirX * tickDist;
+        const by = barrelTipY + dirY * tickDist;
         this.ctx.save();
         this.ctx.globalAlpha = 0.55;
         this.ctx.strokeStyle = guideColor;
         this.ctx.lineWidth   = 3.5;
         this.ctx.lineCap     = 'round';
         this.ctx.beginPath();
-        this.ctx.moveTo(bx - perpX * tickLen, by - perpY * tickLen);
-        this.ctx.lineTo(bx + perpX * tickLen, by + perpY * tickLen);
+        this.ctx.moveTo(bx - perpX * 7, by - perpY * 7);
+        this.ctx.lineTo(bx + perpX * 7, by + perpY * 7);
         this.ctx.stroke();
         this.ctx.restore();
       }
 
-      // ── Terminal reticle — 4-arc circle with gaps, hollow centre ──
-      const impactX  = barrelTipX + dirX * range;
-      const impactY  = barrelTipY + dirY * range;
-      const reticleR = 13;           // radius of the reticle ring
-      const arcSpan  = Math.PI * 0.44; // ~80° per arc
-      const gapHalf  = Math.PI * 0.06; // ~10° gap on each side
-
+      // ── Terminal reticle — 4 arcs, hollow centre (at impact or max range) ──
+      const termX    = barrelTipX + dirX * drawLength;
+      const termY    = barrelTipY + dirY * drawLength;
+      // When hitting a ship the reticle is tighter to convey a direct hit
+      const reticleR = didHit ? 10 : 13;
+      const arcSpan  = Math.PI * 0.44;
+      const gapHalf  = Math.PI * 0.06;
       this.ctx.save();
       this.ctx.globalAlpha = 0.75;
       this.ctx.strokeStyle = guideColor;
       this.ctx.lineWidth   = 3.5;
       this.ctx.lineCap     = 'round';
-
-      // Four arcs centred at 0, π/2, π, 3π/2
       for (let i = 0; i < 4; i++) {
         const centre = (Math.PI / 2) * i;
         this.ctx.beginPath();
-        this.ctx.arc(impactX, impactY, reticleR,
-          centre + gapHalf,
-          centre + arcSpan - gapHalf);
+        this.ctx.arc(termX, termY, reticleR, centre + gapHalf, centre + arcSpan - gapHalf);
         this.ctx.stroke();
       }
       this.ctx.restore();
