@@ -1179,8 +1179,8 @@ export class RenderSystem {
       const x2 = mx + step;           // fore inner
       const x3 = mx + halfBase;       // fore outer
 
-      // Hull rail sits ~78 units from centreline (brigantine beam ~90, inset for planks)
-      const railDist = 78;
+      // Hull rail at ~85 units from centreline — plank centres sit at Y=±90, inset by ~5
+      const railDist = 85;
 
       // Rope style — hemp tan
       this.ctx.strokeStyle = '#8B7355';
@@ -1239,38 +1239,40 @@ export class RenderSystem {
   }
 
   /**
-   * Draw a short, blocky cleat whose body spans between xA and xB at hull-rail y.
-   * The cleat is rotated by `angle` so its body aligns with the local hull plank.
+   * Draw a long-blocky wooden cleat whose body spans exactly from xA to xB at y.
+   * The body is elongated along X (long axis of the rail) and shallow in Y —
+   * a 5:1 aspect ratio gives the "long plank" look.
+   * The cleat is rotated by `angle` to follow the local hull plank tangent.
    *
-   * Body width = 70 % of the rope-pair span (shorter than the gap — doesn't reach the ropes).
-   * Aspect ratio ≈ 2 : 1  (wide × tall) — blocky/chunky appearance.
-   * Two upright horns at each end catch the downline ropes.
+   *   |       body (long bar)       |
+   *   [█]═════════════════════════[█]
+   *   horn                        horn
+   *   (at xA)                  (at xB)
    */
   private drawSailRopeCleat(xA: number, xB: number, y: number, angle: number = 0): void {
-    const cx     = (xA + xB) / 2;
-    const span   = Math.abs(xB - xA);
-    const bodyW  = span * 0.70;   // shorter than the full gap
-    const bodyH  = bodyW * 0.50;  // blocky 2 : 1 ratio
-    const hornW  = bodyH * 0.90;  // horn thickness (square-ish)
-    const hornH  = bodyH * 0.80;  // horn height — stubby, close to body height
+    const cx    = (xA + xB) / 2;
+    const bodyW = Math.abs(xB - xA);  // full span — body reaches both rope positions
+    const bodyH = bodyW * 0.20;       // 5 : 1 long-blocky ratio
+    const hornW = bodyH * 1.20;       // horn is wider than body is tall (square-ish block)
+    const hornH = bodyH * 1.30;       // horn projects 1.3× body height beyond rail
 
     this.ctx.save();
     this.ctx.translate(cx, y);
-    this.ctx.rotate(angle);       // align body with local hull plank direction
+    this.ctx.rotate(angle);           // follow local hull plank tangent
 
     this.ctx.fillStyle   = '#4A3728';
     this.ctx.strokeStyle = '#2C1F14';
     this.ctx.lineWidth   = 0.9;
 
-    // Central bar — blocky rectangular body along X
+    // Long central bar
     this.ctx.fillRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
     this.ctx.strokeRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
 
-    // Aft horn
+    // Aft horn — upright block at the xA end, centred on the bar
     this.ctx.fillRect(-bodyW / 2, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
     this.ctx.strokeRect(-bodyW / 2, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
 
-    // Fore horn
+    // Fore horn — upright block at the xB end, centred on the bar
     this.ctx.fillRect(bodyW / 2 - hornW, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
     this.ctx.strokeRect(bodyW / 2 - hornW, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
 
