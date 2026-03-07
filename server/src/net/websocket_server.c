@@ -1255,10 +1255,10 @@ static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float 
 /**
  * Apply a single crew task assignment from the client manning-priority panel.
  *
- * task == "Sails"   + NPC_ROLE_RIGGER  → walk to mast, set AT_CANNON (active)
- * task == "Cannons" + NPC_ROLE_GUNNER  → walk to active-side cannon, set MOVING/AT_CANNON
- * task == "Combat"  + NPC_ROLE_GUNNER  → same as Cannons
- * anything else (Repairs, Idle, role mismatch) → set IDLE — NPC stands down
+ * task == "Sails"   → become RIGGER, walk to the next free mast
+ * task == "Cannons" → become GUNNER,  sector system places at closest cannon
+ * task == "Combat"  → same as Cannons
+ * anything else     → become NONE,    walk to deck centre
  */
 static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task) {
     SimpleShip* ship = find_ship(ship_id);
@@ -1276,47 +1276,68 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
         return;
     }
 
+    /* Clear previous role state before applying new assignment */
+    npc->wants_cannon       = false;
+    npc->assigned_cannon_id = 0;
+
     bool want_sails   = (strncmp(task, "Sails",   5) == 0);
     bool want_cannons = (strncmp(task, "Cannons", 7) == 0 || strncmp(task, "Combat", 6) == 0);
 
-    if (want_sails && npc->role == NPC_ROLE_RIGGER) {
-        /* Rigger → back to mast */
-        uint32_t mast_id = npc->port_cannon_id; /* riggers store mast in both fields */
-        ShipModule* mast = find_module_by_id(ship, mast_id);
-        if (mast) {
-            float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mast->local_pos.x));
-            float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(mast->local_pos.y));
-            npc->target_local_x = mx;
-            npc->target_local_y = my + 20.0f;
-            npc->assigned_cannon_id = mast_id;
+    if (want_sails) {
+        /* Become a rigger — find the first mast not already occupied by another rigger */
+        uint32_t free_mast = 0;
+        for (int m = 0; m < ship->module_count && free_mast == 0; m++) {
+            if (ship->modules[m].type_id != MODULE_TYPE_MAST) continue;
+            uint32_t mid = ship->modules[m].id;
+            bool occupied = false;
+            for (int j = 0; j < world_npc_count; j++) {
+                WorldNpc* other = &world_npcs[j];
+                if (!other->active || other->id == npc->id) continue;
+                if (other->ship_id != ship_id) continue;
+                if (other->role == NPC_ROLE_RIGGER && other->assigned_cannon_id == mid) {
+                    occupied = true;
+                    break;
+                }
+            }
+            if (!occupied) free_mast = mid;
+        }
+        npc->role = NPC_ROLE_RIGGER;
+        if (free_mast != 0) {
+            ShipModule* mast = find_module_by_id(ship, free_mast);
+            if (mast) {
+                float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mast->local_pos.x));
+                float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(mast->local_pos.y));
+                npc->target_local_x     = mx;
+                npc->target_local_y     = my + 20.0f;
+                npc->assigned_cannon_id = free_mast;
+            }
+            log_info("⛵ NPC %u (%s) → RIGGER, walking to mast %u", npc->id, npc->name, free_mast);
+        } else {
+            /* All masts full — wait at centre until one frees up */
+            npc->target_local_x = 0.0f;
+            npc->target_local_y = 0.0f;
+            log_info("⛵ NPC %u (%s) → RIGGER, all masts occupied — standby", npc->id, npc->name);
         }
         npc->state = WORLD_NPC_STATE_MOVING;
-        log_info("⛵ NPC %u (%s) assigned to Sails — walking to mast %u",
-                 npc->id, npc->name, npc->assigned_cannon_id);
 
-    } else if (want_cannons && npc->role == NPC_ROLE_GUNNER) {
-        /* Mark on cannon duty; sector system places them at the right cannon */
-        npc->wants_cannon       = true;
-        npc->assigned_cannon_id = 0; /* sector update will assign */
+    } else if (want_cannons) {
+        /* Become a gunner — sector system places at the closest cannon */
+        npc->role         = NPC_ROLE_GUNNER;
+        npc->wants_cannon = true;
         update_npc_cannon_sector(ship, ship->active_aim_angle);
-        log_info("🔫 NPC %u (%s) on cannon duty — sector dispatch issued", npc->id, npc->name);
+        log_info("🔫 NPC %u (%s) → GUNNER, sector dispatch issued", npc->id, npc->name);
 
     } else {
-        /* Stand down — clear cannon duty and walk to deck centre */
-        npc->wants_cannon       = false;
-        npc->assigned_cannon_id = 0;
-        npc->target_local_x     = 0.0f;
-        npc->target_local_y     = 0.0f;
-        npc->state              = WORLD_NPC_STATE_MOVING;
-        /* Re-run sector so remaining duty gunners can claim the vacated cannon */
-        if (npc->role == NPC_ROLE_GUNNER)
-            update_npc_cannon_sector(ship, ship->active_aim_angle);
-        log_info("💤 NPC %u (%s) going idle — walking to centre (task=%s role=%d)",
-                 npc->id, npc->name, task, (int)npc->role);
+        /* Stand down — return to crew pool */
+        npc->role           = NPC_ROLE_NONE;
+        npc->target_local_x = 0.0f;
+        npc->target_local_y = 0.0f;
+        npc->state          = WORLD_NPC_STATE_MOVING;
+        update_npc_cannon_sector(ship, ship->active_aim_angle);
+        log_info("💤 NPC %u (%s) → IDLE (task=%s)", npc->id, npc->name, task);
+        return;
     }
-    /* NOTE: sail openness is NOT changed here; it is player-controlled only.
-       NPCs manning masts allow the player to issue sail commands; they do not
-       open/close sails automatically. */
+    /* NOTE: sail openness is NOT changed here; it is player-controlled only. */
 }
 
 /**
@@ -1395,111 +1416,42 @@ static void tick_npc_agents(float dt) {
 }
 
 /**
- * Returns true if another active WorldNpc already owns this module ID
- * (either as port or starboard assignment). Prevents double-occupancy.
- */
-static bool is_module_owned_by_npc(uint32_t module_id) {
-    if (module_id == 0) return false;
-    for (int i = 0; i < world_npc_count; i++) {
-        if (!world_npcs[i].active) continue;
-        if (world_npcs[i].port_cannon_id == module_id) return true;
-        if (world_npcs[i].starboard_cannon_id == module_id) return true;
-    }
-    return false;
-}
-
-/**
- * Spawn a gunner NPC for aim-based sector-of-fire assignment.
- * The NPC starts idle; the sector system dispatches it to a cannon when the
- * player assigns it to Cannons via the manning panel and aims at a broadside.
+ * Spawn a generic crew member.  Role is set at runtime by the manning panel
+ * (Sails → RIGGER, Cannons → GUNNER, Idle → NONE).
  * Returns the new NPC id, or 0 on failure.
  */
-static uint32_t spawn_ship_gunner(uint32_t ship_id, const char* name) {
+static uint32_t spawn_ship_crew(uint32_t ship_id, const char* name) {
     if (world_npc_count >= MAX_WORLD_NPCS) {
-        log_warn("spawn_ship_gunner: MAX_WORLD_NPCS reached");
+        log_warn("spawn_ship_crew: MAX_WORLD_NPCS reached");
         return 0;
     }
     SimpleShip* ship = find_ship(ship_id);
     if (!ship) {
-        log_warn("spawn_ship_gunner: ship %u not found", ship_id);
+        log_warn("spawn_ship_crew: ship %u not found", ship_id);
         return 0;
     }
     WorldNpc* npc = &world_npcs[world_npc_count++];
     memset(npc, 0, sizeof(WorldNpc));
-    npc->id                  = next_world_npc_id++;
-    npc->active              = true;
-    npc->role                = NPC_ROLE_GUNNER;
-    npc->ship_id             = ship_id;
-    npc->port_cannon_id      = 0;  /* future: player-locked preferred cannon */
-    npc->starboard_cannon_id = 0;
-    npc->wants_cannon        = false;
-    npc->move_speed          = 80.0f;
-    npc->interact_radius     = 40.0f;
-    /* Start idle at deck centre — player assigns tasks via manning panel */
-    npc->state               = WORLD_NPC_STATE_IDLE;
-    npc->assigned_cannon_id  = 0;
-    strncpy(npc->name, name, sizeof(npc->name) - 1);
+    npc->id             = next_world_npc_id++;
+    npc->active         = true;
+    npc->role           = NPC_ROLE_NONE;  /* assigned dynamically by manning panel */
+    npc->ship_id        = ship_id;
+    npc->wants_cannon   = false;
+    npc->move_speed     = 80.0f;
+    npc->interact_radius= 40.0f;
+    npc->state          = WORLD_NPC_STATE_IDLE;
+    npc->assigned_cannon_id = 0;
+    strncpy(npc->name,     name,              sizeof(npc->name)     - 1);
     strncpy(npc->dialogue, "Aye aye, Captain!", sizeof(npc->dialogue) - 1);
 
-    /* Stagger idle positions along ship centreline so NPCs aren't piled up */
+    /* Stagger idle positions along ship centreline */
     int slot_idx = (int)(npc->id % 9);
     npc->local_x        = -200.0f + slot_idx * 50.0f;
     npc->local_y        = 0.0f;
     npc->target_local_x = npc->local_x;
     npc->target_local_y = npc->local_y;
     ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
-    log_info("🧑 Gunner '%s' (id %u) on ship %u — idle, ready for sector dispatch",
-             npc->name, npc->id, ship_id);
-    return npc->id;
-}
-
-/**
- * Spawn a rigger NPC assigned to a single mast module.
- * The NPC stays at the mast and never side-switches.
- * Position matches the player mast-mount offset (+20px on local Y).
- * Returns the new NPC id, or 0 on failure.
- */
-static uint32_t spawn_ship_rigger(uint32_t ship_id, const char* name, uint32_t mast_module_id) {
-    if (world_npc_count >= MAX_WORLD_NPCS) {
-        log_warn("spawn_ship_rigger: MAX_WORLD_NPCS reached");
-        return 0;
-    }
-    if (is_module_owned_by_npc(mast_module_id)) {
-        log_warn("spawn_ship_rigger: mast %u already owned by another NPC", mast_module_id);
-        return 0;
-    }
-    SimpleShip* ship = find_ship(ship_id);
-    if (!ship) {
-        log_warn("spawn_ship_rigger: ship %u not found", ship_id);
-        return 0;
-    }
-    WorldNpc* npc = &world_npcs[world_npc_count++];
-    memset(npc, 0, sizeof(WorldNpc));
-    npc->id                  = next_world_npc_id++;
-    npc->active              = true;
-    npc->role                = NPC_ROLE_RIGGER;
-    npc->ship_id             = ship_id;
-    // Both ownership fields point to the same mast so is_module_owned_by_npc blocks re-use
-    npc->port_cannon_id      = mast_module_id;
-    npc->starboard_cannon_id = mast_module_id;
-    npc->assigned_cannon_id  = mast_module_id;
-    npc->move_speed          = 80.0f;
-    npc->interact_radius     = 40.0f;
-    /* Start idle at deck centre — player assigns tasks via manning panel */
-    npc->state               = WORLD_NPC_STATE_IDLE;
-    npc->assigned_cannon_id  = 0;  /* will be set to mast_module_id by crew_assign */
-    strncpy(npc->name, name, sizeof(npc->name) - 1);
-    strncpy(npc->dialogue, "Adjusting the sails!", sizeof(npc->dialogue) - 1);
-
-    /* Stagger idle positions along ship centreline so NPCs aren't piled up */
-    int slot_idx = (int)(npc->id % 6);
-    npc->local_x        = -100.0f + slot_idx * 50.0f;
-    npc->local_y        = 0.0f;
-    npc->target_local_x = npc->local_x;
-    npc->target_local_y = npc->local_y;
-    ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
-    log_info("⛵ Rigger '%s' (id %u) on ship %u — mast %u (idle)",
-             npc->name, npc->id, ship_id, mast_module_id);
+    log_info("🧑 Crew '%s' (id %u) on ship %u — idle", npc->name, npc->id, ship_id);
     return npc->id;
 }
 
@@ -2701,27 +2653,22 @@ int websocket_server_init(uint16_t port) {
     //     Module IDs: base+1..3 = port cannons, base+4..6 = starboard cannons.
     //   - 3 riggers per ship: one per mast (base+7, base+8, base+9).
     {
-        /* 3 gunners per ship — sector system dispatches them to any cannon in
-         * the player's aimed arc at runtime; no static cannon ownership. */
-        static const char* gunner_names[6] = {
-            "Bo",  "Mack", "Finn",
-            "Ray", "Cole", "Sven"
+        /* 9 generic crew per ship — roles assigned at runtime by the manning panel.
+         * Any crew member can become a gunner, rigger, or stand idle. */
+        static const char* crew_names[18] = {
+            "Bo",   "Mack", "Finn", "Ray",  "Cole", "Sven",
+            "Ned",  "Hank", "Jim",
+            "Dirk", "Walt", "Hal",  "Cruz", "Ike",  "Rex",
+            "Lars", "Tam",  "Bren"
         };
-        static const char* rigger_names[6] = { "Ned", "Hank", "Jim", "Lars", "Tam", "Bren" };
-        int gunner_idx = 0;
+        int crew_idx = 0;
         for (int s = 0; s < 2; s++) {
-            uint32_t sid  = ships[s].ship_id;
-            uint32_t base = (s == 0) ? 1000u : 2000u;
-            spawn_ship_gunner(sid, gunner_names[gunner_idx++]);
-            spawn_ship_gunner(sid, gunner_names[gunner_idx++]);
-            spawn_ship_gunner(sid, gunner_names[gunner_idx++]);
-            // Three riggers: front mast (base+7), middle mast (base+8), back mast (base+9)
-            spawn_ship_rigger(sid, rigger_names[s * 3],     base + 7);
-            spawn_ship_rigger(sid, rigger_names[s * 3 + 1], base + 8);
-            spawn_ship_rigger(sid, rigger_names[s * 3 + 2], base + 9);
+            uint32_t sid = ships[s].ship_id;
+            for (int c = 0; c < 9; c++)
+                spawn_ship_crew(sid, crew_names[crew_idx++]);
         }
-        log_info("🧑 %d crew NPCs spawned across 2 ships (%d gunners, %d riggers)",
-                 world_npc_count, 6, 6);
+        log_info("🧑 %d crew NPCs spawned across 2 ships (roles assigned by player)",
+                 world_npc_count);
     }
 
     // Enhanced startup message

@@ -247,14 +247,11 @@ export class ManningPriorityPanel {
 
     for (const task of this.priorityOrder) {
       const want = this.assignedCounts.get(task) ?? 0;
-      const preferRole = TASK_PREFERRED_ROLE[task];
       const assigned: Npc[] = [];
 
-      // First pass: role-matching NPCs (available ones come first due to outer sort)
       for (const npc of npcs) {
         if (used.has(npc.id)) continue;
         if (assigned.length >= want) break;
-        if (preferRole !== 0 && npc.role !== preferRole) continue;
         assigned.push(npc);
         used.add(npc.id);
       }
