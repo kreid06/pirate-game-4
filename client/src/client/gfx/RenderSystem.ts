@@ -1179,8 +1179,8 @@ export class RenderSystem {
       const x2 = mx + step;           // fore inner
       const x3 = mx + halfBase;       // fore outer
 
-      // Hull rail at ~85 units from centreline — plank centres sit at Y=±90, inset by ~5
-      const railDist = 85;
+      // Rail at Y=±90 — matches the plank centre line on each side
+      const railDist = 90;
 
       // Rope style — hemp tan
       this.ctx.strokeStyle = '#8B7355';
