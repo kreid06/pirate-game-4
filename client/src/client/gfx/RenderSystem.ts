@@ -562,6 +562,7 @@ export class RenderSystem {
     // Queue cannons and steering wheels (layers 4-5)
     for (const ship of worldState.ships) {
       this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
+      this.queueRenderItem(4, 'cannon-aim-guides', () => this.drawCannonAimGuides(ship, worldState, camera), 1);
       this.queueRenderItem(4, 'rudder', () => this.drawShipRudder(ship, camera));
       this.queueRenderItem(5, 'steering-wheels', () => this.drawShipSteeringWheels(ship, camera));
       this.queueRenderItem(5, 'ladders', () => this.drawShipLadders(ship, camera));
@@ -1006,6 +1007,118 @@ export class RenderSystem {
     this.ctx.restore();
   }
   
+  /**
+   * Draw trajectory aim guides for cannons that are currently being manned.
+   * A dashed line fans out from the barrel tip in the fire direction, with
+   * range-brackets at 1/3 and 2/3 of fireRange and a terminal impact cross.
+   */
+  private drawCannonAimGuides(ship: Ship, worldState: WorldState, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    // Build a set of cannon IDs that have a player currently mounted on them
+    const mountedCannonIds = new Set<number>();
+    for (const player of worldState.players) {
+      if (player.mountedModuleId != null) mountedCannonIds.add(player.mountedModuleId);
+    }
+    if (mountedCannonIds.size === 0) return;
+
+    this.ctx.save();
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    for (const cannon of ship.modules) {
+      if (cannon.kind !== 'cannon') continue;
+      if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
+      if (!mountedCannonIds.has(cannon.id)) continue;
+
+      const cannonData  = cannon.moduleData;
+      const cx          = cannon.localPos.x;
+      const cy          = cannon.localPos.y;
+      const totalAngle  = (cannon.localRot || 0) + (cannonData.aimDirection || 0);
+
+      // Barrel tip — (0, −40) in the turret frame, projected to ship-local space
+      const barrelTipX  = cx + 40 * Math.sin(totalAngle);
+      const barrelTipY  = cy - 40 * Math.cos(totalAngle);
+
+      // Unit fire direction in ship-local space
+      const dirX = Math.sin(totalAngle);
+      const dirY = -Math.cos(totalAngle);
+
+      // Cap guide at fireRange, but no more than 500 units for clarity
+      const range = Math.min(cannonData.fireRange || 400, 500);
+
+      // ── Dashed trajectory line ──
+      // Three fading segments to give a depth-of-field feel
+      const segments: Array<{ start: number; end: number; alpha: number; dash: number[] }> = [
+        { start: 0,         end: range * 0.4, alpha: 0.85, dash: [8, 6]  },
+        { start: range * 0.4, end: range * 0.7, alpha: 0.50, dash: [6, 8]  },
+        { start: range * 0.7, end: range,       alpha: 0.25, dash: [4, 10] },
+      ];
+
+      for (const seg of segments) {
+        const x1 = barrelTipX + dirX * seg.start;
+        const y1 = barrelTipY + dirY * seg.start;
+        const x2 = barrelTipX + dirX * seg.end;
+        const y2 = barrelTipY + dirY * seg.end;
+
+        this.ctx.save();
+        this.ctx.globalAlpha = seg.alpha;
+        this.ctx.strokeStyle = '#FF4422';
+        this.ctx.lineWidth   = 1.5;
+        this.ctx.lineCap     = 'round';
+        this.ctx.setLineDash(seg.dash);
+        this.ctx.beginPath();
+        this.ctx.moveTo(x1, y1);
+        this.ctx.lineTo(x2, y2);
+        this.ctx.stroke();
+        this.ctx.restore();
+      }
+      this.ctx.setLineDash([]);
+
+      // ── Range-bracket tick marks at 1/3 and 2/3 ──
+      for (const frac of [1 / 3, 2 / 3]) {
+        const bx    = barrelTipX + dirX * range * frac;
+        const by    = barrelTipY + dirY * range * frac;
+        const perpX = -dirY;   // perpendicular (rotated 90°)
+        const perpY =  dirX;
+        const tickLen = 6;
+
+        this.ctx.save();
+        this.ctx.globalAlpha = 0.55;
+        this.ctx.strokeStyle = '#FF4422';
+        this.ctx.lineWidth   = 1.2;
+        this.ctx.beginPath();
+        this.ctx.moveTo(bx - perpX * tickLen, by - perpY * tickLen);
+        this.ctx.lineTo(bx + perpX * tickLen, by + perpY * tickLen);
+        this.ctx.stroke();
+        this.ctx.restore();
+      }
+
+      // ── Terminal impact cross at max range ──
+      const impactX = barrelTipX + dirX * range;
+      const impactY = barrelTipY + dirY * range;
+      const cs = 7; // cross half-size
+
+      this.ctx.save();
+      this.ctx.globalAlpha = 0.35;
+      this.ctx.strokeStyle = '#FF4422';
+      this.ctx.lineWidth   = 1.5;
+      this.ctx.beginPath();
+      this.ctx.moveTo(impactX - cs, impactY - cs);
+      this.ctx.lineTo(impactX + cs, impactY + cs);
+      this.ctx.moveTo(impactX + cs, impactY - cs);
+      this.ctx.lineTo(impactX - cs, impactY + cs);
+      this.ctx.stroke();
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
   private drawShipSteeringWheels(ship: Ship, camera: Camera): void {
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
