@@ -1230,8 +1230,9 @@ export class RenderSystem {
         this.ctx.stroke();
 
         // ── 2 elongated cleats: aft pair (x0→x1) and fore pair (x2→x3) ──
-        this.drawSailRopeCleat(x0, x1, ry, this.hullTangentAngle((x0 + x1) / 2, side));
-        this.drawSailRopeCleat(x2, x3, ry, this.hullTangentAngle((x2 + x3) / 2, side));
+        // Cleats are deck hardware running parallel to the long axis — no tilt needed.
+        this.drawSailRopeCleat(x0, x1, ry);
+        this.drawSailRopeCleat(x2, x3, ry);
       }
     }
 
