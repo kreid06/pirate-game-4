@@ -10,6 +10,7 @@ import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
 import { simulate } from '../sim/Physics.js';
+import { createEmptyInventory } from '../sim/Inventory.js';
 
 /**
  * Simple GameEngine for local testing and development
@@ -112,7 +113,9 @@ export class GameEngine {
         radius: PhysicsConfig.PLAYER_RADIUS,
         onDeck: true,
         carrierId: ship.id,
-        deckId: ship.modules[0].id
+        deckId: ship.modules[0].id,
+        isMounted: false,
+        inventory: createEmptyInventory()
       }],
       cannonballs: [],
       carrierDetection: new Map()

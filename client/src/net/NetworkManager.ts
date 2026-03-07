@@ -58,7 +58,10 @@ export enum MessageType {
   // Cannon control messages
   CANNON_AIM = 'cannon_aim',
   CANNON_FIRE = 'cannon_fire',
-  
+
+  SLOT_SELECT = 'slot_select',
+  GIVE_ITEM = 'give_item',
+
   PING = 'ping',
   
   // Server to Client  
@@ -246,7 +249,21 @@ interface ShipSailAngleControlMessage extends NetworkMessage {
   desired_angle: number; // -60 to +60 degrees in increments of 6
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage;
+interface SlotSelectMessage extends NetworkMessage {
+  type: MessageType.SLOT_SELECT;
+  timestamp: number;
+  slot: number;
+}
+
+interface GiveItemMessage extends NetworkMessage {
+  type: MessageType.GIVE_ITEM;
+  timestamp: number;
+  slot: number;
+  item: number;
+  quantity: number;
+}
+
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage;
 
 /**
  * Main network manager class
@@ -741,7 +758,7 @@ export class NetworkManager {
    */
   sendSlotSelect(slot: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: 'slot_select', timestamp: Date.now(), slot });
+    this.sendMessage({ type: MessageType.SLOT_SELECT, timestamp: Date.now(), slot });
   }
 
   /**
@@ -750,7 +767,7 @@ export class NetworkManager {
    */
   sendGiveItem(slot: number, itemId: number, quantity: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: 'give_item', timestamp: Date.now(), slot, item: itemId, quantity });
+    this.sendMessage({ type: MessageType.GIVE_ITEM, timestamp: Date.now(), slot, item: itemId, quantity });
   }
   
   /**
