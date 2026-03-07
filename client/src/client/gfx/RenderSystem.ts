@@ -1018,6 +1018,53 @@ export class RenderSystem {
    * A dashed line fans out from the barrel tip in the fire direction, with
    * range-brackets at 1/3 and 2/3 of fireRange and a terminal impact cross.
    */
+  /**
+   * Ray–convex-polygon intersection in world space using the target ship's hull polygon.
+   * Returns the smallest t ≥ 0 where the ray hits any edge of `hull` (in ship-local coords),
+   * or Infinity when the ray misses entirely within [0, maxT].
+   *
+   * The ray is specified in world space; the hull polygon is in ship-local space and
+   * is transformed back with (shipX, shipY, shipRot).
+   */
+  private rayHullIntersect(
+    rox: number, roy: number,   // ray origin (world)
+    rdx: number, rdy: number,   // ray direction (world, unit-ish, magnitude = range units)
+    hull: { x: number; y: number }[],
+    shipX: number, shipY: number, shipRot: number,
+    maxT: number
+  ): number {
+    if (hull.length < 3) return Infinity;
+
+    // Transform the ray origin and direction into ship-local space
+    const dx = rox - shipX;
+    const dy = roy - shipY;
+    const cosR = Math.cos(-shipRot);
+    const sinR = Math.sin(-shipRot);
+    const lox = dx * cosR - dy * sinR;
+    const loy = dx * sinR + dy * cosR;
+    const ldx = rdx * cosR - rdy * sinR;
+    const ldy = rdx * sinR + rdy * cosR;
+
+    let tMin = Infinity;
+    const n = hull.length;
+    for (let i = 0; i < n; i++) {
+      const ax = hull[i].x,       ay = hull[i].y;
+      const bx = hull[(i + 1) % n].x, by = hull[(i + 1) % n].y;
+      const ex = bx - ax,  ey = by - ay;
+
+      // Cramer's rule: lox + t*ldx = ax + s*ex,  loy + t*ldy = ay + s*ey
+      const denom = ldx * ey - ldy * ex;
+      if (Math.abs(denom) < 1e-10) continue; // parallel
+
+      const t = ((ax - lox) * ey - (ay - loy) * ex) / denom;
+      const s = ((ax - lox) * ldy - (ay - loy) * ldx) / denom;
+      if (t >= 0 && t <= maxT && s >= 0 && s <= 1) {
+        if (t < tMin) tMin = t;
+      }
+    }
+    return tMin;
+  }
+
   private drawCannonAimGuides(ship: Ship, worldState: WorldState, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
     if (!this.playerIsAiming) return;
@@ -1075,25 +1122,33 @@ export class RenderSystem {
       const dirY = -Math.cos(totalAngle);
       const range = Math.min(cannonData.fireRange || 400, 500);
 
-      // Intersection check in world space
+      // ── Hull-accurate impact detection in world space ──
+      // Convert barrel tip and direction into world space for the intersection test.
       const wBarrelX = ship.position.x + barrelTipX * cosR - barrelTipY * sinR;
       const wBarrelY = ship.position.y + barrelTipX * sinR + barrelTipY * cosR;
       const wDirX = dirX * cosR - dirY * sinR;
       const wDirY = dirX * sinR + dirY * cosR;
 
-      let hitShip = false;
+      // Find the nearest enemy ship hull intersection.  tHit is in the same unit space
+      // as `range` (world units ≡ local canvas units at this transform level).
+      let tHit = Infinity;
       for (const other of worldState.ships) {
         if (other.id === ship.id) continue;
-        const dx = other.position.x - wBarrelX;
-        const dy = other.position.y - wBarrelY;
-        const t  = dx * wDirX + dy * wDirY;
-        if (t < 0 || t > range) continue;
-        if (Math.abs(dx * wDirY - dy * wDirX) < 80) { hitShip = true; break; }
+        if (!other.hull || other.hull.length < 3) continue;
+        const t = this.rayHullIntersect(
+          wBarrelX, wBarrelY, wDirX, wDirY,
+          other.hull, other.position.x, other.position.y, other.rotation,
+          range
+        );
+        if (t < tHit) tHit = t;
       }
 
-      const guideColor = hitShip ? '#FFD700' : '#AAAAAA';
+      const didHit     = tHit < Infinity;
+      // Trajectory ends at hull-entry point, clamped to max range
+      const drawLength = didHit ? Math.min(tHit, range) : range;
+      const guideColor = didHit ? '#FFD700' : '#AAAAAA';
 
-      // ── Dashed trajectory line ──
+      // ── Dashed trajectory line (stops at impact) ──
       this.ctx.save();
       this.ctx.globalAlpha = 0.80;
       this.ctx.strokeStyle = guideColor;
@@ -1102,17 +1157,19 @@ export class RenderSystem {
       this.ctx.setLineDash([10, 7]);
       this.ctx.beginPath();
       this.ctx.moveTo(barrelTipX, barrelTipY);
-      this.ctx.lineTo(barrelTipX + dirX * range, barrelTipY + dirY * range);
+      this.ctx.lineTo(barrelTipX + dirX * drawLength, barrelTipY + dirY * drawLength);
       this.ctx.stroke();
       this.ctx.restore();
       this.ctx.setLineDash([]);
 
-      // ── Range-bracket tick marks at 1/3 and 2/3 ──
+      // ── Range-bracket tick marks at 1/3 and 2/3 of max range (only if before impact) ──
+      const perpX = -dirY;
+      const perpY =  dirX;
       for (const frac of [1 / 3, 2 / 3]) {
-        const bx    = barrelTipX + dirX * range * frac;
-        const by    = barrelTipY + dirY * range * frac;
-        const perpX = -dirY;
-        const perpY =  dirX;
+        const tickDist = range * frac;
+        if (tickDist >= drawLength) continue; // past (or at) impact — skip
+        const bx = barrelTipX + dirX * tickDist;
+        const by = barrelTipY + dirY * tickDist;
         this.ctx.save();
         this.ctx.globalAlpha = 0.55;
         this.ctx.strokeStyle = guideColor;
@@ -1125,11 +1182,13 @@ export class RenderSystem {
         this.ctx.restore();
       }
 
-      // ── Terminal reticle — 4 arcs, hollow centre ──
-      const impactX = barrelTipX + dirX * range;
-      const impactY = barrelTipY + dirY * range;
-      const arcSpan = Math.PI * 0.44;
-      const gapHalf = Math.PI * 0.06;
+      // ── Terminal reticle — 4 arcs, hollow centre (at impact or max range) ──
+      const termX    = barrelTipX + dirX * drawLength;
+      const termY    = barrelTipY + dirY * drawLength;
+      // When hitting a ship the reticle is tighter to convey a direct hit
+      const reticleR = didHit ? 10 : 13;
+      const arcSpan  = Math.PI * 0.44;
+      const gapHalf  = Math.PI * 0.06;
       this.ctx.save();
       this.ctx.globalAlpha = 0.75;
       this.ctx.strokeStyle = guideColor;
@@ -1138,7 +1197,7 @@ export class RenderSystem {
       for (let i = 0; i < 4; i++) {
         const centre = (Math.PI / 2) * i;
         this.ctx.beginPath();
-        this.ctx.arc(impactX, impactY, 13, centre + gapHalf, centre + arcSpan - gapHalf);
+        this.ctx.arc(termX, termY, reticleR, centre + gapHalf, centre + arcSpan - gapHalf);
         this.ctx.stroke();
       }
       this.ctx.restore();
