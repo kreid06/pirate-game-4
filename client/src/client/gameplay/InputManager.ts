@@ -84,7 +84,7 @@ export class InputManager {
   
   // Cannon control callbacks
   public onCannonAim: ((aimAngle: number) => void) | null = null;
-  public onCannonFire: ((cannonIds?: number[], fireAll?: boolean) => void) | null = null;
+  public onCannonFire: ((cannonIds?: number[], fireAll?: boolean, ammoType?: number) => void) | null = null;
 
   // Inventory callback
   public onSlotSelect: ((slot: number) => void) | null = null;
@@ -135,6 +135,8 @@ export class InputManager {
   /** ID of the cannon module the player is currently mounted to, or null. */
   public mountedCannonModuleId: number | null = null;
   private lastCannonAimAngle: number = 0;
+  /** Selected ammo type: 0 = cannonball, 1 = bar shot. Toggle with X key. */
+  public selectedAmmoType: number = 0;
   /** Current aim angle relative to ship — updated every frame while right-mouse is held. */
   public get cannonAimAngleRelative(): number { return this.lastCannonAimAngle; }
   private lastLeftClickTime: number = 0;
@@ -872,6 +874,15 @@ export class InputManager {
           this.onBuildRotate(15);
           event.preventDefault();
         }
+        break;
+      case 'KeyX':
+        // Toggle ammo type when mounted to a cannon or helm
+        if (this.mountKind === 'cannon' || this.mountKind === 'helm') {
+          this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
+          const ammoNames = ['CANNONBALL', 'BAR SHOT'];
+          console.log(`💣 Ammo type: ${ammoNames[this.selectedAmmoType]}`);
+          event.preventDefault();
+        }
         break;      // Hotbar slots: Digit1-Digit9 → slots 0-8, Digit0 → slot 9
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
@@ -935,10 +946,10 @@ export class InputManager {
         // Mounted to helm or cannon: fire cannon(s)
         if (isDoubleClick) {
           console.log('💥💥 Double-click: Fire ALL cannons!');
-          if (this.onCannonFire) this.onCannonFire(undefined, true);
+          if (this.onCannonFire) this.onCannonFire(undefined, true, this.selectedAmmoType);
         } else {
           console.log('💥 Single-click: Fire aimed cannons');
-          if (this.onCannonFire) this.onCannonFire();
+          if (this.onCannonFire) this.onCannonFire(undefined, false, this.selectedAmmoType);
         }
       }
 

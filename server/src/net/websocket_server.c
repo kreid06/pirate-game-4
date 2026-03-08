@@ -1225,8 +1225,9 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
 
 // Forward declarations
 static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float world_x, float world_y, 
-                                  float angle, entity_id projectile_id);
-static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired);
+                                  float angle, entity_id projectile_id, uint8_t ammo_type);
+static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired, uint8_t ammo_type);
+static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_type);
 static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task);
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle);
 static void dismount_npc(WorldNpc* npc, SimpleShip* ship);
@@ -1815,7 +1816,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
 /**
  * Fire a single cannon, spawning projectile
  */
-static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired) {
+static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired, uint8_t ammo_type) {
     // Consume ship-level ammo (unless infinite ammo mode is on)
     if (!ship->infinite_ammo) {
         if (ship->cannon_ammo == 0) return; // No ammo — should have been caught earlier
@@ -1880,7 +1881,7 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
         
         log_info("🎯 Before spawn: projectile_count=%u, max=%d", global_sim->projectile_count, MAX_PROJECTILES);
         
-        entity_id projectile_id = sim_create_projectile(global_sim, proj_pos, proj_vel, owner_id);
+        entity_id projectile_id = sim_create_projectile(global_sim, proj_pos, proj_vel, owner_id, ammo_type);
         
         // Stamp the firing ship's company and ship-id so the sim can skip friendly-fire
         // collisions and award XP correctly.
@@ -1889,6 +1890,7 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
             if (proj) {
                 proj->firing_company = ship->company_id;
                 proj->firing_ship_id = (entity_id)ship->ship_id;
+                proj->type = ammo_type;
                 // Apply the firing ship's Damage level multiplier
                 struct Ship* sim_ship = sim_get_ship(global_sim, (entity_id)ship->ship_id);
                 if (sim_ship) {
@@ -1913,7 +1915,7 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
             
             // Broadcast cannon fire event to all clients (use cannon position for visual effect)
             broadcast_cannon_fire(cannon->id, ship->ship_id, cannon_world_x, cannon_world_y, 
-                                projectile_angle, projectile_id);
+                                projectile_angle, projectile_id, ammo_type);
         } else {
             log_warn("Failed to spawn projectile for cannon %u (max projectiles reached)", cannon->id);
         }
@@ -1926,12 +1928,12 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
  * Broadcast cannon fire event to all connected clients
  */
 static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float world_x, float world_y, 
-                                  float angle, entity_id projectile_id) {
+                                  float angle, entity_id projectile_id, uint8_t ammo_type) {
     char message[512];
     snprintf(message, sizeof(message),
             "{\"type\":\"CANNON_FIRE_EVENT\",\"cannonId\":%u,\"shipId\":%u,"
-            "\"x\":%.1f,\"y\":%.1f,\"angle\":%.3f,\"projectileId\":%u}",
-            cannon_id, ship_id, world_x, world_y, angle, projectile_id);
+            "\"x\":%.1f,\"y\":%.1f,\"angle\":%.3f,\"projectileId\":%u,\"ammoType\":%u}",
+            cannon_id, ship_id, world_x, world_y, angle, projectile_id, (unsigned)ammo_type);
     
     char frame[1024];
     size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, message, strlen(message), frame, sizeof(frame));
@@ -1952,7 +1954,7 @@ static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float wo
  * Single click: Fire cannons currently being aimed (within player's aim angle ±30°)
  * Double click: Fire ALL cannons on the ship (broadside)
  */
-static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all) {
+static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_type) {
     if (player->parent_ship_id == 0) {
         log_warn("Player %u tried to fire cannons while not on a ship", player->player_id);
         return;
@@ -2095,7 +2097,7 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all) {
         }
         
         if (should_fire) {
-            fire_cannon(ship, module, player, manually_fired);
+            fire_cannon(ship, module, player, manually_fired, ammo_type);
             cannons_fired++;
             
             // Also update simple ship module for sync
@@ -3631,8 +3633,13 @@ int websocket_server_update(struct Sim* sim) {
                                 if (player && player->parent_ship_id != 0) {
                                     // Parse fire_all flag
                                     bool fire_all = strstr(payload, "\"fire_all\":true") != NULL;
+                                    // Parse ammo_type (0=cannonball, 1=bar_shot)
+                                    uint8_t ammo_type = PROJ_TYPE_CANNONBALL;
+                                    char* at = strstr(payload, "\"ammo_type\":");
+                                    if (at) ammo_type = (uint8_t)atoi(at + 12);
+                                    if (ammo_type > PROJ_TYPE_BAR_SHOT) ammo_type = PROJ_TYPE_CANNONBALL;
                                     
-                                    handle_cannon_fire(player, fire_all);
+                                    handle_cannon_fire(player, fire_all, ammo_type);
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"cannons_fired\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");

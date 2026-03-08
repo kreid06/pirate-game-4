@@ -227,6 +227,7 @@ interface CannonFireMessage extends NetworkMessage {
   timestamp: number;
   cannon_ids?: number[]; // Specific cannons to fire, or undefined for all aimed cannons
   fire_all?: boolean;    // True if double-click (fire all cannons)
+  ammo_type?: number;   // 0 = cannonball (default), 1 = bar shot
 }
 
 /**
@@ -804,7 +805,7 @@ export class NetworkManager {
    * @param cannonIds - Specific cannon IDs to fire, or undefined for aimed cannons
    * @param fireAll - True if double-click (fire all cannons)
    */
-  sendCannonFire(cannonIds?: number[], fireAll: boolean = false): void {
+  sendCannonFire(cannonIds?: number[], fireAll: boolean = false, ammoType: number = 0): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
       return;
     }
@@ -813,10 +814,11 @@ export class NetworkManager {
       type: MessageType.CANNON_FIRE,
       timestamp: Date.now(),
       cannon_ids: cannonIds,
-      fire_all: fireAll
+      fire_all: fireAll,
+      ammo_type: ammoType
     };
 
-    console.log(`💥 Cannon fire: ${fireAll ? 'ALL' : cannonIds ? `IDs ${cannonIds.join(',')}` : 'aimed'}`);
+    console.log(`💥 Cannon fire: ${fireAll ? 'ALL' : cannonIds ? `IDs ${cannonIds.join(',')}` : 'aimed'} [${ammoType === 1 ? 'BAR SHOT' : 'CANNONBALL'}]`);
     this.sendMessage(message);
   }
 

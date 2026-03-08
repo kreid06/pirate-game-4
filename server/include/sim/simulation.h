@@ -23,7 +23,7 @@ int sim_deserialize_state(struct Sim* sim, const uint8_t* buffer, size_t buffer_
 // Entity management
 entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation);
 entity_id sim_create_player(struct Sim* sim, Vec2Q16 position, entity_id ship_id);
-entity_id sim_create_projectile(struct Sim* sim, Vec2Q16 position, Vec2Q16 velocity, entity_id shooter_id);
+entity_id sim_create_projectile(struct Sim* sim, Vec2Q16 position, Vec2Q16 velocity, entity_id shooter_id, uint8_t proj_type);
 
 bool sim_destroy_entity(struct Sim* sim, entity_id id);
 struct Ship* sim_get_ship(struct Sim* sim, entity_id id);

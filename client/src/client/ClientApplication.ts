@@ -303,8 +303,8 @@ export class ClientApplication {
       this.inputManager.onCannonAim = (aimAngle) => {
         this.networkManager.sendCannonAim(aimAngle);
       };
-      this.inputManager.onCannonFire = (cannonIds, fireAll) => {
-        this.networkManager.sendCannonFire(cannonIds, fireAll);
+      this.inputManager.onCannonFire = (cannonIds, fireAll, ammoType) => {
+        this.networkManager.sendCannonFire(cannonIds, fireAll, ammoType ?? 0);
       };
 
       // Hotbar slot selection — update locally for instant UI feedback, then sync server

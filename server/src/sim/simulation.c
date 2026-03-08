@@ -529,7 +529,7 @@ entity_id sim_create_player(struct Sim* sim, Vec2Q16 position, entity_id ship_id
     return id;
 }
 
-entity_id sim_create_projectile(struct Sim* sim, Vec2Q16 position, Vec2Q16 velocity, entity_id shooter_id) {
+entity_id sim_create_projectile(struct Sim* sim, Vec2Q16 position, Vec2Q16 velocity, entity_id shooter_id, uint8_t proj_type) {
     if (!sim || sim->projectile_count >= MAX_PROJECTILES) {
         return INVALID_ENTITY_ID;
     }
@@ -547,7 +547,7 @@ entity_id sim_create_projectile(struct Sim* sim, Vec2Q16 position, Vec2Q16 veloc
     proj->damage = 3000; // 3000 base damage (x weapon_damage multiplier 1.0)
     proj->lifetime = Q16_FROM_INT(10); // 10 second lifetime
     proj->spawn_time = sim->time_ms;
-    proj->type = 0; // Cannonball
+    proj->type = proj_type;
     
     sim->projectile_count++;
     
@@ -639,7 +639,7 @@ void sim_process_input(struct Sim* sim, const struct InputCmd* cmd) {
                     ship->velocity.x + q16_mul(Q16_FROM_INT(200), q16_cos(ship->rotation)),
                     ship->velocity.y + q16_mul(Q16_FROM_INT(200), q16_sin(ship->rotation))
                 };
-                entity_id projectile = sim_create_projectile(sim, cannon_pos, cannon_velocity, player->id);
+                entity_id projectile = sim_create_projectile(sim, cannon_pos, cannon_velocity, player->id, PROJ_TYPE_CANNONBALL);
                 log_info("🔥 Player %u fired cannon from ship %u (projectile %u)", 
                         player->id, ship->id, projectile);
             }
@@ -1094,6 +1094,25 @@ static bool point_in_hull(float px, float py, const Vec2Q16* verts, int n) {
     return inside;
 }
 
+// Find mast module index closest to (lx, ly) in ship-local coords.
+// Used exclusively by bar shot — only MAST modules are eligible targets.
+static int find_mast_hit(const struct Ship* ship, float lx, float ly) {
+    for (int m = 0; m < ship->module_count; m++) {
+        const ShipModule* mod = &ship->modules[m];
+        if (mod->type_id != MODULE_TYPE_MAST) continue;
+        if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
+
+        float mx = Q16_TO_FLOAT(mod->local_pos.x);
+        float my = Q16_TO_FLOAT(mod->local_pos.y);
+        float dx = mx - lx, dy = my - ly;
+        // Generous radius: mast+sail covers a wide area
+        const float mast_radius = CLIENT_TO_SERVER(50.0f);
+        if (dx*dx + dy*dy < mast_radius * mast_radius)
+            return m;
+    }
+    return -1;
+}
+
 void handle_projectile_collisions(struct Sim* sim) {
     // NOTE: hit_event_count is NOT reset here — sim_update_ships may have already
     // queued SHIP_SINK events this tick. The count is reset at the start of the
@@ -1128,6 +1147,62 @@ void handle_projectile_collisions(struct Sim* sim) {
             float rel_y = Q16_TO_FLOAT(proj->position.y) - Q16_TO_FLOAT(ship->position.y);
             float lx = rel_x * cosf(-rot) - rel_y * sinf(-rot);
             float ly = rel_x * sinf(-rot) + rel_y * cosf(-rot);
+
+            // ---- BAR SHOT: bypass hull entirely, only hits mast/sail modules ----
+            if (proj->type == PROJ_TYPE_BAR_SHOT) {
+                int hit_m = find_mast_hit(ship, lx, ly);
+                if (hit_m >= 0) {
+                    ShipModule* hit_mod = &ship->modules[hit_m];
+                    uint16_t mod_id = hit_mod->id;
+
+                    float dmg_before = (float)hit_mod->health;
+                    q16_t effective_damage = Q16_FROM_FLOAT(
+                        Q16_TO_FLOAT(proj->damage)
+                        * ship_level_resistance_mult(&ship->level_stats)
+                    );
+                    module_apply_damage(hit_mod, effective_damage);
+                    float damage_dealt = dmg_before - (float)hit_mod->health;
+                    if (damage_dealt < 0) damage_dealt = 0;
+
+                    bool mast_destroyed = (hit_mod->health <= 0);
+                    if (mast_destroyed) {
+                        log_info("⛵💥 Bar shot %u destroyed mast %u on ship %u",
+                                 proj->id, mod_id, ship->id);
+                        memmove(&ship->modules[hit_m], &ship->modules[hit_m + 1],
+                                (ship->module_count - hit_m - 1) * sizeof(ShipModule));
+                        ship->module_count--;
+                    } else {
+                        log_info("⛵💥 Bar shot %u hit mast %u on ship %u — %d HP remaining",
+                                 proj->id, mod_id, ship->id, (int)hit_mod->health);
+                    }
+
+                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                        ev->ship_id         = ship->id;
+                        ev->module_id       = mod_id;
+                        ev->is_breach       = true;   // reuse breach event so client animates the hit
+                        ev->is_sink         = false;
+                        ev->destroyed       = mast_destroyed;
+                        ev->damage_dealt    = damage_dealt;
+                        ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                        ev->shooter_ship_id = proj->firing_ship_id;
+                    }
+
+                    if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                        if (attacker)
+                            attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
+                    }
+
+                    memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                            (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                    sim->projectile_count--;
+                    removed = true;
+                }
+                // Bar shot misses: keep flying (no hull interaction)
+                continue;
+            }
 
             // Point-in-polygon test
             bool inside_hull = point_in_hull(lx, ly, ship->hull_vertices, ship->hull_vertex_count);

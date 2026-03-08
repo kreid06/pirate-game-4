@@ -88,6 +88,10 @@ struct Player {
     uint8_t reserved[2];
 };
 
+/* Projectile ammo types */
+#define PROJ_TYPE_CANNONBALL  0
+#define PROJ_TYPE_BAR_SHOT    1
+
 // Projectile state (cannonballs, etc)  
 struct Projectile {
     entity_id id;
