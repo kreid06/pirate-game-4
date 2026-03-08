@@ -34,16 +34,19 @@ uint32_t ship_level_xp_cost(const ShipLevelStats* stats, ShipAttribute attr) {
     if (attr >= SHIP_ATTR_COUNT) return UINT32_MAX;
     uint8_t points_spent = (uint8_t)(stats->levels[attr] - 1);
     if (points_spent >= ship_attr_point_cap(attr)) return UINT32_MAX; /* at attribute cap */
-    if (ship_level_total_points(stats) >= SHIP_LEVEL_TOTAL_POINT_CAP) return UINT32_MAX; /* at total cap */
-    return SHIP_LEVEL_XP_BASE * (uint32_t)stats->levels[attr];
+    uint16_t ship_lvl = ship_level_total_points(stats);
+    if (ship_lvl >= SHIP_LEVEL_TOTAL_POINT_CAP) return UINT32_MAX;   /* at total cap */
+    /* Cost = XP needed to advance ship level by 1 (same for every attribute) */
+    return SHIP_LEVEL_XP_BASE * (uint32_t)(ship_lvl + 1);
 }
 
 bool ship_level_upgrade(ShipLevelStats* stats, ShipAttribute attr) {
     if (attr >= SHIP_ATTR_COUNT) return false;
     uint8_t points_spent = (uint8_t)(stats->levels[attr] - 1);
     if (points_spent >= ship_attr_point_cap(attr)) return false; /* attribute maxed */
-    if (ship_level_total_points(stats) >= SHIP_LEVEL_TOTAL_POINT_CAP) return false; /* total cap */
-    uint32_t cost = SHIP_LEVEL_XP_BASE * (uint32_t)stats->levels[attr];
+    uint16_t ship_lvl = ship_level_total_points(stats);
+    if (ship_lvl >= SHIP_LEVEL_TOTAL_POINT_CAP) return false;    /* total cap */
+    uint32_t cost = SHIP_LEVEL_XP_BASE * (uint32_t)(ship_lvl + 1);
     if (stats->xp < cost) return false; /* not enough XP */
     stats->xp -= cost;
     stats->levels[attr]++;

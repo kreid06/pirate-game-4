@@ -38,7 +38,10 @@
 /* Hard cap: total points across ALL attributes */
 #define SHIP_LEVEL_TOTAL_POINT_CAP   65u
 
-/* XP cost to advance one attribute from level L to L+1: SHIP_LEVEL_XP_BASE * L */
+/* XP cost to upgrade any attribute = XP_BASE * (ship_level + 1)
+ * where ship_level = sum of all attribute points spent so far.
+ * Every upgrade is equally expensive at the same ship level regardless of
+ * which attribute is chosen; upgrading advances the ship level by 1. */
 #define SHIP_LEVEL_XP_BASE 100u
 
 /* Attributes that can be levelled up on a ship */
@@ -65,11 +68,13 @@ uint16_t  ship_level_total_points(const ShipLevelStats* stats);
 /* Per-attribute point cap (varies by attribute) */
 uint8_t   ship_attr_point_cap(ShipAttribute attr);
 
-/* XP needed to upgrade attribute from its current level to next (UINT32_MAX if already maxed) */
+/* XP needed to upgrade any attribute (cost = XP_BASE * (ship_level+1)).
+ * Returns UINT32_MAX if the target attribute is at its cap or total cap is reached. */
 uint32_t  ship_level_xp_cost(const ShipLevelStats* stats, ShipAttribute attr);
 
-/* Attempt upgrade; returns true and deducts XP on success.
- * Fails if: not enough XP, attribute already at its point cap, or total points cap reached. */
+/* Attempt upgrade; deducts XP and increments the attribute level on success.
+ * Fails if: not enough XP, attribute at its point cap, or total 65-point cap reached.
+ * Cost = XP_BASE * (current_ship_level + 1), same for every attribute. */
 bool      ship_level_upgrade(ShipLevelStats* stats, ShipAttribute attr);
 
 /* --- Attribute effect helpers --- */
