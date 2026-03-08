@@ -4189,6 +4189,10 @@ int websocket_server_update(struct Sim* sim) {
                                                 nm->data.mast.openness        = 0;
                                                 nm->data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
                                                 sim_ship->module_count++;
+                                                // Mirror into SimpleShip so find_module_on_ship()
+                                                // (used by NPC riggers) can see the new mast.
+                                                if (simple && simple->module_count < MAX_MODULES_PER_SHIP)
+                                                    simple->modules[simple->module_count++] = *nm;
                                                 player->inventory.slots[sail_slot].quantity--;
                                                 if (player->inventory.slots[sail_slot].quantity == 0)
                                                     player->inventory.slots[sail_slot].item = ITEM_NONE;
@@ -4262,6 +4266,10 @@ int websocket_server_update(struct Sim* sim) {
                                                 nh->data.helm.occupied_by    = 0;
                                                 nh->data.helm.wheel_rotation = Q16_FROM_FLOAT(0.0f);
                                                 sim_ship->module_count++;
+                                                // Mirror into SimpleShip so find_module_on_ship()
+                                                // (used by NPC helmsmen) can see the new helm.
+                                                if (simple && simple->module_count < MAX_MODULES_PER_SHIP)
+                                                    simple->modules[simple->module_count++] = *nh;
                                                 player->inventory.slots[helm_slot].quantity--;
                                                 if (player->inventory.slots[helm_slot].quantity == 0)
                                                     player->inventory.slots[helm_slot].item = ITEM_NONE;
