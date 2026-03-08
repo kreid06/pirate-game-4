@@ -100,6 +100,8 @@ export class InputManager {
   public explicitBuildMode: boolean = false;
   public onBuildModeToggle: (() => void) | null = null;
   public onBuildRotate: ((deltaDeg: number) => void) | null = null;
+  /** Called when R is pressed while hovering a damaged mast (not in explicit build mode). */
+  public onRepairSail: (() => void) | null = null;
 
   // Camera zoom callback
   public onZoom: ((factor: number, screenPoint: Vec2) => void) | null = null;
@@ -869,9 +871,13 @@ export class InputManager {
         event.preventDefault();
         break;
       case 'KeyR':
-        // In explicit build mode: rotate the placement ghost by 15 degrees
+        // In explicit build mode: rotate the placement ghost by 15 degrees.
+        // Otherwise: repair sail fibers on the hovered damaged mast.
         if (this.explicitBuildMode && this.onBuildRotate) {
           this.onBuildRotate(15);
+          event.preventDefault();
+        } else if (!this.explicitBuildMode && this.onRepairSail) {
+          this.onRepairSail();
           event.preventDefault();
         }
         break;

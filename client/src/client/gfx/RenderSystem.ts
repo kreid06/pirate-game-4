@@ -62,6 +62,8 @@ export class RenderSystem {
   private mastBuildMode: boolean = false;
   /** The mast slot (mastIndex+ship) currently under the cursor in mast build mode. */
   private hoveredMastSlot: { ship: Ship; mastIndex: number } | null = null;
+  /** An existing but fiber-damaged mast within sail radius of the cursor — for R-key repair. */
+  private hoveredDamagedMast: { ship: Ship; mastIndex: number } | null = null;
   /** Whether helm replacement build mode is active (helm_kit item held). */
   private helmBuildMode: boolean = false;
   /** Whether the helm ghost is hovered in helm build mode. */
@@ -180,6 +182,15 @@ export class RenderSystem {
    */
   getHoveredMastSlot(): { ship: Ship; mastIndex: number } | null {
     return this.hoveredMastSlot;
+  }
+
+  /**
+   * Get an existing but sail-damaged mast under the cursor (for R-key repair).
+   * Returns { ship, mastIndex } when the cursor is within the sail radius (40px) of a mast
+   * whose fiber openness < 100 or wind_efficiency < 1.
+   */
+  getHoveredDamagedMast(): { ship: Ship; mastIndex: number } | null {
+    return this.hoveredDamagedMast;
   }
 
   /**
@@ -494,6 +505,9 @@ export class RenderSystem {
     } else {
       this.hoveredMastSlot = null;
     }
+
+    // Always detect fiber-damaged masts for R-key repair (independent of build mode)
+    this.detectHoveredDamagedMast(worldState);
 
     // In helm build mode, detect whether the missing helm is under the cursor
     if (this.helmBuildMode) {
@@ -1251,6 +1265,49 @@ export class RenderSystem {
         const ddy = localY;
         if (Math.sqrt(ddx * ddx + ddy * ddy) <= 22) {
           this.hoveredMastSlot = { ship, mastIndex: i };
+          return;
+        }
+      }
+    }
+  }
+
+  /**
+   * Detect an existing but sail-fiber-damaged mast under the cursor.
+   * Uses the sail radius (40 client-px = sailWidth/2) matching the server's BAR_SHOT_SAIL_RADIUS.
+   * Only matches masts whose openness < 100 or wind_efficiency < 1 (i.e. fibers are torn).
+   */
+  private readonly SAIL_HIT_RADIUS = 40; // matches BAR_SHOT_SAIL_RADIUS on server
+
+  private detectHoveredDamagedMast(worldState: WorldState): void {
+    this.hoveredDamagedMast = null;
+    if (!this.mouseWorldPos) return;
+
+    for (const ship of worldState.ships) {
+      const helm = ship.modules.find(m => m.kind === 'helm');
+      if (!helm) continue;
+      const base = helm.id;
+
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const localX = dx * cos - dy * sin;
+      const localY = dx * sin + dy * cos;
+
+      for (let i = 0; i < 3; i++) {
+        const mod = ship.modules.find(m => m.id === base + 7 + i && m.kind === 'mast');
+        if (!mod || !mod.moduleData || mod.moduleData.kind !== 'mast') continue;
+
+        const md = mod.moduleData;
+        // Only eligible if fibers are actually damaged
+        const fibersDamaged = md.openness < 100 || md.windEfficiency < 1.0;
+        if (!fibersDamaged) continue;
+
+        const mx = RenderSystem.MAST_XS[i];
+        const ddx = localX - mx;
+        const ddy = localY;
+        if (Math.sqrt(ddx * ddx + ddy * ddy) <= this.SAIL_HIT_RADIUS) {
+          this.hoveredDamagedMast = { ship, mastIndex: i };
           return;
         }
       }

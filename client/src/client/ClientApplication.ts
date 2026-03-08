@@ -320,6 +320,18 @@ export class ClientApplication {
         this.networkManager.sendCannonFire(cannonIds, fireAll, ammoType ?? 0);
       };
 
+      // Sail fiber repair: R key while hovering a damaged mast → consume repair kit, restore fibers
+      this.inputManager.onRepairSail = () => {
+        const damagedMast = this.renderSystem.getHoveredDamagedMast();
+        if (!damagedMast) return;
+        const playerId = this.networkManager.getAssignedPlayerId();
+        const worldState = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+        const player = playerId !== null ? worldState?.players.find(p => p.id === playerId) : null;
+        if (!player || player.carrierId !== damagedMast.ship.id) return; // must be on the same ship
+        console.log(`🧵 [REPAIR] Repairing sail fibers mast ${damagedMast.mastIndex} on ship ${damagedMast.ship.id}`);
+        this.networkManager.sendRepairSail(damagedMast.ship.id, damagedMast.mastIndex);
+      };
+
       // Hotbar slot selection — update locally for instant UI feedback, then sync server
       this.inputManager.onSlotSelect = (slot) => {
         const playerId = this.networkManager.getAssignedPlayerId();

@@ -1448,6 +1448,15 @@ static void tick_npc_agents(float dt) {
                         module->state_bits |=  MODULE_STATE_DEPLOYED;
                     else
                         module->state_bits &= ~MODULE_STATE_DEPLOYED;
+
+                    // Gradually repair torn sail fibers (rigger stitching sails).
+                    // Rate: +10 openness/s, +0.1 wind_efficiency/s — slow, needs sustained manning.
+                    float eff = Q16_TO_FLOAT(module->data.mast.wind_efficiency);
+                    if (eff < 1.0f) {
+                        eff += 0.1f * dt;
+                        if (eff > 1.0f) eff = 1.0f;
+                        module->data.mast.wind_efficiency = Q16_FROM_FLOAT(eff);
+                    }
                 }
                 break;
             }
@@ -3066,12 +3075,13 @@ int websocket_server_update(struct Sim* sim) {
                                                 
                                                 // Add module-specific data based on type
                                                 if (module->type_id == MODULE_TYPE_MAST) {
-                                                    // Mast: include openness and sail angle
+                                                    // Mast: include openness, sail angle, wind efficiency
                                                     float sail_angle = Q16_TO_FLOAT(module->data.mast.angle);
+                                                    float wind_eff   = Q16_TO_FLOAT(module->data.mast.wind_efficiency);
                                                     ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
-                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f}",
+                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f}",
                                                         m > 0 ? "," : "", module->id, module->type_id, 
-                                                        module_x, module_y, module_rot, module->data.mast.openness, sail_angle);
+                                                        module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff);
                                                 } else if (module->type_id == MODULE_TYPE_CANNON) {
                                                     // Cannon: include aim direction and state (ammo is ship-level now)
                                                     float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
@@ -3830,6 +3840,89 @@ int websocket_server_update(struct Sim* sim) {
                                                     "{\"type\":\"message_ack\",\"status\":\"plank_repaired\","
                                                     "\"plank_id\":%u,\"health\":%d,\"maxHealth\":%d}",
                                                     worst_plank->id, (int)worst_plank->health, (int)worst_plank->max_health);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strstr(payload, "\"type\":\"repair_sail\"")) {
+                            // REPAIR SAIL FIBERS: restore openness (+50, cap 100) and wind_efficiency
+                            // (+0.5, cap 1.0) on a specific mast. Consumes 1 ITEM_REPAIR_KIT.
+                            // Payload: {"type":"repair_sail","shipId":N,"mastIndex":N}  (0=bow,1=mid,2=stern)
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    int kit_slot = -1;
+                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                        if (player->inventory.slots[s].item == ITEM_REPAIR_KIT &&
+                                            player->inventory.slots[s].quantity > 0) {
+                                            kit_slot = s; break;
+                                        }
+                                    }
+                                    if (kit_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_repair_kits\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        int req_idx = -1;
+                                        const char* p_mi = strstr(payload, "\"mastIndex\":");
+                                        if (p_mi) req_idx = atoi(p_mi + 12);
+
+                                        struct Ship* sim_ship = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == player->parent_ship_id) {
+                                                sim_ship = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        SimpleShip* simple = find_ship(player->parent_ship_id);
+                                        if (!sim_ship || !simple) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else if (req_idx < 0 || req_idx > 2) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"invalid_mast_index\"}");
+                                        } else {
+                                            uint16_t mast_id = simple->module_id_base + 7 + (uint16_t)req_idx;
+                                            ShipModule* mast_mod = NULL;
+                                            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                                                if (sim_ship->modules[m].id   == mast_id &&
+                                                    sim_ship->modules[m].type_id == MODULE_TYPE_MAST) {
+                                                    mast_mod = &sim_ship->modules[m]; break;
+                                                }
+                                            }
+                                            if (!mast_mod) {
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"mast_not_present\"}");
+                                            } else {
+                                                float eff = Q16_TO_FLOAT(mast_mod->data.mast.wind_efficiency);
+                                                if (mast_mod->data.mast.openness >= 100 && eff >= 1.0f) {
+                                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"sail_intact\"}");
+                                                } else {
+                                                    int new_open = (int)mast_mod->data.mast.openness + 50;
+                                                    if (new_open > 100) new_open = 100;
+                                                    mast_mod->data.mast.openness = (uint8_t)new_open;
+                                                    eff += 0.5f;
+                                                    if (eff > 1.0f) eff = 1.0f;
+                                                    mast_mod->data.mast.wind_efficiency = Q16_FROM_FLOAT(eff);
+                                                    // Mirror into SimpleShip so rigger NPC sees it too
+                                                    ShipModule* sm = find_module_by_id(simple, mast_id);
+                                                    if (sm) {
+                                                        sm->data.mast.openness        = mast_mod->data.mast.openness;
+                                                        sm->data.mast.wind_efficiency = mast_mod->data.mast.wind_efficiency;
+                                                    }
+                                                    player->inventory.slots[kit_slot].quantity--;
+                                                    if (player->inventory.slots[kit_slot].quantity == 0)
+                                                        player->inventory.slots[kit_slot].item = ITEM_NONE;
+                                                    log_info("🧵 Player %u repaired sail fibers mast %u on ship %u (openness->%d, eff->%.2f)",
+                                                             player->player_id, mast_id, sim_ship->id, new_open, eff);
+                                                    snprintf(response, sizeof(response),
+                                                        "{\"type\":\"message_ack\",\"status\":\"sail_repaired\","
+                                                        "\"mastId\":%u,\"openness\":%d,\"windEfficiency\":%.3f}",
+                                                        mast_id, new_open, eff);
+                                                }
                                             }
                                         }
                                     }
@@ -4616,12 +4709,13 @@ int websocket_server_update(struct Sim* sim) {
                         
                         // Add module-specific data based on type
                         if (module->type_id == MODULE_TYPE_MAST) {
-                            // Mast: include openness, sail angle, and health
+                            // Mast: include openness, sail angle, wind efficiency, and health
                             float sail_angle = Q16_TO_FLOAT(module->data.mast.angle);
+                            float wind_eff   = Q16_TO_FLOAT(module->data.mast.wind_efficiency);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"health\":%d,\"maxHealth\":%d}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"health\":%d,\"maxHealth\":%d}",
                                 m > 0 ? "," : "", module->id, module->type_id, 
-                                module_x, module_y, module_rot, module->data.mast.openness, sail_angle,
+                                module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff,
                                 (int)module->health, (int)module->max_health);
                         } else if (module->type_id == MODULE_TYPE_CANNON) {
                             // Cannon: include aim direction, state, and health
@@ -4730,12 +4824,13 @@ int websocket_server_update(struct Sim* sim) {
                         
                         // Add module-specific data based on type
                         if (module->type_id == MODULE_TYPE_MAST) {
-                            // Mast: include openness and sail angle
+                            // Mast: include openness, sail angle, wind efficiency
                             float sail_angle = Q16_TO_FLOAT(module->data.mast.angle);
+                            float wind_eff   = Q16_TO_FLOAT(module->data.mast.wind_efficiency);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f}",
                                 m > 0 ? "," : "", module->id, module->type_id, 
-                                module_x, module_y, module_rot, module->data.mast.openness, sail_angle);
+                                module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff);
                         } else if (module->type_id == MODULE_TYPE_CANNON) {
                             // Cannon: include aim direction, state (ammo is ship-level)
                             float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);

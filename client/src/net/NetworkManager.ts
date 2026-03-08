@@ -63,6 +63,7 @@ export enum MessageType {
   GIVE_ITEM = 'give_item',
   PLACE_PLANK = 'place_plank',
   REPAIR_PLANK = 'repair_plank',
+  REPAIR_SAIL = 'repair_sail',
   PLACE_CANNON = 'place_cannon',
   PLACE_CANNON_AT = 'place_cannon_at',
   PLACE_MAST = 'place_mast',
@@ -278,6 +279,13 @@ interface RepairPlankMessage extends NetworkMessage {
   shipId: number;
 }
 
+interface RepairSailMessage extends NetworkMessage {
+  type: MessageType.REPAIR_SAIL;
+  timestamp: number;
+  shipId: number;
+  mastIndex: number; // 0=bow, 1=mid, 2=stern
+}
+
 interface PlacePlankMessage extends NetworkMessage {
   type: MessageType.PLACE_PLANK;
   timestamp: number;
@@ -330,7 +338,7 @@ interface CrewAssignMessage extends NetworkMessage {
   task: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | RepairPlankMessage | CrewAssignMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | RepairPlankMessage | RepairSailMessage | CrewAssignMessage;
 
 /**
  * Main network manager class
@@ -864,6 +872,16 @@ export class NetworkManager {
   }
 
   /**
+   * Request the server to repair torn sail fibers on a specific mast.
+   * Consumes 1 ITEM_REPAIR_KIT from the player's inventory.
+   * mastIndex: 0=bow, 1=mid, 2=stern.
+   */
+  sendRepairSail(shipId: number, mastIndex: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.REPAIR_SAIL, timestamp: Date.now(), shipId, mastIndex });
+  }
+
+  /**
    * Request the server to replace a destroyed cannon on the player's ship.
    * Server finds the first missing cannon slot (base+1..base+6) and recreates it,
    * consuming 1 ITEM_CANNON from the player's inventory.
@@ -1157,6 +1175,7 @@ export class NetworkManager {
                       sailState: 'full',
                       openness: mod.openness ?? 0,
                       angle: mod.sailAngle ?? 0,
+                      windEfficiency: mod.windEfficiency ?? 1.0,
                       radius: 15,
                       height: 120,
                       sailWidth: 80,
