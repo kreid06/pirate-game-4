@@ -191,19 +191,18 @@ export class ClientApplication {
           ws.ships = ws.ships.filter(s => s.id !== shipId);
         }
       };
-      this.networkManager.onShipLevelUp = (shipId, attribute, level, xp, totalPoints, totalCap) => {
-        // Optimistically update local world state so the ShipMenu reflects the
-        // upgrade immediately, before the next GAME_STATE snapshot arrives.
+      this.networkManager.onShipLevelUp = (shipId, attribute, attrLevel, xp, shipLevel, totalCap, nextUpgradeCost) => {
         const attrNames = ['weight', 'resistance', 'damage', 'crew', 'sturdiness'];
         const attrIdx = attrNames.indexOf(attribute);
         for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
           if (!ws) continue;
           const ship = ws.ships.find(s => s.id === shipId);
           if (!ship?.levelStats) continue;
-          if (attrIdx >= 0) ship.levelStats.levels[attrIdx] = level;
-          ship.levelStats.xp = xp;
-          ship.levelStats.totalPoints = totalPoints;
-          ship.levelStats.totalCap = totalCap;
+          if (attrIdx >= 0) ship.levelStats.levels[attrIdx] = attrLevel;
+          ship.levelStats.xp              = xp;
+          ship.levelStats.shipLevel       = shipLevel;
+          ship.levelStats.totalCap        = totalCap;
+          ship.levelStats.nextUpgradeCost = nextUpgradeCost;
         }
       };
       
@@ -1160,8 +1159,9 @@ export class ClientApplication {
         levels: [1, 8, 12, 3, 5], // demo: some points in resistance/damage
         xp: 350,
         maxCrew: 9 + 2 * 2,       // crew lvl 3 → 13
-        totalPoints: (1-1)+(8-1)+(12-1)+(3-1)+(5-1), // 0+7+11+2+4 = 24
-        totalCap: 65,
+        shipLevel:       (1-1)+(8-1)+(12-1)+(3-1)+(5-1), // 0+7+11+2+4 = 24
+        totalCap:        65,
+        nextUpgradeCost: 100 * (24 + 1), // XP_BASE * (shipLevel + 1) = 2500
         attrCaps: [50, 35, 35, 50, 25],
       },
       modules: [

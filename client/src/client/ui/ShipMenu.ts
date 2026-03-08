@@ -468,25 +468,27 @@ export class ShipMenu {
       return py + ROW_H + 4;
     }
 
-    const totalPts  = ls.totalPoints;
-    const totalCap  = ls.totalCap;
-    const xpStr     = ls.xp.toLocaleString();
-    const ptStr     = `${totalPts} / ${totalCap} pts`;
+    const shipLevel    = ls.shipLevel;
+    const totalCap     = ls.totalCap;
+    const nextCostAll  = ls.nextUpgradeCost;   // same for every attr at this ship level
+    const shipCapped   = shipLevel >= totalCap;
+    const xpStr        = ls.xp.toLocaleString();
+    const lvlStr       = `Lv. ${shipLevel} / ${totalCap}`;
 
-    py = this._sectionHeader(ctx, px, py, 'PROGRESSION', `XP: ${xpStr}   ${ptStr}`);
+    py = this._sectionHeader(ctx, px, py, 'PROGRESSION', `XP: ${xpStr}   ${lvlStr}`);
 
-    // Total-points progress bar
+    // Ship-level progress bar
     {
       const barW     = PANEL_W - PAD * 2 - 100;
       const barX     = px + PAD + 90;
-      const fillFrac = Math.min(totalPts / totalCap, 1);
-      const barColor = fillFrac >= 1 ? GOLD : GREEN;
+      const fillFrac = Math.min(shipLevel / totalCap, 1);
+      const barColor = shipCapped ? GOLD : GREEN;
 
       ctx.font = '12px Consolas, monospace';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = TEXT_DIM;
-      ctx.fillText('Total pts used', px + PAD + 8, py + ROW_H / 2);
+      ctx.fillText('Ship Level', px + PAD + 8, py + ROW_H / 2);
 
       ctx.fillStyle = '#1a1a28';
       ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, barW, BAR_H);
@@ -494,8 +496,22 @@ export class ShipMenu {
       ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, barW * fillFrac, BAR_H);
 
       ctx.textAlign = 'right';
-      ctx.fillStyle = fillFrac >= 1 ? GOLD : TEXT_HEAD;
-      ctx.fillText(ptStr, barX + barW - 2, py + ROW_H / 2);
+      ctx.fillStyle = shipCapped ? GOLD : TEXT_HEAD;
+      ctx.fillText(lvlStr, barX + barW - 2, py + ROW_H / 2);
+      py += ROW_H;
+    }
+
+    // Next upgrade cost row (single cost applies to any attribute)
+    if (!shipCapped) {
+      ctx.font = '12px Consolas, monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = TEXT_DIM;
+      ctx.fillText('Next upgrade cost (any attr):', px + PAD + 8, py + ROW_H / 2);
+      ctx.fillStyle = ls.xp >= nextCostAll ? GREEN : ORANGE;
+      ctx.fillText(`${nextCostAll.toLocaleString()} XP`, px + PAD + 260, py + ROW_H / 2);
+      ctx.fillStyle = TEXT_DIM;
+      ctx.fillText(`(${ls.xp.toLocaleString()} available)`, px + PAD + 360, py + ROW_H / 2);
       py += ROW_H;
     }
 
@@ -509,7 +525,6 @@ export class ShipMenu {
       ctx.fillText('Lvl',        px + PAD + 130,  py + ROW_H / 2);
       ctx.fillText('invested',   px + PAD + 160,  py + ROW_H / 2);
       ctx.fillText('Effect',     px + PAD + 270,  py + ROW_H / 2);
-      ctx.fillText('Next cost',  px + PAD + 370,  py + ROW_H / 2);
       py += ROW_H;
     }
 
@@ -525,11 +540,11 @@ export class ShipMenu {
     for (let ii = 0; ii < attrOrder.length; ii++) {
       const attr    = attrOrder[ii];
       const lvl     = ls.levels[attr] ?? 1;
-      const pts     = lvl - 1;                              // points spent
+      const pts     = lvl - 1;                              // points spent in this attr
       const attrCap = ls.attrCaps[attr] ?? SHIP_ATTR_CAPS[attr] ?? 50;
-      const isMaxed = pts >= attrCap || totalPts >= totalCap;
-      const nextCost = isMaxed ? null : SHIP_LEVEL_XP_BASE * lvl;
-      const wip     = attr === SHIP_ATTR_WEIGHT || attr === SHIP_ATTR_CREW;
+      const attrMaxed = pts >= attrCap;
+      const isMaxed   = attrMaxed || shipCapped;
+      const wip       = attr === SHIP_ATTR_WEIGHT || attr === SHIP_ATTR_CREW;
 
       // Alternate stripe
       if (ii % 2 === 1) {
@@ -585,42 +600,36 @@ export class ShipMenu {
       }
       ctx.fillText(effectStr, px + PAD + 270, py + ROW_H / 2);
 
-      // Next upgrade cost / upgrade button
-      const affordable = !isMaxed && !wip && ls.xp >= (nextCost ?? Infinity);
-      const btnW = 72;
+      // + upgrade button (uses shared nextCostAll)
+      const affordable = !isMaxed && !wip && ls.xp >= nextCostAll && nextCostAll > 0;
+      const btnW = 28;
       const btnH = ROW_H - 6;
       const btnX = px + PANEL_W - PAD - btnW;
       const btnY = py + 3;
 
       if (isMaxed) {
-        ctx.textAlign = 'left';
+        ctx.textAlign = 'right';
         ctx.fillStyle = TEXT_DIM;
         ctx.font = '11px Consolas, monospace';
-        ctx.fillText('— maxed —', px + PAD + 370, py + ROW_H / 2);
+        ctx.fillText(attrMaxed ? '— maxed —' : '— capped —', btnX + btnW, py + ROW_H / 2);
       } else if (wip) {
-        ctx.textAlign = 'left';
+        ctx.textAlign = 'right';
         ctx.fillStyle = TEXT_DIM;
         ctx.font = '11px Consolas, monospace';
-        ctx.fillText('—  WIP  —', px + PAD + 370, py + ROW_H / 2);
+        ctx.fillText('— WIP —', btnX + btnW, py + ROW_H / 2);
       } else {
-        // Cost label
-        ctx.textAlign = 'left';
-        ctx.fillStyle = affordable ? GREEN : ORANGE;
-        ctx.font = '12px Consolas, monospace';
-        ctx.fillText(`${nextCost} XP`, px + PAD + 370, py + ROW_H / 2);
-
-        // Upgrade button
-        ctx.fillStyle = affordable ? 'rgba(68,204,102,0.18)' : 'rgba(255,170,68,0.08)';
+        // + button
+        ctx.fillStyle = affordable ? 'rgba(68,204,102,0.22)' : 'rgba(80,80,80,0.12)';
         ctx.fillRect(btnX, btnY, btnW, btnH);
-        ctx.strokeStyle = affordable ? GREEN : '#555';
+        ctx.strokeStyle = affordable ? GREEN : '#444';
         ctx.lineWidth = 1;
         ctx.strokeRect(btnX, btnY, btnW, btnH);
-        ctx.font = 'bold 11px Consolas, monospace';
+        ctx.font = 'bold 15px Consolas, monospace';
         ctx.textAlign = 'center';
         ctx.fillStyle = affordable ? GREEN : TEXT_DIM;
-        ctx.fillText('↑ UPGRADE', btnX + btnW / 2, py + ROW_H / 2);
+        ctx.fillText('+', btnX + btnW / 2, py + ROW_H / 2);
 
-        // Record hit area for this row's button
+        // Record hit area
         this._upgradeHitAreas.push({
           attr,
           serverName: SHIP_ATTR_SERVER_NAMES[attr] ?? '',

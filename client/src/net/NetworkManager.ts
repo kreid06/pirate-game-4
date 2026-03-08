@@ -373,7 +373,7 @@ export class NetworkManager {
   public onModuleDestroyed: ((shipId: number, moduleId: number, damage: number, hitX?: number, hitY?: number) => void) | null = null;
   public onModuleDamaged: ((shipId: number, moduleId: number, damage: number, hitX?: number, hitY?: number) => void) | null = null;
   public onShipSunk: ((shipId: number) => void) | null = null;
-  public onShipLevelUp: ((shipId: number, attribute: string, level: number, xp: number, totalPoints: number, totalCap: number) => void) | null = null;
+  public onShipLevelUp: ((shipId: number, attribute: string, attrLevel: number, xp: number, shipLevel: number, totalCap: number, nextUpgradeCost: number) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
   
   constructor(config: NetworkConfig) {
@@ -1231,10 +1231,11 @@ export class NetworkManager {
                   ship.levelStats.crew       ?? 1,
                   ship.levelStats.sturdiness ?? 1,
                 ],
-                xp:          ship.levelStats.xp          ?? 0,
-                maxCrew:     ship.levelStats.maxCrew      ?? 9,
-                totalPoints: ship.levelStats.totalPoints  ?? 0,
-                totalCap:    ship.levelStats.totalCap     ?? 65,
+                xp:              ship.levelStats.xp              ?? 0,
+                maxCrew:         ship.levelStats.maxCrew          ?? 9,
+                shipLevel:       ship.levelStats.shipLevel        ?? ship.levelStats.totalPoints ?? 0,
+                totalCap:        ship.levelStats.totalCap         ?? 65,
+                nextUpgradeCost: ship.levelStats.nextUpgradeCost  ?? 0,
                 attrCaps: [
                   ship.levelStats.attrCaps?.weight     ?? 50,
                   ship.levelStats.attrCaps?.resistance ?? 35,
@@ -1418,14 +1419,15 @@ export class NetworkManager {
       }
 
       case 'SHIP_LEVEL_UP': {
-        const lvlShipId:     number = message.shipId     || 0;
-        const lvlAttribute:  string = message.attribute  || '';
-        const lvlLevel:      number = message.level      || 1;
-        const lvlXp:         number = message.xp         ?? 0;
-        const lvlTotalPts:   number = message.totalPoints ?? 0;
-        const lvlTotalCap:   number = message.totalCap   || 65;
-        console.log(`⬆️  SHIP_LEVEL_UP: ship ${lvlShipId} ${lvlAttribute} → L${lvlLevel} (${lvlXp} XP left, pts ${lvlTotalPts}/${lvlTotalCap})`);
-        this.onShipLevelUp?.(lvlShipId, lvlAttribute, lvlLevel, lvlXp, lvlTotalPts, lvlTotalCap);
+        const lvlShipId:         number = message.shipId          || 0;
+        const lvlAttribute:      string = message.attribute        || '';
+        const lvlAttrLevel:      number = message.level            || 1;
+        const lvlXp:             number = message.xp               ?? 0;
+        const lvlShipLevel:      number = message.shipLevel        ?? 0;
+        const lvlTotalCap:       number = message.totalCap         || 65;
+        const lvlNextCost:       number = message.nextUpgradeCost  ?? 0;
+        console.log(`⬆️  SHIP_LEVEL_UP: ship ${lvlShipId} ${lvlAttribute} → L${lvlAttrLevel} | ship level ${lvlShipLevel}/${lvlTotalCap} | next cost ${lvlNextCost} | ${lvlXp} XP left`);
+        this.onShipLevelUp?.(lvlShipId, lvlAttribute, lvlAttrLevel, lvlXp, lvlShipLevel, lvlTotalCap, lvlNextCost);
         break;
       }
 

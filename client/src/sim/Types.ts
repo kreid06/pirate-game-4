@@ -157,10 +157,15 @@ export interface ShipLevelStats {
   xp: number;
   /** Pre-computed max crew from server */
   maxCrew: number;
-  /** Sum of all points spent (= sum of levels[i] − 1) */
-  totalPoints: number;
-  /** Cap for total points across all attributes (= SHIP_LEVEL_TOTAL_POINT_CAP) */
+  /** Ship level = sum of all points spent across all attributes (= sum of levels[i] − 1) */
+  shipLevel: number;
+  /** Cap for total ship level (= SHIP_LEVEL_TOTAL_POINT_CAP) */
   totalCap: number;
+  /**
+   * Unified cost for the NEXT upgrade of ANY attribute at the current ship level.
+   * Formula: XP_BASE * (shipLevel + 1).  0 when fully capped.
+   */
+  nextUpgradeCost: number;
   /** Per-attribute point caps sent by server */
   attrCaps: number[];  // length 5
 }
