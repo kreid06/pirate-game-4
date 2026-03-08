@@ -2615,8 +2615,8 @@ static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t
         s->modules[s->module_count].state_bits  = MODULE_STATE_ACTIVE;
         s->modules[s->module_count].data.cannon.aim_direction  = Q16_FROM_FLOAT(0.0f);
         s->modules[s->module_count].data.cannon.ammunition     = 10;
-        s->modules[s->module_count].data.cannon.time_since_fire = 0;
-        s->modules[s->module_count].data.cannon.reload_time    = Q16_FROM_FLOAT(3000.0f);
+        s->modules[s->module_count].data.cannon.reload_time    = CANNON_RELOAD_TIME_MS;
+        s->modules[s->module_count].data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
         s->module_count++;
     }
 
@@ -3836,8 +3836,8 @@ int websocket_server_update(struct Sim* sim) {
                                             nc.max_health  = Q16_FROM_FLOAT(8000.0f);
                                             nc.data.cannon.aim_direction   = Q16_FROM_FLOAT(0.0f);
                                             nc.data.cannon.ammunition      = 10;
-                                            nc.data.cannon.time_since_fire = 0;
-                                            nc.data.cannon.reload_time     = Q16_FROM_FLOAT(3000.0f);
+                                            nc.data.cannon.reload_time     = CANNON_RELOAD_TIME_MS;
+                                            nc.data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
 
                                             // Add to physics simulation
                                             sim_ship->modules[sim_ship->module_count++] = nc;
@@ -4019,8 +4019,8 @@ int websocket_server_update(struct Sim* sim) {
                                                 nc->max_health  = Q16_FROM_FLOAT(8000.0f);
                                                 nc->data.cannon.aim_direction   = Q16_FROM_FLOAT(0.0f);
                                                 nc->data.cannon.ammunition      = 10;
-                                                nc->data.cannon.time_since_fire = 0;
-                                                nc->data.cannon.reload_time     = Q16_FROM_FLOAT(3000.0f);
+                                                nc->data.cannon.reload_time     = CANNON_RELOAD_TIME_MS;
+                                                nc->data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
                                                 sim_ship->module_count++;
                                                 player->inventory.slots[cannon_slot].quantity--;
                                                 if (player->inventory.slots[cannon_slot].quantity == 0)

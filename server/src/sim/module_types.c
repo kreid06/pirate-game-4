@@ -21,8 +21,8 @@ ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t
         case MODULE_TYPE_CANNON:
             module.data.cannon.aim_direction = 0;
             module.data.cannon.ammunition = 10;
-            module.data.cannon.time_since_fire = 0;
-            module.data.cannon.reload_time = 5000; // 5 seconds in milliseconds
+            module.data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
+            module.data.cannon.reload_time = CANNON_RELOAD_TIME_MS;
             module.health     = 8000;
             module.max_health = 8000;
             break;

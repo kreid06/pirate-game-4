@@ -5,6 +5,9 @@
 #include <stdbool.h>
 #include "core/math.h"
 
+/** Cannon reload time: shared by all sources so every cannon reloads identically. */
+#define CANNON_RELOAD_TIME_MS 3000
+
 /**
  * Module Type IDs - matches client ModuleTypeId enum
  * These are used for efficient network serialization
