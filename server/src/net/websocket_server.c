@@ -4255,24 +4255,33 @@ int websocket_server_update(struct Sim* sim) {
                                     } else {
                                         uint8_t old_level = upg_sim_ship->level_stats.levels[attr];
                                         uint32_t cost     = ship_level_xp_cost(&upg_sim_ship->level_stats, attr);
+                                        uint16_t total_pts_before = ship_level_total_points(&upg_sim_ship->level_stats);
                                         bool ok = ship_level_upgrade(&upg_sim_ship->level_stats, attr);
                                         if (!ok) {
                                             snprintf(response, sizeof(response),
                                                 "{\"type\":\"error\",\"message\":\"upgrade_failed\","
-                                                "\"xp\":%u,\"cost\":%u,\"level\":%u}",
-                                                upg_sim_ship->level_stats.xp, cost, old_level);
+                                                "\"xp\":%u,\"cost\":%u,\"level\":%u,"
+                                                "\"attrCap\":%u,\"totalPoints\":%u,\"totalCap\":%u}",
+                                                upg_sim_ship->level_stats.xp, cost, old_level,
+                                                ship_attr_point_cap(attr),
+                                                total_pts_before,
+                                                SHIP_LEVEL_TOTAL_POINT_CAP);
                                         } else {
                                             uint8_t new_level = upg_sim_ship->level_stats.levels[attr];
-                                            log_info("⬆️  Ship %u upgraded %s: L%u → L%u (XP remaining: %u)",
+                                            uint16_t total_pts = ship_level_total_points(&upg_sim_ship->level_stats);
+                                            log_info("⬆️  Ship %u upgraded %s: L%u → L%u (XP remaining: %u, total pts: %u/%u)",
                                                      upg_ship_id, upg_attr, old_level, new_level,
-                                                     upg_sim_ship->level_stats.xp);
+                                                     upg_sim_ship->level_stats.xp, total_pts,
+                                                     SHIP_LEVEL_TOTAL_POINT_CAP);
                                             /* Broadcast SHIP_LEVEL_UP to all clients */
-                                            char lvl_msg[256];
+                                            char lvl_msg[320];
                                             snprintf(lvl_msg, sizeof(lvl_msg),
                                                 "{\"type\":\"SHIP_LEVEL_UP\",\"shipId\":%u,"
-                                                "\"attribute\":\"%s\",\"level\":%u,\"xp\":%u}",
+                                                "\"attribute\":\"%s\",\"level\":%u,\"xp\":%u,"
+                                                "\"totalPoints\":%u,\"totalCap\":%u}",
                                                 upg_ship_id, upg_attr, new_level,
-                                                upg_sim_ship->level_stats.xp);
+                                                upg_sim_ship->level_stats.xp,
+                                                total_pts, SHIP_LEVEL_TOTAL_POINT_CAP);
                                             uint8_t lvl_frame[512];
                                             size_t lvl_flen = websocket_create_frame(WS_OPCODE_TEXT,
                                                 lvl_msg, strlen(lvl_msg), (char*)lvl_frame, sizeof(lvl_frame));
@@ -4285,9 +4294,11 @@ int websocket_server_update(struct Sim* sim) {
                                             }
                                             snprintf(response, sizeof(response),
                                                 "{\"type\":\"message_ack\",\"status\":\"upgraded\","
-                                                "\"attribute\":\"%s\",\"level\":%u,\"xp\":%u}",
+                                                "\"attribute\":\"%s\",\"level\":%u,\"xp\":%u,"
+                                                "\"totalPoints\":%u,\"totalCap\":%u}",
                                                 upg_attr, new_level,
-                                                upg_sim_ship->level_stats.xp);
+                                                upg_sim_ship->level_stats.xp,
+                                                total_pts, SHIP_LEVEL_TOTAL_POINT_CAP);
                                         }
                                     }
                                 }
@@ -4565,7 +4576,9 @@ int websocket_server_update(struct Sim* sim) {
                 offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
                     "],\"levelStats\":{"
                     "\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u,"
-                    "\"xp\":%u,\"maxCrew\":%u"
+                    "\"xp\":%u,\"maxCrew\":%u,"
+                    "\"totalPoints\":%u,\"totalCap\":%u,"
+                    "\"attrCaps\":{\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u}"
                     "}}",
                     ship->level_stats.levels[SHIP_ATTR_WEIGHT],
                     ship->level_stats.levels[SHIP_ATTR_RESISTANCE],
@@ -4573,7 +4586,14 @@ int websocket_server_update(struct Sim* sim) {
                     ship->level_stats.levels[SHIP_ATTR_CREW],
                     ship->level_stats.levels[SHIP_ATTR_STURDINESS],
                     ship->level_stats.xp,
-                    (unsigned)ship_level_max_crew(&ship->level_stats));
+                    (unsigned)ship_level_max_crew(&ship->level_stats),
+                    (unsigned)ship_level_total_points(&ship->level_stats),
+                    SHIP_LEVEL_TOTAL_POINT_CAP,
+                    ship_attr_point_cap(SHIP_ATTR_WEIGHT),
+                    ship_attr_point_cap(SHIP_ATTR_RESISTANCE),
+                    ship_attr_point_cap(SHIP_ATTR_DAMAGE),
+                    ship_attr_point_cap(SHIP_ATTR_CREW),
+                    ship_attr_point_cap(SHIP_ATTR_STURDINESS));
                 ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "%s", ship_entry);
                 first_ship = false;
             }
