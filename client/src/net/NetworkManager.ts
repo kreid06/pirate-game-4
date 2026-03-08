@@ -305,6 +305,7 @@ interface PlaceMastMessage extends NetworkMessage {
   type: MessageType.PLACE_MAST;
   timestamp: number;
   shipId: number;
+  mastIndex: number; // 0=bow, 1=mid, 2=stern — which specific mast slot to replace
 }
 
 interface PlaceMastAtMessage extends NetworkMessage {
@@ -887,9 +888,9 @@ export class NetworkManager {
    * Server finds the first missing mast slot (base+7..base+9) and recreates it,
    * consuming 1 ITEM_SAIL from the player's inventory.
    */
-  sendPlaceMast(shipId: number): void {
+  sendPlaceMast(shipId: number, mastIndex: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_MAST, timestamp: Date.now(), shipId });
+    this.sendMessage({ type: MessageType.PLACE_MAST, timestamp: Date.now(), shipId, mastIndex });
   }
 
   /**

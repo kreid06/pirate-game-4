@@ -339,7 +339,7 @@ export class ClientApplication {
         const mastSlot = this.renderSystem.getHoveredMastSlot();
         if (mastSlot) {
           console.log(`⛵ [BUILD] Placing mast ${mastSlot.mastIndex} on ship ${mastSlot.ship.id}`);
-          this.networkManager.sendPlaceMast(mastSlot.ship.id);
+          this.networkManager.sendPlaceMast(mastSlot.ship.id, mastSlot.mastIndex);
           return;
         }
         // Cannon replacement build mode

@@ -4151,10 +4151,23 @@ int websocket_server_update(struct Sim* sim) {
                                                 if (mid >= base + 7 && mid <= base + 9)
                                                     present[mid - base - 7] = true;
                                             }
-                                            int missing_idx = -1;
-                                            for (int k = 0; k < 3; k++) {
-                                                if (!present[k]) { missing_idx = k; break; }
+                                            // Use the specific mast index sent by the client.
+                                            // Fall back to the first missing slot if client doesn't send it.
+                                            int requested_idx = -1;
+                                            const char* p_mi = strstr(payload, "\"mastIndex\":");
+                                            if (p_mi) requested_idx = atoi(p_mi + 12);
+
+                                            int target_idx = -1;
+                                            if (requested_idx >= 0 && requested_idx < 3 && !present[requested_idx]) {
+                                                // Client specified a valid missing slot — use it directly
+                                                target_idx = requested_idx;
+                                            } else {
+                                                // Fallback: first missing
+                                                for (int k = 0; k < 3; k++) {
+                                                    if (!present[k]) { target_idx = k; break; }
+                                                }
                                             }
+                                            int missing_idx = target_idx;
                                             if (missing_idx < 0) {
                                                 strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_missing_masts\"}");
                                             } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
