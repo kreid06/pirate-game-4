@@ -1094,23 +1094,36 @@ static bool point_in_hull(float px, float py, const Vec2Q16* verts, int n) {
     return inside;
 }
 
-// Find mast module index closest to (lx, ly) in ship-local coords.
-// Used exclusively by bar shot — only MAST modules are eligible targets.
-// skip_module_id: the bar-shot already hit this mast this pass; skip it so it keeps flying.
-static int find_mast_hit(const struct Ship* ship, float lx, float ly, uint16_t skip_module_id) {
+/*
+ * Bar shot hit zones (client-px, matching sail geometry in modules.ts):
+ *   SAIL_HALF_WIDTH = 40  (sailWidth=80, half = 40) — outer edge of sail cloth
+ *   MAST_POLE_RADIUS = 15 — solid mast centre; structural HP damage
+ *
+ * A shot inside SAIL_HALF_WIDTH hits the fibers.
+ * A shot also inside MAST_POLE_RADIUS additionally damages the mast structure.
+ */
+#define BAR_SHOT_SAIL_RADIUS   CLIENT_TO_SERVER(40.0f)
+#define BAR_SHOT_MAST_RADIUS   CLIENT_TO_SERVER(15.0f)
+
+/* Return value: index into ship->modules[], or -1 for no hit.
+ * *out_center_hit  is set to true only when the bar overlaps the mast pole. */
+static int find_mast_hit(const struct Ship* ship, float lx, float ly,
+                         uint16_t skip_module_id, bool* out_center_hit) {
     for (int m = 0; m < ship->module_count; m++) {
         const ShipModule* mod = &ship->modules[m];
-        if (mod->id == skip_module_id) continue;  // still inside radius of the last-hit mast — skip
+        if (mod->id == skip_module_id) continue;  // still inside radius of last-hit mast
         if (mod->type_id != MODULE_TYPE_MAST) continue;
         if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
 
         float mx = Q16_TO_FLOAT(mod->local_pos.x);
         float my = Q16_TO_FLOAT(mod->local_pos.y);
         float dx = mx - lx, dy = my - ly;
-        // Generous radius: mast+sail covers a wide area
-        const float mast_radius = CLIENT_TO_SERVER(50.0f);
-        if (dx*dx + dy*dy < mast_radius * mast_radius)
+        float dist_sq = dx*dx + dy*dy;
+
+        if (dist_sq < BAR_SHOT_SAIL_RADIUS * BAR_SHOT_SAIL_RADIUS) {
+            *out_center_hit = (dist_sq < BAR_SHOT_MAST_RADIUS * BAR_SHOT_MAST_RADIUS);
             return m;
+        }
     }
     return -1;
 }
@@ -1152,37 +1165,62 @@ void handle_projectile_collisions(struct Sim* sim) {
 
             // ---- BAR SHOT: bypass hull entirely, slices through mast/sail modules ----
             if (proj->type == PROJ_TYPE_BAR_SHOT) {
-                int hit_m = find_mast_hit(ship, lx, ly, (uint16_t)proj->last_hit_module_id);
+                bool center_hit = false;
+                int hit_m = find_mast_hit(ship, lx, ly, (uint16_t)proj->last_hit_module_id, &center_hit);
                 if (hit_m >= 0) {
                     ShipModule* hit_mod = &ship->modules[hit_m];
                     uint16_t mod_id = hit_mod->id;
 
-                    float dmg_before = (float)hit_mod->health;
-                    q16_t effective_damage = Q16_FROM_FLOAT(
-                        Q16_TO_FLOAT(proj->damage)
-                        * ship_level_resistance_mult(&ship->level_stats)
-                    );
-                    module_apply_damage(hit_mod, effective_damage);
-                    float damage_dealt = dmg_before - (float)hit_mod->health;
-                    if (damage_dealt < 0) damage_dealt = 0;
+                    float damage_dealt = 0.0f;
+                    bool mast_destroyed = false;
 
-                    bool mast_destroyed = (hit_mod->health <= 0);
-                    if (mast_destroyed) {
-                        log_info("⛵💥 Bar shot %u destroyed mast %u on ship %u",
-                                 proj->id, mod_id, ship->id);
-                        memmove(&ship->modules[hit_m], &ship->modules[hit_m + 1],
-                                (ship->module_count - hit_m - 1) * sizeof(ShipModule));
-                        ship->module_count--;
+                    if (center_hit) {
+                        // ── Mast pole hit: full structural damage ──
+                        float dmg_before = (float)hit_mod->health;
+                        q16_t effective_damage = Q16_FROM_FLOAT(
+                            Q16_TO_FLOAT(proj->damage)
+                            * ship_level_resistance_mult(&ship->level_stats)
+                        );
+                        module_apply_damage(hit_mod, effective_damage);
+                        damage_dealt = dmg_before - (float)hit_mod->health;
+                        if (damage_dealt < 0) damage_dealt = 0;
+
+                        mast_destroyed = (hit_mod->health <= 0);
+                        if (mast_destroyed) {
+                            log_info("⛵💥 Bar shot %u destroyed mast %u (pole hit) on ship %u",
+                                     proj->id, mod_id, ship->id);
+                            memmove(&ship->modules[hit_m], &ship->modules[hit_m + 1],
+                                    (ship->module_count - hit_m - 1) * sizeof(ShipModule));
+                            ship->module_count--;
+                        } else {
+                            log_info("⛵💥 Bar shot %u hit mast pole %u on ship %u — %d HP remaining",
+                                     proj->id, mod_id, ship->id, (int)hit_mod->health);
+                        }
                     } else {
-                        log_info("⛵💥 Bar shot %u hit mast %u on ship %u — %d HP remaining",
-                                 proj->id, mod_id, ship->id, (int)hit_mod->health);
+                        // ── Sail fiber hit: reduce openness/integrity, no HP damage ──
+                        // Shred the sail cloth by reducing openness (each fiber hit cuts ~25%)
+                        if (hit_mod->data.mast.openness > 0) {
+                            uint8_t shred = 25;
+                            hit_mod->data.mast.openness = (hit_mod->data.mast.openness > shred)
+                                ? hit_mod->data.mast.openness - shred : 0;
+                        }
+                        // Also reduce wind_efficiency to represent torn sail
+                        float eff = Q16_TO_FLOAT(hit_mod->data.mast.wind_efficiency);
+                        eff -= 0.25f;
+                        if (eff < 0.0f) eff = 0.0f;
+                        hit_mod->data.mast.wind_efficiency = Q16_FROM_FLOAT(eff);
+
+                        damage_dealt = 0.0f; // cosmetic hit — shown as a small fiber-shred flash
+                        log_info("⛵🧵 Bar shot %u shredded sail fiber %u on ship %u (openness→%u, eff→%.2f)",
+                                 proj->id, mod_id, ship->id,
+                                 hit_mod->data.mast.openness, eff);
                     }
 
                     if (sim->hit_event_count < MAX_HIT_EVENTS) {
                         struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
                         ev->ship_id         = ship->id;
                         ev->module_id       = mod_id;
-                        ev->is_breach       = true;   // reuse breach event so client animates the hit
+                        ev->is_breach       = true;
                         ev->is_sink         = false;
                         ev->destroyed       = mast_destroyed;
                         ev->damage_dealt    = damage_dealt;
@@ -1191,7 +1229,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                         ev->shooter_ship_id = proj->firing_ship_id;
                     }
 
-                    if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                    if (center_hit && proj->firing_ship_id != INVALID_ENTITY_ID) {
                         struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
                         if (attacker)
                             attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
@@ -1200,10 +1238,9 @@ void handle_projectile_collisions(struct Sim* sim) {
                     // Record which mast was just hit so it's skipped next tick while still in range.
                     // The projectile keeps flying — it slices through sail fibers rather than stopping.
                     proj->last_hit_module_id = mod_id;
-                    // Do NOT remove the projectile; break out of ship loop and let it keep moving.
-                    break;
+                    break; // continue flying — do NOT remove
                 }
-                // Bar shot outside mast radius: clear the skip lock so a mast can be re-entered.
+                // Bar shot outside all mast radii: clear the skip lock
                 if (proj->last_hit_module_id != 0) proj->last_hit_module_id = 0;
                 // Bar shot misses: keep flying (no hull interaction)
                 continue;
