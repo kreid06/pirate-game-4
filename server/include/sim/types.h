@@ -104,6 +104,7 @@ struct Projectile {
     uint16_t flags;         // Projectile flags
     uint8_t type;           // Cannonball, grapeshot, etc
     uint8_t firing_company; // Company owning this projectile (0=unset; skip if == target ship company)
+    uint16_t last_hit_module_id; // Bar shot: ID of the last mast hit — skip it until the proj moves away
     entity_id inside_ship_id;   // 0 = not inside any hull; set when ball passes through a breach
     entity_id firing_ship_id;   // Ship that fired this projectile (for XP award on hit)
 };

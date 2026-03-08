@@ -1096,9 +1096,11 @@ static bool point_in_hull(float px, float py, const Vec2Q16* verts, int n) {
 
 // Find mast module index closest to (lx, ly) in ship-local coords.
 // Used exclusively by bar shot — only MAST modules are eligible targets.
-static int find_mast_hit(const struct Ship* ship, float lx, float ly) {
+// skip_module_id: the bar-shot already hit this mast this pass; skip it so it keeps flying.
+static int find_mast_hit(const struct Ship* ship, float lx, float ly, uint16_t skip_module_id) {
     for (int m = 0; m < ship->module_count; m++) {
         const ShipModule* mod = &ship->modules[m];
+        if (mod->id == skip_module_id) continue;  // still inside radius of the last-hit mast — skip
         if (mod->type_id != MODULE_TYPE_MAST) continue;
         if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
 
@@ -1148,9 +1150,9 @@ void handle_projectile_collisions(struct Sim* sim) {
             float lx = rel_x * cosf(-rot) - rel_y * sinf(-rot);
             float ly = rel_x * sinf(-rot) + rel_y * cosf(-rot);
 
-            // ---- BAR SHOT: bypass hull entirely, only hits mast/sail modules ----
+            // ---- BAR SHOT: bypass hull entirely, slices through mast/sail modules ----
             if (proj->type == PROJ_TYPE_BAR_SHOT) {
-                int hit_m = find_mast_hit(ship, lx, ly);
+                int hit_m = find_mast_hit(ship, lx, ly, (uint16_t)proj->last_hit_module_id);
                 if (hit_m >= 0) {
                     ShipModule* hit_mod = &ship->modules[hit_m];
                     uint16_t mod_id = hit_mod->id;
@@ -1195,11 +1197,14 @@ void handle_projectile_collisions(struct Sim* sim) {
                             attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
                     }
 
-                    memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
-                            (sim->projectile_count - i - 1) * sizeof(struct Projectile));
-                    sim->projectile_count--;
-                    removed = true;
+                    // Record which mast was just hit so it's skipped next tick while still in range.
+                    // The projectile keeps flying — it slices through sail fibers rather than stopping.
+                    proj->last_hit_module_id = mod_id;
+                    // Do NOT remove the projectile; break out of ship loop and let it keep moving.
+                    break;
                 }
+                // Bar shot outside mast radius: clear the skip lock so a mast can be re-entered.
+                if (proj->last_hit_module_id != 0) proj->last_hit_module_id = 0;
                 // Bar shot misses: keep flying (no hull interaction)
                 continue;
             }
