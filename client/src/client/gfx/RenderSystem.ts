@@ -123,6 +123,13 @@ export class RenderSystem {
   }
 
   /**
+   * Spawn sail fiber tear particles at a world position (bar shot mast hit)
+   */
+  spawnSailFiberEffect(worldPos: Vec2, intensity: number = 1.0): void {
+    this.particleSystem.createSailFiberEffect(worldPos, intensity);
+  }
+
+  /**
    * Update render system (particles, effects, etc.)
    */
   update(deltaTime: number): void {
@@ -2060,14 +2067,15 @@ export class RenderSystem {
       const angle = mastData.angle; // Sail angle in degrees
       
       // Only draw sail if openness > 0
-        this.drawSailFiber(x, y, width, height, sailColor, mastData.openness / 100, angle);
+      const healthRatio = mastData.maxHealth > 0 ? mastData.health / mastData.maxHealth : 1;
+        this.drawSailFiber(x, y, width, height, sailColor, mastData.openness / 100, angle, healthRatio, mast.id);
       
     }
     
     this.ctx.restore();
   }
   
-  private drawSailFiber(x: number, y: number, width: number, height: number, sailColor: string, openness: number, angle: number): void {
+  private drawSailFiber(x: number, y: number, width: number, height: number, sailColor: string, openness: number, angle: number, healthRatio: number = 1, moduleId: number = 0): void {
     // Save context and apply rotation around mast position
     this.ctx.save();
     
@@ -2110,6 +2118,42 @@ export class RenderSystem {
     const spacing = sailPower / (lineCount + 1);
     
     this.ctx.beginPath();
+
+    // ── Sail damage tear marks (bar shot) ──
+    // Draw pseudo-random horizontal slash marks seeded by moduleId so they're
+    // stable across frames. tearCount increases as health drops.
+    if (healthRatio < 1.0 && openness > 0) {
+      const tearCount = Math.min(5, Math.floor((1 - healthRatio) * 6));
+      // Simple LCG seeded by moduleId for deterministic crack positions
+      let seed = (moduleId * 1664525 + 1013904223) >>> 0;
+      const lcg = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 0xFFFFFFFF; };
+
+      this.ctx.save();
+      this.ctx.strokeStyle = 'rgba(80, 50, 20, 0.7)';
+      this.ctx.lineWidth   = 1.8;
+      this.ctx.lineCap     = 'round';
+      // Clip to sail shape so tears don't overflow
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, sailTopY);
+      this.ctx.lineTo(0, -sailTopY);
+      this.ctx.quadraticCurveTo(sailPower + 25, 0, 0, sailTopY);
+      this.ctx.clip();
+
+      for (let t = 0; t < tearCount; t++) {
+        // Random vertical position spanning the sail height (sailTopY → -sailTopY)
+        const ty = sailTopY + lcg() * (-sailTopY - sailTopY);
+        // Random horizontal span (partial to full width)
+        const halfW = (0.3 + lcg() * 0.6) * (sailPower * 0.5 + 10);
+        const jitter = () => (lcg() - 0.5) * 4; // small vertical jitter per segment
+        this.ctx.beginPath();
+        this.ctx.moveTo(-halfW, ty + jitter());
+        this.ctx.lineTo(-halfW * 0.3, ty + jitter());
+        this.ctx.lineTo(halfW * 0.3, ty + jitter());
+        this.ctx.lineTo(halfW, ty + jitter());
+        this.ctx.stroke();
+      }
+      this.ctx.restore();
+    }
 
     // Draw the horizontal yard (mast pole) BEFORE restoring context so it rotates with the sail
     this.ctx.fillStyle = '#8B4513';

@@ -150,6 +150,13 @@ export class ClientApplication {
 
         if (worldX !== null && worldY !== null) {
           this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage || 3000, true);
+          // Mast destroyed: big sail-shred burst
+          const ws2 = this.authoritativeWorldState || this.predictedWorldState;
+          const hitShip = ws2?.ships.find(s => s.id === shipId);
+          const hitMod  = hitShip?.modules.find(m => m.id === moduleId);
+          if (hitMod?.kind === 'mast') {
+            this.renderSystem.spawnSailFiberEffect(Vec2.from(worldX, worldY), 2.0);
+          }
         }
 
         // Remove the destroyed module immediately from world state so it disappears
@@ -167,8 +174,8 @@ export class ClientApplication {
         let worldX: number | null = (hitX !== undefined) ? hitX : null;
         let worldY: number | null = (hitY !== undefined) ? hitY : null;
 
+        const ws = this.authoritativeWorldState || this.predictedWorldState;
         if (worldX === null || worldY === null) {
-          const ws = this.authoritativeWorldState || this.predictedWorldState;
           const ship = ws?.ships.find(s => s.id === shipId);
           const mod  = ship?.modules.find(m => m.id === moduleId);
           if (ship) {
@@ -183,6 +190,12 @@ export class ClientApplication {
 
         if (worldX !== null && worldY !== null) {
           this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage, false);
+          // If the hit module is a mast, spawn sail fiber shred particles
+          const ship = ws?.ships.find(s => s.id === shipId);
+          const mod  = ship?.modules.find(m => m.id === moduleId);
+          if (mod?.kind === 'mast') {
+            this.renderSystem.spawnSailFiberEffect(Vec2.from(worldX, worldY), 0.7);
+          }
         }
       };
       this.networkManager.onShipSunk = (shipId) => {
