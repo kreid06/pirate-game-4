@@ -686,7 +686,8 @@ export class ClientApplication {
         networkStats: this.networkManager.getStats(),
         config: this.config,
         assignedPlayerId,
-        playerShipId
+        playerShipId,
+        selectedAmmoType: this.inputManager?.selectedAmmoType ?? 0,
       });
     }
   }

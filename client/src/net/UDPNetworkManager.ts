@@ -665,6 +665,7 @@ export class UDPNetworkManager {
           distanceTraveled: 0,
           timeAlive: 0,
           firedFrom: 0, // Unknown for now
+          ammoType: 0,
           smokeTrail: []
         });
       }

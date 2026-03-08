@@ -1295,13 +1295,14 @@ export class NetworkManager {
             id: ball.id || 0,
             position: Vec2.from(ball.x || 0, ball.y || 0),
             velocity: Vec2.from(ball.vx || 0, ball.vy || 0),
-            firingVelocity: Vec2.from(ball.vx || 0, ball.vy || 0), // Server doesn't send separate firingVelocity
-            radius: 6, // Slightly less than cannon barrel width (~8-10 pixels)
+            firingVelocity: Vec2.from(ball.vx || 0, ball.vy || 0),
+            radius: 6,
             maxRange: 800,
-            distanceTraveled: 0, // Server doesn't send this yet
-            timeAlive: 0, // Server doesn't send this yet
+            distanceTraveled: 0,
+            timeAlive: 0,
             firedFrom: ball.owner || 0,
-            smokeTrail: [] // No smoke trail from server yet
+            ammoType: ball.type ?? 0,   // Server sends "type": 0=cannonball, 1=bar shot
+            smokeTrail: []
           })),
           npcs: (message.npcs || []).map((n: any): Npc => ({
             id: n.id || 0,

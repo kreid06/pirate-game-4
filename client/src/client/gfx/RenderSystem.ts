@@ -2264,20 +2264,59 @@ export class RenderSystem {
   }
   
   private drawCannonball(cannonball: Cannonball, camera: Camera): void {
-    // Check if cannonball is visible
-    if (!camera.isWorldPositionVisible(cannonball.position, 20)) {
-      return; // Skip off-screen cannonballs
-    }
-    
+    if (!camera.isWorldPositionVisible(cannonball.position, 20)) return;
+
     const screenPos = camera.worldToScreen(cannonball.position);
-    const cameraState = camera.getState();
-    const scaledRadius = cannonball.radius * cameraState.zoom;
-    
-    // Draw cannonball as solid black circle (simple and visible)
-    this.ctx.fillStyle = '#000000'; // Pure black
-    this.ctx.beginPath();
-    this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, 0, Math.PI * 2);
-    this.ctx.fill();
+    const zoom      = camera.getState().zoom;
+
+    if (cannonball.ammoType === 1) {
+      // ── Bar Shot ───────────────────────────────────────────────────────────
+      // Two iron balls connected by a spinning bar.
+      // Spin angle: use wall-clock time so it always animates regardless of timeAlive.
+      const spinAngle = (Date.now() / 1000) * 10 + cannonball.id * 1.3; // ~1.6 rot/sec, staggered per projectile
+      const ballR     = Math.max(2, 4 * zoom);
+      const barHalfL  = Math.max(4, 10 * zoom);
+
+      const cos = Math.cos(spinAngle);
+      const sin = Math.sin(spinAngle);
+
+      const ax = screenPos.x - cos * barHalfL;
+      const ay = screenPos.y - sin * barHalfL;
+      const bx = screenPos.x + cos * barHalfL;
+      const by = screenPos.y + sin * barHalfL;
+
+      // Connecting bar
+      this.ctx.strokeStyle = '#cc5500';
+      this.ctx.lineWidth   = Math.max(1.5, 2 * zoom);
+      this.ctx.beginPath();
+      this.ctx.moveTo(ax, ay);
+      this.ctx.lineTo(bx, by);
+      this.ctx.stroke();
+
+      // Ball A
+      this.ctx.fillStyle = '#b84000';
+      this.ctx.beginPath();
+      this.ctx.arc(ax, ay, ballR, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.strokeStyle = '#ff8844';
+      this.ctx.lineWidth   = 1;
+      this.ctx.stroke();
+
+      // Ball B
+      this.ctx.beginPath();
+      this.ctx.arc(bx, by, ballR, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.strokeStyle = '#ff8844';
+      this.ctx.lineWidth   = 1;
+      this.ctx.stroke();
+    } else {
+      // ── Cannonball (default) ───────────────────────────────────────────────
+      const scaledRadius = cannonball.radius * zoom;
+      this.ctx.fillStyle = '#000000';
+      this.ctx.beginPath();
+      this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, 0, Math.PI * 2);
+      this.ctx.fill();
+    }
   }
   
   private drawLoadingSpinner(): void {

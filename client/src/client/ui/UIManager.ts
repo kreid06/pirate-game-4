@@ -26,6 +26,8 @@ export interface UIRenderContext {
   config: ClientConfig;
   assignedPlayerId?: number | null;
   playerShipId?: number; // 0 or absent = not on a ship
+  /** Currently selected ammo type: 0 = Cannonball, 1 = Bar Shot */
+  selectedAmmoType?: number;
 }
 
 /**
@@ -109,7 +111,6 @@ export class UIManager {
     // Render elements in order
     const renderOrder: UIElementType[] = [
       UIElementType.HUD,
-      UIElementType.CONTROL_HINTS,
       UIElementType.NETWORK_STATS,
       UIElementType.DEBUG_OVERLAY
     ];
@@ -131,6 +132,11 @@ export class UIManager {
     
     // Always render FPS in top-right corner
     this.renderFPS(ctx, context);
+
+    // Ammo selector widget — bottom-left, shown when aboard a ship with cannons
+    if (context.playerShipId) {
+      this.renderAmmoSelector(ctx, context.selectedAmmoType ?? 0);
+    }
 
     // Company menu renders last so it sits above all other UI
     this.companyMenu.render(ctx, context.worldState, context.assignedPlayerId);
@@ -180,7 +186,72 @@ export class UIManager {
     
     ctx.restore();
   }
-  
+
+  /**
+   * Ammo selector widget — bottom-left corner.
+   * Shows two slots: Cannonball and Bar Shot, with the active one highlighted.
+   */
+  private renderAmmoSelector(ctx: CanvasRenderingContext2D, selectedAmmoType: number): void {
+    ctx.save();
+
+    const ammoTypes = [
+      { name: 'CANNONBALL', icon: '●',   color: '#c0c0a0' },
+      { name: 'BAR SHOT',   icon: '◉━◉', color: '#ff7733' },
+    ];
+
+    const slotW  = 110;
+    const slotH  = 46;
+    const pad    = 6;
+    const margin = 6;
+    const totalW = ammoTypes.length * slotW + (ammoTypes.length - 1) * margin;
+    const x0     = 12;
+    const y0     = ctx.canvas.height - slotH - 12;
+
+    for (let i = 0; i < ammoTypes.length; i++) {
+      const ammo     = ammoTypes[i];
+      const active   = i === selectedAmmoType;
+      const sx       = x0 + i * (slotW + margin);
+
+      // Background
+      ctx.fillStyle = active ? 'rgba(255,200,50,0.18)' : 'rgba(0,0,0,0.55)';
+      ctx.fillRect(sx, y0, slotW, slotH);
+
+      // Border
+      ctx.strokeStyle = active ? '#ffd700' : '#445';
+      ctx.lineWidth   = active ? 2 : 1;
+      ctx.strokeRect(sx, y0, slotW, slotH);
+
+      // Icon
+      ctx.font         = '18px Consolas, monospace';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = active ? ammo.color : '#556';
+      ctx.fillText(ammo.icon, sx + pad + 2, y0 + slotH / 2 - 4);
+
+      // Name
+      ctx.font      = active ? 'bold 11px Consolas, monospace' : '11px Consolas, monospace';
+      ctx.fillStyle = active ? '#fff' : '#668';
+      ctx.fillText(ammo.name, sx + pad + 2, y0 + slotH / 2 + 10);
+
+      // Active indicator dot
+      if (active) {
+        ctx.fillStyle = '#ffd700';
+        ctx.beginPath();
+        ctx.arc(sx + slotW - 10, y0 + 10, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // [X] key hint below the slots
+    ctx.font         = '10px Consolas, monospace';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle    = 'rgba(120,120,140,0.7)';
+    ctx.fillText('[X] cycle ammo', x0 + 2, y0 + slotH + 3);
+
+    ctx.restore();
+  }
+
   /**
    * Set callback for crew assignment changes from the manning priority panel.
    * The callback receives the player's ship ID and the full assignment list.
@@ -444,8 +515,7 @@ export class UIManager {
     // Initialize Network Stats
     this.elements.set(UIElementType.NETWORK_STATS, new NetworkStatsElement());
     
-    // Initialize Control Hints
-    this.elements.set(UIElementType.CONTROL_HINTS, new ControlHintsElement());
+    // Control hints element removed
     
     // Set initial visibility
     this.updateElementVisibility();
@@ -455,7 +525,6 @@ export class UIManager {
     this.elements.get(UIElementType.HUD)!.visible = true;
     this.elements.get(UIElementType.DEBUG_OVERLAY)!.visible = this.showDebugOverlay;
     this.elements.get(UIElementType.NETWORK_STATS)!.visible = this.showNetworkStats;
-    this.elements.get(UIElementType.CONTROL_HINTS)!.visible = this.showControlHints;
   }
   
   private setupEventListeners(): void {
@@ -508,8 +577,7 @@ export class UIManager {
         break;
 
       case 'F1':
-        this.showControlHints = !this.showControlHints;
-        this.updateElementVisibility();
+        // Control hints panel removed; F1 is a no-op
         break;
     }
   }

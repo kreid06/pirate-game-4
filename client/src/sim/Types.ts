@@ -94,6 +94,8 @@ export interface Cannonball {
   distanceTraveled: number;
   timeAlive: number; // Time since firing (seconds)
   firedFrom: number; // ship id that fired this cannonball
+  /** 0 = cannonball (default), 1 = bar shot */
+  ammoType: number;
   smokeTrail: Array<{
     position: Vec2;
     age: number; // 0 to 1, where 1 is fully faded
