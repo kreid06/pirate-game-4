@@ -17,6 +17,18 @@ import {
   COMPANY_NEUTRAL,
   COMPANY_PIRATES,
   COMPANY_NAVY,
+  ShipLevelStats,
+  SHIP_ATTR_WEIGHT,
+  SHIP_ATTR_RESISTANCE,
+  SHIP_ATTR_DAMAGE,
+  SHIP_ATTR_CREW,
+  SHIP_ATTR_STURDINESS,
+  SHIP_ATTR_COUNT,
+  SHIP_ATTR_NAMES,
+  SHIP_ATTR_DESC,
+  SHIP_ATTR_CAPS,
+  SHIP_LEVEL_TOTAL_POINT_CAP,
+  SHIP_LEVEL_XP_BASE,
 } from '../../sim/Types.js';
 import { ShipModule, CannonModuleData, MastModuleData, PlankModuleData } from '../../sim/modules.js';
 
@@ -34,10 +46,19 @@ const COMPANY_COLORS: Record<number, string> = {
   [COMPANY_NAVY]:    '#4488ff',
 };
 
+/** Attribute index → server-side string name used in upgrade_ship messages */
+const SHIP_ATTR_SERVER_NAMES: Record<number, string> = {
+  [SHIP_ATTR_WEIGHT]:     'weight',
+  [SHIP_ATTR_RESISTANCE]: 'resistance',
+  [SHIP_ATTR_DAMAGE]:     'damage',
+  [SHIP_ATTR_CREW]:       'crew',
+  [SHIP_ATTR_STURDINESS]: 'sturdiness',
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 const PANEL_W  = 480;
-const PANEL_H  = 510;
+const PANEL_H  = 720;
 const PAD      = 18;
 const HEADER_H = 40;
 const ROW_H    = 22;
@@ -58,9 +79,42 @@ const RED       = '#ff5544';
 export class ShipMenu {
   public visible = false;
 
+  /** Called when the player clicks an affordable upgrade row. */
+  public onUpgradeRequest?: (shipId: number, attribute: string) => void;
+
+  /** Hit areas for attribute rows populated each render frame. */
+  private _upgradeHitAreas: Array<{ attr: number; serverName: string; x: number; y: number; w: number; h: number; affordable: boolean }> = [];
+  private _panelX = 0;
+  private _panelY = 0;
+  private _currentShipId = 0;
+
   toggle(): void { this.visible = !this.visible; }
   open():   void { this.visible = true;  }
   close():  void { this.visible = false; }
+
+  /**
+   * Handle a canvas click while the menu is visible.
+   * Returns true if the click was consumed (inside panel or was an upgrade action).
+   */
+  handleClick(x: number, y: number): boolean {
+    if (!this.visible) return false;
+    // Check upgrade row hit areas (only affordable rows fire the callback)
+    for (const area of this._upgradeHitAreas) {
+      if (area.affordable &&
+          x >= area.x && x <= area.x + area.w &&
+          y >= area.y && y <= area.y + area.h) {
+        this.onUpgradeRequest?.(this._currentShipId, area.serverName);
+        return true;
+      }
+    }
+    // Click inside the panel — consume but don't close
+    if (x >= this._panelX && x <= this._panelX + PANEL_W &&
+        y >= this._panelY && y <= this._panelY + PANEL_H) {
+      return true;
+    }
+    // Click outside panel — let caller close the menu
+    return false;
+  }
 
   render(
     ctx:        CanvasRenderingContext2D,
@@ -78,6 +132,11 @@ export class ShipMenu {
 
     const px = Math.round((cw - PANEL_W) / 2);
     const py = Math.round((ch - PANEL_H) / 2);
+
+    this._panelX = px;
+    this._panelY = py;
+    this._upgradeHitAreas = [];
+    this._currentShipId = 0;
 
     ctx.fillStyle   = BG_PANEL;
     ctx.fillRect(px, py, PANEL_W, PANEL_H);
@@ -109,6 +168,7 @@ export class ShipMenu {
     cur = this._identity(ctx, px, cur, ship);
     cur = this._hullAmmo(ctx, px, cur, ship);
     cur = this._modulesSection(ctx, px, cur, ship.modules);
+    cur = this._progressionSection(ctx, px, cur, ship.id, ship.levelStats);
     this._crewSection(ctx, px, cur, worldState, ship.id);
 
     ctx.restore();
@@ -384,6 +444,196 @@ export class ShipMenu {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Renders the ship progression / attribute section.
+   * Shows each attribute's current level, a filled bar up to its individual cap,
+   * the computed effect multiplier, and remaining XP to next upgrade.
+   */
+  private _progressionSection(
+    ctx:        CanvasRenderingContext2D,
+    px:         number, py: number,
+    shipId:     number,
+    ls:         ShipLevelStats | undefined,
+  ): number {
+    this._currentShipId = shipId;
+    if (!ls) {
+      // Server hasn't sent level data yet — show a placeholder
+      py = this._sectionHeader(ctx, px, py, 'PROGRESSION', 'no data');
+      ctx.font = '12px Consolas, monospace';
+      ctx.fillStyle = TEXT_DIM;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText('  Level data not received from server.', px + PAD, py + 4);
+      return py + ROW_H + 4;
+    }
+
+    const totalPts  = ls.totalPoints;
+    const totalCap  = ls.totalCap;
+    const xpStr     = ls.xp.toLocaleString();
+    const ptStr     = `${totalPts} / ${totalCap} pts`;
+
+    py = this._sectionHeader(ctx, px, py, 'PROGRESSION', `XP: ${xpStr}   ${ptStr}`);
+
+    // Total-points progress bar
+    {
+      const barW     = PANEL_W - PAD * 2 - 100;
+      const barX     = px + PAD + 90;
+      const fillFrac = Math.min(totalPts / totalCap, 1);
+      const barColor = fillFrac >= 1 ? GOLD : GREEN;
+
+      ctx.font = '12px Consolas, monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = TEXT_DIM;
+      ctx.fillText('Total pts used', px + PAD + 8, py + ROW_H / 2);
+
+      ctx.fillStyle = '#1a1a28';
+      ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, barW, BAR_H);
+      ctx.fillStyle = barColor;
+      ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, barW * fillFrac, BAR_H);
+
+      ctx.textAlign = 'right';
+      ctx.fillStyle = fillFrac >= 1 ? GOLD : TEXT_HEAD;
+      ctx.fillText(ptStr, barX + barW - 2, py + ROW_H / 2);
+      py += ROW_H;
+    }
+
+    // Header row for attribute table
+    {
+      ctx.font = 'bold 11px Consolas, monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = TEXT_DIM;
+      ctx.fillText('Attribute',  px + PAD + 8,   py + ROW_H / 2);
+      ctx.fillText('Lvl',        px + PAD + 130,  py + ROW_H / 2);
+      ctx.fillText('invested',   px + PAD + 160,  py + ROW_H / 2);
+      ctx.fillText('Effect',     px + PAD + 270,  py + ROW_H / 2);
+      ctx.fillText('Next cost',  px + PAD + 370,  py + ROW_H / 2);
+      py += ROW_H;
+    }
+
+    // One row per attribute
+    const attrOrder = [
+      SHIP_ATTR_DAMAGE,
+      SHIP_ATTR_RESISTANCE,
+      SHIP_ATTR_STURDINESS,
+      SHIP_ATTR_WEIGHT,
+      SHIP_ATTR_CREW,
+    ];
+
+    for (let ii = 0; ii < attrOrder.length; ii++) {
+      const attr    = attrOrder[ii];
+      const lvl     = ls.levels[attr] ?? 1;
+      const pts     = lvl - 1;                              // points spent
+      const attrCap = ls.attrCaps[attr] ?? SHIP_ATTR_CAPS[attr] ?? 50;
+      const isMaxed = pts >= attrCap || totalPts >= totalCap;
+      const nextCost = isMaxed ? null : SHIP_LEVEL_XP_BASE * lvl;
+      const wip     = attr === SHIP_ATTR_WEIGHT || attr === SHIP_ATTR_CREW;
+
+      // Alternate stripe
+      if (ii % 2 === 1) {
+        ctx.fillStyle = BG_STRIPE;
+        ctx.fillRect(px + PAD, py, PANEL_W - PAD * 2, ROW_H);
+      }
+
+      // Attribute name
+      ctx.font = '13px Consolas, monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = wip ? TEXT_DIM : TEXT_HEAD;
+      ctx.fillText((SHIP_ATTR_NAMES[attr] ?? 'Unknown') + (wip ? ' (WIP)' : ''), px + PAD + 8, py + ROW_H / 2);
+
+      // Level number
+      ctx.fillStyle = lvl > 1 ? GOLD : TEXT_DIM;
+      ctx.fillText(String(lvl), px + PAD + 130, py + ROW_H / 2);
+
+      // Mini bar: pts out of attrCap
+      {
+        const mBarW = 80;
+        const mBarX = px + PAD + 158;
+        const frac  = Math.min(pts / attrCap, 1);
+        ctx.fillStyle = '#1a1a28';
+        ctx.fillRect(mBarX, py + (ROW_H - 8) / 2, mBarW, 8);
+        ctx.fillStyle = isMaxed && pts >= attrCap ? GOLD : (wip ? '#556' : GREEN);
+        ctx.fillRect(mBarX, py + (ROW_H - 8) / 2, mBarW * frac, 8);
+        // pts/cap label
+        ctx.font = '10px Consolas, monospace';
+        ctx.textAlign = 'right';
+        ctx.fillStyle = TEXT_DIM;
+        ctx.fillText(`${pts}/${attrCap}`, mBarX + mBarW + 28, py + ROW_H / 2);
+      }
+
+      // Computed effect
+      ctx.font = '12px Consolas, monospace';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = wip ? TEXT_DIM : TEXT_MONO;
+      let effectStr = '';
+      if (!wip) {
+        if (attr === SHIP_ATTR_DAMAGE) {
+          const mult = 1.0 + 0.04 * pts;
+          effectStr = `×${mult.toFixed(2)} dmg`;
+        } else if (attr === SHIP_ATTR_RESISTANCE) {
+          const mult = Math.max(0.30, 1.0 - 0.02 * pts);
+          effectStr = `×${mult.toFixed(2)} recv`;
+        } else if (attr === SHIP_ATTR_STURDINESS) {
+          const mult = Math.max(0.25, 1.0 - 0.03 * pts);
+          effectStr = `×${mult.toFixed(2)} drain`;
+        }
+      } else {
+        effectStr = attr === SHIP_ATTR_CREW ? `max ${ls.maxCrew}` : 'WIP';
+      }
+      ctx.fillText(effectStr, px + PAD + 270, py + ROW_H / 2);
+
+      // Next upgrade cost / upgrade button
+      const affordable = !isMaxed && !wip && ls.xp >= (nextCost ?? Infinity);
+      const btnW = 72;
+      const btnH = ROW_H - 6;
+      const btnX = px + PANEL_W - PAD - btnW;
+      const btnY = py + 3;
+
+      if (isMaxed) {
+        ctx.textAlign = 'left';
+        ctx.fillStyle = TEXT_DIM;
+        ctx.font = '11px Consolas, monospace';
+        ctx.fillText('— maxed —', px + PAD + 370, py + ROW_H / 2);
+      } else if (wip) {
+        ctx.textAlign = 'left';
+        ctx.fillStyle = TEXT_DIM;
+        ctx.font = '11px Consolas, monospace';
+        ctx.fillText('—  WIP  —', px + PAD + 370, py + ROW_H / 2);
+      } else {
+        // Cost label
+        ctx.textAlign = 'left';
+        ctx.fillStyle = affordable ? GREEN : ORANGE;
+        ctx.font = '12px Consolas, monospace';
+        ctx.fillText(`${nextCost} XP`, px + PAD + 370, py + ROW_H / 2);
+
+        // Upgrade button
+        ctx.fillStyle = affordable ? 'rgba(68,204,102,0.18)' : 'rgba(255,170,68,0.08)';
+        ctx.fillRect(btnX, btnY, btnW, btnH);
+        ctx.strokeStyle = affordable ? GREEN : '#555';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(btnX, btnY, btnW, btnH);
+        ctx.font = 'bold 11px Consolas, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = affordable ? GREEN : TEXT_DIM;
+        ctx.fillText('↑ UPGRADE', btnX + btnW / 2, py + ROW_H / 2);
+
+        // Record hit area for this row's button
+        this._upgradeHitAreas.push({
+          attr,
+          serverName: SHIP_ATTR_SERVER_NAMES[attr] ?? '',
+          x: btnX, y: btnY, w: btnW, h: btnH,
+          affordable,
+        });
+      }
+
+      py += ROW_H;
+    }
+
+    return py + 8;
+  }
 
   private _sectionHeader(
     ctx: CanvasRenderingContext2D,

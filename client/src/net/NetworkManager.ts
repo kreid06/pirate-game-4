@@ -373,6 +373,7 @@ export class NetworkManager {
   public onModuleDestroyed: ((shipId: number, moduleId: number, damage: number, hitX?: number, hitY?: number) => void) | null = null;
   public onModuleDamaged: ((shipId: number, moduleId: number, damage: number, hitX?: number, hitY?: number) => void) | null = null;
   public onShipSunk: ((shipId: number) => void) | null = null;
+  public onShipLevelUp: ((shipId: number, attribute: string, level: number, xp: number, totalPoints: number, totalCap: number) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
   
   constructor(config: NetworkConfig) {
@@ -921,6 +922,15 @@ export class NetworkManager {
   }
   
   /**
+   * Request the server to spend XP upgrading one attribute on the player's ship.
+   * attribute must be one of: 'weight' | 'resistance' | 'damage' | 'crew' | 'sturdiness'
+   */
+  sendUpgradeShipAttribute(shipId: number, attribute: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'upgrade_ship', shipId, attribute }));
+  }
+
+  /**
    * Get current network statistics
    */
   getNetworkStats(): NetworkStats {
@@ -1213,6 +1223,26 @@ export class NetworkManager {
               infiniteAmmo: ship.infiniteAmmo ?? true,
               hullHealth: ship.hullHealth ?? 100,
               companyId: ship.company ?? 0,
+              levelStats: ship.levelStats ? {
+                levels: [
+                  ship.levelStats.weight     ?? 1,
+                  ship.levelStats.resistance ?? 1,
+                  ship.levelStats.damage     ?? 1,
+                  ship.levelStats.crew       ?? 1,
+                  ship.levelStats.sturdiness ?? 1,
+                ],
+                xp:          ship.levelStats.xp          ?? 0,
+                maxCrew:     ship.levelStats.maxCrew      ?? 9,
+                totalPoints: ship.levelStats.totalPoints  ?? 0,
+                totalCap:    ship.levelStats.totalCap     ?? 65,
+                attrCaps: [
+                  ship.levelStats.attrCaps?.weight     ?? 50,
+                  ship.levelStats.attrCaps?.resistance ?? 35,
+                  ship.levelStats.attrCaps?.damage     ?? 35,
+                  ship.levelStats.attrCaps?.crew       ?? 50,
+                  ship.levelStats.attrCaps?.sturdiness ?? 25,
+                ],
+              } : undefined,
             };
           }),
           players: (message.players || []).map((player: any) => ({
@@ -1384,6 +1414,18 @@ export class NetworkManager {
         const sunkShipId: number = message.shipId || 0;
         console.log(`🌊 SHIP_SINK: ship ${sunkShipId} has sunk!`);
         this.onShipSunk?.(sunkShipId);
+        break;
+      }
+
+      case 'SHIP_LEVEL_UP': {
+        const lvlShipId:     number = message.shipId     || 0;
+        const lvlAttribute:  string = message.attribute  || '';
+        const lvlLevel:      number = message.level      || 1;
+        const lvlXp:         number = message.xp         ?? 0;
+        const lvlTotalPts:   number = message.totalPoints ?? 0;
+        const lvlTotalCap:   number = message.totalCap   || 65;
+        console.log(`⬆️  SHIP_LEVEL_UP: ship ${lvlShipId} ${lvlAttribute} → L${lvlLevel} (${lvlXp} XP left, pts ${lvlTotalPts}/${lvlTotalCap})`);
+        this.onShipLevelUp?.(lvlShipId, lvlAttribute, lvlLevel, lvlXp, lvlTotalPts, lvlTotalCap);
         break;
       }
 

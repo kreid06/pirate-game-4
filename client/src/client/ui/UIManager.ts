@@ -192,6 +192,16 @@ export class UIManager {
   }
 
   /**
+   * Set callback for ship attribute upgrades from the ship status menu.
+   * Called when the player clicks an affordable \u2191 UPGRADE button.
+   */
+  setShipUpgradeCallback(
+    cb: (shipId: number, attribute: string) => void
+  ): void {
+    this.shipMenu.onUpgradeRequest = cb;
+  }
+
+  /**
    * Update explicit build mode state (called by ClientApplication each frame / on change).
    * Pass null to hide the build mode overlay.
    */
@@ -225,7 +235,9 @@ export class UIManager {
       return true;
     }
     if (this.shipMenu.visible) {
-      this.shipMenu.close();
+      // Forward to shipMenu — returns true if inside panel (upgrade click or panel area)
+      const consumed = this.shipMenu.handleClick(x, y);
+      if (!consumed) this.shipMenu.close();
       return true;
     }
     return this.manningPanel.handleClick(x, y);

@@ -43,6 +43,9 @@ export interface Ship {
 
   // Company/faction (COMPANY_* constants)
   companyId: number;
+
+  // Ship progression (from server levelStats; optional until server sends it)
+  levelStats?: ShipLevelStats;
 }
 
 /**
@@ -102,6 +105,65 @@ export interface Cannonball {
 export const COMPANY_NEUTRAL = 0;
 export const COMPANY_PIRATES = 1;
 export const COMPANY_NAVY    = 2;
+
+// ─── Ship levelling ───────────────────────────────────────────────────────────
+
+/** Mirrors server ShipAttribute enum (ship_level.h) */
+export const SHIP_ATTR_WEIGHT     = 0;
+export const SHIP_ATTR_RESISTANCE = 1;
+export const SHIP_ATTR_DAMAGE     = 2;
+export const SHIP_ATTR_CREW       = 3;
+export const SHIP_ATTR_STURDINESS = 4;
+export const SHIP_ATTR_COUNT      = 5;
+
+/** Hard limits (mirrors ship_level.h constants) */
+export const SHIP_LEVEL_ATTR_POINT_CAP  = 50;
+export const SHIP_LEVEL_TOTAL_POINT_CAP = 65;
+export const SHIP_LEVEL_XP_BASE         = 100;
+
+/** Per-attribute point caps (mirrors SHIP_ATTR_POINTS_* constants) */
+export const SHIP_ATTR_CAPS: Record<number, number> = {
+  [SHIP_ATTR_WEIGHT]:     50,
+  [SHIP_ATTR_RESISTANCE]: 35,
+  [SHIP_ATTR_DAMAGE]:     35,
+  [SHIP_ATTR_CREW]:       50,
+  [SHIP_ATTR_STURDINESS]: 25,
+};
+
+export const SHIP_ATTR_NAMES: Record<number, string> = {
+  [SHIP_ATTR_WEIGHT]:     'Weight',
+  [SHIP_ATTR_RESISTANCE]: 'Resistance',
+  [SHIP_ATTR_DAMAGE]:     'Cannon Dmg',
+  [SHIP_ATTR_CREW]:       'Crew Cap',
+  [SHIP_ATTR_STURDINESS]: 'Sturdiness',
+};
+
+export const SHIP_ATTR_DESC: Record<number, string> = {
+  [SHIP_ATTR_WEIGHT]:     '+5% hull mass/lvl (WIP)',
+  [SHIP_ATTR_RESISTANCE]: '−2% dmg taken/lvl  →  floor 30%',
+  [SHIP_ATTR_DAMAGE]:     '+4% cannon dmg/lvl  →  ceil 240%',
+  [SHIP_ATTR_CREW]:       '+2 max crew/lvl (WIP)',
+  [SHIP_ATTR_STURDINESS]: '−3% sink rate/lvl  →  floor 25%',
+};
+
+/**
+ * Mirrors server ShipLevelStats (ship_level.h).
+ * Received in every ship world-state snapshot under `levelStats`.
+ */
+export interface ShipLevelStats {
+  /** Current level (1 = baseline) for each attribute, indexed by SHIP_ATTR_* */
+  levels: number[];   // length 5
+  /** Unspent XP pool */
+  xp: number;
+  /** Pre-computed max crew from server */
+  maxCrew: number;
+  /** Sum of all points spent (= sum of levels[i] − 1) */
+  totalPoints: number;
+  /** Cap for total points across all attributes (= SHIP_LEVEL_TOTAL_POINT_CAP) */
+  totalCap: number;
+  /** Per-attribute point caps sent by server */
+  attrCaps: number[];  // length 5
+}
 
 // All NPCs are sailors for now — company/alliance system will handle friend/foe later.
 // NPC_TYPE_SAILOR is always 0 from the server; kept for future protocol compatibility.
