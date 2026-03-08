@@ -2674,6 +2674,42 @@ static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t
     log_info("🔧 Ship slot %d (ID %u): %d modules, pos=(%.0f,%.0f)", idx, s->ship_id, s->module_count, world_x, world_y);
 }
 
+uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
+    if (!global_sim) {
+        log_warn("websocket_server_create_ship: no simulation linked");
+        return 0;
+    }
+    if (ship_count >= MAX_SIMPLE_SHIPS) {
+        log_warn("websocket_server_create_ship: MAX_SIMPLE_SHIPS (%d) reached", MAX_SIMPLE_SHIPS);
+        return 0;
+    }
+
+    // Unique module ID range: 1000 per slot (slot 0=1000, slot 1=2000, …)
+    uint16_t mid_base = (uint16_t)(1000u * (uint32_t)(ship_count + 1));
+
+    // Build the SimpleShip layout (uses next_ship_id internally — we override below)
+    init_brigantine_ship(ship_count, x, y, mid_base, company_id);
+
+    // Create the authoritative physics counterpart and use its entity ID
+    Vec2Q16 sim_pos = {
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)),
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
+    };
+    entity_id sim_id = sim_create_ship(global_sim, sim_pos, Q16_FROM_INT(0));
+    if (sim_id == INVALID_ENTITY_ID) {
+        log_warn("websocket_server_create_ship: sim_create_ship failed");
+        ships[ship_count].active = false;
+        return 0;
+    }
+
+    // Sync IDs so the update loop matches them
+    ships[ship_count].ship_id = sim_id;
+    ship_count++;
+
+    log_info("🚢 Admin spawned ship (ID: %u) at (%.0f, %.0f) company=%u", sim_id, x, y, company_id);
+    return sim_id;
+}
+
 int websocket_server_init(uint16_t port) {
     memset(&ws_server, 0, sizeof(ws_server));
     ws_server.port = port;
@@ -2998,11 +3034,11 @@ int websocket_server_update(struct Sim* sim) {
                             if (handled && client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) {
-                                    char game_state_frame[16384];  // Increased for module data
-                                    char game_state_response[12288];  // Increased for module data
+                                    static char game_state_frame[32768];
+                                    static char game_state_response[28000];
                                     
                                     // Build ships array for initial state (increased buffer for modules)
-                                    char ships_str[8192];
+                                    static char ships_str[20000];
                                     int ships_offset = 0;
                                     ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "[");
                                     
@@ -4457,7 +4493,9 @@ int websocket_server_update(struct Sim* sim) {
     
     if (current_time - last_game_state_time > update_interval) {
         // Build ships JSON array with physics properties and modules
-        char ships_json[8192];
+        // Each brigantine ship entry: ~2400 bytes (22 modules + levelStats).
+        // MAX_SIMPLE_SHIPS=16 → worst case ~39000 bytes. Use static to avoid stack overflow.
+        static char ships_json[64000];
         int ships_offset = 0;
         ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "[");
         bool first_ship = true;
@@ -4496,7 +4534,7 @@ int websocket_server_update(struct Sim* sim) {
                     if (ships[ss].ship_id == ship->id) { simple_ship = &ships[ss]; break; }
                 }
 
-                char ship_entry[4096];
+                char ship_entry[6144];
                 float hull_health_pct = Q16_TO_FLOAT(ship->hull_health); // 0.0–100.0
                 int offset = snprintf(ship_entry, sizeof(ship_entry),
                         "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
@@ -4602,7 +4640,11 @@ int websocket_server_update(struct Sim* sim) {
                     ship_attr_point_cap(SHIP_ATTR_DAMAGE),
                     ship_attr_point_cap(SHIP_ATTR_CREW),
                     ship_attr_point_cap(SHIP_ATTR_STURDINESS));
-                ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "%s", ship_entry);
+                {
+                    int n = snprintf(ships_json + ships_offset, sizeof(ships_json) - (size_t)(ships_offset < (int)sizeof(ships_json) ? ships_offset : (int)sizeof(ships_json)-1), "%s", ship_entry);
+                    if (n > 0) ships_offset += n;
+                    if (ships_offset >= (int)sizeof(ships_json) - 1) ships_offset = (int)sizeof(ships_json) - 1;
+                }
                 first_ship = false;
             }
         } else {
@@ -4611,10 +4653,11 @@ int websocket_server_update(struct Sim* sim) {
                 if (ships[s].active) {
                     if (!first_ship) {
                         ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, ",");
+                        if (ships_offset >= (int)sizeof(ships_json) - 1) ships_offset = (int)sizeof(ships_json) - 1;
                     }
                     
                     // Build ship entry with modules
-                    char ship_entry[4096];
+                    char ship_entry[6144];
                     int offset = snprintf(ship_entry, sizeof(ship_entry),
                             "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                             "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
@@ -4671,7 +4714,11 @@ int websocket_server_update(struct Sim* sim) {
                     }
                     
                     offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
-                    ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "%s", ship_entry);
+                    {
+                        int n2 = snprintf(ships_json + ships_offset, sizeof(ships_json) - (size_t)(ships_offset < (int)sizeof(ships_json) ? ships_offset : (int)sizeof(ships_json)-1), "%s", ship_entry);
+                        if (n2 > 0) ships_offset += n2;
+                        if (ships_offset >= (int)sizeof(ships_json) - 1) ships_offset = (int)sizeof(ships_json) - 1;
+                    }
                     first_ship = false;
                 }
             }
@@ -4815,7 +4862,7 @@ int websocket_server_update(struct Sim* sim) {
         
         // Broadcasting game state
         
-        char game_state[20480];  // Large buffer for ships + players + projectiles + npcs
+        static char game_state[131072]; // 128 KB: ships(64K) + players + projectiles + npcs
         snprintf(game_state, sizeof(game_state),
                 "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":%s,\"projectiles\":%s,\"npcs\":%s}",
                 current_time / 33, current_time, ships_json, players_json, projectiles_json, npcs_json);
@@ -4824,7 +4871,7 @@ int websocket_server_update(struct Sim* sim) {
         for (int i = 0; i < WS_MAX_CLIENTS; i++) {
             struct WebSocketClient* client = &ws_server.clients[i];
             if (client->connected && client->handshake_complete) {
-                char frame[20490];  // Must be >= game_state size (20480) + WebSocket header (10)
+                static char frame[131086]; // Must be >= game_state size + WebSocket header (14)
                 size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state, strlen(game_state), frame, sizeof(frame));
                 if (frame_len > 0) {
                     ssize_t sent = send(client->fd, frame, frame_len, 0);

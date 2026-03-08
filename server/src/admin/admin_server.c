@@ -39,6 +39,16 @@ static const char* dashboard_html =
 "#map-canvas { width: 100%; height: 100%; display: block; }\n"
 ".map-legend { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.8); color: white; padding: 1rem; border-radius: 8px; }\n"
 ".refresh-btn { background: #3498db; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; margin-bottom: 1rem; }\n"
+".spawn-btn { background: #27ae60; color: white; border: none; padding: 0.6rem 1.4rem; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 1rem; }\n"
+".spawn-btn:hover { background: #219a52; }\n"
+".spawn-btn:disabled { background: #95a5a6; cursor: not-allowed; }\n"
+".form-row { display: flex; gap: 0.75rem; align-items: flex-end; flex-wrap: wrap; margin-top: 0.75rem; }\n"
+".form-group { display: flex; flex-direction: column; gap: 0.25rem; }\n"
+".form-group label { font-size: 0.8rem; color: #555; font-weight: bold; }\n"
+".form-group input, .form-group select { padding: 0.4rem 0.6rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; width: 100px; }\n"
+".spawn-result { margin-top: 0.75rem; padding: 0.5rem 0.75rem; border-radius: 4px; font-size: 0.9rem; display: none; }\n"
+".spawn-result.ok { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }\n"
+".spawn-result.err { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }\n"
 "</style></head><body>\n"
 "<div class=\"header\"><h1>🏴‍☠️ Pirate Game Admin Panel</h1></div>\n"
 "<div class=\"container\">\n"
@@ -54,6 +64,22 @@ static const char* dashboard_html =
 "<div class=\"card\"><h3>🎯 Physics Objects</h3><div id=\"physics-objects\">Loading...</div></div>\n"
 "<div class=\"card\"><h3>🌐 Network Stats</h3><div id=\"network-stats\">Loading...</div></div>\n"
 "<div class=\"card\"><h3>💬 Message Activity</h3><div id=\"message-stats\">Loading...</div></div>\n"
+"<div class=\"card\"><h3>🚢 Spawn Ship</h3>\n"
+"<p style=\"font-size:0.85rem;color:#555;margin-top:0\">Create a new brigantine on the fly. Coordinates are in client pixels.</p>\n"
+"<div class=\"form-row\">\n"
+"  <div class=\"form-group\"><label>X (px)</label><input id=\"spawn-x\" type=\"number\" value=\"400\"></div>\n"
+"  <div class=\"form-group\"><label>Y (px)</label><input id=\"spawn-y\" type=\"number\" value=\"400\"></div>\n"
+"  <div class=\"form-group\"><label>Company</label>\n"
+"    <select id=\"spawn-company\">\n"
+"      <option value=\"1\">⚔️ Pirates</option>\n"
+"      <option value=\"2\">⚓ Navy</option>\n"
+"      <option value=\"0\">🏳️ Neutral</option>\n"
+"    </select>\n"
+"  </div>\n"
+"  <button class=\"spawn-btn\" onclick=\"spawnShip()\">⚓ Spawn</button>\n"
+"</div>\n"
+"<div id=\"spawn-result\" class=\"spawn-result\"></div>\n"
+"</div>\n"
 "</div></div>\n"
 "<div id=\"map\" class=\"tab-pane\">\n"
 "<h2>🗺️ Live World Map</h2>\n"
@@ -315,6 +341,36 @@ static const char* dashboard_html =
 "updateServerStatus(); updatePhysicsObjects(); updateNetworkStats(); updateMessageStats();\n"
 "if (document.getElementById('map').classList.contains('active')) updateMap();\n"
 "}\n"
+"async function spawnShip() {\n"
+"const x = parseFloat(document.getElementById('spawn-x').value) || 400;\n"
+"const y = parseFloat(document.getElementById('spawn-y').value) || 400;\n"
+"const company = parseInt(document.getElementById('spawn-company').value);\n"
+"const btn = document.querySelector('.spawn-btn');\n"
+"const resultEl = document.getElementById('spawn-result');\n"
+"btn.disabled = true;\n"
+"resultEl.style.display = 'none';\n"
+"try {\n"
+"const r = await fetch('/api/admin/ship', {\n"
+"  method: 'POST',\n"
+"  headers: {'Content-Type': 'application/json'},\n"
+"  body: JSON.stringify({x, y, company})\n"
+"});\n"
+"const data = await r.json();\n"
+"if (data.success) {\n"
+"  resultEl.className = 'spawn-result ok';\n"
+"  resultEl.textContent = `✅ Ship #${data.shipId} spawned at (${x}, ${y})`;\n"
+"} else {\n"
+"  resultEl.className = 'spawn-result err';\n"
+"  resultEl.textContent = `❌ ${data.error || 'Unknown error'}`;\n"
+"}\n"
+"} catch(e) {\n"
+"resultEl.className = 'spawn-result err';\n"
+"resultEl.textContent = '❌ Request failed: ' + e.message;\n"
+"}\n"
+"resultEl.style.display = 'block';\n"
+"btn.disabled = false;\n"
+"refreshAll();\n"
+"}\n"
 "refreshAll(); setInterval(refreshAll, 2000);\n"
 "</script>\n"
 "</body></html>";
@@ -406,8 +462,9 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
         if (received > 0) {
             buffer[received] = '\0';
             
-            // Parse request path
+            // Parse request path for GET
             char *path_start = strstr(buffer, "GET ");
+            char *post_start = strstr(buffer, "POST ");
             if (path_start) {
                 path_start += 4;
                 char *path_end = strchr(path_start, ' ');
@@ -438,6 +495,38 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                         resp.body_length = 9;
                     }
                     
+                    admin_send_response(client_fd, &resp);
+                }
+            } else if (post_start) {
+                post_start += 5;
+                char *path_end = strchr(post_start, ' ');
+                if (path_end) {
+                    *path_end = '\0';
+
+                    struct HttpResponse resp = {0};
+                    if (strcmp(post_start, "/api/admin/ship") == 0) {
+                        // Parse JSON body for x, y, company
+                        // Body starts after the blank line (\r\n\r\n)
+                        float x = 400.0f, y = 400.0f;
+                        uint8_t company = 1; // COMPANY_PIRATES default
+                        char *body = strstr(buffer, "\r\n\r\n");
+                        if (body) {
+                            body += 4;
+                            // Simple extraction — no full JSON parser needed
+                            char *p;
+                            p = strstr(body, "\"x\"");
+                            if (p) { p = strchr(p, ':'); if (p) x = (float)atof(p + 1); }
+                            p = strstr(body, "\"y\"");
+                            if (p) { p = strchr(p, ':'); if (p) y = (float)atof(p + 1); }
+                            p = strstr(body, "\"company\"");
+                            if (p) { p = strchr(p, ':'); if (p) company = (uint8_t)atoi(p + 1); }
+                        }
+                        admin_api_create_ship(&resp, x, y, company);
+                    } else {
+                        resp.status_code = 404;
+                        resp.body = "Not Found";
+                        resp.body_length = 9;
+                    }
                     admin_send_response(client_fd, &resp);
                 }
             }

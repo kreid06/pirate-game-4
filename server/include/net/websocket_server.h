@@ -236,6 +236,16 @@ int websocket_server_init(uint16_t port);
 void websocket_server_set_simulation(struct Sim* sim);
 
 /**
+ * Create a new brigantine ship at runtime (e.g. from admin panel).
+ * Registers both the SimpleShip layout and its physics counterpart in the sim.
+ * @param x  World X position in client pixels
+ * @param y  World Y position in client pixels
+ * @param company_id  COMPANY_* constant (COMPANY_PIRATES, COMPANY_NAVY, etc.)
+ * @return Entity ID of the new ship, or 0 on failure
+ */
+uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id);
+
+/**
  * Clean up WebSocket server and close all connections
  */
 void websocket_server_cleanup(void);
