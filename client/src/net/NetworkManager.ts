@@ -1176,6 +1176,8 @@ export class NetworkManager {
                       openness: mod.openness ?? 0,
                       angle: mod.sailAngle ?? 0,
                       windEfficiency: mod.windEfficiency ?? 1.0,
+                      fiberHealth: mod.fiberHealth ?? 15000,
+                      fiberMaxHealth: mod.fiberMaxHealth ?? 15000,
                       radius: 15,
                       height: 120,
                       sailWidth: 80,

@@ -1300,7 +1300,7 @@ export class RenderSystem {
 
         const md = mod.moduleData;
         // Only eligible if fibers are actually damaged
-        const fibersDamaged = md.openness < 100 || md.windEfficiency < 1.0;
+        const fibersDamaged = md.fiberHealth < md.fiberMaxHealth;
         if (!fibersDamaged) continue;
 
         const mx = RenderSystem.MAST_XS[i];

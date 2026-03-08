@@ -30,7 +30,9 @@ ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t
         case MODULE_TYPE_MAST:
             module.data.mast.angle = 0;
             module.data.mast.openness = 0; // Sails start closed
-            module.data.mast.wind_efficiency = Q16_ONE;
+            module.data.mast.fiber_health     = Q16_FROM_FLOAT(15000.0f);
+            module.data.mast.fiber_max_health = Q16_FROM_FLOAT(15000.0f);
+            module.data.mast.wind_efficiency  = Q16_ONE; // starts at full efficiency
             module.health     = 15000;
             module.max_health = 15000;
             break;

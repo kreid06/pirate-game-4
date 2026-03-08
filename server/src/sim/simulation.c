@@ -1197,23 +1197,26 @@ void handle_projectile_collisions(struct Sim* sim) {
                                      proj->id, mod_id, ship->id, (int)hit_mod->health);
                         }
                     } else {
-                        // ── Sail fiber hit: reduce openness/integrity, no HP damage ──
-                        // Shred the sail cloth by reducing openness (each fiber hit cuts ~25%)
-                        if (hit_mod->data.mast.openness > 0) {
-                            uint8_t shred = 25;
-                            hit_mod->data.mast.openness = (hit_mod->data.mast.openness > shred)
-                                ? hit_mod->data.mast.openness - shred : 0;
-                        }
-                        // Also reduce wind_efficiency to represent torn sail
-                        float eff = Q16_TO_FLOAT(hit_mod->data.mast.wind_efficiency);
-                        eff -= 0.25f;
-                        if (eff < 0.0f) eff = 0.0f;
-                        hit_mod->data.mast.wind_efficiency = Q16_FROM_FLOAT(eff);
+                        // ── Sail fiber hit: damage fiber_health, derive wind_efficiency from HP ratio ──
+                        float fh = Q16_TO_FLOAT(hit_mod->data.mast.fiber_health);
+                        float fhmax = Q16_TO_FLOAT(hit_mod->data.mast.fiber_max_health);
+                        if (fhmax <= 0.0f) fhmax = 15000.0f;
 
-                        damage_dealt = 0.0f; // cosmetic hit — shown as a small fiber-shred flash
-                        log_info("⛵🧵 Bar shot %u shredded sail fiber %u on ship %u (openness→%u, eff→%.2f)",
-                                 proj->id, mod_id, ship->id,
-                                 hit_mod->data.mast.openness, eff);
+                        q16_t effective_damage = Q16_FROM_FLOAT(
+                            Q16_TO_FLOAT(proj->damage)
+                            * ship_level_resistance_mult(&ship->level_stats)
+                        );
+                        fh -= Q16_TO_FLOAT(effective_damage);
+                        if (fh < 0.0f) fh = 0.0f;
+                        hit_mod->data.mast.fiber_health = Q16_FROM_FLOAT(fh);
+
+                        // wind_efficiency tracks fiber HP ratio (0.0 at destroyed, 1.0 at full)
+                        float new_eff = fh / fhmax;
+                        hit_mod->data.mast.wind_efficiency = Q16_FROM_FLOAT(new_eff);
+
+                        damage_dealt = Q16_TO_FLOAT(effective_damage);
+                        log_info("⛵🧵 Bar shot %u shredded sail fiber %u on ship %u (fiber HP %.0f/%.0f, eff %.2f)",
+                                 proj->id, mod_id, ship->id, fh, fhmax, new_eff);
                     }
 
                     if (sim->hit_event_count < MAX_HIT_EVENTS) {

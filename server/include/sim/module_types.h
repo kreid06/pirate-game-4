@@ -54,7 +54,9 @@ typedef struct {
 typedef struct {
     q16_t angle;                // Sail rotation angle
     uint8_t openness;           // Sail deployment percentage (0-100)
-    q16_t wind_efficiency;      // Current wind capture efficiency
+    q16_t wind_efficiency;      // Current wind capture efficiency (derived from fiber_health)
+    q16_t fiber_health;         // Sail cloth HP — same base as mast pole (15000)
+    q16_t fiber_max_health;     // Sail cloth max HP
 } MastModuleData;
 
 /**
