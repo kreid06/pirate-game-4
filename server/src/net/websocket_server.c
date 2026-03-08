@@ -5671,21 +5671,25 @@ void websocket_server_tick(float dt) {
         for (uint32_t s = 0; s < global_sim->ship_count; s++) {
             struct Ship* ship = &global_sim->ships[s];
             
-            // Calculate average sail openness across all masts
+            // Calculate average sail openness and fiber efficiency across all masts
             float total_openness = 0.0f;
+            float total_wind_eff = 0.0f;
             int mast_count = 0;
             for (uint8_t m = 0; m < ship->module_count; m++) {
                 if (ship->modules[m].type_id == MODULE_TYPE_MAST) {
                     total_openness += ship->modules[m].data.mast.openness;
+                    total_wind_eff += Q16_TO_FLOAT(ship->modules[m].data.mast.wind_efficiency);
                     mast_count++;
                 }
             }
             float avg_sail_openness = (mast_count > 0) ? (total_openness / mast_count) : 0.0f;
+            // avg_wind_efficiency: 1.0 = pristine fibers, 0.0 = fully destroyed
+            float avg_wind_efficiency = (mast_count > 0) ? (total_wind_eff / mast_count) : 1.0f;
             
-            // Calculate forward force from wind and sails
-            // Wind power (0-1) * sail openness (0-100) * base speed
+            // Calculate forward force from wind and sails:
+            // wind_power * sail_openness% * fiber_efficiency
             const float BASE_WIND_SPEED = 25.0f; // meters per second at full wind, full sails (5x increased)
-            float wind_force_factor = (global_sim->wind_power * avg_sail_openness / 100.0f);
+            float wind_force_factor = (global_sim->wind_power * avg_sail_openness / 100.0f) * avg_wind_efficiency;
             float target_speed = BASE_WIND_SPEED * wind_force_factor;
             
             // Get current ship speed (magnitude of velocity)
@@ -5700,8 +5704,8 @@ void websocket_server_tick(float dt) {
             
             // Debug logging every 2 seconds
             if (current_time - last_movement_log > 2000 && avg_sail_openness > 0) {
-                log_info("⛵ Ship %u: masts=%d, avg_openness=%.1f%%, wind=%.2f, target_speed=%.2f m/s, current_speed=%.2f m/s, pos=(%.1f,%.1f)",
-                         ship->id, mast_count, avg_sail_openness, global_sim->wind_power, target_speed, current_speed,
+                log_info("⛵ Ship %u: masts=%d, avg_openness=%.1f%%, wind_eff=%.2f, wind=%.2f, target_speed=%.2f m/s, current_speed=%.2f m/s, pos=(%.1f,%.1f)",
+                         ship->id, mast_count, avg_sail_openness, avg_wind_efficiency, global_sim->wind_power, target_speed, current_speed,
                          SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x)), SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y)));
                 last_movement_log = current_time;
             }
