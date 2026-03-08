@@ -74,6 +74,8 @@ export class RenderSystem {
   private _localCompanyId: number = 0;
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
   public playerAimAngleRelative: number = 0;
+  /** Currently selected ammo type (0 = cannonball, 1 = bar shot), set each frame by ClientApplication. */
+  public selectedAmmoType: number = 0;
   /** npcId → task name map set each frame by ClientApplication; used to colour NPCs by task. */
   public npcTaskMap: ReadonlyMap<number, string> = new Map();
   private hoveredPlankSlot: { ship: Ship; sectionName: string; segmentIndex: number } | null = null;
@@ -1557,31 +1559,62 @@ export class RenderSystem {
       const dirY = -Math.cos(totalAngle);
       const range = cannonData.fireRange || 2000;
 
-      // ── Hull-accurate impact detection in world space ──
+      // ── Impact detection in world space ──
       // Convert barrel tip and direction into world space for the intersection test.
       const wBarrelX = ship.position.x + barrelTipX * cosR - barrelTipY * sinR;
       const wBarrelY = ship.position.y + barrelTipX * sinR + barrelTipY * cosR;
       const wDirX = dirX * cosR - dirY * sinR;
       const wDirY = dirX * sinR + dirY * cosR;
 
-      // Find the nearest enemy ship hull intersection.  tHit is in the same unit space
-      // as `range` (world units ≡ local canvas units at this transform level).
       let tHit = Infinity;
-      for (const other of worldState.ships) {
-        if (other.id === ship.id) continue;
-        if (!other.hull || other.hull.length < 3) continue;
-        const t = this.rayHullIntersect(
-          wBarrelX, wBarrelY, wDirX, wDirY,
-          other.hull, other.position.x, other.position.y, other.rotation,
-          range
-        );
-        if (t < tHit) tHit = t;
+
+      if (this.selectedAmmoType === 1) {
+        // ── Bar shot: stop at the nearest enemy mast (ray-circle intersection) ──
+        const MAST_HIT_RADIUS = 28; // world units; generous hit zone for mast cylinder
+        for (const other of worldState.ships) {
+          if (other.id === ship.id) continue;
+          const masts = other.modules.filter(m => m.kind === 'mast');
+          const cosO = Math.cos(other.rotation);
+          const sinO = Math.sin(other.rotation);
+          for (const mast of masts) {
+            // Mast world position
+            const mlx = mast.localPos.x;
+            const mly = mast.localPos.y;
+            const mwx = other.position.x + mlx * cosO - mly * sinO;
+            const mwy = other.position.y + mlx * sinO + mly * cosO;
+            // Ray–circle: M = mastCenter - rayOrigin
+            const mx = mwx - wBarrelX;
+            const my = mwy - wBarrelY;
+            const tProj = mx * wDirX + my * wDirY;
+            if (tProj < 0 || tProj > range) continue;
+            const distSq = mx * mx + my * my - tProj * tProj;
+            if (distSq <= MAST_HIT_RADIUS * MAST_HIT_RADIUS) {
+              const t = tProj - Math.sqrt(MAST_HIT_RADIUS * MAST_HIT_RADIUS - distSq);
+              if (t >= 0 && t < tHit) tHit = t;
+            }
+          }
+        }
+      } else {
+        // ── Cannonball: stop at nearest enemy ship hull ──
+        for (const other of worldState.ships) {
+          if (other.id === ship.id) continue;
+          if (!other.hull || other.hull.length < 3) continue;
+          const t = this.rayHullIntersect(
+            wBarrelX, wBarrelY, wDirX, wDirY,
+            other.hull, other.position.x, other.position.y, other.rotation,
+            range
+          );
+          if (t < tHit) tHit = t;
+        }
       }
 
       const didHit     = tHit < Infinity;
-      // Trajectory ends at hull-entry point, clamped to max range
+      // Trajectory ends at impact point, clamped to max range
       const drawLength = didHit ? Math.min(tHit, range) : range;
-      const guideColor = didHit ? '#FFD700' : '#AAAAAA';
+      // Bar shot uses orange-gold when targeting a mast; cannonball uses yellow/grey
+      const guideColor = didHit
+        ? (this.selectedAmmoType === 1 ? '#FF8C00' : '#FFD700')
+        : '#AAAAAA';
 
       // ── Dashed trajectory line (stops at impact) ──
       this.ctx.save();

@@ -666,6 +666,7 @@ export class ClientApplication {
       this.renderSystem.playerIsAiming = this.inputManager?.isRightMouseDown ?? false;
       this.renderSystem.localPlayerId = this.networkManager.getAssignedPlayerId();
       this.renderSystem.playerAimAngleRelative = this.inputManager?.cannonAimAngleRelative ?? 0;
+      this.renderSystem.selectedAmmoType = this.inputManager?.selectedAmmoType ?? 0;
       this.renderSystem.npcTaskMap = this.uiManager.getNpcTaskMap();
 
       // Keep explicit build mode UI in sync with latest world state (sail count may change)
