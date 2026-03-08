@@ -4504,11 +4504,22 @@ int websocket_server_update(struct Sim* sim) {
     if (current_time - last_game_state_time > update_interval) {
         // Build ships JSON array with physics properties and modules
         // Each brigantine ship entry: ~2400 bytes (22 modules + levelStats).
-        // MAX_SIMPLE_SHIPS=16 → worst case ~39000 bytes. Use static to avoid stack overflow.
+        // MAX_SIMPLE_SHIPS=50 → worst case ~120000 bytes. Use static to avoid stack overflow.
         static char ships_json[64000];
         int ships_offset = 0;
         ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "[");
         bool first_ship = true;
+        
+        // levelStats dirty tracking: only serialize when XP or total_points actually changes.
+        // Indexed by sim->ships[] loop position (stable across a single tick build).
+        static uint32_t last_levelstats_xp[MAX_SHIPS];
+        static uint32_t last_levelstats_tp[MAX_SHIPS];  // total_points
+        static bool levelstats_initialized = false;
+        if (!levelstats_initialized) {
+            memset(last_levelstats_xp, 0xFF, sizeof(last_levelstats_xp));
+            memset(last_levelstats_tp, 0xFF, sizeof(last_levelstats_tp));
+            levelstats_initialized = true;
+        }
         
         // Log which ship source we're using
         static uint32_t last_ship_source_log = 0;
@@ -4549,13 +4560,11 @@ int websocket_server_update(struct Sim* sim) {
                 int offset = snprintf(ship_entry, sizeof(ship_entry),
                         "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
-                        "\"mass\":%.1f,\"moment_of_inertia\":%.1f,"
-                        "\"max_speed\":%.1f,\"turn_rate\":%.2f,"
-                        "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"rudder_angle\":%.3f,"
+                        "\"rudder_angle\":%.3f,"
                         "\"hullHealth\":%.2f,\"company\":%u,"
                         "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                         ship->id, pos_x, pos_y, rotation, vel_x, vel_y, ang_vel,
-                        5000.0f, 500000.0f, 15.0f, 1.0f, 0.95f, 0.90f, rudder_radians,
+                        rudder_radians,
                         hull_health_pct,
                         simple_ship ? simple_ship->company_id : COMPANY_NEUTRAL,
                         simple_ship ? simple_ship->cannon_ammo : 0,
@@ -4623,33 +4632,46 @@ int websocket_server_update(struct Sim* sim) {
                     }
                 }
                 
-                offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                    "],\"levelStats\":{"
-                    "\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u,"
-                    "\"xp\":%u,\"maxCrew\":%u,"
-                    "\"shipLevel\":%u,\"totalPoints\":%u,\"totalCap\":%u,"
-                    "\"nextUpgradeCost\":%u,"
-                    "\"attrCaps\":{\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u}"
-                    "}}",
-                    ship->level_stats.levels[SHIP_ATTR_WEIGHT],
-                    ship->level_stats.levels[SHIP_ATTR_RESISTANCE],
-                    ship->level_stats.levels[SHIP_ATTR_DAMAGE],
-                    ship->level_stats.levels[SHIP_ATTR_CREW],
-                    ship->level_stats.levels[SHIP_ATTR_STURDINESS],
-                    ship->level_stats.xp,
-                    (unsigned)ship_level_max_crew(&ship->level_stats),
-                    (unsigned)ship_level_total_points(&ship->level_stats),
-                    (unsigned)ship_level_total_points(&ship->level_stats),
-                    SHIP_LEVEL_TOTAL_POINT_CAP,
-                    /* next upgrade cost (same for all attrs at this ship level) */
-                    ship_level_total_points(&ship->level_stats) < SHIP_LEVEL_TOTAL_POINT_CAP
-                        ? SHIP_LEVEL_XP_BASE * (uint32_t)(ship_level_total_points(&ship->level_stats) + 1)
-                        : 0u,
-                    ship_attr_point_cap(SHIP_ATTR_WEIGHT),
-                    ship_attr_point_cap(SHIP_ATTR_RESISTANCE),
-                    ship_attr_point_cap(SHIP_ATTR_DAMAGE),
-                    ship_attr_point_cap(SHIP_ATTR_CREW),
-                    ship_attr_point_cap(SHIP_ATTR_STURDINESS));
+                uint32_t cur_xp = ship->level_stats.xp;
+                uint32_t cur_tp = (uint32_t)ship_level_total_points(&ship->level_stats);
+                bool lvl_dirty = (s >= MAX_SHIPS) ||
+                                 (cur_xp != last_levelstats_xp[s]) ||
+                                 (cur_tp != last_levelstats_tp[s]);
+
+                if (lvl_dirty) {
+                    if (s < MAX_SHIPS) {
+                        last_levelstats_xp[s] = cur_xp;
+                        last_levelstats_tp[s] = cur_tp;
+                    }
+                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        "],\"levelStats\":{"
+                        "\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u,"
+                        "\"xp\":%u,\"maxCrew\":%u,"
+                        "\"shipLevel\":%u,\"totalPoints\":%u,\"totalCap\":%u,"
+                        "\"nextUpgradeCost\":%u,"
+                        "\"attrCaps\":{\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u}"
+                        "}}",
+                        ship->level_stats.levels[SHIP_ATTR_WEIGHT],
+                        ship->level_stats.levels[SHIP_ATTR_RESISTANCE],
+                        ship->level_stats.levels[SHIP_ATTR_DAMAGE],
+                        ship->level_stats.levels[SHIP_ATTR_CREW],
+                        ship->level_stats.levels[SHIP_ATTR_STURDINESS],
+                        cur_xp,
+                        (unsigned)ship_level_max_crew(&ship->level_stats),
+                        cur_tp, cur_tp,
+                        SHIP_LEVEL_TOTAL_POINT_CAP,
+                        cur_tp < SHIP_LEVEL_TOTAL_POINT_CAP
+                            ? SHIP_LEVEL_XP_BASE * (cur_tp + 1u)
+                            : 0u,
+                        ship_attr_point_cap(SHIP_ATTR_WEIGHT),
+                        ship_attr_point_cap(SHIP_ATTR_RESISTANCE),
+                        ship_attr_point_cap(SHIP_ATTR_DAMAGE),
+                        ship_attr_point_cap(SHIP_ATTR_CREW),
+                        ship_attr_point_cap(SHIP_ATTR_STURDINESS));
+                } else {
+                    // levelStats unchanged — close the modules array and ship object
+                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
+                }
                 {
                     int n = snprintf(ships_json + ships_offset, sizeof(ships_json) - (size_t)(ships_offset < (int)sizeof(ships_json) ? ships_offset : (int)sizeof(ships_json)-1), "%s", ship_entry);
                     if (n > 0) ships_offset += n;
@@ -4671,15 +4693,11 @@ int websocket_server_update(struct Sim* sim) {
                     int offset = snprintf(ship_entry, sizeof(ship_entry),
                             "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                             "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
-                            "\"mass\":%.1f,\"moment_of_inertia\":%.1f,"
-                            "\"max_speed\":%.1f,\"turn_rate\":%.2f,"
-                            "\"water_drag\":%.3f,\"angular_drag\":%.3f,\"rudder_angle\":%.3f,"
+                            "\"rudder_angle\":%.3f,"
                             "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                             ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
                             ships[s].velocity_x, ships[s].velocity_y, ships[s].angular_velocity,
-                            ships[s].mass, ships[s].moment_of_inertia,
-                            ships[s].max_speed, ships[s].turn_rate,
-                            ships[s].water_drag, ships[s].angular_drag, 0.0f,
+                            0.0f,
                             ships[s].cannon_ammo, ships[s].infinite_ammo ? "true" : "false");
                     
                     // Add modules from simple ships

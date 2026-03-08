@@ -778,6 +778,9 @@ export class NetworkManager {
     this.sendMessage(message);
   }
 
+  private lastAimSentTime: number = 0;
+  private readonly AIM_SEND_INTERVAL_MS = 50; // 20 Hz max
+
   /**
    * Send cannon aim update (right-click hold + mouse move)
    * Aim angle is relative to ship rotation
@@ -787,16 +790,18 @@ export class NetworkManager {
       return;
     }
 
+    const now = Date.now();
+    if (now - this.lastAimSentTime < this.AIM_SEND_INTERVAL_MS) {
+      return; // throttle to 20 Hz
+    }
+    this.lastAimSentTime = now;
+
     const message: CannonAimMessage = {
       type: MessageType.CANNON_AIM,
-      timestamp: Date.now(),
+      timestamp: now,
       aim_angle: aimAngle
     };
 
-    // Only log occasionally to avoid spam
-    if (Math.random() < 0.05) {
-      console.log(`🎯 Cannon aim: ${(aimAngle * 180 / Math.PI).toFixed(1)}°`);
-    }
     this.sendMessage(message);
   }
 
@@ -1245,7 +1250,7 @@ export class NetworkManager {
                   ship.levelStats.attrCaps?.crew       ?? 50,
                   ship.levelStats.attrCaps?.sturdiness ?? 25,
                 ],
-              } : undefined,
+              } : properShip.levelStats,
             };
           }),
           players: (message.players || []).map((player: any) => ({
