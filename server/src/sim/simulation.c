@@ -1,4 +1,5 @@
 #include "sim/simulation.h"
+#include "sim/ship_level.h"
 #include "net/protocol.h"
 #include "core/hash.h"
 #include "core/math.h"
@@ -198,7 +199,7 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
             // Each leaking plank contributes half the single-missing-plank base rate
             drain_rate += 0.5f * (1.0f / 1.2f) * (float)planks_leaking;
 
-            float drain  = drain_rate * dt_secs;
+            float drain = drain_rate * ship_level_sturdiness_mult(&ship->level_stats) * dt_secs;
             float health = Q16_TO_FLOAT(ship->hull_health) - drain;
             if (health <= 0.0f) {
                 health = 0.0f;
@@ -320,6 +321,8 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
     ship->desired_sail_openness = 0;  // Sails start closed
     ship->rudder_angle = 0.0f;        // Rudder centered
     ship->target_rudder_angle = 0.0f; // No input
+
+    ship_level_init(&ship->level_stats);
     
     // Create brigantine hull with curved bow/stern sections (47 vertices)
     // Matches client-side createCurvedShipHull() from ShipUtils.ts
@@ -1147,7 +1150,11 @@ void handle_projectile_collisions(struct Sim* sim) {
                     uint16_t mod_id = hit_mod->id;
 
                     float dmg_before = (float)hit_mod->health;
-                    module_apply_damage(hit_mod, proj->damage);
+                    q16_t effective_damage = Q16_FROM_FLOAT(
+                        Q16_TO_FLOAT(proj->damage)
+                        * ship_level_resistance_mult(&ship->level_stats)
+                    );
+                    module_apply_damage(hit_mod, effective_damage);
                     float damage_dealt = dmg_before - (float)hit_mod->health;
                     if (damage_dealt < 0) damage_dealt = 0;
 
@@ -1158,14 +1165,22 @@ void handle_projectile_collisions(struct Sim* sim) {
 
                         if (sim->hit_event_count < MAX_HIT_EVENTS) {
                             struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
-                            ev->ship_id      = ship->id;
-                            ev->module_id    = mod_id;
-                            ev->is_breach    = true;
-                            ev->is_sink      = false;
-                            ev->destroyed    = true;
-                            ev->damage_dealt = damage_dealt;
-                            ev->hit_x        = Q16_TO_FLOAT(proj->position.x);
-                            ev->hit_y        = Q16_TO_FLOAT(proj->position.y);
+                            ev->ship_id          = ship->id;
+                            ev->module_id        = mod_id;
+                            ev->is_breach        = true;
+                            ev->is_sink          = false;
+                            ev->destroyed        = true;
+                            ev->damage_dealt     = damage_dealt;
+                            ev->hit_x            = Q16_TO_FLOAT(proj->position.x);
+                            ev->hit_y            = Q16_TO_FLOAT(proj->position.y);
+                            ev->shooter_ship_id  = proj->firing_ship_id;
+                        }
+
+                        /* Award XP to the attacker ship */
+                        if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                            struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                            if (attacker)
+                                attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
                         }
 
                         memmove(&ship->modules[hit_m], &ship->modules[hit_m + 1],
@@ -1178,14 +1193,22 @@ void handle_projectile_collisions(struct Sim* sim) {
                         // Non-fatal hit — still emit event for damage numbers
                         if (sim->hit_event_count < MAX_HIT_EVENTS) {
                             struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
-                            ev->ship_id      = ship->id;
-                            ev->module_id    = mod_id;
-                            ev->is_breach    = true;
-                            ev->is_sink      = false;
-                            ev->destroyed    = false;
-                            ev->damage_dealt = damage_dealt;
-                            ev->hit_x        = Q16_TO_FLOAT(proj->position.x);
-                            ev->hit_y        = Q16_TO_FLOAT(proj->position.y);
+                            ev->ship_id          = ship->id;
+                            ev->module_id        = mod_id;
+                            ev->is_breach        = true;
+                            ev->is_sink          = false;
+                            ev->destroyed        = false;
+                            ev->damage_dealt     = damage_dealt;
+                            ev->hit_x            = Q16_TO_FLOAT(proj->position.x);
+                            ev->hit_y            = Q16_TO_FLOAT(proj->position.y);
+                            ev->shooter_ship_id  = proj->firing_ship_id;
+                        }
+
+                        /* Award XP to the attacker ship */
+                        if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                            struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                            if (attacker)
+                                attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
                         }
                     }
 
@@ -1228,7 +1251,11 @@ void handle_projectile_collisions(struct Sim* sim) {
                 ShipModule* hit_plank = &ship->modules[hit_plank_idx];
 
                 float plank_hp_before = (float)hit_plank->health;
-                module_apply_damage(hit_plank, proj->damage);
+                q16_t effective_damage = Q16_FROM_FLOAT(
+                    Q16_TO_FLOAT(proj->damage)
+                    * ship_level_resistance_mult(&ship->level_stats)
+                );
+                module_apply_damage(hit_plank, effective_damage);
                 float plank_damage_dealt = plank_hp_before - (float)hit_plank->health;
                 if (plank_damage_dealt < 0) plank_damage_dealt = 0;
 
@@ -1239,14 +1266,22 @@ void handle_projectile_collisions(struct Sim* sim) {
 
                     if (sim->hit_event_count < MAX_HIT_EVENTS) {
                         struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
-                        ev->ship_id      = ship->id;
-                        ev->module_id    = plank_module_id;
-                        ev->is_breach    = false;
-                        ev->is_sink      = false;
-                        ev->destroyed    = true;
-                        ev->damage_dealt = plank_damage_dealt;
-                        ev->hit_x        = Q16_TO_FLOAT(proj->position.x);
-                        ev->hit_y        = Q16_TO_FLOAT(proj->position.y);
+                        ev->ship_id         = ship->id;
+                        ev->module_id       = plank_module_id;
+                        ev->is_breach       = false;
+                        ev->is_sink         = false;
+                        ev->destroyed       = true;
+                        ev->damage_dealt    = plank_damage_dealt;
+                        ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                        ev->shooter_ship_id = proj->firing_ship_id;
+                    }
+
+                    /* Award XP to the attacker ship */
+                    if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                        if (attacker)
+                            attacker->level_stats.xp += 10u + (uint32_t)(plank_damage_dealt / 100.0f);
                     }
 
                     memmove(&ship->modules[hit_plank_idx], &ship->modules[hit_plank_idx + 1],
@@ -1256,17 +1291,24 @@ void handle_projectile_collisions(struct Sim* sim) {
                     log_info("🎯 Projectile %u hit plank %u on ship %u — %d HP remaining",
                              proj->id, plank_module_id, ship->id, (int)hit_plank->health);
 
-                    // Non-fatal hit — emit event for damage numbers
                     if (sim->hit_event_count < MAX_HIT_EVENTS) {
                         struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
-                        ev->ship_id      = ship->id;
-                        ev->module_id    = plank_module_id;
-                        ev->is_breach    = false;
-                        ev->is_sink      = false;
-                        ev->destroyed    = false;
-                        ev->damage_dealt = plank_damage_dealt;
-                        ev->hit_x        = Q16_TO_FLOAT(proj->position.x);
-                        ev->hit_y        = Q16_TO_FLOAT(proj->position.y);
+                        ev->ship_id         = ship->id;
+                        ev->module_id       = plank_module_id;
+                        ev->is_breach       = false;
+                        ev->is_sink         = false;
+                        ev->destroyed       = false;
+                        ev->damage_dealt    = plank_damage_dealt;
+                        ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                        ev->shooter_ship_id = proj->firing_ship_id;
+                    }
+
+                    /* Award XP to the attacker ship */
+                    if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                        if (attacker)
+                            attacker->level_stats.xp += 10u + (uint32_t)(plank_damage_dealt / 100.0f);
                     }
                 }
 

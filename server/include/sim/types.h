@@ -6,6 +6,7 @@
 #include "core/math.h"
 #include "core/rng.h"
 #include "sim/module_types.h"
+#include "sim/ship_level.h"
 
 // Maximum entity counts
 #define MAX_SHIPS 50
@@ -66,6 +67,9 @@ struct Ship {
     //   N planks        ->  (1/1.2) * 2^(N-1) HP/s
     uint8_t initial_plank_count; // Set once when ship is created (typically 10)
     uint8_t company_id;           // 0=neutral; set by websocket layer to enable friendly-fire skip
+
+    /* Ship progression — levelled attributes and XP pool. */
+    ShipLevelStats level_stats;
 };
 
 // Player state  
@@ -96,7 +100,8 @@ struct Projectile {
     uint16_t flags;         // Projectile flags
     uint8_t type;           // Cannonball, grapeshot, etc
     uint8_t firing_company; // Company owning this projectile (0=unset; skip if == target ship company)
-    entity_id inside_ship_id; // 0 = not inside any hull; set when ball passes through a breach
+    entity_id inside_ship_id;   // 0 = not inside any hull; set when ball passes through a breach
+    entity_id firing_ship_id;   // Ship that fired this projectile (for XP award on hit)
 };
 
 // Input command from client
@@ -131,10 +136,11 @@ struct HitEvent {
     uint16_t  module_id;   // ID of the module hit (0 for SHIP_SINK)
     bool      is_breach;   // false = plank hit / sink; true = interior module hit through breach
     bool      is_sink;     // true = ship hull_health reached 0
-    bool      destroyed;   // true = module was destroyed by this hit
-    float     damage_dealt; // how much damage this hit dealt (in HP units)
+    bool      destroyed;        // true = module was destroyed by this hit
+    float     damage_dealt;     // how much damage this hit dealt (in HP units)
     float     hit_x;
     float     hit_y;
+    entity_id shooter_ship_id;  // Ship that fired the projectile (for XP award)
 };
 
 // Complete simulation state

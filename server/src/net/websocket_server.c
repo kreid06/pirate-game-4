@@ -1,4 +1,5 @@
 #include "net/websocket_server.h"
+#include "sim/ship_level.h"
 #include "net/websocket_protocol.h"
 #include "net/network.h"
 #include "sim/simulation.h"
@@ -1486,6 +1487,22 @@ static uint32_t spawn_ship_crew(uint32_t ship_id, const char* name) {
         log_warn("spawn_ship_crew: ship %u not found", ship_id);
         return 0;
     }
+    /* Enforce per-ship crew cap derived from the Crew level attribute */
+    if (global_sim) {
+        struct Ship* sim_ship = sim_get_ship(global_sim, (entity_id)ship_id);
+        if (sim_ship) {
+            uint8_t max_crew = ship_level_max_crew(&sim_ship->level_stats);
+            int crew_count = 0;
+            for (int i = 0; i < world_npc_count; i++) {
+                if (world_npcs[i].active && world_npcs[i].ship_id == ship_id)
+                    crew_count++;
+            }
+            if (crew_count >= (int)max_crew) {
+                log_warn("spawn_ship_crew: ship %u crew cap (%u) reached", ship_id, max_crew);
+                return 0;
+            }
+        }
+    }
     WorldNpc* npc = &world_npcs[world_npc_count++];
     memset(npc, 0, sizeof(WorldNpc));
     npc->id             = next_world_npc_id++;
@@ -1863,10 +1880,20 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
         
         entity_id projectile_id = sim_create_projectile(global_sim, proj_pos, proj_vel, owner_id);
         
-        // Stamp the firing ship's company so the sim can skip friendly-fire collisions
+        // Stamp the firing ship's company and ship-id so the sim can skip friendly-fire
+        // collisions and award XP correctly.
         if (projectile_id != INVALID_ENTITY_ID) {
             struct Projectile* proj = sim_get_projectile(global_sim, projectile_id);
-            if (proj) proj->firing_company = ship->company_id;
+            if (proj) {
+                proj->firing_company = ship->company_id;
+                proj->firing_ship_id = (entity_id)ship->ship_id;
+                // Apply the firing ship's Damage level multiplier
+                struct Ship* sim_ship = sim_get_ship(global_sim, (entity_id)ship->ship_id);
+                if (sim_ship) {
+                    float dmg_mult = ship_level_damage_mult(&sim_ship->level_stats);
+                    proj->damage = Q16_FROM_FLOAT(Q16_TO_FLOAT(proj->damage) * dmg_mult);
+                }
+            }
         }
         
         log_info("🎯 After spawn: projectile_count=%u, projectile_id=%u", global_sim->projectile_count, projectile_id);
@@ -4206,6 +4233,67 @@ int websocket_server_update(struct Sim* sim) {
                             strcpy(response, "{\"type\":\"message_ack\",\"status\":\"crew_assigned\"}");
                             handled = true;
 
+                        } else if (strstr(payload, "\"type\":\"upgrade_ship\"")) {
+                            // UPGRADE SHIP: spend XP to advance one attribute on the player's ship.
+                            // {"type":"upgrade_ship","shipId":N,"attribute":"resistance"}
+                            uint32_t upg_ship_id = 0;
+                            char upg_attr[32] = "";
+                            char* p2;
+                            p2 = strstr(payload, "\"shipId\":");    if (p2) sscanf(p2 +  9, "%u",  &upg_ship_id);
+                            p2 = strstr(payload, "\"attribute\":\""); if (p2) sscanf(p2 + 13, "%31[^\"]s", upg_attr);
+
+                            if (!global_sim || upg_ship_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                            } else {
+                                struct Ship* upg_sim_ship = sim_get_ship(global_sim, (entity_id)upg_ship_id);
+                                if (!upg_sim_ship) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                } else {
+                                    ShipAttribute attr = ship_attr_from_name(upg_attr);
+                                    if (attr == SHIP_ATTR_COUNT) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"unknown_attribute\"}");
+                                    } else {
+                                        uint8_t old_level = upg_sim_ship->level_stats.levels[attr];
+                                        uint32_t cost     = ship_level_xp_cost(&upg_sim_ship->level_stats, attr);
+                                        bool ok = ship_level_upgrade(&upg_sim_ship->level_stats, attr);
+                                        if (!ok) {
+                                            snprintf(response, sizeof(response),
+                                                "{\"type\":\"error\",\"message\":\"upgrade_failed\","
+                                                "\"xp\":%u,\"cost\":%u,\"level\":%u}",
+                                                upg_sim_ship->level_stats.xp, cost, old_level);
+                                        } else {
+                                            uint8_t new_level = upg_sim_ship->level_stats.levels[attr];
+                                            log_info("⬆️  Ship %u upgraded %s: L%u → L%u (XP remaining: %u)",
+                                                     upg_ship_id, upg_attr, old_level, new_level,
+                                                     upg_sim_ship->level_stats.xp);
+                                            /* Broadcast SHIP_LEVEL_UP to all clients */
+                                            char lvl_msg[256];
+                                            snprintf(lvl_msg, sizeof(lvl_msg),
+                                                "{\"type\":\"SHIP_LEVEL_UP\",\"shipId\":%u,"
+                                                "\"attribute\":\"%s\",\"level\":%u,\"xp\":%u}",
+                                                upg_ship_id, upg_attr, new_level,
+                                                upg_sim_ship->level_stats.xp);
+                                            uint8_t lvl_frame[512];
+                                            size_t lvl_flen = websocket_create_frame(WS_OPCODE_TEXT,
+                                                lvl_msg, strlen(lvl_msg), (char*)lvl_frame, sizeof(lvl_frame));
+                                            if (lvl_flen > 0) {
+                                                for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                                                    struct WebSocketClient* wc = &ws_server.clients[ci];
+                                                    if (wc->connected && wc->handshake_complete)
+                                                        send(wc->fd, lvl_frame, lvl_flen, 0);
+                                                }
+                                            }
+                                            snprintf(response, sizeof(response),
+                                                "{\"type\":\"message_ack\",\"status\":\"upgraded\","
+                                                "\"attribute\":\"%s\",\"level\":%u,\"xp\":%u}",
+                                                upg_attr, new_level,
+                                                upg_sim_ship->level_stats.xp);
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
                         } else {
                             ws_server.unknown_messages_received++;
                             ws_server.last_unknown_time = get_time_ms();
@@ -4474,7 +4562,18 @@ int websocket_server_update(struct Sim* sim) {
                     }
                 }
                 
-                offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
+                offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                    "],\"levelStats\":{"
+                    "\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u,"
+                    "\"xp\":%u,\"maxCrew\":%u"
+                    "}}",
+                    ship->level_stats.levels[SHIP_ATTR_WEIGHT],
+                    ship->level_stats.levels[SHIP_ATTR_RESISTANCE],
+                    ship->level_stats.levels[SHIP_ATTR_DAMAGE],
+                    ship->level_stats.levels[SHIP_ATTR_CREW],
+                    ship->level_stats.levels[SHIP_ATTR_STURDINESS],
+                    ship->level_stats.xp,
+                    (unsigned)ship_level_max_crew(&ship->level_stats));
                 ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "%s", ship_entry);
                 first_ship = false;
             }
