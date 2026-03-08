@@ -122,10 +122,12 @@ static int world_npc_count = 0;
 static uint32_t next_world_npc_id = 9000;
 
 // Global ship data (simple ships for testing)
-#define MAX_SIMPLE_SHIPS 16
+#define MAX_SIMPLE_SHIPS 50
 static SimpleShip ships[MAX_SIMPLE_SHIPS] = {0};
 static int ship_count = 0;
 static int next_ship_id = 1;
+// Monotonically-increasing module ID base — never reused, avoids collisions on slot recycle
+static uint32_t next_mid_base = 3000u;
 
 // Helper function to find a ship by ID
 static SimpleShip* find_ship(uint32_t ship_id) {
@@ -2684,8 +2686,9 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
         return 0;
     }
 
-    // Unique module ID range: 1000 per slot (slot 0=1000, slot 1=2000, …)
-    uint16_t mid_base = (uint16_t)(1000u * (uint32_t)(ship_count + 1));
+    // Unique module ID range: monotonically increasing so recycled slots never collide
+    uint16_t mid_base = (uint16_t)(next_mid_base & 0xFFFF);
+    next_mid_base += 1000u;
 
     // Build the SimpleShip layout (uses next_ship_id internally — we override below)
     init_brigantine_ship(ship_count, x, y, mid_base, company_id);
@@ -5060,7 +5063,10 @@ void websocket_server_tick(float dt) {
                 entity_id sunk_id = ev->ship_id;
                 for (int s = 0; s < ship_count; s++) {
                     if (ships[s].active && ships[s].ship_id == sunk_id) {
-                        ships[s].active = false;
+                        // Swap-and-pop so the slot is immediately recycled
+                        ships[s] = ships[ship_count - 1];
+                        memset(&ships[ship_count - 1], 0, sizeof(SimpleShip));
+                        ship_count--;
                         break;
                     }
                 }
