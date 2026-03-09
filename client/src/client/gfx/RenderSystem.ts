@@ -78,6 +78,8 @@ export class RenderSystem {
   public playerIsAiming: boolean = false;
   /** The assigned local player ID, so guides only draw for that player's cannon. */
   public localPlayerId: number | null = null;
+  /** Player position info used by the hover tooltip to determine interact range. */
+  public playerInteractInfo: { worldPos: Vec2; localPos: Vec2 | null; carrierId: number | null } | null = null;
   /** Cached local player company for the current frame — set at start of queueWorldObjects. */
   private _localCompanyId: number = 0;
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
@@ -3364,7 +3366,23 @@ export class RenderSystem {
     
     // Add interaction hint
     lines.push('');
-    lines.push('[E] Interact');
+    const MAX_INTERACT_DIST = 50;
+    let interactLabel = '[E] Interact';
+    if (this.playerInteractInfo) {
+      const { worldPos, localPos, carrierId } = this.playerInteractInfo;
+      const cos = Math.cos(ship.rotation);
+      const sin = Math.sin(ship.rotation);
+      const modWorldX = ship.position.x + (module.localPos.x * cos - module.localPos.y * sin);
+      const modWorldY = ship.position.y + (module.localPos.x * sin + module.localPos.y * cos);
+      let dist: number;
+      if (carrierId === ship.id && localPos) {
+        dist = localPos.sub(module.localPos).length();
+      } else {
+        dist = worldPos.sub(Vec2.from(modWorldX, modWorldY)).length();
+      }
+      interactLabel = dist <= MAX_INTERACT_DIST ? '[E] Interact' : 'Not in Range';
+    }
+    lines.push(interactLabel);
     
     // Measure text dimensions
     this.ctx.font = '14px monospace';

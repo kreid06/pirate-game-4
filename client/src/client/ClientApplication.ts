@@ -795,6 +795,11 @@ export class ClientApplication {
         if (player) {
           this.inputManager.setPlayerPosition(player.position);
           this.inputManager.setPlayerVelocity(player.velocity); // For stop detection
+          this.renderSystem.playerInteractInfo = {
+            worldPos: player.position,
+            localPos: player.localPosition ?? null,
+            carrierId: player.carrierId ?? null,
+          };
         }
       }
       
