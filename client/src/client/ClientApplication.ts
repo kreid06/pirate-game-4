@@ -801,6 +801,12 @@ export class ClientApplication {
       // Render game world with hybrid state
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
       
+      // Pipe screen-space mouse position so UIManager can render hotbar tooltips
+      if (this.inputManager) {
+        const mp = this.inputManager.getMouseScreenPosition();
+        this.uiManager.setMousePos(mp.x, mp.y);
+      }
+
       // Render UI overlay
       const assignedPlayerId = this.networkManager.getAssignedPlayerId();
       const playerShipId = assignedPlayerId !== null

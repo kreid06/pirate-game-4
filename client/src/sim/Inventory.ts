@@ -43,25 +43,27 @@ export interface ItemDef {
   borderColor: string;
   /** One or two characters shown inside the slot */
   symbol: string;
+  /** Short description shown in the hotbar tooltip */
+  description: string;
 }
 
 export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
-  none:          { kind: 'none',          name: 'Empty',         category: 'none',     maxStack: 0,  color: '#2a2a2a', borderColor: '#444',    symbol: ''  },
-  plank:         { kind: 'plank',         name: 'Plank',         category: 'building', maxStack: 99, color: '#b8832b', borderColor: '#7a5520', symbol: 'P' },
-  repair_kit:    { kind: 'repair_kit',    name: 'Repair Kit',    category: 'repair',   maxStack: 99, color: '#2577e3', borderColor: '#1a4fa0', symbol: 'R' },
-  cannon_ball:   { kind: 'cannon_ball',   name: 'Cannonball',    category: 'ammo',     maxStack: 99, color: '#555',    borderColor: '#333',    symbol: 'C' },
-  cannon:        { kind: 'cannon',        name: 'Cannon',        category: 'building', maxStack: 9,  color: '#333333', borderColor: '#111',    symbol: '⚫' },
-  sail:          { kind: 'sail',          name: 'Sail',          category: 'building', maxStack: 9,  color: '#1e8c6e', borderColor: '#0f5c48', symbol: '⛵' },
-  helm_kit:      { kind: 'helm_kit',      name: 'Helm Kit',      category: 'building', maxStack: 3,  color: '#6a3d8f', borderColor: '#3d2060', symbol: 'W' },
-  deck:          { kind: 'deck',          name: 'Deck',          category: 'building', maxStack: 9,  color: '#8b5e3c', borderColor: '#5c3a1c', symbol: '⊟' },
-  sword:         { kind: 'sword',         name: 'Sword',         category: 'weapon',   maxStack: 1,  color: '#c0c0c0', borderColor: '#777',    symbol: 'S' },
-  pistol:        { kind: 'pistol',        name: 'Pistol',        category: 'weapon',   maxStack: 1,  color: '#8b4513', borderColor: '#5a2d0c', symbol: 'G' },
-  hammer:        { kind: 'hammer',        name: 'Hammer',        category: 'tool',     maxStack: 1,  color: '#c07830', borderColor: '#885020', symbol: 'H' },
-  cloth_armor:   { kind: 'cloth_armor',   name: 'Cloth Armor',   category: 'armor',    maxStack: 1,  color: '#8b7f4a', borderColor: '#5c5430', symbol: 'A' },
-  leather_armor: { kind: 'leather_armor', name: 'Leather Armor', category: 'armor',    maxStack: 1,  color: '#8b5a2b', borderColor: '#5a3010', symbol: 'A' },
-  iron_armor:    { kind: 'iron_armor',    name: 'Iron Armor',    category: 'armor',    maxStack: 1,  color: '#8a8a8c', borderColor: '#555558', symbol: 'A' },
-  wooden_shield: { kind: 'wooden_shield', name: 'Wooden Shield', category: 'shield',   maxStack: 1,  color: '#c8a46e', borderColor: '#8a6030', symbol: 'D' },
-  iron_shield:   { kind: 'iron_shield',   name: 'Iron Shield',   category: 'shield',   maxStack: 1,  color: '#aaaaac', borderColor: '#666668', symbol: 'D' },
+  none:          { kind: 'none',          name: 'Empty',         category: 'none',     maxStack: 0,  color: '#2a2a2a', borderColor: '#444',    symbol: '',   description: 'An empty slot.' },
+  plank:         { kind: 'plank',         name: 'Plank',         category: 'building', maxStack: 99, color: '#b8832b', borderColor: '#7a5520', symbol: 'P',  description: 'Replaces a missing hull plank on your ship.' },
+  repair_kit:    { kind: 'repair_kit',    name: 'Repair Kit',    category: 'repair',   maxStack: 99, color: '#2577e3', borderColor: '#1a4fa0', symbol: 'R',  description: 'Press E to repair the most damaged plank or sail on your ship.' },
+  cannon_ball:   { kind: 'cannon_ball',   name: 'Cannonball',    category: 'ammo',     maxStack: 99, color: '#555',    borderColor: '#333',    symbol: 'C',  description: 'Standard ammunition. Deals heavy damage to hull planks.' },
+  cannon:        { kind: 'cannon',        name: 'Cannon',        category: 'building', maxStack: 9,  color: '#333333', borderColor: '#111',    symbol: '\u26ab', description: 'Replaces a destroyed cannon on your ship.' },
+  sail:          { kind: 'sail',          name: 'Sail',          category: 'building', maxStack: 9,  color: '#1e8c6e', borderColor: '#0f5c48', symbol: '\u26f5', description: 'Replaces a missing mast and sail on your ship.' },
+  helm_kit:      { kind: 'helm_kit',      name: 'Helm Kit',      category: 'building', maxStack: 3,  color: '#6a3d8f', borderColor: '#3d2060', symbol: 'W',  description: 'Replaces a destroyed ship helm (steering wheel).' },
+  deck:          { kind: 'deck',          name: 'Deck',          category: 'building', maxStack: 9,  color: '#8b5e3c', borderColor: '#5c3a1c', symbol: '\u229f', description: 'Replaces a destroyed ship deck. Required for crew to walk on.' },
+  sword:         { kind: 'sword',         name: 'Sword',         category: 'weapon',   maxStack: 1,  color: '#c0c0c0', borderColor: '#777',    symbol: 'S',  description: 'Melee weapon. Left-click to slash nearby enemies.' },
+  pistol:        { kind: 'pistol',        name: 'Pistol',        category: 'weapon',   maxStack: 1,  color: '#8b4513', borderColor: '#5a2d0c', symbol: 'G',  description: 'Ranged weapon. Left-click to fire a shot at your cursor.' },
+  hammer:        { kind: 'hammer',        name: 'Hammer',        category: 'tool',     maxStack: 1,  color: '#c07830', borderColor: '#885020', symbol: 'H',  description: 'Click a damaged module or the ship deck to begin a repair minigame.' },
+  cloth_armor:   { kind: 'cloth_armor',   name: 'Cloth Armor',   category: 'armor',    maxStack: 1,  color: '#8b7f4a', borderColor: '#5c5430', symbol: 'A',  description: 'Light armor. Provides basic protection against attacks.' },
+  leather_armor: { kind: 'leather_armor', name: 'Leather Armor', category: 'armor',    maxStack: 1,  color: '#8b5a2b', borderColor: '#5a3010', symbol: 'A',  description: 'Medium armor. Better protection than cloth.' },
+  iron_armor:    { kind: 'iron_armor',    name: 'Iron Armor',    category: 'armor',    maxStack: 1,  color: '#8a8a8c', borderColor: '#555558', symbol: 'A',  description: 'Heavy armor. Provides strong protection.' },
+  wooden_shield: { kind: 'wooden_shield', name: 'Wooden Shield', category: 'shield',   maxStack: 1,  color: '#c8a46e', borderColor: '#8a6030', symbol: 'D',  description: 'A light wooden shield for blocking attacks.' },
+  iron_shield:   { kind: 'iron_shield',   name: 'Iron Shield',   category: 'shield',   maxStack: 1,  color: '#aaaaac', borderColor: '#666668', symbol: 'D',  description: 'A sturdy iron shield for reliable defense.' },
 };
 
 /**
@@ -86,6 +88,14 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   21: 'iron_shield',
   13: 'deck',
 };
+
+/**
+ * Reverse map: ItemKind → numeric server ID.
+ * Useful for display (tooltips, logs).
+ */
+export const ITEM_KIND_ID: Partial<Record<ItemKind, number>> = Object.fromEntries(
+  Object.entries(ITEM_ID_MAP).map(([id, kind]) => [kind, Number(id)])
+) as Partial<Record<ItemKind, number>>;
 
 // ── Slot / inventory structures ─────────────────────────────────────────────
 

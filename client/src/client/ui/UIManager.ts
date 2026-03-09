@@ -9,7 +9,7 @@ import { ClientConfig } from '../ClientConfig.js';
 import { WorldState } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
-import { ITEM_DEFS, INVENTORY_SLOTS, ItemKind } from '../../sim/Inventory.js';
+import { ITEM_DEFS, INVENTORY_SLOTS, ItemKind, ITEM_KIND_ID } from '../../sim/Inventory.js';
 import { ManningPriorityPanel } from './ManningPriorityPanel.js';
 import { CompanyMenu } from './CompanyMenu.js';
 import { PlayerMenu } from './PlayerMenu.js';
@@ -73,6 +73,10 @@ export class UIManager {
   private showDebugOverlay = false;
   private showNetworkStats = false;
   private showControlHints = true;
+
+  // Mouse screen position (updated each frame before render)
+  private mouseX = 0;
+  private mouseY = 0;
 
   // Explicit build mode (B key) overlay state
   private buildModeState: {
@@ -406,6 +410,14 @@ export class UIManager {
   /**
    * Handle a canvas click — returns true if the UI consumed it.
    */
+  /** Update the current screen-space mouse position so tooltips can be drawn. */
+  setMousePos(x: number, y: number): void {
+    this.mouseX = x;
+    this.mouseY = y;
+    const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (hud) { hud.mouseX = x; hud.mouseY = y; }
+  }
+
   handleClick(x: number, y: number): boolean {
     // Hammer minigame swallows all clicks while active
     if (this.hammerGame.active) {
@@ -845,6 +857,8 @@ export class UIManager {
 class HUDElement implements UIElement {
   type = UIElementType.HUD;
   visible = true;
+  public mouseX = 0;
+  public mouseY = 0;
   
   render(ctx: CanvasRenderingContext2D, context: UIRenderContext): void {
     // Find our player using the server-assigned player ID
@@ -996,7 +1010,143 @@ class HUDElement implements UIElement {
       ctx.fillText(String(i === 9 ? 0 : i + 1), sx + SLOT_SIZE / 2, sy + SLOT_SIZE + 2);
     }
 
+    // Tooltip: check which slot (if any) the mouse is hovering
+    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+      const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+      const sy = startY + PADDING;
+      if (
+        this.mouseX >= sx && this.mouseX <= sx + SLOT_SIZE &&
+        this.mouseY >= sy && this.mouseY <= sy + SLOT_SIZE
+      ) {
+        this.renderHotbarTooltip(ctx, canvas, slots, i, sx, sy);
+        break;
+      }
+    }
+
     ctx.restore();
+  }
+
+  /** Draw a tooltip above the hovered hotbar slot. */
+  private renderHotbarTooltip(
+    ctx: CanvasRenderingContext2D,
+    canvas: HTMLCanvasElement,
+    slots: { item: ItemKind; quantity: number }[],
+    hoveredIndex: number,
+    slotX: number,
+    slotY: number,
+  ): void {
+    const SLOT_SIZE = 48;
+    const slot = slots[hoveredIndex] ?? { item: 'none' as ItemKind, quantity: 0 };
+    if (slot.item === 'none') return;
+
+    const def    = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
+    const itemId = ITEM_KIND_ID[slot.item] ?? 0;
+
+    const PAD   = 10;
+    const W     = 220;
+    const LINE  = 16;
+    const nameH = 18;
+    const descLines = this.wrapText(ctx, def.description, W - PAD * 2, '12px Consolas, monospace');
+    const totalH = PAD + nameH + 4 + LINE + 4 + descLines.length * LINE + PAD;
+
+    // Position: centred above the slot, clamped to canvas
+    let tx = slotX + SLOT_SIZE / 2 - W / 2;
+    let ty = slotY - totalH - 6;
+    tx = Math.max(4, Math.min(canvas.width - W - 4, tx));
+    if (ty < 4) ty = slotY + SLOT_SIZE + 6;
+
+    ctx.save();
+
+    // Shadow
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur  = 8;
+    ctx.fillStyle   = 'rgba(12,12,20,0.94)';
+    ctx.strokeStyle = def.borderColor;
+    ctx.lineWidth   = 1.5;
+    this.roundRect(ctx, tx, ty, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Colour accent bar on left
+    ctx.fillStyle = def.color;
+    this.roundRect(ctx, tx, ty, 4, totalH, { tl: 6, tr: 0, br: 0, bl: 6 });
+    ctx.fill();
+
+    let cy = ty + PAD;
+
+    // Item name
+    ctx.fillStyle    = '#ffffff';
+    ctx.font         = `bold 14px Consolas, monospace`;
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(def.name, tx + PAD + 4, cy);
+    cy += nameH + 4;
+
+    // ID  +  category
+    ctx.fillStyle = '#888';
+    ctx.font      = '11px Consolas, monospace';
+    ctx.fillText(`ID: ${itemId}   [${def.category}]`, tx + PAD + 4, cy);
+    cy += LINE + 4;
+
+    // Description
+    ctx.fillStyle = '#ccc';
+    ctx.font      = '12px Consolas, monospace';
+    for (const line of descLines) {
+      ctx.fillText(line, tx + PAD + 4, cy);
+      cy += LINE;
+    }
+
+    ctx.restore();
+  }
+
+  /** Word-wrap `text` into lines that fit within `maxWidth`. */
+  private wrapText(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    maxWidth: number,
+    font: string,
+  ): string[] {
+    ctx.save();
+    ctx.font = font;
+    const words  = text.split(' ');
+    const lines: string[] = [];
+    let current = '';
+    for (const word of words) {
+      const test = current ? `${current} ${word}` : word;
+      if (ctx.measureText(test).width > maxWidth && current) {
+        lines.push(current);
+        current = word;
+      } else {
+        current = test;
+      }
+    }
+    if (current) lines.push(current);
+    ctx.restore();
+    return lines;
+  }
+
+  /** Draw a rounded rectangle path. corners can be a uniform radius or per-corner object. */
+  private roundRect(
+    ctx: CanvasRenderingContext2D,
+    x: number, y: number, w: number, h: number,
+    corners: number | { tl: number; tr: number; br: number; bl: number },
+  ): void {
+    const tl = typeof corners === 'number' ? corners : corners.tl;
+    const tr = typeof corners === 'number' ? corners : corners.tr;
+    const br = typeof corners === 'number' ? corners : corners.br;
+    const bl = typeof corners === 'number' ? corners : corners.bl;
+    ctx.beginPath();
+    ctx.moveTo(x + tl, y);
+    ctx.lineTo(x + w - tr, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + tr);
+    ctx.lineTo(x + w, y + h - br);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - br, y + h);
+    ctx.lineTo(x + bl, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - bl);
+    ctx.lineTo(x, y + tl);
+    ctx.quadraticCurveTo(x, y, x + tl, y);
+    ctx.closePath();
   }
 
   private renderEquipmentPanel(
