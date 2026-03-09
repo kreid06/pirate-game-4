@@ -2133,8 +2133,12 @@ export class RenderSystem {
   }
   
   private drawSailFiber(x: number, y: number, width: number, height: number, sailColor: string, openness: number, angle: number, healthRatio: number = 1, moduleId: number = 0): void {
-    // At 0 HP the sail is completely shredded — don't draw anything
-    if (healthRatio <= 0) return;
+    // Clamp health — NaN guard for missing fiberMaxHealth
+    const clampedHealth = Math.max(0, Math.min(1, isNaN(healthRatio) ? 1 : healthRatio));
+
+    // Sail fades out in the last 25% of its HP so destruction feels gradual
+    const sailAlpha = clampedHealth < 0.25 ? clampedHealth / 0.25 : 1.0;
+    const sailVisible = clampedHealth >= 0.02;
 
     // Helper: parse '#RRGGBB' → [r, g, b]
     const hexToRgb = (hex: string): [number, number, number] => {
@@ -2150,98 +2154,77 @@ export class RenderSystem {
     };
 
     // Damage factor: 0 = pristine, 1 = nearly destroyed
-    const damage = 1 - Math.max(0, Math.min(1, healthRatio));
-    const grey: [number, number, number] = [110, 110, 110]; // target grey when fully damaged
+    const damage = 1 - clampedHealth;
+    const grey: [number, number, number] = [110, 110, 110];
 
     const centerColor = lerpColor(hexToRgb(sailColor), grey, damage);
     const edgeColor   = lerpColor(hexToRgb('#E6E6E6'), grey, damage);
 
-    // Save context and apply rotation around mast position
+    // Set up rotated coordinate space (yard always rotates with sail angle)
     this.ctx.save();
-    
-    // Translate to mast position and rotate (this rotates both sail and yard)
     this.ctx.translate(x, y);
-    this.ctx.rotate(angle); // Angle is already in radians from server
-    
-    // Now draw everything relative to (0, 0) since we've translated to the mast position
-    const sailTopY = -height * 1.4; // Top of sail attaches to yard (negative = up)
-    const sailPower = width * 1.2 * openness; // Adjust height based on openness
-    
-    // Create a gradient for the sail — shifts from original color toward grey as health drops
-    const gradient = this.ctx.createLinearGradient(
-      -width / 2, sailTopY,
-      width / 2, sailTopY
-    );
-    gradient.addColorStop(0,   edgeColor);
-    gradient.addColorStop(0.5, centerColor);
-    gradient.addColorStop(1,   edgeColor);
-    
-    // Draw sail shape
-    this.ctx.beginPath();
-    this.ctx.moveTo(0, sailTopY);
-    this.ctx.lineTo(0, -sailTopY);
-    
-    // Bottom of sail curves slightly
-    this.ctx.quadraticCurveTo(sailPower + 25, 0, 0, sailTopY);
-   
-    this.ctx.closePath();
-    
-    // Fill with gradient
-    this.ctx.fillStyle = gradient;
-    this.ctx.fill();
-    
-    // Add some sail details (horizontal lines)
-    this.ctx.strokeStyle = '#DDDDDD';
-    this.ctx.lineWidth = 0.5;
-    
-    const lineCount = 3;
-    const spacing = sailPower / (lineCount + 1);
-    
-    this.ctx.beginPath();
+    this.ctx.rotate(angle);
 
-    // ── Sail damage tear marks (bar shot) ──
-    // Draw pseudo-random horizontal slash marks seeded by moduleId so they're
-    // stable across frames. tearCount increases as health drops.
-    if (healthRatio < 1.0 && openness > 0) {
-      const tearCount = Math.min(5, Math.floor((1 - healthRatio) * 6));
-      // Simple LCG seeded by moduleId for deterministic crack positions
-      let seed = (moduleId * 1664525 + 1013904223) >>> 0;
-      const lcg = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 0xFFFFFFFF; };
+    const sailTopY  = -height * 1.4;
+    const sailPower = width * 1.2 * openness;
 
+    // ── Sail cloth — only when fibers are not fully shredded ──
+    if (sailVisible) {
       this.ctx.save();
-      this.ctx.strokeStyle = 'rgba(80, 50, 20, 0.7)';
-      this.ctx.lineWidth   = 1.8;
-      this.ctx.lineCap     = 'round';
-      // Clip to sail shape so tears don't overflow
+      this.ctx.globalAlpha = sailAlpha;
+
+      const gradient = this.ctx.createLinearGradient(-width / 2, sailTopY, width / 2, sailTopY);
+      gradient.addColorStop(0,   edgeColor);
+      gradient.addColorStop(0.5, centerColor);
+      gradient.addColorStop(1,   edgeColor);
+
       this.ctx.beginPath();
       this.ctx.moveTo(0, sailTopY);
       this.ctx.lineTo(0, -sailTopY);
       this.ctx.quadraticCurveTo(sailPower + 25, 0, 0, sailTopY);
-      this.ctx.clip();
+      this.ctx.closePath();
+      this.ctx.fillStyle = gradient;
+      this.ctx.fill();
 
-      for (let t = 0; t < tearCount; t++) {
-        // Random vertical position spanning the sail height (sailTopY → -sailTopY)
-        const ty = sailTopY + lcg() * (-sailTopY - sailTopY);
-        // Random horizontal span (partial to full width)
-        const halfW = (0.3 + lcg() * 0.6) * (sailPower * 0.5 + 10);
-        const jitter = () => (lcg() - 0.5) * 4; // small vertical jitter per segment
+      // ── Tear marks ──
+      if (clampedHealth < 1.0 && openness > 0) {
+        const tearCount = Math.min(5, Math.floor((1 - clampedHealth) * 6));
+        let seed = (moduleId * 1664525 + 1013904223) >>> 0;
+        const lcg = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 0xFFFFFFFF; };
+
+        this.ctx.save();
+        this.ctx.strokeStyle = 'rgba(80, 50, 20, 0.7)';
+        this.ctx.lineWidth   = 1.8;
+        this.ctx.lineCap     = 'round';
         this.ctx.beginPath();
-        this.ctx.moveTo(-halfW, ty + jitter());
-        this.ctx.lineTo(-halfW * 0.3, ty + jitter());
-        this.ctx.lineTo(halfW * 0.3, ty + jitter());
-        this.ctx.lineTo(halfW, ty + jitter());
-        this.ctx.stroke();
+        this.ctx.moveTo(0, sailTopY);
+        this.ctx.lineTo(0, -sailTopY);
+        this.ctx.quadraticCurveTo(sailPower + 25, 0, 0, sailTopY);
+        this.ctx.clip();
+
+        for (let t = 0; t < tearCount; t++) {
+          const ty = sailTopY + lcg() * (-sailTopY - sailTopY);
+          const halfW = (0.3 + lcg() * 0.6) * (sailPower * 0.5 + 10);
+          const jitter = () => (lcg() - 0.5) * 4;
+          this.ctx.beginPath();
+          this.ctx.moveTo(-halfW, ty + jitter());
+          this.ctx.lineTo(-halfW * 0.3, ty + jitter());
+          this.ctx.lineTo(halfW * 0.3, ty + jitter());
+          this.ctx.lineTo(halfW, ty + jitter());
+          this.ctx.stroke();
+        }
+        this.ctx.restore();
       }
-      this.ctx.restore();
+
+      this.ctx.restore(); // end sailAlpha save
     }
 
-    // Draw the horizontal yard (mast pole) BEFORE restoring context so it rotates with the sail
+    // ── Horizontal yard (always visible — holds the sail even when cloth is shredded) ──
     this.ctx.fillStyle = '#8B4513';
     this.ctx.strokeStyle = '#654321';
     this.ctx.fillRect(-width / 20, sailTopY, width / 10, -sailTopY * 2);
     this.ctx.strokeRect(-width / 20, sailTopY, width / 10, -sailTopY * 2);
 
-    // Restore context after rotation
     this.ctx.restore();
   }
   
@@ -2753,9 +2736,13 @@ export class RenderSystem {
       lines.push(`Turn Rate: ${moduleData.maxTurnRate.toFixed(2)}`);
       lines.push(`Responsiveness: ${(moduleData.responsiveness * 100).toFixed(0)}%`);
     } else if (moduleData.kind === 'mast') {
-      const hp = Math.round((moduleData as any).health ?? 15000);
-      const maxHp = (moduleData as any).maxHealth ?? 15000;
+      const hp = Math.round(moduleData.health ?? 15000);
+      const maxHp = moduleData.maxHealth ?? 15000;
       lines.push(`Health: ${hp} / ${maxHp}`);
+      const fh = Math.round(moduleData.fiberHealth ?? 15000);
+      const fhMax = moduleData.fiberMaxHealth ?? 15000;
+      const fhPct = fhMax > 0 ? Math.round((fh / fhMax) * 100) : 100;
+      lines.push(`Sail Fibers: ${fh} / ${fhMax} (${fhPct}%)`);
       lines.push(`Sail State: ${moduleData.sailState.toUpperCase()}`);
       lines.push(`Openness: ${moduleData.openness.toFixed(0)}%`);
       lines.push(`Wind Efficiency: ${(moduleData.windEfficiency * 100).toFixed(0)}%`);

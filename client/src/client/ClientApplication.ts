@@ -573,7 +573,15 @@ export class ClientApplication {
    */
   private updateClient(deltaTime: number): void {
     const dt = deltaTime / 1000; // Convert to seconds
-    
+
+    // Re-derive the mouse world position from the current (unchanged) screen position every
+    // frame so player movement toward the mouse keeps working even when the camera pans
+    // (i.e. the mouse hasn't physically moved but the world under it has shifted).
+    const mouseScreen = this.inputManager.getMouseScreenPosition();
+    const mouseWorld  = this.camera.screenToWorld(mouseScreen);
+    this.inputManager.updateMouseWorldPosition(mouseWorld);
+    this.renderSystem.updateMousePosition(mouseWorld);
+
     // Update input (collect current input state)
     this.inputManager.update(dt);
     

@@ -335,6 +335,13 @@ export class InputManager {
   }
   
   /**
+   * Get current mouse position in screen coordinates
+   */
+  getMouseScreenPosition(): Vec2 {
+    return this.inputState.mousePosition.clone();
+  }
+
+  /**
    * Get current mouse world position
    */
   getMouseWorldPosition(): Vec2 {
