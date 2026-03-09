@@ -1187,6 +1187,86 @@ export class RenderSystem {
       this.drawLeakingPlankIcon(cx, cy, iconR);
     }
 
+    // ── DECK status ──────────────────────────────────────────────────────────
+    const deckMod = ship.modules.find(m => m.kind === 'deck');
+    if (!deckMod) {
+      // No deck present — draw a persistent orange warning at ship center
+      this.drawMissingDeckIcon(0, 0, 22);
+    } else {
+      // Deck present but damaged — draw a health bar at ship center
+      const dmd = deckMod.moduleData as any;
+      if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number'
+          && dmd.maxHealth > 0 && dmd.health < dmd.maxHealth) {
+        this.drawDeckHealthBar(0, 0, dmd.health / dmd.maxHealth);
+      }
+    }
+
+    this.ctx.restore();
+  }
+
+  /** Orange circle with "!" mark — missing deck warning. */
+  private drawMissingDeckIcon(cx: number, cy: number, r: number): void {
+    this.ctx.save();
+    this.ctx.globalAlpha = 0.82;
+
+    // Filled circle background
+    this.ctx.fillStyle = 'rgba(255,140,0,0.25)';
+    this.ctx.strokeStyle = '#ff8c00';
+    this.ctx.lineWidth = 1.5;
+    this.ctx.beginPath();
+    this.ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    // "!" exclamation mark
+    this.ctx.strokeStyle = '#ffaa33';
+    this.ctx.lineWidth = 2.2;
+    this.ctx.lineCap = 'round';
+    // Vertical bar
+    this.ctx.beginPath();
+    this.ctx.moveTo(cx, cy - r * 0.52);
+    this.ctx.lineTo(cx, cy + r * 0.12);
+    this.ctx.stroke();
+    // Dot
+    this.ctx.beginPath();
+    this.ctx.arc(cx, cy + r * 0.42, 1.6, 0, Math.PI * 2);
+    this.ctx.fillStyle = '#ffaa33';
+    this.ctx.fill();
+
+    this.ctx.restore();
+  }
+
+  /** Small horizontal health bar drawn at ship-local (cx, cy) for the deck module. */
+  private drawDeckHealthBar(cx: number, cy: number, fraction: number): void {
+    const barW = 44;
+    const barH = 6;
+    const x0 = cx - barW / 2;
+    const y0 = cy - barH / 2;
+
+    this.ctx.save();
+    this.ctx.globalAlpha = 0.85;
+
+    // Background
+    this.ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    this.ctx.beginPath();
+    this.ctx.roundRect(x0 - 1, y0 - 1, barW + 2, barH + 2, 3);
+    this.ctx.fill();
+
+    // Filled portion — gradient from orange (low) to green (full)
+    const r = Math.round(255 * (1 - fraction));
+    const g = Math.round(200 * fraction);
+    this.ctx.fillStyle = `rgb(${r},${g},30)`;
+    this.ctx.beginPath();
+    this.ctx.roundRect(x0, y0, Math.max(2, barW * fraction), barH, 2);
+    this.ctx.fill();
+
+    // Border
+    this.ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    this.ctx.lineWidth = 0.6;
+    this.ctx.beginPath();
+    this.ctx.roundRect(x0, y0, barW, barH, 2);
+    this.ctx.stroke();
+
     this.ctx.restore();
   }
 

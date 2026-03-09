@@ -255,13 +255,13 @@ export class ClientApplication {
                 const sin = Math.sin(-playerShip.rotation);
                 const localClick = Vec2.from(dx * cos - dy * sin, dx * sin + dy * cos);
                 if (PolygonUtils.pointInPolygon(localClick, playerShip.hull, 8)) {
-                  const planks = playerShip.modules.filter(m => m.kind === 'plank');
-                  const damaged = planks.filter(m => {
+                  const repairable = playerShip.modules.filter(m => m.kind === 'plank' || m.kind === 'deck');
+                  const damaged = repairable.filter(m => {
                     const md = m.moduleData as any;
                     return md && md.health < (md.maxHealth ?? 0);
                   });
                   if (damaged.length === 0) {
-                    console.log('🔨 [HAMMER] All deck planks are at full health');
+                    console.log('🔨 [HAMMER] All planks and deck are at full health');
                     return;
                   }
                   const worstPlank = damaged.reduce((worst, m) => {

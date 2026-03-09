@@ -165,6 +165,21 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
             }
         }
 
+        // Passive healing for deck at same 2.5%/s rate
+        for (uint8_t m = 0; m < ship->module_count; m++) {
+            ShipModule* mod = &ship->modules[m];
+            if (mod->type_id != MODULE_TYPE_DECK) continue;
+            if (mod->health <= 0 || mod->health >= (int32_t)mod->max_health) continue;
+            if (!(mod->state_bits & MODULE_STATE_REPAIRING)) continue;
+            float heal = (float)mod->max_health * 0.025f * dt_secs;
+            mod->health += (int32_t)heal;
+            if (mod->health >= (int32_t)mod->max_health) {
+                mod->health = (int32_t)mod->max_health;
+                mod->state_bits &= (uint16_t)~MODULE_STATE_REPAIRING;
+                mod->state_bits &= (uint16_t)~MODULE_STATE_DAMAGED;
+            }
+        }
+
         int missing = (int)ship->initial_plank_count - planks_remaining;
 
         if (missing == 0 && planks_leaking == 0) {
