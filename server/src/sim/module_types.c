@@ -55,6 +55,10 @@ ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t
             break;
             
         case MODULE_TYPE_DECK:
+            module.health     = 65000;
+            module.max_health = 65000;
+            break;
+
         case MODULE_TYPE_LADDER:
         case MODULE_TYPE_CUSTOM:
         default:

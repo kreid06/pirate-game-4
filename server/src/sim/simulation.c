@@ -1264,6 +1264,7 @@ void handle_projectile_collisions(struct Sim* sim) {
             // If ball was marked as breaching this ship but has now exited the hull, clear it
             if (proj->inside_ship_id == ship->id && !inside_hull) {
                 proj->inside_ship_id = 0;
+                if (proj->last_hit_module_id == 200) proj->last_hit_module_id = 0; // clear deck hit flag
                 continue;
             }
 
@@ -1272,6 +1273,48 @@ void handle_projectile_collisions(struct Sim* sim) {
             // ---- Ball is inside the hull polygon ----
 
             if (proj->inside_ship_id == ship->id) {
+                // ---- Deck pass-through: damage deck once per hull entry (priority) ----
+                // Deck ID is always 200; use last_hit_module_id==200 to fire only once per pass.
+                if (proj->last_hit_module_id != 200) {
+                    for (uint8_t m = 0; m < ship->module_count; m++) {
+                        ShipModule* deck = &ship->modules[m];
+                        if (deck->type_id != MODULE_TYPE_DECK) continue;
+                        if (deck->health <= 0) break;
+
+                        proj->last_hit_module_id = 200; // mark deck as hit for this pass
+
+                        float dmg_before = (float)deck->health;
+                        q16_t eff_dmg = Q16_FROM_FLOAT(
+                            Q16_TO_FLOAT(proj->damage)
+                            * ship_level_resistance_mult(&ship->level_stats));
+                        module_apply_damage(deck, eff_dmg);
+                        float deck_dmg = dmg_before - (float)deck->health;
+                        if (deck_dmg < 0) deck_dmg = 0;
+
+                        log_info("🪵 Projectile %u grazed deck on ship %u (%.0f HP remaining) — passing through",
+                                 proj->id, ship->id, (float)deck->health);
+
+                        if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                            struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                            ev->ship_id         = ship->id;
+                            ev->module_id       = deck->id;
+                            ev->is_breach       = true;
+                            ev->is_sink         = false;
+                            ev->destroyed       = (deck->health <= 0);
+                            ev->damage_dealt    = deck_dmg;
+                            ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                            ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                            ev->shooter_ship_id = proj->firing_ship_id;
+                        }
+                        if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                            struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                            if (attacker)
+                                attacker->level_stats.xp += 10u + (uint32_t)(deck_dmg / 100.0f);
+                        }
+                        break;
+                    }
+                }
+
                 // Ball already breached this hull — check for interior module hits at current position
                 int hit_m = find_module_hit(ship, lx, ly);
                 if (hit_m >= 0) {

@@ -1680,6 +1680,17 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
  * Tick world NPCs: animate movement across deck, then update world positions.
  */
 static void tick_world_npcs(float dt) {
+    // Plank centre positions in client-space local coords (match HULL_POINTS in modules.ts)
+    // Order: bow_port, bow_starboard, 3× starboard, stern_starboard, stern_port, 3× port
+    static const float s_plank_cx[10] = {
+         246.25f,  246.25f,  115.0f,  -35.0f, -185.0f,
+        -281.25f, -281.25f, -185.0f,  -35.0f,  115.0f
+    };
+    static const float s_plank_cy[10] = {
+         45.0f, -45.0f, -90.0f, -90.0f, -90.0f,
+        -45.0f,  45.0f,  90.0f,  90.0f,  90.0f
+    };
+
     for (int i = 0; i < world_npc_count; i++) {
         WorldNpc* npc = &world_npcs[i];
         if (!npc->active) continue;
@@ -1714,80 +1725,58 @@ static void tick_world_npcs(float dt) {
         }
 
         // ── Repair crew (NPC_ROLE_REPAIRER) ─────────────────────────────────────
-        // When idle, scan the ship for the most damaged module and walk over to fix
-        // it.  On arrival (WORLD_NPC_STATE_REPAIRING), apply 10%/s until full, then
-        // walk back to the idle spawn position.
         if (npc->role != NPC_ROLE_REPAIRER) continue;
+        if (!global_sim) continue;
 
-        if (npc->state == WORLD_NPC_STATE_IDLE) {
-            if (!global_sim) continue;
-
-            struct Ship* sim_ship = NULL;
-            for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-                if ((uint32_t)global_sim->ships[s].id == npc->ship_id) {
-                    sim_ship = &global_sim->ships[s];
-                    break;
-                }
+        struct Ship* sim_ship = NULL;
+        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+            if ((uint32_t)global_sim->ships[s].id == npc->ship_id) {
+                sim_ship = &global_sim->ships[s];
+                break;
             }
-            if (!sim_ship) continue;
+        }
 
-            // Pick the most-damaged (lowest HP ratio) module not already claimed
-            ShipModule* target_mod = NULL;
-            float worst_ratio = 1.0f;
-            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                ShipModule* mod = &sim_ship->modules[m];
-                if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
-                if (mod->max_health == 0) continue;
-                float ratio = (float)mod->health / (float)mod->max_health;
-                if (ratio >= 1.0f || ratio >= worst_ratio) continue;
-                // Skip if another repair crew member is already heading here
-                bool taken = false;
-                for (int j = 0; j < world_npc_count; j++) {
-                    WorldNpc* other = &world_npcs[j];
-                    if (!other->active || other->id == npc->id) continue;
-                    if (other->ship_id == npc->ship_id &&
-                        other->role == NPC_ROLE_REPAIRER &&
-                        other->assigned_cannon_id == mod->id) {
-                        taken = true;
-                        break;
+        // ── REPAIRING: actively fix the assigned module ──────────────────────────
+        if (npc->state == WORLD_NPC_STATE_REPAIRING) {
+            bool still_working = false;
+
+            if (sim_ship) {
+                uint32_t target_id = npc->assigned_cannon_id;
+
+                // If it's a plank slot that's empty, place a new plank first
+                if (target_id >= 100 && target_id <= 109) {
+                    bool module_exists = false;
+                    for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                        if ((uint32_t)sim_ship->modules[m].id == target_id) {
+                            module_exists = true; break;
+                        }
+                    }
+                    if (!module_exists && sim_ship->module_count < MAX_MODULES_PER_SHIP) {
+                        int idx = (int)(target_id - 100);
+                        Vec2Q16 pos = {
+                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(s_plank_cx[idx])),
+                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(s_plank_cy[idx]))
+                        };
+                        ShipModule new_plank = module_create((uint16_t)target_id, MODULE_TYPE_PLANK, pos, 0);
+                        new_plank.health      = new_plank.max_health / 10; // start at 10% HP
+                        new_plank.state_bits |= MODULE_STATE_DAMAGED | MODULE_STATE_REPAIRING;
+                        sim_ship->modules[sim_ship->module_count++] = new_plank;
+                        // Also register in SimpleShip so hit-event tracking stays in sync
+                        SimpleShip* simple = find_ship(npc->ship_id);
+                        if (simple && simple->module_count < MAX_MODULES_PER_SHIP)
+                            simple->modules[simple->module_count++] = new_plank;
+                        log_info("🔨 NPC %u (%s) placed missing plank %u on ship %u",
+                                 npc->id, npc->name, target_id, sim_ship->id);
                     }
                 }
-                if (!taken) {
-                    target_mod  = mod;
-                    worst_ratio = ratio;
-                }
-            }
 
-            if (target_mod) {
-                float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(target_mod->local_pos.x));
-                float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(target_mod->local_pos.y));
-                npc->target_local_x     = mx;
-                npc->target_local_y     = my;
-                npc->assigned_cannon_id = target_mod->id;
-                npc->state              = WORLD_NPC_STATE_MOVING;
-                log_info("🔧 NPC %u (%s) → walking to repair module %u (%.0f%% HP)",
-                         npc->id, npc->name, target_mod->id, worst_ratio * 100.0f);
-            }
-
-        } else if (npc->state == WORLD_NPC_STATE_REPAIRING) {
-            if (!global_sim) continue;
-
-            struct Ship* sim_ship = NULL;
-            for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-                if ((uint32_t)global_sim->ships[s].id == npc->ship_id) {
-                    sim_ship = &global_sim->ships[s];
-                    break;
-                }
-            }
-
-            bool still_working = false;
-            if (sim_ship) {
+                // Now repair the module (whether freshly placed or already present)
                 for (uint8_t m = 0; m < sim_ship->module_count; m++) {
                     ShipModule* mod = &sim_ship->modules[m];
-                    if (mod->id != npc->assigned_cannon_id) continue;
+                    if ((uint32_t)mod->id != target_id) continue;
                     if (mod->state_bits & MODULE_STATE_DESTROYED) break;
 
-                    // Initiate passive regen (2.5%/s via sim_update_ships) on arrival
+                    // Initiate passive regen (2.5%/s via sim_update_ships)
                     mod->state_bits |= MODULE_STATE_REPAIRING;
 
                     // Repair main HP at 10%/s
@@ -1796,7 +1785,7 @@ static void tick_world_npcs(float dt) {
                         mod->health += (int32_t)heal;
                         if (mod->health >= (int32_t)mod->max_health) {
                             mod->health = (int32_t)mod->max_health;
-                            mod->state_bits &= ~MODULE_STATE_DAMAGED;
+                            mod->state_bits &= ~(uint16_t)MODULE_STATE_DAMAGED;
                         } else {
                             still_working = true;
                         }
@@ -1819,13 +1808,108 @@ static void tick_world_npcs(float dt) {
             }
 
             if (!still_working) {
-                // Module is fully repaired (or destroyed) — walk back to idle position
-                log_info("✅ NPC %u (%s) finished repairing module %u",
+                log_info("✅ NPC %u (%s) finished with module %u",
                          npc->id, npc->name, npc->assigned_cannon_id);
                 npc->assigned_cannon_id = 0;
-                npc->target_local_x     = npc->idle_local_x;
-                npc->target_local_y     = npc->idle_local_y;
+                // Fall through to the IDLE scan below so the NPC goes directly to
+                // the next damaged/missing module without returning home first.
+                npc->state = WORLD_NPC_STATE_IDLE;
+            }
+        }
+
+        // ── IDLE: scan for next damaged or missing module ────────────────────────
+        // This runs both when the NPC was already idle AND immediately after
+        // finishing a repair (state was just set to IDLE above).
+        if (npc->state == WORLD_NPC_STATE_IDLE) {
+            if (!sim_ship) continue;
+
+            // --- 1. Check for missing planks (highest priority) ------------------
+            bool present[10] = {false};
+            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                uint16_t mid = sim_ship->modules[m].id;
+                if (mid >= 100 && mid <= 109) present[mid - 100] = true;
+            }
+            int missing_idx = -1;
+            for (int k = 0; k < 10; k++) {
+                if (present[k]) continue;
+                bool taken = false;
+                for (int j = 0; j < world_npc_count; j++) {
+                    WorldNpc* other = &world_npcs[j];
+                    if (!other->active || other->id == npc->id) continue;
+                    if (other->ship_id == npc->ship_id &&
+                        other->role   == NPC_ROLE_REPAIRER &&
+                        other->assigned_cannon_id == (uint32_t)(100 + k)) {
+                        taken = true; break;
+                    }
+                }
+                if (!taken) { missing_idx = k; break; }
+            }
+
+            if (missing_idx >= 0) {
+                // Stop 28 client units inward from the hull edge
+                float pcx = s_plank_cx[missing_idx], pcy = s_plank_cy[missing_idx];
+                float pmag = sqrtf(pcx * pcx + pcy * pcy);
+                if (pmag > 0.0f) { pcx -= (pcx / pmag) * 28.0f; pcy -= (pcy / pmag) * 28.0f; }
+                npc->target_local_x     = pcx;
+                npc->target_local_y     = pcy;
+                npc->assigned_cannon_id = (uint32_t)(100 + missing_idx);
                 npc->state              = WORLD_NPC_STATE_MOVING;
+                log_info("🔨 NPC %u (%s) → walking to place missing plank %u",
+                         npc->id, npc->name, 100 + missing_idx);
+                continue;
+            }
+
+            // --- 2. Check for damaged modules ------------------------------------
+            // First pass: prefer a module NOT already claimed by another NPC.
+            // If everything damaged is taken, fall back to stacking on the worst one.
+            ShipModule* target_mod  = NULL;
+            ShipModule* stack_mod   = NULL; // fallback: most-damaged taken module
+            float worst_ratio  = 1.0f;
+            float stack_ratio  = 1.0f;
+            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                ShipModule* mod = &sim_ship->modules[m];
+                if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
+                if (mod->max_health == 0) continue;
+                float ratio = (float)mod->health / (float)mod->max_health;
+                if (ratio >= 1.0f) continue;
+                bool taken = false;
+                for (int j = 0; j < world_npc_count; j++) {
+                    WorldNpc* other = &world_npcs[j];
+                    if (!other->active || other->id == npc->id) continue;
+                    if (other->ship_id == npc->ship_id &&
+                        other->role   == NPC_ROLE_REPAIRER &&
+                        other->assigned_cannon_id == (uint32_t)mod->id) {
+                        taken = true; break;
+                    }
+                }
+                if (!taken && ratio < worst_ratio) { target_mod = mod; worst_ratio = ratio; }
+                if ( taken && ratio < stack_ratio)  { stack_mod  = mod; stack_ratio = ratio; }
+            }
+            // If no untaken module available, allow stacking on the most-damaged taken one
+            if (!target_mod) target_mod = stack_mod;
+
+            if (target_mod) {
+                float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(target_mod->local_pos.x));
+                float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(target_mod->local_pos.y));
+                // Stop 28 client units inward from the hull edge
+                float mmag = sqrtf(mx * mx + my * my);
+                if (mmag > 0.0f) { mx -= (mx / mmag) * 28.0f; my -= (my / mmag) * 28.0f; }
+                npc->target_local_x     = mx;
+                npc->target_local_y     = my;
+                npc->assigned_cannon_id = (uint32_t)target_mod->id;
+                npc->state              = WORLD_NPC_STATE_MOVING;
+                log_info("🔧 NPC %u (%s) → walking to repair module %u (%.0f%% HP)",
+                         npc->id, npc->name, target_mod->id, worst_ratio * 100.0f);
+                continue;
+            }
+
+            // --- 3. Nothing to do: drift back to idle position if not already there
+            float hdx = npc->idle_local_x - npc->local_x;
+            float hdy = npc->idle_local_y - npc->local_y;
+            if (sqrtf(hdx * hdx + hdy * hdy) > 1.0f) {
+                npc->target_local_x = npc->idle_local_x;
+                npc->target_local_y = npc->idle_local_y;
+                npc->state          = WORLD_NPC_STATE_MOVING;
             }
         }
     }
@@ -3962,9 +4046,18 @@ int websocket_server_update(struct Sim* sim) {
                                                 strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
                                             } else {
                                                 uint16_t plank_id = 100 + (uint16_t)missing_idx;
+                                                static const float pp_cx[10] = {
+                                                     246.25f,  246.25f,  115.0f,  -35.0f, -185.0f,
+                                                    -281.25f, -281.25f, -185.0f,  -35.0f,  115.0f };
+                                                static const float pp_cy[10] = {
+                                                     45.0f, -45.0f, -90.0f, -90.0f, -90.0f,
+                                                    -45.0f,  45.0f,  90.0f,  90.0f,  90.0f };
+                                                Vec2Q16 plank_pos = {
+                                                    Q16_FROM_FLOAT(CLIENT_TO_SERVER(pp_cx[missing_idx])),
+                                                    Q16_FROM_FLOAT(CLIENT_TO_SERVER(pp_cy[missing_idx]))
+                                                };
                                                 ShipModule new_plank = module_create(
-                                                    plank_id, MODULE_TYPE_PLANK,
-                                                    (Vec2Q16){0, 0}, 0);
+                                                    plank_id, MODULE_TYPE_PLANK, plank_pos, 0);
                                                 // New planks start at 10% HP and heal passively
                                                 new_plank.health = new_plank.max_health / 10;
                                                 new_plank.state_bits |= MODULE_STATE_DAMAGED;
