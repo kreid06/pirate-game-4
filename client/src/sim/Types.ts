@@ -277,3 +277,18 @@ export interface GhostPlacement {
   /** Ship-local rotation in radians. */
   localRot: number;
 }
+
+// ── Weapon control groups ──────────────────────────────────────────────────
+
+/** Firing mode for a weapon control group. */
+export type WeaponGroupMode = 'aiming' | 'freefire' | 'haltfire' | 'targetfire';
+
+/** State for one of the 10 user-defined weapon control groups. */
+export interface WeaponGroupState {
+  /** Module IDs of cannons assigned to this group. */
+  cannonIds: number[];
+  /** Current firing mode for this group. */
+  mode: WeaponGroupMode;
+  /** For targetfire mode: the ship ID the group is locked onto. -1 = none. */
+  targetId: number;
+}

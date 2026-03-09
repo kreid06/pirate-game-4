@@ -84,12 +84,20 @@ export class InputManager {
   
   // Cannon control callbacks
   public onCannonAim: ((aimAngle: number) => void) | null = null;
-  public onCannonFire: ((cannonIds?: number[], fireAll?: boolean, ammoType?: number) => void) | null = null;
+  public onCannonFire: ((cannonIds?: number[], fireAll?: boolean, ammoType?: number, weaponGroup?: number) => void) | null = null;
 
   // Inventory callbacks
   public onSlotSelect: ((slot: number) => void) | null = null;
   /** Q key — deselect the active hotbar slot (unequip). */
   public onUnequip: (() => void) | null = null;
+  /** Digit 1–9 on helm — selects weapon group 0–9. */
+  public onWeaponGroupSelect: ((group: number) => void) | null = null;
+  /** Ctrl+left-click on a cannon: true = add to active weapon group, false = remove. */
+  public onGroupAssign: ((add: boolean) => void) | null = null;
+  /** Right-click intercepted by UI (e.g. cycling weapon group mode on hotbar). Returns true if consumed. */
+  public onUIRightClick: ((x: number, y: number) => boolean) | null = null;
+  /** Right-click on world while on helm in targetfire mode — world position to lock onto. */
+  public onGroupTarget: ((worldPos: Vec2) => void) | null = null;
 
   // UI click intercept — return true to consume the click before game logic runs
   public onUIClick: ((x: number, y: number) => boolean) | null = null;
@@ -122,6 +130,14 @@ export class InputManager {
   // Ship control state tracking
   private mountKind: 'none' | 'helm' | 'cannon' | 'mast' = 'none';
   private get isMountedToHelm(): boolean { return this.mountKind === 'helm'; }
+  /** Active weapon group while on helm: 0=LEFT, 1=RIGHT, 2=FORE, 3=AFT, -1=none */
+  public activeWeaponGroup: number = -1;
+  /** Returns the current mount kind. */
+  public getMountKind(): string { return this.mountKind; }
+  /** Returns true while Ctrl is currently held — used to show weapon group overlay. */
+  public isCtrlHeld(): boolean {
+    return this.inputState.pressedKeys.has('ControlLeft') || this.inputState.pressedKeys.has('ControlRight');
+  }
   private currentSailOpenness: number = 100; // Start at 100% (full sails)
   private currentSailAngle: number = 0; // Start at 0 degrees
   private lastRudderState: { left: boolean; right: boolean } = { left: false, right: false };
@@ -419,6 +435,7 @@ export class InputManager {
       }
     } else {
       console.log(`⚓ [INPUT] Player dismounted - player controls active`);
+      this.activeWeaponGroup = -1;
     }
   }
 
@@ -937,7 +954,17 @@ export class InputManager {
         break;
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
-        if (this.onSlotSelect) this.onSlotSelect(parseInt(event.code.replace('Digit', '')) - 1);
+        if (this.mountKind === 'helm') {
+          // On helm: Digit1-4 selects weapon group (LEFT/RIGHT/FORE/AFT)
+          const digit = parseInt(event.code.replace('Digit', ''));
+          if (digit >= 1 && digit <= 4) {
+            this.activeWeaponGroup = digit - 1;
+            if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
+            event.preventDefault();
+          }
+        } else {
+          if (this.onSlotSelect) this.onSlotSelect(parseInt(event.code.replace('Digit', '')) - 1);
+        }
         break;
       case 'Digit0':
         if (this.onSlotSelect) this.onSlotSelect(9);
@@ -1005,6 +1032,12 @@ export class InputManager {
       const timeSinceLastClick = now - this.lastLeftClickTime;
       const isDoubleClick = timeSinceLastClick < this.DOUBLE_CLICK_THRESHOLD;
 
+      // Ctrl+left-click: assign/remove cannon from active weapon group — never fires
+      if (event.ctrlKey) {
+        if (this.onGroupAssign) this.onGroupAssign(!event.shiftKey);
+        return;
+      }
+
       if (this.mountKind === 'none') {
         // Walking: left-click = attack toward mouse
         if (this.onActionEvent) {
@@ -1014,12 +1047,12 @@ export class InputManager {
         // Mounted to helm or cannon: fire cannon(s)
         if (isDoubleClick) {
           console.log('💥💥 Double-click: Fire ALL cannons!');
-          if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType);
+          if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined);
           // Cannon will reload into the pending ammo type
           this.loadedAmmoType = this.selectedAmmoType;
         } else {
           console.log('💥 Single-click: Fire aimed cannons');
-          if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType);
+          if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined);
           // Cannon will reload into the pending ammo type
           this.loadedAmmoType = this.selectedAmmoType;
         }
@@ -1032,6 +1065,12 @@ export class InputManager {
       if (this.buildMenuOpen && this.onBuildRightClick) {
         this.onBuildRightClick(this.inputState.mouseWorldPosition);
       } else {
+        if (this.onUIRightClick && this.onUIRightClick(event.offsetX, event.offsetY)) return;
+        // Helm mode: right-click = target-fire lock onto entity at cursor
+        if (this.mountKind === 'helm' && this.onGroupTarget) {
+          this.onGroupTarget(this.inputState.mouseWorldPosition);
+          return;
+        }
         this.inputState.rightMouseDown = true;
         // Aiming will be handled in update() while right mouse is held
       }

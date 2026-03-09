@@ -27,7 +27,7 @@ import { UIManager } from './ui/UIManager.js';
 import { AudioManager } from './audio/AudioManager.js';
 
 // Core Simulation Types
-import { WorldState, Ship, InputFrame } from '../sim/Types.js';
+import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode } from '../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../sim/Types.js';
 import { createEmptyInventory } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
@@ -94,6 +94,11 @@ export class ClientApplication {
   private buildMenuOpen = false;
   private ghostPlacements: GhostPlacement[] = [];
   private pendingGhostKind: GhostModuleKind | null = null;
+
+  // Weapon control groups — 10 user-defined groups (0–9), persistent per session
+  private controlGroups: Map<number, WeaponGroupState> = new Map(
+    Array.from({ length: 10 }, (_, i) => [i, { cannonIds: [], mode: 'haltfire' as WeaponGroupMode, targetId: -1 }])
+  );
   // Optimistic modules placed locally, keyed by ship ID, with expiry timestamp.
   // Overlaid on top of worldToRender every frame so they appear in online mode.
   private localPendingModules = new Map<number, { module: ShipModule; expiry: number }[]>();
@@ -421,7 +426,21 @@ export class ClientApplication {
       this.inputManager.onCannonAim = (aimAngle) => {
         this.networkManager.sendCannonAim(aimAngle);
       };
-      this.inputManager.onCannonFire = (cannonIds, fireAll, ammoType) => {
+      this.inputManager.onCannonFire = (cannonIds, fireAll, ammoType, weaponGroup) => {
+        // If a weapon group is selected and not firing all, use the control group's cannon list
+        if (weaponGroup !== undefined && weaponGroup >= 0 && !fireAll) {
+          const groupState = this.controlGroups.get(weaponGroup);
+          if (groupState) {
+            // haltfire — never fire
+            if (groupState.mode === 'haltfire') return;
+            // Use the group's assigned cannon list (aiming / freefire / targetfire all fire it)
+            const groupIds = groupState.cannonIds;
+            if (groupIds.length > 0) {
+              this.networkManager.sendCannonFire(groupIds, false, ammoType ?? 0);
+              return;
+            }
+          }
+        }
         this.networkManager.sendCannonFire(cannonIds, fireAll, ammoType ?? 0);
       };
       this.inputManager.onForceReload = () => {
@@ -588,6 +607,55 @@ export class ClientApplication {
         return this.uiManager?.handleClick(x, y) ?? false;
       };
 
+      // Ctrl+left-click: assign/remove cannon from the active weapon group
+      this.inputManager.onGroupAssign = (add: boolean) => {
+        const hovered = this.renderSystem.getHoveredModule();
+        if (!hovered || hovered.module.kind !== 'cannon') return;
+        const cannonId = hovered.module.id;
+        const group = this.inputManager.activeWeaponGroup;
+        if (group < 0) return;
+        const state = this.controlGroups.get(group);
+        if (!state) return;
+        if (add) {
+          // Remove from any previous group first (a cannon belongs to at most one group)
+          for (const [, s] of this.controlGroups) s.cannonIds = s.cannonIds.filter(id => id !== cannonId);
+          if (!state.cannonIds.includes(cannonId)) state.cannonIds.push(cannonId);
+          console.log(`🎯 Cannon ${cannonId} → group G${group}`);
+        } else {
+          state.cannonIds = state.cannonIds.filter(id => id !== cannonId);
+          console.log(`❌ Cannon ${cannonId} removed from group G${group}`);
+        }
+      };
+
+      // Right-click intercepted by UIManager (e.g. cycling weapon group mode on hotbar)
+      this.inputManager.onUIRightClick = (x, y) => {
+        return this.uiManager?.handleRightClick(x, y) ?? false;
+      };
+
+      // Right-click on world while on helm = lock target for the active weapon group
+      this.inputManager.onGroupTarget = (worldPos) => {
+        const group = this.inputManager.activeWeaponGroup;
+        if (group < 0) return;
+        const state = this.controlGroups.get(group);
+        if (!state || state.mode !== 'targetfire') return;
+        const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        if (!ws) return;
+        const pid = this.networkManager.getAssignedPlayerId();
+        const player = pid !== null ? ws.players.find(p => p.id === pid) : null;
+        const myShipId = player?.carrierId ?? -1;
+        let best = -1;
+        let bestDist = 600;
+        for (const ship of ws.ships) {
+          if (ship.id === myShipId) continue;
+          const dx = ship.position.x - worldPos.x;
+          const dy = ship.position.y - worldPos.y;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < bestDist) { bestDist = d; best = ship.id; }
+        }
+        state.targetId = best;
+        console.log(`🎯 Group G${group} target → ship ${best} (dist ${bestDist.toFixed(0)})`);
+      };
+
       // Set up mouse tracking for mouse-relative movement
       this.setupMouseTracking();
       
@@ -611,6 +679,16 @@ export class ClientApplication {
       this.uiManager.onBuildItemSelect = (item) => {
         this.buildSelectedItem = item;
         this.syncBuildModeState();
+      };
+
+      // Weapon group mode cycling (right-click on hotbar slot while on helm)
+      this.uiManager.onGroupModeChange = (groupIndex: number, mode: WeaponGroupMode) => {
+        const state = this.controlGroups.get(groupIndex);
+        if (state) {
+          state.mode = mode;
+          if (mode !== 'targetfire') state.targetId = -1; // clear lock when leaving targetfire
+          console.log(`🎯 Group G${groupIndex} mode → ${mode}`);
+        }
       };
 
       // Build panel: player selected a module type for ghost placement
@@ -895,6 +973,8 @@ export class ClientApplication {
       this.renderSystem.playerAimAngleRelative = this.inputManager?.cannonAimAngleRelative ?? 0;
       this.renderSystem.selectedAmmoType = this.inputManager?.getLoadedAmmoType() ?? 0;
       this.renderSystem.npcTaskMap = this.uiManager.getNpcTaskMap();
+      this.renderSystem.controlGroups = this.controlGroups as Map<number, { cannonIds: number[]; mode: string }>;
+      this.renderSystem.showGroupOverlay = this.inputManager?.isCtrlHeld() ?? false;
 
       // Keep explicit build mode UI in sync with latest world state (sail count may change)
       if (this.explicitBuildMode) this.syncBuildModeState();
@@ -913,6 +993,9 @@ export class ClientApplication {
       const playerShipId = assignedPlayerId !== null
         ? (worldToRender.players.find(p => p.id === assignedPlayerId)?.carrierId ?? 0)
         : 0;
+      const playerShip = playerShipId
+        ? (worldToRender.ships.find(s => s.id === playerShipId) ?? null)
+        : null;
       this.uiManager.render(this.renderSystem.getContext(), {
         worldState: worldToRender,
         camera: this.camera,
@@ -923,6 +1006,10 @@ export class ClientApplication {
         playerShipId,
         selectedAmmoType: this.inputManager?.getLoadedAmmoType() ?? 0,
         pendingAmmoType: this.inputManager?.selectedAmmoType ?? 0,
+        mountKind: this.inputManager?.getMountKind() ?? 'none',
+        activeWeaponGroup: this.inputManager?.activeWeaponGroup ?? -1,
+        playerShip,
+        controlGroups: this.controlGroups,
       });
     }
   }

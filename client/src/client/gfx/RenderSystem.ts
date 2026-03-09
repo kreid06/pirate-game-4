@@ -80,6 +80,10 @@ export class RenderSystem {
   public localPlayerId: number | null = null;
   /** Player position info used by the hover tooltip to determine interact range. */
   public playerInteractInfo: { worldPos: Vec2; localPos: Vec2 | null; carrierId: number | null } | null = null;
+  /** Weapon control groups — set by ClientApplication each frame. Null when not on helm. */
+  public controlGroups: Map<number, { cannonIds: number[]; mode: string }> | null = null;
+  /** When true, draws group membership badges on all cannons (while Ctrl is held). */
+  public showGroupOverlay: boolean = false;
   /** Cached local player company for the current frame — set at start of queueWorldObjects. */
   private _localCompanyId: number = 0;
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
@@ -871,6 +875,9 @@ export class RenderSystem {
       this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
       this.queueRenderItem(4, 'cannon-aim-guides', () => this.drawCannonAimGuides(ship, worldState, camera), 1);
       this.queueRenderItem(4, 'rudder', () => this.drawShipRudder(ship, camera));
+      if (this.showGroupOverlay && this.controlGroups) {
+        this.queueRenderItem(5, `cannon-groups-${ship.id}`, () => this.drawCannonGroupOverlay(ship, camera));
+      }
       this.queueRenderItem(5, 'steering-wheels', () => this.drawShipSteeringWheels(ship, camera));
       this.queueRenderItem(5, 'ladders', () => this.drawShipLadders(ship, camera));
       this.queueRenderItem(5, 'sail-ropes', () => this.drawShipSailRopes(ship, camera));
@@ -2055,6 +2062,83 @@ export class RenderSystem {
       }
     }
     return tMin;
+  }
+
+  private drawCannonGroupOverlay(ship: Ship, camera: Camera): void {
+    if (!this.controlGroups) return;
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const GROUP_COLORS = [
+      '#e74c3c', '#3498db', '#2ecc71', '#f1c40f', '#9b59b6',
+      '#e67e22', '#1abc9c', '#ec407a', '#26c6da', '#9ccc65',
+    ];
+    const MODE_COLORS: Record<string, string> = {
+      aiming:     '#3498db',
+      freefire:   '#e67e22',
+      haltfire:   '#e74c3c',
+      targetfire: '#ff66cc',
+    };
+
+    // Build cannonId → { group index, mode } lookup
+    const cannonGroupMap = new Map<number, { g: number; mode: string }>();
+    this.controlGroups.forEach((state, g) => {
+      for (const id of state.cannonIds) cannonGroupMap.set(id, { g, mode: state.mode });
+    });
+
+    const screenPos = camera.worldToScreen(ship.position);
+    const cs = camera.getState();
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cs.zoom, cs.zoom);
+    this.ctx.rotate(ship.rotation - cs.rotation);
+
+    for (const mod of ship.modules) {
+      if (mod.kind !== 'cannon') continue;
+      const info = cannonGroupMap.get(mod.id);
+      const lx = mod.localPos.x;
+      const ly = mod.localPos.y;
+      const lr = (mod as { localRot?: number }).localRot ?? 0;
+
+      this.ctx.save();
+      this.ctx.translate(lx, ly);
+      this.ctx.rotate(lr);
+
+      if (info) {
+        const color    = GROUP_COLORS[info.g % 10];
+        const modeColor = MODE_COLORS[info.mode] ?? '#999';
+        const lw = 3 / cs.zoom;
+        // Colored bounding box
+        this.ctx.strokeStyle = color;
+        this.ctx.lineWidth = lw;
+        this.ctx.strokeRect(-15, -10, 30, 20);
+        // Group index badge (top-left)
+        const r = 7 / cs.zoom;
+        this.ctx.fillStyle = color;
+        this.ctx.beginPath();
+        this.ctx.arc(-9, -5, r, 0, Math.PI * 2);
+        this.ctx.fill();
+        this.ctx.fillStyle = '#fff';
+        this.ctx.font = `bold ${10 / cs.zoom}px Consolas, monospace`;
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'middle';
+        this.ctx.fillText(String(info.g), -9, -5);
+        // Mode dot (bottom-right)
+        this.ctx.fillStyle = modeColor;
+        this.ctx.beginPath();
+        this.ctx.arc(9, 5, 4 / cs.zoom, 0, Math.PI * 2);
+        this.ctx.fill();
+      } else {
+        // Unassigned — dim outline only
+        this.ctx.strokeStyle = 'rgba(200,200,200,0.3)';
+        this.ctx.lineWidth = 1.5 / cs.zoom;
+        this.ctx.strokeRect(-15, -10, 30, 20);
+      }
+
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
   }
 
   private drawCannonAimGuides(ship: Ship, worldState: WorldState, camera: Camera): void {

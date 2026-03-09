@@ -6,7 +6,7 @@
  */
 
 import { ClientConfig } from '../ClientConfig.js';
-import { WorldState, Npc } from '../../sim/Types.js';
+import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState } from '../../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
@@ -30,6 +30,14 @@ export interface UIRenderContext {
   /** Currently selected ammo type: 0 = Cannonball, 1 = Bar Shot */
   selectedAmmoType?: number;   // loaded (in barrel right now)
   pendingAmmoType?: number;    // queued for next reload
+  /** Current mount kind: 'none' | 'helm' | 'cannon' | 'mast' */
+  mountKind?: string;
+  /** Active weapon group on helm: 0–9, -1=none */
+  activeWeaponGroup?: number;
+  /** The ship the player is currently on (for cannon group counts). */
+  playerShip?: Ship | null;
+  /** User-defined weapon control groups — set while on helm. */
+  controlGroups?: Map<number, WeaponGroupState>;
 }
 
 /**
@@ -91,6 +99,11 @@ export class UIManager {
 
   /** Called when the player clicks a build item button (cannon/sail). */
   public onBuildItemSelect: ((item: 'cannon' | 'sail') => void) | null = null;
+  /** Called when a weapon group has its mode cycled via right-click. */
+  public onGroupModeChange: ((groupIndex: number, mode: WeaponGroupMode) => void) | null = null;
+  /** Cached from last render frame — used by handleRightClick for hotbar hit-testing. */
+  private _cachedHelmActiveGroup: number = -1;
+  private _cachedControlGroups: Map<number, WeaponGroupState> | null = null;
 
   // ── Ghost build menu state ─────────────────────────────────────────────────
   private buildMenuOpen = false;
@@ -185,7 +198,41 @@ export class UIManager {
   /**
    * Render all UI elements
    */
+  /**
+   * Handle a right-click: if the cursor is over a weapon group hotbar slot while on helm,
+   * cycles that group’s mode and returns true to consume the click.
+   */
+  handleRightClick(x: number, y: number): boolean {
+    if (!this._cachedControlGroups) return false;
+    const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+    const totalW = INVENTORY_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+    const startX = Math.round((this.canvas.width - totalW) / 2);
+    const startY = this.canvas.height - totalH - 8;
+    if (y < startY || y > startY + PADDING + SLOT_SIZE) return false;
+    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+      const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+      if (x >= sx && x <= sx + SLOT_SIZE) {
+        const state = this._cachedControlGroups.get(i);
+        if (!state) return false;
+        const CYCLE: WeaponGroupMode[] = ['aiming', 'freefire', 'haltfire', 'targetfire'];
+        const next = CYCLE[(CYCLE.indexOf(state.mode) + 1) % CYCLE.length];
+        if (this.onGroupModeChange) this.onGroupModeChange(i, next);
+        return true;
+      }
+    }
+    return false;
+  }
+
   render(ctx: CanvasRenderingContext2D, context: UIRenderContext): void {
+    // Cache helm state so handleRightClick can do hotbar hit-testing
+    if (context.mountKind === 'helm' && context.controlGroups) {
+      this._cachedHelmActiveGroup = context.activeWeaponGroup ?? -1;
+      this._cachedControlGroups = context.controlGroups;
+    } else {
+      this._cachedControlGroups = null;
+    }
+
     // Render elements in order
     const renderOrder: UIElementType[] = [
       UIElementType.HUD,
@@ -211,8 +258,8 @@ export class UIManager {
     // Always render FPS in top-right corner
     this.renderFPS(ctx, context);
 
-    // Ammo selector widget — bottom-left, shown when aboard a ship with cannons
-    if (context.playerShipId) {
+    // Ammo selector widget — only when mounted to a cannon
+    if (context.mountKind === 'cannon') {
       this.renderAmmoSelector(ctx, context.selectedAmmoType ?? 0, context.pendingAmmoType ?? context.selectedAmmoType ?? 0);
     }
 
@@ -1163,8 +1210,11 @@ class HUDElement implements UIElement {
       this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, plankRatio);
     }
 
-    // Hotbar
-    this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot);
+    // Hotbar — in ship/helm mode reuses same grid to show weapon groups
+    const helmMode = context.mountKind === 'helm'
+      ? { activeGroup: context.activeWeaponGroup ?? -1, playerShip: context.playerShip ?? null, controlGroups: context.controlGroups }
+      : undefined;
+    this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot, helmMode);
 
     // Equipment panel (armor + shield)
     this.renderEquipmentPanel(ctx, ctx.canvas, player.inventory.equipment.armor, player.inventory.equipment.shield);
@@ -1174,7 +1224,8 @@ class HUDElement implements UIElement {
     ctx: CanvasRenderingContext2D,
     canvas: HTMLCanvasElement,
     slots: { item: ItemKind; quantity: number }[],
-    activeSlot: number
+    activeSlot: number,
+    weaponMode?: { activeGroup: number; playerShip: Ship | null; controlGroups?: Map<number, WeaponGroupState> },
   ): void {
     const SLOT_SIZE = 48;
     const SLOT_GAP = 4;
@@ -1184,6 +1235,21 @@ class HUDElement implements UIElement {
     const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
     const startX = Math.round((canvas.width - totalW) / 2);
     const startY = canvas.height - totalH - 8;
+
+    // ── Weapon-group display constants (used in helm mode) ─────────────────
+    const MODE_LABELS: Record<string, string> = {
+      aiming:     'AIM',
+      freefire:   'FREE',
+      haltfire:   'HALT',
+      targetfire: 'LOCK',
+    };
+    const MODE_COLORS: Record<string, string> = {
+      aiming:     '#3498db',
+      freefire:   '#e67e22',
+      haltfire:   '#555',
+      targetfire: '#ff66cc',
+    };
+    // ── ─────────────────────────────────────────────────────────────────────
 
     // Background panel
     ctx.save();
@@ -1198,40 +1264,94 @@ class HUDElement implements UIElement {
       const def  = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
       const sx   = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
       const sy   = startY + PADDING;
-      const isActive = i === activeSlot && activeSlot < 10;
+      const isActive = weaponMode
+        ? i === weaponMode.activeGroup
+        : (i === activeSlot && activeSlot < 10);
 
       // Slot background
       ctx.fillStyle = isActive ? 'rgba(255,220,60,0.18)' : 'rgba(30,30,40,0.9)';
       ctx.fillRect(sx, sy, SLOT_SIZE, SLOT_SIZE);
 
       // Slot border (bright gold when active)
-      ctx.strokeStyle = isActive ? '#ffd700' : def.borderColor;
+      ctx.strokeStyle = isActive ? '#ffd700' : (weaponMode ? 'rgba(120,120,140,0.55)' : def.borderColor);
       ctx.lineWidth = isActive ? 2.5 : 1;
       ctx.strokeRect(sx, sy, SLOT_SIZE, SLOT_SIZE);
 
-      // Item fill color swatch
-      if (slot.item !== 'none') {
-        const swatchPad = 6;
-        ctx.fillStyle = def.color;
-        ctx.fillRect(sx + swatchPad, sy + swatchPad, SLOT_SIZE - swatchPad * 2, SLOT_SIZE - swatchPad * 2);
-        ctx.strokeStyle = def.borderColor;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(sx + swatchPad, sy + swatchPad, SLOT_SIZE - swatchPad * 2, SLOT_SIZE - swatchPad * 2);
+      if (weaponMode) {
+        // ── Ship / helm mode: show weapon control group ──────────────────────
+        const cgroups  = weaponMode.controlGroups ?? new Map<number, WeaponGroupState>();
+        const state    = cgroups.get(i);
+        const count    = state?.cannonIds.length ?? 0;
+        const mode     = state?.mode ?? 'haltfire';
+        const modeCol  = MODE_COLORS[mode] ?? '#555';
+        const modeLbl  = MODE_LABELS[mode] ?? mode;
+        const hasLock  = mode === 'targetfire' && state != null && state.targetId >= 0;
 
-        // Symbol
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 18px Consolas, monospace';
-        ctx.textAlign = 'center';
+        // Group number label (top-centre)
+        ctx.font         = 'bold 11px Consolas, monospace';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle    = isActive ? '#ffd700' : 'rgba(160,160,180,0.75)';
+        ctx.fillText(`G${i}`, sx + SLOT_SIZE / 2, sy + 3);
+
+        // Cannon count (large, centre)
+        if (count > 0) {
+          ctx.font         = 'bold 20px Consolas, monospace';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle    = isActive ? '#ffffff' : 'rgba(200,200,220,0.9)';
+          ctx.fillText(String(count), sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2 - 3);
+          ctx.font         = '8px Consolas, monospace';
+          ctx.fillStyle    = isActive ? 'rgba(255,255,255,0.65)' : 'rgba(140,140,160,0.6)';
+          ctx.fillText(count === 1 ? 'cannon' : 'cannons', sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2 + 10);
+        } else {
+          ctx.font         = '10px Consolas, monospace';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle    = 'rgba(70,70,80,0.5)';
+          ctx.fillText('empty', sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
+        }
+
+        // Mode badge strip along bottom
+        const BADGE_H = 13;
+        ctx.fillStyle = count > 0 ? modeCol : 'rgba(50,50,60,0.85)';
+        ctx.fillRect(sx + 1, sy + SLOT_SIZE - BADGE_H - 1, SLOT_SIZE - 2, BADGE_H);
+        ctx.font         = 'bold 8px Consolas, monospace';
         ctx.textBaseline = 'middle';
-        ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
+        ctx.fillStyle    = '#fff';
+        ctx.fillText(count > 0 ? modeLbl : '---', sx + SLOT_SIZE / 2, sy + SLOT_SIZE - BADGE_H / 2 - 1);
 
-        // Stack count (bottom-right, only for stackables > 1)
-        if (slot.quantity > 1) {
-          ctx.fillStyle = '#ffee88';
-          ctx.font = 'bold 11px Consolas, monospace';
-          ctx.textAlign = 'right';
-          ctx.textBaseline = 'bottom';
-          ctx.fillText(String(slot.quantity), sx + SLOT_SIZE - 3, sy + SLOT_SIZE - 3);
+        // Target-locked dot (top-right corner)
+        if (hasLock) {
+          ctx.fillStyle = '#ff66cc';
+          ctx.beginPath();
+          ctx.arc(sx + SLOT_SIZE - 5, sy + 5, 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else {
+        // ── Normal inventory mode ─────────────────────────────────────────────
+        // Item fill color swatch
+        if (slot.item !== 'none') {
+          const swatchPad = 6;
+          ctx.fillStyle = def.color;
+          ctx.fillRect(sx + swatchPad, sy + swatchPad, SLOT_SIZE - swatchPad * 2, SLOT_SIZE - swatchPad * 2);
+          ctx.strokeStyle = def.borderColor;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(sx + swatchPad, sy + swatchPad, SLOT_SIZE - swatchPad * 2, SLOT_SIZE - swatchPad * 2);
+
+          // Symbol
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 18px Consolas, monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
+
+          // Stack count (bottom-right, only for stackables > 1)
+          if (slot.quantity > 1) {
+            ctx.fillStyle = '#ffee88';
+            ctx.font = 'bold 11px Consolas, monospace';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(String(slot.quantity), sx + SLOT_SIZE - 3, sy + SLOT_SIZE - 3);
+          }
         }
       }
 
