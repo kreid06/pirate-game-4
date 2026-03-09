@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
@@ -52,6 +52,7 @@ export class RenderSystem {
   // Hover state
   private mouseWorldPos: Vec2 | null = null;
   private hoveredModule: { ship: Ship; module: any } | null = null;
+  private hoveredNpc: Npc | null = null;
 
   // Build mode state
   private buildMode: boolean = false;
@@ -569,6 +570,7 @@ export class RenderSystem {
     
     // Detect hovered module
     this.detectHoveredModule(worldState);
+    this.detectHoveredNpc(worldState);
 
     // In build mode, detect which missing plank slot is under the cursor
     if (this.buildMode) {
@@ -639,6 +641,7 @@ export class RenderSystem {
     
     // Draw hover tooltip (screen space, on top of everything)
     this.drawHoverTooltip(camera);
+    this.drawNpcTooltip(camera);
   }
   
   /**
@@ -3169,6 +3172,94 @@ export class RenderSystem {
     }
   }
   
+  /**
+  /**
+   * Detect which NPC (if any) the mouse is hovering over.
+   */
+  private detectHoveredNpc(worldState: WorldState): void {
+    this.hoveredNpc = null;
+    if (!this.mouseWorldPos) return;
+    const HOVER_RADIUS = 22; // world units
+    let bestDist = HOVER_RADIUS;
+    for (const npc of worldState.npcs) {
+      let worldPos = npc.position;
+      if (npc.shipId) {
+        const ship = worldState.ships.find(s => s.id === npc.shipId);
+        if (ship && npc.localPosition) {
+          const cosR = Math.cos(ship.rotation);
+          const sinR = Math.sin(ship.rotation);
+          worldPos = Vec2.from(
+            ship.position.x + npc.localPosition.x * cosR - npc.localPosition.y * sinR,
+            ship.position.y + npc.localPosition.x * sinR + npc.localPosition.y * cosR
+          );
+        }
+      }
+      const dist = this.mouseWorldPos.distanceTo(worldPos);
+      if (dist < bestDist) { bestDist = dist; this.hoveredNpc = npc; }
+    }
+  }
+
+  /**
+   * Draw hover tooltip for a hovered NPC.
+   */
+  private drawNpcTooltip(camera: Camera): void {
+    if (!this.hoveredNpc || !this.mouseWorldPos) return;
+    // Skip if a module tooltip is already showing (avoid overlap)
+    if (this.hoveredModule) return;
+
+    const npc = this.hoveredNpc;
+    const COMPANY_NAMES: Record<number, string> = {
+      [COMPANY_NEUTRAL]: 'Neutral',
+      [COMPANY_PIRATES]: 'Pirates',
+      [COMPANY_NAVY]:    'Navy',
+    };
+    const ROLE_NAMES: Record<number, string> = {
+      0: 'None', 1: 'Gunner', 2: 'Helmsman', 3: 'Rigger', 4: 'Repairer',
+    };
+    const STATE_NAMES: Record<number, string> = {
+      0: 'Idle', 1: 'Moving', 2: 'At Cannon', 3: 'Repairing',
+    };
+    const companyStr = COMPANY_NAMES[npc.companyId] ?? `ID ${npc.companyId}`;
+    const lines: string[] = [
+      npc.name,
+      `ID: ${npc.id}`,
+      `Company: ${companyStr} (${npc.companyId})`,
+      `Role: ${ROLE_NAMES[npc.role] ?? npc.role}`,
+      `State: ${STATE_NAMES[npc.state] ?? npc.state}`,
+    ];
+    if (npc.shipId) lines.push(`Ship: ${npc.shipId}`);
+
+    const screenPos = camera.worldToScreen(this.mouseWorldPos);
+    const padding = 10;
+    const lineHeight = 18;
+
+    this.ctx.font = '14px monospace';
+    this.ctx.textAlign = 'left';
+    this.ctx.textBaseline = 'top';
+    let maxWidth = 0;
+    for (const line of lines) maxWidth = Math.max(maxWidth, this.ctx.measureText(line).width);
+
+    const boxWidth  = maxWidth + padding * 2;
+    const boxHeight = lines.length * lineHeight + padding * 2;
+
+    let tx = screenPos.x + 15;
+    let ty = screenPos.y + 15;
+    if (tx + boxWidth  > this.canvas.width)  tx = screenPos.x - boxWidth  - 15;
+    if (ty + boxHeight > this.canvas.height) ty = screenPos.y - boxHeight - 15;
+
+    this.ctx.fillStyle   = 'rgba(0,0,0,0.85)';
+    this.ctx.strokeStyle = '#aac8ff';
+    this.ctx.lineWidth   = 2;
+    this.ctx.fillRect(tx, ty, boxWidth, boxHeight);
+    this.ctx.strokeRect(tx, ty, boxWidth, boxHeight);
+
+    // Header line in yellow, rest in white
+    for (let i = 0; i < lines.length; i++) {
+      this.ctx.fillStyle = i === 0 ? '#ffe066' : '#ffffff';
+      this.ctx.fillText(lines[i], tx + padding, ty + padding + i * lineHeight);
+    }
+  }
+
   /**
    * Draw hover tooltip for modules
    */

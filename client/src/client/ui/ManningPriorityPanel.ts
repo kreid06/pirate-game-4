@@ -74,14 +74,20 @@ export class ManningPriorityPanel {
 
     const shipNpcs = npcs.filter(n => n.shipId === shipId);
 
-    // Seed task lists from server-authoritative NPC states
+    // Seed task lists from the server-authoritative NPC role field.
+    // role 1 = Gunner  → Cannons
+    // role 3 = Rigger  → Sails
+    // role 4 = Repairer → Repairs
+    // role 0/2 (None/Helmsman) → unassigned/Idle
     for (const npc of shipNpcs) {
-      if (npc.state === NPC_STATE_AT_CANNON) {
+      if (npc.role === 1) {
         this.taskNpcs.get('Cannons')?.push(npc.id);
-      } else if (npc.state === NPC_STATE_REPAIRING) {
+      } else if (npc.role === 3) {
+        this.taskNpcs.get('Sails')?.push(npc.id);
+      } else if (npc.role === 4) {
         this.taskNpcs.get('Repairs')?.push(npc.id);
       }
-      // Idle / Moving → unassigned
+      // role 0 (None) / role 2 (Helmsman) → unassigned
     }
 
     // Rebuild lastTaskMap from seeded assignments
