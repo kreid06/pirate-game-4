@@ -1705,6 +1705,27 @@ static void tick_world_npcs(float dt) {
                     }
                 }
                 if (intr_ship) {
+                    // Check for missing deck (highest priority)
+                    bool intr_deck_present = false;
+                    for (uint8_t m = 0; m < intr_ship->module_count; m++) {
+                        if (intr_ship->modules[m].id == 200) { intr_deck_present = true; break; }
+                    }
+                    bool intr_deck_taken = false;
+                    if (!intr_deck_present) {
+                        for (int j = 0; j < world_npc_count; j++) {
+                            WorldNpc* other = &world_npcs[j];
+                            if (!other->active || other->id == npc->id) continue;
+                            if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
+                                other->assigned_cannon_id == 200) { intr_deck_taken = true; break; }
+                        }
+                    }
+                    if (!intr_deck_present && !intr_deck_taken) {
+                        npc->target_local_x     = 0.0f;
+                        npc->target_local_y     = 0.0f;
+                        npc->assigned_cannon_id = 200;
+                        log_info("🔨 NPC %u (%s) interrupted — redirecting to replace missing deck",
+                                 npc->id, npc->name);
+                    } else {
                     // Check for missing planks first
                     bool present[10] = {false};
                     for (uint8_t m = 0; m < intr_ship->module_count; m++) {
@@ -1766,6 +1787,7 @@ static void tick_world_npcs(float dt) {
                                      npc->id, npc->name, intr_mod->id, intr_worst * 100.0f);
                         }
                     }
+                    } // end deck-missing else
                 }
             }
 
@@ -1815,6 +1837,25 @@ static void tick_world_npcs(float dt) {
 
             if (sim_ship) {
                 uint32_t target_id = npc->assigned_cannon_id;
+
+                // If the deck is missing, place it first
+                if (target_id == 200) {
+                    bool deck_exists = false;
+                    for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                        if (sim_ship->modules[m].id == 200) { deck_exists = true; break; }
+                    }
+                    if (!deck_exists && sim_ship->module_count < MAX_MODULES_PER_SHIP) {
+                        ShipModule new_deck = module_create(200, MODULE_TYPE_DECK, (Vec2Q16){0,0}, 0);
+                        new_deck.health      = new_deck.max_health / 10;
+                        new_deck.state_bits |= MODULE_STATE_DAMAGED | MODULE_STATE_REPAIRING;
+                        sim_ship->modules[sim_ship->module_count++] = new_deck;
+                        SimpleShip* simple = find_ship(npc->ship_id);
+                        if (simple && simple->module_count < MAX_MODULES_PER_SHIP)
+                            simple->modules[simple->module_count++] = new_deck;
+                        log_info("🔨 NPC %u (%s) placed missing deck on ship %u",
+                                 npc->id, npc->name, sim_ship->id);
+                    }
+                }
 
                 // If it's a plank slot that's empty, place a new plank first
                 if (target_id >= 100 && target_id <= 109) {
@@ -1895,6 +1936,29 @@ static void tick_world_npcs(float dt) {
         // finishing a repair (state was just set to IDLE above).
         if (npc->state == WORLD_NPC_STATE_IDLE) {
             if (!sim_ship) continue;
+
+            // --- 0. Check for missing deck (highest priority) -------------------
+            bool deck_present = false;
+            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                if (sim_ship->modules[m].id == 200) { deck_present = true; break; }
+            }
+            if (!deck_present) {
+                bool deck_taken = false;
+                for (int j = 0; j < world_npc_count; j++) {
+                    WorldNpc* other = &world_npcs[j];
+                    if (!other->active || other->id == npc->id) continue;
+                    if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
+                        other->assigned_cannon_id == 200) { deck_taken = true; break; }
+                }
+                if (!deck_taken) {
+                    npc->target_local_x     = 0.0f;
+                    npc->target_local_y     = 0.0f;
+                    npc->assigned_cannon_id = 200;
+                    npc->state              = WORLD_NPC_STATE_MOVING;
+                    log_info("🔨 NPC %u (%s) → walking to replace missing deck", npc->id, npc->name);
+                    continue;
+                }
+            }
 
             // --- 1. Check for missing planks (highest priority) ------------------
             bool present[10] = {false};
@@ -4066,6 +4130,66 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                             } else {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
+                        } else if (strstr(payload, "\"type\":\"place_deck\"")) {
+                            // PLACE DECK: re-insert a destroyed deck on the player's ship.
+                            // Consumes 1 ITEM_DECK from inventory (infinite for NPCs).
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    int deck_slot = -1;
+                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                        if (player->inventory.slots[s].item == ITEM_DECK &&
+                                            player->inventory.slots[s].quantity > 0) {
+                                            deck_slot = s; break;
+                                        }
+                                    }
+                                    if (deck_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_deck\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        struct Ship* sim_ship = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == player->parent_ship_id) {
+                                                sim_ship = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        if (!sim_ship) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else {
+                                            bool deck_present = false;
+                                            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                                                if (sim_ship->modules[m].id == 200) { deck_present = true; break; }
+                                            }
+                                            if (deck_present) {
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"deck_already_present\"}");
+                                            } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
+                                                strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                            } else {
+                                                ShipModule new_deck = module_create(200, MODULE_TYPE_DECK, (Vec2Q16){0,0}, 0);
+                                                new_deck.health = new_deck.max_health / 10; // start at 10%
+                                                new_deck.state_bits |= MODULE_STATE_DAMAGED | MODULE_STATE_REPAIRING;
+                                                sim_ship->modules[sim_ship->module_count++] = new_deck;
+                                                SimpleShip* simple = find_ship(player->parent_ship_id);
+                                                if (simple && simple->module_count < MAX_MODULES_PER_SHIP)
+                                                    simple->modules[simple->module_count++] = new_deck;
+                                                player->inventory.slots[deck_slot].quantity--;
+                                                if (player->inventory.slots[deck_slot].quantity == 0)
+                                                    player->inventory.slots[deck_slot].item = ITEM_NONE;
+                                                log_info("🔨 Player %u placed deck on ship %u",
+                                                         player->player_id, sim_ship->id);
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"deck_placed\"}");
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             handled = true;
 
