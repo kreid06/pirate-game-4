@@ -324,6 +324,9 @@ export class ClientApplication {
         }
 
         if (action === 'interact') {
+          // Exit build/plan mode on any interaction attempt
+          this.exitAllBuildModes();
+
           const playerId = this.networkManager.getAssignedPlayerId();
           const worldState = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
           const player = playerId !== null ? worldState?.players.find(p => p.id === playerId) : null;
@@ -498,13 +501,9 @@ export class ClientApplication {
       // Works anytime the player is on a ship deck.
       // If a cannon or sail item is active in the hotbar, also enters free-placement mode.
       this.inputManager.onBuildModeToggle = () => {
-        if (this.buildMenuOpen) {
-          // Close the build menu and cancel any pending ghost
-          this.buildMenuOpen = false;
-          this.inputManager.buildMenuOpen = false;
-          this.explicitBuildMode = false;
-          this.pendingGhostKind = null;
-          this.buildRotationDeg = 0;
+        if (this.buildMenuOpen || this.explicitBuildMode) {
+          // Close everything via the single exit helper
+          this.exitAllBuildModes();
           console.log('🏗️ [BUILD MENU] CLOSED');
         } else {
           // Open — require player to be on a ship
@@ -524,7 +523,7 @@ export class ClientApplication {
             this.explicitBuildMode = true;
             this.buildSelectedItem = activeItem as 'cannon' | 'sail';
           }
-          console.log(`🏗️ [BUILD MENU] OPENED${this.explicitBuildMode ? ` (free-place: ${this.buildSelectedItem})` : ''}`);
+          console.log(`🏗️ [BUILD MENU] OPENED${this.explicitBuildMode ? ` (free-place: ${this.buildSelectedItem})` : ' (plan mode)'}`);
         }
         this.syncBuildModeState();
       };
@@ -961,8 +960,9 @@ export class ClientApplication {
         // Only update if mount state actually changed
         if (currentlyMounted !== this.previousMountState) {
           if (currentlyMounted) {
-            // Player is now mounted - enable controls
+            // Player is now mounted — exit build/plan mode and enable controls
             console.log(`⚓ [MOUNT STATE] Server says player is mounted to module ${player.mountedModuleId}`);
+            this.exitAllBuildModes();
             // Look up the module kind from the ship
             let moduleKind = 'helm'; // default fallback
             const ship = worldState.ships.find(s => s.id === player.carrierId);
@@ -1018,6 +1018,23 @@ export class ClientApplication {
   }
   
   /**
+   * Exit every build and plan mode in one call.
+   * Use this whenever the player does something incompatible with build/plan mode
+   * (interact, mount, dismount, etc.).
+   */
+  private exitAllBuildModes(): void {
+    if (!this.buildMenuOpen && !this.explicitBuildMode && this.pendingGhostKind === null) return;
+    this.buildMenuOpen      = false;
+    this.inputManager.buildMenuOpen = false;
+    this.explicitBuildMode  = false;
+    this.pendingGhostKind   = null;
+    this.buildRotationDeg   = 0;
+    this.syncBuildModeState();
+    this.checkBuildMode();
+    console.log('🏗️ [BUILD] All build/plan modes exited');
+  }
+
+  /**
    * Check whether the active hotbar item puts the player in build mode.
    * Plank in active slot → build mode on. Anything else → build mode off.
    */
@@ -1047,6 +1064,7 @@ export class ClientApplication {
         // (but keep build menu open if it was open)
         this.explicitBuildMode = false;
         this.buildRotationDeg = 0;
+        this.pendingGhostKind = null;
         this.syncBuildModeState();
         console.log('🔨 [BUILD MODE] EXITED (item changed)');
       }
