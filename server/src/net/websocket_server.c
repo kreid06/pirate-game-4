@@ -1472,9 +1472,12 @@ static void tick_npc_agents(float dt) {
                                           + (float)(M_PI / 2.0f);
                     while (desired_offset >  (float)M_PI) desired_offset -= 2.0f * (float)M_PI;
                     while (desired_offset < -(float)M_PI) desired_offset += 2.0f * (float)M_PI;
-                    const float CANNON_AIM_RANGE = 30.0f * ((float)M_PI / 180.0f);
-                    if (desired_offset > CANNON_AIM_RANGE || desired_offset < -CANNON_AIM_RANGE)
-                        desired_offset = 0.0f;
+                    const float CANNON_AIM_RANGE        = 30.0f * ((float)M_PI / 180.0f);
+                    const float CANNON_AIM_RESET_MARGIN = 15.0f * ((float)M_PI / 180.0f);
+                    if (fabsf(desired_offset) > CANNON_AIM_RANGE + CANNON_AIM_RESET_MARGIN)
+                        desired_offset = 0.0f; // Fully outside dead-band — reset to neutral
+                    else if (fabsf(desired_offset) > CANNON_AIM_RANGE)
+                        break; // In dead-band — hold current desired_aim_direction
                     module->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
                     // Mirror into sim-ship
                     if (global_sim) {
@@ -2228,11 +2231,13 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
         while (desired_offset > M_PI) desired_offset -= 2.0f * M_PI;
         while (desired_offset < -M_PI) desired_offset += 2.0f * M_PI;
 
-        // Only update this cannon if the mouse aim falls within its ±30° arc.
-        // If the mouse is pointing away from this cannon's broadside, reset it to neutral
-        // so it doesn't visually strain toward its clamp limit.
-        if (desired_offset > CANNON_AIM_RANGE || desired_offset < -CANNON_AIM_RANGE) {
-            desired_offset = 0.0f; // Return to neutral, do not track out-of-arc targets
+        // Hysteresis: track within ±30°, hold in the ±15° dead-band beyond that,
+        // and only reset to neutral once the cursor is more than 45° off the cannon arc.
+        const float CANNON_AIM_RESET_MARGIN = 15.0f * ((float)M_PI / 180.0f);
+        if (fabsf(desired_offset) > CANNON_AIM_RANGE + CANNON_AIM_RESET_MARGIN) {
+            desired_offset = 0.0f; // Fully outside dead-band — reset to neutral
+        } else if (fabsf(desired_offset) > CANNON_AIM_RANGE) {
+            continue; // In dead-band — hold current desired_aim_direction, skip update
         }
 
         // Update cannon's aim_direction
