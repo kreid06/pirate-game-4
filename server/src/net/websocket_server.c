@@ -1835,6 +1835,8 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
         ship->cannon_ammo--;
     }
     cannon->data.cannon.time_since_fire = 0;
+    cannon->state_bits |= MODULE_STATE_RELOADING;
+    cannon->state_bits &= ~MODULE_STATE_FIRING;
     
     // Calculate cannon world position (ship transform + cannon local position)
     // NOTE: ship->x/y are in CLIENT PIXELS, cannon->local_pos is in SERVER UNITS (Q16)

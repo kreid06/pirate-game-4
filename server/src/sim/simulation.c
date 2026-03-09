@@ -1,4 +1,5 @@
 #include "sim/simulation.h"
+#include "sim/module_types.h"
 #include "sim/ship_level.h"
 #include "net/protocol.h"
 #include "core/hash.h"
@@ -127,6 +128,11 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
     for (uint16_t i = 0; i < sim->ship_count; i++) {
         struct Ship* ship = &sim->ships[i];
         update_ship_physics(ship, dt);
+
+        // Update per-module state (reload timers, etc.)
+        for (uint8_t m = 0; m < ship->module_count; m++) {
+            module_update(&ship->modules[m], dt);
+        }
 
         // ---- Sinking / water mechanic ----
         // Count remaining planks and detect leaks (< 30% HP).
