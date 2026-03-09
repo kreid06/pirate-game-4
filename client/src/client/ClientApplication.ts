@@ -73,6 +73,12 @@ export class ClientApplication {
   private previousMountState = false;    // Track previous mount state to detect changes
   private previousCarrierId: number | null = null; // Track ship changes for boarding sync
 
+  // Camera zoom animation
+  private targetZoom  = 1.0;  // Zoom level we're animating toward
+  private preHelmZoom = 1.0;  // Zoom before helm mount, restored on dismount
+  private static readonly HELM_ZOOM    = 0.60; // Zoomed-out level while at the helm
+  private static readonly DEFAULT_ZOOM = 1.00; // Normal gameplay zoom
+
   // Explicit build mode (B key) — independent of hotbar item build modes
   private explicitBuildMode = false;
   private buildSelectedItem: 'cannon' | 'sail' = 'cannon';
@@ -563,9 +569,10 @@ export class ClientApplication {
         }
       };
       
-      // Set up scroll-wheel zoom
+      // Set up scroll-wheel zoom (also update targetZoom so animation doesn't fight the user)
       this.inputManager.onZoom = (factor, _screenPoint) => {
-        this.camera.setZoom(this.camera.getState().zoom * factor);
+        this.targetZoom = Math.max(0.1, Math.min(10.0, this.targetZoom * factor));
+        this.camera.setZoom(this.targetZoom);
       };
 
       // Let UI panels (e.g. manning priority panel) consume clicks before game logic
@@ -933,6 +940,13 @@ export class ClientApplication {
     const smoothedY = currentPos.y + (player.position.y - currentPos.y) * lerpFactor;
     
     this.camera.setPosition(Vec2.from(smoothedX, smoothedY));
+
+    // Smooth zoom toward targetZoom (ease-out, ~0.6 s to settle)
+    const currentZoom = this.camera.getState().zoom;
+    if (Math.abs(currentZoom - this.targetZoom) > 0.001) {
+      const zoomLerp = 1.0 - Math.pow(0.01, dt);
+      this.camera.setZoom(currentZoom + (this.targetZoom - currentZoom) * zoomLerp);
+    }
   }
   
   /**
@@ -1004,10 +1018,17 @@ export class ClientApplication {
               if (typeof mastData?.openness === 'number') initialSailOpenness = mastData.openness;
             }
             this.inputManager.setMountState(true, player.carrierId, moduleKind, player.mountedModuleId, initialSailOpenness);
+            // Zoom out when mounting the helm
+            if (moduleKind === 'helm') {
+              this.preHelmZoom = this.camera.getState().zoom;
+              this.targetZoom  = ClientApplication.HELM_ZOOM;
+            }
           } else {
             // Player is now dismounted - disable ship controls
             console.log(`⚓ [MOUNT STATE] Server says player is dismounted`);
             this.inputManager.setMountState(false);
+            // Restore zoom to what it was before mounting the helm
+            this.targetZoom = this.preHelmZoom;
           }
           this.previousMountState = currentlyMounted;
         }
@@ -1566,12 +1587,12 @@ export class ClientApplication {
 
     if (zoomIn) {
       zoomIn.addEventListener('click', () => {
-        this.camera.setZoom(this.camera.getState().zoom * 1.2);
+        this.targetZoom = Math.max(0.1, Math.min(10.0, this.targetZoom * 1.2));
       });
     }
     if (zoomOut) {
       zoomOut.addEventListener('click', () => {
-        this.camera.setZoom(this.camera.getState().zoom / 1.2);
+        this.targetZoom = Math.max(0.1, Math.min(10.0, this.targetZoom / 1.2));
       });
     }
   }
@@ -1808,6 +1829,12 @@ export class ClientApplication {
           ? (() => { const mast = worldState.ships.find(s => s.id === shipId)?.modules.find(m => m.kind === 'mast'); return (mast?.moduleData as any)?.openness as number | undefined; })()
           : undefined
       );
+
+      // Zoom out when mounting the helm
+      if (moduleKind.toUpperCase() === 'HELM') {
+        this.preHelmZoom = this.camera.getState().zoom;
+        this.targetZoom  = ClientApplication.HELM_ZOOM;
+      }
     }
     
     // Update player state in all world states
