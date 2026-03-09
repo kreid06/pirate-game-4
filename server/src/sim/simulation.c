@@ -152,6 +152,14 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
                 planks_leaking++;
             }
             planks_remaining++;
+
+            // Passive healing at 2.5%/s for damaged (but not destroyed) planks
+            if (mod->health < (int32_t)mod->max_health) {
+                float heal = (float)mod->max_health * 0.025f * dt_secs;
+                mod->health += (int32_t)heal;
+                if (mod->health > (int32_t)mod->max_health)
+                    mod->health = (int32_t)mod->max_health;
+            }
         }
 
         int missing = (int)ship->initial_plank_count - planks_remaining;

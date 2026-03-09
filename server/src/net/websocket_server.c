@@ -1694,7 +1694,7 @@ static void tick_world_npcs(float dt) {
                 npc->local_y = npc->target_local_y;
                 if (npc->assigned_cannon_id != 0) {
                     /* Repair crew arrives at a damaged module; gunners/riggers arrive at a post */
-                    npc->state = (npc->role == NPC_ROLE_NONE)
+                    npc->state = (npc->role == NPC_ROLE_REPAIRER)
                                ? WORLD_NPC_STATE_REPAIRING
                                : WORLD_NPC_STATE_AT_CANNON;
                 } else {
@@ -5494,6 +5494,17 @@ void websocket_server_tick(float dt) {
                     }
                 }
                 if (global_sim) sim_destroy_entity(global_sim, sunk_id);
+                // Reset all players aboard the sunk ship to swimming state
+                for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+                    if (!players[pi].active || players[pi].parent_ship_id != sunk_id) continue;
+                    players[pi].parent_ship_id      = 0;
+                    players[pi].movement_state      = PLAYER_STATE_SWIMMING;
+                    players[pi].is_mounted          = false;
+                    players[pi].mounted_module_id   = 0;
+                    players[pi].controlling_ship_id = 0;
+                    players[pi].x = SERVER_TO_CLIENT(ev->hit_x);
+                    players[pi].y = SERVER_TO_CLIENT(ev->hit_y);
+                }
                 snprintf(msg, sizeof(msg),
                     "{\"type\":\"SHIP_SINK\",\"shipId\":%u,\"x\":%.1f,\"y\":%.1f}",
                     sunk_id,
