@@ -3835,6 +3835,9 @@ int websocket_server_update(struct Sim* sim) {
                                                 ShipModule new_plank = module_create(
                                                     plank_id, MODULE_TYPE_PLANK,
                                                     (Vec2Q16){0, 0}, 0);
+                                                // New planks start at 10% HP and heal passively
+                                                new_plank.health = new_plank.max_health / 10;
+                                                new_plank.state_bits |= MODULE_STATE_DAMAGED;
                                                 sim_ship->modules[sim_ship->module_count++] = new_plank;
                                                 // Consume 1 plank
                                                 player->inventory.slots[plank_slot].quantity--;

@@ -1099,7 +1099,7 @@ export class RenderSystem {
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
 
-    const iconR = 5.5; // icon radius in ship-local units
+    const iconR = 16.5; // icon radius in ship-local units (3× base for visibility)
 
     // ── MISSING planks ───────────────────────────────────────────────────────
     const presentKeys = new Set<string>();
