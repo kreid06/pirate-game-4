@@ -148,9 +148,10 @@ export class InputManager {
   /** Selected ammo type: 0 = cannonball, 1 = bar shot. Toggle with X key. */
   public selectedAmmoType: number = 0;    // Pending ammo (to load after next fire)
   public loadedAmmoType: number = 0;      // What's physically in the barrel right now
-  private lastXTapTime: number = 0;       // For double-tap detection on X
+  private xHoldTimer: ReturnType<typeof setTimeout> | null = null;  // setTimeout handle for 1s hold
+  private xHoldFired: boolean = false;    // True if hold timer already fired this press
 
-  /** Called when player double-taps X to force-reload with the pending ammo type. */
+  /** Called when player holds X (1s) to force-reload with the pending ammo type. */
   public onForceReload: (() => void) | null = null;
 
   /** Returns what ammo type is currently loaded (for aim guides and fire messages). */
@@ -910,22 +911,22 @@ export class InputManager {
         break;
       case 'KeyX':
         // Toggle ammo type when mounted to a cannon or helm
+        // On initial press: start a 1s timer — if it fires, force swap immediately
+        // On release before 1s: cancel timer, queue the swap instead
         if (this.mountKind === 'cannon' || this.mountKind === 'helm') {
-          const now = performance.now();
-          const isDoubleTap = (now - this.lastXTapTime) < 400;
-          this.lastXTapTime = now;
-
-          // Toggle pending ammo type
-          this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
-          const ammoNames = ['CANNONBALL', 'BAR SHOT'];
-
-          if (isDoubleTap) {
-            // Force reload: immediately switch the loaded type and tell server
-            this.loadedAmmoType = this.selectedAmmoType;
-            console.log(`⚡ Force reload → ${ammoNames[this.loadedAmmoType]}`);
-            if (this.onForceReload) this.onForceReload();
-          } else {
-            console.log(`💣 Pending ammo: ${ammoNames[this.selectedAmmoType]} (double-tap X to force reload)`);
+          if (!event.repeat) {
+            this.xHoldFired = false;
+            this.xHoldTimer = setTimeout(() => {
+              this.xHoldFired = true;
+              const ammoNames = ['CANNONBALL', 'BAR SHOT'];
+              // Toggle if nothing is queued yet
+              if (this.selectedAmmoType === this.loadedAmmoType) {
+                this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
+              }
+              this.loadedAmmoType = this.selectedAmmoType;
+              console.log(`⚡ Ammo force-loaded → ${ammoNames[this.loadedAmmoType]}`);
+              if (this.onForceReload) this.onForceReload();
+            }, 500);
           }
           event.preventDefault();
         }
@@ -952,6 +953,23 @@ export class InputManager {
       if (mapping.keyCode === event.code) {
         mapping.pressed = false;
       }
+    }
+
+    // X key ammo logic:
+    //   hold 1s (timer fires while key is down) → force-load immediately
+    //   release before 1s                       → queue the swap for after next fire
+    if (event.code === 'KeyX' && (this.mountKind === 'cannon' || this.mountKind === 'helm')) {
+      if (this.xHoldTimer !== null) {
+        clearTimeout(this.xHoldTimer);
+        this.xHoldTimer = null;
+      }
+      if (!this.xHoldFired) {
+        // Released before 1s — queue the swap
+        this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
+        const ammoNames = ['CANNONBALL', 'BAR SHOT'];
+        console.log(`💣 Ammo queued → ${ammoNames[this.selectedAmmoType]} (hold X 0.5s to load now)`);
+      }
+      // If xHoldFired is true the force-load already happened — nothing more to do
     }
   }
   

@@ -396,7 +396,7 @@ export class UIManager {
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle    = 'rgba(120,120,140,0.7)';
-    const hint = switchPending ? '[X] cycle  |  double-tap X → force reload' : '[X] cycle ammo';
+    const hint = switchPending ? '[X] cycle  |  hold X (0.5s) → force reload' : '[X] cycle ammo';
     ctx.fillText(hint, x0 + 2, y0 + slotH + 3);
 
     ctx.restore();
