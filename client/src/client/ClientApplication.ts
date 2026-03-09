@@ -455,6 +455,9 @@ export class ClientApplication {
           this.handleExplicitBuildPlace(worldPos);
           return;
         }
+        // Hotbar ghost snap: if the active hotbar item matches a nearby ghost, place
+        // the real module at the ghost's stored position and consume the ghost.
+        if (this.tryPlaceAtGhost(worldPos)) return;
         // Helm replacement (highest priority — only one helm per ship)
         const helmSlot = this.renderSystem.getHoveredHelmSlot();
         if (helmSlot) {
@@ -1207,6 +1210,105 @@ export class ClientApplication {
       this.syncBuildModeState();
       console.log(`🏗️ [GHOST] Removed ghost`);
     }
+  }
+
+  /**
+   * When the player has a buildable item in their hotbar (cannon / sail) and
+   * clicks within 80 units of a matching ghost marker, place the real module
+   * at the ghost's stored position/rotation and consume the ghost.
+   * Returns true if a placement was attempted (caller should early-return).
+   */
+  private tryPlaceAtGhost(worldPos: Vec2): boolean {
+    if (this.ghostPlacements.length === 0) return false;
+
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    if (!ws) return false;
+
+    const playerId = this.networkManager?.getAssignedPlayerId();
+    const player   = ws.players.find(p => p.id === playerId);
+    if (!player) return false;
+    const activeSlot  = player.inventory?.activeSlot ?? 0;
+    const activeItem  = player.inventory?.slots[activeSlot]?.item ?? 'none';
+    const itemToKind: Partial<Record<string, GhostModuleKind>> = {
+      cannon: 'cannon', sail: 'mast',
+    };
+    const matchKind = itemToKind[activeItem];
+    if (!matchKind) return false;
+
+    // Find the nearest ghost of the matching kind within 80 world units
+    let bestGhost: GhostPlacement | null = null;
+    let bestDist = 80; // snap radius in world units
+    for (const g of this.ghostPlacements) {
+      if (g.kind !== matchKind) continue;
+      const ship = ws.ships.find(s => s.id === g.shipId);
+      if (!ship) continue;
+      const cos = Math.cos(ship.rotation);
+      const sin = Math.sin(ship.rotation);
+      const wx = ship.position.x + g.localPos.x * cos - g.localPos.y * sin;
+      const wy = ship.position.y + g.localPos.x * sin + g.localPos.y * cos;
+      const dist = worldPos.sub(Vec2.from(wx, wy)).length();
+      if (dist < bestDist) { bestDist = dist; bestGhost = g; }
+    }
+    if (!bestGhost) return false;
+
+    const ship = ws.ships.find(s => s.id === bestGhost!.shipId)!;
+    const { x: localX, y: localY } = bestGhost.localPos;
+    const localRot = bestGhost.localRot;
+    const tempId = Date.now() % 100000 + 10000;
+
+    // Overlap check against real modules (exclude the ghost's own footprint since we're consuming it)
+    const newFp = getModuleFootprint(matchKind as any);
+    for (const mod of ship.modules) {
+      if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+      const existFp = getModuleFootprint(mod.kind);
+      if (footprintsOverlap(newFp, localX, localY, localRot, existFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
+        console.log(`❌ [GHOST SNAP] Placement blocked by existing ${mod.kind}`);
+        return true; // consumed the click, even though blocked
+      }
+    }
+    // Also check OTHER ghosts (not this one)
+    for (const g of this.ghostPlacements) {
+      if (g.id === bestGhost.id) continue;
+      if (g.shipId !== ship.id) continue;
+      const gFp = getModuleFootprint(g.kind as any);
+      if (footprintsOverlap(newFp, localX, localY, localRot, gFp, g.localPos.x, g.localPos.y, g.localRot)) {
+        console.log(`❌ [GHOST SNAP] Placement blocked by ghost ${g.kind}`);
+        return true;
+      }
+    }
+
+    if (matchKind === 'cannon') {
+      console.log(`🔨 [GHOST SNAP] Placing cannon at ghost pos (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${(localRot * 180 / Math.PI).toFixed(0)}°`);
+      const newCannon = ModuleUtils.createDefaultModule(tempId, 'cannon', Vec2.from(localX, localY));
+      newCannon.localRot = localRot;
+      for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
+        const s = state?.ships.find(sh => sh.id === ship.id);
+        if (s) s.modules.push(newCannon);
+      }
+      const pending = this.localPendingModules.get(ship.id) ?? [];
+      pending.push({ module: newCannon, expiry: Date.now() + 5000 });
+      this.localPendingModules.set(ship.id, pending);
+      this.networkManager.sendPlaceCannonAt(ship.id, localX, localY, localRot);
+    } else {
+      // mast
+      const mastCount = ship.modules.filter(m => m.kind === 'mast').length;
+      if (mastCount >= 3) { console.log(`❌ [GHOST SNAP] Max sails`); return true; }
+      console.log(`⛵ [GHOST SNAP] Placing mast at ghost pos (${localX.toFixed(0)}, ${localY.toFixed(0)})`);
+      const newMast = ModuleUtils.createDefaultModule(tempId, 'mast', Vec2.from(localX, localY));
+      for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
+        const s = state?.ships.find(sh => sh.id === ship.id);
+        if (s) s.modules.push(newMast);
+      }
+      const pending = this.localPendingModules.get(ship.id) ?? [];
+      pending.push({ module: newMast, expiry: Date.now() + 5000 });
+      this.localPendingModules.set(ship.id, pending);
+      this.networkManager.sendPlaceMastAt(ship.id, localX, localY);
+    }
+
+    // Consume the ghost marker
+    this.ghostPlacements = this.ghostPlacements.filter(g => g.id !== bestGhost!.id);
+    this.syncBuildModeState();
+    return true;
   }
 
   /**

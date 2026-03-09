@@ -821,8 +821,9 @@ export class RenderSystem {
       this.queueRenderItem(3, 'plank-status', () => this.drawPlankStatusIcons(ship, camera), 2);
     }
 
-    // Ghost placement plan markers — visible in build menu mode OR hotbar build mode
-    if (this.ghostPlacements.length > 0 && (this.buildMenuOpen || this.explicitBuildState !== null)) {
+    // Ghost placement plan markers — visible in build menu mode, B-key mode, or hotbar build mode
+    if (this.ghostPlacements.length > 0 &&
+        (this.buildMenuOpen || this.explicitBuildState !== null || this.cannonBuildMode || this.mastBuildMode)) {
       for (const ship of worldState.ships) {
         const shipGhosts = this.ghostPlacements.filter(g => g.shipId === ship.id);
         if (shipGhosts.length > 0) {
@@ -3425,7 +3426,7 @@ export class RenderSystem {
     this.ctx.rotate(ship.rotation - camRot);
 
     const t = performance.now() / 1000;
-    const pulse = 0.55 + 0.20 * Math.sin(t * 2.5);
+    const pulse = 0.70 + 0.20 * Math.sin(t * 2.5);
 
     for (const g of ghosts) {
       this.ctx.save();
@@ -3434,8 +3435,8 @@ export class RenderSystem {
       this.ctx.globalAlpha = pulse;
 
       // All ghost plan markers use faint green — same palette as old ghost shapes
-      const ghostFill   = 'rgba(40,110,60,0.38)';
-      const ghostStroke = '#55cc88';
+      const ghostFill   = 'rgba(40,130,70,0.55)';
+      const ghostStroke = '#66ee99';
 
       switch (g.kind) {
         case 'cannon': {

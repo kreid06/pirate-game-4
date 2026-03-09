@@ -892,12 +892,12 @@ export class InputManager {
         event.preventDefault();
         break;
       case 'KeyR':
-        // In explicit build mode: rotate the placement ghost by 15 degrees.
+        // In explicit build mode OR plan mode (build menu open): rotate the placement ghost.
         // Otherwise: repair sail fibers on the hovered damaged mast.
-        if (this.explicitBuildMode && this.onBuildRotate) {
+        if ((this.explicitBuildMode || this.buildMenuOpen) && this.onBuildRotate) {
           this.onBuildRotate(15);
           event.preventDefault();
-        } else if (!this.explicitBuildMode && this.onRepairSail) {
+        } else if (!this.explicitBuildMode && !this.buildMenuOpen && this.onRepairSail) {
           this.onRepairSail();
           event.preventDefault();
         }
