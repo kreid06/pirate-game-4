@@ -7,6 +7,7 @@
 
 import { ClientConfig } from '../ClientConfig.js';
 import { WorldState } from '../../sim/Types.js';
+import { GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
 import { ITEM_DEFS, INVENTORY_SLOTS, ItemKind, ITEM_KIND_ID } from '../../sim/Inventory.js';
@@ -55,6 +56,7 @@ interface UIElement {
  */
 export class UIManager {
   private config: ClientConfig;
+  private canvas: HTMLCanvasElement;
   
   // UI Elements
   private elements: Map<UIElementType, UIElement> = new Map();
@@ -90,6 +92,28 @@ export class UIManager {
   /** Called when the player clicks a build item button (cannon/sail). */
   public onBuildItemSelect: ((item: 'cannon' | 'sail') => void) | null = null;
 
+  // ── Ghost build menu state ─────────────────────────────────────────────────
+  private buildMenuOpen = false;
+  private buildMenuGhosts: GhostPlacement[] = [];
+  private buildMenuPending: GhostModuleKind | null = null;
+  /** Called when player clicks a module type in the left build panel. */
+  public onBuildPanelSelect: ((kind: GhostModuleKind) => void) | null = null;
+
+  // Entries shown in the left build panel
+  private static readonly BUILD_PANEL_ENTRIES: Array<{
+    kind: GhostModuleKind; label: string; symbol: string; color: string; borderColor: string;
+  }> = [
+    { kind: 'plank',  label: 'Plank',  symbol: 'P',  color: '#b8832b', borderColor: '#7a5520' },
+    { kind: 'cannon', label: 'Cannon', symbol: '⚫', color: '#444',    borderColor: '#888'    },
+    { kind: 'mast',   label: 'Sail',   symbol: '⛵', color: '#1e8c6e', borderColor: '#0f5c48' },
+    { kind: 'helm',   label: 'Helm',   symbol: 'W',  color: '#6a3d8f', borderColor: '#3d2060' },
+    { kind: 'deck',   label: 'Deck',   symbol: '⊟', color: '#8b5e3c', borderColor: '#5c3a1c' },
+  ];
+
+  private static readonly BUILD_PANEL_W = 164;
+  private static readonly BUILD_PANEL_ENTRY_H = 46;
+  private static readonly BUILD_PANEL_HEADER_H = 32;
+
   // ── Hammer minigame state ──────────────────────────────────────────────────
   private hammerGame: {
     active:          boolean;
@@ -106,8 +130,9 @@ export class UIManager {
     callback: null, resultTime: -1, won: null,
   };
   
-  constructor(_canvas: HTMLCanvasElement, config: ClientConfig) {
+  constructor(canvas: HTMLCanvasElement, config: ClientConfig) {
     this.config = config;
+    this.canvas = canvas;
     
     this.initializeUIElements();
     this.setupEventListeners();
@@ -200,6 +225,11 @@ export class UIManager {
     // Explicit build mode overlay (renders on top of everything, including menus)
     if (this.buildModeState?.active) {
       this.renderBuildModeOverlay(ctx, ctx.canvas);
+    }
+
+    // Ghost build menu panel — left side of screen
+    if (this.buildMenuOpen) {
+      this.renderBuildMenuPanel(ctx, ctx.canvas);
     }
 
     // Hammer minigame — topmost overlay, blocks all game input when active
@@ -408,6 +438,19 @@ export class UIManager {
   }
 
   /**
+   * Update ghost build menu state (called by ClientApplication on each change).
+   */
+  setBuildMenuState(
+    open: boolean,
+    ghosts: GhostPlacement[],
+    pending: GhostModuleKind | null
+  ): void {
+    this.buildMenuOpen = open;
+    this.buildMenuGhosts = ghosts;
+    this.buildMenuPending = pending;
+  }
+
+  /**
    * Handle a canvas click — returns true if the UI consumed it.
    */
   /** Update the current screen-space mouse position so tooltips can be drawn. */
@@ -423,6 +466,10 @@ export class UIManager {
     if (this.hammerGame.active) {
       if (this.hammerGame.resultTime === -1) this.strikeHammer();
       return true;
+    }
+    // Build panel (left side) — check before other panels
+    if (this.buildMenuOpen) {
+      if (this.handleBuildPanelClick(x, y)) return true;
     }
     // Build mode item selection buttons (highest priority — always shown when in build mode)
     if (this.buildModeState?.active) {
@@ -456,6 +503,30 @@ export class UIManager {
   // -----------------------------------------------------------------------
   // Build mode helpers
   // -----------------------------------------------------------------------
+
+  /**
+   * Handle a click on the left-side ghost build module panel.
+   * Returns true if the click landed inside the panel.
+   */
+  private handleBuildPanelClick(x: number, y: number): boolean {
+    const W = UIManager.BUILD_PANEL_W;
+    const ENTRY_H = UIManager.BUILD_PANEL_ENTRY_H;
+    const HEADER_H = UIManager.BUILD_PANEL_HEADER_H;
+    const entries = UIManager.BUILD_PANEL_ENTRIES;
+    const totalH = HEADER_H + entries.length * ENTRY_H + 8;
+    const panelY = (this.canvas.height - totalH) / 2;
+
+    if (x < 0 || x > W || y < panelY || y > panelY + totalH) return false;
+
+    const relY = y - panelY - HEADER_H;
+    if (relY < 0) return true; // clicked header area
+
+    const idx = Math.floor(relY / ENTRY_H);
+    if (idx >= 0 && idx < entries.length) {
+      this.onBuildPanelSelect?.(entries[idx].kind);
+    }
+    return true;
+  }
 
   /**
    * Test whether a click hits one of the build mode item buttons.
@@ -635,6 +706,134 @@ export class UIManager {
     ctx.textBaseline = 'top';
     ctx.fillStyle = '#ffffff';
     ctx.fillText(`${Math.round(angleDeg)}°`, centerX, dialY + 3);
+
+    ctx.restore();
+  }
+
+  /**
+   * Render the left-side ghost build module panel.
+   * Shows clickable entries for each buildable module type.
+   * The currently-pending ghost kind is highlighted.
+   * Ghost placements are shown as a count badge on each entry.
+   */
+  private renderBuildMenuPanel(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    const W      = UIManager.BUILD_PANEL_W;
+    const EH     = UIManager.BUILD_PANEL_ENTRY_H;
+    const HH     = UIManager.BUILD_PANEL_HEADER_H;
+    const PAD    = 10;
+    const entries = UIManager.BUILD_PANEL_ENTRIES;
+    const totalH = HH + entries.length * EH + 8;
+    const px     = 0;
+    const py     = Math.round((canvas.height - totalH) / 2);
+
+    ctx.save();
+
+    // ── Panel background ──────────────────────────────────────────────────
+    ctx.fillStyle = 'rgba(8,14,24,0.88)';
+    ctx.strokeStyle = 'rgba(90,140,200,0.45)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, totalH, [0, 8, 8, 0]);
+    ctx.fill();
+    ctx.stroke();
+
+    // ── Header ─────────────────────────────────────────────────────────────
+    ctx.fillStyle = 'rgba(30,60,100,0.70)';
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, HH, [0, 8, 0, 0]);
+    ctx.fill();
+
+    ctx.fillStyle = '#a8c8e8';
+    ctx.font = 'bold 12px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('🏗️  BUILD MENU  [B]', px + W / 2, py + HH / 2);
+
+    // ── Module entries ─────────────────────────────────────────────────────
+    const ghostCounts = new Map<GhostModuleKind, number>();
+    for (const g of this.buildMenuGhosts) {
+      ghostCounts.set(g.kind, (ghostCounts.get(g.kind) ?? 0) + 1);
+    }
+
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const ey = py + HH + i * EH;
+      const isPending = this.buildMenuPending === e.kind;
+      const isHovered = this.mouseX >= px && this.mouseX < px + W
+        && this.mouseY >= ey && this.mouseY < ey + EH;
+
+      // Row background
+      if (isPending) {
+        ctx.fillStyle = 'rgba(50,180,80,0.25)';
+      } else if (isHovered) {
+        ctx.fillStyle = 'rgba(80,120,180,0.22)';
+      } else {
+        ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.03)' : 'transparent';
+      }
+      ctx.fillRect(px + 2, ey + 1, W - 4, EH - 2);
+
+      // Color swatch circle
+      const swatchX = px + PAD + 10;
+      const swatchY = ey + EH / 2;
+      const swatchR = 10;
+      ctx.fillStyle = e.color;
+      ctx.strokeStyle = isPending ? '#55ee88' : e.borderColor;
+      ctx.lineWidth = isPending ? 2 : 1.5;
+      ctx.beginPath();
+      ctx.arc(swatchX, swatchY, swatchR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Symbol inside swatch
+      ctx.fillStyle = '#fff';
+      ctx.font = `${swatchR * 1.1}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(e.symbol, swatchX, swatchY + 1);
+
+      // Entry label
+      ctx.fillStyle = isPending ? '#88ee99' : isHovered ? '#d0e8ff' : '#c8d8e8';
+      ctx.font = isPending ? 'bold 13px Consolas, monospace' : '13px Consolas, monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(e.label, swatchX + swatchR + 8, swatchY);
+
+      // Ghost count badge
+      const count = ghostCounts.get(e.kind) ?? 0;
+      if (count > 0) {
+        const badge = `×${count}`;
+        ctx.fillStyle = 'rgba(255,200,50,0.85)';
+        ctx.font = 'bold 11px Consolas, monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText(badge, px + W - 10, swatchY);
+      }
+
+      // Pending indicator arrow on the right edge
+      if (isPending) {
+        ctx.fillStyle = '#55ee88';
+        ctx.font = '13px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('▶', px + W - 8, swatchY);
+      }
+
+      // Separator
+      if (i < entries.length - 1) {
+        ctx.strokeStyle = 'rgba(90,140,200,0.18)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(px + 8, ey + EH);
+        ctx.lineTo(px + W - 8, ey + EH);
+        ctx.stroke();
+      }
+    }
+
+    // ── Footer hint ────────────────────────────────────────────────────────
+    ctx.fillStyle = 'rgba(140,170,200,0.6)';
+    ctx.font = '10px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('[R] rotate  [RMB] cancel', px + W / 2, py + totalH - 6);
 
     ctx.restore();
   }

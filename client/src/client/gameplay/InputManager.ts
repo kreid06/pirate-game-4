@@ -103,6 +103,12 @@ export class InputManager {
   /** Called when R is pressed while hovering a damaged mast (not in explicit build mode). */
   public onRepairSail: (() => void) | null = null;
 
+  // Build menu (B key — open panel + ghost placement system)
+  /** True while the build menu panel is open. Affects right-click and other input. */
+  public buildMenuOpen: boolean = false;
+  /** Right-click while build menu is open — fires with world position. */
+  public onBuildRightClick: ((worldPos: Vec2) => void) | null = null;
+
   // Camera zoom callback
   public onZoom: ((factor: number, screenPoint: Vec2) => void) | null = null;
   
@@ -994,8 +1000,13 @@ export class InputManager {
       this.lastLeftClickTime = now;
       
     } else if (event.button === 2) { // Right mouse button
-      this.inputState.rightMouseDown = true;
-      // Aiming will be handled in update() while right mouse is held
+      // Build menu: right-click fires ghost-cancel / ghost-remove callback
+      if (this.buildMenuOpen && this.onBuildRightClick) {
+        this.onBuildRightClick(this.inputState.mouseWorldPosition);
+      } else {
+        this.inputState.rightMouseDown = true;
+        // Aiming will be handled in update() while right mouse is held
+      }
     }
   }
   

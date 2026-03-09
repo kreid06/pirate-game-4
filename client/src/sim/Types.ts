@@ -248,3 +248,31 @@ export const PhysicsConfig = {
   CANNONBALL_RELOAD_TIME: 3.0, // seconds to reload after firing
   SPLASH_RADIUS: 50, // splash effect radius
 } as const;
+
+// ── Build / Ghost placement system ──────────────────────────────────────────
+
+/**
+ * Module kinds that can be ghost-placed as planning markers.
+ * Subset of ModuleKind — only buildable module types.
+ */
+export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck';
+
+/**
+ * A client-local "ghost" placement — a translucent planning marker showing
+ * where the player intends to place a module in the future.
+ * Ghost placements are purely client-side and never sent to the server.
+ * (Exception: server-side destroyed-module slots are shown via the existing
+ * snap-point ghost system and not tracked here.)
+ */
+export interface GhostPlacement {
+  /** Unique client-local identifier. */
+  id: string;
+  /** Type of module this ghost represents. */
+  kind: GhostModuleKind;
+  /** ID of the ship this ghost is attached to. */
+  shipId: number;
+  /** Ship-local position. */
+  localPos: { x: number; y: number };
+  /** Ship-local rotation in radians. */
+  localRot: number;
+}

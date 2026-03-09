@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { ClientState } from '../ClientApplication.js';
@@ -259,12 +259,32 @@ export class RenderSystem {
   // Explicit B-key build mode ghost preview state
   private explicitBuildState: { item: 'cannon' | 'sail'; rotationDeg: number } | null = null;
 
+  // Ghost placement plan markers and pending ghost cursor
+  private ghostPlacements: GhostPlacement[] = [];
+  private pendingGhostState: { kind: GhostModuleKind; rotDeg: number } | null = null;
+  private buildMenuOpen = false;
+
   /**
    * Set explicit build mode state for ghost preview rendering.
    * Pass null to disable.
    */
   setExplicitBuildMode(state: { item: 'cannon' | 'sail'; rotationDeg: number } | null): void {
     this.explicitBuildState = state;
+  }
+
+  /** Update the list of ghost planning markers to render on ships. */
+  setGhostPlacements(ghosts: GhostPlacement[]): void {
+    this.ghostPlacements = ghosts;
+  }
+
+  /** Track whether the build menu is open so ghost plans are only shown then. */
+  setBuildMenuOpen(open: boolean): void {
+    this.buildMenuOpen = open;
+  }
+
+  /** Set the ghost currently attached to the cursor for precision ghost placement. Pass null to clear. */
+  setPendingGhost(state: { kind: GhostModuleKind; rotDeg: number } | null): void {
+    this.pendingGhostState = state;
   }
 
   /**
@@ -602,6 +622,11 @@ export class RenderSystem {
       this.drawExplicitBuildGhost(worldState, camera);
     }
 
+    // Draw pending ghost cursor attached to mouse
+    if (this.pendingGhostState) {
+      this.drawPendingGhostCursor(worldState, camera);
+    }
+
     // Draw effects and particles (always on top)
     this.particleSystem.render(camera);
     this.effectRenderer.render(camera);
@@ -794,6 +819,16 @@ export class RenderSystem {
     // Plank status icons — missing (red ✕) and leaking (water waves) — layer 3 priority 2
     for (const ship of worldState.ships) {
       this.queueRenderItem(3, 'plank-status', () => this.drawPlankStatusIcons(ship, camera), 2);
+    }
+
+    // Ghost placement plan markers — visible in build menu mode OR hotbar build mode
+    if (this.ghostPlacements.length > 0 && (this.buildMenuOpen || this.explicitBuildState !== null)) {
+      for (const ship of worldState.ships) {
+        const shipGhosts = this.ghostPlacements.filter(g => g.shipId === ship.id);
+        if (shipGhosts.length > 0) {
+          this.queueRenderItem(3, `ghost-plans-${ship.id}`, () => this.drawGhostPlacements(ship, shipGhosts, camera), 4);
+        }
+      }
     }
 
     // In cannon build mode, overlay ghost cannons at destroyed slots (layer 4, after real cannons)
@@ -3375,6 +3410,286 @@ export class RenderSystem {
    * Draw a semi-transparent ghost cannon or mast at the cursor world position.
    * Tinted green when placement is valid, red when invalid (overlap or max sails).
    */
+  /**
+   * Draw ghost planning markers for a single ship.
+   * Each ghost is rendered as a translucent colored shape at its ship-local position.
+   */
+  private drawGhostPlacements(ship: Ship, ghosts: GhostPlacement[], camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 400)) return;
+    const screenPos = camera.worldToScreen(ship.position);
+    const { zoom, rotation: camRot } = camera.getState();
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - camRot);
+
+    const t = performance.now() / 1000;
+    const pulse = 0.55 + 0.20 * Math.sin(t * 2.5);
+
+    for (const g of ghosts) {
+      this.ctx.save();
+      this.ctx.translate(g.localPos.x, g.localPos.y);
+      this.ctx.rotate(g.localRot);
+      this.ctx.globalAlpha = pulse;
+
+      // All ghost plan markers use faint green — same palette as old ghost shapes
+      const ghostFill   = 'rgba(40,110,60,0.38)';
+      const ghostStroke = '#55cc88';
+
+      switch (g.kind) {
+        case 'cannon': {
+          this.ctx.fillStyle = ghostFill;
+          this.ctx.strokeStyle = ghostStroke;
+          this.ctx.lineWidth = 1.2;
+          this.ctx.setLineDash([3, 2]);
+          this.ctx.fillRect(-15, -10, 30, 20);
+          this.ctx.strokeRect(-15, -10, 30, 20);
+          this.ctx.fillRect(-8, -36, 16, 28);
+          this.ctx.strokeRect(-8, -36, 16, 28);
+          this.ctx.setLineDash([]);
+          break;
+        }
+        case 'mast': {
+          this.ctx.fillStyle = ghostFill;
+          this.ctx.strokeStyle = ghostStroke;
+          this.ctx.lineWidth = 1.2;
+          this.ctx.setLineDash([4, 2]);
+          this.ctx.beginPath();
+          this.ctx.arc(0, 0, 15, 0, Math.PI * 2);
+          this.ctx.fill();
+          this.ctx.stroke();
+          this.ctx.fillStyle = 'rgba(40,110,60,0.13)';
+          this.ctx.fillRect(-40, -5, 80, 10);
+          this.ctx.strokeRect(-40, -5, 80, 10);
+          this.ctx.setLineDash([]);
+          break;
+        }
+        case 'helm': {
+          const R = 16;
+          this.ctx.fillStyle = ghostFill;
+          this.ctx.strokeStyle = ghostStroke;
+          this.ctx.lineWidth = 1.2;
+          this.ctx.setLineDash([3, 2]);
+          this.ctx.beginPath();
+          this.ctx.arc(0, 0, R, 0, Math.PI * 2);
+          this.ctx.fill();
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          for (let s = 0; s < 6; s++) {
+            const a = (s / 6) * Math.PI * 2;
+            this.ctx.beginPath();
+            this.ctx.moveTo(0, 0);
+            this.ctx.lineTo(Math.cos(a) * R, Math.sin(a) * R);
+            this.ctx.strokeStyle = 'rgba(80,190,130,0.45)';
+            this.ctx.lineWidth = 1;
+            this.ctx.stroke();
+          }
+          break;
+        }
+        case 'deck': {
+          this.ctx.fillStyle = ghostFill;
+          this.ctx.strokeStyle = ghostStroke;
+          this.ctx.lineWidth = 1.5;
+          this.ctx.setLineDash([5, 3]);
+          this.ctx.beginPath();
+          this.ctx.roundRect(-240, -60, 480, 120, 8);
+          this.ctx.fill();
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          break;
+        }
+        case 'plank':
+        default: {
+          this.ctx.fillStyle = ghostFill;
+          this.ctx.strokeStyle = ghostStroke;
+          this.ctx.lineWidth = 1.2;
+          this.ctx.setLineDash([3, 2]);
+          this.ctx.beginPath();
+          this.ctx.roundRect(-25, -8, 50, 16, 4);
+          this.ctx.fill();
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          break;
+        }
+      }
+
+      // Label
+      this.ctx.globalAlpha = pulse * 0.9;
+      this.ctx.fillStyle = '#99eebb';
+      this.ctx.font = '9px Consolas, monospace';
+      this.ctx.textAlign = 'center';
+      this.ctx.textBaseline = 'bottom';
+      const labelY = g.kind === 'deck' ? -64 : -22;
+      this.ctx.fillText(g.kind, 0, labelY);
+
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw the ghost module that is currently attached to the cursor for precision placement.
+   * Shows the module shape at the mouse world position, color-coded valid (green) or invalid (red).
+   */
+  private drawPendingGhostCursor(worldState: WorldState, camera: Camera): void {
+    if (!this.pendingGhostState || !this.mouseWorldPos) return;
+    const { kind, rotDeg } = this.pendingGhostState;
+
+    // Find nearest ship
+    let nearestShip: Ship | null = null;
+    let nearestDist = Infinity;
+    for (const ship of worldState.ships) {
+      const d = this.mouseWorldPos.sub(ship.position).length();
+      if (d < nearestDist) { nearestDist = d; nearestShip = ship; }
+    }
+    const onShip = nearestShip !== null && nearestDist < 400;
+
+    let localX = 0; let localY = 0;
+    if (nearestShip) {
+      const dx = this.mouseWorldPos.x - nearestShip.position.x;
+      const dy = this.mouseWorldPos.y - nearestShip.position.y;
+      const c = Math.cos(-nearestShip.rotation);
+      const s = Math.sin(-nearestShip.rotation);
+      localX = dx * c - dy * s;
+      localY = dx * s + dy * c;
+    }
+
+    const rotRad = (rotDeg * Math.PI) / 180;
+
+    // Validate: check overlap with existing modules
+    let valid = onShip;
+    let invalidReason = onShip ? '' : 'Not on ship';
+    if (valid && nearestShip) {
+      const newKind: GhostModuleKind = kind;
+      const skipKinds: GhostModuleKind[] = ['plank', 'deck'];
+      if (!skipKinds.includes(newKind as GhostModuleKind)) {
+        const newFp = getModuleFootprint(newKind as any);
+        for (const mod of nearestShip.modules) {
+          if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+          const existFp = getModuleFootprint(mod.kind);
+          if (footprintsOverlap(newFp, localX, localY, rotRad, existFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
+            valid = false;
+            invalidReason = 'Overlap!';
+            break;
+          }
+        }
+      }
+      // Also check existing ghost placements so cursor turns red/orange
+      if (valid && nearestShip) {
+        const skipKinds2: GhostModuleKind[] = ['plank', 'deck'];
+        if (!skipKinds2.includes(newKind as GhostModuleKind)) {
+          const newFp2 = getModuleFootprint(newKind as any);
+          for (const g of this.ghostPlacements) {
+            if (g.shipId !== nearestShip.id) continue;
+            const gFp = getModuleFootprint(g.kind as any);
+            if (footprintsOverlap(newFp2, localX, localY, rotRad, gFp, g.localPos.x, g.localPos.y, g.localRot)) {
+              valid = false;
+              invalidReason = 'Remove plan first!';
+              break;
+            }
+          }
+        }
+      }
+
+      // Mast: centerline + separation
+      if (kind === 'mast' && valid) {
+        if (Math.abs(localY) > 25) { valid = false; invalidReason = 'Must be on centerline'; }
+        if (valid) {
+          const MIN_SEP = 80;
+          for (const mod of nearestShip.modules) {
+            if (mod.kind !== 'mast') continue;
+            if (Math.hypot(localX - mod.localPos.x, localY - mod.localPos.y) < MIN_SEP) {
+              valid = false; invalidReason = 'Too close to mast'; break;
+            }
+          }
+        }
+      }
+    }
+
+    const screenPos = camera.worldToScreen(this.mouseWorldPos);
+    const { zoom, rotation: camRot } = camera.getState();
+    const shipRot = nearestShip?.rotation ?? 0;
+
+    this.ctx.save();
+    this.ctx.globalAlpha = 0.72;
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(shipRot - camRot + rotRad);
+
+    const planBlocked = invalidReason === 'Remove plan first!';
+    const okColor   = valid ? '#44ff88' : planBlocked ? '#ffaa44' : '#ff5555';
+    const fillColor = valid ? 'rgba(30,120,60,0.45)' : planBlocked ? 'rgba(160,90,20,0.45)' : 'rgba(120,30,30,0.45)';
+
+    switch (kind) {
+      case 'cannon': {
+        this.ctx.fillStyle = fillColor;
+        this.ctx.strokeStyle = okColor;
+        this.ctx.lineWidth = 1.5;
+        this.ctx.fillRect(-15, -10, 30, 20);  this.ctx.strokeRect(-15, -10, 30, 20);
+        this.ctx.fillRect(-8, -38, 16, 30);   this.ctx.strokeRect(-8, -38, 16, 30);
+        break;
+      }
+      case 'mast': {
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, 15, 0, Math.PI * 2);
+        this.ctx.fillStyle = fillColor; this.ctx.fill();
+        this.ctx.strokeStyle = okColor; this.ctx.lineWidth = 1.5; this.ctx.stroke();
+        this.ctx.fillStyle = valid ? 'rgba(100,220,160,0.30)' : planBlocked ? 'rgba(220,160,80,0.25)' : 'rgba(220,100,100,0.25)';
+        this.ctx.strokeStyle = okColor;
+        this.ctx.fillRect(-40, -5, 80, 10); this.ctx.strokeRect(-40, -5, 80, 10);
+        break;
+      }
+      case 'helm': {
+        const R = 16;
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, R, 0, Math.PI * 2);
+        this.ctx.fillStyle = fillColor; this.ctx.fill();
+        this.ctx.strokeStyle = okColor; this.ctx.lineWidth = 1.5; this.ctx.stroke();
+        for (let s = 0; s < 6; s++) {
+          const a = (s / 6) * Math.PI * 2;
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(Math.cos(a) * R, Math.sin(a) * R);
+          this.ctx.strokeStyle = okColor; this.ctx.lineWidth = 1; this.ctx.stroke();
+        }
+        break;
+      }
+      case 'deck': {
+        this.ctx.beginPath();
+        this.ctx.roundRect(-240, -60, 480, 120, 8);
+        this.ctx.fillStyle = fillColor; this.ctx.fill();
+        this.ctx.strokeStyle = okColor; this.ctx.lineWidth = 1.5; this.ctx.stroke();
+        break;
+      }
+      default: { // plank
+        this.ctx.beginPath();
+        this.ctx.roundRect(-25, -8, 50, 16, 4);
+        this.ctx.fillStyle = fillColor; this.ctx.fill();
+        this.ctx.strokeStyle = okColor; this.ctx.lineWidth = 1.5; this.ctx.stroke();
+        break;
+      }
+    }
+
+    this.ctx.restore();
+
+    // Status label (screen-space, below cursor)
+    const label = valid
+      ? `Place ${kind} [click]`
+      : invalidReason || 'Not on ship';
+    this.ctx.save();
+    this.ctx.font = 'bold 12px Consolas, monospace';
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'top';
+    const tw = this.ctx.measureText(label).width + 10;
+    this.ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    this.ctx.fillRect(screenPos.x - tw / 2, screenPos.y + 28, tw, 18);
+    this.ctx.fillStyle = valid ? '#88ff99' : invalidReason === 'Remove plan first!' ? '#ffaa44' : '#ff8888';
+    this.ctx.fillText(label, screenPos.x, screenPos.y + 30);
+    this.ctx.restore();
+  }
+
   private drawExplicitBuildGhost(worldState: WorldState, camera: Camera): void {
     if (!this.explicitBuildState || !this.mouseWorldPos) return;
     const { item, rotationDeg } = this.explicitBuildState;
@@ -3408,6 +3723,7 @@ export class RenderSystem {
     const newKind = item === 'cannon' ? 'cannon' as const : 'mast' as const;
     const newFp = getModuleFootprint(newKind);
     let overlaps = false;
+    let ghostBlocked = false;
     if (nearestShip) {
       for (const mod of nearestShip.modules) {
         if (mod.kind === 'plank' || mod.kind === 'deck') continue;
@@ -3417,11 +3733,37 @@ export class RenderSystem {
           overlaps = true; break;
         }
       }
+      // Also check planned ghost markers so the cursor turns red if blocked
+      if (!overlaps) {
+        for (const g of this.ghostPlacements) {
+          if (g.shipId !== nearestShip.id) continue;
+          const gFp = getModuleFootprint(g.kind as any);
+          if (footprintsOverlap(newFp, localX, localY, rotRad, gFp, g.localPos.x, g.localPos.y, g.localRot)) {
+            ghostBlocked = true; break;
+          }
+        }
+      }
     }
     const sailMaxed = item === 'sail' &&
       (nearestShip?.modules.filter(m => m.kind === 'mast').length ?? 0) >= 3;
 
-    const valid = onShip && !overlaps && !sailMaxed;
+    // Sail extra constraints: must be on centerline, min separation from other masts
+    let sailConstraintFail = '';
+    if (item === 'sail' && !sailMaxed && nearestShip) {
+      if (Math.abs(localY) > 25) {
+        sailConstraintFail = 'Must be on centerline';
+      } else {
+        const MIN_SEP = 80;
+        for (const mod of nearestShip.modules) {
+          if (mod.kind !== 'mast') continue;
+          if (Math.hypot(localX - mod.localPos.x, localY - mod.localPos.y) < MIN_SEP) {
+            sailConstraintFail = 'Too close to mast'; break;
+          }
+        }
+      }
+    }
+
+    const valid = onShip && !overlaps && !ghostBlocked && !sailMaxed && sailConstraintFail === '';
 
     // Screen position of cursor
     const screenPos = camera.worldToScreen(this.mouseWorldPos);
@@ -3439,15 +3781,15 @@ export class RenderSystem {
 
     if (item === 'cannon') {
       // -- Cannon base --
-      this.ctx.fillStyle   = valid ? '#336633' : '#663333';
-      this.ctx.strokeStyle = valid ? '#88ff88' : '#ff8888';
+      this.ctx.fillStyle   = valid ? '#336633' : ghostBlocked ? '#664422' : '#663333';
+      this.ctx.strokeStyle = valid ? '#88ff88' : ghostBlocked ? '#ffaa44' : '#ff8888';
       this.ctx.lineWidth   = 1 / zoom;
       this.ctx.fillRect(-15, -10, 30, 20);
       this.ctx.strokeRect(-15, -10, 30, 20);
 
       // -- Barrel (pointing up / forward) --
-      this.ctx.fillStyle   = valid ? '#225522' : '#552222';
-      this.ctx.strokeStyle = valid ? '#55ee55' : '#ee5555';
+      this.ctx.fillStyle   = valid ? '#225522' : ghostBlocked ? '#553311' : '#552222';
+      this.ctx.strokeStyle = valid ? '#55ee55' : ghostBlocked ? '#ee9933' : '#ee5555';
       this.ctx.fillRect(-8, -38, 16, 30);
       this.ctx.strokeRect(-8, -38, 16, 30);
     } else {
@@ -3455,8 +3797,8 @@ export class RenderSystem {
       const radius = 15;
       this.ctx.beginPath();
       this.ctx.arc(0, 0, radius, 0, Math.PI * 2);
-      this.ctx.fillStyle   = valid ? '#334433' : '#443333';
-      this.ctx.strokeStyle = valid ? '#88ff88' : '#ff8888';
+      this.ctx.fillStyle   = valid ? '#334433' : ghostBlocked ? '#443322' : '#443333';
+      this.ctx.strokeStyle = valid ? '#88ff88' : ghostBlocked ? '#ffaa44' : '#ff8888';
       this.ctx.lineWidth   = 1 / zoom;
       this.ctx.fill();
       this.ctx.stroke();
@@ -3465,8 +3807,8 @@ export class RenderSystem {
       const sailW = 80;
       this.ctx.beginPath();
       this.ctx.rect(-sailW / 2, -5, sailW, 10);
-      this.ctx.fillStyle   = valid ? 'rgba(180,240,180,0.35)' : 'rgba(240,180,180,0.35)';
-      this.ctx.strokeStyle = valid ? '#66dd66' : '#dd6666';
+      this.ctx.fillStyle   = valid ? 'rgba(180,240,180,0.35)' : ghostBlocked ? 'rgba(240,200,140,0.35)' : 'rgba(240,180,180,0.35)';
+      this.ctx.strokeStyle = valid ? '#66dd66' : ghostBlocked ? '#ddaa44' : '#dd6666';
       this.ctx.lineWidth   = 1 / zoom;
       this.ctx.fill();
       this.ctx.stroke();
@@ -3477,10 +3819,12 @@ export class RenderSystem {
     // Status label in screen space (below ghost)
     const label = valid
       ? (item === 'cannon' ? 'Place Cannon' : 'Place Sail')
-      : overlaps ? 'Blocked!'  
-      : sailMaxed ? 'Max Sails (3/3)'
+      : ghostBlocked      ? 'Remove plan first!'
+      : overlaps         ? 'Blocked!'
+      : sailMaxed        ? 'Max Sails (3/3)'
+      : sailConstraintFail ? sailConstraintFail
       : 'Not on ship';
-    const labelColor = valid ? '#88ff88' : '#ff8888';
+    const labelColor = valid ? '#88ff88' : ghostBlocked ? '#ffaa44' : '#ff8888';
 
     this.ctx.save();
     this.ctx.font = 'bold 13px Consolas, monospace';

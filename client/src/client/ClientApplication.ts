@@ -28,6 +28,7 @@ import { AudioManager } from './audio/AudioManager.js';
 
 // Core Simulation Types
 import { WorldState, Ship, InputFrame } from '../sim/Types.js';
+import { GhostPlacement, GhostModuleKind } from '../sim/Types.js';
 import { createEmptyInventory } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils, ShipModule, getModuleFootprint, footprintsOverlap } from '../sim/modules.js';
@@ -75,6 +76,11 @@ export class ClientApplication {
   private explicitBuildMode = false;
   private buildSelectedItem: 'cannon' | 'sail' = 'cannon';
   private buildRotationDeg = 0;
+
+  // Ghost placement system — B key opens build menu, player places planning markers
+  private buildMenuOpen = false;
+  private ghostPlacements: GhostPlacement[] = [];
+  private pendingGhostKind: GhostModuleKind | null = null;
   // Optimistic modules placed locally, keyed by ship ID, with expiry timestamp.
   // Overlaid on top of worldToRender every frame so they appear in online mode.
   private localPendingModules = new Map<number, { module: ShipModule; expiry: number }[]>();
@@ -428,13 +434,23 @@ export class ClientApplication {
           }
         }
         this.networkManager.sendSlotSelect(slot);
+        // Selecting a hotbar item deselects any build panel ghost kind
+        if (this.pendingGhostKind !== null) {
+          this.pendingGhostKind = null;
+          this.syncBuildModeState();
+        }
         // Re-evaluate build mode: plank in active slot → build mode on
         this.checkBuildMode();
       };
 
       // Build placement: left-click in build mode → send place_plank / place_cannon / place_mast / replace_helm
       this.inputManager.onBuildPlace = (worldPos) => {
-        // Explicit B-key build mode takes priority
+        // Ghost menu pending placement takes highest priority
+        if (this.buildMenuOpen && this.pendingGhostKind !== null) {
+          this.handleGhostPlace(worldPos);
+          return;
+        }
+        // Explicit B-key build mode takes priority (free placement, real module)
         if (this.explicitBuildMode) {
           this.handleExplicitBuildPlace(worldPos);
           return;
@@ -475,36 +491,58 @@ export class ClientApplication {
         }
       };
 
-      // Explicit build mode toggle (B key)
-      // Only activates when a buildable item (cannon / sail) is in the active hotbar slot.
-      // The active item determines what will be placed — no separate button needed.
+      // Build menu toggle (B key) — opens/closes the left-panel build menu.
+      // Works anytime the player is on a ship deck.
+      // If a cannon or sail item is active in the hotbar, also enters free-placement mode.
       this.inputManager.onBuildModeToggle = () => {
-        if (!this.explicitBuildMode) {
-          // Entering build mode — check that a buildable item is selected
+        if (this.buildMenuOpen) {
+          // Close the build menu and cancel any pending ghost
+          this.buildMenuOpen = false;
+          this.inputManager.buildMenuOpen = false;
+          this.explicitBuildMode = false;
+          this.pendingGhostKind = null;
+          this.buildRotationDeg = 0;
+          console.log('🏗️ [BUILD MENU] CLOSED');
+        } else {
+          // Open — require player to be on a ship
           const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
           const playerId = this.networkManager?.getAssignedPlayerId();
           const player = ws?.players.find(p => p.id === playerId);
-          const activeSlot = player?.inventory?.activeSlot ?? 0;
-          const activeItem = player?.inventory?.slots[activeSlot]?.item ?? 'none';
-          if (activeItem !== 'cannon' && activeItem !== 'sail') {
-            console.log('🔨 [BUILD MODE] Cannot enter — no buildable item selected (need cannon or sail)');
+          if (!player?.carrierId) {
+            console.log('🏗️ [BUILD MENU] Cannot open — not on a ship');
             return;
           }
-          this.buildSelectedItem = activeItem as 'cannon' | 'sail';
-        } else {
-          // Exiting — reset rotation
-          this.buildRotationDeg = 0;
+          this.buildMenuOpen = true;
+          this.inputManager.buildMenuOpen = true;
+          // If a buildable item is in the hotbar, also enter free-placement mode
+          const activeSlot = player.inventory?.activeSlot ?? 0;
+          const activeItem = player.inventory?.slots[activeSlot]?.item ?? 'none';
+          if (activeItem === 'cannon' || activeItem === 'sail') {
+            this.explicitBuildMode = true;
+            this.buildSelectedItem = activeItem as 'cannon' | 'sail';
+          }
+          console.log(`🏗️ [BUILD MENU] OPENED${this.explicitBuildMode ? ` (free-place: ${this.buildSelectedItem})` : ''}`);
         }
-        this.explicitBuildMode = !this.explicitBuildMode;
-        this.inputManager.buildMode = this.explicitBuildMode || this.inputManager.buildMode;
         this.syncBuildModeState();
-        console.log(`🔨 [BUILD MODE] ${this.explicitBuildMode ? `ENTERED (${this.buildSelectedItem})` : 'EXITED'}`);
       };
 
-      // Build rotation (R key in explicit build mode)
+      // Build rotation (R key in explicit build mode or ghost placement)
       this.inputManager.onBuildRotate = (deltaDeg: number) => {
         this.buildRotationDeg = (this.buildRotationDeg + deltaDeg + 360) % 360;
         this.syncBuildModeState();
+      };
+
+      // Right-click in build menu: cancel pending ghost or remove nearest placed ghost
+      this.inputManager.onBuildRightClick = (worldPos: Vec2) => {
+        if (this.pendingGhostKind !== null) {
+          // Cancel the ghost currently attached to the cursor
+          this.pendingGhostKind = null;
+          this.syncBuildModeState();
+          console.log('🏗️ [GHOST] Cancelled pending ghost');
+        } else {
+          // Remove the nearest placed ghost marker
+          this.removeNearestGhost(worldPos);
+        }
       };
       
       // Set up scroll-wheel zoom
@@ -540,6 +578,32 @@ export class ClientApplication {
       this.uiManager.onBuildItemSelect = (item) => {
         this.buildSelectedItem = item;
         this.syncBuildModeState();
+      };
+
+      // Build panel: player selected a module type for ghost placement
+      // This unequips any matching hotbar item and attaches a ghost to the cursor.
+      this.uiManager.onBuildPanelSelect = (kind: GhostModuleKind) => {
+        const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        const playerId = this.networkManager?.getAssignedPlayerId();
+        const player = ws?.players.find(p => p.id === playerId);
+        if (player) {
+          // Unequip matching hotbar item so we go into ghost-only mode
+          const kindToItem: Partial<Record<GhostModuleKind, string>> = {
+            plank: 'plank', cannon: 'cannon', mast: 'sail', helm: 'helm_kit', deck: 'deck',
+          };
+          const activeSlot = player.inventory?.activeSlot ?? 0;
+          const activeItem = player.inventory?.slots[activeSlot]?.item ?? 'none';
+          if (activeItem === kindToItem[kind]) {
+            const emptyIdx = player.inventory.slots.findIndex(s => s.item === 'none');
+            if (emptyIdx >= 0) this.networkManager.sendSlotSelect(emptyIdx);
+          }
+        }
+        // Exit free-placement mode — this is now a ghost-only action
+        this.explicitBuildMode = false;
+        this.pendingGhostKind = kind;
+        this.buildRotationDeg = 0;
+        this.syncBuildModeState();
+        console.log(`🏗️ [GHOST] Picking up ghost: ${kind} — click on ship to place`);
       };
       
       // Initialize Audio System  
@@ -976,7 +1040,8 @@ export class ClientApplication {
           this.syncBuildModeState();
         }
       } else {
-        // Player switched to a non-buildable item — auto-exit build mode
+        // Player switched to a non-buildable item — auto-exit explicit placement mode
+        // (but keep build menu open if it was open)
         this.explicitBuildMode = false;
         this.buildRotationDeg = 0;
         this.syncBuildModeState();
@@ -984,14 +1049,14 @@ export class ClientApplication {
       }
     }
 
-    // When explicit build mode is active, suppress the old snap-point ghost modes
-    // so they don't render confusingly alongside the free-placement ghost.
+    // inputManager.buildMode must be true when menu is open, in explicit mode, or any snap-point mode
     this.renderSystem.setBuildMode(!this.explicitBuildMode && inBuildMode);
     this.renderSystem.setCannonBuildMode(!this.explicitBuildMode && inCannonBuildMode);
     this.renderSystem.setMastBuildMode(!this.explicitBuildMode && inMastBuildMode);
     this.renderSystem.setHelmBuildMode(!this.explicitBuildMode && inHelmBuildMode);
     this.renderSystem.setDeckBuildMode(!this.explicitBuildMode && inDeckBuildMode);
-    this.inputManager.buildMode = this.explicitBuildMode || inBuildMode || inCannonBuildMode || inMastBuildMode || inHelmBuildMode || inDeckBuildMode;
+    this.inputManager.buildMode = this.explicitBuildMode || this.buildMenuOpen
+      || inBuildMode || inCannonBuildMode || inMastBuildMode || inHelmBuildMode || inDeckBuildMode;
   }
 
   /**
@@ -1021,10 +1086,126 @@ export class ClientApplication {
         rotationDeg: this.buildRotationDeg,
       } : null
     );
+
+    // Sync ghost placement state
+    this.uiManager?.setBuildMenuState(this.buildMenuOpen, this.ghostPlacements, this.pendingGhostKind);
+    this.renderSystem?.setBuildMenuOpen(this.buildMenuOpen);
+    this.renderSystem?.setGhostPlacements(this.ghostPlacements);
+    this.renderSystem?.setPendingGhost(
+      this.pendingGhostKind !== null
+        ? { kind: this.pendingGhostKind, rotDeg: this.buildRotationDeg }
+        : null
+    );
+
     // In explicit build mode inputManager.buildMode must stay true
     if (this.inputManager) {
       this.inputManager.explicitBuildMode = this.explicitBuildMode;
-      if (this.explicitBuildMode) this.inputManager.buildMode = true;
+      if (this.explicitBuildMode || this.buildMenuOpen) this.inputManager.buildMode = true;
+    }
+  }
+
+  /**
+   * Place a ghost planning marker at the specified world position.
+   * Ghost placements are purely client-local visual markers — never sent to server.
+   * Mast ghosts are snapped to the ship centerline and must respect min separation.
+   */
+  private handleGhostPlace(worldPos: Vec2): void {
+    if (!this.pendingGhostKind) return;
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    if (!ws) return;
+
+    let nearestShip: Ship | null = null;
+    let nearestDist = Infinity;
+    for (const ship of ws.ships) {
+      const dist = worldPos.sub(ship.position).length();
+      if (dist < nearestDist) { nearestDist = dist; nearestShip = ship; }
+    }
+    if (!nearestShip || nearestDist > 400) return;
+
+    const dx = worldPos.x - nearestShip.position.x;
+    const dy = worldPos.y - nearestShip.position.y;
+    const cos = Math.cos(-nearestShip.rotation);
+    const sin = Math.sin(-nearestShip.rotation);
+    let localX = dx * cos - dy * sin;
+    let localY = dx * sin + dy * cos;
+
+    const ghostRotRad = (this.buildRotationDeg * Math.PI) / 180;
+
+    // Mast ghosts: snap to centerline and enforce min separation
+    if (this.pendingGhostKind === 'mast') {
+      localY = 0; // Force onto ship centerline
+      const MIN_MAST_SEP = 80;
+      for (const mod of nearestShip.modules) {
+        if (mod.kind !== 'mast') continue;
+        if (Math.hypot(localX - mod.localPos.x, 0 - mod.localPos.y) < MIN_MAST_SEP) {
+          console.log(`❌ [GHOST] Mast ghost too close to existing mast`);
+          return;
+        }
+      }
+      for (const g of this.ghostPlacements) {
+        if (g.shipId !== nearestShip.id || g.kind !== 'mast') continue;
+        if (Math.hypot(localX - g.localPos.x, 0) < MIN_MAST_SEP) {
+          console.log(`❌ [GHOST] Mast ghost too close to another mast ghost`);
+          return;
+        }
+      }
+    }
+
+    // Geometry-based overlap check against existing ship modules (same logic as real placement)
+    const newFp = getModuleFootprint(this.pendingGhostKind as any);
+    for (const mod of nearestShip.modules) {
+      if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+      const existFp = getModuleFootprint(mod.kind);
+      if (footprintsOverlap(newFp, localX, localY, ghostRotRad, existFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
+        console.log(`❌ [GHOST] Ghost overlaps existing ${mod.kind}`);
+        return;
+      }
+    }
+
+    // Overlap check against other ghost placements on the same ship
+    for (const g of this.ghostPlacements) {
+      if (g.shipId !== nearestShip.id) continue;
+      const existFp = getModuleFootprint(g.kind as any);
+      if (footprintsOverlap(newFp, localX, localY, ghostRotRad, existFp, g.localPos.x, g.localPos.y, g.localRot)) {
+        console.log(`❌ [GHOST] Ghost overlaps another ghost (${g.kind})`);
+        return;
+      }
+    }
+
+    const ghost: GhostPlacement = {
+      id: `ghost-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+      kind: this.pendingGhostKind,
+      shipId: nearestShip.id,
+      localPos: { x: localX, y: localY },
+      localRot: ghostRotRad,
+    };
+    this.ghostPlacements.push(ghost);
+    this.syncBuildModeState();
+    console.log(`🏗️ [GHOST] Placed ${this.pendingGhostKind} ghost at (${localX.toFixed(0)}, ${localY.toFixed(0)})`);
+  }
+
+  /**
+   * Remove the ghost placement nearest to the given world position.
+   * Only fires if the cursor is within 60 units of a ghost.
+   */
+  private removeNearestGhost(worldPos: Vec2): void {
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    let nearestId: string | null = null;
+    let nearestDist = Infinity;
+    for (const ghost of this.ghostPlacements) {
+      const ship = ws?.ships.find(s => s.id === ghost.shipId);
+      if (!ship) continue;
+      const cos = Math.cos(ship.rotation);
+      const sin = Math.sin(ship.rotation);
+      const wx = ship.position.x + ghost.localPos.x * cos - ghost.localPos.y * sin;
+      const wy = ship.position.y + ghost.localPos.x * sin + ghost.localPos.y * cos;
+      const dist = worldPos.sub(Vec2.from(wx, wy)).length();
+      if (dist < nearestDist) { nearestDist = dist; nearestId = ghost.id; }
+    }
+    if (nearestId && nearestDist < 60) {
+      this.ghostPlacements = this.ghostPlacements.filter(g => g.id !== nearestId);
+      this.syncBuildModeState();
+      console.log(`🏗️ [GHOST] Removed ghost`);
     }
   }
 
@@ -1071,6 +1252,16 @@ export class ClientApplication {
       }
     }
 
+    // Block placement if it overlaps any ghost planning marker on this ship
+    for (const g of this.ghostPlacements) {
+      if (g.shipId !== nearestShip.id) continue;
+      const ghostFp = getModuleFootprint(g.kind as any);
+      if (footprintsOverlap(newFp, localX, localY, rotationRad, ghostFp, g.localPos.x, g.localPos.y, g.localRot)) {
+        console.log(`❌ [BUILD] Placement blocked by ghost marker (${g.kind}) — remove it first`);
+        return;
+      }
+    }
+
     // Optimistically add the module to all local world states so it appears immediately.
     // In online mode the server's next authoritative tick will include (or exclude) it.
     // In demo/offline mode this IS the only placement path.
@@ -1096,6 +1287,22 @@ export class ClientApplication {
       if (mastCount >= 3) {
         console.log(`❌ [BUILD] Max sails reached (${mastCount}/3)`);
         return;
+      }
+      // Sail placement constraints:
+      // 1. Mast center must be on the ship centerline (|localY| ≤ 25)
+      if (Math.abs(localY) > 25) {
+        console.log(`❌ [BUILD] Sail must be on ship centerline — current offset: ${localY.toFixed(0)} (max ±25)`);
+        return;
+      }
+      // 2. Mast cleats must not overlap — enforce minimum center-to-center separation
+      const MIN_MAST_SEP = 80;
+      for (const mod of shipRef.modules) {
+        if (mod.kind !== 'mast') continue;
+        const dist = Math.hypot(localX - mod.localPos.x, localY - mod.localPos.y);
+        if (dist < MIN_MAST_SEP) {
+          console.log(`❌ [BUILD] Mast too close to existing mast at (${mod.localPos.x.toFixed(0)}, ${mod.localPos.y.toFixed(0)}) — distance ${dist.toFixed(0)} < ${MIN_MAST_SEP}`);
+          return;
+        }
       }
       console.log(`⛵ [BUILD] Placing sail at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) on ship ${shipRef.id}`);
       const newMast = ModuleUtils.createDefaultModule(tempId, 'mast', Vec2.from(localX, localY));
