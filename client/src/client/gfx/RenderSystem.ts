@@ -1310,10 +1310,11 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
-  /** Semi-transparent red circle with an × mark (missing plank). */
+  /** Semi-transparent red circle with an × mark (missing plank). Pulsates for attention. */
   private drawMissingPlankIcon(cx: number, cy: number, r: number): void {
+    const pulse = 0.55 + 0.45 * Math.abs(Math.sin(Date.now() / 480));
     this.ctx.save();
-    this.ctx.globalAlpha = 0.78;
+    this.ctx.globalAlpha = 0.72 * pulse;
 
     // Filled circle background
     this.ctx.fillStyle = 'rgba(220,30,30,0.30)';
@@ -1337,27 +1338,37 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
-  /** Semi-transparent blue wave lines (leaking plank). */
+  /** Water-drop icons (leaking plank): three flat teardrops, pulsating. */
   private drawLeakingPlankIcon(cx: number, cy: number, r: number): void {
+    const pulse = 0.55 + 0.45 * Math.abs(Math.sin(Date.now() / 480));
     this.ctx.save();
-    this.ctx.globalAlpha = 0.82;
-    this.ctx.strokeStyle = '#33bbff';
-    this.ctx.lineWidth = 1.3;
-    this.ctx.lineCap = 'round';
+    this.ctx.globalAlpha = 0.82 * pulse;
+    this.ctx.fillStyle = '#33aaff';
 
-    // Three horizontal wave arcs stacked vertically
-    const ww = r * 0.75;
-    const amp = r * 0.22;
-    for (let row = -1; row <= 1; row++) {
-      const wy = cy + row * (r * 0.44);
+    // Drop positions: top-centre, bottom-left, bottom-right
+    const dropR  = r * 0.30;
+    const spread = r * 0.38;
+    const drops: [number, number][] = [
+      [cx,          cy - spread * 0.7],
+      [cx - spread, cy + spread * 0.5],
+      [cx + spread, cy + spread * 0.5],
+    ];
+
+    for (const [dx, dy] of drops) {
       this.ctx.beginPath();
-      this.ctx.moveTo(cx - ww, wy);
+      this.ctx.moveTo(dx, dy - dropR * 1.55);          // pointed tip
       this.ctx.bezierCurveTo(
-        cx - ww * 0.33, wy - amp,
-        cx + ww * 0.33, wy + amp,
-        cx + ww,        wy
+        dx + dropR * 0.9, dy - dropR * 0.3,
+        dx + dropR,       dy + dropR * 0.5,
+        dx,               dy + dropR
       );
-      this.ctx.stroke();
+      this.ctx.bezierCurveTo(
+        dx - dropR,       dy + dropR * 0.5,
+        dx - dropR * 0.9, dy - dropR * 0.3,
+        dx,               dy - dropR * 1.55
+      );
+      this.ctx.closePath();
+      this.ctx.fill();
     }
 
     this.ctx.restore();
