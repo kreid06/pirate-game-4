@@ -3431,6 +3431,24 @@ export class RenderSystem {
     const screenPos = camera.worldToScreen(ship.position);
     const { zoom, rotation: camRot } = camera.getState();
 
+    // In hotbar mode, find the nearest matching ghost within the 80u snap radius
+    const hotbarKind: GhostModuleKind | null =
+      this.cannonBuildMode && !this.explicitBuildState ? 'cannon' :
+      this.mastBuildMode  && !this.explicitBuildState ? 'mast' : null;
+    let snapGhostId: string | null = null;
+    if (hotbarKind && this.mouseWorldPos) {
+      let bestDist = 80;
+      const cos = Math.cos(ship.rotation);
+      const sin = Math.sin(ship.rotation);
+      for (const g of ghosts) {
+        if (g.kind !== hotbarKind) continue;
+        const wx = ship.position.x + g.localPos.x * cos - g.localPos.y * sin;
+        const wy = ship.position.y + g.localPos.x * sin + g.localPos.y * cos;
+        const dist = Math.hypot(this.mouseWorldPos.x - wx, this.mouseWorldPos.y - wy);
+        if (dist < bestDist) { bestDist = dist; snapGhostId = g.id; }
+      }
+    }
+
     this.ctx.save();
     this.ctx.translate(screenPos.x, screenPos.y);
     this.ctx.scale(zoom, zoom);
@@ -3438,16 +3456,18 @@ export class RenderSystem {
 
     const t = performance.now() / 1000;
     const pulse = 0.70 + 0.20 * Math.sin(t * 2.5);
+    const snapPulse = 0.85 + 0.15 * Math.sin(t * 5.0); // faster pulse for snap highlight
 
     for (const g of ghosts) {
+      const isSnap = g.id === snapGhostId;
       this.ctx.save();
       this.ctx.translate(g.localPos.x, g.localPos.y);
       this.ctx.rotate(g.localRot);
-      this.ctx.globalAlpha = pulse;
+      this.ctx.globalAlpha = isSnap ? snapPulse : pulse;
 
-      // All ghost plan markers use faint green — same palette as old ghost shapes
-      const ghostFill   = 'rgba(40,130,70,0.55)';
-      const ghostStroke = '#66ee99';
+      // Snap target uses bright teal; normal plan marker uses faint green
+      const ghostFill   = isSnap ? 'rgba(20,180,160,0.55)' : 'rgba(40,130,70,0.55)';
+      const ghostStroke = isSnap ? '#44ffee' : '#66ee99';
 
       switch (g.kind) {
         case 'cannon': {
@@ -3526,14 +3546,27 @@ export class RenderSystem {
         }
       }
 
+      // Outer snap ring for the hotbar-snap target
+      if (isSnap) {
+        this.ctx.globalAlpha = snapPulse * 0.9;
+        this.ctx.strokeStyle = '#44ffee';
+        this.ctx.lineWidth = 2.5;
+        this.ctx.setLineDash([4, 3]);
+        const ringR = g.kind === 'cannon' ? 28 : g.kind === 'deck' ? 250 : 32;
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, ringR, 0, Math.PI * 2);
+        this.ctx.stroke();
+        this.ctx.setLineDash([]);
+      }
+
       // Label
-      this.ctx.globalAlpha = pulse * 0.9;
-      this.ctx.fillStyle = '#99eebb';
-      this.ctx.font = '9px Consolas, monospace';
+      this.ctx.globalAlpha = (isSnap ? snapPulse : pulse) * 0.9;
+      this.ctx.fillStyle = isSnap ? '#44ffee' : '#99eebb';
+      this.ctx.font = isSnap ? 'bold 10px Consolas, monospace' : '9px Consolas, monospace';
       this.ctx.textAlign = 'center';
       this.ctx.textBaseline = 'bottom';
       const labelY = g.kind === 'deck' ? -64 : -22;
-      this.ctx.fillText(g.kind, 0, labelY);
+      this.ctx.fillText(isSnap ? '⚡ Click to place!' : g.kind, 0, labelY);
 
       this.ctx.restore();
     }
