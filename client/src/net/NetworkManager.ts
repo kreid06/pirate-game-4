@@ -64,6 +64,7 @@ export enum MessageType {
   PLACE_PLANK = 'place_plank',
   REPAIR_PLANK = 'repair_plank',
   REPAIR_SAIL = 'repair_sail',
+  USE_HAMMER = 'use_hammer',
   PLACE_CANNON = 'place_cannon',
   PLACE_CANNON_AT = 'place_cannon_at',
   PLACE_MAST = 'place_mast',
@@ -286,6 +287,12 @@ interface RepairSailMessage extends NetworkMessage {
   mastIndex: number; // 0=bow, 1=mid, 2=stern
 }
 
+interface UseHammerMessage extends NetworkMessage {
+  type: MessageType.USE_HAMMER;
+  timestamp: number;
+  shipId: number;
+}
+
 interface PlacePlankMessage extends NetworkMessage {
   type: MessageType.PLACE_PLANK;
   timestamp: number;
@@ -338,7 +345,7 @@ interface CrewAssignMessage extends NetworkMessage {
   task: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | RepairPlankMessage | RepairSailMessage | CrewAssignMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage;
 
 /**
  * Main network manager class
@@ -880,6 +887,15 @@ export class NetworkManager {
   sendRepairPlank(shipId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.REPAIR_PLANK, timestamp: Date.now(), shipId });
+  }
+
+  /**
+   * Apply a hammer-boosted instant repair (10 000 HP) to the most damaged plank.
+   * Called only after the player wins the client-side hammer minigame.
+   */
+  sendUseHammer(shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.USE_HAMMER, timestamp: Date.now(), shipId });
   }
 
   /**

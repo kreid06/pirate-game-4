@@ -3923,6 +3923,59 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strstr(payload, "\"type\":\"use_hammer\"")) {
+                            // USE HAMMER: apply boosted instant repair (10000 HP) to the most
+                            // damaged plank. Hammer is a reusable tool; not consumed.
+                            // Bonus is only sent by the client after winning the minigame.
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else if (!global_sim) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                } else {
+                                    struct Ship* sim_ship = NULL;
+                                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                        if (global_sim->ships[si].id == player->parent_ship_id) {
+                                            sim_ship = &global_sim->ships[si]; break;
+                                        }
+                                    }
+                                    if (!sim_ship) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                    } else {
+                                        ShipModule* worst_plank = NULL;
+                                        for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                                            ShipModule* mod = &sim_ship->modules[m];
+                                            if (mod->type_id == MODULE_TYPE_PLANK &&
+                                                mod->health > 0 &&
+                                                mod->health < mod->max_health) {
+                                                if (!worst_plank || mod->health < worst_plank->health)
+                                                    worst_plank = mod;
+                                            }
+                                        }
+                                        if (!worst_plank) {
+                                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"planks_full_health\"}");
+                                        } else {
+                                            worst_plank->health += 10000;
+                                            if (worst_plank->health > (int32_t)worst_plank->max_health)
+                                                worst_plank->health = (int32_t)worst_plank->max_health;
+                                            if (worst_plank->health >= (int32_t)worst_plank->max_health)
+                                                worst_plank->state_bits &= ~MODULE_STATE_DAMAGED;
+                                            log_info("🔨 Player %u hammer-repaired plank %u on ship %u to %d/%d HP",
+                                                     player->player_id, worst_plank->id, sim_ship->id,
+                                                     (int)worst_plank->health, (int)worst_plank->max_health);
+                                            snprintf(response, sizeof(response),
+                                                "{\"type\":\"message_ack\",\"status\":\"hammer_repair_applied\","
+                                                "\"plank_id\":%u,\"health\":%d,\"maxHealth\":%d}",
+                                                worst_plank->id, (int)worst_plank->health, (int)worst_plank->max_health);
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
                         } else if (strstr(payload, "\"type\":\"repair_sail\"")) {
                             // REPAIR SAIL FIBERS: restore openness (+50, cap 100) and wind_efficiency
                             // (+0.5, cap 1.0) on a specific mast. Consumes 1 ITEM_REPAIR_KIT.

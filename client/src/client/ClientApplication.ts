@@ -238,10 +238,19 @@ export class ClientApplication {
           const playerId = this.networkManager.getAssignedPlayerId();
           const worldState = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
           const player = playerId !== null ? worldState?.players.find(p => p.id === playerId) : null;
-
-          // Repair mode: active slot = repair_kit → repair most damaged plank on ship
           const activeSlot = player?.inventory?.activeSlot ?? 0;
           const activeItem = player?.inventory?.slots[activeSlot]?.item ?? 'none';
+
+          // Hammer tool: E while holding hammer → start repair minigame
+          if (activeItem === 'hammer' && player && player.carrierId !== 0) {
+            const shipId = player.carrierId;
+            this.uiManager?.startHammerMinigame((won) => {
+              if (won) this.networkManager.sendUseHammer(shipId);
+            });
+            return;
+          }
+
+          // Repair mode: active slot = repair_kit → repair most damaged plank on ship
           if (activeItem === 'repair_kit' && player && player.carrierId !== 0) {
             console.log(`🔧 [REPAIR] Sending repair_plank for ship ${player.carrierId}`);
             this.networkManager.sendRepairPlank(player.carrierId);
@@ -1066,7 +1075,13 @@ export class ClientApplication {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
         return;
       }
-      
+
+      // Route Space / Enter to UIManager for minigame handling first
+      if (this.uiManager?.handleKeyDown(e.key)) {
+        e.preventDefault();
+        return;
+      }
+
       switch (e.key) {
         case ']':
           this.renderSystem.toggleHoverBoundaries();

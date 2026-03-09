@@ -88,7 +88,7 @@ void module_update(ShipModule* module, q16_t dt) {
         case MODULE_TYPE_PLANK:
             // Passive self-repair: 5% of max_health per second
             if (module->health > 0 && module->health < (int32_t)module->max_health) {
-                float heal = (float)module->max_health * 0.05f * Q16_TO_FLOAT(dt);
+                float heal = (float)module->max_health * 0.025f * Q16_TO_FLOAT(dt);
                 module->health += (int32_t)heal;
                 if (module->health > (int32_t)module->max_health)
                     module->health = (int32_t)module->max_health;

@@ -85,6 +85,22 @@ export class UIManager {
 
   /** Called when the player clicks a build item button (cannon/sail). */
   public onBuildItemSelect: ((item: 'cannon' | 'sail') => void) | null = null;
+
+  // ── Hammer minigame state ──────────────────────────────────────────────────
+  private hammerGame: {
+    active:          boolean;
+    startTime:       number;   // performance.now() when minigame began
+    duration:        number;   // ms for cursor to travel full track
+    sweetspotStart:  number;   // 0..1 — left edge of green zone
+    sweetspotWidth:  number;   // 0..1 — width of green zone
+    callback:        ((won: boolean) => void) | null;
+    resultTime:      number;   // performance.now() when player struck; -1 = not yet
+    won:             boolean | null;
+  } = {
+    active: false, startTime: 0, duration: 2500,
+    sweetspotStart: 0, sweetspotWidth: 0,
+    callback: null, resultTime: -1, won: null,
+  };
   
   constructor(_canvas: HTMLCanvasElement, config: ClientConfig) {
     this.config = config;
@@ -93,6 +109,39 @@ export class UIManager {
     this.setupEventListeners();
   }
   
+  /**
+   * Start the hammer repair minigame.
+   * callback receives true if the player hits the green zone, false otherwise.
+   * A second call while the game is active is silently ignored.
+   */
+  startHammerMinigame(callback: (won: boolean) => void): void {
+    if (this.hammerGame.active) return;
+    this.hammerGame = {
+      active: true,
+      startTime: performance.now(),
+      duration: 2500,
+      // Random zone in the middle 55% of the track so it's challenging but fair
+      sweetspotStart: 0.20 + Math.random() * 0.50,
+      sweetspotWidth: 0.16,
+      callback,
+      resultTime: -1,
+      won: null,
+    };
+  }
+
+  /**
+   * Route a keydown event.  Returns true if the minigame consumed the key.
+   * Call this from the application keydown handler before processing game input.
+   */
+  handleKeyDown(key: string): boolean {
+    if (!this.hammerGame.active) return false;
+    if (key === ' ' || key === 'Enter') {
+      if (this.hammerGame.resultTime === -1) this.strikeHammer();
+      return true;
+    }
+    return false;
+  }
+
   /**
    * Update UI manager
    */
@@ -147,6 +196,11 @@ export class UIManager {
     // Explicit build mode overlay (renders on top of everything, including menus)
     if (this.buildModeState?.active) {
       this.renderBuildModeOverlay(ctx, ctx.canvas);
+    }
+
+    // Hammer minigame — topmost overlay, blocks all game input when active
+    if (this.hammerGame.active) {
+      this.renderHammerMinigame(ctx, ctx.canvas);
     }
   }
   
@@ -353,6 +407,11 @@ export class UIManager {
    * Handle a canvas click — returns true if the UI consumed it.
    */
   handleClick(x: number, y: number): boolean {
+    // Hammer minigame swallows all clicks while active
+    if (this.hammerGame.active) {
+      if (this.hammerGame.resultTime === -1) this.strikeHammer();
+      return true;
+    }
     // Build mode item selection buttons (highest priority — always shown when in build mode)
     if (this.buildModeState?.active) {
       const consumed = this.handleBuildModeClick(x, y);
@@ -643,6 +702,140 @@ export class UIManager {
         // Control hints panel removed; F1 is a no-op
         break;
     }
+  }
+
+  // ── Hammer minigame private helpers ──────────────────────────────────────
+
+  /** Called when the player presses SPACE, Enter, or clicks during the minigame. */
+  private strikeHammer(): void {
+    const elapsed = performance.now() - this.hammerGame.startTime;
+    const pos     = Math.min(elapsed / this.hammerGame.duration, 1);
+    const inZone  = pos >= this.hammerGame.sweetspotStart
+                 && pos <= this.hammerGame.sweetspotStart + this.hammerGame.sweetspotWidth;
+    this.hammerGame.won       = inZone;
+    this.hammerGame.resultTime = performance.now();
+    // Dismiss after 900 ms so the player can see the result flash
+    setTimeout(() => {
+      const cb  = this.hammerGame.callback;
+      const won = this.hammerGame.won;
+      this.hammerGame.active   = false;
+      this.hammerGame.callback = null;
+      if (cb) cb(won!);
+    }, 900);
+  }
+
+  /** Full-screen overlay rendering for the hammer minigame. */
+  private renderHammerMinigame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    const now = performance.now();
+    const elapsed = now - this.hammerGame.startTime;
+
+    // Auto-fail when cursor reaches the end without a strike
+    if (this.hammerGame.resultTime === -1 && elapsed >= this.hammerGame.duration) {
+      this.hammerGame.won       = false;
+      this.hammerGame.resultTime = now;
+      setTimeout(() => {
+        const cb = this.hammerGame.callback;
+        this.hammerGame.active   = false;
+        this.hammerGame.callback = null;
+        if (cb) cb(false);
+      }, 900);
+    }
+
+    const cw = canvas.width;
+    const ch = canvas.height;
+
+    ctx.save();
+
+    // Dim background
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.fillRect(0, 0, cw, ch);
+
+    // Panel
+    const pw = 500, ph = 190;
+    const px = (cw - pw) / 2;
+    const py = (ch - ph) / 2;
+
+    ctx.fillStyle   = '#16162a';
+    ctx.strokeStyle = '#8b6520';
+    ctx.lineWidth   = 2.5;
+    ctx.beginPath();
+    ctx.roundRect?.(px, py, pw, ph, 12);
+    ctx.fill();
+    ctx.stroke();
+
+    // Title
+    ctx.fillStyle     = '#f0c060';
+    ctx.font          = 'bold 21px Consolas, monospace';
+    ctx.textAlign     = 'center';
+    ctx.textBaseline  = 'top';
+    ctx.fillText('\uD83D\uDD28  HAMMER REPAIR', cw / 2, py + 16);
+
+    // ── Track bar ────────────────────────────────────────────────────────
+    const trackW = 430;
+    const trackH = 26;
+    const trackX = (cw - trackW) / 2;
+    const trackY = py + 80;
+
+    // Track background
+    ctx.fillStyle   = '#252538';
+    ctx.strokeStyle = '#4a4a66';
+    ctx.lineWidth   = 1.5;
+    ctx.fillRect(trackX, trackY, trackW, trackH);
+    ctx.strokeRect(trackX, trackY, trackW, trackH);
+
+    // Sweetspot (green zone)
+    const ssX = trackX + this.hammerGame.sweetspotStart * trackW;
+    const ssW = this.hammerGame.sweetspotWidth * trackW;
+    ctx.fillStyle   = 'rgba(0,210,70,0.30)';
+    ctx.strokeStyle = '#00cc44';
+    ctx.lineWidth   = 1.5;
+    ctx.fillRect(ssX, trackY, ssW, trackH);
+    ctx.strokeRect(ssX, trackY, ssW, trackH);
+
+    // Cursor — frozen at strike position after result
+    const resultElapsed = this.hammerGame.resultTime >= 0 ? (now - this.hammerGame.resultTime) : -1;
+    const cursorFrac    = this.hammerGame.resultTime >= 0
+      ? Math.min((this.hammerGame.resultTime - this.hammerGame.startTime) / this.hammerGame.duration, 1)
+      : Math.min(elapsed / this.hammerGame.duration, 1);
+    const cursorX = trackX + cursorFrac * trackW;
+
+    // Result flash tint over the whole track
+    if (resultElapsed >= 0) {
+      const fade = Math.max(0, 1 - resultElapsed / 700);
+      ctx.globalAlpha = 0.35 + fade * 0.55;
+      ctx.fillStyle   = this.hammerGame.won ? 'rgba(0,255,80,0.55)' : 'rgba(255,50,50,0.55)';
+      ctx.fillRect(trackX, trackY, trackW, trackH);
+      ctx.globalAlpha = 1;
+    }
+
+    // Cursor line
+    ctx.strokeStyle = resultElapsed >= 0
+      ? (this.hammerGame.won ? '#44ff88' : '#ff4444')
+      : (cursorFrac > 0.8 ? '#ffcc00' : '#ffffff'); // warn yellow near the end
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cursorX, trackY - 5);
+    ctx.lineTo(cursorX, trackY + trackH + 5);
+    ctx.stroke();
+
+    // ── Result / instructions text ────────────────────────────────────────
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'top';
+    if (resultElapsed >= 0) {
+      ctx.font      = 'bold 28px Consolas, monospace';
+      ctx.fillStyle = this.hammerGame.won ? '#33ff88' : '#ff5555';
+      ctx.fillText(this.hammerGame.won ? 'CRACK! \u2192 +10 000 HP' : 'MISSED!', cw / 2, py + 128);
+    } else {
+      ctx.font      = '14px Consolas, monospace';
+      ctx.fillStyle = '#aaaacc';
+      ctx.fillText('Press [SPACE] or click when the cursor enters the green zone', cw / 2, py + 128);
+      // Countdown ticks along the bottom of the track as tiny tick marks
+      const pct = elapsed / this.hammerGame.duration;
+      ctx.fillStyle = pct > 0.75 ? '#ff8800' : '#555577';
+      ctx.fillRect(trackX, trackY + trackH + 3, trackW * (1 - pct), 3);
+    }
+
+    ctx.restore();
   }
 }
 
