@@ -21,6 +21,7 @@ import {
   NPC_STATE_IDLE,
   NPC_STATE_MOVING,
   NPC_STATE_AT_CANNON,
+  NPC_STATE_REPAIRING,
 } from '../../sim/Types.js';
 
 // ── Visual constants ──────────────────────────────────────────────────────────
@@ -42,12 +43,14 @@ const NPC_ROLE_NAMES: Record<number, string> = {
   1: 'Gunner',
   2: 'Sailor',
   3: 'Rigger',
+  4: 'Repairer',
 };
 
 const NPC_STATE_NAMES: Record<number, string> = {
   [NPC_STATE_IDLE]:      'Idle',
   [NPC_STATE_MOVING]:    'Moving',
   [NPC_STATE_AT_CANNON]: 'At Cannon',
+  [NPC_STATE_REPAIRING]: 'Repairing',
 };
 
 const PANEL_W  = 560;
@@ -228,6 +231,7 @@ export class CompanyMenu {
 
       const stateColor =
         npc.state === NPC_STATE_AT_CANNON ? '#ff9944' :
+        npc.state === NPC_STATE_REPAIRING ? '#66dd88' :
         npc.state === NPC_STATE_MOVING    ? '#88ccff' :
                                             TEXT_DIM;
 

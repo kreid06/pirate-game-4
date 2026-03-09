@@ -180,6 +180,7 @@ export const NPC_TYPE_SAILOR = 0;
 export const NPC_STATE_IDLE      = 0;
 export const NPC_STATE_MOVING    = 1;
 export const NPC_STATE_AT_CANNON = 2;
+export const NPC_STATE_REPAIRING = 3;
 
 /**
  * Visible world NPC entity (sailor crew member)

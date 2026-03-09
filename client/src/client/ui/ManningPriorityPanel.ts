@@ -14,6 +14,7 @@ export type ManningTask = 'Sails' | 'Cannons' | 'Repairs' | 'Combat';
 
 /** NPC state constants (mirror server WorldNpcState) */
 const NPC_STATE_AT_CANNON = 2;
+const NPC_STATE_REPAIRING = 3;
 
 const TASK_COLORS: Record<ManningTask, string> = {
   Sails:   '#5aafff',
@@ -198,7 +199,7 @@ export class ManningPriorityPanel {
       // ---- Assigned NPC chips (small text row) ----
       if (assignedNpcs.length > 0) {
         const chipParts = assignedNpcs.map(n => {
-          const avail = n.state !== NPC_STATE_AT_CANNON;
+          const avail = n.state !== NPC_STATE_AT_CANNON && n.state !== NPC_STATE_REPAIRING;
           return `#${n.id}${avail ? '' : '●'}`;
         });
         ctx.fillStyle = 'rgba(200,220,255,0.65)';
@@ -275,8 +276,8 @@ export class ManningPriorityPanel {
     // Only pick from genuinely idle NPCs — never steal from another task
     const idle = shipNpcs.filter(n => !assigned.has(n.id));
     if (idle.length === 0) return;
-    // Prefer a non-stationed NPC (state !== AT_CANNON) to avoid interrupting active work
-    const pick = idle.find(n => n.state !== NPC_STATE_AT_CANNON) ?? idle[0];
+    // Prefer a non-stationed NPC (state !== AT_CANNON/REPAIRING) to avoid interrupting active work
+    const pick = idle.find(n => n.state !== NPC_STATE_AT_CANNON && n.state !== NPC_STATE_REPAIRING) ?? idle[0];
     this.taskNpcs.get(task)!.push(pick.id);
     this.notifyAssignment();
   }

@@ -57,6 +57,7 @@ typedef enum {
     NPC_ROLE_GUNNER    = 1,  // Mans a cannon: aims at enemy ship and fires
     NPC_ROLE_HELMSMAN  = 2,  // Controls the helm: steers toward/away from target
     NPC_ROLE_RIGGER    = 3,  // Manages a mast: sets sail openness based on orders
+    NPC_ROLE_REPAIRER  = 4,  // Seeks damaged modules and repairs them
 } NpcRole;
 
 // NPC agent — server-side autonomous crew member mounted to a module
@@ -92,6 +93,7 @@ typedef enum {
     WORLD_NPC_STATE_IDLE      = 0, // Resting at or near assigned cannon
     WORLD_NPC_STATE_MOVING    = 1, // Walking across deck to a new cannon after a side switch
     WORLD_NPC_STATE_AT_CANNON = 2, // Arrived — ready to fire
+    WORLD_NPC_STATE_REPAIRING = 3, // Arrived at a damaged module and actively repairing it
 } WorldNpcState;
 
 typedef struct WorldNpc {
