@@ -725,6 +725,7 @@ export class ClientApplication {
         assignedPlayerId,
         playerShipId,
         selectedAmmoType: this.inputManager?.getLoadedAmmoType() ?? 0,
+        pendingAmmoType: this.inputManager?.selectedAmmoType ?? 0,
       });
     }
   }

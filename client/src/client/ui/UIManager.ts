@@ -27,7 +27,8 @@ export interface UIRenderContext {
   assignedPlayerId?: number | null;
   playerShipId?: number; // 0 or absent = not on a ship
   /** Currently selected ammo type: 0 = Cannonball, 1 = Bar Shot */
-  selectedAmmoType?: number;
+  selectedAmmoType?: number;   // loaded (in barrel right now)
+  pendingAmmoType?: number;    // queued for next reload
 }
 
 /**
@@ -135,7 +136,7 @@ export class UIManager {
 
     // Ammo selector widget — bottom-left, shown when aboard a ship with cannons
     if (context.playerShipId) {
-      this.renderAmmoSelector(ctx, context.selectedAmmoType ?? 0);
+      this.renderAmmoSelector(ctx, context.selectedAmmoType ?? 0, context.pendingAmmoType ?? context.selectedAmmoType ?? 0);
     }
 
     // Company menu renders last so it sits above all other UI
@@ -191,7 +192,7 @@ export class UIManager {
    * Ammo selector widget — bottom-left corner.
    * Shows two slots: Cannonball and Bar Shot, with the active one highlighted.
    */
-  private renderAmmoSelector(ctx: CanvasRenderingContext2D, selectedAmmoType: number): void {
+  private renderAmmoSelector(ctx: CanvasRenderingContext2D, loadedAmmoType: number, pendingAmmoType: number): void {
     ctx.save();
 
     const ammoTypes = [
@@ -203,39 +204,100 @@ export class UIManager {
     const slotH  = 46;
     const pad    = 6;
     const margin = 6;
-    const totalW = ammoTypes.length * slotW + (ammoTypes.length - 1) * margin;
     const x0     = 12;
     const y0     = ctx.canvas.height - slotH - 12;
 
+    // If pending == loaded, only one slot needs highlighting (yellow/gold)
+    const switchPending = pendingAmmoType !== loadedAmmoType;
+
     for (let i = 0; i < ammoTypes.length; i++) {
-      const ammo     = ammoTypes[i];
-      const active   = i === selectedAmmoType;
-      const sx       = x0 + i * (slotW + margin);
+      const ammo    = ammoTypes[i];
+      const isLoaded  = i === loadedAmmoType;
+      const isPending = i === pendingAmmoType;
+      const sx      = x0 + i * (slotW + margin);
+
+      // Determine highlight state
+      // loaded → green;  pending (different from loaded) → yellow;  inactive → dim
+      let bgColor: string;
+      let borderColor: string;
+      let borderWidth: number;
+      let textColor: string;
+      let iconColor: string;
+      let dotColor: string | null = null;
+
+      if (isLoaded && !switchPending) {
+        // No pending switch — loaded slot is green (active/ready)
+        bgColor     = 'rgba(50,220,80,0.18)';
+        borderColor = '#44dd66';
+        borderWidth = 2;
+        iconColor   = ammo.color;
+        textColor   = '#ccffcc';
+        dotColor    = '#44dd66';
+      } else if (isLoaded) {
+        // Loaded but a different ammo is queued — show green
+        bgColor     = 'rgba(50,220,80,0.18)';
+        borderColor = '#44dd66';
+        borderWidth = 2;
+        iconColor   = ammo.color;
+        textColor   = '#ccffcc';
+        dotColor    = '#44dd66';
+      } else if (isPending) {
+        // Pending/queued ammo — yellow
+        bgColor     = 'rgba(255,200,50,0.18)';
+        borderColor = '#ffd700';
+        borderWidth = 2;
+        iconColor   = ammo.color;
+        textColor   = '#fff';
+        dotColor    = '#ffd700';
+      } else {
+        // Inactive
+        bgColor     = 'rgba(0,0,0,0.55)';
+        borderColor = '#445';
+        borderWidth = 1;
+        iconColor   = '#556';
+        textColor   = '#668';
+      }
 
       // Background
-      ctx.fillStyle = active ? 'rgba(255,200,50,0.18)' : 'rgba(0,0,0,0.55)';
+      ctx.fillStyle = bgColor;
       ctx.fillRect(sx, y0, slotW, slotH);
 
       // Border
-      ctx.strokeStyle = active ? '#ffd700' : '#445';
-      ctx.lineWidth   = active ? 2 : 1;
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth   = borderWidth;
       ctx.strokeRect(sx, y0, slotW, slotH);
 
       // Icon
       ctx.font         = '18px Consolas, monospace';
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle    = active ? ammo.color : '#556';
+      ctx.fillStyle    = iconColor;
       ctx.fillText(ammo.icon, sx + pad + 2, y0 + slotH / 2 - 4);
 
       // Name
-      ctx.font      = active ? 'bold 11px Consolas, monospace' : '11px Consolas, monospace';
-      ctx.fillStyle = active ? '#fff' : '#668';
+      const highlighted = isLoaded || isPending;
+      ctx.font      = highlighted ? 'bold 11px Consolas, monospace' : '11px Consolas, monospace';
+      ctx.fillStyle = textColor;
       ctx.fillText(ammo.name, sx + pad + 2, y0 + slotH / 2 + 10);
 
-      // Active indicator dot
-      if (active) {
+      // Small label: LOADED / NEXT
+      if (isLoaded && switchPending) {
+        ctx.font      = '9px Consolas, monospace';
+        ctx.fillStyle = '#44dd66';
+        ctx.textAlign = 'right';
+        ctx.fillText('LOADED', sx + slotW - 5, y0 + slotH - 6);
+        ctx.textAlign = 'left';
+      } else if (isPending && switchPending) {
+        ctx.font      = '9px Consolas, monospace';
         ctx.fillStyle = '#ffd700';
+        ctx.textAlign = 'right';
+        ctx.fillText('NEXT', sx + slotW - 5, y0 + slotH - 6);
+        ctx.textAlign = 'left';
+      }
+
+      // Indicator dot
+      if (dotColor) {
+        ctx.fillStyle = dotColor;
         ctx.beginPath();
         ctx.arc(sx + slotW - 10, y0 + 10, 4, 0, Math.PI * 2);
         ctx.fill();
@@ -247,7 +309,8 @@ export class UIManager {
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle    = 'rgba(120,120,140,0.7)';
-    ctx.fillText('[X] cycle ammo', x0 + 2, y0 + slotH + 3);
+    const hint = switchPending ? '[X] cycle  |  double-tap X → force reload' : '[X] cycle ammo';
+    ctx.fillText(hint, x0 + 2, y0 + slotH + 3);
 
     ctx.restore();
   }
