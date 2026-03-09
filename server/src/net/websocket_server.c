@@ -2020,6 +2020,15 @@ static void tick_world_npcs(float dt) {
                 if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
                 if (mod->max_health == 0) continue;
                 float ratio = (float)mod->health / (float)mod->max_health;
+                // For masts, also consider fiber (sail) health damage
+                if (mod->type_id == MODULE_TYPE_MAST) {
+                    float fhmax = Q16_TO_FLOAT(mod->data.mast.fiber_max_health);
+                    if (fhmax > 0.0f) {
+                        float fh = Q16_TO_FLOAT(mod->data.mast.fiber_health);
+                        float fiber_ratio = fh / fhmax;
+                        if (fiber_ratio < ratio) ratio = fiber_ratio;
+                    }
+                }
                 if (ratio >= 1.0f) continue;
                 bool taken = false;
                 for (int j = 0; j < world_npc_count; j++) {
