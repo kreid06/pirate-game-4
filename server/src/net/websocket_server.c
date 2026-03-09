@@ -661,6 +661,8 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].inventory.slots[5].quantity = 3;
             players[i].inventory.slots[6].item     = ITEM_HELM;
             players[i].inventory.slots[6].quantity = 1;
+            players[i].inventory.slots[7].item     = ITEM_DECK;
+            players[i].inventory.slots[7].quantity = 3;
 
             return &players[i];
         }
