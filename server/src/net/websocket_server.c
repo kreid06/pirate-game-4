@@ -1217,6 +1217,9 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
             ship->modules[i].data.mast.angle = angle_q16;
         }
     }
+
+    // Persist desired angle so rigger NPCs can apply it when they arrive at a mast
+    ship->desired_sail_angle = angle_radians;
     
     // Send acknowledgment
     char response[256];
@@ -1460,17 +1463,65 @@ static void tick_npc_agents(float dt) {
                 }
                 if (!npc_at_cannon) break;
 
+                // Sync cannon's desired aim to the ship's current aim angle every tick.
+                // Mirrors the rigger pattern: the NpcAgent continuously applies the
+                // authoritative ship value so no aim message is needed on arrival.
+                {
+                    float cannon_base_angle = Q16_TO_FLOAT(module->local_rot);
+                    float desired_offset = ship->active_aim_angle - cannon_base_angle
+                                          + (float)(M_PI / 2.0f);
+                    while (desired_offset >  (float)M_PI) desired_offset -= 2.0f * (float)M_PI;
+                    while (desired_offset < -(float)M_PI) desired_offset += 2.0f * (float)M_PI;
+                    const float CANNON_AIM_RANGE = 30.0f * ((float)M_PI / 180.0f);
+                    if (desired_offset > CANNON_AIM_RANGE || desired_offset < -CANNON_AIM_RANGE)
+                        desired_offset = 0.0f;
+                    module->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
+                    // Mirror into sim-ship
+                    if (global_sim) {
+                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                            if (global_sim->ships[si].id == ship->ship_id) {
+                                for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
+                                    if (global_sim->ships[si].modules[mi].id == module->id) {
+                                        global_sim->ships[si].modules[mi].data.cannon.desired_aim_direction
+                                            = Q16_FROM_FLOAT(desired_offset);
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 break;
             }
 
             case NPC_ROLE_RIGGER: {
-                // Set sail openness to desired level
+                // Set sail openness and angle to the ship's desired values
                 if (module->type_id == MODULE_TYPE_MAST) {
-                    module->data.mast.openness = npc->desired_openness;
-                    if (npc->desired_openness > 0)
+                    uint8_t target_openness = ship->desired_sail_openness;
+                    module->data.mast.openness = target_openness;
+                    if (target_openness > 0)
                         module->state_bits |=  MODULE_STATE_DEPLOYED;
                     else
                         module->state_bits &= ~MODULE_STATE_DEPLOYED;
+
+                    // Apply desired sail angle
+                    module->data.mast.angle = Q16_FROM_FLOAT(ship->desired_sail_angle);
+                    // Mirror into sim-ship
+                    if (global_sim) {
+                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                            if (global_sim->ships[si].id == ship->ship_id) {
+                                for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
+                                    if (global_sim->ships[si].modules[mi].id == module->id) {
+                                        global_sim->ships[si].modules[mi].data.mast.angle = module->data.mast.angle;
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
 
                     // Gradually repair torn sail fibers at 500 HP/s.
                     float fh    = Q16_TO_FLOAT(module->data.mast.fiber_health);
