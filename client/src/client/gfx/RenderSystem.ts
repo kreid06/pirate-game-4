@@ -2123,9 +2123,9 @@ export class RenderSystem {
       const sailColor = mastData.sailColor;
       const angle = mastData.angle; // Sail angle in degrees
       
-      // Only draw sail if openness > 0
-      const healthRatio = mastData.maxHealth > 0 ? mastData.health / mastData.maxHealth : 1;
-        this.drawSailFiber(x, y, width, height, sailColor, mastData.openness / 100, angle, healthRatio, mast.id);
+      // Use sail cloth HP (fiberHealth) for visual degradation, not mast pole HP
+      const healthRatio = mastData.fiberMaxHealth > 0 ? mastData.fiberHealth / mastData.fiberMaxHealth : 1;
+      this.drawSailFiber(x, y, width, height, sailColor, mastData.openness / 100, angle, healthRatio, mast.id);
       
     }
     
@@ -2133,6 +2133,29 @@ export class RenderSystem {
   }
   
   private drawSailFiber(x: number, y: number, width: number, height: number, sailColor: string, openness: number, angle: number, healthRatio: number = 1, moduleId: number = 0): void {
+    // At 0 HP the sail is completely shredded — don't draw anything
+    if (healthRatio <= 0) return;
+
+    // Helper: parse '#RRGGBB' → [r, g, b]
+    const hexToRgb = (hex: string): [number, number, number] => {
+      const h = hex.replace('#', '');
+      return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+    };
+    // Helper: lerp two [r,g,b] triples and return '#RRGGBB'
+    const lerpColor = (a: [number, number, number], b: [number, number, number], t: number): string => {
+      const r = Math.round(a[0] + (b[0] - a[0]) * t);
+      const g = Math.round(a[1] + (b[1] - a[1]) * t);
+      const bl = Math.round(a[2] + (b[2] - a[2]) * t);
+      return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${bl.toString(16).padStart(2, '0')}`;
+    };
+
+    // Damage factor: 0 = pristine, 1 = nearly destroyed
+    const damage = 1 - Math.max(0, Math.min(1, healthRatio));
+    const grey: [number, number, number] = [110, 110, 110]; // target grey when fully damaged
+
+    const centerColor = lerpColor(hexToRgb(sailColor), grey, damage);
+    const edgeColor   = lerpColor(hexToRgb('#E6E6E6'), grey, damage);
+
     // Save context and apply rotation around mast position
     this.ctx.save();
     
@@ -2144,14 +2167,14 @@ export class RenderSystem {
     const sailTopY = -height * 1.4; // Top of sail attaches to yard (negative = up)
     const sailPower = width * 1.2 * openness; // Adjust height based on openness
     
-    // Create a gradient for the sail
+    // Create a gradient for the sail — shifts from original color toward grey as health drops
     const gradient = this.ctx.createLinearGradient(
       -width / 2, sailTopY,
       width / 2, sailTopY
     );
-    gradient.addColorStop(0, '#E6E6E6');
-    gradient.addColorStop(0.5, sailColor);
-    gradient.addColorStop(1, '#E6E6E6');
+    gradient.addColorStop(0,   edgeColor);
+    gradient.addColorStop(0.5, centerColor);
+    gradient.addColorStop(1,   edgeColor);
     
     // Draw sail shape
     this.ctx.beginPath();

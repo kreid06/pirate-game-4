@@ -148,11 +148,12 @@ export interface MastModuleData {
   radius: number;              // Mast pole radius for rendering
   sailWidth: number;           // Width of the sail
   sailColor: string;           // Color of the sail fabric
+  openness: number;            // Sail openness (0-100) — how much the sail is deployed
   health: number;               // Mast pole HP (base max: 15000)
   maxHealth: number;            // Max mast pole HP
   fiberHealth: number;          // Sail cloth HP (base max: 15000, same as mast)
   fiberMaxHealth: number;       // Sail cloth max HP
-  angle: number;               // Sail angle in degrees (for wind direction)
+  angle: number;               // Sail angle in radians (from server)
 }
 
 /**
@@ -326,6 +327,8 @@ export class ModuleUtils {
           sailColor: '#F5F5DC',   // Beige/cream color for sails
           openness: 80,           // Start with sails mostly deployed
           angle: 0,               // Start with sails aligned with ship
+          health: 15000,
+          maxHealth: 15000,
           fiberHealth: 15000,     // Sail cloth HP (same base as mast)
           fiberMaxHealth: 15000,
         } as MastModuleData;
