@@ -996,7 +996,14 @@ export class ClientApplication {
               const mod = ship.modules.find(m => m.id === player.mountedModuleId);
               if (mod) moduleKind = mod.kind.toLowerCase();
             }
-            this.inputManager.setMountState(true, player.carrierId, moduleKind, player.mountedModuleId);
+            // For helm: seed sail openness from the first mast so W works immediately
+            let initialSailOpenness: number | undefined;
+            if (moduleKind === 'helm') {
+              const mast = ship?.modules.find(m => m.kind === 'mast');
+              const mastData = mast?.moduleData as any;
+              if (typeof mastData?.openness === 'number') initialSailOpenness = mastData.openness;
+            }
+            this.inputManager.setMountState(true, player.carrierId, moduleKind, player.mountedModuleId, initialSailOpenness);
           } else {
             // Player is now dismounted - disable ship controls
             console.log(`⚓ [MOUNT STATE] Server says player is dismounted`);
@@ -1795,7 +1802,12 @@ export class ClientApplication {
         }
       }
       
-      this.inputManager.setMountState(true, shipId, moduleKind, moduleId);
+      this.inputManager.setMountState(true, shipId, moduleKind, moduleId,
+        // Seed sail openness for helm so W works on first mount
+        moduleKind.toUpperCase() === 'HELM' && worldState
+          ? (() => { const mast = worldState.ships.find(s => s.id === shipId)?.modules.find(m => m.kind === 'mast'); return (mast?.moduleData as any)?.openness as number | undefined; })()
+          : undefined
+      );
     }
     
     // Update player state in all world states

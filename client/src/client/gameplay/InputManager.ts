@@ -397,7 +397,7 @@ export class InputManager {
   /**
    * Set mount state (called when player mounts/dismounts a module)
    */
-  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number): void {
+  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number): void {
     this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast') : 'none';
     this.currentShipId = shipId !== undefined ? shipId : null;
     this.mountedCannonModuleId = (mounted && moduleKind.toLowerCase() === 'cannon' && moduleId != null) ? moduleId : null;
@@ -405,14 +405,16 @@ export class InputManager {
     if (mounted) {
       console.log(`⚓ [INPUT] Player mounted to ${moduleKind} on ship ${shipId}`);
       if (this.mountKind === 'helm') {
-        // Reset helm/sail control state
-        this.currentSailOpenness = 100;
+        // Seed from the server's current sail openness so W/S work immediately
+        const seeded = initialSailOpenness ?? 100;
+        this.currentSailOpenness = seeded;
+        this.lastSailOpenness    = seeded;
         this.currentSailAngle = 0;
-        this.lastSailOpenness = 100;
         this.lastSailAngle = 0;
         this.lastRudderState = { left: false, right: false };
         this.lastSailOpennessChangeTime = 0;
         this.lastSailAngleChangeTime = 0;
+        console.log(`⛵ [INPUT] Seeded sail openness to ${seeded}% on mount`);
       }
     } else {
       console.log(`⚓ [INPUT] Player dismounted - player controls active`);
