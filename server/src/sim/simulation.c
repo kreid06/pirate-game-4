@@ -167,10 +167,8 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
 
         // ---- Sinking / water mechanic ----
         // Count remaining planks and detect leaks (< 30% HP).
-        // Leaking planks also self-damage at 80 internal HP/s (= 0.8 display HP/s
-        // since max_health 10000 maps to 100 display HP).
-        int planks_to_remove[MAX_MODULES_PER_SHIP];
-        int remove_count = 0;
+        // Leaking planks do NOT self-damage — they stay at their current HP but
+        // contribute to the hull drain rate at half the missing-plank rate.
         int planks_remaining = 0;
         int planks_leaking = 0;
 
@@ -182,37 +180,9 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
             bool is_leaking = (mod->health < mod->max_health * 30 / 100);
 
             if (is_leaking) {
-                // Leaking plank deteriorates at 80 internal HP/s (0.8 display HP/s)
-                float ph = (float)mod->health - 80.0f * dt_secs;
-                if (ph <= 0.0f) {
-                    mod->health = 0;
-                    planks_to_remove[remove_count++] = (int)m;
-                    continue; // Don't count as remaining
-                }
-                mod->health = (q16_t)ph;
                 planks_leaking++;
             }
             planks_remaining++;
-        }
-
-        // Remove planks that just drained to zero (iterate backwards to preserve indices)
-        for (int ri = remove_count - 1; ri >= 0; ri--) {
-            int m = planks_to_remove[ri];
-            ShipModule* mod = &ship->modules[m];
-            if (sim->hit_event_count < MAX_HIT_EVENTS) {
-                struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
-                ev->ship_id      = ship->id;
-                ev->module_id    = mod->id;
-                ev->is_breach    = false;
-                ev->is_sink      = false;
-                ev->destroyed    = true;
-                ev->damage_dealt = 0;
-                ev->hit_x        = Q16_TO_FLOAT(ship->position.x);
-                ev->hit_y        = Q16_TO_FLOAT(ship->position.y);
-            }
-            memmove(&ship->modules[m], &ship->modules[m + 1],
-                    (ship->module_count - m - 1) * sizeof(ShipModule));
-            ship->module_count--;
         }
 
         int missing = (int)ship->initial_plank_count - planks_remaining;
