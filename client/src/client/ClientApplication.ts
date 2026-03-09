@@ -446,6 +446,13 @@ export class ClientApplication {
           this.networkManager.sendReplaceHelm(helmSlot.ship.id);
           return;
         }
+        // Deck replacement (high priority — only one deck per ship)
+        const deckSlot = this.renderSystem.getHoveredDeckSlot();
+        if (deckSlot) {
+          console.log(`🪵 [BUILD] Placing deck on ship ${deckSlot.ship.id}`);
+          this.networkManager.sendPlaceDeck();
+          return;
+        }
         // Mast placement build mode
         const mastSlot = this.renderSystem.getHoveredMastSlot();
         if (mastSlot) {
@@ -952,6 +959,7 @@ export class ClientApplication {
     const inCannonBuildMode = activeItem === 'cannon';
     const inMastBuildMode   = activeItem === 'sail';
     const inHelmBuildMode   = activeItem === 'helm_kit';
+    const inDeckBuildMode   = activeItem === 'deck';
 
     // Track whether the active item changed while in explicit build mode
     if (this.explicitBuildMode) {
@@ -976,7 +984,8 @@ export class ClientApplication {
     this.renderSystem.setCannonBuildMode(!this.explicitBuildMode && inCannonBuildMode);
     this.renderSystem.setMastBuildMode(!this.explicitBuildMode && inMastBuildMode);
     this.renderSystem.setHelmBuildMode(!this.explicitBuildMode && inHelmBuildMode);
-    this.inputManager.buildMode = this.explicitBuildMode || inBuildMode || inCannonBuildMode || inMastBuildMode || inHelmBuildMode;
+    this.renderSystem.setDeckBuildMode(!this.explicitBuildMode && inDeckBuildMode);
+    this.inputManager.buildMode = this.explicitBuildMode || inBuildMode || inCannonBuildMode || inMastBuildMode || inHelmBuildMode || inDeckBuildMode;
   }
 
   /**

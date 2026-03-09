@@ -68,6 +68,10 @@ export class RenderSystem {
   private helmBuildMode: boolean = false;
   /** Whether the helm ghost is hovered in helm build mode. */
   private hoveredHelmSlot: { ship: Ship } | null = null;
+  /** Whether deck placement build mode is active (deck item held). */
+  private deckBuildMode: boolean = false;
+  /** Whether the deck ghost is hovered in deck build mode. */
+  private hoveredDeckSlot: { ship: Ship } | null = null;
   /** Set by ClientApplication each frame — true when the local player is holding right-mouse. */
   public playerIsAiming: boolean = false;
   /** The assigned local player ID, so guides only draw for that player's cannon. */
@@ -213,6 +217,24 @@ export class RenderSystem {
    */
   getHoveredHelmSlot(): { ship: Ship } | null {
     return this.hoveredHelmSlot;
+  }
+
+  /**
+   * Enable or disable deck placement build mode
+   */
+  setDeckBuildMode(active: boolean): void {
+    this.deckBuildMode = active;
+    if (!active) this.hoveredDeckSlot = null;
+  }
+
+  /** Whether deck build mode is currently active */
+  isInDeckBuildMode(): boolean {
+    return this.deckBuildMode;
+  }
+
+  /** Get the ship whose deck slot is hovered (only in deck build mode) */
+  getHoveredDeckSlot(): { ship: Ship } | null {
+    return this.hoveredDeckSlot;
   }
 
   /**
@@ -558,6 +580,13 @@ export class RenderSystem {
       this.hoveredHelmSlot = null;
     }
 
+    // In deck build mode, detect whether the missing deck slot is under the cursor
+    if (this.deckBuildMode) {
+      this.detectHoveredDeckSlot(worldState);
+    } else {
+      this.hoveredDeckSlot = null;
+    }
+
     // Draw background elements
     this.drawWater(camera);
     this.drawGrid(camera);
@@ -785,6 +814,13 @@ export class RenderSystem {
     if (this.helmBuildMode) {
       for (const ship of worldState.ships) {
         this.queueRenderItem(5, 'helm-ghost', () => this.drawMissingHelmGhost(ship, camera), 1);
+      }
+    }
+
+    // In deck build mode, overlay ghost deck outline if missing (layer 3, under planks)
+    if (this.deckBuildMode) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(3, 'deck-ghost', () => this.drawMissingDeckGhost(ship, camera), 0);
       }
     }
     
@@ -1596,6 +1632,108 @@ export class RenderSystem {
       this.ctx.beginPath();
       this.ctx.arc(RenderSystem.HELM_X, 0, 18, 0, Math.PI * 2);
       this.ctx.strokeStyle = '#ee88ff';
+      this.ctx.lineWidth   = lw * 1.5;
+      this.ctx.stroke();
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Detect whether a ship with a missing deck has its hull area under the cursor.
+   */
+  private detectHoveredDeckSlot(worldState: WorldState): void {
+    this.hoveredDeckSlot = null;
+    if (!this.mouseWorldPos) return;
+
+    for (const ship of worldState.ships) {
+      const deckPresent = ship.modules.some(m => m.kind === 'deck');
+      if (deckPresent) continue;
+
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const localX = dx * cos - dy * sin;
+      const localY = dx * sin + dy * cos;
+
+      // Hit-test against the ship's walkable deck area (slightly inset from full hull)
+      if (Math.abs(localX) <= 280 && Math.abs(localY) <= 75) {
+        this.hoveredDeckSlot = { ship };
+        return;
+      }
+    }
+  }
+
+  /**
+   * Draw a ghost deck outline when the deck module is missing (deck build mode).
+   */
+  private drawMissingDeckGhost(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const deckPresent = ship.modules.some(m => m.kind === 'deck');
+    if (deckPresent) return;
+
+    this.ctx.save();
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const lw = 1.5 / cameraState.zoom;
+    const isHovered = this.hoveredDeckSlot?.ship === ship;
+
+    // Deck ghost: rounded rectangle covering walkable area
+    const w = 480; // half-width total
+    const h = 120; // half-height total
+    const r = 12;  // corner radius
+    const x = -240;
+    const y = -60;
+
+    this.ctx.beginPath();
+    this.ctx.moveTo(x + r, y);
+    this.ctx.lineTo(x + w - r, y);
+    this.ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    this.ctx.lineTo(x + w, y + h - r);
+    this.ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    this.ctx.lineTo(x + r, y + h);
+    this.ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    this.ctx.lineTo(x, y + r);
+    this.ctx.quadraticCurveTo(x, y, x + r, y);
+    this.ctx.closePath();
+
+    this.ctx.fillStyle   = isHovered ? 'rgba(180,110,40,0.30)' : 'rgba(140,80,30,0.12)';
+    this.ctx.strokeStyle = isHovered ? '#dd8833' : 'rgba(200,120,50,0.55)';
+    this.ctx.lineWidth   = isHovered ? lw * 2 : lw;
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    // Draw deck plank lines for visual clarity
+    this.ctx.strokeStyle = isHovered ? 'rgba(220,150,80,0.45)' : 'rgba(180,110,50,0.25)';
+    this.ctx.lineWidth   = lw * 0.8;
+    const plankSpacing = 20;
+    for (let py2 = y + plankSpacing; py2 < y + h; py2 += plankSpacing) {
+      this.ctx.beginPath();
+      this.ctx.moveTo(x + 2, py2);
+      this.ctx.lineTo(x + w - 2, py2);
+      this.ctx.stroke();
+    }
+
+    if (isHovered) {
+      // Outer highlight ring
+      this.ctx.beginPath();
+      this.ctx.moveTo(x + r - 6, y - 6);
+      this.ctx.lineTo(x + w - r + 6, y - 6);
+      this.ctx.quadraticCurveTo(x + w + 6, y - 6, x + w + 6, y + r - 6);
+      this.ctx.lineTo(x + w + 6, y + h - r + 6);
+      this.ctx.quadraticCurveTo(x + w + 6, y + h + 6, x + w - r + 6, y + h + 6);
+      this.ctx.lineTo(x + r - 6, y + h + 6);
+      this.ctx.quadraticCurveTo(x - 6, y + h + 6, x - 6, y + h - r + 6);
+      this.ctx.lineTo(x - 6, y + r - 6);
+      this.ctx.quadraticCurveTo(x - 6, y - 6, x + r - 6, y - 6);
+      this.ctx.closePath();
+      this.ctx.strokeStyle = '#ffbb66';
       this.ctx.lineWidth   = lw * 1.5;
       this.ctx.stroke();
     }

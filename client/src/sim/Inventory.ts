@@ -25,7 +25,8 @@ export type ItemKind =
   | 'leather_armor'
   | 'iron_armor'
   | 'wooden_shield'
-  | 'iron_shield';
+  | 'iron_shield'
+  | 'deck';
 
 // ── Category groups ─────────────────────────────────────────────────────────
 export type ItemCategory = 'none' | 'building' | 'repair' | 'ammo' | 'weapon' | 'tool' | 'armor' | 'shield';
@@ -52,6 +53,7 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   cannon:        { kind: 'cannon',        name: 'Cannon',        category: 'building', maxStack: 9,  color: '#333333', borderColor: '#111',    symbol: '⚫' },
   sail:          { kind: 'sail',          name: 'Sail',          category: 'building', maxStack: 9,  color: '#1e8c6e', borderColor: '#0f5c48', symbol: '⛵' },
   helm_kit:      { kind: 'helm_kit',      name: 'Helm Kit',      category: 'building', maxStack: 3,  color: '#6a3d8f', borderColor: '#3d2060', symbol: 'W' },
+  deck:          { kind: 'deck',          name: 'Deck',          category: 'building', maxStack: 9,  color: '#8b5e3c', borderColor: '#5c3a1c', symbol: '⊟' },
   sword:         { kind: 'sword',         name: 'Sword',         category: 'weapon',   maxStack: 1,  color: '#c0c0c0', borderColor: '#777',    symbol: 'S' },
   pistol:        { kind: 'pistol',        name: 'Pistol',        category: 'weapon',   maxStack: 1,  color: '#8b4513', borderColor: '#5a2d0c', symbol: 'G' },
   hammer:        { kind: 'hammer',        name: 'Hammer',        category: 'tool',     maxStack: 1,  color: '#c07830', borderColor: '#885020', symbol: 'H' },
@@ -82,6 +84,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   12: 'iron_armor',
   20: 'wooden_shield',
   21: 'iron_shield',
+  13: 'deck',
 };
 
 // ── Slot / inventory structures ─────────────────────────────────────────────

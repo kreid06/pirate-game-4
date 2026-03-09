@@ -70,6 +70,7 @@ export enum MessageType {
   PLACE_MAST = 'place_mast',
   PLACE_MAST_AT = 'place_mast_at',
   REPLACE_HELM = 'replace_helm',
+  PLACE_DECK = 'place_deck',
   CREW_ASSIGN = 'crew_assign',
 
   PING = 'ping',
@@ -338,6 +339,11 @@ interface ReplaceHelmMessage extends NetworkMessage {
   shipId: number;
 }
 
+interface PlaceDeckMessage extends NetworkMessage {
+  type: MessageType.PLACE_DECK;
+  timestamp: number;
+}
+
 interface CrewAssignMessage extends NetworkMessage {
   type: MessageType.CREW_ASSIGN;
   timestamp: number;
@@ -346,7 +352,7 @@ interface CrewAssignMessage extends NetworkMessage {
   task: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage;
 
 /**
  * Main network manager class
@@ -956,6 +962,15 @@ export class NetworkManager {
   sendReplaceHelm(shipId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.REPLACE_HELM, timestamp: Date.now(), shipId });
+  }
+
+  /**
+   * Request the server to place a missing deck module on the player's ship.
+   * Consumes 1 ITEM_DECK from the player's inventory.
+   */
+  sendPlaceDeck(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_DECK, timestamp: Date.now() });
   }
 
   /**
