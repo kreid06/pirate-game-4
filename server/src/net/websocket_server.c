@@ -1787,6 +1787,9 @@ static void tick_world_npcs(float dt) {
                     if (mod->id != npc->assigned_cannon_id) continue;
                     if (mod->state_bits & MODULE_STATE_DESTROYED) break;
 
+                    // Initiate passive regen (2.5%/s via sim_update_ships) on arrival
+                    mod->state_bits |= MODULE_STATE_REPAIRING;
+
                     // Repair main HP at 10%/s
                     if (mod->health < (int32_t)mod->max_health) {
                         float heal = (float)mod->max_health * 0.10f * dt;
