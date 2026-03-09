@@ -43,7 +43,8 @@ typedef enum {
  * Cannon-specific module data
  */
 typedef struct {
-    q16_t aim_direction;        // Angle the cannon is aimed at
+    q16_t aim_direction;         // Current angle the cannon is rotated to
+    q16_t desired_aim_direction; // Target angle — actual rotates toward this each tick
     uint8_t ammunition;         // Remaining ammunition
     uint32_t time_since_fire;   // Time since last fire (ms)
     uint32_t reload_time;       // Time required to reload (ms)

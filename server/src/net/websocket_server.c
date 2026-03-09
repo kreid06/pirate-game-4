@@ -1284,7 +1284,7 @@ static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float 
     if (desired_offset >  CANNON_AIM_RANGE) desired_offset =  CANNON_AIM_RANGE;
     if (desired_offset < -CANNON_AIM_RANGE) desired_offset = -CANNON_AIM_RANGE;
 
-    cannon->data.cannon.aim_direction = Q16_FROM_FLOAT(desired_offset);
+    cannon->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
 
     // Mirror into sim-ship so fire_cannon reads the correct value
     if (global_sim) {
@@ -1293,7 +1293,7 @@ static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float 
                 struct Ship* sim_ship = &global_sim->ships[s];
                 for (uint8_t m = 0; m < sim_ship->module_count; m++) {
                     if (sim_ship->modules[m].id == cannon->id) {
-                        sim_ship->modules[m].data.cannon.aim_direction = Q16_FROM_FLOAT(desired_offset);
+                        sim_ship->modules[m].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
                         break;
                     }
                 }
@@ -2185,12 +2185,12 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
         }
 
         // Update cannon's aim_direction
-        cannon->data.cannon.aim_direction = Q16_FROM_FLOAT(desired_offset);
+        cannon->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
 
         // Also update simple ship for sync
         for (int i = 0; i < ship->module_count; i++) {
             if (ship->modules[i].id == cannon->id) {
-                ship->modules[i].data.cannon.aim_direction = Q16_FROM_FLOAT(desired_offset);
+                ship->modules[i].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
                 break;
             }
         }
@@ -5985,6 +5985,46 @@ void websocket_server_tick(float dt) {
     // ===== TICK NPC AGENTS =====
     tick_npc_agents(dt);
     tick_world_npcs(dt);
+
+    // ===== ADVANCE CANNON AIM TOWARD DESIRED (turn-speed limit) =====
+    // Cannons rotate at a maximum of 60 degrees per second.
+    {
+        const float CANNON_TURN_SPEED = 60.0f * (float)(M_PI / 180.0f); // rad/s
+        const float max_step = CANNON_TURN_SPEED * dt;
+        for (int s = 0; s < ship_count; s++) {
+            if (!ships[s].active) continue;
+            for (int m = 0; m < ships[s].module_count; m++) {
+                ShipModule* mod = &ships[s].modules[m];
+                if (mod->type_id != MODULE_TYPE_CANNON) continue;
+                float cur  = Q16_TO_FLOAT(mod->data.cannon.aim_direction);
+                float tgt  = Q16_TO_FLOAT(mod->data.cannon.desired_aim_direction);
+                float diff = tgt - cur;
+                // Normalise diff to -PI..PI
+                while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+                while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+                if (fabsf(diff) <= max_step) {
+                    cur = tgt;
+                } else {
+                    cur += (diff > 0.0f ? max_step : -max_step);
+                }
+                mod->data.cannon.aim_direction = Q16_FROM_FLOAT(cur);
+                // Mirror into sim-ship
+                if (global_sim) {
+                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                        if (global_sim->ships[si].id == ships[s].ship_id) {
+                            for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
+                                if (global_sim->ships[si].modules[mi].id == mod->id) {
+                                    global_sim->ships[si].modules[mi].data.cannon.aim_direction = mod->data.cannon.aim_direction;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     int moving_players = 0;
     
