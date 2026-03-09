@@ -444,6 +444,18 @@ export class RenderSystem {
   /**
    * Check if a point (in ship-local coordinates) is inside a curved plank
    */
+  /**
+   * Lerp a hex colour toward black proportionally to damage taken.
+   * healthRatio 1.0 = full health (original colour), 0.0 = destroyed (black).
+   */
+  private darkenByDamage(hex: string, healthRatio: number): string {
+    const t = Math.max(0, Math.min(1, healthRatio));
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgb(${Math.round(r * t)},${Math.round(g * t)},${Math.round(b * t)})`;
+  }
+
   private isPointInCurvedPlank(
     localX: number, 
     localY: number, 
@@ -915,21 +927,11 @@ export class RenderSystem {
       // Skip completely destroyed planks
       if (health <= 0) continue;
       
-      // Color based on health
-      const healthRatio = health / 100;
-      let fillColor: string;
-      let strokeColor: string;
-      
-      if (healthRatio > 0.66) {
-        fillColor = '#8B7355'; // Healthy brown
-        strokeColor = '#654321';
-      } else if (healthRatio > 0.33) {
-        fillColor = '#A0826D'; // Damaged (lighter)
-        strokeColor = '#8B4513';
-      } else {
-        fillColor = '#B8956A'; // Critical (very light)
-        strokeColor = '#A0826D';
-      }
+      // Smoothly darken toward black as health decreases
+      const maxHealth = plankData.maxHealth || 10000;
+      const healthRatio = Math.max(0, health / maxHealth);
+      const fillColor   = this.darkenByDamage('#8B7355', healthRatio);
+      const strokeColor = this.darkenByDamage('#4A3020', healthRatio);
       
       this.ctx.fillStyle = fillColor;
       this.ctx.strokeStyle = strokeColor;
@@ -1494,6 +1496,9 @@ export class RenderSystem {
       const y = cannon.localPos.y;
       const turretAngle = cannonData.aimDirection || 0; // Cannon aim direction in radians
       const localRot = cannon.localRot || 0; // Module rotation
+
+      // Health-based darkening
+      const cannonHealthRatio = Math.max(0, cannonData.health / (cannonData.maxHealth || 8000));
       
       // Save context for this cannon
       this.ctx.save();
@@ -1505,7 +1510,7 @@ export class RenderSystem {
       const lineWidth = 1 / cameraState.zoom;
       
       // Draw cannon base (doesn't rotate with turret)
-      this.ctx.fillStyle = '#8B4513';
+      this.ctx.fillStyle = this.darkenByDamage('#8B4513', cannonHealthRatio);
       this.ctx.strokeStyle = '#000000';
       this.ctx.lineWidth = lineWidth;
       this.ctx.fillRect(-15, -10, 30, 20);
@@ -1522,7 +1527,7 @@ export class RenderSystem {
       this.ctx.rotate(turretAngle);
       
       // Draw cannon turret (barrel) - now relative to the pivot point
-      this.ctx.fillStyle = '#333333';
+      this.ctx.fillStyle = this.darkenByDamage('#333333', cannonHealthRatio);
       this.ctx.strokeStyle = '#000000';
       this.ctx.lineWidth = lineWidth;
       this.ctx.beginPath();
@@ -1839,9 +1844,11 @@ export class RenderSystem {
       
       const x = helm.localPos.x;
       const y = helm.localPos.y;
+      const helmData = helm.moduleData as import('../../sim/modules.js').HelmModuleData;
+      const helmHealthRatio = Math.max(0, (helmData.health ?? 10000) / (helmData.maxHealth ?? 10000));
       
-      // Draw helm as a simple brown circle
-      this.ctx.fillStyle = '#8B4513';
+      // Draw helm as a simple brown circle, darkened by damage
+      this.ctx.fillStyle = this.darkenByDamage('#8B4513', helmHealthRatio);
       this.ctx.beginPath();
       this.ctx.arc(x, y, 8, 0, Math.PI * 2);
       this.ctx.fill();
