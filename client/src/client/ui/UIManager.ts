@@ -726,6 +726,33 @@ export class UIManager {
     const px     = 0;
     const py     = Math.round((canvas.height - totalH) / 2);
 
+    // ── Plan mode top banner (only when not also in explicit build mode) ──
+    if (!this.buildModeState?.active) {
+      const BANNER_H = 40;
+      const cw = canvas.width;
+      ctx.save();
+      const bannerGrad = ctx.createLinearGradient(0, 0, 0, BANNER_H);
+      bannerGrad.addColorStop(0, '#0a3d2e');
+      bannerGrad.addColorStop(1, '#062618');
+      ctx.fillStyle = bannerGrad;
+      ctx.fillRect(0, 0, cw, BANNER_H);
+      ctx.strokeStyle = '#33cc77';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, BANNER_H);
+      ctx.lineTo(cw, BANNER_H);
+      ctx.stroke();
+      ctx.font = 'bold 18px Consolas, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#66ee99';
+      ctx.fillText(
+        '📋  PLAN MODE — Select module on left  |  [B] Exit  |  [Click] Place Ghost',
+        cw / 2, BANNER_H / 2
+      );
+      ctx.restore();
+    }
+
     ctx.save();
 
     // ── Panel background ──────────────────────────────────────────────────
@@ -738,16 +765,16 @@ export class UIManager {
     ctx.stroke();
 
     // ── Header ─────────────────────────────────────────────────────────────
-    ctx.fillStyle = 'rgba(30,60,100,0.70)';
+    ctx.fillStyle = 'rgba(20,80,60,0.85)';
     ctx.beginPath();
     ctx.roundRect(px, py, W, HH, [0, 8, 0, 0]);
     ctx.fill();
 
-    ctx.fillStyle = '#a8c8e8';
+    ctx.fillStyle = '#66ee99';
     ctx.font = 'bold 12px Consolas, monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('🏗️  BUILD MENU  [B]', px + W / 2, py + HH / 2);
+    ctx.fillText('📋  PLAN MODE  [B]', px + W / 2, py + HH / 2);
 
     // ── Module entries ─────────────────────────────────────────────────────
     const ghostCounts = new Map<GhostModuleKind, number>();

@@ -1068,6 +1068,12 @@ export class ClientApplication {
         this.syncBuildModeState();
         console.log('🔨 [BUILD MODE] EXITED (item changed)');
       }
+    } else if (this.buildMenuOpen && (activeItem === 'cannon' || activeItem === 'sail')) {
+      // Plan mode is open and player equipped a buildable item — jump straight into build
+      this.explicitBuildMode = true;
+      this.buildSelectedItem = activeItem;
+      this.syncBuildModeState();
+      console.log(`🏗️ [BUILD] Auto-entered explicit build from plan mode: ${activeItem}`);
     }
 
     // inputManager.buildMode must be true when menu is open, in explicit mode, or any snap-point mode
