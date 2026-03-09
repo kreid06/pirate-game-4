@@ -32,6 +32,7 @@ import { createEmptyInventory } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils, ShipModule, getModuleFootprint, footprintsOverlap } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
+import { PolygonUtils } from '../common/PolygonUtils.js';
 
 /**
  * Application lifecycle states
@@ -245,7 +246,37 @@ export class ClientApplication {
           if (activeItem === 'hammer' && player && player.carrierId !== 0) {
             const hoveredForHammer = this.renderSystem.getHoveredModule();
             if (!hoveredForHammer) {
-              console.log('🔨 [HAMMER] No module hovered — aim at a module to repair');
+              // No specific module hovered — check if click landed on the ship hull for deck repair
+              const playerShip = worldState?.ships.find(s => s.id === player.carrierId);
+              if (playerShip && playerShip.hull && target) {
+                const dx = target.x - playerShip.position.x;
+                const dy = target.y - playerShip.position.y;
+                const cos = Math.cos(-playerShip.rotation);
+                const sin = Math.sin(-playerShip.rotation);
+                const localClick = Vec2.from(dx * cos - dy * sin, dx * sin + dy * cos);
+                if (PolygonUtils.pointInPolygon(localClick, playerShip.hull, 8)) {
+                  const planks = playerShip.modules.filter(m => m.kind === 'plank');
+                  const damaged = planks.filter(m => {
+                    const md = m.moduleData as any;
+                    return md && md.health < (md.maxHealth ?? 0);
+                  });
+                  if (damaged.length === 0) {
+                    console.log('🔨 [HAMMER] All deck planks are at full health');
+                    return;
+                  }
+                  const worstPlank = damaged.reduce((worst, m) => {
+                    const wmd = worst.moduleData as any;
+                    const cmd = m.moduleData as any;
+                    return (cmd?.health ?? 0) / (cmd?.maxHealth ?? 1) < (wmd?.health ?? 0) / (wmd?.maxHealth ?? 1)
+                      ? m : worst;
+                  });
+                  this.uiManager?.startHammerMinigame((won) => {
+                    if (won) this.networkManager.sendUseHammer(player!.carrierId, worstPlank.id);
+                  });
+                  return;
+                }
+              }
+              console.log('🔨 [HAMMER] No module hovered — aim at a module or click the deck to repair');
               return;
             }
             // Proximity check
