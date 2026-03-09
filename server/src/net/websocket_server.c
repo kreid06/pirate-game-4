@@ -5347,6 +5347,25 @@ void websocket_server_tick(float dt) {
     // This ensures SimpleShip has current position/rotation for mounted player updates
     sync_simple_ships_from_simulation();
 
+    // ===== UPDATE has_crew FLAGS BEFORE SIM STEP =====
+    // Passive module healing in sim_update_ships is gated behind has_crew so that
+    // uncrewed enemy ships do not self-repair between boarding attempts.
+    if (global_sim) {
+        // Clear all flags first
+        for (uint32_t s = 0; s < global_sim->ship_count; s++)
+            global_sim->ships[s].has_crew = 0;
+        // Set flag for every ship that has at least one active player aboard
+        for (int p = 0; p < WS_MAX_CLIENTS; p++) {
+            if (!players[p].active || players[p].parent_ship_id == 0) continue;
+            for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+                if ((uint32_t)global_sim->ships[s].id == players[p].parent_ship_id) {
+                    global_sim->ships[s].has_crew = 1;
+                    break;
+                }
+            }
+        }
+    }
+
     // ===== BROADCAST HIT EVENTS FROM SIMULATION =====
     if (global_sim && global_sim->hit_event_count > 0) {
         char frame[512];

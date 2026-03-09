@@ -267,6 +267,15 @@ export class ClientApplication {
             }
             const shipId   = player.carrierId;
             const moduleId = hoveredForHammer.module.id;
+            // Don't start the minigame if the module is already at full health
+            const md = hoveredForHammer.module.moduleData as any;
+            const poleFullHealth  = !md || md.health >= (md.maxHealth ?? 0);
+            const fiberFullHealth = hoveredForHammer.module.kind !== 'mast'
+              || (md?.fiberHealth ?? 0) >= (md?.fiberMaxHealth ?? 0);
+            if (poleFullHealth && fiberFullHealth) {
+              console.log('🔨 [HAMMER] Module is already at full health');
+              return;
+            }
             this.uiManager?.startHammerMinigame((won) => {
               if (won) this.networkManager.sendUseHammer(shipId, moduleId);
             });

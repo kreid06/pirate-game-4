@@ -67,6 +67,7 @@ struct Ship {
     //   N planks        ->  (1/1.2) * 2^(N-1) HP/s
     uint8_t initial_plank_count; // Set once when ship is created (typically 10)
     uint8_t company_id;           // 0=neutral; set by websocket layer to enable friendly-fire skip
+    uint8_t has_crew;             // 1 if ≥1 player is aboard; updated by websocket layer before each sim step
 
     /* Ship progression — levelled attributes and XP pool. */
     ShipLevelStats level_stats;

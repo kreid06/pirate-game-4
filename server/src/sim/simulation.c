@@ -134,6 +134,37 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
             module_update(&ship->modules[m], dt);
         }
 
+        // Passive self-repair: only when at least one player is aboard.
+        // Rate: 2.5%/s for planks, cannons, mast poles, and mast fibers.
+        if (ship->has_crew) {
+            for (uint8_t m = 0; m < ship->module_count; m++) {
+                ShipModule* mod = &ship->modules[m];
+                if (!module_is_functional(mod)) continue;
+
+                // Pole / cannon / plank HP
+                if (mod->health > 0 && mod->health < (int32_t)mod->max_health) {
+                    float heal = (float)mod->max_health * 0.025f * Q16_TO_FLOAT(dt);
+                    mod->health += (int32_t)heal;
+                    if (mod->health > (int32_t)mod->max_health)
+                        mod->health = (int32_t)mod->max_health;
+                    if (mod->health >= (int32_t)mod->max_health)
+                        mod->state_bits &= ~MODULE_STATE_DAMAGED;
+                }
+
+                // Mast sail fibers
+                if (mod->type_id == MODULE_TYPE_MAST) {
+                    float fh    = Q16_TO_FLOAT(mod->data.mast.fiber_health);
+                    float fhmax = Q16_TO_FLOAT(mod->data.mast.fiber_max_health);
+                    if (fhmax > 0.0f && fh > 0.0f && fh < fhmax) {
+                        fh += fhmax * 0.025f * Q16_TO_FLOAT(dt);
+                        if (fh > fhmax) fh = fhmax;
+                        mod->data.mast.fiber_health    = Q16_FROM_FLOAT(fh);
+                        mod->data.mast.wind_efficiency = Q16_FROM_FLOAT(fh / fhmax);
+                    }
+                }
+            }
+        }
+
         // ---- Sinking / water mechanic ----
         // Count remaining planks and detect leaks (< 30% HP).
         // Leaking planks also self-damage at 80 internal HP/s (= 0.8 display HP/s
