@@ -415,6 +415,10 @@ export class RenderSystem {
           const radius = moduleData.radius || 15;
           width = radius * 2;
           height = radius * 2;
+        } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
+          // Helm renders as a circle with radius 8
+          width = 16;
+          height = 16;
         }
         
         // Check if mouse is within module bounds (simple rectangle check)
@@ -2929,6 +2933,17 @@ export class RenderSystem {
       } else if (moduleData.kind === 'ladder') {
         // Ladder renders as fillRect(-10, -20, 20, 40)
         this.ctx.strokeRect(-10, -20, 20, 40);
+      } else if (moduleData.kind === 'mast') {
+        // Mast is a circle
+        const radius = (moduleData as any).radius || 15;
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        this.ctx.stroke();
+      } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
+        // Helm renders as a circle with radius 8
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, 8, 0, Math.PI * 2);
+        this.ctx.stroke();
       } else {
         // Default highlight for other modules
         const size = 20;
