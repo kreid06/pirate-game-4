@@ -4569,8 +4569,8 @@ int websocket_server_update(struct Sim* sim) {
                                             nc.local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
                                             nc.local_rot   = Q16_FROM_FLOAT(rotation);
                                             nc.state_bits  = MODULE_STATE_ACTIVE;
-                                            nc.health      = Q16_FROM_FLOAT(8000.0f);
-                                            nc.max_health  = Q16_FROM_FLOAT(8000.0f);
+                                            nc.health      = 8000;
+                                            nc.max_health  = 8000;
                                             nc.data.cannon.aim_direction   = Q16_FROM_FLOAT(0.0f);
                                             nc.data.cannon.ammunition      = 10;
                                             nc.data.cannon.reload_time     = CANNON_RELOAD_TIME_MS;
@@ -4663,11 +4663,13 @@ int websocket_server_update(struct Sim* sim) {
                                             nm.local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
                                             nm.local_rot   = Q16_FROM_FLOAT(0.0f);
                                             nm.state_bits  = MODULE_STATE_ACTIVE | MODULE_STATE_DEPLOYED;
-                                            nm.health      = Q16_FROM_FLOAT(15000.0f);
-                                            nm.max_health  = Q16_FROM_FLOAT(15000.0f);
-                                            nm.data.mast.angle           = Q16_FROM_FLOAT(0.0f);
-                                            nm.data.mast.openness        = 0;
-                                            nm.data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
+                                            nm.health      = 15000;
+                                            nm.max_health  = 15000;
+                                            nm.data.mast.angle             = Q16_FROM_FLOAT(0.0f);
+                                            nm.data.mast.openness          = 0;
+                                            nm.data.mast.fiber_health      = Q16_FROM_FLOAT(15000.0f);
+                                            nm.data.mast.fiber_max_health  = Q16_FROM_FLOAT(15000.0f);
+                                            nm.data.mast.wind_efficiency   = Q16_FROM_FLOAT(1.0f);
 
                                             // Add to physics simulation and to SimpleShip (NPC + network)
                                             sim_ship->modules[sim_ship->module_count++] = nm;
@@ -4752,8 +4754,8 @@ int websocket_server_update(struct Sim* sim) {
                                                 nc->local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cy));
                                                 nc->local_rot   = Q16_FROM_FLOAT(rot);
                                                 nc->state_bits  = MODULE_STATE_ACTIVE;
-                                                nc->health      = Q16_FROM_FLOAT(8000.0f);
-                                                nc->max_health  = Q16_FROM_FLOAT(8000.0f);
+                                                nc->health      = 8000;
+                                                nc->max_health  = 8000;
                                                 nc->data.cannon.aim_direction   = Q16_FROM_FLOAT(0.0f);
                                                 nc->data.cannon.ammunition      = 10;
                                                 nc->data.cannon.reload_time     = CANNON_RELOAD_TIME_MS;
@@ -4847,8 +4849,8 @@ int websocket_server_update(struct Sim* sim) {
                                                 nm->local_pos.y = Q16_FROM_FLOAT(0.0f);
                                                 nm->local_rot   = Q16_FROM_FLOAT(0.0f);
                                                 nm->state_bits  = MODULE_STATE_ACTIVE | MODULE_STATE_DEPLOYED;
-                                                nm->health      = Q16_FROM_FLOAT(15000.0f);
-                                                nm->max_health  = Q16_FROM_FLOAT(15000.0f);
+                                                nm->health      = 15000;
+                                                nm->max_health  = 15000;
                                                 nm->data.mast.angle           = Q16_FROM_FLOAT(0.0f);
                                                 nm->data.mast.openness        = 0;
                                                 nm->data.mast.fiber_health     = Q16_FROM_FLOAT(15000.0f);
