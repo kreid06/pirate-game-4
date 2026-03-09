@@ -2067,28 +2067,43 @@ export class RenderSystem {
     // Player must be mounted and on this ship
     if (!localPlayer || !localPlayer.isMounted || localPlayer.carrierId !== ship.id) return;
 
-    let cannonsToShow: typeof ship.modules = [];
+    // Each entry carries the module and a fade alpha (1 = fully visible, 0 = hidden)
+    let cannonsToShow: Array<{ module: (typeof ship.modules)[0]; alpha: number }> = [];
 
     if (localPlayer.mountedModuleId != null) {
       const mountedMod = ship.modules.find(m => m.id === localPlayer.mountedModuleId);
       if (mountedMod?.kind === 'cannon') {
-        // Mounted directly on a cannon — show just that one
-        cannonsToShow = [mountedMod];
+        // Mounted directly on a cannon — show just that one at full opacity
+        cannonsToShow = [{ module: mountedMod, alpha: 1 }];
       } else if (mountedMod?.kind === 'helm' || mountedMod?.kind === 'steering-wheel') {
-        // On the helm — only show cannons whose outward-facing sector contains the aim direction,
-        // AND that have an NPC stationed at them (AT_CANNON) or a player mounted on them.
+        // On the helm — show trajectory guides based on each cannon's angular rotation limit.
+        // Matches the server formula: desired_offset = aim - localRot + π/2
+        // Server clamps to ±30° (CANNON_AIM_RANGE). We add a 15° fade zone beyond that.
+        //   |offset| ≤ 30°        → alpha 1.0  (within rotation range)
+        //   30° < |offset| ≤ 45°  → alpha fades 1→0 (past the rotation limit)
+        //   |offset| >  45°       → hidden
         const aim = this.playerAimAngleRelative;
-        const shipNpcs = worldState.npcs.filter(n => n.shipId === ship.id);
+        const CANNON_LIMIT_RAD = 30 * Math.PI / 180;
+        const FADE_RAD         = 15 * Math.PI / 180;
+        const shipNpcs    = worldState.npcs.filter(n => n.shipId === ship.id);
         const shipPlayers = worldState.players.filter(p => p.carrierId === ship.id && p.isMounted);
-        cannonsToShow = ship.modules.filter(m => {
-          if (m.kind !== 'cannon') return false;
-          if (Math.sin((m.localRot || 0) - aim) <= 0) return false;
-          // Check if any NPC is stationed at this cannon
-          const hasNpc = shipNpcs.some(n => n.assignedCannonId === m.id && n.state === NPC_STATE_AT_CANNON);
-          // Check if any other player is mounted directly on this cannon
+        for (const m of ship.modules) {
+          if (m.kind !== 'cannon') continue;
+          // Angular offset from cannon's natural axis (server convention)
+          let offset = aim - (m.localRot || 0) + Math.PI / 2;
+          // Normalize to [-π, π]
+          while (offset >  Math.PI) offset -= 2 * Math.PI;
+          while (offset < -Math.PI) offset += 2 * Math.PI;
+          const absOffset = Math.abs(offset);
+          if (absOffset > CANNON_LIMIT_RAD + FADE_RAD) continue; // beyond 45° — skip
+          const hasNpc    = shipNpcs.some(n => n.assignedCannonId === m.id && n.state === NPC_STATE_AT_CANNON);
           const hasPlayer = shipPlayers.some(p => p.mountedModuleId === m.id);
-          return hasNpc || hasPlayer;
-        });
+          if (!hasNpc && !hasPlayer) continue;
+          const alpha = absOffset <= CANNON_LIMIT_RAD
+            ? 1
+            : (CANNON_LIMIT_RAD + FADE_RAD - absOffset) / FADE_RAD;
+          cannonsToShow.push({ module: m, alpha });
+        }
       }
     }
 
@@ -2104,7 +2119,7 @@ export class RenderSystem {
     const cosR = Math.cos(ship.rotation);
     const sinR = Math.sin(ship.rotation);
 
-    for (const cannon of cannonsToShow) {
+    for (const { module: cannon, alpha: fadeAlpha } of cannonsToShow) {
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
       const cannonData = cannon.moduleData;
 
@@ -2177,7 +2192,7 @@ export class RenderSystem {
 
       // ── Dashed trajectory line (stops at impact) ──
       this.ctx.save();
-      this.ctx.globalAlpha = 0.80;
+      this.ctx.globalAlpha = 0.80 * fadeAlpha;
       this.ctx.strokeStyle = guideColor;
       this.ctx.lineWidth   = 3.5;
       this.ctx.lineCap     = 'round';
@@ -2198,7 +2213,7 @@ export class RenderSystem {
         const bx = barrelTipX + dirX * tickDist;
         const by = barrelTipY + dirY * tickDist;
         this.ctx.save();
-        this.ctx.globalAlpha = 0.55;
+        this.ctx.globalAlpha = 0.55 * fadeAlpha;
         this.ctx.strokeStyle = guideColor;
         this.ctx.lineWidth   = 3.5;
         this.ctx.lineCap     = 'round';
@@ -2217,7 +2232,7 @@ export class RenderSystem {
       const arcSpan  = Math.PI * 0.44;
       const gapHalf  = Math.PI * 0.06;
       this.ctx.save();
-      this.ctx.globalAlpha = 0.75;
+      this.ctx.globalAlpha = 0.75 * fadeAlpha;
       this.ctx.strokeStyle = guideColor;
       this.ctx.lineWidth   = 3.5;
       this.ctx.lineCap     = 'round';
