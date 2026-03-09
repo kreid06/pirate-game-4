@@ -436,7 +436,9 @@ export class ClientApplication {
             // Use the group's assigned cannon list (aiming / freefire / targetfire all fire it)
             const groupIds = groupState.cannonIds;
             if (groupIds.length > 0) {
-              this.networkManager.sendCannonFire(groupIds, false, ammoType ?? 0);
+              // freefire and targetfire skip the server-side aim-angle check
+              const skipAimCheck = groupState.mode === 'freefire' || groupState.mode === 'targetfire';
+              this.networkManager.sendCannonFire(groupIds, false, ammoType ?? 0, skipAimCheck);
               return;
             }
           }
@@ -618,13 +620,21 @@ export class ClientApplication {
         if (!state) return;
         if (add) {
           // Remove from any previous group first (a cannon belongs to at most one group)
-          for (const [, s] of this.controlGroups) s.cannonIds = s.cannonIds.filter(id => id !== cannonId);
+          for (const [gi, s] of this.controlGroups) {
+            if (s.cannonIds.includes(cannonId)) {
+              s.cannonIds = s.cannonIds.filter(id => id !== cannonId);
+              // Sync the cleared group to server
+              this.networkManager.sendCannonGroupConfig(gi, s.mode, s.cannonIds, s.targetId > 0 ? s.targetId : 0);
+            }
+          }
           if (!state.cannonIds.includes(cannonId)) state.cannonIds.push(cannonId);
           console.log(`🎯 Cannon ${cannonId} → group G${group}`);
         } else {
           state.cannonIds = state.cannonIds.filter(id => id !== cannonId);
           console.log(`❌ Cannon ${cannonId} removed from group G${group}`);
         }
+        // Sync the updated group to server
+        this.networkManager.sendCannonGroupConfig(group, state.mode, state.cannonIds, state.targetId > 0 ? state.targetId : 0);
       };
 
       // Right-click intercepted by UIManager (e.g. cycling weapon group mode on hotbar)
@@ -654,6 +664,8 @@ export class ClientApplication {
         }
         state.targetId = best;
         console.log(`🎯 Group G${group} target → ship ${best} (dist ${bestDist.toFixed(0)})`);
+        // Sync target lock to server so it can auto-aim in targetfire mode
+        this.networkManager.sendCannonGroupConfig(group, state.mode, state.cannonIds, best > 0 ? best : 0);
       };
 
       // Set up mouse tracking for mouse-relative movement
@@ -688,6 +700,8 @@ export class ClientApplication {
           state.mode = mode;
           if (mode !== 'targetfire') state.targetId = -1; // clear lock when leaving targetfire
           console.log(`🎯 Group G${groupIndex} mode → ${mode}`);
+          // Sync mode change to server
+          this.networkManager.sendCannonGroupConfig(groupIndex, mode, state.cannonIds, 0);
         }
       };
 

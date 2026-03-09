@@ -58,6 +58,7 @@ export enum MessageType {
   // Cannon control messages
   CANNON_AIM = 'cannon_aim',
   CANNON_FIRE = 'cannon_fire',
+  CANNON_GROUP_CONFIG = 'cannon_group_config',
 
   SLOT_SELECT = 'slot_select',
   UNEQUIP = 'unequip',
@@ -231,7 +232,21 @@ interface CannonFireMessage extends NetworkMessage {
   timestamp: number;
   cannon_ids?: number[]; // Specific cannons to fire, or undefined for all aimed cannons
   fire_all?: boolean;    // True if double-click (fire all cannons)
-  ammo_type?: number;   // 0 = cannonball (default), 1 = bar shot
+  freefire?: boolean;    // True if freefire/targetfire mode — skip server aim-angle check
+  ammo_type?: number;    // 0 = cannonball (default), 1 = bar shot
+}
+
+/**
+ * Weapon control group configuration message.
+ * Sent whenever the player changes a group's mode, cannon assignment, or target.
+ */
+interface CannonGroupConfigMessage extends NetworkMessage {
+  type: MessageType.CANNON_GROUP_CONFIG;
+  timestamp: number;
+  group_index: number;          // 0–9
+  mode: 'aiming' | 'freefire' | 'haltfire' | 'targetfire';
+  cannon_ids: number[];         // Module IDs of cannons in this group
+  target_ship_id: number;       // Server ship entity ID for targetfire; 0 otherwise
 }
 
 /**
@@ -357,7 +372,7 @@ interface CrewAssignMessage extends NetworkMessage {
   task: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage;
 
 /**
  * Main network manager class
@@ -837,8 +852,10 @@ export class NetworkManager {
    * Send cannon fire command
    * @param cannonIds - Specific cannon IDs to fire, or undefined for aimed cannons
    * @param fireAll - True if double-click (fire all cannons)
+   * @param ammoType - 0 = cannonball, 1 = bar shot
+   * @param freefire - True for freefire/targetfire groups (server skips aim-angle check)
    */
-  sendCannonFire(cannonIds?: number[], fireAll: boolean = false, ammoType: number = 0): void {
+  sendCannonFire(cannonIds?: number[], fireAll: boolean = false, ammoType: number = 0, freefire: boolean = false): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
       return;
     }
@@ -848,10 +865,41 @@ export class NetworkManager {
       timestamp: Date.now(),
       cannon_ids: cannonIds,
       fire_all: fireAll,
+      freefire: freefire || undefined,
       ammo_type: ammoType
     };
 
-    console.log(`💥 Cannon fire: ${fireAll ? 'ALL' : cannonIds ? `IDs ${cannonIds.join(',')}` : 'aimed'} [${ammoType === 1 ? 'BAR SHOT' : 'CANNONBALL'}]`);
+    console.log(`💥 Cannon fire: ${fireAll ? 'ALL' : cannonIds ? `IDs ${cannonIds.join(',')}` : 'aimed'} [${ammoType === 1 ? 'BAR SHOT' : 'CANNONBALL'}]${freefire ? ' FREEFIRE' : ''}`);
+    this.sendMessage(message);
+  }
+
+  /**
+   * Send weapon control group configuration to the server.
+   * Call this whenever a group's mode, cannon assignment, or target changes.
+   *
+   * @param groupIndex     0–9 group slot
+   * @param mode           New firing mode
+   * @param cannonIds      Module IDs of cannons in this group
+   * @param targetShipId   Server ship entity ID for targetfire; 0 otherwise
+   */
+  sendCannonGroupConfig(
+    groupIndex: number,
+    mode: 'aiming' | 'freefire' | 'haltfire' | 'targetfire',
+    cannonIds: number[],
+    targetShipId: number = 0
+  ): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      return;
+    }
+    const message: CannonGroupConfigMessage = {
+      type: MessageType.CANNON_GROUP_CONFIG,
+      timestamp: Date.now(),
+      group_index: groupIndex,
+      mode,
+      cannon_ids: cannonIds,
+      target_ship_id: targetShipId
+    };
+    console.log(`🎯 Group ${groupIndex} config → mode=${mode} cannons=[${cannonIds.join(',')}] target=${targetShipId}`);
     this.sendMessage(message);
   }
 

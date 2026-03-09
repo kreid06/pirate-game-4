@@ -176,6 +176,28 @@ typedef enum {
     PLAYER_STATE_FALLING    // Airborne (jumped off ship)
 } PlayerMovementState;
 
+// ── Weapon Control Groups ────────────────────────────────────────────────────
+// Each player has up to 10 weapon control groups (mirroring the client-side
+// hotbar groups 0–9).  Groups track which cannons belong to them, the current
+// firing mode, and an optional target ship for TARGETFIRE mode.
+typedef enum {
+    WEAPON_GROUP_MODE_AIMING     = 0,  // Player aims manually; fire on command
+    WEAPON_GROUP_MODE_FREEFIRE   = 1,  // Fire at current aim angle; no aim check
+    WEAPON_GROUP_MODE_HALTFIRE   = 2,  // Suppressed — fire commands are ignored
+    WEAPON_GROUP_MODE_TARGETFIRE = 3,  // Auto-aim at target_ship_id; fire on command
+} WeaponGroupMode;
+
+#define MAX_WEAPON_GROUPS      10
+#define MAX_CANNONS_PER_GROUP  16
+
+typedef struct {
+    uint32_t        cannon_ids[MAX_CANNONS_PER_GROUP];
+    uint8_t         cannon_count;
+    WeaponGroupMode mode;
+    uint32_t        target_ship_id;  /* TARGETFIRE only; 0 = no target */
+} WeaponGroup;
+// ────────────────────────────────────────────────────────────────────────────
+
 // WebSocket player structure
 typedef struct WebSocketPlayer {
     uint32_t player_id;          // WebSocket client player ID (e.g., 1000, 1001)
@@ -210,6 +232,9 @@ typedef struct WebSocketPlayer {
     float cannon_aim_angle_relative; // Ship-relative aim angle (radians)
 
     uint8_t company_id;            // Inherited from the ship this player boards
+
+    // Weapon control groups (0–9, mirrors client hotbar)
+    WeaponGroup weapon_groups[MAX_WEAPON_GROUPS];
 
     // Inventory
     PlayerInventory inventory;

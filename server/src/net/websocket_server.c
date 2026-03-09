@@ -1267,7 +1267,12 @@ static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float wo
                                   float angle, entity_id projectile_id, uint8_t ammo_type);
 static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired, uint8_t ammo_type);
 static void handle_cannon_force_reload(WebSocketPlayer* player);
-static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_type);
+static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_type,
+                               uint32_t* explicit_ids, int explicit_count, bool skip_aim_check);
+static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
+                                       WeaponGroupMode mode, uint32_t* cannon_ids,
+                                       int cannon_count, uint32_t target_ship_id);
+static void tick_player_weapon_groups(void);
 static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task);
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle);
 static void dismount_npc(WorldNpc* npc, SimpleShip* ship);
@@ -2152,6 +2157,81 @@ static void tick_world_npcs(float dt) {
 }
 
 /**
+ * Parse a JSON array of uint32_t values for a given key.
+ * Supports keys like "cannon_ids":[101,103,105].
+ * Returns the number of values written into out[] (capped at max_out).
+ */
+static int parse_json_uint32_array(const char* json, const char* key, uint32_t* out, int max_out) {
+    // Build search pattern: "key":[
+    char pattern[64];
+    snprintf(pattern, sizeof(pattern), "\"%s\":[", key);
+    const char* start = strstr(json, pattern);
+    if (!start) return 0;
+    start += strlen(pattern);
+    int count = 0;
+    while (count < max_out) {
+        while (*start == ' ' || *start == '\t') start++;
+        if (*start == ']' || *start == '\0') break;
+        char* end;
+        unsigned long val = strtoul(start, &end, 10);
+        if (end == start) break; // no digits
+        out[count++] = (uint32_t)val;
+        start = end;
+        while (*start == ' ' || *start == '\t') start++;
+        if (*start == ',') start++;
+    }
+    return count;
+}
+
+/**
+ * Configure a player's weapon control group.
+ * Called when the client sends "cannon_group_config".
+ */
+static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
+                                       WeaponGroupMode mode, uint32_t* cannon_ids,
+                                       int cannon_count, uint32_t target_ship_id) {
+    if (group_index < 0 || group_index >= MAX_WEAPON_GROUPS) return;
+    WeaponGroup* group = &player->weapon_groups[group_index];
+    group->mode         = mode;
+    group->cannon_count = (uint8_t)(cannon_count > MAX_CANNONS_PER_GROUP
+                                    ? MAX_CANNONS_PER_GROUP : cannon_count);
+    for (int i = 0; i < group->cannon_count; i++) {
+        group->cannon_ids[i] = cannon_ids[i];
+    }
+    group->target_ship_id = (mode == WEAPON_GROUP_MODE_TARGETFIRE) ? target_ship_id : 0;
+    log_info("🎯 Player %u group %d → mode=%d cannons=%d target=%u",
+             player->player_id, group_index, mode, group->cannon_count, group->target_ship_id);
+}
+
+/**
+ * Per-tick update: for each player's TARGETFIRE weapon groups, auto-aim the
+ * group's cannons toward the locked target ship using npc_aim_cannon_at_world().
+ */
+static void tick_player_weapon_groups(void) {
+    for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+        WebSocketPlayer* player = &players[pi];
+        if (!player->active || player->parent_ship_id == 0) continue;
+        SimpleShip* ship = find_ship(player->parent_ship_id);
+        if (!ship) continue;
+
+        for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
+            WeaponGroup* group = &player->weapon_groups[g];
+            if (group->mode != WEAPON_GROUP_MODE_TARGETFIRE) continue;
+            if (group->target_ship_id == 0 || group->cannon_count == 0) continue;
+
+            SimpleShip* target = find_ship(group->target_ship_id);
+            if (!target || !target->active) continue;
+
+            for (int c = 0; c < group->cannon_count; c++) {
+                ShipModule* cannon = find_module_on_ship(ship, group->cannon_ids[c]);
+                if (!cannon || cannon->type_id != MODULE_TYPE_CANNON) continue;
+                npc_aim_cannon_at_world(ship, cannon, target->x, target->y);
+            }
+        }
+    }
+}
+
+/**
  * Handle cannon aim from player
  * Updates player's aim angle and cannon aim_direction for all cannons within range
  */
@@ -2469,11 +2549,16 @@ static void handle_cannon_force_reload(WebSocketPlayer* player) {
 }
 
 /**
- * Handle cannon fire from player
- * Single click: Fire cannons currently being aimed (within player's aim angle ±30°)
- * Double click: Fire ALL cannons on the ship (broadside)
+ * Handle cannon fire from player.
+ *
+ * @param fire_all        True → broadside (fire every loaded cannon with crew).
+ * @param ammo_type       PROJ_TYPE_CANNONBALL or PROJ_TYPE_BAR_SHOT.
+ * @param explicit_ids    Non-NULL → fire only these cannon module IDs (weapon-group fire).
+ * @param explicit_count  Length of explicit_ids array (0 when explicit_ids is NULL).
+ * @param skip_aim_check  True → skip the aim-angle tolerance check (freefire / targetfire).
  */
-static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_type) {
+static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_type,
+                               uint32_t* explicit_ids, int explicit_count, bool skip_aim_check) {
     if (player->parent_ship_id == 0) {
         log_warn("Player %u tried to fire cannons while not on a ship", player->player_id);
         return;
@@ -2534,8 +2619,18 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
         
         if (module->type_id != MODULE_TYPE_CANNON) continue;
 
-        // If mounted to a specific cannon, skip every other cannon
-        if (at_cannon && module->id != mounted_cannon_id) continue;
+        // If the client sent an explicit cannon-ID list (weapon-group fire), only
+        // fire cannons that appear in that list.
+        if (explicit_ids && explicit_count > 0) {
+            bool in_list = false;
+            for (int ei = 0; ei < explicit_count; ei++) {
+                if (explicit_ids[ei] == module->id) { in_list = true; break; }
+            }
+            if (!in_list) continue;
+        } else if (at_cannon && module->id != mounted_cannon_id) {
+            // If mounted to a specific cannon, skip every other cannon
+            continue;
+        }
 
         // Check ammo and reload status
         if (!ship->infinite_ammo && ship->cannon_ammo == 0) {
@@ -2582,11 +2677,11 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
             }
         }
         
-        bool should_fire = fire_all;
+        bool should_fire = fire_all || skip_aim_check;
         
-        if (!fire_all) {
-            // Single click: Only fire cannons within aim range
-            // Cannon can aim ±30° from base rotation
+        if (!fire_all && !skip_aim_check) {
+            // Single click with aim check: only fire cannons within player's aim arc
+            // Cannon can aim ±30° from its base rotation
             float cannon_base_angle = Q16_TO_FLOAT(module->local_rot); // Cannon's base rotation relative to ship
             float cannon_current_aim = Q16_TO_FLOAT(module->data.cannon.aim_direction); // Current aim offset
             // Convert base angle from rendering convention to physics convention (subtract PI/2)
@@ -2630,9 +2725,10 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
         }
     }
     
-    log_info("💥 Player %u fired %d cannon(s) on ship %u (%s)", 
+    log_info("💥 Player %u fired %d cannon(s) on ship %u (%s%s)", 
              player->player_id, cannons_fired, ship->ship_id,
-             fire_all ? "BROADSIDE" : "AIMED");
+             fire_all ? "BROADSIDE" : (explicit_ids ? "GROUP" : "AIMED"),
+             skip_aim_check ? "/FREEFIRE" : "");
 }
 
 // ============================================================================
@@ -4155,13 +4251,22 @@ int websocket_server_update(struct Sim* sim) {
                                 if (player && player->parent_ship_id != 0) {
                                     // Parse fire_all flag
                                     bool fire_all = strstr(payload, "\"fire_all\":true") != NULL;
+                                    // freefire: skip aim-angle check (set by client for freefire/targetfire modes)
+                                    bool freefire = strstr(payload, "\"freefire\":true") != NULL;
                                     // Parse ammo_type (0=cannonball, 1=bar_shot)
                                     uint8_t ammo_type = PROJ_TYPE_CANNONBALL;
                                     char* at = strstr(payload, "\"ammo_type\":");
                                     if (at) ammo_type = (uint8_t)atoi(at + 12);
                                     if (ammo_type > PROJ_TYPE_BAR_SHOT) ammo_type = PROJ_TYPE_CANNONBALL;
+                                    // Parse optional cannon_ids array
+                                    uint32_t explicit_ids[MAX_CANNONS_PER_GROUP];
+                                    int explicit_count = parse_json_uint32_array(
+                                        payload, "cannon_ids", explicit_ids, MAX_CANNONS_PER_GROUP);
                                     
-                                    handle_cannon_fire(player, fire_all, ammo_type);
+                                    handle_cannon_fire(player, fire_all, ammo_type,
+                                                       explicit_count > 0 ? explicit_ids : NULL,
+                                                       explicit_count,
+                                                       freefire);
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"cannons_fired\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
@@ -4180,6 +4285,49 @@ int websocket_server_update(struct Sim* sim) {
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"force_reloaded\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strstr(payload, "\"type\":\"cannon_group_config\"")) {
+                            // WEAPON GROUP CONFIG — set mode, cannon list, and optional target for a group
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    // Parse group_index (0–9)
+                                    int group_index = -1;
+                                    const char* gi = strstr(payload, "\"group_index\":");
+                                    if (gi) group_index = atoi(gi + 14);
+
+                                    // Parse mode string
+                                    WeaponGroupMode mode = WEAPON_GROUP_MODE_HALTFIRE;
+                                    if      (strstr(payload, "\"mode\":\"aiming\""))     mode = WEAPON_GROUP_MODE_AIMING;
+                                    else if (strstr(payload, "\"mode\":\"freefire\""))   mode = WEAPON_GROUP_MODE_FREEFIRE;
+                                    else if (strstr(payload, "\"mode\":\"targetfire\"")) mode = WEAPON_GROUP_MODE_TARGETFIRE;
+                                    else if (strstr(payload, "\"mode\":\"haltfire\""))   mode = WEAPON_GROUP_MODE_HALTFIRE;
+
+                                    // Parse cannon_ids array
+                                    uint32_t cannon_ids[MAX_CANNONS_PER_GROUP];
+                                    int cannon_count = parse_json_uint32_array(
+                                        payload, "cannon_ids", cannon_ids, MAX_CANNONS_PER_GROUP);
+
+                                    // Parse optional target_ship_id
+                                    uint32_t target_ship_id = 0;
+                                    const char* tsi = strstr(payload, "\"target_ship_id\":");
+                                    if (tsi) target_ship_id = (uint32_t)strtoul(tsi + 17, NULL, 10);
+
+                                    if (group_index >= 0 && group_index < MAX_WEAPON_GROUPS) {
+                                        handle_cannon_group_config(player, group_index, mode,
+                                                                   cannon_ids, cannon_count,
+                                                                   target_ship_id);
+                                        strcpy(response, "{\"type\":\"message_ack\",\"status\":\"group_configured\"}");
+                                    } else {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"invalid_group_index\"}");
+                                    }
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"player_not_found\"}");
                                 }
                             }
                             handled = true;
@@ -6067,6 +6215,9 @@ void websocket_server_tick(float dt) {
     // ===== TICK NPC AGENTS =====
     tick_npc_agents(dt);
     tick_world_npcs(dt);
+
+    // ===== TICK PLAYER WEAPON GROUPS (TARGETFIRE auto-aim) =====
+    tick_player_weapon_groups();
 
     // ===== ADVANCE CANNON AIM TOWARD DESIRED (turn-speed limit) =====
     // Cannons rotate at a maximum of 60 degrees per second.
