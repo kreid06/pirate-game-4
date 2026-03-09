@@ -6,7 +6,7 @@
  */
 
 import { ClientConfig } from '../ClientConfig.js';
-import { WorldState } from '../../sim/Types.js';
+import { WorldState, Npc } from '../../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
@@ -497,6 +497,14 @@ export class UIManager {
   /** Returns the current npcId → task name map for colouring NPCs in the render system. */
   getNpcTaskMap(): ReadonlyMap<number, string> {
     return this.manningPanel.getTaskMap();
+  }
+
+  /**
+   * Called when the local player boards a new ship.
+   * Seeds the crew panel from the ship's authoritative NPC states and resets delta tracking.
+   */
+  syncCrewFromBoarding(npcs: Npc[], shipId: number): void {
+    this.manningPanel.syncFromBoarding(npcs, shipId);
   }
 
   // -----------------------------------------------------------------------

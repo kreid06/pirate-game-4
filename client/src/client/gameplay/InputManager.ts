@@ -155,6 +155,8 @@ export class InputManager {
 
   /** Returns what ammo type is currently loaded (for aim guides and fire messages). */
   public getLoadedAmmoType(): number { return this.loadedAmmoType; }
+  /** Resets loaded and pending ammo type to cannonball (0). Call when boarding a new ship. */
+  public resetAmmoType(): void { this.selectedAmmoType = 0; this.loadedAmmoType = 0; }
   /** Current aim angle relative to ship — updated every frame while right-mouse is held. */
   public get cannonAimAngleRelative(): number { return this.lastCannonAimAngle; }
   private lastLeftClickTime: number = 0;

@@ -60,6 +60,42 @@ export class ManningPriorityPanel {
   /** Returns the most-recently-computed npcId → task name map (read-only). */
   getTaskMap(): ReadonlyMap<number, string> { return this.lastTaskMap; }
 
+  /**
+   * Called when the local player boards a new ship.
+   * Seeds the task panel from the authoritative NPC states already in the world state
+   * so the UI reflects reality instead of stale assignments from the previous ship.
+   */
+  syncFromBoarding(npcs: Npc[], shipId: number): void {
+    this._currentShipId = shipId;
+    this.lastSentAssignment.clear();
+    for (const list of this.taskNpcs.values()) list.length = 0;
+    this.lastTaskMap.clear();
+    if (shipId === 0) return;
+
+    const shipNpcs = npcs.filter(n => n.shipId === shipId);
+
+    // Seed task lists from server-authoritative NPC states
+    for (const npc of shipNpcs) {
+      if (npc.state === NPC_STATE_AT_CANNON) {
+        this.taskNpcs.get('Cannons')?.push(npc.id);
+      } else if (npc.state === NPC_STATE_REPAIRING) {
+        this.taskNpcs.get('Repairs')?.push(npc.id);
+      }
+      // Idle / Moving → unassigned
+    }
+
+    // Rebuild lastTaskMap from seeded assignments
+    const npcById = new Map(shipNpcs.map(n => [n.id, n]));
+    for (const [task, ids] of this.taskNpcs) {
+      for (const id of ids) {
+        if (npcById.has(id)) this.lastTaskMap.set(id, task);
+      }
+    }
+    for (const npc of shipNpcs) {
+      if (!this.lastTaskMap.has(npc.id)) this.lastTaskMap.set(npc.id, 'Idle');
+    }
+  }
+
   // Panel geometry (screen-space, fixed on left side)
   private readonly PX = 10;
   private readonly PY = 60;

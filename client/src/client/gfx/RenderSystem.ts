@@ -3644,6 +3644,7 @@ export class RenderSystem {
       // Mast: centerline + separation
       if (kind === 'mast' && valid) {
         if (Math.abs(localY) > 25) { valid = false; invalidReason = 'Must be on centerline'; }
+        if (valid && (localX < -240 || localX > 200)) { valid = false; invalidReason = 'Outside sail zone!'; }
         if (valid) {
           const MIN_SEP = 80;
           for (const mod of nearestShip.modules) {
@@ -3653,6 +3654,13 @@ export class RenderSystem {
             }
           }
         }
+      }
+
+      // Edge margin — module center must be at least module-radius inset from hull boundary
+      if (valid) {
+        const edgeMargin = (kind === 'cannon' || kind === 'mast') ? 15 : 10;
+        const edgeDist = PolygonUtils.distanceToPolygonEdge(Vec2.from(localX, localY), nearestShip.hull);
+        if (edgeDist < edgeMargin) { valid = false; invalidReason = 'Too close to edge!'; }
       }
     }
 
@@ -3782,6 +3790,7 @@ export class RenderSystem {
     let overlaps = false;
     let ghostBlocked = false;
     let ghostSnap = false;
+    let edgeTooClose = false;
     if (nearestShip) {
       for (const mod of nearestShip.modules) {
         if (mod.kind === 'plank' || mod.kind === 'deck') continue;
@@ -3802,6 +3811,13 @@ export class RenderSystem {
           }
         }
       }
+
+      // Edge margin — cannon base half-width / mast radius = 15; center must be that far from hull edge
+      if (!overlaps && !ghostBlocked) {
+        const edgeMargin = newKind === 'cannon' ? 15 : 15;
+        const edgeDist = PolygonUtils.distanceToPolygonEdge(Vec2.from(localX, localY), nearestShip.hull);
+        if (edgeDist < edgeMargin) edgeTooClose = true;
+      }
     }
     const sailMaxed = item === 'sail' &&
       (nearestShip?.modules.filter(m => m.kind === 'mast').length ?? 0) >= 3;
@@ -3809,16 +3825,20 @@ export class RenderSystem {
     // Sail extra constraints: centerline already enforced by snap above; only check mast separation
     let sailConstraintFail = '';
     if (item === 'sail' && !sailMaxed && nearestShip) {
-      const MIN_SEP = 80;
-      for (const mod of nearestShip.modules) {
-        if (mod.kind !== 'mast') continue;
-        if (Math.hypot(localX - mod.localPos.x, 0 - mod.localPos.y) < MIN_SEP) {
-          sailConstraintFail = 'Too close to mast'; break;
+      if (localX < -240 || localX > 200) {
+        sailConstraintFail = 'Outside sail zone!';
+      } else {
+        const MIN_SEP = 80;
+        for (const mod of nearestShip.modules) {
+          if (mod.kind !== 'mast') continue;
+          if (Math.hypot(localX - mod.localPos.x, 0 - mod.localPos.y) < MIN_SEP) {
+            sailConstraintFail = 'Too close to mast'; break;
+          }
         }
       }
     }
 
-    const valid = onShip && !overlaps && !ghostBlocked && !ghostSnap && !sailMaxed && sailConstraintFail === '';
+    const valid = onShip && !overlaps && !ghostBlocked && !ghostSnap && !edgeTooClose && !sailMaxed && sailConstraintFail === '';
 
     // Screen position of cursor
     const screenPos = camera.worldToScreen(this.mouseWorldPos);
@@ -3877,6 +3897,7 @@ export class RenderSystem {
       : ghostSnap        ? '⚡ Snap to plan!'
       : ghostBlocked      ? 'Remove plan first!'
       : overlaps         ? 'Blocked!'
+      : edgeTooClose     ? 'Too close to edge!'
       : sailMaxed        ? 'Max Sails (3/3)'
       : sailConstraintFail ? sailConstraintFail
       : 'Not on ship';

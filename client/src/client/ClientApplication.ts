@@ -70,7 +70,8 @@ export class ClientApplication {
   private demoWorldState: WorldState | null = null;
   private camera!: Camera;
   private hasReceivedWorldState = false; // Track if we've received at least one world state
-  private previousMountState = false; // Track previous mount state to detect changes
+  private previousMountState = false;    // Track previous mount state to detect changes
+  private previousCarrierId: number | null = null; // Track ship changes for boarding sync
 
   // Explicit build mode (B key) — independent of hotbar item build modes
   private explicitBuildMode = false;
@@ -961,7 +962,18 @@ export class ClientApplication {
       if (player) {
         // Update ship ID and rotation for cannon aiming (works even if not mounted to helm)
         this.inputManager.setCurrentShipId(player.carrierId || null);
-        
+
+        // Detect boarding — when carrierId changes to a new ship, sync ammo type and crew tasks
+        const newCarrierId = player.carrierId || null;
+        if (newCarrierId !== this.previousCarrierId) {
+          if (newCarrierId) {
+            console.log(`⚓ [BOARD] Boarded ship ${newCarrierId} (was: ${this.previousCarrierId ?? 'none'}) — syncing ammo type & crew tasks`);
+            this.inputManager.resetAmmoType();
+            this.uiManager.syncCrewFromBoarding(worldState.npcs, newCarrierId);
+          }
+          this.previousCarrierId = newCarrierId;
+        }
+
         if (player.carrierId) {
           const ship = worldState.ships.find(s => s.id === player.carrierId);
           if (ship) {
@@ -1181,6 +1193,12 @@ export class ClientApplication {
     // Mast ghosts: snap to centerline and enforce min separation
     if (this.pendingGhostKind === 'mast') {
       localY = 0; // Force onto ship centerline
+      // Constrain to rectangular body of ship (away from bow/stern curves)
+      const MAST_X_MIN = -240, MAST_X_MAX = 200;
+      if (localX < MAST_X_MIN || localX > MAST_X_MAX) {
+        console.log(`❌ [GHOST] Mast ghost outside allowed fore-aft range`);
+        return;
+      }
       const MIN_MAST_SEP = 80;
       for (const mod of nearestShip.modules) {
         if (mod.kind !== 'mast') continue;
@@ -1196,6 +1214,14 @@ export class ClientApplication {
           return;
         }
       }
+    }
+
+    // Edge margin — ghost center must be at least module-radius inset from hull boundary
+    const ghostMargin = this.pendingGhostKind === 'cannon' ? 15 : this.pendingGhostKind === 'mast' ? 15 : 10;
+    const ghostEdgeDist = PolygonUtils.distanceToPolygonEdge(Vec2.from(localX, localY), nearestShip.hull);
+    if (ghostEdgeDist < ghostMargin) {
+      console.log(`❌ [GHOST] Too close to hull edge (dist ${ghostEdgeDist.toFixed(1)}, min ${ghostMargin})`);
+      return;
     }
 
     // Geometry-based overlap check against existing ship modules (same logic as real placement)
@@ -1396,6 +1422,15 @@ export class ClientApplication {
 
     // Geometry-based overlap check against existing non-plank, non-deck modules
     const newKind = this.buildSelectedItem === 'cannon' ? 'cannon' as const : 'mast' as const;
+
+    // Cannon base half-width = 15; mast radius = 15 — center must be at least this far from hull edge
+    const placementMargin = 15;
+    const edgeDist = PolygonUtils.distanceToPolygonEdge(Vec2.from(localX, localY), nearestShip.hull);
+    if (edgeDist < placementMargin) {
+      console.log(`❌ [BUILD] Too close to hull edge (dist ${edgeDist.toFixed(1)}, min ${placementMargin})`);
+      return;
+    }
+
     const newFp = getModuleFootprint(newKind);
     for (const mod of nearestShip.modules) {
       if (mod.kind === 'plank' || mod.kind === 'deck') continue;
@@ -1451,6 +1486,12 @@ export class ClientApplication {
       this.localPendingModules.set(shipRef.id, pending);
       this.networkManager.sendPlaceCannonAt(shipRef.id, localX, localY, rotationRad);
     } else {
+      // Sail — constrain to rectangular body of ship (away from bow/stern curves)
+      const MAST_X_MIN = -240, MAST_X_MAX = 200;
+      if (localX < MAST_X_MIN || localX > MAST_X_MAX) {
+        console.log(`❌ [BUILD] Sail outside allowed fore-aft range (x=${localX.toFixed(0)}, range ${MAST_X_MIN}..${MAST_X_MAX})`);
+        return;
+      }
       // Sail — check for max 3 masts
       const mastCount = shipRef.modules.filter(m => m.kind === 'mast').length;
       if (mastCount >= 3) {
