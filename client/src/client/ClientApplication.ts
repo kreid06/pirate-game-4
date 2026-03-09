@@ -72,6 +72,12 @@ export class ClientApplication {
   private hasReceivedWorldState = false; // Track if we've received at least one world state
   private previousMountState = false;    // Track previous mount state to detect changes
   private previousCarrierId: number | null = null; // Track ship changes for boarding sync
+  // Optimistic hotbar slot — held until server confirms the same value so that
+  // rapid movement messages (W held) don't let stale world-states flicker the UI back.
+  private pendingActiveSlot: number | null = null;
+  // Optimistic mount state — held from module_interact_success until the server's
+  // world-state echo confirms isMounted=true for the same module.
+  private pendingMount: { moduleId: number; moduleKind: string; mountOffset?: Vec2 } | null = null;
 
   // Camera zoom animation
   private targetZoom  = 1.0;  // Zoom level we're animating toward
@@ -436,6 +442,7 @@ export class ClientApplication {
 
       // Q key: unequip active slot — use 255 as "nothing selected" sentinel
       this.inputManager.onUnequip = () => {
+        this.pendingActiveSlot = 255;
         const playerId = this.networkManager.getAssignedPlayerId();
         if (playerId !== null) {
           for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
@@ -451,6 +458,7 @@ export class ClientApplication {
 
       // Hotbar slot selection — update locally for instant UI feedback, then sync server
       this.inputManager.onSlotSelect = (slot) => {
+        this.pendingActiveSlot = slot;
         const playerId = this.networkManager.getAssignedPlayerId();
         if (playerId !== null) {
           for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
@@ -962,6 +970,36 @@ export class ClientApplication {
    */
   private onServerWorldState(worldState: WorldState): void {
     this.authoritativeWorldState = worldState;
+
+    // Re-apply optimistic hotbar slot so rapid world-state updates don't flicker it back.
+    // Once the server confirms (its activeSlot matches our pending value) we clear pending.
+    if (this.pendingActiveSlot !== null) {
+      const pid = this.networkManager.getAssignedPlayerId();
+      const p   = pid !== null ? worldState.players.find(pl => pl.id === pid) : null;
+      if (p) {
+        if (p.inventory.activeSlot === this.pendingActiveSlot) {
+          this.pendingActiveSlot = null; // server confirmed — stop overriding
+        } else {
+          p.inventory.activeSlot = this.pendingActiveSlot; // keep local value
+        }
+      }
+    }
+
+    // Re-apply optimistic mount state until the server's world-state confirms it.
+    if (this.pendingMount !== null) {
+      const pid = this.networkManager.getAssignedPlayerId();
+      const p   = pid !== null ? worldState.players.find(pl => pl.id === pid) : null;
+      if (p) {
+        if (p.isMounted && p.mountedModuleId === this.pendingMount.moduleId) {
+          this.pendingMount = null; // server confirmed — stop overriding
+        } else {
+          // Keep local mount state visible until server catches up
+          p.isMounted        = true;
+          p.mountedModuleId  = this.pendingMount.moduleId;
+          if (this.pendingMount.mountOffset) p.mountOffset = this.pendingMount.mountOffset;
+        }
+      }
+    }
     
     // Update network latency for dynamic interpolation buffer
     const networkStats = this.networkManager.getStats();
@@ -1806,7 +1844,10 @@ export class ClientApplication {
    */
   private handleModuleMountSuccess(moduleId: number, moduleKind: string, mountOffset?: Vec2): void {
     console.log(`🎮 [MOUNT] Player mounted to ${moduleKind} (ID: ${moduleId})`);
-    
+
+    // Set optimistic pending mount so world-state flickers don't undo the visual
+    this.pendingMount = { moduleId, moduleKind, mountOffset };
+
     const playerId = this.networkManager.getAssignedPlayerId();
     if (playerId === null) return;
     
@@ -1882,6 +1923,6 @@ export class ClientApplication {
    */
   private handleModuleMountFailure(reason: string): void {
     console.log(`⚠️ [MOUNT] Mount failed: ${reason}`);
-    // Could show UI notification here
+    this.pendingMount = null; // clear optimistic mount on failure
   }
 }
