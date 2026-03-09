@@ -10,7 +10,7 @@ import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer } from './EffectRenderer.js';
 import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING } from '../../sim/Types.js';
-import { ShipModule, createCompleteHullSegments, PlankSegment, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
+import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { ClientState } from '../ClientApplication.js';
 
@@ -762,6 +762,11 @@ export class RenderSystem {
       }
     }
 
+    // Plank status icons — missing (red ✕) and leaking (water waves) — layer 3 priority 2
+    for (const ship of worldState.ships) {
+      this.queueRenderItem(3, 'plank-status', () => this.drawPlankStatusIcons(ship, camera), 2);
+    }
+
     // In cannon build mode, overlay ghost cannons at destroyed slots (layer 4, after real cannons)
     if (this.cannonBuildMode) {
       for (const ship of worldState.ships) {
@@ -1069,6 +1074,134 @@ export class RenderSystem {
 
         this.ctx.restore();
       }
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw semi-transparent status icons on planks for friendly ships:
+   *   Red circle + X  — plank slot is missing entirely
+   *   Blue wave lines — plank is leaking (health < 30% max)
+   */
+  private drawPlankStatusIcons(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    // Only show for own company or neutral ships — hide from enemies
+    const isEnemy = this._localCompanyId !== 0 && ship.companyId !== 0
+      && ship.companyId !== this._localCompanyId;
+    if (isEnemy) return;
+
+    this.ctx.save();
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const iconR = 5.5; // icon radius in ship-local units
+
+    // ── MISSING planks ───────────────────────────────────────────────────────
+    const presentKeys = new Set<string>();
+    const plankModules = ship.modules.filter(
+      m => m.kind === 'plank' && m.moduleData?.kind === 'plank'
+    );
+    for (const pm of plankModules) {
+      const pd = pm.moduleData as PlankModuleData;
+      presentKeys.add(`${pd.sectionName}_${pd.segmentIndex}`);
+    }
+
+    const template = this.getPlankTemplate();
+    for (const seg of template) {
+      if (presentKeys.has(`${seg.sectionName}_${seg.index}`)) continue;
+
+      let cx: number, cy: number;
+      if (seg.isCurved && seg.curveStart && seg.curveControl && seg.curveEnd
+          && seg.t1 !== undefined && seg.t2 !== undefined) {
+        const pt = this.getQuadraticPoint(
+          seg.curveStart, seg.curveControl, seg.curveEnd,
+          (seg.t1 + seg.t2) / 2
+        );
+        cx = pt.x; cy = pt.y;
+      } else {
+        cx = (seg.start.x + seg.end.x) / 2;
+        cy = (seg.start.y + seg.end.y) / 2;
+      }
+      this.drawMissingPlankIcon(cx, cy, iconR);
+    }
+
+    // ── LEAKING planks ───────────────────────────────────────────────────────
+    for (const pm of plankModules) {
+      const pd = pm.moduleData as PlankModuleData;
+      if (pd.health <= 0) continue; // already counted as missing above
+      const leakThreshold = (pd.maxHealth || 10000) * 0.30;
+      if (pd.health >= leakThreshold) continue;
+
+      let cx: number, cy: number;
+      if (pd.isCurved && pd.curveData) {
+        const pt = this.getQuadraticPoint(
+          pd.curveData.start, pd.curveData.control, pd.curveData.end,
+          (pd.curveData.t1 + pd.curveData.t2) / 2
+        );
+        cx = pt.x; cy = pt.y;
+      } else {
+        cx = pm.localPos.x;
+        cy = pm.localPos.y;
+      }
+      this.drawLeakingPlankIcon(cx, cy, iconR);
+    }
+
+    this.ctx.restore();
+  }
+
+  /** Semi-transparent red circle with an × mark (missing plank). */
+  private drawMissingPlankIcon(cx: number, cy: number, r: number): void {
+    this.ctx.save();
+    this.ctx.globalAlpha = 0.78;
+
+    // Filled circle background
+    this.ctx.fillStyle = 'rgba(220,30,30,0.30)';
+    this.ctx.strokeStyle = '#ff4444';
+    this.ctx.lineWidth = 1.2;
+    this.ctx.beginPath();
+    this.ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    // × arms
+    const arm = r * 0.55;
+    this.ctx.strokeStyle = '#ff5555';
+    this.ctx.lineWidth = 1.5;
+    this.ctx.lineCap = 'round';
+    this.ctx.beginPath();
+    this.ctx.moveTo(cx - arm, cy - arm); this.ctx.lineTo(cx + arm, cy + arm);
+    this.ctx.moveTo(cx + arm, cy - arm); this.ctx.lineTo(cx - arm, cy + arm);
+    this.ctx.stroke();
+
+    this.ctx.restore();
+  }
+
+  /** Semi-transparent blue wave lines (leaking plank). */
+  private drawLeakingPlankIcon(cx: number, cy: number, r: number): void {
+    this.ctx.save();
+    this.ctx.globalAlpha = 0.82;
+    this.ctx.strokeStyle = '#33bbff';
+    this.ctx.lineWidth = 1.3;
+    this.ctx.lineCap = 'round';
+
+    // Three horizontal wave arcs stacked vertically
+    const ww = r * 0.75;
+    const amp = r * 0.22;
+    for (let row = -1; row <= 1; row++) {
+      const wy = cy + row * (r * 0.44);
+      this.ctx.beginPath();
+      this.ctx.moveTo(cx - ww, wy);
+      this.ctx.bezierCurveTo(
+        cx - ww * 0.33, wy - amp,
+        cx + ww * 0.33, wy + amp,
+        cx + ww,        wy
+      );
+      this.ctx.stroke();
     }
 
     this.ctx.restore();
