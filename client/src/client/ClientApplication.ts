@@ -1170,6 +1170,12 @@ export class ClientApplication {
     let localX = dx * cos - dy * sin;
     let localY = dx * sin + dy * cos;
 
+    // Reject if outside the ship hull polygon
+    if (!PolygonUtils.pointInPolygon(Vec2.from(localX, localY), nearestShip.hull)) {
+      console.log('❌ [GHOST] Click is outside ship hull — ignoring');
+      return;
+    }
+
     const ghostRotRad = (this.buildRotationDeg * Math.PI) / 180;
 
     // Mast ghosts: snap to centerline and enforce min separation
@@ -1367,7 +1373,7 @@ export class ClientApplication {
         nearestShip = ship;
       }
     }
-    if (!nearestShip || nearestDist > 400) return; // Too far from any ship
+    if (!nearestShip || nearestDist > 400) return;
 
     // Convert world position to ship-local coordinates
     const dx = worldPos.x - nearestShip.position.x;
@@ -1376,6 +1382,12 @@ export class ClientApplication {
     const sin = Math.sin(-nearestShip.rotation);
     let localX = dx * cos - dy * sin;
     let localY = dx * sin + dy * cos;
+
+    // Reject if click lands outside the ship hull polygon
+    if (!PolygonUtils.pointInPolygon(Vec2.from(localX, localY), nearestShip.hull)) {
+      console.log('❌ [BUILD] Click is outside ship hull — ignoring');
+      return;
+    }
 
     let rotationRad = (this.buildRotationDeg * Math.PI) / 180;
 

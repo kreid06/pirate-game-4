@@ -12,6 +12,7 @@ import { EffectRenderer } from './EffectRenderer.js';
 import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
+import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
 
 /** NPC fill colours keyed by assigned task name (matches ManningPriorityPanel task colours). */
@@ -3589,7 +3590,7 @@ export class RenderSystem {
       const d = this.mouseWorldPos.sub(ship.position).length();
       if (d < nearestDist) { nearestDist = d; nearestShip = ship; }
     }
-    const onShip = nearestShip !== null && nearestDist < 400;
+    let onShip = nearestShip !== null && nearestDist < 400;
 
     let localX = 0; let localY = 0;
     if (nearestShip) {
@@ -3599,6 +3600,8 @@ export class RenderSystem {
       const s = Math.sin(-nearestShip.rotation);
       localX = dx * c - dy * s;
       localY = dx * s + dy * c;
+      // Refine: cursor must actually be inside the ship hull polygon
+      if (onShip) onShip = PolygonUtils.pointInPolygon(Vec2.from(localX, localY), nearestShip.hull);
     }
 
     const rotRad = (rotDeg * Math.PI) / 180;
@@ -3749,7 +3752,7 @@ export class RenderSystem {
       if (dist < nearestDist) { nearestDist = dist; nearestShip = ship; }
     }
 
-    const onShip = nearestShip !== null && nearestDist < 400;
+    let onShip = nearestShip !== null && nearestDist < 400;
 
     // Compute ship-local cursor position
     let localX = 0;
@@ -3766,6 +3769,11 @@ export class RenderSystem {
     // Sails must sit on the ship centerline — snap cursor position to Y=0 so
     // the ghost always renders on-axis instead of showing off-center then blocking.
     if (item === 'sail') localY = 0;
+
+    // Refine onShip using hull polygon test (after Y snap for sails)
+    if (onShip && nearestShip) {
+      onShip = PolygonUtils.pointInPolygon(Vec2.from(localX, localY), nearestShip.hull);
+    }
 
     // Validate placement using geometry (OBB/circle) overlap — not a simple radius check
     const rotRad = (rotationDeg * Math.PI) / 180;

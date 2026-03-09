@@ -103,7 +103,6 @@ export class UIManager {
   private static readonly BUILD_PANEL_ENTRIES: Array<{
     kind: GhostModuleKind; label: string; symbol: string; color: string; borderColor: string;
   }> = [
-    { kind: 'plank',  label: 'Plank',  symbol: 'P',  color: '#b8832b', borderColor: '#7a5520' },
     { kind: 'cannon', label: 'Cannon', symbol: '⚫', color: '#444',    borderColor: '#888'    },
     { kind: 'mast',   label: 'Sail',   symbol: '⛵', color: '#1e8c6e', borderColor: '#0f5c48' },
     { kind: 'helm',   label: 'Helm',   symbol: 'W',  color: '#6a3d8f', borderColor: '#3d2060' },
