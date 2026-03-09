@@ -1,0 +1,28 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Client: Dev Server",
+			"type": "shell",
+			"command": "source ~/.nvm/nvm.sh && cd client && npm run dev -- --host",
+			"isBackground": true,
+			"problemMatcher": [
+				{
+					"pattern": {
+						"regexp": "^$"
+					},
+					"background": {
+						"activeOnStart": true,
+						"beginsPattern": "VITE",
+						"endsPattern": "Local:"
+					}
+				}
+			],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared"
+			}
+		}
+	]
+}
