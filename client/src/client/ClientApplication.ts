@@ -604,13 +604,14 @@ export class ClientApplication {
         const playerId = this.networkManager?.getAssignedPlayerId();
         const player = ws?.players.find(p => p.id === playerId);
         if (player) {
-          // Always deselect the active hotbar item when entering ghost placement —
-          // switch to an empty slot so we don't accidentally build the real thing.
-          const activeSlot = player.inventory?.activeSlot ?? 0;
-          const activeItem = player.inventory?.slots[activeSlot]?.item ?? 'none';
-          if (activeItem !== 'none') {
-            const emptyIdx = player.inventory.slots.findIndex(s => s.item === 'none');
-            if (emptyIdx >= 0) this.networkManager.sendSlotSelect(emptyIdx);
+          // Always go to unequipped state (255) when entering ghost placement —
+          // so no hotbar item is active and we don't accidentally build the real thing.
+          if ((player.inventory?.activeSlot ?? 255) !== 255) {
+            for (const ws2 of [this.authoritativeWorldState, this.predictedWorldState]) {
+              const p2 = ws2?.players.find(pl => pl.id === playerId);
+              if (p2) p2.inventory.activeSlot = 255;
+            }
+            this.networkManager.sendUnequip();
           }
         }
         // Exit free-placement mode — this is now a ghost-only action
@@ -1376,7 +1377,7 @@ export class ClientApplication {
     let localX = dx * cos - dy * sin;
     let localY = dx * sin + dy * cos;
 
-    const rotationRad = (this.buildRotationDeg * Math.PI) / 180;
+    let rotationRad = (this.buildRotationDeg * Math.PI) / 180;
 
     // Sails must be on the ship centerline — snap Y to 0 (matches visual cursor behaviour)
     if (this.buildSelectedItem === 'sail') localY = 0;
@@ -1394,14 +1395,28 @@ export class ClientApplication {
       }
     }
 
-    // Block placement if it overlaps any ghost planning marker on this ship
+    // If placement overlaps a ghost planning marker on this ship:
+    //   - same kind  → snap to ghost's stored position/rotation and consume it
+    //   - other kind → still block (different module type is in the way)
     for (const g of this.ghostPlacements) {
       if (g.shipId !== nearestShip.id) continue;
       const ghostFp = getModuleFootprint(g.kind as any);
-      if (footprintsOverlap(newFp, localX, localY, rotationRad, ghostFp, g.localPos.x, g.localPos.y, g.localRot)) {
-        console.log(`❌ [BUILD] Placement blocked by ghost marker (${g.kind}) — remove it first`);
+      if (!footprintsOverlap(newFp, localX, localY, rotationRad, ghostFp, g.localPos.x, g.localPos.y, g.localRot)) continue;
+      if (g.kind === newKind) {
+        // Snap real placement to the ghost's exact stored position and consume it
+        console.log(`🎯 [BUILD] Snapping to ghost plan at (${g.localPos.x.toFixed(0)}, ${g.localPos.y.toFixed(0)})`);
+        localX = g.localPos.x;
+        localY = g.localPos.y;
+        rotationRad = g.localRot;
+        this.buildRotationDeg = g.localRot * 180 / Math.PI;
+        this.ghostPlacements = this.ghostPlacements.filter(gh => gh.id !== g.id);
+        this.syncBuildModeState();
+        // Fall through to normal placement below using snapped coords
+      } else {
+        console.log(`❌ [BUILD] Placement blocked by ghost marker (${g.kind}) — different module type`);
         return;
       }
+      break;
     }
 
     // Optimistically add the module to all local world states so it appears immediately.

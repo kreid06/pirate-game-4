@@ -3740,6 +3740,7 @@ export class RenderSystem {
     const newFp = getModuleFootprint(newKind);
     let overlaps = false;
     let ghostBlocked = false;
+    let ghostSnap = false;
     if (nearestShip) {
       for (const mod of nearestShip.modules) {
         if (mod.kind === 'plank' || mod.kind === 'deck') continue;
@@ -3749,13 +3750,14 @@ export class RenderSystem {
           overlaps = true; break;
         }
       }
-      // Also check planned ghost markers so the cursor turns red if blocked
+      // Also check planned ghost markers — same kind snaps, different kind blocks
       if (!overlaps) {
         for (const g of this.ghostPlacements) {
           if (g.shipId !== nearestShip.id) continue;
           const gFp = getModuleFootprint(g.kind as any);
           if (footprintsOverlap(newFp, localX, localY, rotRad, gFp, g.localPos.x, g.localPos.y, g.localRot)) {
-            ghostBlocked = true; break;
+            if (g.kind === newKind) { ghostSnap = true; } else { ghostBlocked = true; }
+            break;
           }
         }
       }
@@ -3775,7 +3777,7 @@ export class RenderSystem {
       }
     }
 
-    const valid = onShip && !overlaps && !ghostBlocked && !sailMaxed && sailConstraintFail === '';
+    const valid = onShip && !overlaps && !ghostBlocked && !ghostSnap && !sailMaxed && sailConstraintFail === '';
 
     // Screen position of cursor
     const screenPos = camera.worldToScreen(this.mouseWorldPos);
@@ -3793,15 +3795,15 @@ export class RenderSystem {
 
     if (item === 'cannon') {
       // -- Cannon base --
-      this.ctx.fillStyle   = valid ? '#336633' : ghostBlocked ? '#664422' : '#663333';
-      this.ctx.strokeStyle = valid ? '#88ff88' : ghostBlocked ? '#ffaa44' : '#ff8888';
+      this.ctx.fillStyle   = valid ? '#336633' : ghostSnap ? '#1a4d44' : ghostBlocked ? '#664422' : '#663333';
+      this.ctx.strokeStyle = valid ? '#88ff88' : ghostSnap ? '#44ddcc' : ghostBlocked ? '#ffaa44' : '#ff8888';
       this.ctx.lineWidth   = 1 / zoom;
       this.ctx.fillRect(-15, -10, 30, 20);
       this.ctx.strokeRect(-15, -10, 30, 20);
 
       // -- Barrel (pointing up / forward) --
-      this.ctx.fillStyle   = valid ? '#225522' : ghostBlocked ? '#553311' : '#552222';
-      this.ctx.strokeStyle = valid ? '#55ee55' : ghostBlocked ? '#ee9933' : '#ee5555';
+      this.ctx.fillStyle   = valid ? '#225522' : ghostSnap ? '#1a4d44' : ghostBlocked ? '#553311' : '#552222';
+      this.ctx.strokeStyle = valid ? '#55ee55' : ghostSnap ? '#33ccbb' : ghostBlocked ? '#ee9933' : '#ee5555';
       this.ctx.fillRect(-8, -38, 16, 30);
       this.ctx.strokeRect(-8, -38, 16, 30);
     } else {
@@ -3809,8 +3811,8 @@ export class RenderSystem {
       const radius = 15;
       this.ctx.beginPath();
       this.ctx.arc(0, 0, radius, 0, Math.PI * 2);
-      this.ctx.fillStyle   = valid ? '#334433' : ghostBlocked ? '#443322' : '#443333';
-      this.ctx.strokeStyle = valid ? '#88ff88' : ghostBlocked ? '#ffaa44' : '#ff8888';
+      this.ctx.fillStyle   = valid ? '#334433' : ghostSnap ? '#1a4d44' : ghostBlocked ? '#443322' : '#443333';
+      this.ctx.strokeStyle = valid ? '#88ff88' : ghostSnap ? '#44ddcc' : ghostBlocked ? '#ffaa44' : '#ff8888';
       this.ctx.lineWidth   = 1 / zoom;
       this.ctx.fill();
       this.ctx.stroke();
@@ -3819,8 +3821,8 @@ export class RenderSystem {
       const sailW = 80;
       this.ctx.beginPath();
       this.ctx.rect(-sailW / 2, -5, sailW, 10);
-      this.ctx.fillStyle   = valid ? 'rgba(180,240,180,0.35)' : ghostBlocked ? 'rgba(240,200,140,0.35)' : 'rgba(240,180,180,0.35)';
-      this.ctx.strokeStyle = valid ? '#66dd66' : ghostBlocked ? '#ddaa44' : '#dd6666';
+      this.ctx.fillStyle   = valid ? 'rgba(180,240,180,0.35)' : ghostSnap ? 'rgba(140,240,230,0.35)' : ghostBlocked ? 'rgba(240,200,140,0.35)' : 'rgba(240,180,180,0.35)';
+      this.ctx.strokeStyle = valid ? '#66dd66' : ghostSnap ? '#44ddcc' : ghostBlocked ? '#ddaa44' : '#dd6666';
       this.ctx.lineWidth   = 1 / zoom;
       this.ctx.fill();
       this.ctx.stroke();
@@ -3831,12 +3833,13 @@ export class RenderSystem {
     // Status label in screen space (below ghost)
     const label = valid
       ? (item === 'cannon' ? 'Place Cannon' : 'Place Sail')
+      : ghostSnap        ? '⚡ Snap to plan!'
       : ghostBlocked      ? 'Remove plan first!'
       : overlaps         ? 'Blocked!'
       : sailMaxed        ? 'Max Sails (3/3)'
       : sailConstraintFail ? sailConstraintFail
       : 'Not on ship';
-    const labelColor = valid ? '#88ff88' : ghostBlocked ? '#ffaa44' : '#ff8888';
+    const labelColor = valid ? '#88ff88' : ghostSnap ? '#44ddcc' : ghostBlocked ? '#ffaa44' : '#ff8888';
 
     this.ctx.save();
     this.ctx.font = 'bold 13px Consolas, monospace';

@@ -147,7 +147,8 @@ export function parseInventoryFromServer(
     }
   }
 
-  inv.activeSlot = (activeSlot >= 0 && activeSlot < INVENTORY_SLOTS) ? activeSlot : 0;
+  // 255 = unequipped sentinel; 0-9 = valid hotbar slots; anything else clamp to 0
+  inv.activeSlot = (activeSlot === 255 || (activeSlot >= 0 && activeSlot < INVENTORY_SLOTS)) ? activeSlot : 0;
   inv.equipment.armor  = ITEM_ID_MAP[armorId]  ?? 'none';
   inv.equipment.shield = ITEM_ID_MAP[shieldId] ?? 'none';
 

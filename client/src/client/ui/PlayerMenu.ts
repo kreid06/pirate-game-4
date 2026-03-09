@@ -238,7 +238,7 @@ export class PlayerMenu {
     player: NonNullable<ReturnType<WorldState['players']['find']>>,
   ): number {
     const inv = player.inventory;
-    py = this._sectionHeader(ctx, px, py, 'INVENTORY', `slot ${inv.activeSlot + 1} active`);
+    py = this._sectionHeader(ctx, px, py, 'INVENTORY', inv.activeSlot === 255 ? 'nothing equipped' : `slot ${inv.activeSlot + 1} active`);
 
     py += 4;
 
