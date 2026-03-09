@@ -678,6 +678,16 @@ static void remove_player(uint32_t player_id) {
     
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (players[i].active && players[i].player_id == player_id) {
+            // Remove the physics/collision entity from the simulation first so
+            // there are no invisible collision bodies left behind.
+            if (global_sim && players[i].sim_entity_id != 0) {
+                bool removed = sim_destroy_entity(global_sim, players[i].sim_entity_id);
+                if (removed) {
+                    log_info("🎮 Removed sim entity %u for player %u", players[i].sim_entity_id, player_id);
+                } else {
+                    log_warn("sim_destroy_entity could not find entity %u for player %u", players[i].sim_entity_id, player_id);
+                }
+            }
             // Clear the entire player structure
             memset(&players[i], 0, sizeof(WebSocketPlayer));
             log_info("🎮 Removed player %u", player_id);
