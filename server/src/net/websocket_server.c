@@ -3924,9 +3924,9 @@ int websocket_server_update(struct Sim* sim) {
                             handled = true;
 
                         } else if (strstr(payload, "\"type\":\"use_hammer\"")) {
-                            // USE HAMMER: apply boosted instant repair (10000 HP) to the most
-                            // damaged plank. Hammer is a reusable tool; not consumed.
-                            // Bonus is only sent by the client after winning the minigame.
+                            // USE HAMMER: apply 20% of target module's max_health as instant repair.
+                            // Targets the specific module ID sent by the client (must be on same ship).
+                            // Hammer is a reusable tool; not consumed.
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                             } else {
@@ -3936,6 +3936,11 @@ int websocket_server_update(struct Sim* sim) {
                                 } else if (!global_sim) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                 } else {
+                                    // Parse moduleId from payload
+                                    int req_module_id = -1;
+                                    const char* p_mid = strstr(payload, "\"moduleId\":");
+                                    if (p_mid) req_module_id = atoi(p_mid + 11);
+
                                     struct Ship* sim_ship = NULL;
                                     for (uint32_t si = 0; si < global_sim->ship_count; si++) {
                                         if (global_sim->ships[si].id == player->parent_ship_id) {
@@ -3944,32 +3949,43 @@ int websocket_server_update(struct Sim* sim) {
                                     }
                                     if (!sim_ship) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                    } else if (req_module_id < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"missing_module_id\"}");
                                     } else {
-                                        ShipModule* worst_plank = NULL;
+                                        ShipModule* target = NULL;
                                         for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                                            ShipModule* mod = &sim_ship->modules[m];
-                                            if (mod->type_id == MODULE_TYPE_PLANK &&
-                                                mod->health > 0 &&
-                                                mod->health < mod->max_health) {
-                                                if (!worst_plank || mod->health < worst_plank->health)
-                                                    worst_plank = mod;
+                                            if (sim_ship->modules[m].id == (uint16_t)req_module_id) {
+                                                target = &sim_ship->modules[m]; break;
                                             }
                                         }
-                                        if (!worst_plank) {
-                                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"planks_full_health\"}");
+                                        if (!target || target->health <= 0) {
+                                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"module_not_found\"}");
                                         } else {
-                                            worst_plank->health += 10000;
-                                            if (worst_plank->health > (int32_t)worst_plank->max_health)
-                                                worst_plank->health = (int32_t)worst_plank->max_health;
-                                            if (worst_plank->health >= (int32_t)worst_plank->max_health)
-                                                worst_plank->state_bits &= ~MODULE_STATE_DAMAGED;
-                                            log_info("🔨 Player %u hammer-repaired plank %u on ship %u to %d/%d HP",
-                                                     player->player_id, worst_plank->id, sim_ship->id,
-                                                     (int)worst_plank->health, (int)worst_plank->max_health);
+                                            // Apply 20% of max_health as instant repair
+                                            int32_t repair = (int32_t)(target->max_health * 20 / 100);
+                                            target->health += repair;
+                                            if (target->health > (int32_t)target->max_health)
+                                                target->health = (int32_t)target->max_health;
+                                            if (target->health >= (int32_t)target->max_health)
+                                                target->state_bits &= ~MODULE_STATE_DAMAGED;
+                                            // For masts: also repair 20% of fibers
+                                            if (target->type_id == MODULE_TYPE_MAST) {
+                                                float fh    = Q16_TO_FLOAT(target->data.mast.fiber_health);
+                                                float fhmax = Q16_TO_FLOAT(target->data.mast.fiber_max_health);
+                                                if (fhmax > 0.0f) {
+                                                    fh += fhmax * 0.20f;
+                                                    if (fh > fhmax) fh = fhmax;
+                                                    target->data.mast.fiber_health    = Q16_FROM_FLOAT(fh);
+                                                    target->data.mast.wind_efficiency = Q16_FROM_FLOAT(fh / fhmax);
+                                                }
+                                            }
+                                            log_info("🔨 Player %u hammer-repaired module %u (type %u) on ship %u to %d/%d HP",
+                                                     player->player_id, target->id, target->type_id,
+                                                     sim_ship->id, (int)target->health, (int)target->max_health);
                                             snprintf(response, sizeof(response),
                                                 "{\"type\":\"message_ack\",\"status\":\"hammer_repair_applied\","
-                                                "\"plank_id\":%u,\"health\":%d,\"maxHealth\":%d}",
-                                                worst_plank->id, (int)worst_plank->health, (int)worst_plank->max_health);
+                                                "\"moduleId\":%u,\"health\":%d,\"maxHealth\":%d}",
+                                                target->id, (int)target->health, (int)target->max_health);
                                         }
                                     }
                                 }

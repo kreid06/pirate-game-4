@@ -83,6 +83,15 @@ void module_update(ShipModule* module, q16_t dt) {
                     module->state_bits &= ~MODULE_STATE_FIRING;
                 }
             }
+            // Gradual self-repair: 2.5%/s
+            if (module->health > 0 && module->health < (int32_t)module->max_health) {
+                float heal = (float)module->max_health * 0.025f * Q16_TO_FLOAT(dt);
+                module->health += (int32_t)heal;
+                if (module->health > (int32_t)module->max_health)
+                    module->health = (int32_t)module->max_health;
+                if (module->health >= (int32_t)module->max_health)
+                    module->state_bits &= ~MODULE_STATE_DAMAGED;
+            }
             break;
             
         case MODULE_TYPE_PLANK:
@@ -99,7 +108,26 @@ void module_update(ShipModule* module, q16_t dt) {
             break;
 
         case MODULE_TYPE_MAST:
-            // Mast updates could include wind calculations, sail animations, etc.
+            // Mast pole: gradual self-repair 2.5%/s
+            if (module->health > 0 && module->health < (int32_t)module->max_health) {
+                float heal = (float)module->max_health * 0.025f * Q16_TO_FLOAT(dt);
+                module->health += (int32_t)heal;
+                if (module->health > (int32_t)module->max_health)
+                    module->health = (int32_t)module->max_health;
+                if (module->health >= (int32_t)module->max_health)
+                    module->state_bits &= ~MODULE_STATE_DAMAGED;
+            }
+            // Sail fibers: gradual self-repair 2.5%/s
+            {
+                float fh    = Q16_TO_FLOAT(module->data.mast.fiber_health);
+                float fhmax = Q16_TO_FLOAT(module->data.mast.fiber_max_health);
+                if (fhmax > 0.0f && fh > 0.0f && fh < fhmax) {
+                    fh += fhmax * 0.025f * Q16_TO_FLOAT(dt);
+                    if (fh > fhmax) fh = fhmax;
+                    module->data.mast.fiber_health    = Q16_FROM_FLOAT(fh);
+                    module->data.mast.wind_efficiency = Q16_FROM_FLOAT(fh / fhmax);
+                }
+            }
             break;
             
         default:

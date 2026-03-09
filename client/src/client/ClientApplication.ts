@@ -241,11 +241,34 @@ export class ClientApplication {
           const activeSlot = player?.inventory?.activeSlot ?? 0;
           const activeItem = player?.inventory?.slots[activeSlot]?.item ?? 'none';
 
-          // Hammer tool: E while holding hammer → start repair minigame
+          // Hammer tool: E while holding hammer + hovered repairable module in range → minigame
           if (activeItem === 'hammer' && player && player.carrierId !== 0) {
-            const shipId = player.carrierId;
+            const hoveredForHammer = this.renderSystem.getHoveredModule();
+            if (!hoveredForHammer) {
+              console.log('🔨 [HAMMER] No module hovered — aim at a module to repair');
+              return;
+            }
+            // Proximity check (reuse same logic as module interact)
+            let hammerDist: number;
+            if (player.carrierId === hoveredForHammer.ship.id && player.localPosition) {
+              hammerDist = player.localPosition.sub(hoveredForHammer.module.localPos).length();
+            } else {
+              const cos = Math.cos(hoveredForHammer.ship.rotation);
+              const sin = Math.sin(hoveredForHammer.ship.rotation);
+              const wx = hoveredForHammer.ship.position.x
+                + hoveredForHammer.module.localPos.x * cos - hoveredForHammer.module.localPos.y * sin;
+              const wy = hoveredForHammer.ship.position.y
+                + hoveredForHammer.module.localPos.x * sin + hoveredForHammer.module.localPos.y * cos;
+              hammerDist = player.position.sub(Vec2.from(wx, wy)).length();
+            }
+            if (hammerDist > 50) {
+              console.log(`🔨 [HAMMER] Module too far (${hammerDist.toFixed(1)}px) — get closer`);
+              return;
+            }
+            const shipId   = player.carrierId;
+            const moduleId = hoveredForHammer.module.id;
             this.uiManager?.startHammerMinigame((won) => {
-              if (won) this.networkManager.sendUseHammer(shipId);
+              if (won) this.networkManager.sendUseHammer(shipId, moduleId);
             });
             return;
           }

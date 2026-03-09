@@ -97,7 +97,7 @@ export class UIManager {
     resultTime:      number;   // performance.now() when player struck; -1 = not yet
     won:             boolean | null;
   } = {
-    active: false, startTime: 0, duration: 2500,
+    active: false, startTime: 0, duration: 1250,
     sweetspotStart: 0, sweetspotWidth: 0,
     callback: null, resultTime: -1, won: null,
   };
@@ -119,7 +119,7 @@ export class UIManager {
     this.hammerGame = {
       active: true,
       startTime: performance.now(),
-      duration: 2500,
+      duration: 1250,
       // Random zone in the middle 55% of the track so it's challenging but fair
       sweetspotStart: 0.20 + Math.random() * 0.50,
       sweetspotWidth: 0.16,

@@ -291,6 +291,7 @@ interface UseHammerMessage extends NetworkMessage {
   type: MessageType.USE_HAMMER;
   timestamp: number;
   shipId: number;
+  moduleId: number;
 }
 
 interface PlacePlankMessage extends NetworkMessage {
@@ -893,9 +894,9 @@ export class NetworkManager {
    * Apply a hammer-boosted instant repair (10 000 HP) to the most damaged plank.
    * Called only after the player wins the client-side hammer minigame.
    */
-  sendUseHammer(shipId: number): void {
+  sendUseHammer(shipId: number, moduleId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.USE_HAMMER, timestamp: Date.now(), shipId });
+    this.sendMessage({ type: MessageType.USE_HAMMER, timestamp: Date.now(), shipId, moduleId });
   }
 
   /**
