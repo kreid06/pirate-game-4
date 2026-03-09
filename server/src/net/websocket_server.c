@@ -1475,9 +1475,9 @@ static void tick_npc_agents(float dt) {
                     const float CANNON_AIM_RANGE        = 30.0f * ((float)M_PI / 180.0f);
                     const float CANNON_AIM_RESET_MARGIN = 15.0f * ((float)M_PI / 180.0f);
                     if (fabsf(desired_offset) > CANNON_AIM_RANGE + CANNON_AIM_RESET_MARGIN)
-                        desired_offset = 0.0f; // Fully outside dead-band — reset to neutral
+                        desired_offset = 0.0f; // Past grace zone — return to neutral
                     else if (fabsf(desired_offset) > CANNON_AIM_RANGE)
-                        break; // In dead-band — hold current desired_aim_direction
+                        desired_offset = (desired_offset > 0.0f) ? CANNON_AIM_RANGE : -CANNON_AIM_RANGE;
                     module->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
                     // Mirror into sim-ship
                     if (global_sim) {
@@ -2231,13 +2231,15 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
         while (desired_offset > M_PI) desired_offset -= 2.0f * M_PI;
         while (desired_offset < -M_PI) desired_offset += 2.0f * M_PI;
 
-        // Hysteresis: track within ±30°, hold in the ±15° dead-band beyond that,
-        // and only reset to neutral once the cursor is more than 45° off the cannon arc.
+        // Three zones:
+        //  ≤ ±30°           — track normally
+        //  ±30° to ±45°     — clamp to arc limit so cannon stays at its lateral edge
+        //  > ±45°           — reset to neutral (cursor is clearly pointing away)
         const float CANNON_AIM_RESET_MARGIN = 15.0f * ((float)M_PI / 180.0f);
         if (fabsf(desired_offset) > CANNON_AIM_RANGE + CANNON_AIM_RESET_MARGIN) {
-            desired_offset = 0.0f; // Fully outside dead-band — reset to neutral
+            desired_offset = 0.0f; // Past grace zone — return to neutral
         } else if (fabsf(desired_offset) > CANNON_AIM_RANGE) {
-            continue; // In dead-band — hold current desired_aim_direction, skip update
+            desired_offset = (desired_offset > 0.0f) ? CANNON_AIM_RANGE : -CANNON_AIM_RANGE;
         }
 
         // Update cannon's aim_direction
