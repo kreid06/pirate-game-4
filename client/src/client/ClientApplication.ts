@@ -234,21 +234,21 @@ export class ClientApplication {
         this.networkManager.sendRotationUpdate(rotation);
       };
       this.inputManager.onActionEvent = (action, target) => {
-        if (action === 'interact') {
+        // Hammer tool: left-click on hovered module while holding hammer → minigame
+        if (action === 'attack') {
           const playerId = this.networkManager.getAssignedPlayerId();
           const worldState = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
           const player = playerId !== null ? worldState?.players.find(p => p.id === playerId) : null;
           const activeSlot = player?.inventory?.activeSlot ?? 0;
           const activeItem = player?.inventory?.slots[activeSlot]?.item ?? 'none';
 
-          // Hammer tool: E while holding hammer + hovered repairable module in range → minigame
           if (activeItem === 'hammer' && player && player.carrierId !== 0) {
             const hoveredForHammer = this.renderSystem.getHoveredModule();
             if (!hoveredForHammer) {
               console.log('🔨 [HAMMER] No module hovered — aim at a module to repair');
               return;
             }
-            // Proximity check (reuse same logic as module interact)
+            // Proximity check
             let hammerDist: number;
             if (player.carrierId === hoveredForHammer.ship.id && player.localPosition) {
               hammerDist = player.localPosition.sub(hoveredForHammer.module.localPos).length();
@@ -281,6 +281,17 @@ export class ClientApplication {
             });
             return;
           }
+          // Not a hammer click — pass to server
+          this.networkManager.sendAction(action, target);
+          return;
+        }
+
+        if (action === 'interact') {
+          const playerId = this.networkManager.getAssignedPlayerId();
+          const worldState = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+          const player = playerId !== null ? worldState?.players.find(p => p.id === playerId) : null;
+          const activeSlot = player?.inventory?.activeSlot ?? 0;
+          const activeItem = player?.inventory?.slots[activeSlot]?.item ?? 'none';
 
           // Repair mode: active slot = repair_kit → repair most damaged plank on ship
           if (activeItem === 'repair_kit' && player && player.carrierId !== 0) {

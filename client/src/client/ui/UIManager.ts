@@ -901,7 +901,19 @@ class HUDElement implements UIElement {
       : null;
 
     if (playerShip != null) {
-      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100);
+      // Compute aggregate plank health ratio from the ship's plank modules
+      const planks = playerShip.modules.filter(m => m.kind === 'plank');
+      let plankRatio = 1;
+      if (planks.length > 0) {
+        let totalHp = 0, totalMax = 0;
+        for (const m of planks) {
+          const d = m.moduleData as { health?: number; maxHealth?: number } | undefined;
+          totalHp  += d?.health    ?? 0;
+          totalMax += d?.maxHealth ?? 10000;
+        }
+        plankRatio = totalMax > 0 ? Math.max(0, Math.min(1, totalHp / totalMax)) : 1;
+      }
+      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, plankRatio);
     }
 
     // Hotbar
@@ -1063,7 +1075,8 @@ class HUDElement implements UIElement {
   private renderWaterMeter(
     ctx: CanvasRenderingContext2D,
     canvas: HTMLCanvasElement,
-    hullHealth: number
+    hullHealth: number,
+    plankRatio: number = 1
   ): void {
     // waterFill: 0 = completely dry, 1 = ship fully flooded
     const waterFill = Math.max(0, Math.min(1, 1 - hullHealth / 100));
@@ -1160,6 +1173,38 @@ class HUDElement implements UIElement {
     ctx.font      = '9px Consolas, monospace';
     ctx.fillStyle = isCritical ? '#ff7777' : '#557799';
     ctx.fillText('WATER', ix + iW / 2, labelY + 14);
+
+    // ── Hull (plank) health bar ───────────────────────────────────────────
+    const barY       = labelY + 28;
+    const barW       = iW;
+    const barH       = 8;
+    const plankCrit  = plankRatio < 0.30;
+    const plankWarn  = plankRatio < 0.60;
+    const barColor   = plankCrit ? '#dd3333' : plankWarn ? '#dd9922' : '#33aa55';
+
+    // Background track
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fillRect(ix, barY, barW, barH);
+
+    // Filled portion
+    ctx.fillStyle = barColor;
+    ctx.fillRect(ix, barY, Math.round(barW * plankRatio), barH);
+
+    // Border
+    ctx.strokeStyle = plankCrit ? '#ff4444' : 'rgba(255,255,255,0.30)';
+    ctx.lineWidth   = 1;
+    ctx.strokeRect(ix, barY, barW, barH);
+
+    // Label: "HULL  XX%"
+    const hullPct = Math.round(plankRatio * 100);
+    ctx.font         = '9px Consolas, monospace';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle    = plankCrit ? '#ff5555' : '#778866';
+    ctx.fillText('HULL', ix, barY + barH + 3);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = plankCrit ? '#ff5555' : '#aabbaa';
+    ctx.fillText(`${hullPct}%`, ix + barW, barY + barH + 3);
 
     ctx.restore();
   }
