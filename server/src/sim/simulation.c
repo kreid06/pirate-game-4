@@ -454,16 +454,29 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         0
     );
     
-    // Initialize 10 hull planks (health tracking only - client creates positions from hull geometry)
-    // Plank IDs: 100-109 (hard-coded indices matching client createCompleteHullSegments())
-    // Order: bow_port, bow_starboard, 3x starboard_side, stern_starboard, stern_port, 3x port_side
+    // Initialize 10 hull planks with positions matching client hull geometry.
+    // Positions are the segment midpoints derived from createCompleteHullSegments()
+    // in modules.ts using HULL_POINTS. Order: bow_port, bow_starboard,
+    // 3x starboard_side, stern_starboard, stern_port, 3x port_side.
+    // All values in client-space coords (divided by WORLD_SCALE_FACTOR to get server units).
+    static const float plank_cx[10] = {
+         246.25f,  246.25f,   // bow_port, bow_starboard
+         115.0f,  -35.0f, -185.0f,  // starboard_side [0-2]
+        -281.25f, -281.25f,  // stern_starboard, stern_port
+        -185.0f,  -35.0f,   115.0f   // port_side [0-2]
+    };
+    static const float plank_cy[10] = {
+         45.0f,  -45.0f,
+        -90.0f,  -90.0f,  -90.0f,
+        -45.0f,   45.0f,
+         90.0f,   90.0f,   90.0f
+    };
     for (int i = 0; i < 10; i++) {
-        ShipModule plank = module_create(
-            100 + i, MODULE_TYPE_PLANK,
-            (Vec2Q16){0, 0}, // Position not used - client generates from hull
-            0 // Rotation not used - client calculates from segment
-        );
-        // Set initial health via module_create (max_health = health = 10000)
+        Vec2Q16 pos = {
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(plank_cx[i])),
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(plank_cy[i]))
+        };
+        ShipModule plank = module_create(100 + i, MODULE_TYPE_PLANK, pos, 0);
         ship->modules[ship->module_count++] = plank;
     }
     ship->initial_plank_count = 10;
