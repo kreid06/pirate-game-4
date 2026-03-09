@@ -1336,10 +1336,13 @@ export class ClientApplication {
     const dy = worldPos.y - nearestShip.position.y;
     const cos = Math.cos(-nearestShip.rotation);
     const sin = Math.sin(-nearestShip.rotation);
-    const localX = dx * cos - dy * sin;
-    const localY = dx * sin + dy * cos;
+    let localX = dx * cos - dy * sin;
+    let localY = dx * sin + dy * cos;
 
     const rotationRad = (this.buildRotationDeg * Math.PI) / 180;
+
+    // Sails must be on the ship centerline — snap Y to 0 (matches visual cursor behaviour)
+    if (this.buildSelectedItem === 'sail') localY = 0;
 
     // Geometry-based overlap check against existing non-plank, non-deck modules
     const newKind = this.buildSelectedItem === 'cannon' ? 'cannon' as const : 'mast' as const;
@@ -1390,13 +1393,7 @@ export class ClientApplication {
         console.log(`❌ [BUILD] Max sails reached (${mastCount}/3)`);
         return;
       }
-      // Sail placement constraints:
-      // 1. Mast center must be on the ship centerline (|localY| ≤ 25)
-      if (Math.abs(localY) > 25) {
-        console.log(`❌ [BUILD] Sail must be on ship centerline — current offset: ${localY.toFixed(0)} (max ±25)`);
-        return;
-      }
-      // 2. Mast cleats must not overlap — enforce minimum center-to-center separation
+      // Mast cleats must not overlap — enforce minimum center-to-center separation
       const MIN_MAST_SEP = 80;
       for (const mod of shipRef.modules) {
         if (mod.kind !== 'mast') continue;

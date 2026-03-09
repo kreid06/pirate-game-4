@@ -1515,17 +1515,19 @@ export class RenderSystem {
       this.ctx.translate(cx, cy);
       this.ctx.rotate(rot);
 
-      // Ghost cannon base rect (matches real cannon 30×20)
-      this.ctx.strokeStyle = isHovered ? '#ffaa00' : 'rgba(255,160,0,0.55)';
-      this.ctx.fillStyle   = isHovered ? 'rgba(255,180,0,0.35)' : 'rgba(255,140,0,0.15)';
+      // Ghost cannon base rect — unified green palette
+      this.ctx.strokeStyle = isHovered ? '#66ee99' : 'rgba(80,210,130,0.65)';
+      this.ctx.fillStyle   = isHovered ? 'rgba(40,160,80,0.45)' : 'rgba(40,130,70,0.20)';
       this.ctx.lineWidth   = isHovered ? lw * 2 : lw;
+      this.ctx.setLineDash(isHovered ? [] : [4, 3]);
       this.ctx.beginPath();
       this.ctx.rect(-15, -10, 30, 20);
       this.ctx.fill();
       this.ctx.stroke();
+      this.ctx.setLineDash([]);
 
       // Ghost barrel stub
-      this.ctx.strokeStyle = isHovered ? '#ffcc44' : 'rgba(255,200,50,0.45)';
+      this.ctx.strokeStyle = isHovered ? '#99ffbb' : 'rgba(80,200,120,0.45)';
       this.ctx.fillStyle   = 'transparent';
       this.ctx.lineWidth   = lw;
       this.ctx.beginPath();
@@ -1534,7 +1536,7 @@ export class RenderSystem {
 
       // Hovered: bright highlight circle
       if (isHovered) {
-        this.ctx.strokeStyle = '#ffff00';
+        this.ctx.strokeStyle = '#88ff99';
         this.ctx.lineWidth = lw * 1.5;
         this.ctx.beginPath();
         this.ctx.arc(0, 0, 22, 0, Math.PI * 2);
@@ -1686,17 +1688,19 @@ export class RenderSystem {
       const isHovered = this.hoveredMastSlot?.ship === ship &&
                         this.hoveredMastSlot?.mastIndex === i;
 
-      // Ghost mast circle (radius 14px, matching real mast)
+      // Ghost mast circle — unified green palette (matches plan ghost markers)
       this.ctx.beginPath();
       this.ctx.arc(mx, 0, 14, 0, Math.PI * 2);
-      this.ctx.fillStyle   = isHovered ? 'rgba(0,210,210,0.35)' : 'rgba(0,160,160,0.15)';
-      this.ctx.strokeStyle = isHovered ? '#00dddd' : 'rgba(0,200,200,0.55)';
+      this.ctx.fillStyle   = isHovered ? 'rgba(40,160,80,0.45)' : 'rgba(40,130,70,0.20)';
+      this.ctx.strokeStyle = isHovered ? '#66ee99' : 'rgba(80,210,130,0.65)';
       this.ctx.lineWidth   = isHovered ? lw * 2 : lw;
+      this.ctx.setLineDash(isHovered ? [] : [4, 3]);
       this.ctx.fill();
       this.ctx.stroke();
+      this.ctx.setLineDash([]);
 
       // Ghost sail stub (vertical line up from mast)
-      this.ctx.strokeStyle = isHovered ? '#66eeee' : 'rgba(0,180,180,0.40)';
+      this.ctx.strokeStyle = isHovered ? '#99ffbb' : 'rgba(80,200,120,0.45)';
       this.ctx.lineWidth   = lw;
       this.ctx.beginPath();
       this.ctx.moveTo(mx, 0);
@@ -1707,7 +1711,7 @@ export class RenderSystem {
       if (isHovered) {
         this.ctx.beginPath();
         this.ctx.arc(mx, 0, 22, 0, Math.PI * 2);
-        this.ctx.strokeStyle = '#00ffff';
+        this.ctx.strokeStyle = '#88ff99';
         this.ctx.lineWidth   = lw * 1.5;
         this.ctx.stroke();
       }
@@ -3215,11 +3219,18 @@ export class RenderSystem {
       lines.push(`Turn Rate: ${moduleData.maxTurnRate.toFixed(2)}`);
       lines.push(`Responsiveness: ${(moduleData.responsiveness * 100).toFixed(0)}%`);
     } else if (moduleData.kind === 'mast') {
-      const hp = Math.round(moduleData.health ?? 15000);
-      const maxHp = moduleData.maxHealth ?? 15000;
+      // Guard against Q16 fixed-point blowup from server (Q16 max for 15000 ≈ 983 million)
+      const Q16_THRESHOLD = 100_000;
+      const rawHp = moduleData.health ?? 15000;
+      const rawMax = moduleData.maxHealth ?? 15000;
+      const hp    = Math.round(rawHp  > Q16_THRESHOLD ? rawHp  / 65536 : rawHp);
+      const maxHp = Math.round(rawMax > Q16_THRESHOLD ? rawMax / 65536 : rawMax);
       lines.push(`Health: ${hp} / ${maxHp}`);
-      const fh = Math.round(moduleData.fiberHealth ?? 15000);
-      const fhMax = moduleData.fiberMaxHealth ?? 15000;
+      // Guard against 0/0 fiber health on freshly placed masts
+      const rawFh    = moduleData.fiberHealth    ?? 15000;
+      const rawFhMax = moduleData.fiberMaxHealth ?? 15000;
+      const fh    = rawFhMax === 0 ? 15000 : Math.round(rawFh    > Q16_THRESHOLD ? rawFh    / 65536 : rawFh);
+      const fhMax = rawFhMax === 0 ? 15000 : Math.round(rawFhMax > Q16_THRESHOLD ? rawFhMax / 65536 : rawFhMax);
       const fhPct = fhMax > 0 ? Math.round((fh / fhMax) * 100) : 100;
       lines.push(`Sail Fibers: ${fh} / ${fhMax} (${fhPct}%)`);
       lines.push(`Sail State: ${moduleData.sailState.toUpperCase()}`);
@@ -3719,6 +3730,10 @@ export class RenderSystem {
       localY = dx * sin + dy * cos;
     }
 
+    // Sails must sit on the ship centerline — snap cursor position to Y=0 so
+    // the ghost always renders on-axis instead of showing off-center then blocking.
+    if (item === 'sail') localY = 0;
+
     // Validate placement using geometry (OBB/circle) overlap — not a simple radius check
     const rotRad = (rotationDeg * Math.PI) / 180;
     const newKind = item === 'cannon' ? 'cannon' as const : 'mast' as const;
@@ -3748,18 +3763,14 @@ export class RenderSystem {
     const sailMaxed = item === 'sail' &&
       (nearestShip?.modules.filter(m => m.kind === 'mast').length ?? 0) >= 3;
 
-    // Sail extra constraints: must be on centerline, min separation from other masts
+    // Sail extra constraints: centerline already enforced by snap above; only check mast separation
     let sailConstraintFail = '';
     if (item === 'sail' && !sailMaxed && nearestShip) {
-      if (Math.abs(localY) > 25) {
-        sailConstraintFail = 'Must be on centerline';
-      } else {
-        const MIN_SEP = 80;
-        for (const mod of nearestShip.modules) {
-          if (mod.kind !== 'mast') continue;
-          if (Math.hypot(localX - mod.localPos.x, localY - mod.localPos.y) < MIN_SEP) {
-            sailConstraintFail = 'Too close to mast'; break;
-          }
+      const MIN_SEP = 80;
+      for (const mod of nearestShip.modules) {
+        if (mod.kind !== 'mast') continue;
+        if (Math.hypot(localX - mod.localPos.x, 0 - mod.localPos.y) < MIN_SEP) {
+          sailConstraintFail = 'Too close to mast'; break;
         }
       }
     }
