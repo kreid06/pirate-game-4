@@ -4028,10 +4028,11 @@ int websocket_server_update(struct Sim* sim) {
                                             if (!worst_plank) {
                                                 strcpy(response, "{\"type\":\"message_ack\",\"status\":\"planks_full_health\"}");
                                             } else {
-                                                // Restore 5000 HP (half a plank's max)
+                                                // Restore 5000 HP (half a plank's max) and start passive regen
                                                 worst_plank->health += 5000;
                                                 if (worst_plank->health > worst_plank->max_health)
                                                     worst_plank->health = worst_plank->max_health;
+                                                worst_plank->state_bits |= MODULE_STATE_REPAIRING;
                                                 // Consume 1 repair kit
                                                 player->inventory.slots[kit_slot].quantity--;
                                                 if (player->inventory.slots[kit_slot].quantity == 0)

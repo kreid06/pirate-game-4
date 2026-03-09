@@ -35,7 +35,8 @@ typedef enum {
     MODULE_STATE_RELOADING = (1 << 4),   // Cannon is reloading
     MODULE_STATE_OCCUPIED = (1 << 5),    // Seat/helm is occupied
     MODULE_STATE_DEPLOYED = (1 << 6),    // Sail/ladder is deployed
-    MODULE_STATE_LOCKED = (1 << 7)       // Module is locked/unusable
+    MODULE_STATE_LOCKED = (1 << 7),       // Module is locked/unusable
+    MODULE_STATE_REPAIRING = (1 << 8)     // Repair has been initiated (enables passive regen)
 } ModuleStateBits;
 
 /**
@@ -90,7 +91,7 @@ typedef struct {
     uint16_t deck_id;           // Which deck this module belongs to
     Vec2Q16 local_pos;          // Position relative to ship center
     q16_t local_rot;            // Rotation relative to ship
-    uint8_t state_bits;         // Compact state flags
+    uint16_t state_bits;        // Compact state flags
     q16_t health;               // Current HP (all module types)
     q16_t max_health;           // Maximum HP:
                                 //   plank: 10000, cannon: 8000
