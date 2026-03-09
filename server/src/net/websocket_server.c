@@ -533,6 +533,7 @@ static bool websocket_handshake(int client_fd, const char* request) {
 static WebSocketPlayer* find_player(uint32_t player_id);
 static WebSocketPlayer* create_player(uint32_t player_id);
 static void remove_player(uint32_t player_id);
+static ShipModule* find_module_by_id(SimpleShip* ship, uint32_t module_id);
 
 // Player management functions
 static WebSocketPlayer* find_player(uint32_t player_id) {
@@ -678,6 +679,29 @@ static void remove_player(uint32_t player_id) {
     
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (players[i].active && players[i].player_id == player_id) {
+            // If mounted, clear the module's occupied state so other players can use it.
+            if (players[i].is_mounted && players[i].mounted_module_id != 0) {
+                for (int s = 0; s < ship_count; s++) {
+                    if (!ships[s].active) continue;
+                    ShipModule* mod = find_module_by_id(&ships[s], players[i].mounted_module_id);
+                    if (!mod) continue;
+                    switch (mod->type_id) {
+                        case MODULE_TYPE_HELM:
+                        case MODULE_TYPE_STEERING_WHEEL:
+                            mod->data.helm.occupied_by = 0;
+                            break;
+                        case MODULE_TYPE_SEAT:
+                            mod->data.seat.occupied_by = 0;
+                            break;
+                        default:
+                            break;
+                    }
+                    mod->state_bits &= ~MODULE_STATE_OCCUPIED;
+                    log_info("🔓 Cleared occupied state on module %u (player %u disconnected)",
+                             mod->id, player_id);
+                    break;
+                }
+            }
             // Remove the physics/collision entity from the simulation first so
             // there are no invisible collision bodies left behind.
             if (global_sim && players[i].sim_entity_id != 0) {
