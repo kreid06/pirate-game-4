@@ -1198,15 +1198,16 @@ void handle_projectile_collisions(struct Sim* sim) {
                         }
                     } else {
                         // ── Sail fiber hit: damage fiber_health, derive wind_efficiency from HP ratio ──
+                        // NOTE: fiber_health is stored as a proper Q16 float (Q16_FROM_FLOAT(15000.0)).
+                        // proj->damage is stored as a plain integer in q16_t (e.g. 3000 raw ≠ Q16 for 3000.0).
+                        // Using Q16_TO_FLOAT(proj->damage) gives ~0.046, not 3000 — so bypass Q16 here.
                         float fh = Q16_TO_FLOAT(hit_mod->data.mast.fiber_health);
                         float fhmax = Q16_TO_FLOAT(hit_mod->data.mast.fiber_max_health);
                         if (fhmax <= 0.0f) fhmax = 15000.0f;
 
-                        q16_t effective_damage = Q16_FROM_FLOAT(
-                            Q16_TO_FLOAT(proj->damage)
-                            * ship_level_resistance_mult(&ship->level_stats)
-                        );
-                        fh -= Q16_TO_FLOAT(effective_damage);
+                        float fiber_dmg = (float)proj->damage
+                                          * ship_level_resistance_mult(&ship->level_stats);
+                        fh -= fiber_dmg;
                         if (fh < 0.0f) fh = 0.0f;
                         hit_mod->data.mast.fiber_health = Q16_FROM_FLOAT(fh);
 
@@ -1214,7 +1215,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                         float new_eff = fh / fhmax;
                         hit_mod->data.mast.wind_efficiency = Q16_FROM_FLOAT(new_eff);
 
-                        damage_dealt = Q16_TO_FLOAT(effective_damage);
+                        damage_dealt = fiber_dmg;
                         log_info("⛵🧵 Bar shot %u shredded sail fiber %u on ship %u (fiber HP %.0f/%.0f, eff %.2f)",
                                  proj->id, mod_id, ship->id, fh, fhmax, new_eff);
                     }
@@ -1238,10 +1239,18 @@ void handle_projectile_collisions(struct Sim* sim) {
                             attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
                     }
 
-                    // Record which mast was just hit so it's skipped next tick while still in range.
-                    // The projectile keeps flying — it slices through sail fibers rather than stopping.
-                    proj->last_hit_module_id = mod_id;
-                    break; // continue flying — do NOT remove
+                    if (center_hit) {
+                        // Bar shot hit the mast pole directly — stop it here.
+                        memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                                (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                        sim->projectile_count--;
+                        removed = true;
+                    } else {
+                        // Sail fiber hit — record which mast was just hit so it's skipped next
+                        // tick while still in range; projectile keeps flying.
+                        proj->last_hit_module_id = mod_id;
+                    }
+                    break;
                 }
                 // Bar shot outside all mast radii: clear the skip lock
                 if (proj->last_hit_module_id != 0) proj->last_hit_module_id = 0;
