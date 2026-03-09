@@ -1191,7 +1191,7 @@ class HUDElement implements UIElement {
       const def  = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
       const sx   = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
       const sy   = startY + PADDING;
-      const isActive = i === activeSlot;
+      const isActive = i === activeSlot && activeSlot < 10;
 
       // Slot background
       ctx.fillStyle = isActive ? 'rgba(255,220,60,0.18)' : 'rgba(30,30,40,0.9)';

@@ -60,6 +60,7 @@ export enum MessageType {
   CANNON_FIRE = 'cannon_fire',
 
   SLOT_SELECT = 'slot_select',
+  UNEQUIP = 'unequip',
   GIVE_ITEM = 'give_item',
   PLACE_PLANK = 'place_plank',
   REPAIR_PLANK = 'repair_plank',
@@ -267,6 +268,10 @@ interface SlotSelectMessage extends NetworkMessage {
   slot: number;
 }
 
+interface UnequipMessage extends NetworkMessage {
+  type: MessageType.UNEQUIP;
+}
+
 interface GiveItemMessage extends NetworkMessage {
   type: MessageType.GIVE_ITEM;
   timestamp: number;
@@ -352,7 +357,7 @@ interface CrewAssignMessage extends NetworkMessage {
   task: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage;
 
 /**
  * Main network manager class
@@ -867,6 +872,15 @@ export class NetworkManager {
   sendSlotSelect(slot: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.SLOT_SELECT, timestamp: Date.now(), slot });
+  }
+
+  /**
+   * Notify the server that the player unequipped (deselected) their active hotbar slot.
+   * Server sets active_slot = 255 as a "nothing equipped" sentinel.
+   */
+  sendUnequip(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.UNEQUIP, timestamp: Date.now() });
   }
 
   /**

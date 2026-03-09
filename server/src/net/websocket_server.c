@@ -4109,6 +4109,21 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strstr(payload, "\"type\":\"unequip\"")) {
+                            // INVENTORY: player deselected active slot (Q key) — sentinel 255 = nothing equipped
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    player->inventory.active_slot = 255;
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"unequipped\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
                         } else if (strstr(payload, "\"type\":\"give_item\"")) {
                             // INVENTORY: server-side item grant (used by admin/tests)
                             // {"type":"give_item","slot":0,"item":1,"quantity":10}

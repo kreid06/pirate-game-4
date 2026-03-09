@@ -86,8 +86,10 @@ export class InputManager {
   public onCannonAim: ((aimAngle: number) => void) | null = null;
   public onCannonFire: ((cannonIds?: number[], fireAll?: boolean, ammoType?: number) => void) | null = null;
 
-  // Inventory callback
+  // Inventory callbacks
   public onSlotSelect: ((slot: number) => void) | null = null;
+  /** Q key — deselect the active hotbar slot (unequip). */
+  public onUnequip: (() => void) | null = null;
 
   // UI click intercept — return true to consume the click before game logic runs
   public onUIClick: ((x: number, y: number) => boolean) | null = null;
@@ -924,6 +926,10 @@ export class InputManager {
           event.preventDefault();
         }
         break;      // Hotbar slots: Digit1-Digit9 → slots 0-8, Digit0 → slot 9
+      case 'KeyQ':
+        if (this.onUnequip) this.onUnequip();
+        event.preventDefault();
+        break;
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
         if (this.onSlotSelect) this.onSlotSelect(parseInt(event.code.replace('Digit', '')) - 1);

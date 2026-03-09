@@ -427,6 +427,21 @@ export class ClientApplication {
         this.networkManager.sendRepairSail(damagedMast.ship.id, damagedMast.mastIndex);
       };
 
+      // Q key: unequip active slot — use 255 as "nothing selected" sentinel
+      this.inputManager.onUnequip = () => {
+        const playerId = this.networkManager.getAssignedPlayerId();
+        if (playerId !== null) {
+          for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+            const p = ws?.players.find(pl => pl.id === playerId);
+            if (p) p.inventory.activeSlot = 255;
+          }
+        }
+        this.networkManager.sendUnequip();
+        // Also exit any build mode that was active due to the equipped item
+        this.exitAllBuildModes();
+        console.log('🎒 [INVENTORY] Unequipped active slot');
+      };
+
       // Hotbar slot selection — update locally for instant UI feedback, then sync server
       this.inputManager.onSlotSelect = (slot) => {
         const playerId = this.networkManager.getAssignedPlayerId();
@@ -589,13 +604,11 @@ export class ClientApplication {
         const playerId = this.networkManager?.getAssignedPlayerId();
         const player = ws?.players.find(p => p.id === playerId);
         if (player) {
-          // Unequip matching hotbar item so we go into ghost-only mode
-          const kindToItem: Partial<Record<GhostModuleKind, string>> = {
-            plank: 'plank', cannon: 'cannon', mast: 'sail', helm: 'helm_kit', deck: 'deck',
-          };
+          // Always deselect the active hotbar item when entering ghost placement —
+          // switch to an empty slot so we don't accidentally build the real thing.
           const activeSlot = player.inventory?.activeSlot ?? 0;
           const activeItem = player.inventory?.slots[activeSlot]?.item ?? 'none';
-          if (activeItem === kindToItem[kind]) {
+          if (activeItem !== 'none') {
             const emptyIdx = player.inventory.slots.findIndex(s => s.item === 'none');
             if (emptyIdx >= 0) this.networkManager.sendSlotSelect(emptyIdx);
           }
