@@ -1696,6 +1696,79 @@ static void tick_world_npcs(float dt) {
         if (!npc->active) continue;
 
         if (npc->state == WORLD_NPC_STATE_MOVING) {
+            // ── Repairer walking home: interrupt if new damage appears ──────────
+            if (npc->role == NPC_ROLE_REPAIRER && npc->assigned_cannon_id == 0 && global_sim) {
+                struct Ship* intr_ship = NULL;
+                for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+                    if ((uint32_t)global_sim->ships[s].id == npc->ship_id) {
+                        intr_ship = &global_sim->ships[s]; break;
+                    }
+                }
+                if (intr_ship) {
+                    // Check for missing planks first
+                    bool present[10] = {false};
+                    for (uint8_t m = 0; m < intr_ship->module_count; m++) {
+                        uint16_t mid = intr_ship->modules[m].id;
+                        if (mid >= 100 && mid <= 109) present[mid - 100] = true;
+                    }
+                    int intr_missing = -1;
+                    for (int k = 0; k < 10; k++) {
+                        if (present[k]) continue;
+                        bool taken = false;
+                        for (int j = 0; j < world_npc_count; j++) {
+                            WorldNpc* other = &world_npcs[j];
+                            if (!other->active || other->id == npc->id) continue;
+                            if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
+                                other->assigned_cannon_id == (uint32_t)(100 + k)) { taken = true; break; }
+                        }
+                        if (!taken) { intr_missing = k; break; }
+                    }
+                    if (intr_missing >= 0) {
+                        float pcx = s_plank_cx[intr_missing], pcy = s_plank_cy[intr_missing];
+                        float pmag = sqrtf(pcx * pcx + pcy * pcy);
+                        if (pmag > 0.0f) { pcx -= (pcx / pmag) * 28.0f; pcy -= (pcy / pmag) * 28.0f; }
+                        npc->target_local_x     = pcx;
+                        npc->target_local_y     = pcy;
+                        npc->assigned_cannon_id = (uint32_t)(100 + intr_missing);
+                        log_info("🔨 NPC %u (%s) interrupted — redirecting to missing plank %u",
+                                 npc->id, npc->name, 100 + intr_missing);
+                    } else {
+                        // Check for damaged modules
+                        ShipModule* intr_mod = NULL;
+                        ShipModule* intr_stack = NULL;
+                        float intr_worst = 1.0f, intr_stack_r = 1.0f;
+                        for (uint8_t m = 0; m < intr_ship->module_count; m++) {
+                            ShipModule* mod = &intr_ship->modules[m];
+                            if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
+                            if (mod->max_health == 0) continue;
+                            float ratio = (float)mod->health / (float)mod->max_health;
+                            if (ratio >= 1.0f) continue;
+                            bool taken = false;
+                            for (int j = 0; j < world_npc_count; j++) {
+                                WorldNpc* other = &world_npcs[j];
+                                if (!other->active || other->id == npc->id) continue;
+                                if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
+                                    other->assigned_cannon_id == (uint32_t)mod->id) { taken = true; break; }
+                            }
+                            if (!taken && ratio < intr_worst)  { intr_mod   = mod; intr_worst  = ratio; }
+                            if ( taken && ratio < intr_stack_r){ intr_stack = mod; intr_stack_r = ratio; }
+                        }
+                        if (!intr_mod) intr_mod = intr_stack;
+                        if (intr_mod) {
+                            float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(intr_mod->local_pos.x));
+                            float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(intr_mod->local_pos.y));
+                            float mmag = sqrtf(mx * mx + my * my);
+                            if (mmag > 0.0f) { mx -= (mx / mmag) * 28.0f; my -= (my / mmag) * 28.0f; }
+                            npc->target_local_x     = mx;
+                            npc->target_local_y     = my;
+                            npc->assigned_cannon_id = (uint32_t)intr_mod->id;
+                            log_info("🔧 NPC %u (%s) interrupted — redirecting to damaged module %u (%.0f%% HP)",
+                                     npc->id, npc->name, intr_mod->id, intr_worst * 100.0f);
+                        }
+                    }
+                }
+            }
+
             float dx   = npc->target_local_x - npc->local_x;
             float dy   = npc->target_local_y - npc->local_y;
             float dist = sqrtf(dx * dx + dy * dy);
@@ -5620,6 +5693,75 @@ void websocket_server_tick(float dt) {
                             }
                         }
                     }
+
+                    // ── Deck destroyed: cascade-destroy all non-mast non-ladder modules ──
+                    if (ev->module_id == 200) {
+                        log_info("💥 Deck destroyed on ship %u — cascading destruction", ev->ship_id);
+
+                        // Destroy on the sim ship
+                        struct Ship* sim_ship = NULL;
+                        if (global_sim) {
+                            for (uint32_t ss = 0; ss < global_sim->ship_count; ss++) {
+                                if ((uint32_t)global_sim->ships[ss].id == ev->ship_id) {
+                                    sim_ship = &global_sim->ships[ss]; break;
+                                }
+                            }
+                        }
+                        if (sim_ship) {
+                            uint8_t m = 0;
+                            while (m < sim_ship->module_count) {
+                                ModuleTypeId t = sim_ship->modules[m].type_id;
+                                if (t == MODULE_TYPE_MAST || t == MODULE_TYPE_LADDER) { m++; continue; }
+                                // Fire a MODULE_HIT event for each cascaded module
+                                if (global_sim->hit_event_count < MAX_HIT_EVENTS) {
+                                    struct HitEvent* ce = &global_sim->hit_events[global_sim->hit_event_count++];
+                                    ce->ship_id         = ev->ship_id;
+                                    ce->module_id       = sim_ship->modules[m].id;
+                                    ce->is_breach       = true;
+                                    ce->is_sink         = false;
+                                    ce->destroyed       = true;
+                                    ce->damage_dealt    = (float)sim_ship->modules[m].health;
+                                    ce->hit_x           = ev->hit_x;
+                                    ce->hit_y           = ev->hit_y;
+                                    ce->shooter_ship_id = ev->shooter_ship_id;
+                                }
+                                memmove(&sim_ship->modules[m], &sim_ship->modules[m + 1],
+                                        (sim_ship->module_count - m - 1) * sizeof(ShipModule));
+                                sim_ship->module_count--;
+                            }
+                        }
+                        // Also purge SimpleShip mirror
+                        if (simple) {
+                            uint8_t m = 0;
+                            while (m < simple->module_count) {
+                                ModuleTypeId t = simple->modules[m].type_id;
+                                if (t == MODULE_TYPE_MAST || t == MODULE_TYPE_LADDER) { m++; continue; }
+                                memmove(&simple->modules[m], &simple->modules[m + 1],
+                                        (simple->module_count - m - 1) * sizeof(ShipModule));
+                                simple->module_count--;
+                            }
+                        }
+                        // Dismount any players whose module was just wiped
+                        for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+                            if (!players[pi].active || players[pi].parent_ship_id != ev->ship_id) continue;
+                            if (!players[pi].is_mounted) continue;
+                            // Check if their mounted module still exists
+                            bool still_there = false;
+                            if (simple) {
+                                for (int m = 0; m < simple->module_count; m++) {
+                                    if ((uint32_t)simple->modules[m].id == players[pi].mounted_module_id) {
+                                        still_there = true; break;
+                                    }
+                                }
+                            }
+                            if (!still_there) {
+                                players[pi].is_mounted          = false;
+                                players[pi].mounted_module_id   = 0;
+                                players[pi].controlling_ship_id = 0;
+                            }
+                        }
+                    }
+
                     snprintf(msg, sizeof(msg),
                         "{\"type\":\"MODULE_HIT\",\"shipId\":%u,\"moduleId\":%u,"
                         "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
