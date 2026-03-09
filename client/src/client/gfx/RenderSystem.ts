@@ -2367,7 +2367,14 @@ export class RenderSystem {
     }
     
     // Draw rotation indicator (facing direction from mouse aim)
-    const rotation = player.rotation;
+    // For the local player use the live mouse-to-player angle so the arrow is
+    // always visually correct even before the server round-trips the rotation.
+    let rotation = player.rotation;
+    if (player.id === this.localPlayerId && this.mouseWorldPos) {
+      const dx = this.mouseWorldPos.x - player.position.x;
+      const dy = this.mouseWorldPos.y - player.position.y;
+      rotation = Math.atan2(dy, dx);
+    }
     
     this.ctx.strokeStyle = '#ffffff';
     this.ctx.lineWidth = 3;
