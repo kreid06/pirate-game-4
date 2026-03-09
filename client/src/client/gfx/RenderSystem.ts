@@ -1537,6 +1537,54 @@ export class RenderSystem {
       // Restore turret rotation
       this.ctx.restore();
       
+      // Reload indicator — two spinning circular arrows while MODULE_STATE_RELOADING (bit 4) is set
+      const isReloading = ((cannonData.stateBits ?? 0) & 16) !== 0;
+      if (isReloading) {
+        const t = performance.now() / 1000; // seconds
+        const spinAngle = t * 2.5; // ~2.5 rad/s
+        const iconR = 9;
+        const arcSpan = (5 * Math.PI) / 6; // 150°
+        const arrowSize = 3;
+        const lw = 2 / cameraState.zoom;
+
+        this.ctx.save();
+        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.90)';
+        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.90)';
+        this.ctx.lineWidth = lw;
+        this.ctx.lineCap = 'round';
+
+        for (let i = 0; i < 2; i++) {
+          const startAngle = spinAngle + i * Math.PI;
+          const endAngle = startAngle + arcSpan;
+
+          // Arc
+          this.ctx.beginPath();
+          this.ctx.arc(0, 0, iconR, startAngle, endAngle);
+          this.ctx.stroke();
+
+          // Arrowhead (filled triangle) at the tip of the arc
+          const tipX = Math.cos(endAngle) * iconR;
+          const tipY = Math.sin(endAngle) * iconR;
+          // Tangent direction at end (direction of rotation)
+          const tx = -Math.sin(endAngle);
+          const ty =  Math.cos(endAngle);
+          // Radial outward direction
+          const rx = Math.cos(endAngle);
+          const ry = Math.sin(endAngle);
+
+          this.ctx.beginPath();
+          this.ctx.moveTo(tipX + tx * arrowSize,        tipY + ty * arrowSize);
+          this.ctx.lineTo(tipX - tx * arrowSize * 0.5 + rx * arrowSize * 0.9,
+                          tipY - ty * arrowSize * 0.5 + ry * arrowSize * 0.9);
+          this.ctx.lineTo(tipX - tx * arrowSize * 0.5 - rx * arrowSize * 0.9,
+                          tipY - ty * arrowSize * 0.5 - ry * arrowSize * 0.9);
+          this.ctx.closePath();
+          this.ctx.fill();
+        }
+
+        this.ctx.restore();
+      }
+
       // Restore cannon position
       this.ctx.restore();
     }

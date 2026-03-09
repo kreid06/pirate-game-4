@@ -837,6 +837,17 @@ export class NetworkManager {
   }
 
   /**
+   * Force-reload the player's manned cannon, discarding the current round.
+   * Tells the server to reset the reload timer so the cannon reloads immediately
+   * into the newly-selected ammo type.
+   */
+  sendForceReload(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: 'cannon_force_reload' as any, timestamp: Date.now() });
+    console.log('⚡ Force reload sent');
+  }
+
+  /**
    * Notify the server that the player selected a different hotbar slot.
    */
   sendSlotSelect(slot: number): void {
@@ -1157,6 +1168,7 @@ export class NetworkManager {
                       maxAmmunition: 50,
                       health: mod.health ?? 8000,
                       maxHealth: mod.maxHealth ?? 8000,
+                      stateBits: mod.state ?? 0,
                     };
                   } else if (kind === 'helm' || kind === 'steering-wheel') {
                     moduleData = {

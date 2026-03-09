@@ -138,7 +138,15 @@ export class InputManager {
   public mountedCannonModuleId: number | null = null;
   private lastCannonAimAngle: number = 0;
   /** Selected ammo type: 0 = cannonball, 1 = bar shot. Toggle with X key. */
-  public selectedAmmoType: number = 0;
+  public selectedAmmoType: number = 0;    // Pending ammo (to load after next fire)
+  public loadedAmmoType: number = 0;      // What's physically in the barrel right now
+  private lastXTapTime: number = 0;       // For double-tap detection on X
+
+  /** Called when player double-taps X to force-reload with the pending ammo type. */
+  public onForceReload: (() => void) | null = null;
+
+  /** Returns what ammo type is currently loaded (for aim guides and fire messages). */
+  public getLoadedAmmoType(): number { return this.loadedAmmoType; }
   /** Current aim angle relative to ship — updated every frame while right-mouse is held. */
   public get cannonAimAngleRelative(): number { return this.lastCannonAimAngle; }
   private lastLeftClickTime: number = 0;
@@ -891,9 +899,22 @@ export class InputManager {
       case 'KeyX':
         // Toggle ammo type when mounted to a cannon or helm
         if (this.mountKind === 'cannon' || this.mountKind === 'helm') {
+          const now = performance.now();
+          const isDoubleTap = (now - this.lastXTapTime) < 400;
+          this.lastXTapTime = now;
+
+          // Toggle pending ammo type
           this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
           const ammoNames = ['CANNONBALL', 'BAR SHOT'];
-          console.log(`💣 Ammo type: ${ammoNames[this.selectedAmmoType]}`);
+
+          if (isDoubleTap) {
+            // Force reload: immediately switch the loaded type and tell server
+            this.loadedAmmoType = this.selectedAmmoType;
+            console.log(`⚡ Force reload → ${ammoNames[this.loadedAmmoType]}`);
+            if (this.onForceReload) this.onForceReload();
+          } else {
+            console.log(`💣 Pending ammo: ${ammoNames[this.selectedAmmoType]} (double-tap X to force reload)`);
+          }
           event.preventDefault();
         }
         break;      // Hotbar slots: Digit1-Digit9 → slots 0-8, Digit0 → slot 9
@@ -959,10 +980,14 @@ export class InputManager {
         // Mounted to helm or cannon: fire cannon(s)
         if (isDoubleClick) {
           console.log('💥💥 Double-click: Fire ALL cannons!');
-          if (this.onCannonFire) this.onCannonFire(undefined, true, this.selectedAmmoType);
+          if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType);
+          // Cannon will reload into the pending ammo type
+          this.loadedAmmoType = this.selectedAmmoType;
         } else {
           console.log('💥 Single-click: Fire aimed cannons');
-          if (this.onCannonFire) this.onCannonFire(undefined, false, this.selectedAmmoType);
+          if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType);
+          // Cannon will reload into the pending ammo type
+          this.loadedAmmoType = this.selectedAmmoType;
         }
       }
 

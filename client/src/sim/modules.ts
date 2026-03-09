@@ -134,6 +134,7 @@ export interface CannonModuleData {
   maxAmmunition: number;        // Maximum ammunition capacity
   health: number;               // Current HP (base max: 8000)
   maxHealth: number;            // Max HP
+  stateBits: number;            // Server MODULE_STATE_* bitmask (bit 4 = RELOADING)
 }
 
 /**

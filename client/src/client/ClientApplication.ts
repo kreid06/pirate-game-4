@@ -319,6 +319,9 @@ export class ClientApplication {
       this.inputManager.onCannonFire = (cannonIds, fireAll, ammoType) => {
         this.networkManager.sendCannonFire(cannonIds, fireAll, ammoType ?? 0);
       };
+      this.inputManager.onForceReload = () => {
+        this.networkManager.sendForceReload();
+      };
 
       // Sail fiber repair: R key while hovering a damaged mast → consume repair kit, restore fibers
       this.inputManager.onRepairSail = () => {
@@ -699,7 +702,7 @@ export class ClientApplication {
       this.renderSystem.playerIsAiming = this.inputManager?.isRightMouseDown ?? false;
       this.renderSystem.localPlayerId = this.networkManager.getAssignedPlayerId();
       this.renderSystem.playerAimAngleRelative = this.inputManager?.cannonAimAngleRelative ?? 0;
-      this.renderSystem.selectedAmmoType = this.inputManager?.selectedAmmoType ?? 0;
+      this.renderSystem.selectedAmmoType = this.inputManager?.getLoadedAmmoType() ?? 0;
       this.renderSystem.npcTaskMap = this.uiManager.getNpcTaskMap();
 
       // Keep explicit build mode UI in sync with latest world state (sail count may change)
@@ -721,7 +724,7 @@ export class ClientApplication {
         config: this.config,
         assignedPlayerId,
         playerShipId,
-        selectedAmmoType: this.inputManager?.selectedAmmoType ?? 0,
+        selectedAmmoType: this.inputManager?.getLoadedAmmoType() ?? 0,
       });
     }
   }

@@ -1227,6 +1227,7 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
 static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float world_x, float world_y, 
                                   float angle, entity_id projectile_id, uint8_t ammo_type);
 static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired, uint8_t ammo_type);
+static void handle_cannon_force_reload(WebSocketPlayer* player);
 static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_type);
 static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task);
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle);
@@ -1958,6 +1959,57 @@ static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float wo
             }
         }
     }
+}
+
+/**
+ * Handle force-reload request from player.
+ * Resets the reload timer on the player's manned cannon (or all nearest cannons
+ * when at the helm) and marks them as RELOADING so they cannot fire immediately.
+ * This lets a player discard the currently loaded round and reload a different ammo type.
+ */
+static void handle_cannon_force_reload(WebSocketPlayer* player) {
+    if (player->parent_ship_id == 0 || !player->is_mounted) return;
+
+    SimpleShip* ship = find_ship(player->parent_ship_id);
+    if (!ship) return;
+
+    struct Ship* sim_ship = NULL;
+    if (global_sim) {
+        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+            if (global_sim->ships[s].id == ship->ship_id) {
+                sim_ship = &global_sim->ships[s];
+                break;
+            }
+        }
+    }
+    if (!sim_ship) return;
+
+    ShipModule* mmod = find_module_by_id(ship, player->mounted_module_id);
+    if (!mmod) return;
+
+    bool at_cannon = (mmod->type_id == MODULE_TYPE_CANNON);
+    bool at_helm   = (mmod->type_id == MODULE_TYPE_HELM ||
+                      mmod->type_id == MODULE_TYPE_STEERING_WHEEL);
+
+    if (!at_cannon && !at_helm) return;
+
+    int reloaded = 0;
+    for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+        ShipModule* module = &sim_ship->modules[m];
+        if (module->type_id != MODULE_TYPE_CANNON) continue;
+
+        /* For a cannon-mounted player only reset their specific cannon */
+        if (at_cannon && module->id != mmod->id) continue;
+
+        /* Reset reload timer and set RELOADING flag */
+        module->data.cannon.time_since_fire = 0;
+        module->state_bits |= MODULE_STATE_RELOADING;
+        module->state_bits &= ~MODULE_STATE_FIRING;
+        reloaded++;
+    }
+
+    log_info("⚡ Force-reload: player %u reset %d cannon(s) on ship %u",
+             player->player_id, reloaded, ship->ship_id);
 }
 
 /**
@@ -3660,7 +3712,22 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 handled = true;
                             }
-                            
+
+                        } else if (strstr(payload, "\"type\":\"cannon_force_reload\"")) {
+                            // CANNON FORCE RELOAD — discard current round, restart reload
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player && player->parent_ship_id != 0) {
+                                    handle_cannon_force_reload(player);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"force_reloaded\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                }
+                            }
+                            handled = true;
+
                         } else if (strstr(payload, "\"type\":\"ping\"")) {
                             // JSON ping message
                             snprintf(response, sizeof(response),
