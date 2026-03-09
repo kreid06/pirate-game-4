@@ -358,11 +358,37 @@ export class RenderSystem {
       const localX = dx * cos - dy * sin;
       const localY = dx * sin + dy * cos;
       
-      // Check each module
+      // --- Pass 1: ladders take priority over planks ---
+      for (const module of ship.modules) {
+        if (!module.moduleData) continue;
+        const moduleData = module.moduleData;
+        if (moduleData.kind !== 'ladder') continue;
+        
+        // Ladder renders as fillRect(-10, -20, 20, 40) centered at localPos with localRot
+        const halfWidth = 10;  // 20 / 2
+        const halfHeight = 20; // 40 / 2
+        
+        const mdx = localX - module.localPos.x;
+        const mdy = localY - module.localPos.y;
+        const mcos = Math.cos(-(module.localRot || 0));
+        const msin = Math.sin(-(module.localRot || 0));
+        const modLocalX = mdx * mcos - mdy * msin;
+        const modLocalY = mdx * msin + mdy * mcos;
+        
+        if (Math.abs(modLocalX) <= halfWidth && Math.abs(modLocalY) <= halfHeight) {
+          this.hoveredModule = { ship, module };
+          return;
+        }
+      }
+      
+      // --- Pass 2: everything else (planks, cannons, masts, etc.) ---
       for (const module of ship.modules) {
         if (!module.moduleData) continue;
         
         const moduleData = module.moduleData;
+        
+        // Ladders already checked in pass 1
+        if (moduleData.kind === 'ladder') continue;
         
         // Special handling for curved planks
         if (moduleData.kind === 'plank' && moduleData.isCurved && moduleData.curveData) {
@@ -2900,6 +2926,9 @@ export class RenderSystem {
         const width = 30;
         const height = 20;
         this.ctx.strokeRect(-width/2, -height/2, width, height);
+      } else if (moduleData.kind === 'ladder') {
+        // Ladder renders as fillRect(-10, -20, 20, 40)
+        this.ctx.strokeRect(-10, -20, 20, 40);
       } else {
         // Default highlight for other modules
         const size = 20;
