@@ -1401,6 +1401,7 @@ export class NetworkManager {
             state: n.state ?? 0,
             role: n.role ?? 0,
             companyId: n.company ?? 0,
+            assignedCannonId: n.assigned_cannon_id ?? 0,
           })),
           carrierDetection: new Map() // Will be populated as needed
         };

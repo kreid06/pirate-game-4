@@ -5592,11 +5592,13 @@ int websocket_server_update(struct Sim* sim) {
                 "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
                 "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                 "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
-                "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u}",
+                "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u,"
+                "\"assigned_cannon_id\":%u}",
                 npc->id, npc->name,
                 npc->x, npc->y, npc->rotation,
                 npc->ship_id, npc->local_x, npc->local_y,
-                npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id);
+                npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id,
+                npc->assigned_cannon_id);
             first_npc = false;
         }
         npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "]");

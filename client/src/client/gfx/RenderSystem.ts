@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_CANNON, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
@@ -2075,14 +2075,20 @@ export class RenderSystem {
         // Mounted directly on a cannon — show just that one
         cannonsToShow = [mountedMod];
       } else if (mountedMod?.kind === 'helm' || mountedMod?.kind === 'steering-wheel') {
-        // On the helm — only show cannons whose outward-facing sector contains the aim direction.
-        // Sector check: sin(cannon.localRot - aimAngleRelative) > 0 means the cannon's barrel
-        // faces the same general half-plane as the player is aiming toward.
+        // On the helm — only show cannons whose outward-facing sector contains the aim direction,
+        // AND that have an NPC stationed at them (AT_CANNON) or a player mounted on them.
         const aim = this.playerAimAngleRelative;
-        cannonsToShow = ship.modules.filter(m =>
-          m.kind === 'cannon' &&
-          Math.sin((m.localRot || 0) - aim) > 0
-        );
+        const shipNpcs = worldState.npcs.filter(n => n.shipId === ship.id);
+        const shipPlayers = worldState.players.filter(p => p.carrierId === ship.id && p.isMounted);
+        cannonsToShow = ship.modules.filter(m => {
+          if (m.kind !== 'cannon') return false;
+          if (Math.sin((m.localRot || 0) - aim) <= 0) return false;
+          // Check if any NPC is stationed at this cannon
+          const hasNpc = shipNpcs.some(n => n.assignedCannonId === m.id && n.state === NPC_STATE_AT_CANNON);
+          // Check if any other player is mounted directly on this cannon
+          const hasPlayer = shipPlayers.some(p => p.mountedModuleId === m.id);
+          return hasNpc || hasPlayer;
+        });
       }
     }
 
