@@ -5711,7 +5711,8 @@ void websocket_server_tick(float dt) {
                             uint8_t m = 0;
                             while (m < sim_ship->module_count) {
                                 ModuleTypeId t = sim_ship->modules[m].type_id;
-                                if (t == MODULE_TYPE_MAST || t == MODULE_TYPE_LADDER) { m++; continue; }
+                                if (t == MODULE_TYPE_MAST || t == MODULE_TYPE_LADDER ||
+                                    t == MODULE_TYPE_PLANK || t == MODULE_TYPE_DECK) { m++; continue; }
                                 // Fire a MODULE_HIT event for each cascaded module
                                 if (global_sim->hit_event_count < MAX_HIT_EVENTS) {
                                     struct HitEvent* ce = &global_sim->hit_events[global_sim->hit_event_count++];
@@ -5735,7 +5736,8 @@ void websocket_server_tick(float dt) {
                             uint8_t m = 0;
                             while (m < simple->module_count) {
                                 ModuleTypeId t = simple->modules[m].type_id;
-                                if (t == MODULE_TYPE_MAST || t == MODULE_TYPE_LADDER) { m++; continue; }
+                                if (t == MODULE_TYPE_MAST || t == MODULE_TYPE_LADDER ||
+                                    t == MODULE_TYPE_PLANK || t == MODULE_TYPE_DECK) { m++; continue; }
                                 memmove(&simple->modules[m], &simple->modules[m + 1],
                                         (simple->module_count - m - 1) * sizeof(ShipModule));
                                 simple->module_count--;
