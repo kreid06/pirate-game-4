@@ -84,7 +84,7 @@ export class InputManager {
   
   // Cannon control callbacks
   public onCannonAim: ((aimAngle: number) => void) | null = null;
-  public onCannonFire: ((cannonIds?: number[], fireAll?: boolean, ammoType?: number, weaponGroup?: number) => void) | null = null;
+  public onCannonFire: ((cannonIds?: number[], fireAll?: boolean, ammoType?: number, weaponGroup?: number, weaponGroups?: Set<number>) => void) | null = null;
 
   // Inventory callbacks
   public onSlotSelect: ((slot: number) => void) | null = null;
@@ -134,11 +134,13 @@ export class InputManager {
   // Ship control state tracking
   private mountKind: 'none' | 'helm' | 'cannon' | 'mast' = 'none';
   private get isMountedToHelm(): boolean { return this.mountKind === 'helm'; }
-  /** Mode of the currently active weapon group — kept in sync by ClientApplication. */
+  /** Mode of the currently active (primary) weapon group — kept in sync by ClientApplication. */
   public activeGroupMode: string = 'haltfire';
 
-  /** Active weapon group while on helm: 0=LEFT, 1=RIGHT, 2=FORE, 3=AFT, -1=none */
+  /** Primary active weapon group (last one solo-selected). Used for assign/mode-cycle/targetfire. */
   public activeWeaponGroup: number = -1;
+  /** All currently selected weapon groups. Digit alone = solo; Ctrl+Digit = toggle add/remove. */
+  public activeWeaponGroups: Set<number> = new Set();
   /** Returns the current mount kind. */
   public getMountKind(): string { return this.mountKind; }
   /** Returns true while Shift is currently held — used to show weapon group overlay. */
@@ -443,6 +445,7 @@ export class InputManager {
     } else {
       console.log(`⚓ [INPUT] Player dismounted - player controls active`);
       this.activeWeaponGroup = -1;
+      this.activeWeaponGroups.clear();
     }
   }
 
@@ -962,9 +965,18 @@ export class InputManager {
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
         if (this.mountKind === 'helm') {
-          // Digit1-9 selects weapon groups 0-8
           const digit = parseInt(event.code.replace('Digit', ''));
-          this.activeWeaponGroup = digit - 1;
+          const groupIdx = digit - 1;
+          if (this.activeWeaponGroups.has(groupIdx)) {
+            this.activeWeaponGroups.delete(groupIdx);
+            if (this.activeWeaponGroup === groupIdx) {
+              this.activeWeaponGroup = this.activeWeaponGroups.size > 0
+                ? [...this.activeWeaponGroups][this.activeWeaponGroups.size - 1] : -1;
+            }
+          } else {
+            this.activeWeaponGroups.add(groupIdx);
+            this.activeWeaponGroup = groupIdx;
+          }
           if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           event.preventDefault();
         } else {
@@ -973,8 +985,17 @@ export class InputManager {
         break;
       case 'Digit0':
         if (this.mountKind === 'helm') {
-          // Digit0 selects weapon group 9
-          this.activeWeaponGroup = 9;
+          const groupIdx = 9;
+          if (this.activeWeaponGroups.has(groupIdx)) {
+            this.activeWeaponGroups.delete(groupIdx);
+            if (this.activeWeaponGroup === groupIdx) {
+              this.activeWeaponGroup = this.activeWeaponGroups.size > 0
+                ? [...this.activeWeaponGroups][this.activeWeaponGroups.size - 1] : -1;
+            }
+          } else {
+            this.activeWeaponGroups.add(groupIdx);
+            this.activeWeaponGroup = groupIdx;
+          }
           if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           event.preventDefault();
         } else {
@@ -1060,12 +1081,12 @@ export class InputManager {
         // Mounted to helm or cannon: fire cannon(s)
         if (isDoubleClick) {
           console.log('💥💥 Double-click: Fire ALL cannons!');
-          if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined);
+          if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
           // Cannon will reload into the pending ammo type
           this.loadedAmmoType = this.selectedAmmoType;
         } else {
           console.log('💥 Single-click: Fire aimed cannons');
-          if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined);
+          if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
           // Cannon will reload into the pending ammo type
           this.loadedAmmoType = this.selectedAmmoType;
         }

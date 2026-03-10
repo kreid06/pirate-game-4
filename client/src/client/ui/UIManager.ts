@@ -34,6 +34,8 @@ export interface UIRenderContext {
   mountKind?: string;
   /** Active weapon group on helm: 0–9, -1=none */
   activeWeaponGroup?: number;
+  /** All currently selected weapon groups (multi-select). */
+  activeWeaponGroups?: Set<number>;
   /** The ship the player is currently on (for cannon group counts). */
   playerShip?: Ship | null;
   /** User-defined weapon control groups — set while on helm. */
@@ -1212,7 +1214,7 @@ class HUDElement implements UIElement {
 
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
     const helmMode = context.mountKind === 'helm'
-      ? { activeGroup: context.activeWeaponGroup ?? -1, playerShip: context.playerShip ?? null, controlGroups: context.controlGroups }
+      ? { activeGroup: context.activeWeaponGroup ?? -1, activeGroups: context.activeWeaponGroups ?? new Set<number>(), playerShip: context.playerShip ?? null, controlGroups: context.controlGroups }
       : undefined;
     this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot, helmMode);
 
@@ -1225,7 +1227,7 @@ class HUDElement implements UIElement {
     canvas: HTMLCanvasElement,
     slots: { item: ItemKind; quantity: number }[],
     activeSlot: number,
-    weaponMode?: { activeGroup: number; playerShip: Ship | null; controlGroups?: Map<number, WeaponGroupState> },
+    weaponMode?: { activeGroup: number; activeGroups: Set<number>; playerShip: Ship | null; controlGroups?: Map<number, WeaponGroupState> },
   ): void {
     const SLOT_SIZE = 48;
     const SLOT_GAP = 4;
@@ -1265,7 +1267,7 @@ class HUDElement implements UIElement {
       const sx   = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
       const sy   = startY + PADDING;
       const isActive = weaponMode
-        ? i === weaponMode.activeGroup
+        ? weaponMode.activeGroups.has(i)
         : (i === activeSlot && activeSlot < 10);
 
       // Slot background

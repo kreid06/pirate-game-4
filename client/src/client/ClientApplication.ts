@@ -99,8 +99,8 @@ export class ClientApplication {
   private controlGroups: Map<number, WeaponGroupState> = new Map(
     Array.from({ length: 10 }, (_, i) => [i, { cannonIds: [], mode: 'haltfire' as WeaponGroupMode, targetId: -1 }])
   );
-  /** Mode the active group was in before a right-click-hold temporarily switched it to 'aiming'. */
-  private _aimOverridePrevMode: WeaponGroupMode | null = null;
+  /** Maps group index → previous mode, saved while right-click-hold temporarily switches all selected groups to 'aiming'. */
+  private _aimOverrideGroups: Map<number, WeaponGroupMode> | null = null;
   // Optimistic modules placed locally, keyed by ship ID, with expiry timestamp.
   // Overlaid on top of worldToRender every frame so they appear in online mode.
   private localPendingModules = new Map<number, { module: ShipModule; expiry: number }[]>();
@@ -428,20 +428,21 @@ export class ClientApplication {
       this.inputManager.onCannonAim = (aimAngle) => {
         this.networkManager.sendCannonAim(aimAngle);
       };
-      this.inputManager.onCannonFire = (cannonIds, fireAll, ammoType, weaponGroup) => {
-        // If a weapon group is selected and not firing all, use the control group's cannon list
-        if (weaponGroup !== undefined && weaponGroup >= 0 && !fireAll) {
-          const groupState = this.controlGroups.get(weaponGroup);
-          if (groupState) {
-            // Use the group's assigned cannon list for all modes including haltfire
-            // (haltfire still allows manual player fire; NPCs just won't auto-swap for it)
-            const groupIds = groupState.cannonIds;
-            if (groupIds.length > 0) {
-              // freefire and targetfire skip the server-side aim-angle check
-              const skipAimCheck = groupState.mode === 'freefire' || groupState.mode === 'targetfire';
-              this.networkManager.sendCannonFire(groupIds, false, ammoType ?? 0, skipAimCheck);
-              return;
-            }
+      this.inputManager.onCannonFire = (cannonIds, fireAll, ammoType, weaponGroup, weaponGroups) => {
+        // Multi-group fire: fire all cannons in every selected group
+        const groups = weaponGroups && weaponGroups.size > 0 ? weaponGroups : (weaponGroup !== undefined && weaponGroup >= 0 ? new Set([weaponGroup]) : null);
+        if (groups && !fireAll) {
+          const allIds: number[] = [];
+          let skipAimCheck = false;
+          for (const g of groups) {
+            const gs = this.controlGroups.get(g);
+            if (!gs || gs.cannonIds.length === 0) continue;
+            for (const id of gs.cannonIds) if (!allIds.includes(id)) allIds.push(id);
+            if (gs.mode === 'freefire' || gs.mode === 'targetfire') skipAimCheck = true;
+          }
+          if (allIds.length > 0) {
+            this.networkManager.sendCannonFire(allIds, false, ammoType ?? 0, skipAimCheck);
+            return;
           }
         }
         this.networkManager.sendCannonFire(cannonIds, fireAll, ammoType ?? 0);
@@ -661,35 +662,39 @@ export class ClientApplication {
       };
 
       // Right-click hold → temporarily enter 'aiming' mode so cannons track the mouse.
-      // On release, revert to whatever mode the group had before (e.g. 'haltfire').
+      // Applies to all currently selected groups whose mode isn't targetfire/aiming.
       this.inputManager.onAimStart = () => {
-        const group = this.inputManager.activeWeaponGroup;
-        if (group < 0) return;
-        const state = this.controlGroups.get(group);
-        // Don't override targetfire — it has its own right-click semantics.
-        if (!state || state.mode === 'targetfire' || state.mode === 'aiming') return;
-        this._aimOverridePrevMode = state.mode;
-        state.mode = 'aiming';
-        this.inputManager.activeGroupMode = 'aiming';
-        this.networkManager.sendCannonGroupConfig(group, 'aiming', state.cannonIds, state.targetId > 0 ? state.targetId : 0);
+        const groups = this.inputManager.activeWeaponGroups;
+        if (groups.size === 0) return;
+        this._aimOverrideGroups = new Map();
+        for (const g of groups) {
+          const state = this.controlGroups.get(g);
+          if (!state || state.mode === 'targetfire' || state.mode === 'aiming') continue;
+          this._aimOverrideGroups.set(g, state.mode);
+          state.mode = 'aiming';
+          this.networkManager.sendCannonGroupConfig(g, 'aiming', state.cannonIds, state.targetId > 0 ? state.targetId : 0);
+        }
+        // Update primary group mode for right-click routing
+        const primaryState = this.controlGroups.get(this.inputManager.activeWeaponGroup);
+        this.inputManager.activeGroupMode = primaryState?.mode ?? 'aiming';
       };
       this.inputManager.onAimEnd = () => {
-        const group = this.inputManager.activeWeaponGroup;
-        if (group < 0 || this._aimOverridePrevMode === null) return;
-        const state = this.controlGroups.get(group);
-        if (!state) { this._aimOverridePrevMode = null; return; }
-        state.mode = this._aimOverridePrevMode;
-        this.inputManager.activeGroupMode = this._aimOverridePrevMode;
-        this.networkManager.sendCannonGroupConfig(group, this._aimOverridePrevMode, state.cannonIds, state.targetId > 0 ? state.targetId : 0);
-        this._aimOverridePrevMode = null;
+        if (!this._aimOverrideGroups) return;
+        for (const [g, prevMode] of this._aimOverrideGroups) {
+          const state = this.controlGroups.get(g);
+          if (!state) continue;
+          state.mode = prevMode;
+          this.networkManager.sendCannonGroupConfig(g, prevMode, state.cannonIds, state.targetId > 0 ? state.targetId : 0);
+        }
+        this._aimOverrideGroups = null;
+        const primaryState = this.controlGroups.get(this.inputManager.activeWeaponGroup);
+        this.inputManager.activeGroupMode = primaryState?.mode ?? 'haltfire';
       };
 
-      // Right-click on world while on helm = lock target for the active weapon group
+      // Right-click on world while on helm = lock target for all selected targetfire groups
       this.inputManager.onGroupTarget = (worldPos) => {
-        const group = this.inputManager.activeWeaponGroup;
-        if (group < 0) return;
-        const state = this.controlGroups.get(group);
-        if (!state || state.mode !== 'targetfire') return;
+        const groups = this.inputManager.activeWeaponGroups;
+        if (groups.size === 0) return;
         const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
         if (!ws) return;
         const pid = this.networkManager.getAssignedPlayerId();
@@ -704,10 +709,13 @@ export class ClientApplication {
           const d = Math.sqrt(dx * dx + dy * dy);
           if (d < bestDist) { bestDist = d; best = ship.id; }
         }
-        state.targetId = best;
-        console.log(`🎯 Group G${group} target → ship ${best} (dist ${bestDist.toFixed(0)})`);
-        // Sync target lock to server so it can auto-aim in targetfire mode
-        this.networkManager.sendCannonGroupConfig(group, state.mode, state.cannonIds, best > 0 ? best : 0);
+        for (const g of groups) {
+          const state = this.controlGroups.get(g);
+          if (!state || state.mode !== 'targetfire') continue;
+          state.targetId = best;
+          this.networkManager.sendCannonGroupConfig(g, state.mode, state.cannonIds, best > 0 ? best : 0);
+        }
+        if (best >= 0) console.log(`🎯 Groups [${[...groups].join(',')}] target → ship ${best} (dist ${bestDist.toFixed(0)})`);
       };
 
       // Set up mouse tracking for mouse-relative movement
@@ -1068,6 +1076,7 @@ export class ClientApplication {
         pendingAmmoType: this.inputManager?.selectedAmmoType ?? 0,
         mountKind: this.inputManager?.getMountKind() ?? 'none',
         activeWeaponGroup: this.inputManager?.activeWeaponGroup ?? -1,
+        activeWeaponGroups: this.inputManager?.activeWeaponGroups,
         playerShip,
         controlGroups: this.controlGroups,
       });
