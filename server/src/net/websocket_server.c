@@ -2249,6 +2249,26 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
         group->cannon_ids[i] = cannon_ids[i];
     }
     group->target_ship_id = (mode == WEAPON_GROUP_MODE_TARGETFIRE) ? target_ship_id : 0;
+
+    /* Evict any WorldNpc crew currently assigned to these cannons.
+     * Player weapon groups are player-controlled; NPCs must not occupy them. */
+    SimpleShip* ship = find_ship(player->parent_ship_id);
+    for (int ci = 0; ci < group->cannon_count; ci++) {
+        uint32_t cid = group->cannon_ids[ci];
+        for (int ni = 0; ni < world_npc_count; ni++) {
+            WorldNpc* npc = &world_npcs[ni];
+            if (!npc->active || npc->ship_id != player->parent_ship_id) continue;
+            if (npc->role != NPC_ROLE_GUNNER || npc->assigned_cannon_id != cid) continue;
+            /* Dismiss this gunner back to standby */
+            log_info("🚫 Evicting NPC %u from cannon %u (assigned to player group %d)",
+                     npc->id, cid, group_index);
+            dismount_npc(npc, ship);
+            npc->target_local_x = npc->idle_local_x;
+            npc->target_local_y = npc->idle_local_y;
+            npc->state          = WORLD_NPC_STATE_MOVING;
+        }
+    }
+
     log_info("🎯 Player %u group %d → mode=%d cannons=%d target=%u",
              player->player_id, group_index, mode, group->cannon_count, group->target_ship_id);
 }
@@ -2401,12 +2421,14 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
          *   - If player_has_groups → cannon is outside all groups; skip it.
          *   - If !player_has_groups → legacy path; propagate normally.
          * ──────────────────────────────────────────────────────────────────── */
+        bool cannon_in_player_group = false; /* set true for AIMING/FREEFIRE group members */
         {
             WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, cannon->id);
             if (grp) {
                 if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   continue; /* suppressed */
                 if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) continue; /* auto-aim owns it */
                 /* AIMING / FREEFIRE: player aim propagates below */
+                cannon_in_player_group = true;
             } else {
                 /* Cannon is not in any weapon group */
                 if (player_has_groups) continue; /* groups are active — ignore ungrouped cannons */
@@ -2416,7 +2438,12 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
 
         // Only move a cannon if it is occupied (player or WorldNpc gunner).
         // Skip cannons with no occupant so they don't track the mouse.
-        bool cannon_has_occupant = (cannon->state_bits & MODULE_STATE_OCCUPIED) != 0;
+        // Exception: player-group (AIMING/FREEFIRE) cannons are always
+        // player-controlled — no NPC needs to be seated for them to track.
+        bool cannon_has_occupant = cannon_in_player_group; /* group cannons are always 'manned' by the player */
+        if (!cannon_has_occupant) {
+            cannon_has_occupant = (cannon->state_bits & MODULE_STATE_OCCUPIED) != 0;
+        }
         if (!cannon_has_occupant) {
             // Check if a WorldNpc gunner is stationed here
             for (int ni = 0; ni < world_npc_count; ni++) {
