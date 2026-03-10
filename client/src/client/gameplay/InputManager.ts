@@ -977,6 +977,9 @@ export class InputManager {
             this.activeWeaponGroups.add(groupIdx);
             this.activeWeaponGroup = groupIdx;
           }
+          // Force next handleCannonAiming() to re-send aim with updated group list
+          // even if the mouse hasn't moved, so the server learns about the new selection.
+          this.lastCannonAimAngle = Infinity;
           if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           event.preventDefault();
         } else {
@@ -996,6 +999,7 @@ export class InputManager {
             this.activeWeaponGroups.add(groupIdx);
             this.activeWeaponGroup = groupIdx;
           }
+          this.lastCannonAimAngle = Infinity;
           if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           event.preventDefault();
         } else {

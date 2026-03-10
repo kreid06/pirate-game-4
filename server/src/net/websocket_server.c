@@ -2824,6 +2824,72 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             }
         }
     }
+
+    /* ── Pass 3: Dismiss NPC gunners from out-of-sector AIMING cannons ──────
+     *
+     * When aim has moved clearly past a cannon's lateral limits (±30° + 15°
+     * grace = ±45°), any NPC that is AT_CANNON for that cannon is sent back to
+     * their idle position.  This prevents NPCs from idling at a cannon
+     * indefinitely after the player sweeps the aim line past it.
+     *
+     * Only cannons that belong to the currently active groups (from this aim
+     * message) are considered.  Cannons in other groups keep their crew
+     * unaffected.  FREEFIRE / TARGETFIRE cannons are never dismissed here
+     * because those modes staff unconditionally.
+     * ──────────────────────────────────────────────────────────────────────── */
+    {
+        const float DISMISS_LIMIT = CANNON_AIM_RANGE + 15.0f * ((float)M_PI / 180.0f); /* ±45° */
+
+        for (int ni = 0; ni < world_npc_count; ni++) {
+            WorldNpc* npc = &world_npcs[ni];
+            if (!npc->active || npc->ship_id != ship->ship_id) continue;
+            if (npc->role != NPC_ROLE_GUNNER) continue;
+            if (npc->state != WORLD_NPC_STATE_AT_CANNON) continue;
+            if (npc->assigned_cannon_id == 0) continue;
+
+            /* Determine if this cannon belongs to an active group */
+            WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, npc->assigned_cannon_id);
+            if (!grp) continue;
+
+            /* Only AIMING mode cannons are dismissed based on sector.
+             * FREEFIRE / TARGETFIRE: crew stays unconditionally. */
+            bool in_active_group = false;
+            if (active_group_count > 0) {
+                for (int ag = 0; ag < active_group_count && !in_active_group; ag++) {
+                    uint32_t tg = active_group_indices[ag];
+                    if (tg >= MAX_WEAPON_GROUPS) continue;
+                    WeaponGroup* chk = &ship->weapon_groups[tg];
+                    for (int ci = 0; ci < chk->cannon_count && !in_active_group; ci++) {
+                        if (chk->cannon_ids[ci] == npc->assigned_cannon_id) in_active_group = true;
+                    }
+                }
+            } else {
+                /* No active groups in message — fall back to stored mode */
+                in_active_group = (grp->mode == WEAPON_GROUP_MODE_AIMING);
+            }
+            if (!in_active_group) continue;
+            if (grp->mode != WEAPON_GROUP_MODE_AIMING) continue;
+
+            /* Compute angular distance from current aim to this cannon's sector centre */
+            ShipModule* can_mod = find_module_on_ship(ship, npc->assigned_cannon_id);
+            if (!can_mod) continue;
+            float fire_dir = Q16_TO_FLOAT(can_mod->local_rot) - (float)(M_PI / 2.0f);
+            float diff = aim_angle - fire_dir;
+            while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+            while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+
+            if (fabsf(diff) <= DISMISS_LIMIT) continue; /* still within grace zone — keep them */
+
+            /* Aim is clearly outside this cannon's lateral limits — dismiss to idle */
+            log_info("🚶 NPC %u (%s) dismissed from cannon %u (aim %.0f° outside sector limit)",
+                     npc->id, npc->name, npc->assigned_cannon_id,
+                     fabsf(diff) * 180.0f / (float)M_PI);
+            npc->assigned_cannon_id = 0;
+            npc->target_local_x     = npc->idle_local_x;
+            npc->target_local_y     = npc->idle_local_y;
+            npc->state              = WORLD_NPC_STATE_MOVING;
+        }
+    }
 }
 
 /**
