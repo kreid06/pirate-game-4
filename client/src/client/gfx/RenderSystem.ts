@@ -433,17 +433,15 @@ export class RenderSystem {
       
       // --- Pass 2: everything else (planks, cannons, masts, etc.) ---
       for (const module of ship.modules) {
-        if (!module.moduleData) continue;
-        
-        const moduleData = module.moduleData;
-        
         // Ladders already checked in pass 1
-        if (moduleData.kind === 'ladder') continue;
-        
+        if ((module.moduleData?.kind ?? module.kind) === 'ladder') continue;
+
+        const moduleKind = module.moduleData?.kind ?? module.kind;
+
         // Special handling for curved planks
-        if (moduleData.kind === 'plank' && moduleData.isCurved && moduleData.curveData) {
+        if (module.moduleData && moduleKind === 'plank' && module.moduleData.kind === 'plank' && module.moduleData.isCurved && module.moduleData.curveData) {
           // Check if mouse is within curved plank boundary
-          if (this.isPointInCurvedPlank(localX, localY, moduleData.curveData, moduleData.width)) {
+          if (this.isPointInCurvedPlank(localX, localY, module.moduleData.curveData, module.moduleData.width)) {
             this.hoveredModule = { ship, module };
             return; // Found a match, stop searching
           }
@@ -454,18 +452,18 @@ export class RenderSystem {
         let width = 20;
         let height = 20;
         
-        if (moduleData.kind === 'plank') {
-          width = moduleData.length || 20;
-          height = moduleData.width || 10;
-        } else if (moduleData.kind === 'cannon') {
+        if (moduleKind === 'plank' && module.moduleData?.kind === 'plank') {
+          width = module.moduleData.length || 20;
+          height = module.moduleData.width || 10;
+        } else if (moduleKind === 'cannon') {
           width = 30;
           height = 20;
-        } else if (moduleData.kind === 'mast') {
+        } else if (moduleKind === 'mast') {
           // Masts are circles, so use radius for both width and height
-          const radius = moduleData.radius || 15;
+          const radius = (module.moduleData?.kind === 'mast' && module.moduleData.radius) || 15;
           width = radius * 2;
           height = radius * 2;
-        } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
+        } else if (moduleKind === 'helm' || moduleKind === 'steering-wheel') {
           // Helm renders as a circle with radius 8
           width = 16;
           height = 16;

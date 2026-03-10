@@ -92,8 +92,8 @@ export class InputManager {
   public onUnequip: (() => void) | null = null;
   /** Digit 1–9 on helm — selects weapon group 0–9. */
   public onWeaponGroupSelect: ((group: number) => void) | null = null;
-  /** Ctrl+left-click on a cannon: true = add to active weapon group, false = remove. */
-  public onGroupAssign: ((add: boolean) => void) | null = null;
+  /** Shift+left-click on a cannon toggles it in/out of the active weapon group. */
+  public onGroupAssign: (() => void) | null = null;
   /** Right-click intercepted by UI (e.g. cycling weapon group mode on hotbar). Returns true if consumed. */
   public onUIRightClick: ((x: number, y: number) => boolean) | null = null;
   /** Right-click on world while on helm in targetfire mode — world position to lock onto. */
@@ -134,9 +134,9 @@ export class InputManager {
   public activeWeaponGroup: number = -1;
   /** Returns the current mount kind. */
   public getMountKind(): string { return this.mountKind; }
-  /** Returns true while Ctrl is currently held — used to show weapon group overlay. */
-  public isCtrlHeld(): boolean {
-    return this.inputState.pressedKeys.has('ControlLeft') || this.inputState.pressedKeys.has('ControlRight');
+  /** Returns true while Shift is currently held — used to show weapon group overlay. */
+  public isShiftHeld(): boolean {
+    return this.inputState.pressedKeys.has('ShiftLeft') || this.inputState.pressedKeys.has('ShiftRight');
   }
   private currentSailOpenness: number = 100; // Start at 100% (full sails)
   private currentSailAngle: number = 0; // Start at 0 degrees
@@ -955,19 +955,24 @@ export class InputManager {
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
         if (this.mountKind === 'helm') {
-          // On helm: Digit1-4 selects weapon group (LEFT/RIGHT/FORE/AFT)
+          // Digit1-9 selects weapon groups 0-8
           const digit = parseInt(event.code.replace('Digit', ''));
-          if (digit >= 1 && digit <= 4) {
-            this.activeWeaponGroup = digit - 1;
-            if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
-            event.preventDefault();
-          }
+          this.activeWeaponGroup = digit - 1;
+          if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
+          event.preventDefault();
         } else {
           if (this.onSlotSelect) this.onSlotSelect(parseInt(event.code.replace('Digit', '')) - 1);
         }
         break;
       case 'Digit0':
-        if (this.onSlotSelect) this.onSlotSelect(9);
+        if (this.mountKind === 'helm') {
+          // Digit0 selects weapon group 9
+          this.activeWeaponGroup = 9;
+          if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
+          event.preventDefault();
+        } else {
+          if (this.onSlotSelect) this.onSlotSelect(9);
+        }
         break;
     }
   }
@@ -1012,6 +1017,12 @@ export class InputManager {
     event.preventDefault();
     
     if (event.button === 0) { // Left mouse button
+      // Shift+click toggles cannon group membership — check before any UI consumption
+      if (event.shiftKey) {
+        if (this.onGroupAssign) this.onGroupAssign();
+        return;
+      }
+
       // Let UI panels consume the click first (e.g. manning priority panel)
       if (this.onUIClick && this.onUIClick(event.offsetX, event.offsetY)) {
         this.inputState.leftMouseDown = false;
@@ -1032,12 +1043,7 @@ export class InputManager {
       const timeSinceLastClick = now - this.lastLeftClickTime;
       const isDoubleClick = timeSinceLastClick < this.DOUBLE_CLICK_THRESHOLD;
 
-      // Ctrl+left-click: assign/remove cannon from active weapon group — never fires
-      if (event.ctrlKey) {
-        if (this.onGroupAssign) this.onGroupAssign(!event.shiftKey);
-        return;
-      }
-
+      // Shift+left-click is handled at the top of onMouseDown — unreachable here
       if (this.mountKind === 'none') {
         // Walking: left-click = attack toward mouse
         if (this.onActionEvent) {
@@ -1104,7 +1110,7 @@ export class InputManager {
   }
   
   private onContextMenu(event: Event): void {
-    event.preventDefault(); // Prevent right-click context menu
+    event.preventDefault(); // Prevent browser context menu
   }
   
   private onGamepadConnected(event: GamepadEvent): void {

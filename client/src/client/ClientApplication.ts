@@ -610,28 +610,38 @@ export class ClientApplication {
       };
 
       // Ctrl+left-click: assign/remove cannon from the active weapon group
-      this.inputManager.onGroupAssign = (add: boolean) => {
+      this.inputManager.onGroupAssign = () => {
         const hovered = this.renderSystem.getHoveredModule();
-        if (!hovered || hovered.module.kind !== 'cannon') return;
+        if (!hovered) {
+          console.warn(`⚠️ GroupAssign: no module hovered`);
+          return;
+        }
+        if (hovered.module.kind !== 'cannon') {
+          console.warn(`⚠️ GroupAssign: hovered module is '${hovered.module.kind}', not a cannon`);
+          return;
+        }
         const cannonId = hovered.module.id;
         const group = this.inputManager.activeWeaponGroup;
-        if (group < 0) return;
+        if (group < 0) {
+          console.warn(`⚠️ GroupAssign: no weapon group selected (activeWeaponGroup=${group}) — select a group (1–0) on the hotbar first`);
+          return;
+        }
         const state = this.controlGroups.get(group);
         if (!state) return;
-        if (add) {
+        if (state.cannonIds.includes(cannonId)) {
+          // Already in this group — remove it
+          state.cannonIds = state.cannonIds.filter(id => id !== cannonId);
+          console.log(`❌ Cannon ${cannonId} removed from group G${group}`);
+        } else {
           // Remove from any previous group first (a cannon belongs to at most one group)
           for (const [gi, s] of this.controlGroups) {
             if (s.cannonIds.includes(cannonId)) {
               s.cannonIds = s.cannonIds.filter(id => id !== cannonId);
-              // Sync the cleared group to server
               this.networkManager.sendCannonGroupConfig(gi, s.mode, s.cannonIds, s.targetId > 0 ? s.targetId : 0);
             }
           }
-          if (!state.cannonIds.includes(cannonId)) state.cannonIds.push(cannonId);
+          state.cannonIds.push(cannonId);
           console.log(`🎯 Cannon ${cannonId} → group G${group}`);
-        } else {
-          state.cannonIds = state.cannonIds.filter(id => id !== cannonId);
-          console.log(`❌ Cannon ${cannonId} removed from group G${group}`);
         }
         // Sync the updated group to server
         this.networkManager.sendCannonGroupConfig(group, state.mode, state.cannonIds, state.targetId > 0 ? state.targetId : 0);
@@ -988,7 +998,7 @@ export class ClientApplication {
       this.renderSystem.selectedAmmoType = this.inputManager?.getLoadedAmmoType() ?? 0;
       this.renderSystem.npcTaskMap = this.uiManager.getNpcTaskMap();
       this.renderSystem.controlGroups = this.controlGroups as Map<number, { cannonIds: number[]; mode: string }>;
-      this.renderSystem.showGroupOverlay = this.inputManager?.isCtrlHeld() ?? false;
+      this.renderSystem.showGroupOverlay = this.inputManager?.isShiftHeld() ?? false;
 
       // Keep explicit build mode UI in sync with latest world state (sail count may change)
       if (this.explicitBuildMode) this.syncBuildModeState();
