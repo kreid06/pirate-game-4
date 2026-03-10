@@ -1272,6 +1272,7 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
 static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
                                        WeaponGroupMode mode, uint32_t* cannon_ids,
                                        int cannon_count, uint32_t target_ship_id);
+static WeaponGroup* find_cannon_weapon_group(uint32_t ship_id, uint32_t cannon_id);
 static void tick_player_weapon_groups(void);
 static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task);
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle);
@@ -1492,6 +1493,25 @@ static void tick_npc_agents(float dt) {
                 }
                 if (!npc_at_cannon) break;
 
+                /* ── Weapon-group override ──────────────────────────────────
+                 * If this cannon belongs to a player's weapon control group,
+                 * the group mode dictates what the NPC does:
+                 *
+                 *   HALTFIRE   → suppress everything; NPC does not aim or fire.
+                 *   TARGETFIRE → aim is handled by tick_player_weapon_groups();
+                 *                skip the NPC aim update below to avoid fighting it.
+                 *   AIMING / FREEFIRE → NPC aims normally (follows ship aim angle).
+                 * ─────────────────────────────────────────────────────────── */
+                {
+                    WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, module->id);
+                    if (grp) {
+                        if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   break; /* suppressed */
+                        if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE)  break; /* aim owned by tick_player_weapon_groups */
+                        if (grp->mode == WEAPON_GROUP_MODE_AIMING)      break; /* player's manual aim owns this cannon */
+                        /* FREEFIRE: NPC follows ship aim angle normally */
+                    }
+                }
+
                 // Sync cannon's desired aim to the ship's current aim angle every tick.
                 // Mirrors the rigger pattern: the NpcAgent continuously applies the
                 // authoritative ship value so no aim message is needed on arrival.
@@ -1685,7 +1705,10 @@ static void dispatch_gunner_to_cannon(WorldNpc* npc, SimpleShip* ship,
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
     if (!ship) return;
 
-    /* ─ Step 1: rank ALL cannons by angular distance from aim (no cutoff) ─ */
+    /* ─ Step 1: rank ALL cannons by angular distance from aim (no cutoff) ─
+     *           Cannons assigned to a player's weapon group are excluded from
+     *           the sector-dispatch pool — their NPC assignment is fixed by the
+     *           group (or they stay wherever they already are).                */
     uint32_t sorted_ids [MAX_MODULES_PER_SHIP];
     float    sorted_diff[MAX_MODULES_PER_SHIP]; /* absolute angle diff, radians */
     int      cannon_count = 0;
@@ -1693,6 +1716,9 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
     for (int m = 0; m < ship->module_count; m++) {
         ShipModule* mod = &ship->modules[m];
         if (mod->type_id != MODULE_TYPE_CANNON) continue;
+
+        /* Skip cannons claimed by a weapon control group — the group owns them */
+        if (find_cannon_weapon_group(ship->ship_id, mod->id)) continue;
 
         float fire_dir = Q16_TO_FLOAT(mod->local_rot) - (float)(M_PI / 2.0f);
         float diff = aim_angle - fire_dir;
@@ -1714,11 +1740,17 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
     if (cannon_count == 0) return;
 
     /* ─ Step 2: for each on-duty gunner, move them if a significantly closer
-     *           cannon is available (hysteresis prevents jitter) ─ */
+     *           cannon is available (hysteresis prevents jitter).
+     *           Gunners already at a weapon-group cannon stay put — their
+     *           assignment is fixed by the group, not the sector.       ─ */
     for (int i = 0; i < world_npc_count; i++) {
         WorldNpc* npc = &world_npcs[i];
         if (!npc->active || npc->ship_id != ship->ship_id) continue;
         if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
+
+        /* If this gunner is already at a weapon-group cannon, leave them there */
+        if (npc->assigned_cannon_id != 0 &&
+            find_cannon_weapon_group(ship->ship_id, npc->assigned_cannon_id)) continue;
 
         /* Find a locked preference first */
         if (npc->port_cannon_id != 0) {
@@ -2207,8 +2239,26 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
  * Per-tick update: for each player's TARGETFIRE weapon groups, auto-aim the
  * group's cannons toward the locked target ship using npc_aim_cannon_at_world().
  */
-static void tick_player_weapon_groups(void) {
+
+/**
+ * Find the WeaponGroup that owns cannon_id on ship_id, from any active player.
+ * Returns NULL if no weapon group claims this cannon.
+ */
+static WeaponGroup* find_cannon_weapon_group(uint32_t ship_id, uint32_t cannon_id) {
     for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+        WebSocketPlayer* p = &players[pi];
+        if (!p->active || p->parent_ship_id != ship_id) continue;
+        for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
+            WeaponGroup* grp = &p->weapon_groups[g];
+            for (int c = 0; c < grp->cannon_count; c++) {
+                if (grp->cannon_ids[c] == cannon_id) return grp;
+            }
+        }
+    }
+    return NULL;
+}
+
+static void tick_player_weapon_groups(void) {    for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
         WebSocketPlayer* player = &players[pi];
         if (!player->active || player->parent_ship_id == 0) continue;
         SimpleShip* ship = find_ship(player->parent_ship_id);
@@ -2298,6 +2348,24 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
     // Update cannon(s) depending on how the player is mounted:
     //   - helm → update all cannons (broadside targeting)
     //   - cannon mount → update only the mounted cannon
+    
+    /* ── Determine whether this player has ANY weapon groups configured ──────
+     * If at least one group has cannons assigned, we enter "group mode":
+     * only cannons that are explicitly listed in an AIMING or FREEFIRE group
+     * for this player will receive aim updates.  Cannons in other groups, or
+     * ungrouped cannons, are completely ignored while group mode is active.
+     *
+     * If no groups have any cannons at all, fall back to the legacy path
+     * (all occupied cannons in arc receive aim updates).
+     * ────────────────────────────────────────────────────────────────────── */
+    bool player_has_groups = false;
+    for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
+        if (player->weapon_groups[g].cannon_count > 0) {
+            player_has_groups = true;
+            break;
+        }
+    }
+
     for (uint8_t m = 0; m < sim_ship->module_count; m++) {
         if (sim_ship->modules[m].type_id != MODULE_TYPE_CANNON) continue;
 
@@ -2305,6 +2373,28 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
 
         // If mounted to a specific cannon, skip all others
         if (at_cannon && cannon->id != player->mounted_module_id) continue;
+
+        /* ── Weapon-group aim priority ───────────────────────────────────────
+         * AIMING     → player aim IS the authority for this cannon; propagate.
+         * FREEFIRE   → player can steer the aim; propagate.
+         * HALTFIRE   → suppressed; never track the player's cursor.
+         * TARGETFIRE → auto-aim owns it; skip here to avoid fighting it.
+         * Not in any group (no_group):
+         *   - If player_has_groups → cannon is outside all groups; skip it.
+         *   - If !player_has_groups → legacy path; propagate normally.
+         * ──────────────────────────────────────────────────────────────────── */
+        {
+            WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, cannon->id);
+            if (grp) {
+                if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   continue; /* suppressed */
+                if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) continue; /* auto-aim owns it */
+                /* AIMING / FREEFIRE: player aim propagates below */
+            } else {
+                /* Cannon is not in any weapon group */
+                if (player_has_groups) continue; /* groups are active — ignore ungrouped cannons */
+                /* No groups configured — legacy behaviour; fall through */
+            }
+        }
 
         // Only move a cannon if it is occupied (player or WorldNpc gunner).
         // Skip cannons with no occupant so they don't track the mouse.
