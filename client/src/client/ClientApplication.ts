@@ -433,9 +433,8 @@ export class ClientApplication {
         if (weaponGroup !== undefined && weaponGroup >= 0 && !fireAll) {
           const groupState = this.controlGroups.get(weaponGroup);
           if (groupState) {
-            // haltfire — never fire
-            if (groupState.mode === 'haltfire') return;
-            // Use the group's assigned cannon list (aiming / freefire / targetfire all fire it)
+            // Use the group's assigned cannon list for all modes including haltfire
+            // (haltfire still allows manual player fire; NPCs just won't auto-swap for it)
             const groupIds = groupState.cannonIds;
             if (groupIds.length > 0) {
               // freefire and targetfire skip the server-side aim-angle check

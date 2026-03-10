@@ -50,7 +50,12 @@ typedef struct SimpleShip {
     // Ship modules (cannons, masts, helm, seats, etc.)
     ShipModule modules[MAX_MODULES_PER_SHIP];
     uint8_t module_count;
-} SimpleShip;
+    /** Wall-clock time (ms) when each cannon module last fired.
+     *  Indexed by the module's position in modules[] (0-based).
+     *  0 = never fired (treated as "fresh" — crew stays without penalty).
+     *  Updated by fire_cannon(); used by is_cannon_stale() to decide if
+     *  crew are allowed to leave for a busier cannon. */
+    uint32_t cannon_last_fire_ms[MAX_MODULES_PER_SHIP];} SimpleShip;
 
 // NPC behavior types
 typedef enum {

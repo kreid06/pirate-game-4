@@ -35,8 +35,13 @@ typedef enum {
     MODULE_STATE_RELOADING = (1 << 4),   // Cannon is reloading
     MODULE_STATE_OCCUPIED = (1 << 5),    // Seat/helm is occupied
     MODULE_STATE_DEPLOYED = (1 << 6),    // Sail/ladder is deployed
-    MODULE_STATE_LOCKED = (1 << 7),       // Module is locked/unusable
-    MODULE_STATE_REPAIRING = (1 << 8)     // Repair has been initiated (enables passive regen)
+    MODULE_STATE_LOCKED = (1 << 7),      // Module is locked/unusable
+    MODULE_STATE_REPAIRING = (1 << 8),   // Repair has been initiated (enables passive regen)
+    /** Cannon needs a gunner: player is aiming at it but no crew is stationed.
+     *  Set by handle_cannon_aim() on the SimpleShip module; cleared when an NPC
+     *  arrives at AT_CANNON.  NPCs treat NEEDED cannons as their top-priority
+     *  destination regardless of weapon-group membership. */
+    MODULE_STATE_NEEDED = (1 << 9)
 } ModuleStateBits;
 
 /**
