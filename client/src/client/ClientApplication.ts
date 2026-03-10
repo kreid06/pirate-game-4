@@ -286,6 +286,19 @@ export class ClientApplication {
             targetId: g.targetShipId,
           });
         }
+
+        // If an aim override is currently active (player is holding right-click),
+        // re-apply the temporary 'aiming' mode for any group that was overridden.
+        // Without this, a partial echo from the server (sent after processing the
+        // first group-config message but before the second) would reset the second
+        // group back to its previous mode, causing only the first group to aim.
+        if (this._aimOverrideGroups) {
+          for (const [g] of this._aimOverrideGroups) {
+            const state = this.controlGroups.get(g);
+            if (state) state.mode = 'aiming';
+          }
+        }
+
         // Sync InputManager's activeGroupMode to the primary selected group
         if (this.inputManager) {
           const primaryState = this.controlGroups.get(this.inputManager.activeWeaponGroup);

@@ -52,6 +52,12 @@ struct WebSocketClient {
     char ip_address[INET_ADDRSTRLEN];
     uint16_t port;
     uint32_t player_id; // Associated player ID
+    /* Set when a cannon_group_config was processed this message-loop iteration.
+     * Broadcast is deferred until all messages from this client in the current
+     * frame have been handled, so a burst of group-config messages (e.g. the
+     * client switching two groups to AIMING simultaneously) produces exactly
+     * one broadcast rather than one per message. */
+    uint32_t pending_group_broadcast_ship_id;
 };
 
 struct WebSocketServer {
@@ -2478,9 +2484,19 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
     log_info("🎯 Player %u group %d → mode=%d cannons=%d target=%u",
              player->player_id, group_index, mode, group->cannon_count, group->target_ship_id);
 
-    /* Broadcast authoritative group state to all clients so every player
-     * on this ship sees the updated configuration immediately. */
-    broadcast_cannon_group_state(ship);
+    /* Defer the broadcast: mark the sender's client slot as dirty so that all
+     * group-config messages in one frame collapse into a single broadcast at
+     * the end of this connection's message processing.  This prevents a burst
+     * of rapid config messages (e.g. switching two groups to AIMING at once)
+     * from echoing an intermediate state back to the sender before all groups
+     * have been updated on the server. */
+    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+        struct WebSocketClient* c = &ws_server.clients[ci];
+        if (c->connected && c->player_id == player->player_id) {
+            c->pending_group_broadcast_ship_id = ship->ship_id;
+            break;
+        }
+    }
 }
 
 /**
@@ -2616,10 +2632,90 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
 
         ShipModule* cannon = &sim_ship->modules[m];
 
-        // If mounted to a specific cannon, skip all others
+        /* Resolve weapon group membership once for this cannon */
+        WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, cannon->id);
+
+        /* ── Pass 1: MODULE_STATE_NEEDED update  (no at_cannon gate) ────────
+         *
+         * Every AIMING-mode group cannon on the ship must have its staffing
+         * flag refreshed on every aim message, regardless of which station
+         * the player is physically sitting at.  Running this pass BEFORE the
+         * at_cannon skip ensures that port and starboard AIMING groups both
+         * react to the aim angle simultaneously — even if the player is
+         * mounted to just one physical cannon.
+         *
+         * FREEFIRE cannons are staffed unconditionally by assign_weapon_group_crew
+         * each tick; applying a sector gate here would fight that logic, so we
+         * leave their NEEDED bit alone.
+         * HALTFIRE / TARGETFIRE NEEDED bits are managed by handle_cannon_group_config.
+         * Ungrouped cannons (when groups are active) are cleared and skipped.
+         * ──────────────────────────────────────────────────────────────────── */
+        {
+            bool do_needed_update;
+            if (!grp) {
+                if (player_has_groups) {
+                    /* Ungrouped cannon in group mode — clear stale flag, skip later */
+                    ShipModule* ungrouped = find_module_on_ship(ship, cannon->id);
+                    if (ungrouped) ungrouped->state_bits &= ~MODULE_STATE_NEEDED;
+                }
+                /* Legacy (no groups at all): sector-based staffing applies */
+                do_needed_update = !player_has_groups;
+            } else {
+                /* Only AIMING groups use sector-gated staffing */
+                do_needed_update = (grp->mode == WEAPON_GROUP_MODE_AIMING);
+            }
+
+            if (do_needed_update) {
+                float fire_dir = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
+                float diff = aim_angle - fire_dir;
+                while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+                while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+                bool in_sector = fabsf(diff) <= CANNON_AIM_RANGE;
+
+                ShipModule* smod = find_module_on_ship(ship, cannon->id);
+                if (smod) {
+                    bool occupied = (cannon->state_bits & MODULE_STATE_OCCUPIED) != 0;
+                    if (!occupied) {
+                        for (int ni = 0; ni < world_npc_count; ni++) {
+                            WorldNpc* wnpc = &world_npcs[ni];
+                            if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
+                                wnpc->ship_id == ship->ship_id &&
+                                wnpc->assigned_cannon_id == cannon->id &&
+                                wnpc->state == WORLD_NPC_STATE_AT_CANNON) {
+                                occupied = true; break;
+                            }
+                        }
+                    }
+                    if (in_sector && !occupied) {
+                        bool en_route = false;
+                        for (int ni = 0; ni < world_npc_count; ni++) {
+                            WorldNpc* w = &world_npcs[ni];
+                            if (w->active && w->role == NPC_ROLE_GUNNER &&
+                                w->ship_id == ship->ship_id &&
+                                w->assigned_cannon_id == cannon->id) {
+                                en_route = true; break;
+                            }
+                        }
+                        if (en_route) smod->state_bits &= ~MODULE_STATE_NEEDED; /* help is on the way */
+                        else          smod->state_bits |=  MODULE_STATE_NEEDED; /* nobody coming — urgent */
+                    } else {
+                        /* Outside sector, already occupied, or covered — clear */
+                        smod->state_bits &= ~MODULE_STATE_NEEDED;
+                    }
+                }
+            }
+        }
+
+        /* ── Pass 2: Aim-direction propagation (with all original gates) ────
+         *
+         * Now apply the at_cannon and group-mode filters that restrict which
+         * cannons physically track the cursor.
+         * ──────────────────────────────────────────────────────────────────── */
+
+        // If mounted to a specific cannon, propagate aim only to that cannon
         if (at_cannon && cannon->id != player->mounted_module_id) continue;
 
-        /* ── Weapon-group aim priority ───────────────────────────────────────
+        /* ── Weapon-group aim priority ──────────────────────────────────────
          * AIMING     → player aim IS the authority for this cannon; propagate.
          * FREEFIRE   → player can steer the aim; propagate.
          * HALTFIRE   → suppressed; never track the player's cursor.
@@ -2628,35 +2724,12 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
          *   - If player_has_groups → cannon is outside all groups; skip it.
          *   - If !player_has_groups → legacy path; propagate normally.
          * ──────────────────────────────────────────────────────────────────── */
-        bool cannon_in_player_group = false;
-        {
-            WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, cannon->id);
-            if (grp) {
-                if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   continue;
-                if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) continue;
-                cannon_in_player_group = true;
-            } else {
-                if (player_has_groups) {
-                    /* Cannon is not assigned to any group — player cannot control
-                     * it via weapon groups.  Clear any stale NEEDED bit so NPCs
-                     * are never summoned to an ungrouped cannon. */
-                    ShipModule* ungrouped = find_module_on_ship(ship, cannon->id);
-                    if (ungrouped) ungrouped->state_bits &= ~MODULE_STATE_NEEDED;
-                    continue;
-                }
-            }
+        if (grp) {
+            if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   continue;
+            if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) continue;
+        } else if (player_has_groups) {
+            continue; /* ungrouped cannon in group mode — already handled in pass 1 */
         }
-        (void)cannon_in_player_group; /* occupancy check below applies to all cannons */
-
-        /* Cannon sector check: only consider this cannon NEEDED if the player's
-         * aim angle falls within its ±30° sector.  Outside that cone the cannon
-         * can't physically rotate to match the aim, so there's no point staffing it. */
-        float cannon_fire_dir = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
-        float sector_diff = aim_angle - cannon_fire_dir;
-        while (sector_diff >  (float)M_PI) sector_diff -= 2.0f * (float)M_PI;
-        while (sector_diff < -(float)M_PI) sector_diff += 2.0f * (float)M_PI;
-        const float CANNON_SECTOR = 30.0f * (float)(M_PI / 180.0f); /* ±30° */
-        bool aim_in_sector = fabsf(sector_diff) <= CANNON_SECTOR;
 
         // Only move a cannon if it is occupied (player or WorldNpc gunner AT_CANNON).
         bool cannon_has_occupant = (cannon->state_bits & MODULE_STATE_OCCUPIED) != 0;
@@ -2670,28 +2743,6 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
                     cannon_has_occupant = true;
                     break;
                 }
-            }
-        }
-        /* Update MODULE_STATE_NEEDED on the SimpleShip module.
-         * Only set when aim is within the cannon's sector — outside that cone
-         * the cannon can't reach the target so it should not pull crew. */
-        ShipModule* smod_aim = find_module_on_ship(ship, cannon->id);
-        if (smod_aim) {
-            if (aim_in_sector && !cannon_has_occupant) {
-                bool en_route = false;
-                for (int ni = 0; ni < world_npc_count; ni++) {
-                    WorldNpc* w = &world_npcs[ni];
-                    if (w->active && w->role == NPC_ROLE_GUNNER &&
-                        w->ship_id == ship->ship_id &&
-                        w->assigned_cannon_id == cannon->id) {
-                        en_route = true; break;
-                    }
-                }
-                if (en_route) smod_aim->state_bits &= ~MODULE_STATE_NEEDED; /* help is on the way */
-                else          smod_aim->state_bits |=  MODULE_STATE_NEEDED; /* nobody coming — urgent */
-            } else {
-                /* Outside sector, occupied, or already covered — not needed */
-                smod_aim->state_bits &= ~MODULE_STATE_NEEDED;
             }
         }
         if (!cannon_has_occupant) continue;
@@ -5877,6 +5928,19 @@ int websocket_server_update(struct Sim* sim) {
                         }
                     }
                     
+                    /* ── Flush deferred cannon-group broadcast ────────────────────────────
+                     * handle_cannon_group_config sets pending_group_broadcast_ship_id
+                     * instead of broadcasting immediately, so that two rapid group-config
+                     * messages in the same recv cycle (e.g. switching two groups to AIMING
+                     * at once) collapse into a single broadcast sent here — after the
+                     * response ACK is queued — containing the fully-updated state.
+                     * ──────────────────────────────────────────────────────────────────── */
+                    if (client->pending_group_broadcast_ship_id != 0) {
+                        SimpleShip* bship = find_ship(client->pending_group_broadcast_ship_id);
+                        if (bship) broadcast_cannon_group_state(bship);
+                        client->pending_group_broadcast_ship_id = 0;
+                    }
+
                     // Send response
                     if (handled) {
                         char frame[2048];  // Increased to safely hold 1024-byte response + frame headers
