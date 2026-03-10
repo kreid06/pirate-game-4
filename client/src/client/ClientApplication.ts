@@ -485,8 +485,8 @@ export class ClientApplication {
       };
       
       // Cannon control callbacks
-      this.inputManager.onCannonAim = (aimAngle) => {
-        this.networkManager.sendCannonAim(aimAngle);
+      this.inputManager.onCannonAim = (aimAngle, activeGroups) => {
+        this.networkManager.sendCannonAim(aimAngle, activeGroups);
       };
       this.inputManager.onCannonFire = (cannonIds, fireAll, ammoType, weaponGroup, weaponGroups) => {
         // Multi-group fire: fire all cannons in every selected group

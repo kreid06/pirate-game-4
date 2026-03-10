@@ -2546,7 +2546,8 @@ static void tick_ship_weapon_groups(void) {
  * Handle cannon aim from player
  * Updates player's aim angle and cannon aim_direction for all cannons within range
  */
-static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
+static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
+                              uint32_t* active_group_indices, int active_group_count) {
     if (player->parent_ship_id == 0) {
         return; // Player not on a ship
     }
@@ -2661,8 +2662,26 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
                 /* Legacy (no groups at all): sector-based staffing applies */
                 do_needed_update = !player_has_groups;
             } else {
-                /* Only AIMING groups use sector-gated staffing */
-                do_needed_update = (grp->mode == WEAPON_GROUP_MODE_AIMING);
+                /* A cannon's group is eligible for NEEDED if its group index
+                 * appears in the active_group_indices list sent by the client
+                 * with this aim message.  This bypasses the stored group mode
+                 * entirely, fixing the race between cannon_group_config and
+                 * cannon_aim arriving in the same burst. */
+                bool in_active = false;
+                for (int ag = 0; ag < active_group_count && !in_active; ag++) {
+                    uint32_t tg = active_group_indices[ag];
+                    if (tg >= MAX_WEAPON_GROUPS) continue;
+                    WeaponGroup* chk = &ship->weapon_groups[tg];
+                    for (int ci = 0; ci < chk->cannon_count && !in_active; ci++) {
+                        if (chk->cannon_ids[ci] == cannon->id) in_active = true;
+                    }
+                }
+                /* Fall back to stored AIMING mode when no active_groups were
+                 * sent (e.g. legacy clients or pure cannon-mount flow). */
+                if (active_group_count == 0) {
+                    in_active = (grp->mode == WEAPON_GROUP_MODE_AIMING);
+                }
+                do_needed_update = in_active;
             }
 
             if (do_needed_update) {
@@ -2725,8 +2744,22 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
          *   - If !player_has_groups → legacy path; propagate normally.
          * ──────────────────────────────────────────────────────────────────── */
         if (grp) {
-            if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   continue;
-            if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) continue;
+            /* If this cannon's group is in the active list from the aim
+             * message, allow aim propagation regardless of stored mode
+             * (fixes race between cannon_group_config and cannon_aim). */
+            bool in_active_pass2 = false;
+            for (int ag = 0; ag < active_group_count && !in_active_pass2; ag++) {
+                uint32_t tg = active_group_indices[ag];
+                if (tg >= MAX_WEAPON_GROUPS) continue;
+                WeaponGroup* chk = &ship->weapon_groups[tg];
+                for (int ci = 0; ci < chk->cannon_count && !in_active_pass2; ci++) {
+                    if (chk->cannon_ids[ci] == cannon->id) in_active_pass2 = true;
+                }
+            }
+            if (!in_active_pass2) {
+                if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   continue;
+                if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) continue;
+            }
         } else if (player_has_groups) {
             continue; /* ungrouped cannon in group mode — already handled in pass 1 */
         }
@@ -4783,8 +4816,32 @@ int websocket_server_update(struct Sim* sim) {
                                     if (angle_start) {
                                         sscanf(angle_start + 12, "%f", &aim_angle);
                                     }
-                                    
-                                    handle_cannon_aim(player, aim_angle);
+
+                                    // Parse active_groups array e.g. [0,1]
+                                    uint32_t active_groups[MAX_WEAPON_GROUPS];
+                                    int active_group_count = 0;
+                                    {
+                                        char* ag_start = strstr(payload, "\"active_groups\":");
+                                        if (ag_start) {
+                                            ag_start += 17; /* skip "active_groups": */
+                                            while (*ag_start && *ag_start != '[') ag_start++;
+                                            if (*ag_start == '[') ag_start++;
+                                            char* ag_end = strchr(ag_start, ']');
+                                            char* p = ag_start;
+                                            while (p && ag_end && p < ag_end &&
+                                                   active_group_count < MAX_WEAPON_GROUPS) {
+                                                char* num_end;
+                                                long val = strtol(p, &num_end, 10);
+                                                if (num_end == p) break;
+                                                if (val >= 0 && val < MAX_WEAPON_GROUPS)
+                                                    active_groups[active_group_count++] = (uint32_t)val;
+                                                p = num_end;
+                                                while (p < ag_end && (*p == ',' || *p == ' ')) p++;
+                                            }
+                                        }
+                                    }
+
+                                    handle_cannon_aim(player, aim_angle, active_groups, active_group_count);
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"aim_updated\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");

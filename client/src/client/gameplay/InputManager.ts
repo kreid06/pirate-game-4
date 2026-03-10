@@ -83,7 +83,7 @@ export class InputManager {
   public onShipSailAngleControl: ((desiredAngle: number) => void) | null = null;
   
   // Cannon control callbacks
-  public onCannonAim: ((aimAngle: number) => void) | null = null;
+  public onCannonAim: ((aimAngle: number, activeGroups: number[]) => void) | null = null;
   public onCannonFire: ((cannonIds?: number[], fireAll?: boolean, ammoType?: number, weaponGroup?: number, weaponGroups?: Set<number>) => void) | null = null;
 
   // Inventory callbacks
@@ -582,7 +582,7 @@ export class InputManager {
     
     if (angleDelta > ANGLE_THRESHOLD) {
       if (this.onCannonAim) {
-        this.onCannonAim(aimAngleRelative);
+        this.onCannonAim(aimAngleRelative, [...this.activeWeaponGroups]);
       }
       this.lastCannonAimAngle = aimAngleRelative;
     }

@@ -226,6 +226,7 @@ interface CannonAimMessage extends NetworkMessage {
   type: MessageType.CANNON_AIM;
   timestamp: number;
   aim_angle: number; // Radians, relative to ship rotation
+  active_groups: number[]; // Weapon group indices the player is currently aiming with
 }
 
 /**
@@ -836,7 +837,7 @@ export class NetworkManager {
    * Send cannon aim update (right-click hold + mouse move)
    * Aim angle is relative to ship rotation
    */
-  sendCannonAim(aimAngle: number): void {
+  sendCannonAim(aimAngle: number, activeGroups: number[] = []): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
       return;
     }
@@ -850,7 +851,8 @@ export class NetworkManager {
     const message: CannonAimMessage = {
       type: MessageType.CANNON_AIM,
       timestamp: now,
-      aim_angle: aimAngle
+      aim_angle: aimAngle,
+      active_groups: activeGroups
     };
 
     this.sendMessage(message);
