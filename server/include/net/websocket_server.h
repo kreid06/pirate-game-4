@@ -12,6 +12,25 @@
 #define COMPANY_PIRATES  1   // Player's company
 #define COMPANY_NAVY     2   // Enemy AI company
 
+// ── Weapon Control Groups ────────────────────────────────────────────────────
+typedef enum {
+    WEAPON_GROUP_MODE_AIMING     = 0,
+    WEAPON_GROUP_MODE_FREEFIRE   = 1,
+    WEAPON_GROUP_MODE_HALTFIRE   = 2,
+    WEAPON_GROUP_MODE_TARGETFIRE = 3,
+} WeaponGroupMode;
+
+#define MAX_WEAPON_GROUPS      10
+#define MAX_CANNONS_PER_GROUP  16
+
+typedef struct {
+    uint32_t        cannon_ids[MAX_CANNONS_PER_GROUP];
+    uint8_t         cannon_count;
+    WeaponGroupMode mode;
+    uint32_t        target_ship_id;
+} WeaponGroup;
+// ────────────────────────────────────────────────────────────────────────────
+
 // Simple ship structure for WebSocket server
 typedef struct SimpleShip {
     uint32_t ship_id;
@@ -183,28 +202,6 @@ typedef enum {
     PLAYER_STATE_SWIMMING,  // In water
     PLAYER_STATE_FALLING    // Airborne (jumped off ship)
 } PlayerMovementState;
-
-// ── Weapon Control Groups ────────────────────────────────────────────────────
-// Each player has up to 10 weapon control groups (mirroring the client-side
-// hotbar groups 0–9).  Groups track which cannons belong to them, the current
-// firing mode, and an optional target ship for TARGETFIRE mode.
-typedef enum {
-    WEAPON_GROUP_MODE_AIMING     = 0,  // Player aims manually; fire on command
-    WEAPON_GROUP_MODE_FREEFIRE   = 1,  // Fire at current aim angle; no aim check
-    WEAPON_GROUP_MODE_HALTFIRE   = 2,  // Suppressed — fire commands are ignored
-    WEAPON_GROUP_MODE_TARGETFIRE = 3,  // Auto-aim at target_ship_id; fire on command
-} WeaponGroupMode;
-
-#define MAX_WEAPON_GROUPS      10
-#define MAX_CANNONS_PER_GROUP  16
-
-typedef struct {
-    uint32_t        cannon_ids[MAX_CANNONS_PER_GROUP];
-    uint8_t         cannon_count;
-    WeaponGroupMode mode;
-    uint32_t        target_ship_id;  /* TARGETFIRE only; 0 = no target */
-} WeaponGroup;
-// ────────────────────────────────────────────────────────────────────────────
 
 // WebSocket player structure
 typedef struct WebSocketPlayer {

@@ -534,6 +534,7 @@ static WebSocketPlayer* find_player(uint32_t player_id);
 static WebSocketPlayer* create_player(uint32_t player_id);
 static void remove_player(uint32_t player_id);
 static ShipModule* find_module_by_id(SimpleShip* ship, uint32_t module_id);
+static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship);
 
 // Player management functions
 static WebSocketPlayer* find_player(uint32_t player_id) {
@@ -1287,7 +1288,8 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
 static WeaponGroup* find_cannon_weapon_group(uint32_t ship_id, uint32_t cannon_id);
 static bool is_cannon_stale(SimpleShip* ship, uint32_t cannon_id);
 static void assign_weapon_group_crew(SimpleShip* ship);
-static void tick_player_weapon_groups(void);
+static void tick_ship_weapon_groups(void);
+static void ship_init_default_weapon_groups(SimpleShip* ship);
 static void broadcast_cannon_group_state(SimpleShip* ship);
 static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship);
 static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task);
@@ -2390,6 +2392,11 @@ static int parse_json_uint32_array(const char* json, const char* key, uint32_t* 
  * Configure a weapon control group on the ship.
  * Called when a client sends "cannon_group_config".  The group is stored per-ship
  * so all players on the same ship share authoritative group state.
+ *
+ * Enforces:
+ *  - cannon IDs must be real cannon modules on this ship (invalid IDs stripped)
+ *  - exclusive ownership: each cannon can only belong to one group at a time
+ *    (cannon is removed from any other group before being added here)
  */
 static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
                                        WeaponGroupMode mode, uint32_t* cannon_ids,
@@ -2399,12 +2406,40 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship) return;
 
+    /* ── Validate: strip any cannon ID not belonging to a real cannon module on
+     *    this ship.  Prevents clients from referencing foreign-ship cannons. ── */
+    uint32_t valid_ids[MAX_CANNONS_PER_GROUP];
+    int      valid_count = 0;
+    int      limit = (cannon_count > MAX_CANNONS_PER_GROUP) ? MAX_CANNONS_PER_GROUP : cannon_count;
+    for (int i = 0; i < limit; i++) {
+        ShipModule* mod = find_module_on_ship(ship, cannon_ids[i]);
+        if (mod && mod->type_id == MODULE_TYPE_CANNON) {
+            valid_ids[valid_count++] = cannon_ids[i];
+        }
+    }
+
+    /* ── Exclusive ownership: remove each validated cannon from every other group
+     *    so a cannon can never appear in two groups simultaneously. ── */
+    for (int i = 0; i < valid_count; i++) {
+        for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
+            if (g == group_index) continue;
+            WeaponGroup* other = &ship->weapon_groups[g];
+            for (int c = 0; c < other->cannon_count; c++) {
+                if (other->cannon_ids[c] == valid_ids[i]) {
+                    /* Compact: overwrite with last entry */
+                    other->cannon_ids[c] = other->cannon_ids[other->cannon_count - 1];
+                    other->cannon_count--;
+                    break;
+                }
+            }
+        }
+    }
+
     WeaponGroup* group = &ship->weapon_groups[group_index];
     group->mode         = mode;
-    group->cannon_count = (uint8_t)(cannon_count > MAX_CANNONS_PER_GROUP
-                                    ? MAX_CANNONS_PER_GROUP : cannon_count);
-    for (int i = 0; i < group->cannon_count; i++) {
-        group->cannon_ids[i] = cannon_ids[i];
+    group->cannon_count = (uint8_t)valid_count;
+    for (int i = 0; i < valid_count; i++) {
+        group->cannon_ids[i] = valid_ids[i];
     }
     group->target_ship_id = (mode == WEAPON_GROUP_MODE_TARGETFIRE) ? target_ship_id : 0;
 
@@ -2469,7 +2504,7 @@ static WeaponGroup* find_cannon_weapon_group(uint32_t ship_id, uint32_t cannon_i
     return NULL;
 }
 
-static void tick_player_weapon_groups(void) {
+static void tick_ship_weapon_groups(void) {
     for (int si = 0; si < ship_count; si++) {
         SimpleShip* ship = &ships[si];
         if (!ship->active) continue;
@@ -3632,6 +3667,42 @@ void websocket_server_set_simulation(struct Sim* sim) {
     log_info("✅ WebSocket server linked to simulation for collision detection");
 }
 
+/**
+ * Partition the ship's cannon modules into sensible default weapon control groups.
+ * Group 0 = port-side cannons  (local_y > 0), mode = HALTFIRE
+ * Group 1 = starboard cannons  (local_y < 0), mode = HALTFIRE
+ * Groups 2-9 = empty,                          mode = HALTFIRE
+ *
+ * All groups start HALTFIRE so the ship is silent until the player actively
+ * configures them.  Called once after all modules have been added to the ship.
+ */
+static void ship_init_default_weapon_groups(SimpleShip* ship) {
+    /* Reset all groups to HALTFIRE with no cannons */
+    for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
+        ship->weapon_groups[g].mode         = WEAPON_GROUP_MODE_HALTFIRE;
+        ship->weapon_groups[g].cannon_count = 0;
+        ship->weapon_groups[g].target_ship_id = 0;
+    }
+
+    /* Partition cannons: port (local_y > 0) → group 0, starboard → group 1 */
+    for (int m = 0; m < ship->module_count; m++) {
+        ShipModule* mod = &ship->modules[m];
+        if (mod->type_id != MODULE_TYPE_CANNON) continue;
+
+        float local_y = Q16_TO_FLOAT(mod->local_pos.y);
+        int   target_group = (local_y > 0.0f) ? 0 : 1;
+        WeaponGroup* grp = &ship->weapon_groups[target_group];
+        if (grp->cannon_count < MAX_CANNONS_PER_GROUP) {
+            grp->cannon_ids[grp->cannon_count++] = mod->id;
+        }
+    }
+
+    log_info("🔫 Ship %u: default groups — port=%d cannons (grp0), starboard=%d cannons (grp1)",
+             ship->ship_id,
+             ship->weapon_groups[0].cannon_count,
+             ship->weapon_groups[1].cannon_count);
+}
+
 // Initialize a brigantine ship at the given slot index, world position (client pixels), module ID base, and company
 static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t module_id_base, uint8_t company_id) {
     SimpleShip* s = &ships[idx];
@@ -3717,6 +3788,9 @@ static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t
     s->modules[s->module_count].local_rot   = Q16_FROM_FLOAT(0.0f);
     s->modules[s->module_count].state_bits  = MODULE_STATE_ACTIVE;
     s->module_count++;
+
+    /* Set up default weapon control groups now that all modules are registered */
+    ship_init_default_weapon_groups(s);
 
     log_info("🔧 Ship slot %d (ID %u): %d modules, pos=(%.0f,%.0f)", idx, s->ship_id, s->module_count, world_x, world_y);
 }
@@ -6650,8 +6724,8 @@ void websocket_server_tick(float dt) {
         if (ships[s].active) assign_weapon_group_crew(&ships[s]);
     }
 
-    // ===== TICK PLAYER WEAPON GROUPS (TARGETFIRE auto-aim) =====
-    tick_player_weapon_groups();
+    // ===== TICK SHIP WEAPON GROUPS (TARGETFIRE auto-aim) =====
+    tick_ship_weapon_groups();
 
     // ===== ADVANCE CANNON AIM TOWARD DESIRED (turn-speed limit) =====
     // Cannons rotate at a maximum of 60 degrees per second.
