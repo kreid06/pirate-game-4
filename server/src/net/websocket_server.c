@@ -866,6 +866,9 @@ static void handle_cannon_interact(WebSocketPlayer* player, struct WebSocketClie
     
     send_mount_success(client, module);
     broadcast_player_mounted(player, module, ship);
+    /* Push current group config to the player mounting a cannon so they can
+     * immediately see which group (if any) this cannon belongs to. */
+    send_cannon_group_state_to_client(client, ship);
 }
 
 static void handle_helm_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
@@ -905,6 +908,9 @@ static void handle_helm_interact(WebSocketPlayer* player, struct WebSocketClient
     
     send_mount_success(client, module);
     broadcast_player_mounted(player, module, ship);
+    /* Push current group config to the newly-mounted helm player so they see
+     * any groups configured by a previous helmsman without needing a resync. */
+    send_cannon_group_state_to_client(client, ship);
 }
 
 static void handle_mast_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
@@ -991,6 +997,10 @@ static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClie
                  "{\"type\":\"player_state_changed\",\"player_id\":%u,\"state\":\"walking\",\"ship_id\":%u}",
                  player->player_id, ship->ship_id);
         websocket_server_broadcast(broadcast);
+
+        /* Unicast current weapon group config to the newly boarded player so
+         * they see the ship's authoritative group state right away. */
+        send_cannon_group_state_to_client(client, ship);
     } else {
         // Player is on a different ship - transfer them
         log_info("🪜 Player %u transferring from ship %u to ship %u via ladder",
@@ -1001,6 +1011,8 @@ static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClie
         
         board_player_on_ship(player, ship, ladder_local_x, ladder_local_y);
         send_interaction_success(client, "ship_transfer");
+        /* Unicast group state after ship transfer too. */
+        send_cannon_group_state_to_client(client, ship);
     }
 }
 
@@ -1276,6 +1288,8 @@ static WeaponGroup* find_cannon_weapon_group(uint32_t ship_id, uint32_t cannon_i
 static bool is_cannon_stale(SimpleShip* ship, uint32_t cannon_id);
 static void assign_weapon_group_crew(SimpleShip* ship);
 static void tick_player_weapon_groups(void);
+static void broadcast_cannon_group_state(SimpleShip* ship);
+static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship);
 static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task);
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle);
 static void dismount_npc(WorldNpc* npc, SimpleShip* ship);
@@ -2373,14 +2387,19 @@ static int parse_json_uint32_array(const char* json, const char* key, uint32_t* 
 }
 
 /**
- * Configure a player's weapon control group.
- * Called when the client sends "cannon_group_config".
+ * Configure a weapon control group on the ship.
+ * Called when a client sends "cannon_group_config".  The group is stored per-ship
+ * so all players on the same ship share authoritative group state.
  */
 static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
                                        WeaponGroupMode mode, uint32_t* cannon_ids,
                                        int cannon_count, uint32_t target_ship_id) {
     if (group_index < 0 || group_index >= MAX_WEAPON_GROUPS) return;
-    WeaponGroup* group = &player->weapon_groups[group_index];
+    if (player->parent_ship_id == 0) return;
+    SimpleShip* ship = find_ship(player->parent_ship_id);
+    if (!ship) return;
+
+    WeaponGroup* group = &ship->weapon_groups[group_index];
     group->mode         = mode;
     group->cannon_count = (uint8_t)(cannon_count > MAX_CANNONS_PER_GROUP
                                     ? MAX_CANNONS_PER_GROUP : cannon_count);
@@ -2393,7 +2412,6 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
      * Mode only controls what the NPC does while there (aim/fire guards
      * in tick_npc_agents enforce HALTFIRE / AIMING / etc. per tick).
      * Immediately ensure any unmanned group cannons get a crew member. */
-    SimpleShip* ship = find_ship(player->parent_ship_id);
 
     /* Clear MODULE_STATE_NEEDED on suppressed-mode cannons.
      * When the player reverts from AIMING to HALTFIRE or TARGETFIRE
@@ -2403,15 +2421,13 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
      * Also covers multi-group onAimEnd: each group sends its own config
      * message, and all need their NEEDED bits cleaned up. */
     if (mode == WEAPON_GROUP_MODE_HALTFIRE || mode == WEAPON_GROUP_MODE_TARGETFIRE) {
-        if (ship) {
-            for (int ci = 0; ci < group->cannon_count; ci++) {
-                ShipModule* mod = find_module_on_ship(ship, group->cannon_ids[ci]);
-                if (mod) mod->state_bits &= ~MODULE_STATE_NEEDED;
-            }
+        for (int ci = 0; ci < group->cannon_count; ci++) {
+            ShipModule* mod = find_module_on_ship(ship, group->cannon_ids[ci]);
+            if (mod) mod->state_bits &= ~MODULE_STATE_NEEDED;
         }
     }
 
-    if (ship) assign_weapon_group_crew(ship);
+    assign_weapon_group_crew(ship);
 
     /* When a group switches to AIMING, immediately re-evaluate NPC routing.
      * This covers the case where the player re-activates aiming at exactly the
@@ -2420,12 +2436,16 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
      * Calling it here ensures any free NPCs are dispatched to the right side
      * as soon as the AIMING mode is applied, before the first aim message
      * arrives. */
-    if (mode == WEAPON_GROUP_MODE_AIMING && ship) {
+    if (mode == WEAPON_GROUP_MODE_AIMING) {
         update_npc_cannon_sector(ship, ship->active_aim_angle);
     }
 
     log_info("🎯 Player %u group %d → mode=%d cannons=%d target=%u",
              player->player_id, group_index, mode, group->cannon_count, group->target_ship_id);
+
+    /* Broadcast authoritative group state to all clients so every player
+     * on this ship sees the updated configuration immediately. */
+    broadcast_cannon_group_state(ship);
 }
 
 /**
@@ -2438,27 +2458,24 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
  * Returns NULL if no weapon group claims this cannon.
  */
 static WeaponGroup* find_cannon_weapon_group(uint32_t ship_id, uint32_t cannon_id) {
-    for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
-        WebSocketPlayer* p = &players[pi];
-        if (!p->active || p->parent_ship_id != ship_id) continue;
-        for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-            WeaponGroup* grp = &p->weapon_groups[g];
-            for (int c = 0; c < grp->cannon_count; c++) {
-                if (grp->cannon_ids[c] == cannon_id) return grp;
-            }
+    SimpleShip* ship = find_ship(ship_id);
+    if (!ship) return NULL;
+    for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
+        WeaponGroup* grp = &ship->weapon_groups[g];
+        for (int c = 0; c < grp->cannon_count; c++) {
+            if (grp->cannon_ids[c] == cannon_id) return grp;
         }
     }
     return NULL;
 }
 
-static void tick_player_weapon_groups(void) {    for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
-        WebSocketPlayer* player = &players[pi];
-        if (!player->active || player->parent_ship_id == 0) continue;
-        SimpleShip* ship = find_ship(player->parent_ship_id);
-        if (!ship) continue;
+static void tick_player_weapon_groups(void) {
+    for (int si = 0; si < ship_count; si++) {
+        SimpleShip* ship = &ships[si];
+        if (!ship->active) continue;
 
         for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-            WeaponGroup* group = &player->weapon_groups[g];
+            WeaponGroup* group = &ship->weapon_groups[g];
             if (group->mode != WEAPON_GROUP_MODE_TARGETFIRE) continue;
             if (group->target_ship_id == 0 || group->cannon_count == 0) continue;
 
@@ -2553,7 +2570,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
      * ────────────────────────────────────────────────────────────────────── */
     bool player_has_groups = false;
     for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-        if (player->weapon_groups[g].cannon_count > 0) {
+        if (ship->weapon_groups[g].cannon_count > 0) {
             player_has_groups = true;
             break;
         }
@@ -2647,7 +2664,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
         /* Skip cannons the player has placed in a haltfire group — they should not track the cursor */
         bool in_haltfire = false;
         for (int g = 0; g < MAX_WEAPON_GROUPS && !in_haltfire; g++) {
-            WeaponGroup* wg = &player->weapon_groups[g];
+            WeaponGroup* wg = &ship->weapon_groups[g];
             if (wg->mode != WEAPON_GROUP_MODE_HALTFIRE) continue;
             for (int ci = 0; ci < wg->cannon_count; ci++) {
                 if (wg->cannon_ids[ci] == cannon->id) { in_haltfire = true; break; }
@@ -2834,6 +2851,78 @@ static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float wo
             }
         }
     }
+}
+
+/**
+ * Broadcast authoritative weapon group state for ship to ALL connected clients.
+ * Clients on other ships will ignore this message by checking shipId.
+ */
+static void broadcast_cannon_group_state(SimpleShip* ship) {
+    if (!ship) return;
+    static const char* mode_names[] = { "aiming", "freefire", "haltfire", "targetfire" };
+    char message[4096];
+    int pos = snprintf(message, sizeof(message),
+        "{\"type\":\"cannon_group_state\",\"shipId\":%u,\"groups\":[", ship->ship_id);
+    for (int g = 0; g < MAX_WEAPON_GROUPS && pos < (int)sizeof(message) - 64; g++) {
+        WeaponGroup* grp = &ship->weapon_groups[g];
+        const char* mode_str = (grp->mode < 4) ? mode_names[grp->mode] : "haltfire";
+        pos += snprintf(message + pos, sizeof(message) - pos,
+            "%s{\"index\":%d,\"mode\":\"%s\",\"cannonIds\":[",
+            (g > 0 ? "," : ""), g, mode_str);
+        for (int c = 0; c < grp->cannon_count && pos < (int)sizeof(message) - 32; c++) {
+            pos += snprintf(message + pos, sizeof(message) - pos,
+                "%s%u", (c > 0 ? "," : ""), grp->cannon_ids[c]);
+        }
+        pos += snprintf(message + pos, sizeof(message) - pos,
+            "],\"targetShipId\":%u}", grp->target_ship_id);
+    }
+    if (pos < (int)sizeof(message) - 2)
+        pos += snprintf(message + pos, sizeof(message) - pos, "]}");
+
+    char frame[5120];
+    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, message, strlen(message), frame, sizeof(frame));
+    if (frame_len > 0) {
+        for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+            struct WebSocketClient* client = &ws_server.clients[i];
+            if (client->connected && client->handshake_complete)
+                send(client->fd, frame, frame_len, 0);
+        }
+    }
+}
+
+/**
+ * Send authoritative weapon group state for ship to a single connected client.
+ * Called after a player mounts to a helm/cannon or boards a ship so they
+ * immediately have the current per-ship group configuration without waiting
+ * for another player to trigger a broadcast.
+ */
+static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship) {
+    if (!client || !ship) return;
+    if (!client->connected || !client->handshake_complete) return;
+    static const char* mode_names[] = { "aiming", "freefire", "haltfire", "targetfire" };
+    char message[4096];
+    int pos = snprintf(message, sizeof(message),
+        "{\"type\":\"cannon_group_state\",\"shipId\":%u,\"groups\":[", ship->ship_id);
+    for (int g = 0; g < MAX_WEAPON_GROUPS && pos < (int)sizeof(message) - 64; g++) {
+        WeaponGroup* grp = &ship->weapon_groups[g];
+        const char* mode_str = (grp->mode < 4) ? mode_names[grp->mode] : "haltfire";
+        pos += snprintf(message + pos, sizeof(message) - pos,
+            "%s{\"index\":%d,\"mode\":\"%s\",\"cannonIds\":[",
+            (g > 0 ? "," : ""), g, mode_str);
+        for (int c = 0; c < grp->cannon_count && pos < (int)sizeof(message) - 32; c++) {
+            pos += snprintf(message + pos, sizeof(message) - pos,
+                "%s%u", (c > 0 ? "," : ""), grp->cannon_ids[c]);
+        }
+        pos += snprintf(message + pos, sizeof(message) - pos,
+            "],\"targetShipId\":%u}", grp->target_ship_id);
+    }
+    if (pos < (int)sizeof(message) - 2)
+        pos += snprintf(message + pos, sizeof(message) - pos, "]}");
+
+    char frame[5120];
+    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, message, strlen(message), frame, sizeof(frame));
+    if (frame_len > 0)
+        send(client->fd, frame, frame_len, 0);
 }
 
 /**

@@ -99,6 +99,14 @@ export class ClientApplication {
   private controlGroups: Map<number, WeaponGroupState> = new Map(
     Array.from({ length: 10 }, (_, i) => [i, { cannonIds: [], mode: 'haltfire' as WeaponGroupMode, targetId: -1 }])
   );
+  /**
+   * Ship ID received from the server's player_boarded or module_interact_success message.
+   * Used to accept cannon_group_state packets that arrive before the world-state tick
+   * has updated the player's carrierId (the boarding/mount event runs in the same tick
+   * as the group-state push, so carrierId is 0 or stale when the message is processed).
+   * Cleared once the group state has been applied or when carrierId catches up.
+   */
+  private pendingGroupShipId: number = 0;
   /** Maps group index → previous mode, saved while right-click-hold temporarily switches all selected groups to 'aiming'. */
   private _aimOverrideGroups: Map<number, WeaponGroupMode> | null = null;
   // Optimistic modules placed locally, keyed by ship ID, with expiry timestamp.
@@ -245,7 +253,46 @@ export class ClientApplication {
           ship.levelStats.nextUpgradeCost = nextUpgradeCost;
         }
       };
-      
+
+      // When the server confirms a ladder board, record the ship ID so that the
+      // cannon_group_state that follows can be accepted before the world-state tick
+      // updates the player's carrierId.
+      this.networkManager.onPlayerBoarded = (shipId) => {
+        this.pendingGroupShipId = shipId;
+      };
+
+      // Authoritative per-ship weapon group state from server
+      this.networkManager.onCannonGroupState = (shipId, groups) => {
+        // Resolve the player's current ship from the world state.
+        const myPlayerId = this.networkManager.getAssignedPlayerId();
+        const ws = this.authoritativeWorldState;
+        const myPlayer = myPlayerId !== null && ws ? ws.players.find(p => p.id === myPlayerId) : null;
+        const myShipId = myPlayer?.carrierId ?? 0;
+
+        // Accept the message if:
+        //  (a) the world state already reflects the player on this ship, OR
+        //  (b) the player just boarded/mounted and the world tick hasn't caught up yet
+        //      (pendingGroupShipId is set by the player_boarded handler above).
+        const isMyShip = shipId !== 0 && (shipId === myShipId || shipId === this.pendingGroupShipId);
+        if (!isMyShip) return;
+
+        // Clear the pending flag — we've now applied the authoritative state.
+        if (shipId === this.pendingGroupShipId) this.pendingGroupShipId = 0;
+
+        for (const g of groups) {
+          this.controlGroups.set(g.index, {
+            mode: g.mode as WeaponGroupMode,
+            cannonIds: g.cannonIds,
+            targetId: g.targetShipId,
+          });
+        }
+        // Sync InputManager's activeGroupMode to the primary selected group
+        if (this.inputManager) {
+          const primaryState = this.controlGroups.get(this.inputManager.activeWeaponGroup);
+          if (primaryState) this.inputManager.activeGroupMode = primaryState.mode;
+        }
+      };
+
       // Initialize Prediction Engine
       this.predictionEngine = new PredictionEngine(this.config.prediction);
       

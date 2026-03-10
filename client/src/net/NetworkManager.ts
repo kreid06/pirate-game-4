@@ -59,6 +59,7 @@ export enum MessageType {
   CANNON_AIM = 'cannon_aim',
   CANNON_FIRE = 'cannon_fire',
   CANNON_GROUP_CONFIG = 'cannon_group_config',
+  CANNON_GROUP_STATE = 'cannon_group_state',
 
   SLOT_SELECT = 'slot_select',
   UNEQUIP = 'unequip',
@@ -86,6 +87,9 @@ export enum MessageType {
   MODULE_INTERACT_SUCCESS = 'module_interact_success',
   MODULE_INTERACT_FAILURE = 'module_interact_failure',
   
+  // Server notifications
+  PLAYER_BOARDED = 'player_boarded',
+
   // Connection Management
   CONNECT = 'connect',
   DISCONNECT = 'disconnect',
@@ -419,6 +423,10 @@ export class NetworkManager {
   public onShipSunk: ((shipId: number) => void) | null = null;
   public onShipLevelUp: ((shipId: number, attribute: string, attrLevel: number, xp: number, shipLevel: number, totalCap: number, nextUpgradeCost: number) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
+  /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
+  public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
+  /** Fired when the server confirms the player has boarded a ship (via ladder). */
+  public onPlayerBoarded: ((shipId: number) => void) | null = null;
   
   constructor(config: NetworkConfig) {
     this.config = config;
@@ -1499,10 +1507,28 @@ export class NetworkManager {
         this.handleModuleInteractFailure(message as ModuleInteractFailureMessage);
         break;
 
+      case MessageType.PLAYER_BOARDED: {
+        const boardedShipId: number = message.ship_id || 0;
+        this.onPlayerBoarded?.(boardedShipId);
+        break;
+      }
+
       case 'npc_dialogue':
         console.log(`💬 [NPC] ${message.npc_name}: "${message.text}"`);
         this.onNpcDialogue?.(message.npc_id, message.npc_name, message.text);
         break;
+
+      case MessageType.CANNON_GROUP_STATE: {
+        const gsShipId: number = message.shipId || 0;
+        const gsGroups = Array.isArray(message.groups) ? message.groups.map((g: any) => ({
+          index: g.index ?? 0,
+          mode: g.mode ?? 'haltfire',
+          cannonIds: Array.isArray(g.cannonIds) ? g.cannonIds.map((id: any) => Number(id)) : [],
+          targetShipId: g.targetShipId ?? 0,
+        })) : [];
+        this.onCannonGroupState?.(gsShipId, gsGroups);
+        break;
+      }
 
       case 'MODULE_HIT': {
         const shipId: number = message.shipId || 0;

@@ -55,7 +55,10 @@ typedef struct SimpleShip {
      *  0 = never fired (treated as "fresh" — crew stays without penalty).
      *  Updated by fire_cannon(); used by is_cannon_stale() to decide if
      *  crew are allowed to leave for a busier cannon. */
-    uint32_t cannon_last_fire_ms[MAX_MODULES_PER_SHIP];} SimpleShip;
+    uint32_t cannon_last_fire_ms[MAX_MODULES_PER_SHIP];
+    /* Per-ship weapon control groups (shared by all players on this ship) */
+    WeaponGroup weapon_groups[MAX_WEAPON_GROUPS];
+} SimpleShip;
 
 // NPC behavior types
 typedef enum {
@@ -237,9 +240,6 @@ typedef struct WebSocketPlayer {
     float cannon_aim_angle_relative; // Ship-relative aim angle (radians)
 
     uint8_t company_id;            // Inherited from the ship this player boards
-
-    // Weapon control groups (0–9, mirrors client hotbar)
-    WeaponGroup weapon_groups[MAX_WEAPON_GROUPS];
 
     // Inventory
     PlayerInventory inventory;
