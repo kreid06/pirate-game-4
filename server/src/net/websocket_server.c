@@ -1788,28 +1788,18 @@ static void assign_weapon_group_crew(SimpleShip* ship) {
             }
         }
 
-        /* ── Aim-sector check (AIMING mode only) ────────────────────────────────
-         * MODULE_STATE_NEEDED is managed exclusively by handle_cannon_aim so it
-         * always reflects the real-time angle from the client message.  This
-         * function only dispatches NPCs and never touches NEEDED.
-         *
-         * For AIMING groups, gate dispatch on the ±30° sector so we don't send
-         * crew to the wrong broadside.  FREEFIRE / TARGETFIRE staff every cannon
-         * unconditionally. */
-        bool aim_in_sector = false;
-        if (grp->mode == WEAPON_GROUP_MODE_AIMING) {
-            float fire_dir = Q16_TO_FLOAT(mod->local_rot) - (float)(M_PI / 2.0f);
-            float sdiff = ship->active_aim_angle - fire_dir;
-            while (sdiff >  (float)M_PI) sdiff -= 2.0f * (float)M_PI;
-            while (sdiff < -(float)M_PI) sdiff += 2.0f * (float)M_PI;
-            aim_in_sector = fabsf(sdiff) <= (30.0f * (float)(M_PI / 180.0f));
-        }
-
         /* ── Dispatch a free NPC to fill unmanned active-mode cannons ───────── */
         if (occupied || en_route) continue; /* already handled */
         if (!is_active_mode) continue;      /* HALTFIRE: don't force crew here */
-        /* For AIMING groups only staff cannons within the current aim sector. */
-        if (grp->mode == WEAPON_GROUP_MODE_AIMING && !aim_in_sector) continue;
+        /* AIMING groups: only staff this cannon once MODULE_STATE_NEEDED is set,
+         * meaning handle_cannon_aim has confirmed the player is actually aiming
+         * toward this cannon's sector.  Dispatching before that would front-load
+         * all available NPCs onto whichever group's config message arrived first,
+         * leaving the other group with no crew regardless of aim direction.
+         *
+         * FREEFIRE / TARGETFIRE: staff unconditionally — no aim gating needed. */
+        if (grp->mode == WEAPON_GROUP_MODE_AIMING &&
+            !(mod->state_bits & MODULE_STATE_NEEDED)) continue;
 
         WorldNpc* best = NULL;
         float     best_dist = 1e9f;
@@ -2404,7 +2394,35 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
      * in tick_npc_agents enforce HALTFIRE / AIMING / etc. per tick).
      * Immediately ensure any unmanned group cannons get a crew member. */
     SimpleShip* ship = find_ship(player->parent_ship_id);
+
+    /* Clear MODULE_STATE_NEEDED on suppressed-mode cannons.
+     * When the player reverts from AIMING to HALTFIRE or TARGETFIRE
+     * (e.g. right-click released, or hotbar mode cycle), NEEDED bits that
+     * were set by handle_cannon_aim while the group was AIMING would
+     * otherwise linger and keep driving NPCs toward those cannons.
+     * Also covers multi-group onAimEnd: each group sends its own config
+     * message, and all need their NEEDED bits cleaned up. */
+    if (mode == WEAPON_GROUP_MODE_HALTFIRE || mode == WEAPON_GROUP_MODE_TARGETFIRE) {
+        if (ship) {
+            for (int ci = 0; ci < group->cannon_count; ci++) {
+                ShipModule* mod = find_module_on_ship(ship, group->cannon_ids[ci]);
+                if (mod) mod->state_bits &= ~MODULE_STATE_NEEDED;
+            }
+        }
+    }
+
     if (ship) assign_weapon_group_crew(ship);
+
+    /* When a group switches to AIMING, immediately re-evaluate NPC routing.
+     * This covers the case where the player re-activates aiming at exactly the
+     * same angle as before (delta = 0 → below the 3° gate in handle_cannon_aim),
+     * so update_npc_cannon_sector would not fire from handle_cannon_aim.
+     * Calling it here ensures any free NPCs are dispatched to the right side
+     * as soon as the AIMING mode is applied, before the first aim message
+     * arrives. */
+    if (mode == WEAPON_GROUP_MODE_AIMING && ship) {
+        update_npc_cannon_sector(ship, ship->active_aim_angle);
+    }
 
     log_info("🎯 Player %u group %d → mode=%d cannons=%d target=%u",
              player->player_id, group_index, mode, group->cannon_count, group->target_ship_id);
@@ -2566,7 +2584,14 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
                 if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) continue;
                 cannon_in_player_group = true;
             } else {
-                if (player_has_groups) continue;
+                if (player_has_groups) {
+                    /* Cannon is not assigned to any group — player cannot control
+                     * it via weapon groups.  Clear any stale NEEDED bit so NPCs
+                     * are never summoned to an ungrouped cannon. */
+                    ShipModule* ungrouped = find_module_on_ship(ship, cannon->id);
+                    if (ungrouped) ungrouped->state_bits &= ~MODULE_STATE_NEEDED;
+                    continue;
+                }
             }
         }
         (void)cannon_in_player_group; /* occupancy check below applies to all cannons */
