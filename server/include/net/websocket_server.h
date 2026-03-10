@@ -75,6 +75,10 @@ typedef struct SimpleShip {
      *  Updated by fire_cannon(); used by is_cannon_stale() to decide if
      *  crew are allowed to leave for a busier cannon. */
     uint32_t cannon_last_fire_ms[MAX_MODULES_PER_SHIP];
+    /** Wall-clock time (ms) when each cannon was last "needed" (aimed-in-sector
+     *  or fired).  NEEDED stays true until this timestamp + CANNON_NEEDED_TIMEOUT_MS
+     *  expires.  Cleared by tick_cannon_needed_expiry(). */
+    uint32_t cannon_last_needed_ms[MAX_MODULES_PER_SHIP];
     /* Per-ship weapon control groups (shared by all players on this ship) */
     WeaponGroup weapon_groups[MAX_WEAPON_GROUPS];
 } SimpleShip;
