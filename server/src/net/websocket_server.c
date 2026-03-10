@@ -1682,6 +1682,24 @@ static void dispatch_gunner_to_cannon(WorldNpc* npc, SimpleShip* ship,
              npc->id, npc->name, cannon_id, abs_diff_deg);
 }
 
+/**
+ * Returns true if cannon_id is claimed by any player weapon group on the given ship.
+ * Player-group cannons are reserved for player control and must be invisible to NPC dispatch.
+ */
+static bool is_cannon_in_any_player_group(uint32_t ship_id, uint32_t cannon_id) {
+    for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+        WebSocketPlayer* p = &players[pi];
+        if (!p->active || p->parent_ship_id != ship_id) continue;
+        for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
+            WeaponGroup* wg = &p->weapon_groups[g];
+            for (int c = 0; c < wg->cannon_count; c++) {
+                if (wg->cannon_ids[c] == cannon_id) return true;
+            }
+        }
+    }
+    return false;
+}
+
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
     if (!ship) return;
 
@@ -1693,6 +1711,9 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
     for (int m = 0; m < ship->module_count; m++) {
         ShipModule* mod = &ship->modules[m];
         if (mod->type_id != MODULE_TYPE_CANNON) continue;
+
+        /* Skip cannons owned by a player weapon group — NPCs must not claim them */
+        if (is_cannon_in_any_player_group(ship->ship_id, mod->id)) continue;
 
         float fire_dir = Q16_TO_FLOAT(mod->local_rot) - (float)(M_PI / 2.0f);
         float diff = aim_angle - fire_dir;
@@ -2323,6 +2344,17 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle) {
             }
         }
         if (!cannon_has_occupant) continue;
+
+        /* Skip cannons the player has placed in a haltfire group — they should not track the cursor */
+        bool in_haltfire = false;
+        for (int g = 0; g < MAX_WEAPON_GROUPS && !in_haltfire; g++) {
+            WeaponGroup* wg = &player->weapon_groups[g];
+            if (wg->mode != WEAPON_GROUP_MODE_HALTFIRE) continue;
+            for (int ci = 0; ci < wg->cannon_count; ci++) {
+                if (wg->cannon_ids[ci] == cannon->id) { in_haltfire = true; break; }
+            }
+        }
+        if (in_haltfire) continue;
 
         float cannon_base_angle = Q16_TO_FLOAT(cannon->local_rot);
 

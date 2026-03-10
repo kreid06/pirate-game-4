@@ -652,6 +652,13 @@ export class ClientApplication {
         return this.uiManager?.handleRightClick(x, y) ?? false;
       };
 
+      // Sync the active group's mode into InputManager whenever the selected group changes.
+      // InputManager uses this to decide whether right-click aims or locks a target.
+      this.inputManager.onWeaponGroupSelect = (group: number) => {
+        const state = this.controlGroups.get(group);
+        this.inputManager.activeGroupMode = state?.mode ?? 'haltfire';
+      };
+
       // Right-click on world while on helm = lock target for the active weapon group
       this.inputManager.onGroupTarget = (worldPos) => {
         const group = this.inputManager.activeWeaponGroup;
@@ -710,6 +717,10 @@ export class ClientApplication {
           state.mode = mode;
           if (mode !== 'targetfire') state.targetId = -1; // clear lock when leaving targetfire
           console.log(`🎯 Group G${groupIndex} mode → ${mode}`);
+          // Keep InputManager.activeGroupMode in sync if this is the active group
+          if (this.inputManager && this.inputManager.activeWeaponGroup === groupIndex) {
+            this.inputManager.activeGroupMode = mode;
+          }
           // Sync mode change to server
           this.networkManager.sendCannonGroupConfig(groupIndex, mode, state.cannonIds, 0);
         }

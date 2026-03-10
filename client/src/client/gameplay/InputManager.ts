@@ -130,6 +130,9 @@ export class InputManager {
   // Ship control state tracking
   private mountKind: 'none' | 'helm' | 'cannon' | 'mast' = 'none';
   private get isMountedToHelm(): boolean { return this.mountKind === 'helm'; }
+  /** Mode of the currently active weapon group — kept in sync by ClientApplication. */
+  public activeGroupMode: string = 'haltfire';
+
   /** Active weapon group while on helm: 0=LEFT, 1=RIGHT, 2=FORE, 3=AFT, -1=none */
   public activeWeaponGroup: number = -1;
   /** Returns the current mount kind. */
@@ -1072,8 +1075,9 @@ export class InputManager {
         this.onBuildRightClick(this.inputState.mouseWorldPosition);
       } else {
         if (this.onUIRightClick && this.onUIRightClick(event.offsetX, event.offsetY)) return;
-        // Helm mode: right-click = target-fire lock onto entity at cursor
-        if (this.mountKind === 'helm' && this.onGroupTarget) {
+        // Helm mode: target-lock only when the active group is in targetfire mode.
+        // In aiming mode (or no group), right-click-drag aims cannons normally.
+        if (this.mountKind === 'helm' && this.activeGroupMode === 'targetfire' && this.onGroupTarget) {
           this.onGroupTarget(this.inputState.mouseWorldPosition);
           return;
         }
