@@ -1273,6 +1273,7 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
                                        WeaponGroupMode mode, uint32_t* cannon_ids,
                                        int cannon_count, uint32_t target_ship_id);
 static WeaponGroup* find_cannon_weapon_group(uint32_t ship_id, uint32_t cannon_id);
+static void assign_weapon_group_crew(SimpleShip* ship);
 static void tick_player_weapon_groups(void);
 static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task);
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle);
@@ -1703,46 +1704,103 @@ static void dispatch_gunner_to_cannon(WorldNpc* npc, SimpleShip* ship,
 }
 
 /**
- * Returns true if cannon_id is claimed by any player weapon group on the given ship.
- * Player-group cannons are reserved for player control and must be invisible to NPC dispatch.
+ * Assign free on-duty gunner NPCs to any weapon-group cannon that is currently
+ * unmanned.  This is the companion to update_npc_cannon_sector() — the sector
+ * system handles non-group cannons; this function handles group cannons.
+ *
+ * Rules:
+ *  - Only considers cannons that belong to a player weapon group.
+ *  - Skips cannons already occupied by a WorldNpc gunner or a player.
+ *  - Picks the nearest free on-duty gunner and walks them to the cannon.
+ *  - All group modes (including HALTFIRE) keep crew stationed; the NPC
+ *    aim/fire guards in tick_npc_agents enforce per-mode behaviour.
  */
-static bool is_cannon_in_any_player_group(uint32_t ship_id, uint32_t cannon_id) {
-    for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
-        WebSocketPlayer* p = &players[pi];
-        if (!p->active || p->parent_ship_id != ship_id) continue;
-        for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-            WeaponGroup* wg = &p->weapon_groups[g];
-            for (int c = 0; c < wg->cannon_count; c++) {
-                if (wg->cannon_ids[c] == cannon_id) return true;
+static void assign_weapon_group_crew(SimpleShip* ship) {
+    if (!ship) return;
+
+    for (int m = 0; m < ship->module_count; m++) {
+        ShipModule* mod = &ship->modules[m];
+        if (mod->type_id != MODULE_TYPE_CANNON) continue;
+
+        WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, mod->id);
+        if (!grp) continue; /* not a group cannon */
+
+        /* Check if this cannon already has an occupant */
+        bool occupied = false;
+        /* Player mounted here? */
+        for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+            WebSocketPlayer* p = &players[pi];
+            if (p->active && p->is_mounted && p->mounted_module_id == mod->id) {
+                occupied = true; break;
             }
         }
+        if (occupied) continue;
+        /* WorldNpc gunner stationed here? */
+        for (int ni = 0; ni < world_npc_count; ni++) {
+            WorldNpc* npc = &world_npcs[ni];
+            if (npc->active && npc->role == NPC_ROLE_GUNNER &&
+                npc->ship_id == ship->ship_id &&
+                npc->assigned_cannon_id == mod->id) {
+                occupied = true; break;
+            }
+        }
+        if (occupied) continue;
+
+        /* Find a free on-duty gunner: wants_cannon but not currently assigned
+         * to any weapon-group cannon (they may be between assignments). */
+        WorldNpc* best = NULL;
+        float     best_dist = 1e9f;
+        float     cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+        float     cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+        for (int ni = 0; ni < world_npc_count; ni++) {
+            WorldNpc* npc = &world_npcs[ni];
+            if (!npc->active || npc->ship_id != ship->ship_id) continue;
+            if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
+            /* Must not already be assigned to a group cannon */
+            if (npc->assigned_cannon_id != 0 &&
+                find_cannon_weapon_group(ship->ship_id, npc->assigned_cannon_id)) continue;
+            float dx = npc->local_x - cx;
+            float dy = npc->local_y - cy;
+            float dist = dx * dx + dy * dy;
+            if (dist < best_dist) { best_dist = dist; best = npc; }
+        }
+
+        if (best) {
+            log_info("🎯 Group cannon %u unmanned — dispatching NPC %u (%s)",
+                     mod->id, best->id, best->name);
+            dispatch_gunner_to_cannon(best, ship, mod->id, 0.0f);
+        }
     }
-    return false;
 }
 
+/**
+ * Returns true if cannon_id is claimed by any player weapon group on the given ship.
+ */
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
     if (!ship) return;
 
-    /* ─ Step 1: rank ALL cannons by angular distance from aim (no cutoff) ─
-     *           Cannons assigned to a player's weapon group are excluded from
-     *           the sector-dispatch pool — their NPC assignment is fixed by the
-     *           group (or they stay wherever they already are).                */
+    /* ─ Step 1: rank ALL cannons by angular distance from aim ─────────────────
+     * Group cannons are included; HALTFIRE group cannons receive a 2π penalty
+     * so they always sort to the back of the list (lower crew priority) but
+     * are never completely invisible to the sector system.                     */
     uint32_t sorted_ids [MAX_MODULES_PER_SHIP];
-    float    sorted_diff[MAX_MODULES_PER_SHIP]; /* absolute angle diff, radians */
+    float    sorted_diff[MAX_MODULES_PER_SHIP];
     int      cannon_count = 0;
 
     for (int m = 0; m < ship->module_count; m++) {
         ShipModule* mod = &ship->modules[m];
         if (mod->type_id != MODULE_TYPE_CANNON) continue;
 
-        /* Skip cannons claimed by a weapon control group — the group owns them */
-        if (find_cannon_weapon_group(ship->ship_id, mod->id)) continue;
-
         float fire_dir = Q16_TO_FLOAT(mod->local_rot) - (float)(M_PI / 2.0f);
         float diff = aim_angle - fire_dir;
         while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
         while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
         float abs_diff = fabsf(diff);
+
+        /* Deprioritize HALTFIRE group cannons — push them to the back */
+        WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, mod->id);
+        if (grp && grp->mode == WEAPON_GROUP_MODE_HALTFIRE)
+            abs_diff += 2.0f * (float)M_PI;
 
         /* Insertion sort: smallest diff first */
         int pos = cannon_count;
@@ -1759,14 +1817,19 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
 
     /* ─ Step 2: for each on-duty gunner, move them if a significantly closer
      *           cannon is available (hysteresis prevents jitter).
-     *           Gunners already at a weapon-group cannon stay put — their
-     *           assignment is fixed by the group, not the sector.       ─ */
+     *
+     *  NPCs that are already assigned to a weapon-group cannon are PINNED —
+     *  the sector system must not pull them away.  assign_weapon_group_crew()
+     *  is responsible for their placement; fighting it here causes NPCs to
+     *  oscillate between MOVING and AT_CANNON and never actually fire.
+     *  The aim-ranking above still deprioritizes HALTFIRE cannons (via the 2π
+     *  penalty) so free NPCs looking for their first cannon prefer active ones. ─ */
     for (int i = 0; i < world_npc_count; i++) {
         WorldNpc* npc = &world_npcs[i];
         if (!npc->active || npc->ship_id != ship->ship_id) continue;
         if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
 
-        /* If this gunner is already at a weapon-group cannon, leave them there */
+        /* If this gunner is assigned to a weapon-group cannon, leave them there */
         if (npc->assigned_cannon_id != 0 &&
             find_cannon_weapon_group(ship->ship_id, npc->assigned_cannon_id)) continue;
 
@@ -2250,24 +2313,12 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
     }
     group->target_ship_id = (mode == WEAPON_GROUP_MODE_TARGETFIRE) ? target_ship_id : 0;
 
-    /* Evict any WorldNpc crew currently assigned to these cannons.
-     * Player weapon groups are player-controlled; NPCs must not occupy them. */
+    /* For all modes, NPCs remain stationed at their assigned cannon.
+     * Mode only controls what the NPC does while there (aim/fire guards
+     * in tick_npc_agents enforce HALTFIRE / AIMING / etc. per tick).
+     * Immediately ensure any unmanned group cannons get a crew member. */
     SimpleShip* ship = find_ship(player->parent_ship_id);
-    for (int ci = 0; ci < group->cannon_count; ci++) {
-        uint32_t cid = group->cannon_ids[ci];
-        for (int ni = 0; ni < world_npc_count; ni++) {
-            WorldNpc* npc = &world_npcs[ni];
-            if (!npc->active || npc->ship_id != player->parent_ship_id) continue;
-            if (npc->role != NPC_ROLE_GUNNER || npc->assigned_cannon_id != cid) continue;
-            /* Dismiss this gunner back to standby */
-            log_info("🚫 Evicting NPC %u from cannon %u (assigned to player group %d)",
-                     npc->id, cid, group_index);
-            dismount_npc(npc, ship);
-            npc->target_local_x = npc->idle_local_x;
-            npc->target_local_y = npc->idle_local_y;
-            npc->state          = WORLD_NPC_STATE_MOVING;
-        }
-    }
+    if (ship) assign_weapon_group_crew(ship);
 
     log_info("🎯 Player %u group %d → mode=%d cannons=%d target=%u",
              player->player_id, group_index, mode, group->cannon_count, group->target_ship_id);
@@ -6361,6 +6412,12 @@ void websocket_server_tick(float dt) {
     // ===== TICK NPC AGENTS =====
     tick_npc_agents(dt);
     tick_world_npcs(dt);
+
+    // ===== ASSIGN CREW TO WEAPON-GROUP CANNONS =====
+    // Ensure every active (non-haltfire) group cannon has at least one NPC gunner.
+    for (int s = 0; s < ship_count; s++) {
+        if (ships[s].active) assign_weapon_group_crew(&ships[s]);
+    }
 
     // ===== TICK PLAYER WEAPON GROUPS (TARGETFIRE auto-aim) =====
     tick_player_weapon_groups();
