@@ -98,6 +98,10 @@ export class InputManager {
   public onUIRightClick: ((x: number, y: number) => boolean) | null = null;
   /** Right-click on world while on helm in targetfire mode — world position to lock onto. */
   public onGroupTarget: ((worldPos: Vec2) => void) | null = null;
+  /** Called when right-click aiming begins (right mouse pressed, not consumed by UI or targetfire). */
+  public onAimStart: (() => void) | null = null;
+  /** Called when right-click aiming ends (right mouse released). */
+  public onAimEnd: (() => void) | null = null;
 
   // UI click intercept — return true to consume the click before game logic runs
   public onUIClick: ((x: number, y: number) => boolean) | null = null;
@@ -1082,6 +1086,7 @@ export class InputManager {
           return;
         }
         this.inputState.rightMouseDown = true;
+        if (this.onAimStart) this.onAimStart();
         // Aiming will be handled in update() while right mouse is held
       }
     }
@@ -1095,6 +1100,7 @@ export class InputManager {
       this.inputState.leftMouseReleased = true;
     } else if (event.button === 2) { // Right mouse button
       this.inputState.rightMouseDown = false;
+      if (this.onAimEnd) this.onAimEnd();
     }
   }
   

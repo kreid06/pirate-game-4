@@ -99,6 +99,8 @@ export class ClientApplication {
   private controlGroups: Map<number, WeaponGroupState> = new Map(
     Array.from({ length: 10 }, (_, i) => [i, { cannonIds: [], mode: 'haltfire' as WeaponGroupMode, targetId: -1 }])
   );
+  /** Mode the active group was in before a right-click-hold temporarily switched it to 'aiming'. */
+  private _aimOverridePrevMode: WeaponGroupMode | null = null;
   // Optimistic modules placed locally, keyed by ship ID, with expiry timestamp.
   // Overlaid on top of worldToRender every frame so they appear in online mode.
   private localPendingModules = new Map<number, { module: ShipModule; expiry: number }[]>();
@@ -657,6 +659,30 @@ export class ClientApplication {
       this.inputManager.onWeaponGroupSelect = (group: number) => {
         const state = this.controlGroups.get(group);
         this.inputManager.activeGroupMode = state?.mode ?? 'haltfire';
+      };
+
+      // Right-click hold → temporarily enter 'aiming' mode so cannons track the mouse.
+      // On release, revert to whatever mode the group had before (e.g. 'haltfire').
+      this.inputManager.onAimStart = () => {
+        const group = this.inputManager.activeWeaponGroup;
+        if (group < 0) return;
+        const state = this.controlGroups.get(group);
+        // Don't override targetfire — it has its own right-click semantics.
+        if (!state || state.mode === 'targetfire' || state.mode === 'aiming') return;
+        this._aimOverridePrevMode = state.mode;
+        state.mode = 'aiming';
+        this.inputManager.activeGroupMode = 'aiming';
+        this.networkManager.sendCannonGroupConfig(group, 'aiming', state.cannonIds, state.targetId > 0 ? state.targetId : 0);
+      };
+      this.inputManager.onAimEnd = () => {
+        const group = this.inputManager.activeWeaponGroup;
+        if (group < 0 || this._aimOverridePrevMode === null) return;
+        const state = this.controlGroups.get(group);
+        if (!state) { this._aimOverridePrevMode = null; return; }
+        state.mode = this._aimOverridePrevMode;
+        this.inputManager.activeGroupMode = this._aimOverridePrevMode;
+        this.networkManager.sendCannonGroupConfig(group, this._aimOverridePrevMode, state.cannonIds, state.targetId > 0 ? state.targetId : 0);
+        this._aimOverridePrevMode = null;
       };
 
       // Right-click on world while on helm = lock target for the active weapon group
