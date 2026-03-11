@@ -2001,6 +2001,29 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
     //          sorted_ids[0], sorted_diff[0] * 180.0f / (float)M_PI);
 }
 
+/* ── NPC global levelling constants ───────────────────────────────────────── */
+/* Max global level: 1 base + 65 upgrades */
+#define NPC_MAX_LEVEL       66u
+/* XP needed to advance from level L to L+1: NPC_LEVEL_XP_BASE * L */
+#define NPC_LEVEL_XP_BASE  100u
+
+/*
+ * Grant XP to a crew NPC and apply any level-ups.
+ * Stops accumulating XP once NPC_MAX_LEVEL is reached.
+ * Each level-up gives 1 stat point (= npc_level - 1 - total_stats_spent).
+ */
+static void npc_apply_xp(WorldNpc* npc, uint32_t xp_gain) {
+    if (npc->npc_level >= NPC_MAX_LEVEL) return; /* already max level — no more XP */
+    npc->xp += xp_gain;
+    /* Process level-ups: cost to advance from L to L+1 is NPC_LEVEL_XP_BASE * L */
+    while (npc->npc_level < NPC_MAX_LEVEL) {
+        uint32_t cost = NPC_LEVEL_XP_BASE * (uint32_t)npc->npc_level;
+        if (npc->xp < cost) break;
+        npc->xp -= cost;
+        npc->npc_level++;
+    }
+}
+
 /**
  * Tick world NPCs: animate movement across deck, then update world positions.
  */
@@ -2278,6 +2301,8 @@ static void tick_world_npcs(float dt) {
             if (!still_working) {
                 log_info("✅ NPC %u (%s) finished with module %u",
                          npc->id, npc->name, npc->assigned_cannon_id);
+                /* Award XP for completing a repair */
+                npc_apply_xp(npc, 25);
                 npc->assigned_cannon_id = 0;
                 // Fall through to the IDLE scan below so the NPC goes directly to
                 // the next damaged/missing module without returning home first.
@@ -6104,10 +6129,12 @@ int websocket_server_update(struct Sim* sim) {
                             handled = true;
 
                         } else if (strstr(payload, "\"type\":\"upgrade_crew_stat\"")) {
-                            // UPGRADE CREW STAT: spend NPC XP to level one stat.
+                            // UPGRADE CREW STAT: spend an earned stat point to level one stat.
                             // {"type":"upgrade_crew_stat","npcId":N,"stat":"health"}
                             // Stats: health | damage | stamina | weight
-                            // Cost: (current_stat_level + 1) * 50 XP;  max 5 per stat.
+                            // Cost: 1 stat point (earned per global level-up, no XP deducted).
+                            // Stat points available = (npc_level - 1) - total_stats_spent.
+                            // No per-stat cap — all 65 points can go into any one stat.
                             uint32_t uc_npc_id = 0;
                             char uc_stat[32] = "";
                             char* p3;
@@ -6131,50 +6158,40 @@ int websocket_server_update(struct Sim* sim) {
 
                                 if (!stat_ptr) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"unknown_stat\"}");
-                                } else if (*stat_ptr >= 5) {
-                                    strcpy(response, "{\"type\":\"error\",\"message\":\"stat_maxed\"}");
                                 } else {
-                                    uint32_t cost = (uint32_t)(*stat_ptr + 1) * 50;
-                                    if (uc_npc->xp < cost) {
+                                    /* Stat points available = levels earned - points already spent */
+                                    uint8_t total_spent = (uint8_t)(
+                                        uc_npc->stat_health + uc_npc->stat_damage +
+                                        uc_npc->stat_stamina + uc_npc->stat_weight);
+                                    uint8_t points_earned = (uint8_t)(uc_npc->npc_level - 1);
+                                    if (total_spent >= points_earned) {
                                         snprintf(response, sizeof(response),
-                                            "{\"type\":\"error\",\"message\":\"insufficient_xp\","
-                                            "\"xp\":%u,\"cost\":%u}", uc_npc->xp, cost);
+                                            "{\"type\":\"error\",\"message\":\"no_stat_points\","
+                                            "\"npcLevel\":%u,\"pointsEarned\":%u,\"pointsSpent\":%u}",
+                                            uc_npc->npc_level, points_earned, total_spent);
                                     } else {
-                                        uc_npc->xp -= cost;
                                         (*stat_ptr)++;
                                         /* Recalculate derived stats */
                                         uint16_t new_max = (uint16_t)(100 + uc_npc->stat_health * 20);
                                         if (new_max > uc_npc->max_health)
                                             uc_npc->health += (new_max - uc_npc->max_health);
                                         uc_npc->max_health = new_max;
-                                        /* Level up check: threshold = npc_level * 100 cumulative */
-                                        static const uint32_t XP_THRESHOLDS[10] = {
-                                            0,100,300,600,1000,1500,2100,2800,3600,4500
-                                        };
-                                        uint32_t total_xp_spent = 0;
-                                        for (int si = 0; si < (int)uc_npc->stat_health;  si++) total_xp_spent += (uint32_t)(si+1)*50;
-                                        for (int si = 0; si < (int)uc_npc->stat_damage;  si++) total_xp_spent += (uint32_t)(si+1)*50;
-                                        for (int si = 0; si < (int)uc_npc->stat_stamina; si++) total_xp_spent += (uint32_t)(si+1)*50;
-                                        for (int si = 0; si < (int)uc_npc->stat_weight;  si++) total_xp_spent += (uint32_t)(si+1)*50;
-                                        uint8_t new_level = 1;
-                                        for (int li = 9; li >= 1; li--) {
-                                            if (uc_npc->xp + total_xp_spent >= XP_THRESHOLDS[li]) {
-                                                new_level = (uint8_t)(li + 1); break;
-                                            }
-                                        }
-                                        if (new_level > uc_npc->npc_level) uc_npc->npc_level = new_level;
-                                        log_info("👤 NPC %u '%s' upgraded %s → %u (xp remaining: %u)",
-                                                 uc_npc->id, uc_npc->name, uc_stat, *stat_ptr, uc_npc->xp);
+                                        uint8_t stat_points_left = (uint8_t)(points_earned - (total_spent + 1));
+                                        log_info("👤 NPC %u '%s' upgraded %s → %u (level %u, %u stat points left)",
+                                                 uc_npc->id, uc_npc->name, uc_stat, *stat_ptr,
+                                                 uc_npc->npc_level, stat_points_left);
                                         /* Broadcast NPC_STAT_UP */
                                         char su_msg[256];
                                         snprintf(su_msg, sizeof(su_msg),
                                             "{\"type\":\"NPC_STAT_UP\",\"npcId\":%u,\"stat\":\"%s\","
                                             "\"level\":%u,\"xp\":%u,\"maxHealth\":%u,\"npcLevel\":%u,"
-                                            "\"statHealth\":%u,\"statDamage\":%u,\"statStamina\":%u,\"statWeight\":%u}",
+                                            "\"statHealth\":%u,\"statDamage\":%u,\"statStamina\":%u,\"statWeight\":%u,"
+                                            "\"statPoints\":%u}",
                                             uc_npc->id, uc_stat, *stat_ptr, uc_npc->xp,
                                             uc_npc->max_health, uc_npc->npc_level,
                                             uc_npc->stat_health, uc_npc->stat_damage,
-                                            uc_npc->stat_stamina, uc_npc->stat_weight);
+                                            uc_npc->stat_stamina, uc_npc->stat_weight,
+                                            stat_points_left);
                                         uint8_t su_frame[512];
                                         size_t su_flen = websocket_create_frame(WS_OPCODE_TEXT,
                                             su_msg, strlen(su_msg), (char*)su_frame, sizeof(su_frame));
@@ -6187,8 +6204,8 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                         snprintf(response, sizeof(response),
                                             "{\"type\":\"message_ack\",\"status\":\"stat_upgraded\","
-                                            "\"stat\":\"%s\",\"level\":%u,\"xp\":%u}",
-                                            uc_stat, *stat_ptr, uc_npc->xp);
+                                            "\"stat\":\"%s\",\"level\":%u,\"statPoints\":%u}",
+                                            uc_stat, *stat_ptr, stat_points_left);
                                     }
                                 }
                             }
@@ -6710,7 +6727,7 @@ int websocket_server_update(struct Sim* sim) {
         projectiles_offset += snprintf(projectiles_json + projectiles_offset, sizeof(projectiles_json) - projectiles_offset, "]");
 
         // Build world NPCs JSON array
-        char npcs_json[4096];
+        char npcs_json[32768]; /* 64 NPCs × ~350 bytes/NPC — must be large enough */
         int npcs_offset = 0;
         npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "[");
         bool first_npc = true;
@@ -6726,14 +6743,17 @@ int websocket_server_update(struct Sim* sim) {
                 "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u,"
                 "\"assigned_cannon_id\":%u,"
                 "\"npc_level\":%u,\"health\":%u,\"max_health\":%u,\"xp\":%u,"
-                "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u}",
+                "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
+                "\"stat_points\":%u}",
                 npc->id, npc->name,
                 npc->x, npc->y, npc->rotation,
                 npc->ship_id, npc->local_x, npc->local_y,
                 npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id,
                 npc->assigned_cannon_id,
                 (unsigned)npc->npc_level, (unsigned)npc->health, (unsigned)npc->max_health, npc->xp,
-                (unsigned)npc->stat_health, (unsigned)npc->stat_damage, (unsigned)npc->stat_stamina, (unsigned)npc->stat_weight);
+                (unsigned)npc->stat_health, (unsigned)npc->stat_damage, (unsigned)npc->stat_stamina, (unsigned)npc->stat_weight,
+                (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
+                    (npc->stat_health + npc->stat_damage + npc->stat_stamina + npc->stat_weight)));
             first_npc = false;
         }
         npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "]");
@@ -7126,6 +7146,18 @@ void websocket_server_tick(float dt) {
                         "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                }
+            }
+
+            /* Award combat XP to NPC gunners on the shooter ship */
+            if (ev->shooter_ship_id != 0 && ev->shooter_ship_id != ev->ship_id) {
+                uint32_t xp_gain = 10 + (uint32_t)(ev->damage_dealt / 10.0f);
+                for (int ni = 0; ni < world_npc_count; ni++) {
+                    WorldNpc* gnpc = &world_npcs[ni];
+                    if (gnpc->active && gnpc->role == NPC_ROLE_GUNNER &&
+                        gnpc->ship_id == ev->shooter_ship_id) {
+                        npc_apply_xp(gnpc, xp_gain);
+                    }
                 }
             }
 

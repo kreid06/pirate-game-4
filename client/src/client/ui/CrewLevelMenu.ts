@@ -6,18 +6,20 @@
  *  • Clicking an NPC sprite in the world (same or allied company)
  *  • Clicking an NPC row in the Ship Menu crew section
  *
- * Stats (upgradeable with NPC XP):
+ * Stats (upgradeable with stat points earned per global level-up):
  *   Health  — +20 max HP per level
  *   Damage  — +10% weapon damage per level
  *   Stamina — +10% reload / work speed per level
  *   Weight  — +10% carry capacity per level
  *
- * Each stat has 5 upgrade levels.  Upgrade cost: (current_level + 1) × 50 XP.
+ * Global level: 1–66 (1 base + 65 upgrades).
+ * Each level-up grants 1 stat point.  XP cost: 100 × current-level to advance.
+ * No per-stat cap — all points can go into any stat.
  */
 
 import { Npc } from '../../sim/Types.js';
-
-// ── Layout constants ──────────────────────────────────────────────────────────
+// Max global NPC level
+const NPC_MAX_LEVEL = 66;
 const PANEL_W  = 360;
 const PAD      = 16;
 const HEADER_H = 44;
@@ -152,8 +154,9 @@ export class CrewLevelMenu {
     };
 
     const hpPct    = npc.maxHealth > 0 ? npc.health / npc.maxHealth : 1;
-    const xpToNext = npc.npcLevel * 100;
-    const xpPct    = Math.min(npc.xp / xpToNext, 1);
+    const isMaxLevel = npc.npcLevel >= NPC_MAX_LEVEL;
+    const xpToNext = isMaxLevel ? NPC_MAX_LEVEL * 100 : npc.npcLevel * 100;
+    const xpPct    = isMaxLevel ? 1 : Math.min(npc.xp / xpToNext, 1);
 
     // Panel height: header section + stats section + footer
     const HEADER_SECTION_H = HEADER_H + 2 + 20 + BAR_H + 6 + 16 + BAR_H + 6 + PAD; // ~120
@@ -190,7 +193,7 @@ export class CrewLevelMenu {
     ctx.fillStyle = TEXT_H;
     ctx.fillText(npc.name, px + PAD, cy);
 
-    const badge = `Lv. ${npc.npcLevel}`;
+    const badge = `Lv. ${npc.npcLevel}${npc.npcLevel >= NPC_MAX_LEVEL ? ' MAX' : ''}`;
     ctx.font      = 'bold 13px Consolas, monospace';
     ctx.textAlign = 'right';
     ctx.fillStyle = GOLD;
@@ -230,11 +233,25 @@ export class CrewLevelMenu {
     // ── XP bar ───────────────────────────────────────────────────────────────
     ctx.font      = '12px Consolas, monospace';
     ctx.fillStyle = TEXT_M;
-    ctx.fillText(`XP  ${npc.xp} / ${xpToNext}`, px + PAD, cy);
+    if (isMaxLevel) {
+      ctx.fillText(`XP  MAX LEVEL`, px + PAD, cy);
+    } else {
+      ctx.fillText(`XP  ${npc.xp} / ${xpToNext}  (next level)`, px + PAD, cy);
+    }
     cy += 16;
 
     this._drawBar(ctx, px + PAD, cy, PW - PAD * 2, BAR_H, xpPct, BLUE_XP, '#1a2040');
     cy += BAR_H + 10;
+
+    // ── Stat points available ─────────────────────────────────────────────────
+    const statPointsLeft = npc.statPoints ?? 0;
+    if (statPointsLeft > 0) {
+      ctx.font      = 'bold 12px Consolas, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = GOLD;
+      ctx.fillText(`★ ${statPointsLeft} stat point${statPointsLeft !== 1 ? 's' : ''} available`, px + PW / 2, cy);
+      cy += 18;
+    }
 
     // ── Section divider ───────────────────────────────────────────────────────
     ctx.strokeStyle = HDR_LINE;
@@ -247,9 +264,7 @@ export class CrewLevelMenu {
     // ── Stat rows ─────────────────────────────────────────────────────────────
     for (const stat of STATS) {
       const statLvl  = npc[stat.key] as number;
-      const cost     = (statLvl + 1) * 50;
-      const maxed    = statLvl >= 5;
-      const afford   = !maxed && npc.xp >= cost;
+      const afford   = statPointsLeft > 0;
 
       // Row background stripe
       ctx.fillStyle = 'rgba(255,255,255,0.03)';
@@ -262,20 +277,11 @@ export class CrewLevelMenu {
       ctx.fillStyle = stat.color;
       ctx.fillText(stat.label, px + PAD, cy + 14);
 
-      // Filled dot level indicators (5 dots)
-      const dotR = 5;
-      const dotGap = 14;
-      const dotsX = px + 100;
-      for (let d = 0; d < 5; d++) {
-        const filled = d < statLvl;
-        ctx.beginPath();
-        ctx.arc(dotsX + d * dotGap, cy + 14, dotR, 0, Math.PI * 2);
-        ctx.fillStyle   = filled ? stat.color : '#2a2a3a';
-        ctx.strokeStyle = filled ? stat.color : '#445';
-        ctx.lineWidth   = 1;
-        ctx.fill();
-        ctx.stroke();
-      }
+      // Level number indicator
+      ctx.font      = 'bold 12px Consolas, monospace';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = statLvl > 0 ? stat.color : TEXT_DIM;
+      ctx.fillText(`${statLvl}`, px + 90, cy + 14);
 
       // Effect description
       ctx.font         = '11px Consolas, monospace';
@@ -290,28 +296,22 @@ export class CrewLevelMenu {
       const btnX = px + PW - PAD - btnW;
       const btnY = cy + (ROW_H - 4 - btnH) / 2;
 
-      if (maxed) {
-        ctx.font      = '11px Consolas, monospace';
-        ctx.textAlign = 'center';
-        ctx.fillStyle = TEXT_DIM;
-        ctx.textBaseline = 'middle';
-        ctx.fillText('MAXED', btnX + btnW / 2, btnY + btnH / 2);
-      } else {
-        ctx.fillStyle   = afford ? BTN_AFD    : BTN_NOT;
-        ctx.strokeStyle = afford ? BTN_AFD_BORDER : BTN_NOT_BORDER;
-        ctx.lineWidth   = 1;
-        ctx.beginPath();
-        ctx.roundRect(btnX, btnY, btnW, btnH, 3);
-        ctx.fill();
-        ctx.stroke();
+      ctx.fillStyle   = afford ? BTN_AFD    : BTN_NOT;
+      ctx.strokeStyle = afford ? BTN_AFD_BORDER : BTN_NOT_BORDER;
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.roundRect(btnX, btnY, btnW, btnH, 3);
+      ctx.fill();
+      ctx.stroke();
 
-        ctx.font         = 'bold 11px Consolas, monospace';
-        ctx.textAlign    = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle    = afford ? BTN_TXT_AFD : BTN_TXT_NOT;
-        ctx.fillText(`${cost} XP`, btnX + btnW / 2, btnY + btnH / 2);
+      ctx.font         = 'bold 11px Consolas, monospace';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = afford ? BTN_TXT_AFD : BTN_TXT_NOT;
+      ctx.fillText(afford ? '+1 Point' : 'No Points', btnX + btnW / 2, btnY + btnH / 2);
 
-        this._btnHits.push({ serverKey: stat.server, x: btnX, y: btnY, w: btnW, h: btnH, affordable: afford });
+      if (afford) {
+        this._btnHits.push({ serverKey: stat.server, x: btnX, y: btnY, w: btnW, h: btnH, affordable: true });
       }
 
       cy += ROW_H;

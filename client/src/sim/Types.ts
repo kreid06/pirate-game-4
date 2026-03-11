@@ -200,14 +200,15 @@ export interface Npc {
   assignedCannonId: number; // Module ID of cannon/mast this NPC is stationed at (0 if none)
 
   // Crew levelling
-  npcLevel: number;       // 1–10
+  npcLevel: number;       // 1–66 (1 base + 65 upgrades)
   health: number;         // current HP
   maxHealth: number;      // max HP (base 100 + statHealth * 20)
-  xp: number;             // accumulated XP
-  statHealth: number;     // 0–5 upgrade levels (+20 max HP each)
-  statDamage: number;     // 0–5 (+10% damage each)
-  statStamina: number;    // 0–5 (+10% reload/work speed each)
-  statWeight: number;     // 0–5 (+10% carry capacity each)
+  xp: number;             // XP progress toward next global level
+  statHealth: number;     // upgrade levels, no individual cap (+20 max HP each)
+  statDamage: number;     // upgrade levels (+10% damage each)
+  statStamina: number;    // upgrade levels (+10% reload/work speed each)
+  statWeight: number;     // upgrade levels (+10% carry capacity each)
+  statPoints: number;     // unspent stat points = (npcLevel - 1) - total spent
 }
 
 /**

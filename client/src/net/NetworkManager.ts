@@ -428,7 +428,8 @@ export class NetworkManager {
   /** Fired when the server confirms an NPC stat upgrade. */
   public onNpcStatUp: ((npcId: number, stat: string, statLevel: number, xp: number,
     maxHealth: number, npcLevel: number,
-    statHealth: number, statDamage: number, statStamina: number, statWeight: number) => void) | null = null;
+    statHealth: number, statDamage: number, statStamina: number, statWeight: number,
+    statPoints: number) => void) | null = null;
   /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
   public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
   /** Fired when the server confirms the player has boarded a ship (via ladder). */
@@ -1483,6 +1484,7 @@ export class NetworkManager {
             statDamage:  n.stat_damage  ?? 0,
             statStamina: n.stat_stamina ?? 0,
             statWeight:  n.stat_weight  ?? 0,
+            statPoints:  n.stat_points  ?? 0,
           })),
           carrierDetection: new Map() // Will be populated as needed
         };
@@ -1548,6 +1550,7 @@ export class NetworkManager {
           message.npcId, message.stat, message.level, message.xp,
           message.maxHealth, message.npcLevel,
           message.statHealth, message.statDamage, message.statStamina, message.statWeight,
+          message.statPoints ?? 0,
         );
         break;
       }

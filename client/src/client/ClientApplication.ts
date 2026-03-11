@@ -862,7 +862,7 @@ export class ClientApplication {
 
       // Handle NPC_STAT_UP broadcast: refresh world-state NPC fields
       this.networkManager.onNpcStatUp = (npcId, _stat, _statLevel, xp,
-          maxHealth, npcLevel, statHealth, statDamage, statStamina, statWeight) => {
+          maxHealth, npcLevel, statHealth, statDamage, statStamina, statWeight, statPoints) => {
         for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
           if (!ws) continue;
           const npc = ws.npcs.find(n => n.id === npcId);
@@ -874,6 +874,7 @@ export class ClientApplication {
           npc.statDamage  = statDamage;
           npc.statStamina = statStamina;
           npc.statWeight  = statWeight;
+          npc.statPoints  = statPoints;
         }
       };
 
