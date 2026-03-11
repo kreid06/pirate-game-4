@@ -2118,6 +2118,35 @@ static void tick_world_npcs(float dt) {
                     npc->state = (npc->role == NPC_ROLE_REPAIRER)
                                ? WORLD_NPC_STATE_REPAIRING
                                : WORLD_NPC_STATE_AT_CANNON;
+
+                    /* Rigger just arrived at mast — immediately apply current sail angle/openness
+                     * so the sail snaps to the correct position without waiting for the next
+                     * sail-angle update message from the helm player. */
+                    if (npc->role == NPC_ROLE_RIGGER) {
+                        SimpleShip* rship = find_ship(npc->ship_id);
+                        if (rship) {
+                            ShipModule* mast = find_module_by_id(rship, npc->assigned_cannon_id);
+                            if (mast && mast->type_id == MODULE_TYPE_MAST) {
+                                uint8_t tgt_open = rship->desired_sail_openness;
+                                mast->data.mast.openness = tgt_open;
+                                if (tgt_open > 0) mast->state_bits |=  MODULE_STATE_DEPLOYED;
+                                else              mast->state_bits &= ~MODULE_STATE_DEPLOYED;
+                                mast->data.mast.angle = Q16_FROM_FLOAT(rship->desired_sail_angle);
+                                if (global_sim) {
+                                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                        if (global_sim->ships[si].id != rship->ship_id) continue;
+                                        for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
+                                            if (global_sim->ships[si].modules[mi].id == mast->id) {
+                                                global_sim->ships[si].modules[mi].data.mast.angle = mast->data.mast.angle;
+                                                break;
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } else {
                     npc->state = WORLD_NPC_STATE_IDLE;
                 }
@@ -3887,7 +3916,7 @@ static void tick_sinking_ships(void) {
         snprintf(msg, sizeof(msg),
             "{\"type\":\"SHIP_SINK\",\"shipId\":%u,\"x\":%.1f,\"y\":%.1f}",
             sunk_id, SERVER_TO_CLIENT(CLIENT_TO_SERVER(wx)), SERVER_TO_CLIENT(CLIENT_TO_SERVER(wy)));
-        broadcast_message(msg);
+        websocket_server_broadcast(msg);
         log_info("⚓ Ship %u fully despawned after sinking", sunk_id);
     }
 }
@@ -6863,7 +6892,7 @@ void websocket_server_tick(float dt) {
                         "{\"type\":\"SHIP_SINKING\",\"shipId\":%u,\"x\":%.1f,\"y\":%.1f}",
                         sunk_id,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
-                    broadcast_message(sink_msg);
+                    websocket_server_broadcast(sink_msg);
                     log_info("🌊 Ship %u entering sinking state", sunk_id);
                 }
                 /* Skip building the broadcast msg for this event — no module_id / damage info */
