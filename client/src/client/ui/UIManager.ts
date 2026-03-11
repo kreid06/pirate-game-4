@@ -260,8 +260,8 @@ export class UIManager {
     // Always render FPS in top-right corner
     this.renderFPS(ctx, context);
 
-    // Ammo selector widget — only when mounted to a cannon
-    if (context.mountKind === 'cannon') {
+    // Ammo selector widget — show when mounted to a cannon or the helm
+    if (context.mountKind === 'cannon' || context.mountKind === 'helm') {
       this.renderAmmoSelector(ctx, context.selectedAmmoType ?? 0, context.pendingAmmoType ?? context.selectedAmmoType ?? 0);
     }
 
