@@ -3139,6 +3139,23 @@ export class RenderSystem {
       this.ctx.fillRect(screenPos.x - tw / 2 - 3, nameY - fontSize, tw + 6, fontSize + 2);
       this.ctx.fillStyle = '#ffe066';
       this.ctx.fillText(npc.name, screenPos.x, nameY);
+
+      // Debug: show assigned cannon/module ID and state below name
+      if (npc.assignedCannonId || npc.state !== 0) {
+        const STATE_SHORT: Record<number, string> = { 0: 'IDL', 1: 'MOV', 2: 'MAN', 3: 'REP' };
+        const ROLE_SHORT: Record<number, string> = { 0: '-', 1: 'G', 2: 'H', 3: 'R', 4: 'P' };
+        const debugLabel = `${ROLE_SHORT[npc.role] ?? '?'}:${STATE_SHORT[npc.state] ?? '?'}`
+          + (npc.assignedCannonId ? ` c${npc.assignedCannonId}` : '');
+        const debugFontSize = Math.max(8, Math.min(11, 10 * cameraState.zoom));
+        this.ctx.font = `${debugFontSize}px monospace`;
+        const dtw = this.ctx.measureText(debugLabel).width;
+        const debugY = screenPos.y + radius + debugFontSize + 2;
+        this.ctx.textBaseline = 'bottom';
+        this.ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        this.ctx.fillRect(screenPos.x - dtw / 2 - 2, debugY - debugFontSize, dtw + 4, debugFontSize + 2);
+        this.ctx.fillStyle = '#aaddff';
+        this.ctx.fillText(debugLabel, screenPos.x, debugY);
+      }
     }
   }
 
@@ -3336,14 +3353,18 @@ export class RenderSystem {
       0: 'Idle', 1: 'Moving', 2: 'At Cannon', 3: 'Repairing',
     };
     const companyStr = COMPANY_NAMES[npc.companyId] ?? `ID ${npc.companyId}`;
+    const taskStr = this.npcTaskMap.get(npc.id) ?? 'Idle';
     const lines: string[] = [
       npc.name,
       `ID: ${npc.id}`,
       `Company: ${companyStr} (${npc.companyId})`,
       `Role: ${ROLE_NAMES[npc.role] ?? npc.role}`,
       `State: ${STATE_NAMES[npc.state] ?? npc.state}`,
+      `Task: ${taskStr}`,
     ];
+    if (npc.assignedCannonId) lines.push(`Cannon: ${npc.assignedCannonId}`);
     if (npc.shipId) lines.push(`Ship: ${npc.shipId}`);
+    if (npc.localPosition) lines.push(`Local: (${npc.localPosition.x.toFixed(0)}, ${npc.localPosition.y.toFixed(0)})`);
 
     const screenPos = camera.worldToScreen(this.mouseWorldPos);
     const padding = 10;

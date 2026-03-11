@@ -1531,8 +1531,7 @@ static void tick_npc_agents(float dt) {
                     if (grp) {
                         if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   break; /* suppressed */
                         if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE)  break; /* aim owned by tick_player_weapon_groups */
-                        if (grp->mode == WEAPON_GROUP_MODE_AIMING)      break; /* player's manual aim owns this cannon */
-                        /* FREEFIRE: NPC follows ship aim angle normally */
+                        /* AIMING / FREEFIRE: NPC follows ship aim angle normally */
                     }
                 }
 
@@ -1722,6 +1721,16 @@ static void dispatch_gunner_to_cannon(WorldNpc* npc, SimpleShip* ship,
     npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->state              = WORLD_NPC_STATE_MOVING;
+
+    /* Keep the corresponding NpcAgent's module_id in sync so that
+     * tick_npc_agents can find and aim the correct cannon after dispatch. */
+    for (int ai = 0; ai < npc_count; ai++) {
+        if (npc_agents[ai].active && npc_agents[ai].npc_id == npc->id &&
+            npc_agents[ai].ship_id == npc->ship_id) {
+            npc_agents[ai].module_id = cannon_id;
+            break;
+        }
+    }
     // log_info("🔫 NPC %u (%s) → cannon %u (%.0f° off aim)",
     //          npc->id, npc->name, cannon_id, abs_diff_deg);
 }
@@ -1754,6 +1763,15 @@ static void tick_cannon_needed_expiry(void) {
             ShipModule* mod = &ship->modules[m];
             if (mod->type_id != MODULE_TYPE_CANNON) continue;
             if (!(mod->state_bits & MODULE_STATE_NEEDED)) continue;
+
+            /* Never expire NEEDED on cannons whose weapon group is actively
+             * AIMING.  The player explicitly selected this group; crew must
+             * remain until the group reverts to HALTFIRE (which clears NEEDED
+             * immediately in handle_cannon_group_config). */
+            {
+                WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, mod->id);
+                if (grp && grp->mode == WEAPON_GROUP_MODE_AIMING) continue;
+            }
 
             uint32_t last_aim = ship->cannon_last_needed_ms[m];
             if (last_aim == 0) {
@@ -2465,6 +2483,32 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
         }
     }
 
+    /* When a group enters AIMING mode, set NEEDED on ALL cannons in this group
+     * so that NPCs are dispatched to them immediately.  This is critical for
+     * multi-group selection: the player may have selected port+starboard but
+     * the aim angle only covers one side, so handle_cannon_aim's sector check
+     * would never set NEEDED on the opposite side.  Setting it here ensures
+     * NPCs walk to all group cannons as soon as aiming begins.
+     *
+     * Once NPCs are in place, the cannon can aim and fire.  When aiming stops
+     * (group reverts to HALTFIRE), NEEDED is cleared above and NPCs stay put
+     * unless pulled to another NEEDED cannon. */
+    if (mode == WEAPON_GROUP_MODE_AIMING) {
+        uint32_t now = get_time_ms();
+        for (int ci = 0; ci < group->cannon_count; ci++) {
+            ShipModule* mod = find_module_on_ship(ship, group->cannon_ids[ci]);
+            if (mod) {
+                mod->state_bits |= MODULE_STATE_NEEDED;
+                for (int mi = 0; mi < ship->module_count; mi++) {
+                    if (ship->modules[mi].id == group->cannon_ids[ci]) {
+                        ship->cannon_last_needed_ms[mi] = now;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     assign_weapon_group_crew(ship);
 
     /* When a group switches to AIMING, immediately re-evaluate NPC routing.
@@ -2677,7 +2721,12 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                  * lateral limits (±CANNON_AIM_RANGE from its fire direction).
                  * This applies to ALL cannons — grouped or ungrouped.
                  * NEEDED is sticky: once set it stays for CANNON_NEEDED_TIMEOUT_MS
-                 * after the last in-sector aim or fire event. */
+                 * after the last in-sector aim or fire event.
+                 *
+                 * NEEDED controls NPC dispatch only — it does NOT gate aim
+                 * propagation (Pass 2 handles that separately).  This keeps
+                 * NPC movement efficient: crew only walks to cannons the
+                 * player is actually pointing at. */
                 float fire_dir = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
                 float diff = aim_angle - fire_dir;
                 while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
@@ -2688,7 +2737,6 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                     ShipModule* smod = find_module_on_ship(ship, cannon->id);
                     if (smod) {
                         smod->state_bits |= MODULE_STATE_NEEDED;
-                        /* Refresh the activity timestamp so the timeout resets */
                         uint32_t now = get_time_ms();
                         for (int mi = 0; mi < ship->module_count; mi++) {
                             if (ship->modules[mi].id == cannon->id) {
@@ -2721,11 +2769,11 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
          *   - If player_has_groups → cannon is outside all groups; skip it.
          *   - If !player_has_groups → legacy path; propagate normally.
          * ──────────────────────────────────────────────────────────────────── */
+        bool in_active_pass2 = false;
         if (grp) {
             /* If this cannon's group is in the active list from the aim
              * message, allow aim propagation regardless of stored mode
              * (fixes race between cannon_group_config and cannon_aim). */
-            bool in_active_pass2 = false;
             for (int ag = 0; ag < active_group_count && !in_active_pass2; ag++) {
                 uint32_t tg = active_group_indices[ag];
                 if (tg >= MAX_WEAPON_GROUPS) continue;
@@ -2742,7 +2790,8 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             continue; /* ungrouped cannon in group mode — already handled in pass 1 */
         }
 
-        // Only move a cannon if it is occupied (player or WorldNpc gunner AT_CANNON).
+        // Only move a cannon if it is occupied (player mounted or WorldNpc AT_CANNON).
+        // Cannons cannot aim without crew present.
         bool cannon_has_occupant = (cannon->state_bits & MODULE_STATE_OCCUPIED) != 0;
         if (!cannon_has_occupant) {
             for (int ni = 0; ni < world_npc_count; ni++) {
