@@ -3554,8 +3554,12 @@ export class RenderSystem {
     }
   }
 
+  /** Returns the NPC currently under the cursor (null if none). */
+  getHoveredNpc(): Npc | null { return this.hoveredNpc; }
+
   /**
    * Draw hover tooltip for a hovered NPC.
+   * Shows: name + level, role/state, HP bar (always), XP bar (same company only).
    */
   private drawNpcTooltip(camera: Camera): void {
     if (!this.hoveredNpc || !this.mouseWorldPos) return;
@@ -3563,59 +3567,95 @@ export class RenderSystem {
     if (this.hoveredModule) return;
 
     const npc = this.hoveredNpc;
-    const COMPANY_NAMES: Record<number, string> = {
-      [COMPANY_NEUTRAL]: 'Neutral',
-      [COMPANY_PIRATES]: 'Pirates',
-      [COMPANY_NAVY]:    'Navy',
-    };
     const ROLE_NAMES: Record<number, string> = {
-      0: 'None', 1: 'Gunner', 2: 'Helmsman', 3: 'Rigger', 4: 'Repairer',
+      0: 'Sailor', 1: 'Gunner', 2: 'Helmsman', 3: 'Rigger', 4: 'Repairer',
     };
     const STATE_NAMES: Record<number, string> = {
-      0: 'Idle', 1: 'Moving', 2: 'At Cannon', 3: 'Repairing',
+      0: 'Idle', 1: 'Moving', 2: 'At Station', 3: 'Repairing',
     };
-    const companyStr = COMPANY_NAMES[npc.companyId] ?? `ID ${npc.companyId}`;
-    const taskStr = this.npcTaskMap.get(npc.id) ?? 'Idle';
-    const lines: string[] = [
-      npc.name,
-      `ID: ${npc.id}`,
-      `Company: ${companyStr} (${npc.companyId})`,
-      `Role: ${ROLE_NAMES[npc.role] ?? npc.role}`,
-      `State: ${STATE_NAMES[npc.state] ?? npc.state}`,
-      `Task: ${taskStr}`,
-    ];
-    if (npc.assignedCannonId) lines.push(`Cannon: ${npc.assignedCannonId}`);
-    if (npc.shipId) lines.push(`Ship: ${npc.shipId}`);
-    if (npc.localPosition) lines.push(`Local: (${npc.localPosition.x.toFixed(0)}, ${npc.localPosition.y.toFixed(0)})`);
+
+    const sameCompany = this._localCompanyId !== 0 && npc.companyId === this._localCompanyId;
+    const hpPct = npc.maxHealth > 0 ? npc.health / npc.maxHealth : 1;
+    const xpToNext = npc.npcLevel * 100;
+    const xpPct    = Math.min(npc.xp / xpToNext, 1);
 
     const screenPos = camera.worldToScreen(this.mouseWorldPos);
     const padding = 10;
-    const lineHeight = 18;
+    const barH    = 8;
+    const barW    = 180;
+    const lineH   = 18;
 
     this.ctx.font = '14px monospace';
     this.ctx.textAlign = 'left';
     this.ctx.textBaseline = 'top';
-    let maxWidth = 0;
-    for (const line of lines) maxWidth = Math.max(maxWidth, this.ctx.measureText(line).width);
 
-    const boxWidth  = maxWidth + padding * 2;
-    const boxHeight = lines.length * lineHeight + padding * 2;
+    const titleText = `${npc.name}  Lv.${npc.npcLevel}`;
+    const subText   = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
+    const hpText    = `HP ${npc.health}/${npc.maxHealth} (${Math.round(hpPct * 100)}%)`;
+
+    const lines = [titleText, subText, hpText];
+    let boxW = Math.max(barW + padding * 2, ...lines.map(l => this.ctx.measureText(l).width + padding * 2));
+    // height: 3 text lines + 2 bars (hp always, xp if sameCompany)
+    const barRowH = barH + 4;
+    let boxH = lines.length * lineH + barRowH + padding * 2; // hp bar
+    if (sameCompany) boxH += barRowH + lineH;                // xp label + xp bar
 
     let tx = screenPos.x + 15;
     let ty = screenPos.y + 15;
-    if (tx + boxWidth  > this.canvas.width)  tx = screenPos.x - boxWidth  - 15;
-    if (ty + boxHeight > this.canvas.height) ty = screenPos.y - boxHeight - 15;
+    if (tx + boxW > this.canvas.width)  tx = screenPos.x - boxW  - 15;
+    if (ty + boxH > this.canvas.height) ty = screenPos.y - boxH  - 15;
 
-    this.ctx.fillStyle   = 'rgba(0,0,0,0.85)';
-    this.ctx.strokeStyle = '#aac8ff';
-    this.ctx.lineWidth   = 2;
-    this.ctx.fillRect(tx, ty, boxWidth, boxHeight);
-    this.ctx.strokeRect(tx, ty, boxWidth, boxHeight);
+    // Background
+    this.ctx.fillStyle   = 'rgba(12,16,28,0.95)';
+    this.ctx.strokeStyle = '#88aaff';
+    this.ctx.lineWidth   = 1.5;
+    this.ctx.beginPath();
+    this.ctx.roundRect(tx, ty, boxW, boxH, 4);
+    this.ctx.fill();
+    this.ctx.stroke();
 
-    // Header line in yellow, rest in white
-    for (let i = 0; i < lines.length; i++) {
-      this.ctx.fillStyle = i === 0 ? '#ffe066' : '#ffffff';
-      this.ctx.fillText(lines[i], tx + padding, ty + padding + i * lineHeight);
+    let cy = ty + padding;
+
+    // Title (gold)
+    this.ctx.fillStyle = '#ffe066';
+    this.ctx.fillText(titleText, tx + padding, cy);  cy += lineH;
+
+    // Sub-line (dim)
+    this.ctx.fillStyle = '#9ab';
+    this.ctx.font = '12px monospace';
+    this.ctx.fillText(subText, tx + padding, cy);  cy += lineH;
+
+    // HP label
+    this.ctx.font = '12px monospace';
+    this.ctx.fillStyle = '#ccc';
+    this.ctx.fillText(hpText, tx + padding, cy);  cy += lineH;
+
+    // HP bar
+    const bx = tx + padding;
+    const bw = boxW - padding * 2;
+    this.ctx.fillStyle = '#333';
+    this.ctx.fillRect(bx, cy, bw, barH);
+    const hpColor = hpPct > 0.6 ? '#44cc66' : hpPct > 0.3 ? '#ffaa44' : '#ff5544';
+    this.ctx.fillStyle = hpColor;
+    this.ctx.fillRect(bx, cy, Math.round(bw * hpPct), barH);
+    this.ctx.strokeStyle = '#556';
+    this.ctx.lineWidth = 0.8;
+    this.ctx.strokeRect(bx, cy, bw, barH);
+    cy += barH + 6;
+
+    if (sameCompany) {
+      // XP label
+      this.ctx.fillStyle = '#9ab';
+      this.ctx.font = '12px monospace';
+      this.ctx.fillText(`XP ${npc.xp} / ${xpToNext}  (next level)`, tx + padding, cy);  cy += lineH;
+      // XP bar
+      this.ctx.fillStyle = '#333';
+      this.ctx.fillRect(bx, cy, bw, barH);
+      this.ctx.fillStyle = '#4488ff';
+      this.ctx.fillRect(bx, cy, Math.round(bw * xpPct), barH);
+      this.ctx.strokeStyle = '#556';
+      this.ctx.lineWidth = 0.8;
+      this.ctx.strokeRect(bx, cy, bw, barH);
     }
   }
 

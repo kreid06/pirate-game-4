@@ -15,6 +15,7 @@ import { ManningPriorityPanel } from './ManningPriorityPanel.js';
 import { CompanyMenu } from './CompanyMenu.js';
 import { PlayerMenu } from './PlayerMenu.js';
 import { ShipMenu } from './ShipMenu.js';
+import { CrewLevelMenu } from './CrewLevelMenu.js';
 
 /**
  * UI render context
@@ -80,6 +81,8 @@ export class UIManager {
   private playerMenu = new PlayerMenu();
   // Ship status menu (toggled by [F])
   private shipMenu = new ShipMenu();
+  // Crew level / upgrade panel (opened by clicking an NPC)
+  private crewMenu = new CrewLevelMenu();
 
   // UI State
   private showDebugOverlay = false;
@@ -270,6 +273,12 @@ export class UIManager {
     this.companyMenu.render(ctx, context.worldState, context.assignedPlayerId);
     this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId);
     this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
+    // Crew level menu — update live NPC data before rendering
+    if (this.crewMenu.visible && this.crewMenu.npcId) {
+      const liveNpc = context.worldState.npcs.find(n => n.id === this.crewMenu.npcId);
+      if (liveNpc) this.crewMenu.update(liveNpc);
+    }
+    this.crewMenu.render(ctx, ctx.canvas);
 
     // Explicit build mode overlay (renders on top of everything, including menus)
     if (this.buildModeState?.active) {
@@ -473,6 +482,27 @@ export class UIManager {
   }
 
   /**
+   * Set callback for NPC stat upgrades from the crew level menu.
+   * Called when the player clicks an affordable upgrade button.
+   */
+  setCrewUpgradeCallback(
+    cb: (npcId: number, stat: string) => void
+  ): void {
+    this.crewMenu.onUpgradeRequest = cb;
+    // Also wire ShipMenu NPC rows → open crew menu
+    this.shipMenu.onNpcClick = (npc) => {
+      this.crewMenu.open(npc);
+    };
+  }
+
+  /**
+   * Open the crew level menu for a specific NPC (e.g. from a world click).
+   */
+  openCrewMenuForNpc(npc: Npc): void {
+    this.crewMenu.open(npc);
+  }
+
+  /**
    * Update explicit build mode state (called by ClientApplication each frame / on change).
    * Pass null to hide the build mode overlay.
    */
@@ -533,6 +563,11 @@ export class UIManager {
     }
     if (this.playerMenu.visible) {
       this.playerMenu.close();
+      return true;
+    }
+    if (this.crewMenu.visible) {
+      const consumed = this.crewMenu.handleClick(x, y);
+      if (!consumed) this.crewMenu.close();
       return true;
     }
     if (this.shipMenu.visible) {

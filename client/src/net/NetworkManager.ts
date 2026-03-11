@@ -425,6 +425,10 @@ export class NetworkManager {
   public onShipSinking: ((shipId: number) => void) | null = null;
   public onShipLevelUp: ((shipId: number, attribute: string, attrLevel: number, xp: number, shipLevel: number, totalCap: number, nextUpgradeCost: number) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
+  /** Fired when the server confirms an NPC stat upgrade. */
+  public onNpcStatUp: ((npcId: number, stat: string, statLevel: number, xp: number,
+    maxHealth: number, npcLevel: number,
+    statHealth: number, statDamage: number, statStamina: number, statWeight: number) => void) | null = null;
   /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
   public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
   /** Fired when the server confirms the player has boarded a ship (via ladder). */
@@ -1073,6 +1077,15 @@ export class NetworkManager {
   }
 
   /**
+   * Request the server to spend NPC XP upgrading one stat.
+   * stat must be one of: 'health' | 'damage' | 'stamina' | 'weight'
+   */
+  sendCrewUpgrade(npcId: number, stat: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'upgrade_crew_stat', npcId, stat }));
+  }
+
+  /**
    * Get current network statistics
    */
   getNetworkStats(): NetworkStats {
@@ -1461,6 +1474,15 @@ export class NetworkManager {
             role: n.role ?? 0,
             companyId: n.company ?? 0,
             assignedCannonId: n.assigned_cannon_id ?? 0,
+            // Crew levelling
+            npcLevel:   n.npc_level   ?? 1,
+            health:     n.health      ?? 100,
+            maxHealth:  n.max_health  ?? 100,
+            xp:         n.xp          ?? 0,
+            statHealth:  n.stat_health  ?? 0,
+            statDamage:  n.stat_damage  ?? 0,
+            statStamina: n.stat_stamina ?? 0,
+            statWeight:  n.stat_weight  ?? 0,
           })),
           carrierDetection: new Map() // Will be populated as needed
         };
@@ -1520,6 +1542,15 @@ export class NetworkManager {
         console.log(`💬 [NPC] ${message.npc_name}: "${message.text}"`);
         this.onNpcDialogue?.(message.npc_id, message.npc_name, message.text);
         break;
+
+      case 'NPC_STAT_UP': {
+        this.onNpcStatUp?.(
+          message.npcId, message.stat, message.level, message.xp,
+          message.maxHealth, message.npcLevel,
+          message.statHealth, message.statDamage, message.statStamina, message.statWeight,
+        );
+        break;
+      }
 
       case MessageType.CANNON_GROUP_STATE: {
         const gsShipId: number = message.shipId || 0;

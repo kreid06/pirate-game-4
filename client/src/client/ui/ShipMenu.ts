@@ -82,8 +82,12 @@ export class ShipMenu {
   /** Called when the player clicks an affordable upgrade row. */
   public onUpgradeRequest?: (shipId: number, attribute: string) => void;
 
+  /** Called when the player clicks an NPC row in the crew section. */
+  public onNpcClick?: (npc: import('../../sim/Types.js').Npc) => void;
+
   /** Hit areas for attribute rows populated each render frame. */
   private _upgradeHitAreas: Array<{ attr: number; serverName: string; x: number; y: number; w: number; h: number; affordable: boolean }> = [];
+  private _npcHitAreas: Array<{ npc: import('../../sim/Types.js').Npc; x: number; y: number; w: number; h: number }> = [];
   private _panelX = 0;
   private _panelY = 0;
   private _currentShipId = 0;
@@ -98,6 +102,14 @@ export class ShipMenu {
    */
   handleClick(x: number, y: number): boolean {
     if (!this.visible) return false;
+    // Check NPC row hit areas
+    for (const area of this._npcHitAreas) {
+      if (x >= area.x && x <= area.x + area.w &&
+          y >= area.y && y <= area.y + area.h) {
+        this.onNpcClick?.(area.npc);
+        return true;
+      }
+    }
     // Check upgrade row hit areas (only affordable rows fire the callback)
     for (const area of this._upgradeHitAreas) {
       if (area.affordable &&
@@ -409,7 +421,8 @@ export class ShipMenu {
     worldState: WorldState,
     shipId:     number,
   ): void {
-    const aboard = worldState.npcs.filter(n => n.shipId === shipId);
+    this._npcHitAreas = [];
+    const aboard  = worldState.npcs.filter(n => n.shipId === shipId);
     const players = worldState.players.filter(p => p.carrierId === shipId);
 
     py = this._sectionHeader(ctx, px, py, 'CREW', `${players.length} player${players.length !== 1 ? 's' : ''}, ${aboard.length} NPC${aboard.length !== 1 ? 's' : ''}`);
@@ -423,24 +436,67 @@ export class ShipMenu {
       return;
     }
 
-    // Role tally
-    const roleTally = new Map<string, number>();
+    const ROLE_TAGS: Record<number, string> = { 0: 'Sailor', 1: 'Gunner', 2: 'Helm', 3: 'Rigger', 4: 'Repair' };
+    const NPC_ROW_H = 36;
+    const BAR_H_SM  = 5;
+
     for (const npc of aboard) {
-      const roleName =
-        npc.role === 1 ? 'Gunner' :
-        npc.role === 3 ? 'Rigger' : 'Sailor';
-      roleTally.set(roleName, (roleTally.get(roleName) ?? 0) + 1);
+      const rowX = px + PAD;
+      const rowW = PANEL_W - PAD * 2;
+      const rowY = py;
+
+      // Hover highlight
+      ctx.fillStyle = 'rgba(255,255,255,0.05)';
+      ctx.fillRect(rowX, rowY, rowW, NPC_ROW_H - 2);
+
+      ctx.textBaseline = 'top';
+
+      // Name + level
+      ctx.font      = 'bold 13px Consolas, monospace';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = TEXT_HEAD;
+      ctx.fillText(npc.name, rowX + 4, rowY + 4);
+
+      ctx.font      = '11px Consolas, monospace';
+      ctx.fillStyle = GOLD;
+      ctx.fillText(`Lv.${npc.npcLevel}`, rowX + 140, rowY + 5);
+
+      // Role tag
+      const roleStr = ROLE_TAGS[npc.role] ?? 'Crew';
+      ctx.font      = '11px Consolas, monospace';
+      ctx.fillStyle = TEXT_DIM;
+      ctx.textAlign = 'right';
+      ctx.fillText(roleStr, rowX + rowW - 4, rowY + 5);
+
+      // HP bar
+      const hpPct = npc.maxHealth > 0 ? npc.health / npc.maxHealth : 1;
+      const barX  = rowX + 4;
+      const barW  = rowW - 8;
+      const barY  = rowY + NPC_ROW_H - BAR_H_SM - 4;
+      ctx.fillStyle = '#222';
+      ctx.fillRect(barX, barY, barW, BAR_H_SM);
+      ctx.fillStyle = hpPct > 0.6 ? GREEN : hpPct > 0.3 ? ORANGE : RED;
+      ctx.fillRect(barX, barY, Math.round(barW * hpPct), BAR_H_SM);
+      ctx.strokeStyle = '#445';
+      ctx.lineWidth = 0.6;
+      ctx.strokeRect(barX, barY, barW, BAR_H_SM);
+
+      // HP text next to bar
+      ctx.font      = '10px Consolas, monospace';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = TEXT_DIM;
+      ctx.fillText(`${npc.health}/${npc.maxHealth}`, barX + barW + 3, barY);
+
+      // Click hint (small arrow)
+      ctx.font      = '10px Consolas, monospace';
+      ctx.textAlign = 'right';
+      ctx.fillStyle = TEXT_DIM;
+      ctx.fillText('▸', rowX + rowW, rowY + 4);
+
+      // Register hit area
+      this._npcHitAreas.push({ npc, x: rowX, y: rowY, w: rowW, h: NPC_ROW_H - 2 });
+      py += NPC_ROW_H;
     }
-
-    const parts: string[] = [];
-    for (const [role, n] of roleTally) parts.push(`${n} ${role}${n !== 1 ? 's' : ''}`);
-    if (players.length > 0) parts.unshift(`${players.length} Player${players.length !== 1 ? 's' : ''}`);
-
-    ctx.font = '13px Consolas, monospace';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle = TEXT_MONO;
-    ctx.fillText('  ' + parts.join('   ·   '), px + PAD, py + 5);
   }
 
   // ─────────────────────────────────────────────────────────────────────────

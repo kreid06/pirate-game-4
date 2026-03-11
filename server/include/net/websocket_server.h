@@ -166,6 +166,17 @@ typedef struct WorldNpc {
     char          dialogue[64];
 
     uint8_t       company_id;     // Inherited from ship at spawn time (COMPANY_*)
+
+    // ── Crew levelling ───────────────────────────────────────────────────────
+    uint8_t       npc_level;      // 1–10
+    uint16_t      health;         // current HP
+    uint16_t      max_health;     // base 100 + stat_health * 20
+    uint32_t      xp;             // accumulated experience
+    // Stat upgrade levels (0 = unupgraded, max 5 each)
+    uint8_t       stat_health;    // +20 max HP per level
+    uint8_t       stat_damage;    // +10% damage per level
+    uint8_t       stat_stamina;   // +10% reload/work speed per level
+    uint8_t       stat_weight;    // +10% carry capacity per level
 } WorldNpc;
 // ────────────────────────────────────────────────────────────────────────────
 

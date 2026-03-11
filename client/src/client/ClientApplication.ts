@@ -688,7 +688,14 @@ export class ClientApplication {
 
       // Let UI panels (e.g. manning priority panel) consume clicks before game logic
       this.inputManager.onUIClick = (x, y) => {
-        return this.uiManager?.handleClick(x, y) ?? false;
+        if (this.uiManager?.handleClick(x, y)) return true;
+        // Not consumed by UI — check if hovering an NPC to open the crew level menu
+        const hovNpc = this.renderSystem.getHoveredNpc();
+        if (hovNpc) {
+          this.uiManager?.openCrewMenuForNpc(hovNpc);
+          return true;
+        }
+        return false;
       };
 
       // Ctrl+left-click: assign/remove cannon from the active weapon group
@@ -847,6 +854,28 @@ export class ClientApplication {
       this.uiManager.setShipUpgradeCallback((shipId, attribute) => {
         this.networkManager.sendUpgradeShipAttribute(shipId, attribute);
       });
+
+      // Wire NPC stat upgrade requests from the crew level menu to the server
+      this.uiManager.setCrewUpgradeCallback((npcId, stat) => {
+        this.networkManager.sendCrewUpgrade(npcId, stat);
+      });
+
+      // Handle NPC_STAT_UP broadcast: refresh world-state NPC fields
+      this.networkManager.onNpcStatUp = (npcId, _stat, _statLevel, xp,
+          maxHealth, npcLevel, statHealth, statDamage, statStamina, statWeight) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const npc = ws.npcs.find(n => n.id === npcId);
+          if (!npc) continue;
+          npc.xp         = xp;
+          npc.maxHealth  = maxHealth;
+          npc.npcLevel   = npcLevel;
+          npc.statHealth  = statHealth;
+          npc.statDamage  = statDamage;
+          npc.statStamina = statStamina;
+          npc.statWeight  = statWeight;
+        }
+      };
 
       // Build mode item selection (cannon/sail buttons in build mode panel)
       this.uiManager.onBuildItemSelect = (item) => {

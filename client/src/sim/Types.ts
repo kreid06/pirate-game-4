@@ -198,6 +198,16 @@ export interface Npc {
   role: number;           // NPC_ROLE_* — 1=gunner, 3=rigger
   companyId: number;      // COMPANY_* — faction this NPC belongs to
   assignedCannonId: number; // Module ID of cannon/mast this NPC is stationed at (0 if none)
+
+  // Crew levelling
+  npcLevel: number;       // 1–10
+  health: number;         // current HP
+  maxHealth: number;      // max HP (base 100 + statHealth * 20)
+  xp: number;             // accumulated XP
+  statHealth: number;     // 0–5 upgrade levels (+20 max HP each)
+  statDamage: number;     // 0–5 (+10% damage each)
+  statStamina: number;    // 0–5 (+10% reload/work speed each)
+  statWeight: number;     // 0–5 (+10% carry capacity each)
 }
 
 /**
