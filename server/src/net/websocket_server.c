@@ -1741,7 +1741,7 @@ static void dispatch_gunner_to_cannon(WorldNpc* npc, SimpleShip* ship,
  * While NEEDED is set, NPCs stay at the cannon.  Once it expires, NPCs may
  * leave (but only if another cannon has NEEDED and needs crew).
  */
-#define CANNON_NEEDED_TIMEOUT_MS  3000
+#define CANNON_NEEDED_TIMEOUT_MS  2000
 
 /**
  * tick_cannon_needed_expiry — run once per server tick.
