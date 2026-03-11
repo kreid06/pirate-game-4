@@ -94,6 +94,8 @@ export class InputManager {
   public onWeaponGroupSelect: ((group: number) => void) | null = null;
   /** Shift+left-click on a cannon toggles it in/out of the active weapon group. */
   public onGroupAssign: (() => void) | null = null;
+  /** Ctrl+Digit while hovering a cannon — assign it directly to the given group index. */
+  public onGroupAssignTo: ((group: number) => void) | null = null;
   /** Right-click intercepted by UI (e.g. cycling weapon group mode on hotbar). Returns true if consumed. */
   public onUIRightClick: ((x: number, y: number) => boolean) | null = null;
   /** Right-click on world while on helm in targetfire mode — world position to lock onto. */
@@ -975,20 +977,25 @@ export class InputManager {
         if (this.mountKind === 'helm') {
           const digit = parseInt(event.code.replace('Digit', ''));
           const groupIdx = digit - 1;
-          if (this.activeWeaponGroups.has(groupIdx)) {
-            this.activeWeaponGroups.delete(groupIdx);
-            if (this.activeWeaponGroup === groupIdx) {
-              this.activeWeaponGroup = this.activeWeaponGroups.size > 0
-                ? [...this.activeWeaponGroups][this.activeWeaponGroups.size - 1] : -1;
-            }
+          if (this.isCtrlHeld()) {
+            // Ctrl+Digit: assign hovered cannon to this group without changing selection
+            if (this.onGroupAssignTo) this.onGroupAssignTo(groupIdx);
           } else {
-            this.activeWeaponGroups.add(groupIdx);
-            this.activeWeaponGroup = groupIdx;
+            if (this.activeWeaponGroups.has(groupIdx)) {
+              this.activeWeaponGroups.delete(groupIdx);
+              if (this.activeWeaponGroup === groupIdx) {
+                this.activeWeaponGroup = this.activeWeaponGroups.size > 0
+                  ? [...this.activeWeaponGroups][this.activeWeaponGroups.size - 1] : -1;
+              }
+            } else {
+              this.activeWeaponGroups.add(groupIdx);
+              this.activeWeaponGroup = groupIdx;
+            }
+            // Force next handleCannonAiming() to re-send aim with updated group list
+            // even if the mouse hasn't moved, so the server learns about the new selection.
+            this.lastCannonAimAngle = Infinity;
+            if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           }
-          // Force next handleCannonAiming() to re-send aim with updated group list
-          // even if the mouse hasn't moved, so the server learns about the new selection.
-          this.lastCannonAimAngle = Infinity;
-          if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           event.preventDefault();
         } else {
           if (this.onSlotSelect) this.onSlotSelect(parseInt(event.code.replace('Digit', '')) - 1);
@@ -997,18 +1004,23 @@ export class InputManager {
       case 'Digit0':
         if (this.mountKind === 'helm') {
           const groupIdx = 9;
-          if (this.activeWeaponGroups.has(groupIdx)) {
-            this.activeWeaponGroups.delete(groupIdx);
-            if (this.activeWeaponGroup === groupIdx) {
-              this.activeWeaponGroup = this.activeWeaponGroups.size > 0
-                ? [...this.activeWeaponGroups][this.activeWeaponGroups.size - 1] : -1;
-            }
+          if (this.isCtrlHeld()) {
+            // Ctrl+0: assign hovered cannon to group 9 without changing selection
+            if (this.onGroupAssignTo) this.onGroupAssignTo(groupIdx);
           } else {
-            this.activeWeaponGroups.add(groupIdx);
-            this.activeWeaponGroup = groupIdx;
+            if (this.activeWeaponGroups.has(groupIdx)) {
+              this.activeWeaponGroups.delete(groupIdx);
+              if (this.activeWeaponGroup === groupIdx) {
+                this.activeWeaponGroup = this.activeWeaponGroups.size > 0
+                  ? [...this.activeWeaponGroups][this.activeWeaponGroups.size - 1] : -1;
+              }
+            } else {
+              this.activeWeaponGroups.add(groupIdx);
+              this.activeWeaponGroup = groupIdx;
+            }
+            this.lastCannonAimAngle = Infinity;
+            if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           }
-          this.lastCannonAimAngle = Infinity;
-          if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           event.preventDefault();
         } else {
           if (this.onSlotSelect) this.onSlotSelect(9);
@@ -1084,13 +1096,16 @@ export class InputManager {
       const isDoubleClick = timeSinceLastClick < this.DOUBLE_CLICK_THRESHOLD;
 
       // Shift+left-click is handled at the top of onMouseDown — unreachable here
-      if (this.mountKind === 'none') {
+      if (this.isCtrlHeld()) {
+        // Ctrl+click while mounted: toggle cannon group membership
+        if (this.onGroupAssign) this.onGroupAssign();
+      } else if (this.mountKind === 'none') {
         // Walking: left-click = attack toward mouse
         if (this.onActionEvent) {
           this.onActionEvent('attack', this.inputState.mouseWorldPosition);
         }
-      } else if (!this.isCtrlHeld()) {
-        // Mounted to helm or cannon: fire cannon(s) — blocked while Ctrl is held (group edit mode)
+      } else {
+        // Mounted to helm or cannon: fire cannon(s)
         if (isDoubleClick) {
           console.log('💥💥 Double-click: Fire ALL cannons!');
           if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
@@ -1107,8 +1122,11 @@ export class InputManager {
       this.lastLeftClickTime = now;
       
     } else if (event.button === 2) { // Right mouse button
-      // Ctrl held: block aim and firing entirely (group edit mode)
-      if (this.isCtrlHeld()) return;
+      // Ctrl+right-click: toggle cannon group membership (same as Ctrl+left-click)
+      if (this.isCtrlHeld()) {
+        if (this.onGroupAssign) this.onGroupAssign();
+        return;
+      }
       // Build menu: right-click fires ghost-cancel / ghost-remove callback
       if (this.buildMenuOpen && this.onBuildRightClick) {
         this.onBuildRightClick(this.inputState.mouseWorldPosition);

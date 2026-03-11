@@ -685,7 +685,14 @@ export class ClientApplication {
         const cannonId = hovered.module.id;
         const group = this.inputManager.activeWeaponGroup;
         if (group < 0) {
-          console.warn(`⚠️ GroupAssign: no weapon group selected (activeWeaponGroup=${group}) — select a group (1–0) on the hotbar first`);
+          // No group selected — remove this cannon from whichever group it belongs to
+          for (const [gi, s] of this.controlGroups) {
+            if (s.cannonIds.includes(cannonId)) {
+              s.cannonIds = s.cannonIds.filter(id => id !== cannonId);
+              console.log(`🗑️ Cannon ${cannonId} cleared from group G${gi}`);
+              this.networkManager.sendCannonGroupConfig(gi, s.mode, s.cannonIds, s.targetId > 0 ? s.targetId : 0);
+            }
+          }
           return;
         }
         const state = this.controlGroups.get(group);
@@ -707,6 +714,30 @@ export class ClientApplication {
         }
         // Sync the updated group to server
         this.networkManager.sendCannonGroupConfig(group, state.mode, state.cannonIds, state.targetId > 0 ? state.targetId : 0);
+      };
+
+      this.inputManager.onGroupAssignTo = (targetGroup: number) => {
+        const hovered = this.renderSystem.getHoveredModule();
+        if (!hovered || hovered.module.kind !== 'cannon') return;
+        const cannonId = hovered.module.id;
+        const state = this.controlGroups.get(targetGroup);
+        if (!state) return;
+        if (state.cannonIds.includes(cannonId)) {
+          // Already in this group — remove it
+          state.cannonIds = state.cannonIds.filter(id => id !== cannonId);
+          console.log(`\u274c Cannon ${cannonId} removed from group G${targetGroup}`);
+        } else {
+          // Remove from any other group first
+          for (const [gi, s] of this.controlGroups) {
+            if (gi !== targetGroup && s.cannonIds.includes(cannonId)) {
+              s.cannonIds = s.cannonIds.filter(id => id !== cannonId);
+              this.networkManager.sendCannonGroupConfig(gi, s.mode, s.cannonIds, s.targetId > 0 ? s.targetId : 0);
+            }
+          }
+          state.cannonIds.push(cannonId);
+          console.log(`\ud83c\udfaf Cannon ${cannonId} \u2192 group G${targetGroup}`);
+        }
+        this.networkManager.sendCannonGroupConfig(targetGroup, state.mode, state.cannonIds, state.targetId > 0 ? state.targetId : 0);
       };
 
       // Right-click intercepted by UIManager (e.g. cycling weapon group mode on hotbar)
