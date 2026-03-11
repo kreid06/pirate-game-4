@@ -2212,8 +2212,9 @@ export class RenderSystem {
     if (localPlayer.mountedModuleId != null) {
       const mountedMod = ship.modules.find(m => m.id === localPlayer.mountedModuleId);
       if (mountedMod?.kind === 'cannon') {
-        // Mounted directly on a cannon — show just that one at full opacity
-        cannonsToShow = [{ module: mountedMod, alpha: 1 }];
+        // Mounted directly on a cannon — show just that one at full opacity (unless reloading)
+        const isReloading = ((mountedMod.moduleData as { stateBits?: number } | undefined)?.stateBits ?? 0) & 16;
+        if (!isReloading) cannonsToShow = [{ module: mountedMod, alpha: 1 }];
       } else if (mountedMod?.kind === 'helm' || mountedMod?.kind === 'steering-wheel') {
         // On the helm — show trajectory guides based on each cannon's angular rotation limit.
         // Matches the server formula: desired_offset = aim - localRot + π/2
@@ -2238,6 +2239,9 @@ export class RenderSystem {
           const hasNpc    = shipNpcs.some(n => n.assignedCannonId === m.id && n.state === NPC_STATE_AT_CANNON);
           const hasPlayer = shipPlayers.some(p => p.mountedModuleId === m.id);
           if (!hasNpc && !hasPlayer) continue;
+          // Don't show trajectory for a reloading cannon
+          const isReloading = ((m.moduleData as { stateBits?: number } | undefined)?.stateBits ?? 0) & 16;
+          if (isReloading) continue;
           const alpha = absOffset <= CANNON_LIMIT_RAD
             ? 1
             : (CANNON_LIMIT_RAD + FADE_RAD - absOffset) / FADE_RAD;
