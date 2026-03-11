@@ -1764,15 +1764,6 @@ static void tick_cannon_needed_expiry(void) {
             if (mod->type_id != MODULE_TYPE_CANNON) continue;
             if (!(mod->state_bits & MODULE_STATE_NEEDED)) continue;
 
-            /* Never expire NEEDED on cannons whose weapon group is actively
-             * AIMING.  The player explicitly selected this group; crew must
-             * remain until the group reverts to HALTFIRE (which clears NEEDED
-             * immediately in handle_cannon_group_config). */
-            {
-                WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, mod->id);
-                if (grp && grp->mode == WEAPON_GROUP_MODE_AIMING) continue;
-            }
-
             uint32_t last_aim = ship->cannon_last_needed_ms[m];
             if (last_aim == 0) {
                 /* Never had NEEDED set properly — clear it */
@@ -2483,31 +2474,9 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
         }
     }
 
-    /* When a group enters AIMING mode, set NEEDED on ALL cannons in this group
-     * so that NPCs are dispatched to them immediately.  This is critical for
-     * multi-group selection: the player may have selected port+starboard but
-     * the aim angle only covers one side, so handle_cannon_aim's sector check
-     * would never set NEEDED on the opposite side.  Setting it here ensures
-     * NPCs walk to all group cannons as soon as aiming begins.
-     *
-     * Once NPCs are in place, the cannon can aim and fire.  When aiming stops
-     * (group reverts to HALTFIRE), NEEDED is cleared above and NPCs stay put
-     * unless pulled to another NEEDED cannon. */
-    if (mode == WEAPON_GROUP_MODE_AIMING) {
-        uint32_t now = get_time_ms();
-        for (int ci = 0; ci < group->cannon_count; ci++) {
-            ShipModule* mod = find_module_on_ship(ship, group->cannon_ids[ci]);
-            if (mod) {
-                mod->state_bits |= MODULE_STATE_NEEDED;
-                for (int mi = 0; mi < ship->module_count; mi++) {
-                    if (ship->modules[mi].id == group->cannon_ids[ci]) {
-                        ship->cannon_last_needed_ms[mi] = now;
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    /* NEEDED is set purely by the sector check in handle_cannon_aim Pass 1.
+     * We do NOT set NEEDED unconditionally here — that would cause all cannons
+     * in the group to show NEED even when the aim angle only covers one side. */
 
     assign_weapon_group_crew(ship);
 
@@ -2758,7 +2727,10 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
          * ──────────────────────────────────────────────────────────────────── */
 
         // If mounted to a specific cannon, propagate aim only to that cannon
-        if (at_cannon && cannon->id != player->mounted_module_id) continue;
+        if (at_cannon && cannon->id != player->mounted_module_id) {
+            log_info("🔫 P2 c%u: SKIP at_cannon gate (mounted=%u)", cannon->id, player->mounted_module_id);
+            continue;
+        }
 
         /* ── Weapon-group aim priority ──────────────────────────────────────
          * AIMING     → player aim IS the authority for this cannon; propagate.
@@ -2783,10 +2755,17 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 }
             }
             if (!in_active_pass2) {
-                if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   continue;
-                if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) continue;
+                if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE) {
+                    log_info("🔫 P2 c%u: SKIP haltfire (not in active list)", cannon->id);
+                    continue;
+                }
+                if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) {
+                    log_info("🔫 P2 c%u: SKIP targetfire (not in active list)", cannon->id);
+                    continue;
+                }
             }
         } else if (player_has_groups) {
+            log_info("🔫 P2 c%u: SKIP ungrouped cannon in group mode", cannon->id);
             continue; /* ungrouped cannon in group mode — already handled in pass 1 */
         }
 
@@ -2805,18 +2784,53 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 }
             }
         }
-        if (!cannon_has_occupant) continue;
+        if (!cannon_has_occupant) {
+            /* Find NPC state for diagnostics */
+            int npc_state = -1; uint32_t npc_assigned = 0;
+            for (int ni = 0; ni < world_npc_count; ni++) {
+                WorldNpc* wnpc = &world_npcs[ni];
+                if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
+                    wnpc->ship_id == ship->ship_id &&
+                    wnpc->assigned_cannon_id == cannon->id) {
+                    npc_state = wnpc->state;
+                    npc_assigned = wnpc->id;
+                    break;
+                }
+            }
+            int grp_idx = -1;
+            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[gg] == grp) { grp_idx = gg; break; } } }
+            log_info("🔫 P2 c%u g%d: SKIP no_occupant (sim_occ=%d npc_id=%u npc_state=%d in_active=%d)",
+                     cannon->id, grp_idx,
+                     (cannon->state_bits & MODULE_STATE_OCCUPIED) ? 1 : 0,
+                     npc_assigned, npc_state, in_active_pass2 ? 1 : 0);
+            continue;
+        }
 
-        /* Skip cannons the player has placed in a haltfire group — they should not track the cursor */
-        bool in_haltfire = false;
-        for (int g = 0; g < MAX_WEAPON_GROUPS && !in_haltfire; g++) {
-            WeaponGroup* wg = &ship->weapon_groups[g];
-            if (wg->mode != WEAPON_GROUP_MODE_HALTFIRE) continue;
-            for (int ci = 0; ci < wg->cannon_count; ci++) {
-                if (wg->cannon_ids[ci] == cannon->id) { in_haltfire = true; break; }
+        /* Skip cannons the player has placed in a haltfire group — they should not track the cursor.
+         * BUT: if in_active_pass2 is set, the client's aim message explicitly lists this cannon's
+         * group as active.  This overrides the stored mode to handle the race where the aim
+         * message arrives before the cannon_group_config that switches the group to AIMING. */
+        if (!in_active_pass2) {
+            bool in_haltfire = false;
+            for (int g = 0; g < MAX_WEAPON_GROUPS && !in_haltfire; g++) {
+                WeaponGroup* wg = &ship->weapon_groups[g];
+                if (wg->mode != WEAPON_GROUP_MODE_HALTFIRE) continue;
+                for (int ci = 0; ci < wg->cannon_count; ci++) {
+                    if (wg->cannon_ids[ci] == cannon->id) { in_haltfire = true; break; }
+                }
+            }
+            if (in_haltfire) {
+                log_info("🔫 P2 c%u: SKIP in_haltfire check", cannon->id);
+                continue;
             }
         }
-        if (in_haltfire) continue;
+
+        {
+            int grp_idx = -1;
+            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[gg] == grp) { grp_idx = gg; break; } } }
+            log_info("🔫 P2 c%u g%d: AIM PROPAGATED (in_active=%d mode=%d)",
+                     cannon->id, grp_idx, in_active_pass2 ? 1 : 0, grp ? grp->mode : -1);
+        }
 
         float cannon_base_angle = Q16_TO_FLOAT(cannon->local_rot);
 
