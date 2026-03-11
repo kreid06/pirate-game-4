@@ -81,6 +81,10 @@ typedef struct SimpleShip {
     uint32_t cannon_last_needed_ms[MAX_MODULES_PER_SHIP];
     /* Per-ship weapon control groups (shared by all players on this ship) */
     WeaponGroup weapon_groups[MAX_WEAPON_GROUPS];
+
+    /* Sinking state — entered when hull_health hits 0; ship stays alive for SHIP_SINK_DURATION_MS */
+    bool     is_sinking;
+    uint32_t sink_start_ms;
 } SimpleShip;
 
 // NPC behavior types

@@ -1295,6 +1295,7 @@ static WeaponGroup* find_cannon_weapon_group(uint32_t ship_id, uint32_t cannon_i
 static void assign_weapon_group_crew(SimpleShip* ship);
 static void tick_cannon_needed_expiry(void);
 static void tick_ship_weapon_groups(void);
+static void tick_sinking_ships(void);
 static void ship_init_default_weapon_groups(SimpleShip* ship);
 static void broadcast_cannon_group_state(SimpleShip* ship);
 static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship);
@@ -1742,6 +1743,8 @@ static void dispatch_gunner_to_cannon(WorldNpc* npc, SimpleShip* ship,
  * leave (but only if another cannon has NEEDED and needs crew).
  */
 #define CANNON_NEEDED_TIMEOUT_MS  2000
+/* Duration of the client-side sinking animation; ship stays alive this long after hull_health=0 */
+#define SHIP_SINK_DURATION_MS     8000
 
 /**
  * tick_cannon_needed_expiry — run once per server tick.
@@ -2534,6 +2537,7 @@ static void tick_ship_weapon_groups(void) {
     for (int si = 0; si < ship_count; si++) {
         SimpleShip* ship = &ships[si];
         if (!ship->active) continue;
+        if (ship->is_sinking) continue; /* no auto-fire while sinking */
 
         for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
             WeaponGroup* group = &ship->weapon_groups[g];
@@ -3191,6 +3195,9 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
         return;
     }
 
+    /* Prevent firing while ship is sinking */
+    if (ship->is_sinking) return;
+
     bool at_helm = false;
     bool at_cannon = false;
     uint32_t mounted_cannon_id = 0;
@@ -3822,6 +3829,67 @@ size_t websocket_create_frame(uint8_t opcode, const char* payload, size_t payloa
 void websocket_server_set_simulation(struct Sim* sim) {
     global_sim = sim;
     log_info("✅ WebSocket server linked to simulation for collision detection");
+}
+
+/**
+ * Each tick: keep sinking ships frozen and despawn them after SHIP_SINK_DURATION_MS.
+ */
+static void tick_sinking_ships(void) {
+    uint32_t now = get_time_ms();
+    for (int s = 0; s < ship_count; s++) {
+        SimpleShip* ship = &ships[s];
+        if (!ship->active || !ship->is_sinking) continue;
+
+        /* Keep the vessel stationary — zero velocity in the sim ship every tick */
+        if (global_sim) {
+            for (uint32_t ss = 0; ss < global_sim->ship_count; ss++) {
+                if ((uint32_t)global_sim->ships[ss].id == ship->ship_id) {
+                    global_sim->ships[ss].velocity.x = 0;
+                    global_sim->ships[ss].velocity.y = 0;
+                    global_sim->ships[ss].angular_velocity = 0;
+                    break;
+                }
+            }
+        }
+        ship->velocity_x = 0.0f;
+        ship->velocity_y = 0.0f;
+        ship->angular_velocity = 0.0f;
+
+        /* After 8 s, fully despawn and broadcast SHIP_SINK */
+        if ((now - ship->sink_start_ms) < SHIP_SINK_DURATION_MS) continue;
+
+        entity_id sunk_id = ship->ship_id;
+        float wx = ship->x, wy = ship->y;
+
+        /* Eject any remaining players to the water */
+        for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+            if (!players[pi].active || players[pi].parent_ship_id != sunk_id) continue;
+            players[pi].parent_ship_id      = 0;
+            players[pi].movement_state      = PLAYER_STATE_SWIMMING;
+            players[pi].is_mounted          = false;
+            players[pi].mounted_module_id   = 0;
+            players[pi].controlling_ship_id = 0;
+            players[pi].x = SERVER_TO_CLIENT(CLIENT_TO_SERVER(wx));
+            players[pi].y = SERVER_TO_CLIENT(CLIENT_TO_SERVER(wy));
+        }
+
+        /* Destroy in sim */
+        if (global_sim) sim_destroy_entity(global_sim, sunk_id);
+
+        /* Swap-and-pop */
+        ships[s] = ships[ship_count - 1];
+        memset(&ships[ship_count - 1], 0, sizeof(SimpleShip));
+        ship_count--;
+        s--; /* re-check this slot */
+
+        /* Broadcast final SHIP_SINK */
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+            "{\"type\":\"SHIP_SINK\",\"shipId\":%u,\"x\":%.1f,\"y\":%.1f}",
+            sunk_id, SERVER_TO_CLIENT(CLIENT_TO_SERVER(wx)), SERVER_TO_CLIENT(CLIENT_TO_SERVER(wy)));
+        broadcast_message(msg);
+        log_info("⚓ Ship %u fully despawned after sinking", sunk_id);
+    }
 }
 
 /**
@@ -6749,33 +6817,57 @@ void websocket_server_tick(float dt) {
             char msg[256];
 
             if (ev->is_sink) {
-                // Ship sunk: remove from SimpleShip array and sim, broadcast SHIP_SINK
+                // Ship hull_health reached 0 — enter sinking state instead of immediate despawn.
                 entity_id sunk_id = ev->ship_id;
+                SimpleShip* sinking_ship = NULL;
                 for (int s = 0; s < ship_count; s++) {
                     if (ships[s].active && ships[s].ship_id == sunk_id) {
-                        // Swap-and-pop so the slot is immediately recycled
-                        ships[s] = ships[ship_count - 1];
-                        memset(&ships[ship_count - 1], 0, sizeof(SimpleShip));
-                        ship_count--;
+                        sinking_ship = &ships[s];
                         break;
                     }
                 }
-                if (global_sim) sim_destroy_entity(global_sim, sunk_id);
-                // Reset all players aboard the sunk ship to swimming state
-                for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
-                    if (!players[pi].active || players[pi].parent_ship_id != sunk_id) continue;
-                    players[pi].parent_ship_id      = 0;
-                    players[pi].movement_state      = PLAYER_STATE_SWIMMING;
-                    players[pi].is_mounted          = false;
-                    players[pi].mounted_module_id   = 0;
-                    players[pi].controlling_ship_id = 0;
-                    players[pi].x = SERVER_TO_CLIENT(ev->hit_x);
-                    players[pi].y = SERVER_TO_CLIENT(ev->hit_y);
+                if (sinking_ship && !sinking_ship->is_sinking) {
+                    sinking_ship->is_sinking    = true;
+                    sinking_ship->sink_start_ms = get_time_ms();
+
+                    /* Zero the sim-ship velocity so the ship stops dead */
+                    if (global_sim) {
+                        for (uint32_t ss = 0; ss < global_sim->ship_count; ss++) {
+                            if ((uint32_t)global_sim->ships[ss].id == sunk_id) {
+                                global_sim->ships[ss].velocity.x = 0;
+                                global_sim->ships[ss].velocity.y = 0;
+                                global_sim->ships[ss].angular_velocity = 0;
+                                break;
+                            }
+                        }
+                    }
+
+                    /* Dismount all players from the sinking ship */
+                    for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+                        if (!players[pi].active || players[pi].parent_ship_id != sunk_id) continue;
+                        players[pi].is_mounted          = false;
+                        players[pi].mounted_module_id   = 0;
+                        players[pi].controlling_ship_id = 0;
+                        players[pi].movement_state      = PLAYER_STATE_WALKING;
+                    }
+
+                    /* Dismount all NPCs from the sinking ship */
+                    for (int ni = 0; ni < world_npc_count; ni++) {
+                        if (!world_npcs[ni].active || world_npcs[ni].ship_id != sunk_id) continue;
+                        dismount_npc(&world_npcs[ni], sinking_ship);
+                    }
+
+                    /* Broadcast SHIP_SINKING so clients start the animation immediately */
+                    char sink_msg[128];
+                    snprintf(sink_msg, sizeof(sink_msg),
+                        "{\"type\":\"SHIP_SINKING\",\"shipId\":%u,\"x\":%.1f,\"y\":%.1f}",
+                        sunk_id,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                    broadcast_message(sink_msg);
+                    log_info("🌊 Ship %u entering sinking state", sunk_id);
                 }
-                snprintf(msg, sizeof(msg),
-                    "{\"type\":\"SHIP_SINK\",\"shipId\":%u,\"x\":%.1f,\"y\":%.1f}",
-                    sunk_id,
-                    SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                /* Skip building the broadcast msg for this event — no module_id / damage info */
+                continue;
             } else if (ev->is_breach) {
                 if (ev->destroyed) {
                     // Interior module destroyed through breach: remove from SimpleShip and broadcast MODULE_HIT
@@ -6928,6 +7020,9 @@ void websocket_server_tick(float dt) {
 
     // ===== TICK SHIP WEAPON GROUPS (TARGETFIRE auto-aim) =====
     tick_ship_weapon_groups();
+
+    // ===== TICK SINKING SHIPS (velocity=0, despawn after 8s) =====
+    tick_sinking_ships();
 
     // ===== ADVANCE CANNON AIM TOWARD DESIRED (turn-speed limit) =====
     // Cannons rotate at a maximum of 60 degrees per second.

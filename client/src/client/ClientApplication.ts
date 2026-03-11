@@ -239,6 +239,26 @@ export class ClientApplication {
           ws.ships = ws.ships.filter(s => s.id !== shipId);
         }
       };
+      this.networkManager.onShipSinking = (shipId) => {
+        // Trigger the client-side fade animation immediately when the server enters sinking state
+        this.renderSystem.markShipSinking(shipId);
+
+        // Dismount the local player if they were on this ship
+        const myPlayerId = this.networkManager.getAssignedPlayerId();
+        if (myPlayerId !== null) {
+          for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+            if (!ws) continue;
+            const me = ws.players.find(p => p.id === myPlayerId);
+            if (me && me.carrierId === shipId) {
+              me.isMounted = false;
+              me.mountedModuleId = undefined;
+            }
+          }
+          if (this.inputManager) {
+            this.inputManager.setMountState(false);
+          }
+        }
+      };
       this.networkManager.onShipLevelUp = (shipId, attribute, attrLevel, xp, shipLevel, totalCap, nextUpgradeCost) => {
         const attrNames = ['weight', 'resistance', 'damage', 'crew', 'sturdiness'];
         const attrIdx = attrNames.indexOf(attribute);

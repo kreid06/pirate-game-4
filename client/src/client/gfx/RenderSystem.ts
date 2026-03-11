@@ -96,6 +96,12 @@ export class RenderSystem {
   public npcTaskMap: ReadonlyMap<number, string> = new Map();
   private hoveredPlankSlot: { ship: Ship; sectionName: string; segmentIndex: number } | null = null;
   private plankTemplate: PlankSegment[] | null = null;
+  /** shipId → timestamp (ms) when ship entered the sink-fade sequence — drives the animation. */
+  private sinkTimestamps: Map<number, number> = new Map();
+  /** Frozen ship snapshots for despawned ships — client-side sink animation ghosts. */
+  private sinkingGhosts: Map<number, Ship> = new Map();
+  /** Last known ship state per id — lets us snapshot a ship the moment it despawns. */
+  private lastKnownShips: Map<number, Ship> = new Map();
   
   // Debug flags
   private showHoverBoundaries: boolean = false;
@@ -506,6 +512,50 @@ export class RenderSystem {
     return `rgb(${Math.round(r * t)},${Math.round(g * t)},${Math.round(b * t)})`;
   }
 
+  /**
+   * Returns sinking-related render state for a ship.
+   *  waterFill    0–1 : fraction of hull filled with water (1 - hullHealth/100)
+   *  floodTint    0–1 : how blue the deck is (ramps up from waterFill=0.75 → 1.0)
+   *  phase1Alpha  1–0 : hull / deck / planks fade (0–4 s after despawn)
+   *  phase2Alpha  1–0 : cannons fade (2–6 s after despawn)
+   *  phase3Alpha  1–0 : sail fibers & masts fade (4–8 s after despawn)
+   *
+   * Phase fades only activate for ghost ships (in sinkTimestamps).
+   * Live ships only get the blue flood tint from their current hullHealth.
+   */
+  /** Called by ClientApplication when the server sends SHIP_SINKING — starts the fade clock. */
+  public markShipSinking(shipId: number): void {
+    if (!this.sinkTimestamps.has(shipId)) {
+      this.sinkTimestamps.set(shipId, performance.now());
+    }
+  }
+
+  private computeSinkState(ship: Ship): {
+    waterFill: number;
+    floodTint: number;
+    phase1Alpha: number;
+    phase2Alpha: number;
+    phase3Alpha: number;
+  } {
+    const waterFill = Math.max(0, Math.min(1, 1 - ship.hullHealth / 100));
+    const floodTint = waterFill >= 0.75 ? (waterFill - 0.75) / 0.25 : 0;
+
+    // Start the clock for any live ship the moment hullHealth hits 0 (fallback if SHIP_SINKING arrives late)
+    if (ship.hullHealth <= 0 && !this.sinkTimestamps.has(ship.id)) {
+      this.sinkTimestamps.set(ship.id, performance.now());
+    }
+
+    let phase1Alpha = 1, phase2Alpha = 1, phase3Alpha = 1;
+    const sinkStart = this.sinkTimestamps.get(ship.id);
+    if (sinkStart !== undefined) {
+      const elapsed = (performance.now() - sinkStart) / 1000;
+      phase1Alpha = Math.max(0, 1 - elapsed / 4);                         // 0–4 s
+      phase2Alpha = Math.max(0, 1 - Math.max(0, elapsed - 2) / 4);        // 2–6 s
+      phase3Alpha = Math.max(0, 1 - Math.max(0, elapsed - 4) / 4);        // 4–8 s
+    }
+    return { waterFill, floodTint, phase1Alpha, phase2Alpha, phase3Alpha };
+  }
+
   private isPointInCurvedPlank(
     localX: number, 
     localY: number, 
@@ -793,6 +843,32 @@ export class RenderSystem {
       ? worldState.players.find(p => p.id === this.localPlayerId)
       : null;
     this._localCompanyId = localPlayer?.companyId ?? 0;
+
+    // ── Sinking ghost management ────────────────────────────────────────────
+    // Track every live ship so we can detect despawns frame-to-frame.
+    const currentShipIds = new Set<number>();
+    for (const ship of worldState.ships) {
+      currentShipIds.add(ship.id);
+      this.lastKnownShips.set(ship.id, ship);
+    }
+    // Any ship present last frame but gone now just despawned — create a ghost.
+    for (const [id, snap] of this.lastKnownShips) {
+      if (!currentShipIds.has(id) && !this.sinkingGhosts.has(id)) {
+        this.sinkingGhosts.set(id, { ...snap, hullHealth: 0 });
+        if (!this.sinkTimestamps.has(id)) {
+          this.sinkTimestamps.set(id, performance.now());
+        }
+        this.lastKnownShips.delete(id);
+      }
+    }
+    // Prune fully-faded ghosts (> 8 s elapsed).
+    for (const [id, startTime] of this.sinkTimestamps) {
+      if (!currentShipIds.has(id) && (performance.now() - startTime) / 1000 > 8) {
+        this.sinkTimestamps.delete(id);
+        this.sinkingGhosts.delete(id);
+      }
+    }
+    // ───────────────────────────────────────────────────────────────────────
     
     // Render order (from lowest to highest):
     // 0: water, gridlines (drawn before this queue)
@@ -909,6 +985,20 @@ export class RenderSystem {
     for (const ship of worldState.ships) {
       this.queueRenderItem(9, 'ship-ammo-hud', () => this.drawShipAmmoLabel(ship, camera));
     }
+
+    // ── Sinking ghost ships (client-side fade-out after server despawn) ──────
+    for (const ghost of this.sinkingGhosts.values()) {
+      const id = ghost.id;
+      this.queueRenderItem(1, `ghost-hull-${id}`,       () => this.drawShipHull(ghost, camera));
+      this.queueRenderItem(3, `ghost-planks-${id}`,     () => this.drawShipPlanks(ghost, camera));
+      this.queueRenderItem(4, `ghost-cannons-${id}`,    () => this.drawShipCannons(ghost, camera));
+      this.queueRenderItem(4, `ghost-rudder-${id}`,     () => this.drawShipRudder(ghost, camera));
+      this.queueRenderItem(5, `ghost-wheels-${id}`,     () => this.drawShipSteeringWheels(ghost, camera));
+      this.queueRenderItem(5, `ghost-ladders-${id}`,    () => this.drawShipLadders(ghost, camera));
+      this.queueRenderItem(5, `ghost-ropes-${id}`,      () => this.drawShipSailRopes(ghost, camera));
+      this.queueRenderItem(6, `ghost-fibers-${id}`,     () => this.drawShipSailFibers(ghost, camera));
+      this.queueRenderItem(7, `ghost-masts-${id}`,      () => this.drawShipSailMasts(ghost, camera));
+    }
   }
   
   private queueRenderItem(layer: number, layerName: string, renderFn: () => void, priority: number = 0): void {
@@ -944,8 +1034,12 @@ export class RenderSystem {
     }
     
     if (ship.hull.length === 0) return;
+
+    const { floodTint, phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return; // fully faded — nothing to draw
     
     this.ctx.save();
+    if (phase1Alpha < 1) this.ctx.globalAlpha = phase1Alpha;
     
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
@@ -976,8 +1070,20 @@ export class RenderSystem {
     this.ctx.closePath();
     this.ctx.fill();
     this.ctx.stroke();
+
+    // Water flood tint: blue overlay that intensifies from 75% → 100% water
+    if (floodTint > 0) {
+      this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
+      this.ctx.fillStyle = '#1a6eb5';
+      this.ctx.beginPath();
+      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+      this.ctx.closePath();
+      this.ctx.fill();
+    }
     
     // Draw ship direction indicator
+    this.ctx.globalAlpha = phase1Alpha < 1 ? phase1Alpha : 1;
     this.ctx.strokeStyle = '#ff0000';
     this.ctx.lineWidth = 4 / cameraState.zoom;
     this.ctx.beginPath();
@@ -993,8 +1099,12 @@ export class RenderSystem {
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
       return;
     }
+
+    const { floodTint, phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
     
     this.ctx.save();
+    if (phase1Alpha < 1) this.ctx.globalAlpha = phase1Alpha;
     
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
@@ -1062,6 +1172,41 @@ export class RenderSystem {
         }
         
         this.ctx.globalAlpha = 1.0;
+        this.ctx.restore();
+      }
+    }
+
+    // Water flood tint: blue overlay painted on top of each plank
+    if (floodTint > 0) {
+      const tintAlpha = floodTint * 0.50 * (phase1Alpha < 1 ? phase1Alpha : 1);
+      for (const plank of planks) {
+        if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
+        if ((plank.moduleData.health ?? 1) <= 0) continue;
+        this.ctx.save();
+        this.ctx.globalAlpha = tintAlpha;
+        this.ctx.fillStyle = '#1a6eb5';
+        if (plank.moduleData.isCurved && plank.moduleData.curveData) {
+          // Approximate the curved plank outline using the bezier start/end points
+          const cd = plank.moduleData.curveData;
+          const w = plank.moduleData.width;
+          const s = cd.start, e = cd.end;
+          const nx = -(e.y - s.y), ny = (e.x - s.x);
+          const nlen = Math.hypot(nx, ny) || 1;
+          const ox = (nx / nlen) * w * 0.5, oy = (ny / nlen) * w * 0.5;
+          this.ctx.beginPath();
+          this.ctx.moveTo(s.x - ox, s.y - oy);
+          this.ctx.lineTo(s.x + ox, s.y + oy);
+          this.ctx.lineTo(e.x + ox, e.y + oy);
+          this.ctx.lineTo(e.x - ox, e.y - oy);
+          this.ctx.closePath();
+          this.ctx.fill();
+        } else {
+          this.ctx.translate(plank.localPos.x, plank.localPos.y);
+          this.ctx.rotate(plank.localRot);
+          const hl = plank.moduleData.length / 2;
+          const hw = plank.moduleData.width / 2;
+          this.ctx.fillRect(-hl, -hw, plank.moduleData.length, plank.moduleData.width);
+        }
         this.ctx.restore();
       }
     }
@@ -1892,8 +2037,12 @@ export class RenderSystem {
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
       return;
     }
+
+    const { phase2Alpha } = this.computeSinkState(ship);
+    if (phase2Alpha <= 0) return;
     
     this.ctx.save();
+    if (phase2Alpha < 1) this.ctx.globalAlpha = phase2Alpha;
     
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
@@ -2754,8 +2903,12 @@ export class RenderSystem {
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
       return;
     }
+
+    const { phase3Alpha } = this.computeSinkState(ship);
+    if (phase3Alpha <= 0) return;
     
     this.ctx.save();
+    if (phase3Alpha < 1) this.ctx.globalAlpha = phase3Alpha;
     
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
@@ -2919,8 +3072,12 @@ export class RenderSystem {
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
       return;
     }
+
+    const { phase3Alpha } = this.computeSinkState(ship);
+    if (phase3Alpha <= 0) return;
     
     this.ctx.save();
+    if (phase3Alpha < 1) this.ctx.globalAlpha = phase3Alpha;
     
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();

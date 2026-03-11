@@ -422,6 +422,7 @@ export class NetworkManager {
   public onModuleDestroyed: ((shipId: number, moduleId: number, damage: number, hitX?: number, hitY?: number) => void) | null = null;
   public onModuleDamaged: ((shipId: number, moduleId: number, damage: number, hitX?: number, hitY?: number) => void) | null = null;
   public onShipSunk: ((shipId: number) => void) | null = null;
+  public onShipSinking: ((shipId: number) => void) | null = null;
   public onShipLevelUp: ((shipId: number, attribute: string, attrLevel: number, xp: number, shipLevel: number, totalCap: number, nextUpgradeCost: number) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
   /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
@@ -1580,6 +1581,13 @@ export class NetworkManager {
         const sunkShipId: number = message.shipId || 0;
         console.log(`🌊 SHIP_SINK: ship ${sunkShipId} has sunk!`);
         this.onShipSunk?.(sunkShipId);
+        break;
+      }
+
+      case 'SHIP_SINKING': {
+        const sinkingShipId: number = message.shipId || 0;
+        console.log(`🌊 SHIP_SINKING: ship ${sinkingShipId} is sinking!`);
+        this.onShipSinking?.(sinkingShipId);
         break;
       }
 
