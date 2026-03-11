@@ -8,7 +8,7 @@
 import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
-import { EffectRenderer } from './EffectRenderer.js';
+import { EffectRenderer, AnnouncementKind } from './EffectRenderer.js';
 import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_CANNON, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
@@ -102,6 +102,12 @@ export class RenderSystem {
   private sinkingGhosts: Map<number, Ship> = new Map();
   /** Last known ship state per id — lets us snapshot a ship the moment it despawns. */
   private lastKnownShips: Map<number, Ship> = new Map();
+  /** Last known NPC set — used to detect NPC deaths for kill announcements. */
+  private lastKnownNpcIds: Set<number> = new Set();
+  /** NPC id → name cache for the kill announcement message. */
+  private _lastNpcNames: Map<number, string> = new Map();
+  /** Last ship to fire a cannonball near each ship — used for sink announcements. */
+  private lastAttackerOf: Map<number, number> = new Map();
   /** Last splash emit time (ms) per sinking ship — throttles particle emission. */
   private sinkSplashTimers: Map<number, number> = new Map();
   
@@ -151,6 +157,21 @@ export class RenderSystem {
    */
   spawnSailFiberEffect(worldPos: Vec2, intensity: number = 1.0): void {
     this.particleSystem.createSailFiberEffect(worldPos, intensity);
+  }
+
+  /**
+   * Show a top-centre announcement banner.
+   * @param text    Message to display.
+   * @param kind    'ship_sink' | 'npc_kill' | 'info'
+   * @param duration Seconds to display (default 3.5).
+   */
+  showAnnouncement(text: string, kind: AnnouncementKind = 'info', duration = 3.5): void {
+    this.effectRenderer.createAnnouncement(text, kind, duration);
+  }
+
+  /** Returns the ship ID of the last ship that fired a cannonball near shipId, or null. */
+  getLastAttackerOf(shipId: number): number | null {
+    return this.lastAttackerOf.get(shipId) ?? null;
   }
 
   /**
@@ -691,6 +712,8 @@ export class RenderSystem {
     // Draw effects and particles (always on top)
     this.particleSystem.render(camera);
     this.effectRenderer.render(camera);
+    // Screen-space announcement banners (on top of everything)
+    this.effectRenderer.renderAnnouncements(this.canvas);
     
     // Draw hover boundaries debug if enabled
     if (this.showHoverBoundaries) {
@@ -875,7 +898,23 @@ export class RenderSystem {
     }
     // ───────────────────────────────────────────────────────────────────────
 
-    // ── Sinking splash particles ────────────────────────────────────────────
+    // ── NPC kill detection ─────────────────────────────────────────────────
+    // Build current NPC id set and detect disappearances.
+    const currentNpcIds = new Set<number>();
+    for (const npc of worldState.npcs) currentNpcIds.add(npc.id);
+    for (const id of this.lastKnownNpcIds) {
+      if (!currentNpcIds.has(id)) {
+        // NPC vanished — find its last known name from the previous frame's NPC list
+        // (we keep it in lastKnownShips-style via a name map below).
+        const name = this._lastNpcNames.get(id) ?? `Crew ${id}`;
+        this.effectRenderer.createAnnouncement(`${name} eliminated`, 'npc_kill');
+        this._lastNpcNames.delete(id);
+      }
+    }
+    // Update id set and name map for next frame.
+    this.lastKnownNpcIds = currentNpcIds;
+    for (const npc of worldState.npcs) this._lastNpcNames.set(npc.id, npc.name);
+    // ───────────────────────────────────────────────────────────────────────
     // Emit water-splash bursts for every ship currently in the sink sequence.
     // Burst rate increases from ~1/s at the start to ~4/s near full submersion.
     const nowMs = performance.now();
@@ -1021,6 +1060,19 @@ export class RenderSystem {
     // Queue cannonballs (layer 8 - on top of everything)  
     for (const cannonball of worldState.cannonballs) {
       this.queueRenderItem(8, 'cannonballs', () => this.drawCannonball(cannonball, camera));
+    }
+
+    // Track last attacker per ship: record when a cannonball is within 150 units of a ship
+    // it didn't originate from — used to populate the "sunk by" announcement.
+    for (const cb of worldState.cannonballs) {
+      for (const ship of worldState.ships) {
+        if (ship.id === cb.firedFrom) continue;
+        const dx = cb.position.x - ship.position.x;
+        const dy = cb.position.y - ship.position.y;
+        if (dx * dx + dy * dy < 150 * 150) {
+          this.lastAttackerOf.set(ship.id, cb.firedFrom);
+        }
+      }
     }
 
     // Queue NPCs (layer 2 - same as players)

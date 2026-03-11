@@ -243,13 +243,38 @@ export class ClientApplication {
         // Trigger the client-side fade animation immediately when the server enters sinking state
         this.renderSystem.markShipSinking(shipId);
 
-        // Dismount the local player only if they were on THIS sinking ship
+        // Single declaration shared by announcement and dismount logic
         const myPlayerId = this.networkManager.getAssignedPlayerId();
+
+        // Announcement banner — distinguish own ship vs enemy
+        const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        const myPlayer    = myPlayerId !== null ? ws?.players.find(p => p.id === myPlayerId) : null;
+        const sinkingShip = ws?.ships.find(s => s.id === shipId);
+        if (sinkingShip) {
+          const FACTION: Record<number, string> = { 0: 'Neutral', 1: 'Pirates', 2: 'Navy' };
+          const shipLabel = (s: Ship) => FACTION[s.companyId] ?? `Ship #${s.id}`;
+          const sinkLabel  = shipLabel(sinkingShip);
+          const isOwnShip  = myPlayer?.carrierId === shipId;
+          if (isOwnShip) {
+            const attackerId = this.renderSystem.getLastAttackerOf(shipId);
+            const attacker   = attackerId !== null ? ws?.ships.find(s => s.id === attackerId) : null;
+            const msg = attacker
+              ? `Your ${sinkLabel} was sunk by ${shipLabel(attacker)}`
+              : `Your s${sinkLabel} was sunk!`;
+            this.renderSystem.showAnnouncement(msg, 'ship_sink', 4.0);
+          } else {
+            const myShip  = myPlayer?.carrierId ? ws?.ships.find(s => s.id === myPlayer!.carrierId) : null;
+            const myLabel = myShip ? shipLabel(myShip) : 'Our ship';
+            this.renderSystem.showAnnouncement(`Your ${myLabel} sunk ${sinkLabel}`, 'ship_sink', 4.0);
+          }
+        }
+
+        // Dismount the local player only if they were on THIS sinking ship
         if (myPlayerId !== null) {
           let wasOnSinkingShip = false;
-          for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
-            if (!ws) continue;
-            const me = ws.players.find(p => p.id === myPlayerId);
+          for (const wsState of [this.authoritativeWorldState, this.predictedWorldState]) {
+            if (!wsState) continue;
+            const me = wsState.players.find(p => p.id === myPlayerId);
             if (me && me.carrierId === shipId) {
               me.isMounted = false;
               me.mountedModuleId = undefined;

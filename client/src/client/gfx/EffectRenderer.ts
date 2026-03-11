@@ -19,6 +19,9 @@ export enum EffectType {
   DAMAGE_NUMBER = 'damage_number'
 }
 
+/** Category controls the colour and icon of a top-centre announcement banner. */
+export type AnnouncementKind = 'ship_sink' | 'npc_kill' | 'info';
+
 /**
  * Base effect interface
  */
@@ -60,6 +63,14 @@ interface DamageNumberEffect extends Effect {
   floatOffset: number; // pixels floated upward so far (screen space)
 }
 
+/** Screen-space announcement banner shown at the top-centre of the canvas. */
+interface Announcement {
+  text: string;
+  kind: AnnouncementKind;
+  age: number;      // seconds elapsed
+  maxAge: number;   // total lifetime
+}
+
 /**
  * Effect union type
  */
@@ -72,6 +83,8 @@ export class EffectRenderer {
   private ctx: CanvasRenderingContext2D;
   private effects: VisualEffect[] = [];
   private nextEffectId = 1;
+  /** Screen-space announcement banners (independent of world position). */
+  private announcements: Announcement[] = [];
   
   constructor(ctx: CanvasRenderingContext2D) {
     this.ctx = ctx;
@@ -103,6 +116,13 @@ export class EffectRenderer {
       
       // Update effect-specific properties
       this.updateEffect(effect, dt);
+    }
+
+    // Age announcements
+    for (let i = this.announcements.length - 1; i >= 0; i--) {
+      this.announcements[i].age += dt;
+      if (this.announcements[i].age >= this.announcements[i].maxAge)
+        this.announcements.splice(i, 1);
     }
   }
   
@@ -189,6 +209,99 @@ export class EffectRenderer {
       intensity: 1.0
     };
     this.effects.push(effect);
+  }
+
+  /**
+   * Queue a top-centre announcement banner.
+   * @param text    The message to display.
+   * @param kind    Controls colour/icon: 'ship_sink' | 'npc_kill' | 'info'.
+   * @param duration Total display time in seconds (default 3.5 s).
+   */
+  createAnnouncement(text: string, kind: AnnouncementKind = 'info', duration = 3.5): void {
+    this.announcements.push({ text, kind, age: 0, maxAge: duration });
+  }
+
+  /**
+   * Render all active announcement banners (screen-space, call after world render).
+   * Must be called with the raw canvas dimensions available.
+   */
+  renderAnnouncements(canvas: HTMLCanvasElement): void {
+    if (this.announcements.length === 0) return;
+
+    const ctx = this.ctx;
+    const cx = canvas.width / 2;
+
+    const FADE_IN  = 0.15; // s — quick pop
+    const HOLD_END = 0.65; // fraction of maxAge while fully opaque
+    const FONT_SIZE = 22;
+    const PAD_X = 28;
+    const PAD_Y = 12;
+    const LINE_H = FONT_SIZE + PAD_Y * 2;
+
+    ctx.save();
+    ctx.font = `bold ${FONT_SIZE}px Consolas, monospace`;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+
+    // Stack banners downward from the top (offset each so they don't overlap)
+    let offsetY = 0;
+    for (const ann of this.announcements) {
+      const t = ann.age / ann.maxAge;
+      // Fast fade-in (0 → FADE_IN s), hold, then slow fade-out
+      let alpha: number;
+      const fadeInT = ann.age / FADE_IN;
+      if (fadeInT < 1) {
+        alpha = fadeInT;            // 0 → 1 in FADE_IN seconds
+      } else if (t < HOLD_END) {
+        alpha = 1;                  // fully visible
+      } else {
+        alpha = 1 - (t - HOLD_END) / (1 - HOLD_END); // slow fade out
+      }
+      alpha = Math.max(0, Math.min(1, alpha));
+
+      // Colour scheme per kind
+      let bgColor: string;
+      let textColor: string;
+      let borderColor: string;
+      let icon: string;
+      if (ann.kind === 'ship_sink') {
+        bgColor = 'rgba(20,10,10,0.88)'; borderColor = '#cc3322'; textColor = '#ff7755'; icon = '⚓';
+      } else if (ann.kind === 'npc_kill') {
+        bgColor = 'rgba(10,18,10,0.88)'; borderColor = '#336622'; textColor = '#88ee55'; icon = '💀';
+      } else {
+        bgColor = 'rgba(14,18,30,0.88)'; borderColor = '#445566'; textColor = '#aaccee'; icon = 'ℹ';
+      }
+
+      const label = `${icon}  ${ann.text}`;
+      const textW = ctx.measureText(label).width;
+      const boxW  = textW + PAD_X * 2;
+      const bx    = cx - boxW / 2;
+      const by    = 28 + offsetY;
+
+      ctx.globalAlpha = alpha;
+
+      // Background
+      ctx.fillStyle = bgColor;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, boxW, LINE_H, 5);
+      ctx.fill();
+
+      // Border
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, boxW, LINE_H, 5);
+      ctx.stroke();
+
+      // Text
+      ctx.fillStyle = textColor;
+      ctx.fillText(label, cx, by + LINE_H / 2);
+
+      offsetY += LINE_H + 6;
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.restore();
   }
 
   /**
