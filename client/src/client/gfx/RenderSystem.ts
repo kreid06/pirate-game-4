@@ -851,12 +851,14 @@ export class RenderSystem {
       currentShipIds.add(ship.id);
       this.lastKnownShips.set(ship.id, ship);
     }
-    // Any ship present last frame but gone now just despawned — create a ghost.
+    // Any ship present last frame but gone now just despawned.
+    // Only create a sinking ghost if the server explicitly told us this ship is sinking
+    // (sinkTimestamps entry already set via markShipSinking / computeSinkState).
+    // Ships that disconnect, get admin-removed, etc. receive no animation.
     for (const [id, snap] of this.lastKnownShips) {
-      if (!currentShipIds.has(id) && !this.sinkingGhosts.has(id)) {
-        this.sinkingGhosts.set(id, { ...snap, hullHealth: 0 });
-        if (!this.sinkTimestamps.has(id)) {
-          this.sinkTimestamps.set(id, performance.now());
+      if (!currentShipIds.has(id)) {
+        if (!this.sinkingGhosts.has(id) && this.sinkTimestamps.has(id)) {
+          this.sinkingGhosts.set(id, { ...snap, hullHealth: 0 });
         }
         this.lastKnownShips.delete(id);
       }
@@ -2693,7 +2695,11 @@ export class RenderSystem {
   private drawShipSailRopes(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
+    const { phase3Alpha } = this.computeSinkState(ship);
+    if (phase3Alpha <= 0) return;
+
     this.ctx.save();
+    if (phase3Alpha < 1) this.ctx.globalAlpha = phase3Alpha;
 
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
