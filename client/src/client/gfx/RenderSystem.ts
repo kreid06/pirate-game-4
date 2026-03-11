@@ -870,7 +870,7 @@ export class RenderSystem {
       }
     }
     
-    // Queue cannons and steering wheels (layers 4-5)
+    // Queue cannons and steering wheels (layers 4-6)
     for (const ship of worldState.ships) {
       this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
       this.queueRenderItem(4, 'cannon-aim-guides', () => this.drawCannonAimGuides(ship, worldState, camera), 1);
@@ -878,6 +878,8 @@ export class RenderSystem {
       if ((this.showGroupOverlay || this.activeWeaponGroups.size > 0) && this.controlGroups) {
         this.queueRenderItem(5, `cannon-groups-${ship.id}`, () => this.drawCannonGroupOverlay(ship, camera));
       }
+      // Reload indicators always drawn above group overlay (layer 6)
+      this.queueRenderItem(6, `cannon-reload-${ship.id}`, () => this.drawCannonReloadIndicators(ship, camera));
       this.queueRenderItem(5, 'steering-wheels', () => this.drawShipSteeringWheels(ship, camera));
       this.queueRenderItem(5, 'ladders', () => this.drawShipLadders(ship, camera));
       this.queueRenderItem(5, 'sail-ropes', () => this.drawShipSailRopes(ship, camera));
@@ -1957,54 +1959,6 @@ export class RenderSystem {
       // Restore turret rotation
       this.ctx.restore();
       
-      // Reload indicator — two spinning circular arrows while MODULE_STATE_RELOADING (bit 4) is set
-      const isReloading = ((cannonData.stateBits ?? 0) & 16) !== 0;
-      if (isReloading) {
-        const t = performance.now() / 1000; // seconds
-        const spinAngle = t * 2.5; // ~2.5 rad/s
-        const iconR = 9;
-        const arcSpan = (5 * Math.PI) / 6; // 150°
-        const arrowSize = 3;
-        const lw = 2 / cameraState.zoom;
-
-        this.ctx.save();
-        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.90)';
-        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.90)';
-        this.ctx.lineWidth = lw;
-        this.ctx.lineCap = 'round';
-
-        for (let i = 0; i < 2; i++) {
-          const startAngle = spinAngle + i * Math.PI;
-          const endAngle = startAngle + arcSpan;
-
-          // Arc
-          this.ctx.beginPath();
-          this.ctx.arc(0, 0, iconR, startAngle, endAngle);
-          this.ctx.stroke();
-
-          // Arrowhead (filled triangle) at the tip of the arc
-          const tipX = Math.cos(endAngle) * iconR;
-          const tipY = Math.sin(endAngle) * iconR;
-          // Tangent direction at end (direction of rotation)
-          const tx = -Math.sin(endAngle);
-          const ty =  Math.cos(endAngle);
-          // Radial outward direction
-          const rx = Math.cos(endAngle);
-          const ry = Math.sin(endAngle);
-
-          this.ctx.beginPath();
-          this.ctx.moveTo(tipX + tx * arrowSize,        tipY + ty * arrowSize);
-          this.ctx.lineTo(tipX - tx * arrowSize * 0.5 + rx * arrowSize * 0.9,
-                          tipY - ty * arrowSize * 0.5 + ry * arrowSize * 0.9);
-          this.ctx.lineTo(tipX - tx * arrowSize * 0.5 - rx * arrowSize * 0.9,
-                          tipY - ty * arrowSize * 0.5 - ry * arrowSize * 0.9);
-          this.ctx.closePath();
-          this.ctx.fill();
-        }
-
-        this.ctx.restore();
-      }
-
       // Restore cannon position
       this.ctx.restore();
     }
@@ -2096,6 +2050,9 @@ export class RenderSystem {
     this.ctx.scale(cs.zoom, cs.zoom);
     this.ctx.rotate(ship.rotation - cs.rotation);
 
+    // All sizing below is in world-space units so it scales naturally with zoom.
+    // (The canvas transform already applies cs.zoom, so 1 unit = 1 screen px at zoom=1.)
+
     for (const mod of ship.modules) {
       if (mod.kind !== 'cannon') continue;
       const info = cannonGroupMap.get(mod.id);
@@ -2108,60 +2065,127 @@ export class RenderSystem {
       //  • cannon in a non-active group → only visible when Shift is held
       //  • unassigned cannon            → only visible when Shift is held
       const isActive = info != null && activeGroups.has(info.g);
-      if (!isActive && !showAll) {
-        continue;
-      }
+      if (!isActive && !showAll) continue;
 
       this.ctx.save();
       this.ctx.translate(lx, ly);
       this.ctx.rotate(lr);
 
       if (info) {
-        const color    = GROUP_COLORS[info.g % 10];
+        const color     = GROUP_COLORS[info.g % 10];
         const modeColor = MODE_COLORS[info.mode] ?? '#999';
 
         if (isActive) {
           // ── Active group: bright border + subtle fill + glow ─────────────
-          // Outer glow shadow
           this.ctx.shadowColor = color;
-          this.ctx.shadowBlur  = 8 / cs.zoom;
-          // Semi-transparent fill tint
-          this.ctx.fillStyle = color + '33'; // ~20 % opacity
+          this.ctx.shadowBlur  = 6; // world units — scales with zoom
+          this.ctx.fillStyle   = color + '33'; // ~20 % opacity tint
           this.ctx.fillRect(-15, -10, 30, 20);
-          this.ctx.shadowBlur = 0;
-          // Thick colored border
+          this.ctx.shadowBlur  = 0;
           this.ctx.strokeStyle = color;
-          this.ctx.lineWidth = 4.5 / cs.zoom;
+          this.ctx.lineWidth   = 2.5; // world units — scales with zoom
           this.ctx.strokeRect(-15, -10, 30, 20);
         } else {
-          // ── Inactive group (Shift overlay): regular thin border ───────────
-          this.ctx.strokeStyle = color + 'aa'; // slightly dimmed
-          this.ctx.lineWidth = 2 / cs.zoom;
+          // ── Inactive group (Shift overlay): thinner dimmed border ──────────
+          this.ctx.strokeStyle = color + 'aa';
+          this.ctx.lineWidth   = 1.2; // world units
           this.ctx.strokeRect(-15, -10, 30, 20);
         }
 
-        // Group index badge (top-left)
-        const badgeR = (isActive ? 8 : 7) / cs.zoom;
+        // Group index badge (top-left corner)
+        const badgeR = isActive ? 7 : 6; // world units
         this.ctx.fillStyle = isActive ? color : color + 'aa';
         this.ctx.beginPath();
         this.ctx.arc(-9, -5, badgeR, 0, Math.PI * 2);
         this.ctx.fill();
         this.ctx.fillStyle = '#fff';
-        this.ctx.font = `bold ${(isActive ? 11 : 10) / cs.zoom}px Consolas, monospace`;
+        this.ctx.font = `bold ${isActive ? 9 : 8}px Consolas, monospace`;
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'middle';
         this.ctx.fillText(String(info.g), -9, -5);
 
-        // Mode dot (bottom-right) — always visible for assigned cannons
+        // Mode dot (bottom-right)
         this.ctx.fillStyle = modeColor;
         this.ctx.beginPath();
-        this.ctx.arc(9, 5, (isActive ? 5 : 4) / cs.zoom, 0, Math.PI * 2);
+        this.ctx.arc(9, 5, isActive ? 4 : 3, 0, Math.PI * 2);
         this.ctx.fill();
       } else {
-        // Unassigned — dim outline only (Shift needed to get here)
+        // Unassigned — dim outline only (Shift needed to reach here)
         this.ctx.strokeStyle = 'rgba(200,200,200,0.3)';
-        this.ctx.lineWidth = 1.5 / cs.zoom;
+        this.ctx.lineWidth   = 1.0; // world units
         this.ctx.strokeRect(-15, -10, 30, 20);
+      }
+
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draws the spinning reload animation over every cannon that has
+   * MODULE_STATE_RELOADING (bit 4) set.  Queued at layer 6 so it renders
+   * on top of the group-colour overlay (layer 5).
+   */
+  private drawCannonReloadIndicators(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const screenPos    = camera.worldToScreen(ship.position);
+    const cameraState  = camera.getState();
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const t          = performance.now() / 1000;
+    const spinAngle  = t * 2.5;          // ~2.5 rad/s
+    const iconR      = 9;               // world units — scales with zoom
+    const arcSpan    = (5 * Math.PI) / 6; // 150° per arc
+    const arrowSize  = 3;               // world units
+    // Line width in world units so it scales with zoom just like the cannon outlines
+    const lw         = 1.5;
+
+    for (const cannon of ship.modules) {
+      if (cannon.kind !== 'cannon') continue;
+      if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
+      const isReloading = ((cannon.moduleData.stateBits ?? 0) & 16) !== 0;
+      if (!isReloading) continue;
+
+      this.ctx.save();
+      this.ctx.translate(cannon.localPos.x, cannon.localPos.y);
+      this.ctx.rotate((cannon as { localRot?: number }).localRot ?? 0);
+
+      this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.90)';
+      this.ctx.fillStyle   = 'rgba(255, 255, 255, 0.90)';
+      this.ctx.lineWidth   = lw;
+      this.ctx.lineCap     = 'round';
+
+      for (let i = 0; i < 2; i++) {
+        const startAngle = spinAngle + i * Math.PI;
+        const endAngle   = startAngle + arcSpan;
+
+        // Arc segment
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, iconR, startAngle, endAngle);
+        this.ctx.stroke();
+
+        // Arrowhead at arc tip
+        const tipX = Math.cos(endAngle) * iconR;
+        const tipY = Math.sin(endAngle) * iconR;
+        const tx   = -Math.sin(endAngle);  // tangent
+        const ty   =  Math.cos(endAngle);
+        const rx   =  Math.cos(endAngle);  // radial
+        const ry   =  Math.sin(endAngle);
+
+        this.ctx.beginPath();
+        this.ctx.moveTo(tipX + tx * arrowSize,          tipY + ty * arrowSize);
+        this.ctx.lineTo(tipX - tx * arrowSize * 0.5 + rx * arrowSize * 0.9,
+                        tipY - ty * arrowSize * 0.5 + ry * arrowSize * 0.9);
+        this.ctx.lineTo(tipX - tx * arrowSize * 0.5 - rx * arrowSize * 0.9,
+                        tipY - ty * arrowSize * 0.5 - ry * arrowSize * 0.9);
+        this.ctx.closePath();
+        this.ctx.fill();
       }
 
       this.ctx.restore();
