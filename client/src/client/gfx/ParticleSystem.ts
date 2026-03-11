@@ -29,7 +29,8 @@ export enum ParticleEffectType {
   CANNONBALL_SMOKE = 'cannonball_smoke',
   EXPLOSION = 'explosion',
   WATER_FOAM = 'water_foam',
-  SAIL_FIBER = 'sail_fiber'
+  SAIL_FIBER = 'sail_fiber',
+  SINK_SPLASH = 'sink_splash',
 }
 
 /**
@@ -214,6 +215,49 @@ export class ParticleSystem {
     });
   }
   
+  /**
+   * Create a sinking-ship splash burst.
+   * Called continuously while a ship sinks — emits a small geyser of water
+   * droplets and foam at the given world position.
+   * @param position  World-space origin of the burst (a point on the hull edge).
+   * @param intensity 0–1 scale: 1 = mid-sink, higher = near fully submerged.
+   */
+  createSinkSplash(position: Vec2, intensity: number = 1.0): void {
+    const count = Math.max(2, Math.floor(6 * intensity * this.qualityMultipliers[this.quality]));
+    const particles: Particle[] = [];
+
+    // Colour palette — white foam + blue water + translucent bubbles
+    const waterColors = ['#ffffff', '#e8f4f8', '#c8e8f8', '#87ceeb', '#b0d8f0'];
+
+    for (let i = 0; i < count; i++) {
+      // Upward cone with horizontal scatter
+      const spreadAngle = (Math.random() - 0.5) * Math.PI * 0.9; // ±80° from straight up
+      const speed = 60 + Math.random() * 100 * intensity;
+      const angle  = -Math.PI * 0.5 + spreadAngle; // mostly upward
+
+      particles.push({
+        position: position.add(Vec2.from(
+          (Math.random() - 0.5) * 30,
+          (Math.random() - 0.5) * 15,
+        )),
+        velocity: Vec2.from(Math.cos(angle) * speed, Math.sin(angle) * speed),
+        life: 0,
+        maxLife: 0.6 + Math.random() * 0.9,
+        size: 2 + Math.random() * 4 * intensity,
+        color: waterColors[Math.floor(Math.random() * waterColors.length)],
+        alpha: 0.7 + Math.random() * 0.3,
+        gravity: 160, // droplets arc up then fall quickly
+      });
+    }
+
+    this.effects.push({
+      position: position.clone(),
+      type: ParticleEffectType.SINK_SPLASH,
+      intensity,
+      particles,
+    });
+  }
+
   /**
    * Create sail fiber damage effect — torn cloth shreds flying from a mast hit
    */

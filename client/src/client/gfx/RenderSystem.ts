@@ -102,6 +102,8 @@ export class RenderSystem {
   private sinkingGhosts: Map<number, Ship> = new Map();
   /** Last known ship state per id — lets us snapshot a ship the moment it despawns. */
   private lastKnownShips: Map<number, Ship> = new Map();
+  /** Last splash emit time (ms) per sinking ship — throttles particle emission. */
+  private sinkSplashTimers: Map<number, number> = new Map();
   
   // Debug flags
   private showHoverBoundaries: boolean = false;
@@ -868,9 +870,52 @@ export class RenderSystem {
       if (!currentShipIds.has(id) && (performance.now() - startTime) / 1000 > 8) {
         this.sinkTimestamps.delete(id);
         this.sinkingGhosts.delete(id);
+        this.sinkSplashTimers.delete(id);
       }
     }
     // ───────────────────────────────────────────────────────────────────────
+
+    // ── Sinking splash particles ────────────────────────────────────────────
+    // Emit water-splash bursts for every ship currently in the sink sequence.
+    // Burst rate increases from ~1/s at the start to ~4/s near full submersion.
+    const nowMs = performance.now();
+    for (const [id, sinkStart] of this.sinkTimestamps) {
+      const elapsedS = (nowMs - sinkStart) / 1000;
+      if (elapsedS > 8) continue;
+      // Intensity: ramp from 0.2 at t=0 to 1.0 at t=4s, hold to t=8s
+      const intensity = Math.min(1.0, 0.2 + elapsedS / 5);
+      // Emission interval: 1000ms at start → 250ms near full sink
+      const intervalMs = Math.max(250, 1000 - elapsedS * 100);
+      const lastEmit = this.sinkSplashTimers.get(id) ?? 0;
+      if (nowMs - lastEmit < intervalMs) continue;
+      this.sinkSplashTimers.set(id, nowMs);
+
+      // Resolve world position: prefer live ship, fall back to ghost snapshot
+      let shipPos: Vec2 | null = null;
+      let shipRot = 0;
+      const liveShip = worldState.ships.find(s => s.id === id);
+      if (liveShip) { shipPos = liveShip.position; shipRot = liveShip.rotation; }
+      else {
+        const ghost = this.sinkingGhosts.get(id);
+        if (ghost) { shipPos = ghost.position; shipRot = ghost.rotation; }
+      }
+      if (!shipPos) continue;
+
+      // Emit 2–4 bursts at random positions along the hull waterline
+      const burstCount = Math.max(2, Math.round(intensity * 4));
+      const cosR = Math.cos(shipRot);
+      const sinR = Math.sin(shipRot);
+      for (let b = 0; b < burstCount; b++) {
+        // Random local X along hull (-260 to 190), sides (+/-90)
+        const lx = -260 + Math.random() * 450;
+        const side = (Math.random() < 0.5 ? 1 : -1);
+        const ly = side * (70 + Math.random() * 20); // near the hull edge
+        // Rotate into world space
+        const wx = shipPos.x + lx * cosR - ly * sinR;
+        const wy = shipPos.y + lx * sinR + ly * cosR;
+        this.particleSystem.createSinkSplash(Vec2.from(wx, wy), intensity);
+      }
+    }
     
     // Render order (from lowest to highest):
     // 0: water, gridlines (drawn before this queue)
