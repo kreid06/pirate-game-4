@@ -1103,6 +1103,7 @@ export class ClientApplication {
       this.renderSystem.npcTaskMap = this.uiManager.getNpcTaskMap();
       this.renderSystem.controlGroups = this.controlGroups as Map<number, { cannonIds: number[]; mode: string }>;
       this.renderSystem.showGroupOverlay = this.inputManager?.isShiftHeld() ?? false;
+      this.renderSystem.activeWeaponGroups = this.inputManager?.activeWeaponGroups ?? new Set();
 
       // Keep explicit build mode UI in sync with latest world state (sail count may change)
       if (this.explicitBuildMode) this.syncBuildModeState();

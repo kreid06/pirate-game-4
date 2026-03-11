@@ -82,8 +82,10 @@ export class RenderSystem {
   public playerInteractInfo: { worldPos: Vec2; localPos: Vec2 | null; carrierId: number | null } | null = null;
   /** Weapon control groups — set by ClientApplication each frame. Null when not on helm. */
   public controlGroups: Map<number, { cannonIds: number[]; mode: string }> | null = null;
-  /** When true, draws group membership badges on all cannons (while Ctrl is held). */
+  /** When true, draws group membership badges on all cannons (while Shift is held). */
   public showGroupOverlay: boolean = false;
+  /** Currently selected weapon group indices — cannons in these groups are always highlighted. */
+  public activeWeaponGroups: Set<number> = new Set();
   /** Cached local player company for the current frame — set at start of queueWorldObjects. */
   private _localCompanyId: number = 0;
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
@@ -873,7 +875,7 @@ export class RenderSystem {
       this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
       this.queueRenderItem(4, 'cannon-aim-guides', () => this.drawCannonAimGuides(ship, worldState, camera), 1);
       this.queueRenderItem(4, 'rudder', () => this.drawShipRudder(ship, camera));
-      if (this.showGroupOverlay && this.controlGroups) {
+      if ((this.showGroupOverlay || this.activeWeaponGroups.size > 0) && this.controlGroups) {
         this.queueRenderItem(5, `cannon-groups-${ship.id}`, () => this.drawCannonGroupOverlay(ship, camera));
       }
       this.queueRenderItem(5, 'steering-wheels', () => this.drawShipSteeringWheels(ship, camera));
@@ -2077,6 +2079,9 @@ export class RenderSystem {
       targetfire: '#ff66cc',
     };
 
+    const activeGroups = this.activeWeaponGroups;
+    const showAll = this.showGroupOverlay; // Shift held → show every group
+
     // Build cannonId → { group index, mode } lookup
     const cannonGroupMap = new Map<number, { g: number; mode: string }>();
     this.controlGroups.forEach((state, g) => {
@@ -2098,6 +2103,15 @@ export class RenderSystem {
       const ly = mod.localPos.y;
       const lr = (mod as { localRot?: number }).localRot ?? 0;
 
+      // Decide visibility:
+      //  • cannon in an active group   → always visible (bright highlight)
+      //  • cannon in a non-active group → only visible when Shift is held
+      //  • unassigned cannon            → only visible when Shift is held
+      const isActive = info != null && activeGroups.has(info.g);
+      if (!isActive && !showAll) {
+        continue;
+      }
+
       this.ctx.save();
       this.ctx.translate(lx, ly);
       this.ctx.rotate(lr);
@@ -2105,29 +2119,46 @@ export class RenderSystem {
       if (info) {
         const color    = GROUP_COLORS[info.g % 10];
         const modeColor = MODE_COLORS[info.mode] ?? '#999';
-        const lw = 3 / cs.zoom;
-        // Colored bounding box
-        this.ctx.strokeStyle = color;
-        this.ctx.lineWidth = lw;
-        this.ctx.strokeRect(-15, -10, 30, 20);
+
+        if (isActive) {
+          // ── Active group: bright border + subtle fill + glow ─────────────
+          // Outer glow shadow
+          this.ctx.shadowColor = color;
+          this.ctx.shadowBlur  = 8 / cs.zoom;
+          // Semi-transparent fill tint
+          this.ctx.fillStyle = color + '33'; // ~20 % opacity
+          this.ctx.fillRect(-15, -10, 30, 20);
+          this.ctx.shadowBlur = 0;
+          // Thick colored border
+          this.ctx.strokeStyle = color;
+          this.ctx.lineWidth = 4.5 / cs.zoom;
+          this.ctx.strokeRect(-15, -10, 30, 20);
+        } else {
+          // ── Inactive group (Shift overlay): regular thin border ───────────
+          this.ctx.strokeStyle = color + 'aa'; // slightly dimmed
+          this.ctx.lineWidth = 2 / cs.zoom;
+          this.ctx.strokeRect(-15, -10, 30, 20);
+        }
+
         // Group index badge (top-left)
-        const r = 7 / cs.zoom;
-        this.ctx.fillStyle = color;
+        const badgeR = (isActive ? 8 : 7) / cs.zoom;
+        this.ctx.fillStyle = isActive ? color : color + 'aa';
         this.ctx.beginPath();
-        this.ctx.arc(-9, -5, r, 0, Math.PI * 2);
+        this.ctx.arc(-9, -5, badgeR, 0, Math.PI * 2);
         this.ctx.fill();
         this.ctx.fillStyle = '#fff';
-        this.ctx.font = `bold ${10 / cs.zoom}px Consolas, monospace`;
+        this.ctx.font = `bold ${(isActive ? 11 : 10) / cs.zoom}px Consolas, monospace`;
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'middle';
         this.ctx.fillText(String(info.g), -9, -5);
-        // Mode dot (bottom-right)
+
+        // Mode dot (bottom-right) — always visible for assigned cannons
         this.ctx.fillStyle = modeColor;
         this.ctx.beginPath();
-        this.ctx.arc(9, 5, 4 / cs.zoom, 0, Math.PI * 2);
+        this.ctx.arc(9, 5, (isActive ? 5 : 4) / cs.zoom, 0, Math.PI * 2);
         this.ctx.fill();
       } else {
-        // Unassigned — dim outline only
+        // Unassigned — dim outline only (Shift needed to get here)
         this.ctx.strokeStyle = 'rgba(200,200,200,0.3)';
         this.ctx.lineWidth = 1.5 / cs.zoom;
         this.ctx.strokeRect(-15, -10, 30, 20);
