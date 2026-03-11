@@ -243,18 +243,20 @@ export class ClientApplication {
         // Trigger the client-side fade animation immediately when the server enters sinking state
         this.renderSystem.markShipSinking(shipId);
 
-        // Dismount the local player if they were on this ship
+        // Dismount the local player only if they were on THIS sinking ship
         const myPlayerId = this.networkManager.getAssignedPlayerId();
         if (myPlayerId !== null) {
+          let wasOnSinkingShip = false;
           for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
             if (!ws) continue;
             const me = ws.players.find(p => p.id === myPlayerId);
             if (me && me.carrierId === shipId) {
               me.isMounted = false;
               me.mountedModuleId = undefined;
+              wasOnSinkingShip = true;
             }
           }
-          if (this.inputManager) {
+          if (wasOnSinkingShip && this.inputManager) {
             this.inputManager.setMountState(false);
           }
         }
