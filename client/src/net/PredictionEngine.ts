@@ -360,6 +360,7 @@ export class PredictionEngine {
         ...ball,
         position: ball.position.add(ball.velocity.mul(deltaTime * dampingFactor))
       })),
+      npcs: state.npcs,
       carrierDetection: new Map(state.carrierDetection)
     };
   }
@@ -406,6 +407,7 @@ export class PredictionEngine {
       ships: this.interpolateShips(from.ships, to.ships, alpha), // LINEAR - handles varying server intervals better
       players: this.interpolatePlayers(from.players, to.players, alpha), // LINEAR - matches ship interpolation for mounted players
       cannonballs: this.interpolateCannonballs(from.cannonballs, to.cannonballs, smoothAlpha),
+      npcs: to.npcs,
       carrierDetection: new Map(from.carrierDetection)
     };
   }
@@ -726,6 +728,7 @@ export class PredictionEngine {
         };
       }),
       cannonballs: to.cannonballs, // Don't smooth projectiles
+      npcs: to.npcs,
       carrierDetection: to.carrierDetection,
     };
   }
@@ -774,6 +777,7 @@ export class PredictionEngine {
           position: smoke.position ? smoke.position.clone() : Vec2.zero()
         })) : []
       })),
+      npcs: worldState.npcs || [],
       carrierDetection: new Map(worldState.carrierDetection)
     };
   }

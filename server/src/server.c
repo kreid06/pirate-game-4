@@ -399,9 +399,16 @@ static void init_simulation(struct ServerContext* ctx) {
         Q16_FROM_FLOAT(CLIENT_TO_SERVER(100.0f))
     };
     entity_id ship_id = sim_create_ship(&ctx->simulation, ship_spawn, Q16_FROM_INT(0));
-    
     log_info("Simulation initialized with RNG seed: %u", rng->seed);
-    log_info("Created brigantine ship (ID: %u) at spawn point (10, 10) server units [client: (100, 100)]", ship_id);
+    log_info("Created brigantine ship 1 (ID: %u) at spawn point (10, 10) server units [client: (100, 100)]", ship_id);
+
+    // Create second brigantine ship 600px south for damage testing
+    Vec2Q16 ship2_spawn = {
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(100.0f)),
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(700.0f))
+    };
+    entity_id ship2_id = sim_create_ship(&ctx->simulation, ship2_spawn, Q16_FROM_INT(0));
+    log_info("Created brigantine ship 2 (ID: %u) at (10, 70) server units [client: (100, 700)]", ship2_id);
 }
 
 static void step_simulation(struct ServerContext* ctx) {

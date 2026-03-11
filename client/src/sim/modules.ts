@@ -113,6 +113,8 @@ export interface HelmModuleData {
   maxTurnRate: number;          // Maximum turning rate in rad/s
   responsiveness: number;       // How quickly ship responds to input (0-1)
   currentInput: Vec2;           // Current steering input (-1 to 1 for each axis)
+  health: number;               // Current HP (base max: 10000)
+  maxHealth: number;            // Max HP
   
   // Rendering properties
   wheelRotation: number;        // Current wheel rotation for visual feedback (radians)
@@ -130,6 +132,9 @@ export interface CannonModuleData {
   timeSinceLastFire: number;    // Time since last shot (for reload tracking)
   ammunition: number;           // Remaining ammunition count
   maxAmmunition: number;        // Maximum ammunition capacity
+  health: number;               // Current HP (base max: 8000)
+  maxHealth: number;            // Max HP
+  stateBits: number;            // Server MODULE_STATE_* bitmask (bit 4 = RELOADING)
 }
 
 /**
@@ -138,16 +143,18 @@ export interface CannonModuleData {
 export interface MastModuleData {
   kind: 'mast';
   sailState: 'furled' | 'partial' | 'full';  // Current sail configuration
-  windEfficiency: number;       // How well this mast catches wind (0-1)
+  windEfficiency: number;       // How well this mast catches wind (0-1), derived from fiber HP
   height: number;              // Mast height (affects wind catching)
   integrity: number;           // Structural integrity (0-1, affects performance)
   radius: number;              // Mast pole radius for rendering
   sailWidth: number;           // Width of the sail
   sailColor: string;           // Color of the sail fabric
-  
-  // Rendering properties
-  openness: number;            // Sail openness (0-100) - how much the sail is deployed
-  angle: number;               // Sail angle in degrees (for wind direction)
+  openness: number;            // Sail openness (0-100) — how much the sail is deployed
+  health: number;               // Mast pole HP (base max: 15000)
+  maxHealth: number;            // Max mast pole HP
+  fiberHealth: number;          // Sail cloth HP (base max: 15000, same as mast)
+  fiberMaxHealth: number;       // Sail cloth max HP
+  angle: number;               // Sail angle in radians (from server)
 }
 
 /**
@@ -178,7 +185,8 @@ export interface PlankModuleData {
   kind: 'plank';
   length: number;              // Length of the plank segment
   width: number;               // Width/thickness of the plank
-  health: number;              // Structural integrity (0-100)
+  health: number;              // Current HP (base max: 10000)
+  maxHealth: number;           // Max HP
   material: 'wood' | 'iron' | 'steel'; // Plank material type
   segmentIndex: number;        // Which segment of the ship hull (0-11)
   sectionName?: string;        // Section name (e.g., "port_bow", "starboard_side")
@@ -320,6 +328,10 @@ export class ModuleUtils {
           sailColor: '#F5F5DC',   // Beige/cream color for sails
           openness: 80,           // Start with sails mostly deployed
           angle: 0,               // Start with sails aligned with ship
+          health: 15000,
+          maxHealth: 15000,
+          fiberHealth: 15000,     // Sail cloth HP (same base as mast)
+          fiberMaxHealth: 15000,
         } as MastModuleData;
         break;
 
@@ -352,7 +364,8 @@ export class ModuleUtils {
           kind: 'plank',
           length: 16,              // Default plank length
           width: 4,                // Default plank thickness
-          health: 100,             // Full health
+          health: 10000,           // Full health
+          maxHealth: 10000,
           material: 'wood',        // Default wooden planks
           segmentIndex: 0,         // Default to first segment
         } as PlankModuleData;
@@ -546,7 +559,8 @@ export class ModuleUtils {
       if (plank.moduleData && plank.moduleData.kind === 'plank') {
         plank.moduleData.length = Math.max(length, 15); // Ensure minimum length
         plank.moduleData.width = segment.thickness;
-        plank.moduleData.health = 100;
+        plank.moduleData.health = 10000;
+        plank.moduleData.maxHealth = 10000;
         plank.moduleData.material = 'wood';
         plank.moduleData.segmentIndex = segment.index;
         plank.moduleData.sectionName = segment.sectionName;
@@ -811,4 +825,90 @@ function createCurvedSegmentRange(
     t1: t1,
     t2: t2
   }];
+}
+
+// ─── Module geometry ──────────────────────────────────────────────────────────
+
+export type ModuleFootprint =
+  | { kind: 'box'; hw: number; hh: number }
+  | { kind: 'circle'; radius: number };
+
+/**
+ * Returns the bounding footprint for a module kind (ship-local units).
+ * Used for geometry-based overlap detection when placing modules.
+ */
+export function getModuleFootprint(kind: ModuleKind): ModuleFootprint {
+  switch (kind) {
+    case 'cannon':
+    case 'steering-wheel': return { kind: 'box', hw: 16, hh: 25 };
+    case 'mast':           return { kind: 'circle', radius: 16 };
+    case 'helm':           return { kind: 'box', hw: 14, hh: 14 };
+    case 'seat':           return { kind: 'box', hw: 10, hh: 10 };
+    case 'ladder':         return { kind: 'box', hw: 10, hh: 15 };
+    default:               return { kind: 'circle', radius: 10 };
+  }
+}
+
+/**
+ * Returns true if two module footprints (same 2-D space) overlap.
+ * @param margin extra clearance in pixels added uniformly to each footprint
+ */
+export function footprintsOverlap(
+  fp1: ModuleFootprint, x1: number, y1: number, rot1: number,
+  fp2: ModuleFootprint, x2: number, y2: number, rot2: number,
+  margin = 4
+): boolean {
+  if (fp1.kind === 'circle' && fp2.kind === 'circle') {
+    const dx = x2 - x1, dy = y2 - y1;
+    const r = fp1.radius + fp2.radius + margin;
+    return dx * dx + dy * dy < r * r;
+  }
+  if (fp1.kind === 'circle') {
+    const b = fp2 as { kind: 'box'; hw: number; hh: number };
+    return _circleBoxOverlap(x1, y1, fp1.radius + margin, x2, y2, b.hw, b.hh, rot2);
+  }
+  if (fp2.kind === 'circle') {
+    const b = fp1 as { kind: 'box'; hw: number; hh: number };
+    return _circleBoxOverlap(x2, y2, fp2.radius + margin, x1, y1, b.hw, b.hh, rot1);
+  }
+  // box vs box — separating axis theorem
+  const b1 = fp1 as { kind: 'box'; hw: number; hh: number };
+  const b2 = fp2 as { kind: 'box'; hw: number; hh: number };
+  return _obbOverlap(
+    x1, y1, b1.hw + margin / 2, b1.hh + margin / 2, rot1,
+    x2, y2, b2.hw + margin / 2, b2.hh + margin / 2, rot2
+  );
+}
+
+function _circleBoxOverlap(
+  cx: number, cy: number, r: number,
+  bx: number, by: number, hw: number, hh: number, bRot: number
+): boolean {
+  const cos = Math.cos(-bRot), sin = Math.sin(-bRot);
+  const dx = cx - bx, dy = cy - by;
+  const lx = dx * cos - dy * sin;
+  const ly = dx * sin + dy * cos;
+  const nearX = Math.max(-hw, Math.min(hw, lx));
+  const nearY = Math.max(-hh, Math.min(hh, ly));
+  return (lx - nearX) * (lx - nearX) + (ly - nearY) * (ly - nearY) < r * r;
+}
+
+function _obbOverlap(
+  ax: number, ay: number, ahw: number, ahh: number, aRot: number,
+  bx: number, by: number, bhw: number, bhh: number, bRot: number
+): boolean {
+  const cosA = Math.cos(aRot), sinA = Math.sin(aRot);
+  const cosB = Math.cos(bRot), sinB = Math.sin(bRot);
+  const axes: [number, number][] = [
+    [cosA, sinA], [-sinA, cosA],
+    [cosB, sinB], [-sinB, cosB],
+  ];
+  for (const [nx, ny] of axes) {
+    const pa = ax * nx + ay * ny;
+    const pb = bx * nx + by * ny;
+    const ra = Math.abs(ahw * (cosA * nx + sinA * ny)) + Math.abs(ahh * (-sinA * nx + cosA * ny));
+    const rb = Math.abs(bhw * (cosB * nx + sinB * ny)) + Math.abs(bhh * (-sinB * nx + cosB * ny));
+    if (Math.abs(pa - pb) > ra + rb) return false; // separating axis found
+  }
+  return true; // no separating axis → overlapping
 }

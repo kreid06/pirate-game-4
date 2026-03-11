@@ -10,6 +10,7 @@ import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
 import { simulate } from '../sim/Physics.js';
+import { createEmptyInventory } from '../sim/Inventory.js';
 
 /**
  * Simple GameEngine for local testing and development
@@ -73,6 +74,11 @@ export class GameEngine {
       turnRate: 0.5,
       waterDrag: 0.98,
       angularDrag: 0.95,
+      rudderAngle: 0,
+      cannonAmmo: 0,
+      infiniteAmmo: true,
+      hullHealth: 100,
+      companyId: 0,
       modules: [
         // Ship deck (interior floor)
         ModuleUtils.createShipDeckFromPolygon(shipHull, 200),
@@ -108,9 +114,13 @@ export class GameEngine {
         radius: PhysicsConfig.PLAYER_RADIUS,
         onDeck: true,
         carrierId: ship.id,
-        deckId: ship.modules[0].id
+        deckId: ship.modules[0].id,
+        isMounted: false,
+        companyId: 0,
+        inventory: createEmptyInventory()
       }],
       cannonballs: [],
+      npcs: [],
       carrierDetection: new Map()
     };
   }

@@ -4,9 +4,37 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// ── Company / Alliance system ─────────────────────────────────────────────
+// A company groups ships, players, and NPCs into a faction.
+// Two companies that share an alliance_id are friendly to each other;
+// entities of different companies are hostile.
+#define COMPANY_NEUTRAL  0   // Unclaimed/neutral — no friendly-fire protection
+#define COMPANY_PIRATES  1   // Player's company
+#define COMPANY_NAVY     2   // Enemy AI company
+
+// ── Weapon Control Groups ────────────────────────────────────────────────────
+typedef enum {
+    WEAPON_GROUP_MODE_AIMING     = 0,
+    WEAPON_GROUP_MODE_FREEFIRE   = 1,
+    WEAPON_GROUP_MODE_HALTFIRE   = 2,
+    WEAPON_GROUP_MODE_TARGETFIRE = 3,
+} WeaponGroupMode;
+
+#define MAX_WEAPON_GROUPS      10
+#define MAX_CANNONS_PER_GROUP  16
+
+typedef struct {
+    uint32_t        cannon_ids[MAX_CANNONS_PER_GROUP];
+    uint8_t         cannon_count;
+    WeaponGroupMode mode;
+    uint32_t        target_ship_id;
+} WeaponGroup;
+// ────────────────────────────────────────────────────────────────────────────
+
 // Simple ship structure for WebSocket server
 typedef struct SimpleShip {
     uint32_t ship_id;
+    uint16_t module_id_base;  // ID of the helm module (= module_id_base passed to init_brigantine_ship)
     uint32_t ship_type;      // Ship type ID (1=sloop, 2=cutter, 3=brigantine, etc.)
     float x, y;              // World position
     float rotation;          // Radians
@@ -27,14 +55,157 @@ typedef struct SimpleShip {
     
     // Ship control state
     uint8_t desired_sail_openness;  // Target sail openness (0-100%)
-    
+    float   desired_sail_angle;     // Target sail angle in radians (clamped ±60°)
+
+    // Ship-level ammunition (shared pool for all cannons)
+    uint16_t cannon_ammo;    // Remaining cannonballs (unused when infinite_ammo is true)
+    bool infinite_ammo;      // When true, cannons never consume ammo
+
+    // Crew AI — last aim angle (ship-local radians) used to compute sector of fire
+    float active_aim_angle; // drives update_npc_cannon_sector(); default 0 = forward
+
+    uint8_t company_id;      // COMPANY_* — which faction owns this ship
+
     // Ship modules (cannons, masts, helm, seats, etc.)
     ShipModule modules[MAX_MODULES_PER_SHIP];
     uint8_t module_count;
+    /** Wall-clock time (ms) when each cannon module last fired.
+     *  Indexed by the module's position in modules[] (0-based).
+     *  0 = never fired (treated as "fresh" — crew stays without penalty).
+     *  Updated by fire_cannon(); used by is_cannon_stale() to decide if
+     *  crew are allowed to leave for a busier cannon. */
+    uint32_t cannon_last_fire_ms[MAX_MODULES_PER_SHIP];
+    /** Wall-clock time (ms) when each cannon was last "needed" (aimed-in-sector
+     *  or fired).  NEEDED stays true until this timestamp + CANNON_NEEDED_TIMEOUT_MS
+     *  expires.  Cleared by tick_cannon_needed_expiry(). */
+    uint32_t cannon_last_needed_ms[MAX_MODULES_PER_SHIP];
+    /* Per-ship weapon control groups (shared by all players on this ship) */
+    WeaponGroup weapon_groups[MAX_WEAPON_GROUPS];
+
+    /* Sinking state — entered when hull_health hits 0; ship stays alive for SHIP_SINK_DURATION_MS */
+    bool     is_sinking;
+    uint32_t sink_start_ms;
 } SimpleShip;
 
-// Player movement states
+// NPC behavior types
 typedef enum {
+    NPC_ROLE_NONE      = 0,
+    NPC_ROLE_GUNNER    = 1,  // Mans a cannon: aims at enemy ship and fires
+    NPC_ROLE_HELMSMAN  = 2,  // Controls the helm: steers toward/away from target
+    NPC_ROLE_RIGGER    = 3,  // Manages a mast: sets sail openness based on orders
+    NPC_ROLE_REPAIRER  = 4,  // Seeks damaged modules and repairs them
+} NpcRole;
+
+// NPC agent — server-side autonomous crew member mounted to a module
+typedef struct NpcAgent {
+    uint32_t npc_id;             // Unique NPC ID (starts at 5000)
+    uint32_t ship_id;            // Ship this NPC belongs to
+    uint32_t module_id;          // Module this NPC is mounted to (0 = unmounted)
+    NpcRole  role;               // What this NPC does each tick
+    bool     active;
+
+    // Gunner state
+    uint32_t target_ship_id;     // Enemy ship to aim at (0 = no target)
+    float    fire_cooldown;      // Seconds remaining before next shot (counts down each tick)
+    float    fire_interval;      // Seconds between shots (default 5.0)
+
+    // Helmsman state
+    float    desired_heading;    // Target heading in radians
+    bool     intercept_mode;     // true = steer toward target; false = flee
+
+    // Rigger state
+    uint8_t  desired_openness;   // 0-100 sail openness to maintain
+} NpcAgent;
+
+#define MAX_NPC_AGENTS 64
+
+// ── World NPCs ───────────────────────────────────────────────────────────────
+// Visible, interactable character entities in the world (separate from NpcAgent AI controllers).
+// All crews are sailors for now; a company/alliance system will sort friend from foe later.
+#define MAX_WORLD_NPCS 64
+
+// NPC movement/AI state machine
+typedef enum {
+    WORLD_NPC_STATE_IDLE      = 0, // Resting at or near assigned cannon
+    WORLD_NPC_STATE_MOVING    = 1, // Walking across deck to a new cannon after a side switch
+    WORLD_NPC_STATE_AT_CANNON = 2, // Arrived — ready to fire
+    WORLD_NPC_STATE_REPAIRING = 3, // Arrived at a damaged module and actively repairing it
+} WorldNpcState;
+
+typedef struct WorldNpc {
+    uint32_t      id;
+    char          name[32];
+    bool          active;
+    NpcRole       role;          // NPC_ROLE_GUNNER (cannon) or NPC_ROLE_RIGGER (sail)
+
+    // World position (client units, updated and broadcast every tick)
+    float         x, y;
+    float         rotation;
+
+    // Ship attachment
+    uint32_t      ship_id;         // 0 = free-standing
+    float         local_x, local_y; // Ship-local position in CLIENT units
+
+    // Module associations
+    // Rigger: port_cannon_id = mast module ID (starboard_cannon_id mirrors it).
+    // Gunner: port_cannon_id = future locked-cannon preference (0 = any; player-set later).
+    uint32_t      port_cannon_id;       // Rigger: mast ID.  Gunner: locked preference (0=free)
+    uint32_t      starboard_cannon_id;  // Rigger: mast ID (mirrors port).  Gunner: unused (0)
+    uint32_t      assigned_cannon_id;   // Module the NPC is currently heading to / stationed at
+    bool          wants_cannon;         // Gunner: true = on cannon duty via manning panel
+
+    // Movement / state machine
+    WorldNpcState state;
+    float         target_local_x;
+    float         target_local_y;
+    float         idle_local_x;   // Spawn-time resting position (returned to when idle)
+    float         idle_local_y;
+    float         move_speed; // Client units / second (default 80)
+
+    float         interact_radius;
+    char          dialogue[64];
+
+    uint8_t       company_id;     // Inherited from ship at spawn time (COMPANY_*)
+} WorldNpc;
+// ────────────────────────────────────────────────────────────────────────────
+
+// ── Player Inventory ────────────────────────────────────────────────────────
+#define INVENTORY_SLOTS 10
+
+typedef enum {
+    ITEM_NONE          = 0,
+    ITEM_PLANK         = 1,
+    ITEM_REPAIR_KIT    = 2,
+    ITEM_CANNON_BALL   = 3,
+    ITEM_CANNON        = 7,
+    ITEM_SAIL          = 8,
+    ITEM_HELM          = 9,
+    ITEM_SWORD         = 4,
+    ITEM_PISTOL        = 5,
+    ITEM_HAMMER        = 6,
+    ITEM_CLOTH_ARMOR   = 10,
+    ITEM_LEATHER_ARMOR = 11,
+    ITEM_IRON_ARMOR    = 12,
+    ITEM_WOODEN_SHIELD = 20,
+    ITEM_IRON_SHIELD   = 21,
+    ITEM_DECK          = 13,
+} ItemKind;
+
+typedef struct {
+    ItemKind item;
+    uint8_t  quantity; // 0 = empty; 1 for weapons/tools; 1-99 for stackables
+} InventorySlot;
+
+typedef struct {
+    InventorySlot slots[INVENTORY_SLOTS];
+    ItemKind armor;       // Equipped armor (ITEM_NONE if bare)
+    ItemKind shield;      // Equipped shield (ITEM_NONE if none)
+    uint8_t  active_slot; // Currently selected hotbar slot (0-9)
+} PlayerInventory;
+// ────────────────────────────────────────────────────────────────────────────
+
+typedef enum {
+    PLAYER_STATE_IDLE,
     PLAYER_STATE_WALKING,   // On ship deck
     PLAYER_STATE_SWIMMING,  // In water
     PLAYER_STATE_FALLING    // Airborne (jumped off ship)
@@ -72,6 +243,11 @@ typedef struct WebSocketPlayer {
     // Cannon aiming state
     float cannon_aim_angle;        // World coordinates aim angle (radians)
     float cannon_aim_angle_relative; // Ship-relative aim angle (radians)
+
+    uint8_t company_id;            // Inherited from the ship this player boards
+
+    // Inventory
+    PlayerInventory inventory;
 } WebSocketPlayer;
 
 struct WebSocketStats {
@@ -97,6 +273,16 @@ int websocket_server_init(uint16_t port);
  * @param sim Simulation context
  */
 void websocket_server_set_simulation(struct Sim* sim);
+
+/**
+ * Create a new brigantine ship at runtime (e.g. from admin panel).
+ * Registers both the SimpleShip layout and its physics counterpart in the sim.
+ * @param x  World X position in client pixels
+ * @param y  World Y position in client pixels
+ * @param company_id  COMPANY_* constant (COMPANY_PIRATES, COMPANY_NAVY, etc.)
+ * @return Entity ID of the new ship, or 0 on failure
+ */
+uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id);
 
 /**
  * Clean up WebSocket server and close all connections
@@ -138,6 +324,26 @@ int websocket_server_get_stats(struct WebSocketStats* stats);
  * @return 0 on success, -1 on error
  */
 int websocket_server_get_ships(SimpleShip** out_ships, int* out_count);
+
+/**
+ * Create an NPC agent and mount it to a module on a ship.
+ * @param ship_id   Ship the NPC belongs to
+ * @param module_id Module to mount (cannon, mast, helm)
+ * @param role      NPC_ROLE_GUNNER / NPC_ROLE_HELMSMAN / NPC_ROLE_RIGGER
+ * @return NPC ID on success, 0 on failure
+ */
+uint32_t websocket_server_create_npc(uint32_t ship_id, uint32_t module_id, NpcRole role);
+
+/**
+ * Remove an NPC agent by ID.
+ */
+void websocket_server_remove_npc(uint32_t npc_id);
+
+/**
+ * Set the target ship for a gunner or helmsman NPC.
+ */
+void websocket_server_npc_set_target(uint32_t npc_id, uint32_t target_ship_id);
+
 
 /**
  * Get WebSocket players data for admin panel

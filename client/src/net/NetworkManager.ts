@@ -6,10 +6,11 @@
  */
 
 import { NetworkConfig } from '../client/ClientConfig.js';
-import { WorldState, InputFrame } from '../sim/Types.js';
+import { WorldState, InputFrame, Npc } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { createShipAtPosition } from '../sim/ShipUtils.js';
 import { ShipModule, ModuleKind, MODULE_TYPE_MAP } from '../sim/modules.js';
+import { parseInventoryFromServer, createEmptyInventory } from '../sim/Inventory.js';
 
 /**
  * Network connection states
@@ -57,7 +58,24 @@ export enum MessageType {
   // Cannon control messages
   CANNON_AIM = 'cannon_aim',
   CANNON_FIRE = 'cannon_fire',
-  
+  CANNON_GROUP_CONFIG = 'cannon_group_config',
+  CANNON_GROUP_STATE = 'cannon_group_state',
+
+  SLOT_SELECT = 'slot_select',
+  UNEQUIP = 'unequip',
+  GIVE_ITEM = 'give_item',
+  PLACE_PLANK = 'place_plank',
+  REPAIR_PLANK = 'repair_plank',
+  REPAIR_SAIL = 'repair_sail',
+  USE_HAMMER = 'use_hammer',
+  PLACE_CANNON = 'place_cannon',
+  PLACE_CANNON_AT = 'place_cannon_at',
+  PLACE_MAST = 'place_mast',
+  PLACE_MAST_AT = 'place_mast_at',
+  REPLACE_HELM = 'replace_helm',
+  PLACE_DECK = 'place_deck',
+  CREW_ASSIGN = 'crew_assign',
+
   PING = 'ping',
   
   // Server to Client  
@@ -69,6 +87,9 @@ export enum MessageType {
   MODULE_INTERACT_SUCCESS = 'module_interact_success',
   MODULE_INTERACT_FAILURE = 'module_interact_failure',
   
+  // Server notifications
+  PLAYER_BOARDED = 'player_boarded',
+
   // Connection Management
   CONNECT = 'connect',
   DISCONNECT = 'disconnect',
@@ -205,6 +226,7 @@ interface CannonAimMessage extends NetworkMessage {
   type: MessageType.CANNON_AIM;
   timestamp: number;
   aim_angle: number; // Radians, relative to ship rotation
+  active_groups: number[]; // Weapon group indices the player is currently aiming with
 }
 
 /**
@@ -215,6 +237,21 @@ interface CannonFireMessage extends NetworkMessage {
   timestamp: number;
   cannon_ids?: number[]; // Specific cannons to fire, or undefined for all aimed cannons
   fire_all?: boolean;    // True if double-click (fire all cannons)
+  freefire?: boolean;    // True if freefire/targetfire mode — skip server aim-angle check
+  ammo_type?: number;    // 0 = cannonball (default), 1 = bar shot
+}
+
+/**
+ * Weapon control group configuration message.
+ * Sent whenever the player changes a group's mode, cannon assignment, or target.
+ */
+interface CannonGroupConfigMessage extends NetworkMessage {
+  type: MessageType.CANNON_GROUP_CONFIG;
+  timestamp: number;
+  group_index: number;          // 0–9
+  mode: 'aiming' | 'freefire' | 'haltfire' | 'targetfire';
+  cannon_ids: number[];         // Module IDs of cannons in this group
+  target_ship_id: number;       // Server ship entity ID for targetfire; 0 otherwise
 }
 
 /**
@@ -245,7 +282,102 @@ interface ShipSailAngleControlMessage extends NetworkMessage {
   desired_angle: number; // -60 to +60 degrees in increments of 6
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | PingPongMessage | WorldStateMessage | AckMessage;
+interface SlotSelectMessage extends NetworkMessage {
+  type: MessageType.SLOT_SELECT;
+  timestamp: number;
+  slot: number;
+}
+
+interface UnequipMessage extends NetworkMessage {
+  type: MessageType.UNEQUIP;
+}
+
+interface GiveItemMessage extends NetworkMessage {
+  type: MessageType.GIVE_ITEM;
+  timestamp: number;
+  slot: number;
+  item: number;
+  quantity: number;
+}
+
+interface RepairPlankMessage extends NetworkMessage {
+  type: MessageType.REPAIR_PLANK;
+  timestamp: number;
+  shipId: number;
+}
+
+interface RepairSailMessage extends NetworkMessage {
+  type: MessageType.REPAIR_SAIL;
+  timestamp: number;
+  shipId: number;
+  mastIndex: number; // 0=bow, 1=mid, 2=stern
+}
+
+interface UseHammerMessage extends NetworkMessage {
+  type: MessageType.USE_HAMMER;
+  timestamp: number;
+  shipId: number;
+  moduleId: number;
+}
+
+interface PlacePlankMessage extends NetworkMessage {
+  type: MessageType.PLACE_PLANK;
+  timestamp: number;
+  shipId: number;
+  sectionName: string;
+  segmentIndex: number;
+}
+
+interface PlaceCannonMessage extends NetworkMessage {
+  type: MessageType.PLACE_CANNON;
+  timestamp: number;
+  shipId: number;
+}
+
+interface PlaceCannonAtMessage extends NetworkMessage {
+  type: MessageType.PLACE_CANNON_AT;
+  timestamp: number;
+  shipId: number;
+  localX: number;
+  localY: number;
+  rotation: number; // radians, ship-relative
+}
+
+interface PlaceMastMessage extends NetworkMessage {
+  type: MessageType.PLACE_MAST;
+  timestamp: number;
+  shipId: number;
+  mastIndex: number; // 0=bow, 1=mid, 2=stern — which specific mast slot to replace
+}
+
+interface PlaceMastAtMessage extends NetworkMessage {
+  type: MessageType.PLACE_MAST_AT;
+  timestamp: number;
+  shipId: number;
+  localX: number;
+  localY: number;
+}
+
+interface ReplaceHelmMessage extends NetworkMessage {
+  type: MessageType.REPLACE_HELM;
+  timestamp: number;
+  shipId: number;
+}
+
+interface PlaceDeckMessage extends NetworkMessage {
+  type: MessageType.PLACE_DECK;
+  timestamp: number;
+}
+
+interface CrewAssignMessage extends NetworkMessage {
+  type: MessageType.CREW_ASSIGN;
+  timestamp: number;
+  ship_id: number;
+  npc_id: number;
+  task: string;
+}
+
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage;
 
 /**
  * Main network manager class
@@ -287,6 +419,16 @@ export class NetworkManager {
   public onConnectionStateChanged: ((state: ConnectionState) => void) | null = null;
   public onModuleMountSuccess: ((moduleId: number, moduleKind: string, mountOffset?: Vec2) => void) | null = null;
   public onModuleMountFailure: ((reason: string) => void) | null = null;
+  public onModuleDestroyed: ((shipId: number, moduleId: number, damage: number, hitX?: number, hitY?: number) => void) | null = null;
+  public onModuleDamaged: ((shipId: number, moduleId: number, damage: number, hitX?: number, hitY?: number) => void) | null = null;
+  public onShipSunk: ((shipId: number) => void) | null = null;
+  public onShipSinking: ((shipId: number) => void) | null = null;
+  public onShipLevelUp: ((shipId: number, attribute: string, attrLevel: number, xp: number, shipLevel: number, totalCap: number, nextUpgradeCost: number) => void) | null = null;
+  public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
+  /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
+  public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
+  /** Fired when the server confirms the player has boarded a ship (via ladder). */
+  public onPlayerBoarded: ((shipId: number) => void) | null = null;
   
   constructor(config: NetworkConfig) {
     this.config = config;
@@ -689,25 +831,31 @@ export class NetworkManager {
     this.sendMessage(message);
   }
 
+  private lastAimSentTime: number = 0;
+  private readonly AIM_SEND_INTERVAL_MS = 50; // 20 Hz max
+
   /**
    * Send cannon aim update (right-click hold + mouse move)
    * Aim angle is relative to ship rotation
    */
-  sendCannonAim(aimAngle: number): void {
+  sendCannonAim(aimAngle: number, activeGroups: number[] = []): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
       return;
     }
 
+    const now = Date.now();
+    if (now - this.lastAimSentTime < this.AIM_SEND_INTERVAL_MS) {
+      return; // throttle to 20 Hz
+    }
+    this.lastAimSentTime = now;
+
     const message: CannonAimMessage = {
       type: MessageType.CANNON_AIM,
-      timestamp: Date.now(),
-      aim_angle: aimAngle
+      timestamp: now,
+      aim_angle: aimAngle,
+      active_groups: activeGroups
     };
 
-    // Only log occasionally to avoid spam
-    if (Math.random() < 0.05) {
-      console.log(`🎯 Cannon aim: ${(aimAngle * 180 / Math.PI).toFixed(1)}°`);
-    }
     this.sendMessage(message);
   }
 
@@ -715,8 +863,10 @@ export class NetworkManager {
    * Send cannon fire command
    * @param cannonIds - Specific cannon IDs to fire, or undefined for aimed cannons
    * @param fireAll - True if double-click (fire all cannons)
+   * @param ammoType - 0 = cannonball, 1 = bar shot
+   * @param freefire - True for freefire/targetfire groups (server skips aim-angle check)
    */
-  sendCannonFire(cannonIds?: number[], fireAll: boolean = false): void {
+  sendCannonFire(cannonIds?: number[], fireAll: boolean = false, ammoType: number = 0, freefire: boolean = false): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
       return;
     }
@@ -725,13 +875,203 @@ export class NetworkManager {
       type: MessageType.CANNON_FIRE,
       timestamp: Date.now(),
       cannon_ids: cannonIds,
-      fire_all: fireAll
+      fire_all: fireAll,
+      freefire: freefire || undefined,
+      ammo_type: ammoType
     };
 
-    console.log(`💥 Cannon fire: ${fireAll ? 'ALL' : cannonIds ? `IDs ${cannonIds.join(',')}` : 'aimed'}`);
+    console.log(`💥 Cannon fire: ${fireAll ? 'ALL' : cannonIds ? `IDs ${cannonIds.join(',')}` : 'aimed'} [${ammoType === 1 ? 'BAR SHOT' : 'CANNONBALL'}]${freefire ? ' FREEFIRE' : ''}`);
     this.sendMessage(message);
   }
+
+  /**
+   * Send weapon control group configuration to the server.
+   * Call this whenever a group's mode, cannon assignment, or target changes.
+   *
+   * @param groupIndex     0–9 group slot
+   * @param mode           New firing mode
+   * @param cannonIds      Module IDs of cannons in this group
+   * @param targetShipId   Server ship entity ID for targetfire; 0 otherwise
+   */
+  sendCannonGroupConfig(
+    groupIndex: number,
+    mode: 'aiming' | 'freefire' | 'haltfire' | 'targetfire',
+    cannonIds: number[],
+    targetShipId: number = 0
+  ): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      return;
+    }
+    const message: CannonGroupConfigMessage = {
+      type: MessageType.CANNON_GROUP_CONFIG,
+      timestamp: Date.now(),
+      group_index: groupIndex,
+      mode,
+      cannon_ids: cannonIds,
+      target_ship_id: targetShipId
+    };
+    console.log(`🎯 Group ${groupIndex} config → mode=${mode} cannons=[${cannonIds.join(',')}] target=${targetShipId}`);
+    this.sendMessage(message);
+  }
+
+  /**
+   * Force-reload the player's manned cannon, discarding the current round.
+   * Tells the server to reset the reload timer so the cannon reloads immediately
+   * into the newly-selected ammo type.
+   */
+  sendForceReload(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: 'cannon_force_reload' as any, timestamp: Date.now() });
+    console.log('⚡ Force reload sent');
+  }
+
+  /**
+   * Notify the server that the player selected a different hotbar slot.
+   */
+  sendSlotSelect(slot: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.SLOT_SELECT, timestamp: Date.now(), slot });
+  }
+
+  /**
+   * Notify the server that the player unequipped (deselected) their active hotbar slot.
+   * Server sets active_slot = 255 as a "nothing equipped" sentinel.
+   */
+  sendUnequip(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.UNEQUIP, timestamp: Date.now() });
+  }
+
+  /**
+   * Give an item directly to the local player (admin/test helper).
+   * Sends a give_item message to the server.
+   */
+  sendGiveItem(slot: number, itemId: number, quantity: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.GIVE_ITEM, timestamp: Date.now(), slot, item: itemId, quantity });
+  }
+
+  /**
+   * Request the server to place a plank in a missing hull slot.
+   * Server picks the first destroyed plank (100-109) and restores it, consuming 1 ITEM_PLANK.
+   */
+  sendPlacePlank(shipId: number, sectionName: string, segmentIndex: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_PLANK, timestamp: Date.now(), shipId, sectionName, segmentIndex });
+  }
+
+  /**
+   * Request the server to repair the most damaged plank on the player's ship.
+   * Consumes 1 ITEM_REPAIR_KIT from the player's inventory.
+   */
+  sendRepairPlank(shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.REPAIR_PLANK, timestamp: Date.now(), shipId });
+  }
+
+  /**
+   * Apply a hammer-boosted instant repair (10 000 HP) to the most damaged plank.
+   * Called only after the player wins the client-side hammer minigame.
+   */
+  sendUseHammer(shipId: number, moduleId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.USE_HAMMER, timestamp: Date.now(), shipId, moduleId });
+  }
+
+  /**
+   * Request the server to repair torn sail fibers on a specific mast.
+   * Consumes 1 ITEM_REPAIR_KIT from the player's inventory.
+   * mastIndex: 0=bow, 1=mid, 2=stern.
+   */
+  sendRepairSail(shipId: number, mastIndex: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.REPAIR_SAIL, timestamp: Date.now(), shipId, mastIndex });
+  }
+
+  /**
+   * Request the server to replace a destroyed cannon on the player's ship.
+   * Server finds the first missing cannon slot (base+1..base+6) and recreates it,
+   * consuming 1 ITEM_CANNON from the player's inventory.
+   */
+  sendPlaceCannon(shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_CANNON, timestamp: Date.now(), shipId });
+  }
+
+  /**
+   * Request the server to place a new cannon at an arbitrary ship-local position.
+   * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
+   * Consumes 1 ITEM_CANNON from the player's inventory.
+   */
+  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_CANNON_AT, timestamp: Date.now(), shipId, localX, localY, rotation });
+  }
+
+  /**
+   * Request the server to replace a destroyed mast on the player's ship.
+   * Server finds the first missing mast slot (base+7..base+9) and recreates it,
+   * consuming 1 ITEM_SAIL from the player's inventory.
+   */
+  sendPlaceMast(shipId: number, mastIndex: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_MAST, timestamp: Date.now(), shipId, mastIndex });
+  }
+
+  /**
+   * Request the server to place a new mast at an arbitrary ship-local position.
+   * localX/localY are ship-relative coordinates.
+   * Consumes 1 ITEM_SAIL from the player's inventory.
+   */
+  sendPlaceMastAt(shipId: number, localX: number, localY: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_MAST_AT, timestamp: Date.now(), shipId, localX, localY });
+  }
+
+  /**
+   * Request the server to replace the helm if it was destroyed.
+   * Consumes 1 ITEM_HELM from the player's inventory.
+   */
+  sendReplaceHelm(shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.REPLACE_HELM, timestamp: Date.now(), shipId });
+  }
+
+  /**
+   * Request the server to place a missing deck module on the player's ship.
+   * Consumes 1 ITEM_DECK from the player's inventory.
+   */
+  sendPlaceDeck(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_DECK, timestamp: Date.now() });
+  }
+
+  /**
+   * Send crew task assignments from the manning-priority panel.
+   * One message per NPC — server uses task to drive WorldNpc state transitions.
+   */
+  sendCrewAssign(shipId: number, assignments: Array<{ npcId: number; task: string }>): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    for (const { npcId, task } of assignments) {
+      this.sendMessage({
+        type: MessageType.CREW_ASSIGN,
+        timestamp: Date.now(),
+        ship_id: shipId,
+        npc_id: npcId,
+        task,
+      });
+    }
+  }
   
+  /**
+   * Request the server to spend XP upgrading one attribute on the player's ship.
+   * attribute must be one of: 'weight' | 'resistance' | 'damage' | 'crew' | 'sturdiness'
+   */
+  sendUpgradeShipAttribute(shipId: number, attribute: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'upgrade_ship', shipId, attribute }));
+  }
+
   /**
    * Get current network statistics
    */
@@ -903,14 +1243,17 @@ export class NetworkManager {
             if (ship.modules && Array.isArray(ship.modules)) {
               // Separate gameplay modules from structural modules
               const gameplayModules: ShipModule[] = [];
-              const plankHealthUpdates = new Map<number, number>();
+              const plankHealthUpdates = new Map<number, { health: number; maxHealth: number }>();
               
               for (const mod of ship.modules) {
                 const kind = MODULE_TYPE_MAP.toKind(mod.typeId);
                 
                 if (kind === 'plank') {
                   // Plank: Server only sends health, client generates positions
-                  plankHealthUpdates.set(mod.id, mod.health ?? 100);
+                  plankHealthUpdates.set(mod.id, {
+                    health: mod.health ?? 10000,
+                    maxHealth: mod.maxHealth ?? 10000,
+                  });
                 } else if (kind === 'deck') {
                   // Deck: Client generates from hull, server sends ID only
                   // Skip - client already has deck module
@@ -927,7 +1270,10 @@ export class NetworkManager {
                       reloadTime: 3.0,
                       timeSinceLastFire: 0,
                       ammunition: mod.ammo ?? 50,
-                      maxAmmunition: 50
+                      maxAmmunition: 50,
+                      health: mod.health ?? 8000,
+                      maxHealth: mod.maxHealth ?? 8000,
+                      stateBits: mod.state ?? 0,
                     };
                   } else if (kind === 'helm' || kind === 'steering-wheel') {
                     moduleData = {
@@ -936,7 +1282,9 @@ export class NetworkManager {
                       responsiveness: 0.8,
                       currentInput: Vec2.from(0, 0),
                       wheelRotation: mod.wheelRot ?? 0,
-                      occupied: mod.occupied ?? false
+                      occupied: mod.occupied ?? false,
+                      health: mod.health ?? 10000,
+                      maxHealth: mod.maxHealth ?? 10000,
                     };
                   } else if (kind === 'mast') {
                     moduleData = {
@@ -944,10 +1292,15 @@ export class NetworkManager {
                       sailState: 'full',
                       openness: mod.openness ?? 0,
                       angle: mod.sailAngle ?? 0,
+                      windEfficiency: mod.windEfficiency ?? 1.0,
+                      fiberHealth: mod.fiberHealth ?? 15000,
+                      fiberMaxHealth: mod.fiberMaxHealth ?? 15000,
                       radius: 15,
                       height: 120,
                       sailWidth: 80,
-                      sailColor: '#F5F5DC'
+                      sailColor: '#F5F5DC',
+                      health: mod.health ?? 15000,
+                      maxHealth: mod.maxHealth ?? 15000,
                     };
                   } else if (kind === 'ladder') {
                     moduleData = {
@@ -966,7 +1319,7 @@ export class NetworkManager {
                     localPos: Vec2.from(mod.x || 0, mod.y || 0),
                     localRot: mod.rotation || 0,
                     occupiedBy: null,
-                    stateBits: 0,
+                    stateBits: mod.state ?? 0,
                     moduleData: moduleData
                   } as ShipModule);
                 }
@@ -975,17 +1328,22 @@ export class NetworkManager {
               // Merge: Keep client-generated planks/deck, add server gameplay modules
               const clientPlanks = properShip.modules.filter(m => m.kind === 'plank');
               const clientDeck = properShip.modules.filter(m => m.kind === 'deck');
-              
-              // Update plank health from server data
-              for (const plank of clientPlanks) {
-                const serverHealth = plankHealthUpdates.get(plank.id);
-                if (serverHealth !== undefined && plank.moduleData && plank.moduleData.kind === 'plank') {
-                  plank.moduleData.health = serverHealth;
+
+              // Only include planks the server still reports — absence means destroyed
+              const serverPlankIds = new Set(plankHealthUpdates.keys());
+              const activePlanks = clientPlanks.filter(p => serverPlankIds.has(p.id));
+
+              // Update health on surviving planks
+              for (const plank of activePlanks) {
+                const serverData = plankHealthUpdates.get(plank.id);
+                if (serverData !== undefined && plank.moduleData && plank.moduleData.kind === 'plank') {
+                  plank.moduleData.health = serverData.health;
+                  plank.moduleData.maxHealth = serverData.maxHealth;
                 }
               }
               
               // Combine: client planks/deck + server gameplay modules
-              serverModules = [...clientDeck, ...clientPlanks, ...gameplayModules];
+              serverModules = [...clientDeck, ...activePlanks, ...gameplayModules];
             }
             
             // Override with server's authoritative state
@@ -1007,6 +1365,31 @@ export class NetworkManager {
               waterDrag: ship.water_drag ?? properShip.waterDrag,
               angularDrag: ship.angular_drag ?? properShip.angularDrag,
               rudderAngle: ship.rudder_angle ?? 0,
+              cannonAmmo: ship.ammo ?? 0,
+              infiniteAmmo: ship.infiniteAmmo ?? true,
+              hullHealth: ship.hullHealth ?? 100,
+              companyId: ship.company ?? 0,
+              levelStats: ship.levelStats ? {
+                levels: [
+                  ship.levelStats.weight     ?? 1,
+                  ship.levelStats.resistance ?? 1,
+                  ship.levelStats.damage     ?? 1,
+                  ship.levelStats.crew       ?? 1,
+                  ship.levelStats.sturdiness ?? 1,
+                ],
+                xp:              ship.levelStats.xp              ?? 0,
+                maxCrew:         ship.levelStats.maxCrew          ?? 9,
+                shipLevel:       ship.levelStats.shipLevel        ?? ship.levelStats.totalPoints ?? 0,
+                totalCap:        ship.levelStats.totalCap         ?? 65,
+                nextUpgradeCost: ship.levelStats.nextUpgradeCost  ?? 0,
+                attrCaps: [
+                  ship.levelStats.attrCaps?.weight     ?? 50,
+                  ship.levelStats.attrCaps?.resistance ?? 35,
+                  ship.levelStats.attrCaps?.damage     ?? 35,
+                  ship.levelStats.attrCaps?.crew       ?? 50,
+                  ship.levelStats.attrCaps?.sturdiness ?? 25,
+                ],
+              } : properShip.levelStats,
             };
           }),
           players: (message.players || []).map((player: any) => ({
@@ -1038,19 +1421,46 @@ export class NetworkManager {
             mountedModuleId: player.mounted_module_id || undefined,
             mountOffset: (player.mount_offset_x !== undefined && player.mount_offset_y !== undefined)
               ? Vec2.from(player.mount_offset_x, player.mount_offset_y)
-              : undefined
+              : undefined,
+
+            // Inventory from server
+            inventory: player.inventory
+              ? parseInventoryFromServer(
+                  player.inventory.slots,
+                  player.inventory.activeSlot ?? 0,
+                  player.inventory.armor ?? 0,
+                  player.inventory.shield ?? 0,
+                )
+              : createEmptyInventory(),
+
+            companyId: player.company ?? 0,
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,
             position: Vec2.from(ball.x || 0, ball.y || 0),
             velocity: Vec2.from(ball.vx || 0, ball.vy || 0),
-            firingVelocity: Vec2.from(ball.vx || 0, ball.vy || 0), // Server doesn't send separate firingVelocity
-            radius: 6, // Slightly less than cannon barrel width (~8-10 pixels)
+            firingVelocity: Vec2.from(ball.vx || 0, ball.vy || 0),
+            radius: 6,
             maxRange: 800,
-            distanceTraveled: 0, // Server doesn't send this yet
-            timeAlive: 0, // Server doesn't send this yet
+            distanceTraveled: 0,
+            timeAlive: 0,
             firedFrom: ball.owner || 0,
-            smokeTrail: [] // No smoke trail from server yet
+            ammoType: ball.type ?? 0,   // Server sends "type": 0=cannonball, 1=bar shot
+            smokeTrail: []
+          })),
+          npcs: (message.npcs || []).map((n: any): Npc => ({
+            id: n.id || 0,
+            name: n.name || 'Sailor',
+            type: n.type ?? 0,
+            position: Vec2.from(n.x || 0, n.y || 0),
+            localPosition: Vec2.from(n.local_x || 0, n.local_y || 0),
+            rotation: n.rotation || 0,
+            interactRadius: n.interact_radius ?? 40,
+            shipId: n.ship_id || 0,
+            state: n.state ?? 0,
+            role: n.role ?? 0,
+            companyId: n.company ?? 0,
+            assignedCannonId: n.assigned_cannon_id ?? 0,
           })),
           carrierDetection: new Map() // Will be populated as needed
         };
@@ -1099,7 +1509,101 @@ export class NetworkManager {
       case MessageType.MODULE_INTERACT_FAILURE:
         this.handleModuleInteractFailure(message as ModuleInteractFailureMessage);
         break;
-        
+
+      case MessageType.PLAYER_BOARDED: {
+        const boardedShipId: number = message.ship_id || 0;
+        this.onPlayerBoarded?.(boardedShipId);
+        break;
+      }
+
+      case 'npc_dialogue':
+        console.log(`💬 [NPC] ${message.npc_name}: "${message.text}"`);
+        this.onNpcDialogue?.(message.npc_id, message.npc_name, message.text);
+        break;
+
+      case MessageType.CANNON_GROUP_STATE: {
+        const gsShipId: number = message.shipId || 0;
+        const gsGroups = Array.isArray(message.groups) ? message.groups.map((g: any) => ({
+          index: g.index ?? 0,
+          mode: g.mode ?? 'haltfire',
+          cannonIds: Array.isArray(g.cannonIds) ? g.cannonIds.map((id: any) => Number(id)) : [],
+          targetShipId: g.targetShipId ?? 0,
+        })) : [];
+        this.onCannonGroupState?.(gsShipId, gsGroups);
+        break;
+      }
+
+      case 'MODULE_HIT': {
+        const shipId: number = message.shipId || 0;
+        const moduleId: number = message.moduleId || 0;
+        const hitDmg: number = message.damage || 0;
+        const hitX: number | undefined = message.x;
+        const hitY: number | undefined = message.y;
+        console.log(`💥 MODULE_HIT: ship ${shipId} module ${moduleId} destroyed`);
+        this.onModuleDestroyed?.(shipId, moduleId, hitDmg, hitX, hitY);
+        break;
+      }
+
+      case 'MODULE_DAMAGED': {
+        // Non-fatal interior module hit — spawn damage number only
+        const shipId: number = message.shipId || 0;
+        const moduleId: number = message.moduleId || 0;
+        const damage: number = message.damage || 0;
+        const hitX: number | undefined = message.x;
+        const hitY: number | undefined = message.y;
+        this.onModuleDamaged?.(shipId, moduleId, damage, hitX, hitY);
+        break;
+      }
+
+      case 'PLANK_HIT': {
+        // Plank destroyed — remove immediately so it disappears before the next GAME_STATE
+        const plankShipId: number = message.shipId || 0;
+        const plankId: number = message.plankId || 0;
+        const plankDmg: number = message.damage || 0;
+        const plankHitX: number | undefined = message.x;
+        const plankHitY: number | undefined = message.y;
+        this.onModuleDestroyed?.(plankShipId, plankId, plankDmg, plankHitX, plankHitY);
+        break;
+      }
+
+      case 'PLANK_DAMAGED': {
+        // Non-fatal plank hit — spawn damage number only
+        const plankShipId: number = message.shipId || 0;
+        const plankId: number = message.plankId || 0;
+        const plankDamage: number = message.damage || 0;
+        const plankHitX: number | undefined = message.x;
+        const plankHitY: number | undefined = message.y;
+        this.onModuleDamaged?.(plankShipId, plankId, plankDamage, plankHitX, plankHitY);
+        break;
+      }
+
+      case 'SHIP_SINK': {
+        const sunkShipId: number = message.shipId || 0;
+        console.log(`🌊 SHIP_SINK: ship ${sunkShipId} has sunk!`);
+        this.onShipSunk?.(sunkShipId);
+        break;
+      }
+
+      case 'SHIP_SINKING': {
+        const sinkingShipId: number = message.shipId || 0;
+        console.log(`🌊 SHIP_SINKING: ship ${sinkingShipId} is sinking!`);
+        this.onShipSinking?.(sinkingShipId);
+        break;
+      }
+
+      case 'SHIP_LEVEL_UP': {
+        const lvlShipId:         number = message.shipId          || 0;
+        const lvlAttribute:      string = message.attribute        || '';
+        const lvlAttrLevel:      number = message.level            || 1;
+        const lvlXp:             number = message.xp               ?? 0;
+        const lvlShipLevel:      number = message.shipLevel        ?? 0;
+        const lvlTotalCap:       number = message.totalCap         || 65;
+        const lvlNextCost:       number = message.nextUpgradeCost  ?? 0;
+        console.log(`⬆️  SHIP_LEVEL_UP: ship ${lvlShipId} ${lvlAttribute} → L${lvlAttrLevel} | ship level ${lvlShipLevel}/${lvlTotalCap} | next cost ${lvlNextCost} | ${lvlXp} XP left`);
+        this.onShipLevelUp?.(lvlShipId, lvlAttribute, lvlAttrLevel, lvlXp, lvlShipLevel, lvlTotalCap, lvlNextCost);
+        break;
+      }
+
       default:
         console.log('📦 Received message:', message.type, message);
         break;

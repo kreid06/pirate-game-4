@@ -83,8 +83,50 @@ export class InputManager {
   public onShipSailAngleControl: ((desiredAngle: number) => void) | null = null;
   
   // Cannon control callbacks
-  public onCannonAim: ((aimAngle: number) => void) | null = null;
-  public onCannonFire: ((cannonIds?: number[], fireAll?: boolean) => void) | null = null;
+  public onCannonAim: ((aimAngle: number, activeGroups: number[]) => void) | null = null;
+  public onCannonFire: ((cannonIds?: number[], fireAll?: boolean, ammoType?: number, weaponGroup?: number, weaponGroups?: Set<number>) => void) | null = null;
+
+  // Inventory callbacks
+  public onSlotSelect: ((slot: number) => void) | null = null;
+  /** Q key — deselect the active hotbar slot (unequip). */
+  public onUnequip: (() => void) | null = null;
+  /** Digit 1–9 on helm — selects weapon group 0–9. */
+  public onWeaponGroupSelect: ((group: number) => void) | null = null;
+  /** Shift+left-click on a cannon toggles it in/out of the active weapon group. */
+  public onGroupAssign: (() => void) | null = null;
+  /** Ctrl+Digit while hovering a cannon — assign it directly to the given group index. */
+  public onGroupAssignTo: ((group: number) => void) | null = null;
+  /** Right-click intercepted by UI (e.g. cycling weapon group mode on hotbar). Returns true if consumed. */
+  public onUIRightClick: ((x: number, y: number) => boolean) | null = null;
+  /** Right-click on world while on helm in targetfire mode — world position to lock onto. */
+  public onGroupTarget: ((worldPos: Vec2) => void) | null = null;
+  /** Called when right-click aiming begins (right mouse pressed, not consumed by UI or targetfire). */
+  public onAimStart: (() => void) | null = null;
+  /** Called when right-click aiming ends (right mouse released). */
+  public onAimEnd: (() => void) | null = null;
+
+  // UI click intercept — return true to consume the click before game logic runs
+  public onUIClick: ((x: number, y: number) => boolean) | null = null;
+
+  // Build mode — set when a buildable item (e.g. plank) is in the active hotbar slot
+  public buildMode: boolean = false;
+  public onBuildPlace: ((worldPos: Vec2) => void) | null = null;
+
+  // Explicit build mode (toggled with B key — independent of hotbar items)
+  public explicitBuildMode: boolean = false;
+  public onBuildModeToggle: (() => void) | null = null;
+  public onBuildRotate: ((deltaDeg: number) => void) | null = null;
+  /** Called when R is pressed while hovering a damaged mast (not in explicit build mode). */
+  public onRepairSail: (() => void) | null = null;
+
+  // Build menu (B key — open panel + ghost placement system)
+  /** True while the build menu panel is open. Affects right-click and other input. */
+  public buildMenuOpen: boolean = false;
+  /** Right-click while build menu is open — fires with world position. */
+  public onBuildRightClick: ((worldPos: Vec2) => void) | null = null;
+
+  // Camera zoom callback
+  public onZoom: ((factor: number, screenPoint: Vec2) => void) | null = null;
   
   // HYBRID PROTOCOL: State tracking for change detection
   private previousMovementState: Vec2 = Vec2.zero();
@@ -92,7 +134,29 @@ export class InputManager {
   private readonly ROTATION_THRESHOLD = 0.0524; // 3 degrees in radians
   
   // Ship control state tracking
-  private isMountedToHelm: boolean = false;
+  private mountKind: 'none' | 'helm' | 'cannon' | 'mast' = 'none';
+  private get isMountedToHelm(): boolean { return this.mountKind === 'helm'; }
+  /** Mode of the currently active (primary) weapon group — kept in sync by ClientApplication. */
+  public activeGroupMode: string = 'haltfire';
+
+  /** Primary active weapon group (last one solo-selected). Used for assign/mode-cycle/targetfire. */
+  public activeWeaponGroup: number = -1;
+  /** All currently selected weapon groups. Digit alone = solo; Ctrl+Digit = toggle add/remove. */
+  public activeWeaponGroups: Set<number> = new Set();
+  /** Returns the current mount kind. */
+  public getMountKind(): string { return this.mountKind; }
+  /** Returns true while Shift is currently held — used to show weapon group overlay. */
+  public isShiftHeld(): boolean {
+    return this.inputState.pressedKeys.has('ShiftLeft') || this.inputState.pressedKeys.has('ShiftRight');
+  }
+  /**
+   * Returns true when either Ctrl key is held.
+   * Detects ControlLeft and ControlRight so it works consistently across
+   * macOS (Control ≠ Command), Windows, and Linux keyboards.
+   */
+  public isCtrlHeld(): boolean {
+    return this.inputState.pressedKeys.has('ControlLeft') || this.inputState.pressedKeys.has('ControlRight');
+  }
   private currentSailOpenness: number = 100; // Start at 100% (full sails)
   private currentSailAngle: number = 0; // Start at 0 degrees
   private lastRudderState: { left: boolean; right: boolean } = { left: false, right: false };
@@ -103,8 +167,34 @@ export class InputManager {
   private readonly SAIL_OPENNESS_COOLDOWN = 100; // 0.1s per 10% change
   private readonly SAIL_ANGLE_COOLDOWN = 100; // 0.1s per 6° change
   
+  /** True while right mouse button is held down. */
+  public get isRightMouseDown(): boolean {
+    return this.inputState.rightMouseDown;
+  }
+
   // Cannon aiming state
+  /** True while the player is mounted to a cannon and holding right-mouse to aim. */
+  public get isCannonAiming(): boolean {
+    return this.mountKind === 'cannon' && this.inputState.rightMouseDown;
+  }
+  /** ID of the cannon module the player is currently mounted to, or null. */
+  public mountedCannonModuleId: number | null = null;
   private lastCannonAimAngle: number = 0;
+  /** Selected ammo type: 0 = cannonball, 1 = bar shot. Toggle with X key. */
+  public selectedAmmoType: number = 0;    // Pending ammo (to load after next fire)
+  public loadedAmmoType: number = 0;      // What's physically in the barrel right now
+  private xHoldTimer: ReturnType<typeof setTimeout> | null = null;  // setTimeout handle for 1s hold
+  private xHoldFired: boolean = false;    // True if hold timer already fired this press
+
+  /** Called when player holds X (1s) to force-reload with the pending ammo type. */
+  public onForceReload: (() => void) | null = null;
+
+  /** Returns what ammo type is currently loaded (for aim guides and fire messages). */
+  public getLoadedAmmoType(): number { return this.loadedAmmoType; }
+  /** Resets loaded and pending ammo type to cannonball (0). Call when boarding a new ship. */
+  public resetAmmoType(): void { this.selectedAmmoType = 0; this.loadedAmmoType = 0; }
+  /** Current aim angle relative to ship — updated every frame while right-mouse is held. */
+  public get cannonAimAngleRelative(): number { return this.lastCannonAimAngle; }
   private lastLeftClickTime: number = 0;
   private readonly DOUBLE_CLICK_THRESHOLD = 300; // 300ms for double-click detection
   private currentShipId: number | null = null; // Track which ship player is on for aim calculation
@@ -178,10 +268,20 @@ export class InputManager {
     this.handleCannonAiming();
     
     // If mounted to helm, handle ship controls instead of player movement
-    if (this.isMountedToHelm) {
+    if (this.mountKind === 'helm') {
       this.handleShipControls();
       this.resetFrameFlags();
       return; // Skip normal player input processing
+    }
+
+    // If mounted to cannon/mast, handle interact-to-dismount only
+    if (this.mountKind === 'cannon' || this.mountKind === 'mast') {
+      if (this.isActionActive('interact') && this.canInteract()) {
+        this.lastInteractionTime = Date.now();
+        if (this.onActionEvent) this.onActionEvent('dismount');
+      }
+      this.resetFrameFlags();
+      return; // Locked to mount position
     }
     
     // Generate current input frame
@@ -237,6 +337,11 @@ export class InputManager {
       }
     }
     
+    // Walking right-click = block
+    if (this.inputState.rightMouseDown && this.mountKind === 'none') {
+      if (this.onActionEvent) this.onActionEvent('block');
+    }
+
     // Reset per-frame flags
     this.resetFrameFlags();
   }
@@ -284,6 +389,13 @@ export class InputManager {
   }
   
   /**
+   * Get current mouse position in screen coordinates
+   */
+  getMouseScreenPosition(): Vec2 {
+    return this.inputState.mousePosition.clone();
+  }
+
+  /**
    * Get current mouse world position
    */
   getMouseWorldPosition(): Vec2 {
@@ -319,24 +431,31 @@ export class InputManager {
   }
 
   /**
-   * Set mount state (called when player mounts/dismounts helm)
+   * Set mount state (called when player mounts/dismounts a module)
    */
-  setMountState(mounted: boolean, shipId?: number): void {
-    this.isMountedToHelm = mounted;
+  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number): void {
+    this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast') : 'none';
     this.currentShipId = shipId !== undefined ? shipId : null;
-    
+    this.mountedCannonModuleId = (mounted && moduleKind.toLowerCase() === 'cannon' && moduleId != null) ? moduleId : null;
+
     if (mounted) {
-      console.log(`⚓ [INPUT] Player mounted to helm on ship ${shipId} - ship controls active`);
-      // Reset ship control state
-      this.currentSailOpenness = 100;
-      this.currentSailAngle = 0;
-      this.lastSailOpenness = 100;
-      this.lastSailAngle = 0;
-      this.lastRudderState = { left: false, right: false };
-      this.lastSailOpennessChangeTime = 0;
-      this.lastSailAngleChangeTime = 0;
+      console.log(`⚓ [INPUT] Player mounted to ${moduleKind} on ship ${shipId}`);
+      if (this.mountKind === 'helm') {
+        // Seed from the server's current sail openness so W/S work immediately
+        const seeded = initialSailOpenness ?? 100;
+        this.currentSailOpenness = seeded;
+        this.lastSailOpenness    = seeded;
+        this.currentSailAngle = 0;
+        this.lastSailAngle = 0;
+        this.lastRudderState = { left: false, right: false };
+        this.lastSailOpennessChangeTime = 0;
+        this.lastSailAngleChangeTime = 0;
+        console.log(`⛵ [INPUT] Seeded sail openness to ${seeded}% on mount`);
+      }
     } else {
       console.log(`⚓ [INPUT] Player dismounted - player controls active`);
+      this.activeWeaponGroup = -1;
+      this.activeWeaponGroups.clear();
     }
   }
 
@@ -434,7 +553,12 @@ export class InputManager {
     if (!this.inputState.rightMouseDown) {
       return;
     }
-    
+
+    // Only aim when mounted to helm or cannon
+    if (this.mountKind !== 'helm' && this.mountKind !== 'cannon') {
+      return;
+    }
+
     // Need to be on a ship to aim cannons
     if (this.currentShipId === null) {
       return;
@@ -443,6 +567,14 @@ export class InputManager {
     // Calculate aim angle from player position to mouse position (world coordinates)
     const dx = this.inputState.mouseWorldPosition.x - this.playerPosition.x;
     const dy = this.inputState.mouseWorldPosition.y - this.playerPosition.y;
+
+    // Only rotate cannons when the mouse is within effective cannonball range.
+    // Beyond this distance the aim angle is physically meaningless.
+    const CANNON_AIM_RANGE = 800; // client units — matches CANNONBALL_RANGE
+    if (dx * dx + dy * dy > CANNON_AIM_RANGE * CANNON_AIM_RANGE) {
+      return;
+    }
+
     const aimAngleWorld = Math.atan2(dy, dx);
     
     // Convert to ship-relative angle
@@ -460,7 +592,7 @@ export class InputManager {
     
     if (angleDelta > ANGLE_THRESHOLD) {
       if (this.onCannonAim) {
-        this.onCannonAim(aimAngleRelative);
+        this.onCannonAim(aimAngleRelative, [...this.activeWeaponGroups]);
       }
       this.lastCannonAimAngle = aimAngleRelative;
     }
@@ -798,6 +930,101 @@ export class InputManager {
         break;
       case 'KeyC':
         // Camera mode toggle handled by client application
+        break;      case 'KeyB':
+        // Toggle explicit build mode
+        if (this.onBuildModeToggle) this.onBuildModeToggle();
+        event.preventDefault();
+        break;
+      case 'KeyR':
+        // In explicit build mode OR plan mode (build menu open): rotate the placement ghost.
+        // Otherwise: repair sail fibers on the hovered damaged mast.
+        if ((this.explicitBuildMode || this.buildMenuOpen) && this.onBuildRotate) {
+          this.onBuildRotate(15);
+          event.preventDefault();
+        } else if (!this.explicitBuildMode && !this.buildMenuOpen && this.onRepairSail) {
+          this.onRepairSail();
+          event.preventDefault();
+        }
+        break;
+      case 'KeyX':
+        // Toggle ammo type when mounted to a cannon or helm
+        // On initial press: start a 1s timer — if it fires, force swap immediately
+        // On release before 1s: cancel timer, queue the swap instead
+        if (this.mountKind === 'cannon' || this.mountKind === 'helm') {
+          if (!event.repeat) {
+            this.xHoldFired = false;
+            this.xHoldTimer = setTimeout(() => {
+              this.xHoldFired = true;
+              const ammoNames = ['CANNONBALL', 'BAR SHOT'];
+              // Toggle if nothing is queued yet
+              if (this.selectedAmmoType === this.loadedAmmoType) {
+                this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
+              }
+              this.loadedAmmoType = this.selectedAmmoType;
+              console.log(`⚡ Ammo force-loaded → ${ammoNames[this.loadedAmmoType]}`);
+              if (this.onForceReload) this.onForceReload();
+            }, 500);
+          }
+          event.preventDefault();
+        }
+        break;      // Hotbar slots: Digit1-Digit9 → slots 0-8, Digit0 → slot 9
+      case 'KeyQ':
+        if (this.onUnequip) this.onUnequip();
+        event.preventDefault();
+        break;
+      case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
+      case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
+        if (this.mountKind === 'helm') {
+          const digit = parseInt(event.code.replace('Digit', ''));
+          const groupIdx = digit; // Key 1→G1, Key 2→G2, …, Key 9→G9
+          if (this.isCtrlHeld()) {
+            // Ctrl+Digit: assign hovered cannon to this group without changing selection
+            if (this.onGroupAssignTo) this.onGroupAssignTo(groupIdx);
+          } else {
+            if (this.activeWeaponGroups.has(groupIdx)) {
+              this.activeWeaponGroups.delete(groupIdx);
+              if (this.activeWeaponGroup === groupIdx) {
+                this.activeWeaponGroup = this.activeWeaponGroups.size > 0
+                  ? [...this.activeWeaponGroups][this.activeWeaponGroups.size - 1] : -1;
+              }
+            } else {
+              this.activeWeaponGroups.add(groupIdx);
+              this.activeWeaponGroup = groupIdx;
+            }
+            // Force next handleCannonAiming() to re-send aim with updated group list
+            // even if the mouse hasn't moved, so the server learns about the new selection.
+            this.lastCannonAimAngle = Infinity;
+            if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
+          }
+          event.preventDefault();
+        } else {
+          if (this.onSlotSelect) this.onSlotSelect(parseInt(event.code.replace('Digit', '')) - 1);
+        }
+        break;
+      case 'Digit0':
+        if (this.mountKind === 'helm') {
+          const groupIdx = 0; // Key 0→G0
+          if (this.isCtrlHeld()) {
+            // Ctrl+0: assign hovered cannon to group 9 without changing selection
+            if (this.onGroupAssignTo) this.onGroupAssignTo(groupIdx);
+          } else {
+            if (this.activeWeaponGroups.has(groupIdx)) {
+              this.activeWeaponGroups.delete(groupIdx);
+              if (this.activeWeaponGroup === groupIdx) {
+                this.activeWeaponGroup = this.activeWeaponGroups.size > 0
+                  ? [...this.activeWeaponGroups][this.activeWeaponGroups.size - 1] : -1;
+              }
+            } else {
+              this.activeWeaponGroups.add(groupIdx);
+              this.activeWeaponGroup = groupIdx;
+            }
+            this.lastCannonAimAngle = Infinity;
+            if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
+          }
+          event.preventDefault();
+        } else {
+          if (this.onSlotSelect) this.onSlotSelect(9);
+        }
         break;
     }
   }
@@ -810,6 +1037,23 @@ export class InputManager {
       if (mapping.keyCode === event.code) {
         mapping.pressed = false;
       }
+    }
+
+    // X key ammo logic:
+    //   hold 1s (timer fires while key is down) → force-load immediately
+    //   release before 1s                       → queue the swap for after next fire
+    if (event.code === 'KeyX' && (this.mountKind === 'cannon' || this.mountKind === 'helm')) {
+      if (this.xHoldTimer !== null) {
+        clearTimeout(this.xHoldTimer);
+        this.xHoldTimer = null;
+      }
+      if (!this.xHoldFired) {
+        // Released before 1s — queue the swap
+        this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
+        const ammoNames = ['CANNONBALL', 'BAR SHOT'];
+        console.log(`💣 Ammo queued → ${ammoNames[this.selectedAmmoType]} (hold X 0.5s to load now)`);
+      }
+      // If xHoldFired is true the force-load already happened — nothing more to do
     }
   }
   
@@ -825,31 +1069,79 @@ export class InputManager {
     event.preventDefault();
     
     if (event.button === 0) { // Left mouse button
+      // Shift+click toggles cannon group membership — check before any UI consumption
+      if (event.shiftKey) {
+        if (this.onGroupAssign) this.onGroupAssign();
+        return;
+      }
+
+      // Let UI panels consume the click first (e.g. manning priority panel)
+      if (this.onUIClick && this.onUIClick(event.offsetX, event.offsetY)) {
+        this.inputState.leftMouseDown = false;
+        return;
+      }
+
       this.inputState.leftMouseDown = true;
       
+      if (this.buildMode) {
+        // Build mode: left click places a building item (e.g. plank) at cursor
+        if (this.onBuildPlace) {
+          this.onBuildPlace(this.inputState.mouseWorldPosition);
+        }
+        return;
+      }
+
       const now = Date.now();
       const timeSinceLastClick = now - this.lastLeftClickTime;
       const isDoubleClick = timeSinceLastClick < this.DOUBLE_CLICK_THRESHOLD;
-      
-      if (isDoubleClick) {
-        // Double-click: Fire all cannons
-        console.log('💥💥 Double-click: Fire ALL cannons!');
-        if (this.onCannonFire) {
-          this.onCannonFire(undefined, true); // fireAll = true
+
+      // Shift+left-click is handled at the top of onMouseDown — unreachable here
+      if (this.isCtrlHeld()) {
+        // Ctrl+click while mounted: toggle cannon group membership
+        if (this.onGroupAssign) this.onGroupAssign();
+      } else if (this.mountKind === 'none') {
+        // Walking: left-click = attack toward mouse
+        if (this.onActionEvent) {
+          this.onActionEvent('attack', this.inputState.mouseWorldPosition);
         }
       } else {
-        // Single click: Fire aimed cannons
-        console.log('💥 Single-click: Fire aimed cannons');
-        if (this.onCannonFire) {
-          this.onCannonFire(); // Fire aimed cannons only
+        // Mounted to helm or cannon: fire cannon(s)
+        if (isDoubleClick) {
+          console.log('💥💥 Double-click: Fire ALL cannons!');
+          if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
+          // Cannon will reload into the pending ammo type
+          this.loadedAmmoType = this.selectedAmmoType;
+        } else {
+          console.log('💥 Single-click: Fire aimed cannons');
+          if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
+          // Cannon will reload into the pending ammo type
+          this.loadedAmmoType = this.selectedAmmoType;
         }
       }
-      
+
       this.lastLeftClickTime = now;
       
     } else if (event.button === 2) { // Right mouse button
-      this.inputState.rightMouseDown = true;
-      // Aiming will be handled in update() while right mouse is held
+      // Ctrl+right-click: toggle cannon group membership (same as Ctrl+left-click)
+      if (this.isCtrlHeld()) {
+        if (this.onGroupAssign) this.onGroupAssign();
+        return;
+      }
+      // Build menu: right-click fires ghost-cancel / ghost-remove callback
+      if (this.buildMenuOpen && this.onBuildRightClick) {
+        this.onBuildRightClick(this.inputState.mouseWorldPosition);
+      } else {
+        if (this.onUIRightClick && this.onUIRightClick(event.offsetX, event.offsetY)) return;
+        // Helm mode: target-lock only when the active group is in targetfire mode.
+        // In aiming mode (or no group), right-click-drag aims cannons normally.
+        if (this.mountKind === 'helm' && this.activeGroupMode === 'targetfire' && this.onGroupTarget) {
+          this.onGroupTarget(this.inputState.mouseWorldPosition);
+          return;
+        }
+        this.inputState.rightMouseDown = true;
+        if (this.onAimStart) this.onAimStart();
+        // Aiming will be handled in update() while right mouse is held
+      }
     }
   }
   
@@ -860,17 +1152,30 @@ export class InputManager {
       this.inputState.leftMouseDown = false;
       this.inputState.leftMouseReleased = true;
     } else if (event.button === 2) { // Right mouse button
-      this.inputState.rightMouseDown = false;
+      if (this.inputState.rightMouseDown) {
+        this.inputState.rightMouseDown = false;
+        if (this.onAimEnd) this.onAimEnd();
+      }
     }
   }
   
   private onMouseWheel(event: WheelEvent): void {
     event.preventDefault();
-    // Mouse wheel zoom is handled by camera system
+    if (!this.onZoom) return;
+
+    const rect = this.canvas.getBoundingClientRect();
+    const screenPoint = Vec2.from(
+      event.clientX - rect.left,
+      event.clientY - rect.top
+    );
+
+    // deltaY > 0 = scroll down = zoom out, < 0 = scroll up = zoom in
+    const zoomFactor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
+    this.onZoom(zoomFactor, screenPoint);
   }
   
   private onContextMenu(event: Event): void {
-    event.preventDefault(); // Prevent right-click context menu
+    event.preventDefault(); // Prevent browser context menu
   }
   
   private onGamepadConnected(event: GamepadEvent): void {

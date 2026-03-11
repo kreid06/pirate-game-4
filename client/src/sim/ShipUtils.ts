@@ -80,6 +80,10 @@ export function createShipAtPosition(position: Vec2, rotation: number): Ship {
     turnRate: BRIGANTINE_PHYSICS.turnRate,
     waterDrag: BRIGANTINE_PHYSICS.waterDrag,
     angularDrag: BRIGANTINE_PHYSICS.angularDrag,
-    rudderAngle: 0
+    rudderAngle: 0,
+    cannonAmmo: 0,
+    infiniteAmmo: true,
+    hullHealth: 100,
+    companyId: 0
   };
 }

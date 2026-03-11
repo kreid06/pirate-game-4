@@ -28,7 +28,8 @@ export enum ParticleEffectType {
   WATER_SPLASH = 'water_splash',
   CANNONBALL_SMOKE = 'cannonball_smoke',
   EXPLOSION = 'explosion',
-  WATER_FOAM = 'water_foam'
+  WATER_FOAM = 'water_foam',
+  SAIL_FIBER = 'sail_fiber'
 }
 
 /**
@@ -76,7 +77,7 @@ export class ParticleSystem {
    * Update all particle effects
    */
   update(deltaTime: number): void {
-    const dt = deltaTime / 1000; // Convert to seconds
+    const dt = deltaTime; // deltaTime is already in seconds
     
     // Update all effects
     for (let i = this.effects.length - 1; i >= 0; i--) {
@@ -213,6 +214,45 @@ export class ParticleSystem {
     });
   }
   
+  /**
+   * Create sail fiber damage effect — torn cloth shreds flying from a mast hit
+   */
+  createSailFiberEffect(position: Vec2, intensity: number = 1.0): void {
+    const particleCount = Math.floor(12 * intensity * this.qualityMultipliers[this.quality]);
+    const particles: Particle[] = [];
+
+    // Palette: cream, off-white, and worn tan — typical canvas sail colours
+    const clothColors = ['#F5F5DC', '#FAF0E6', '#FFFACD', '#EEE8AA', '#D2B48C'];
+
+    for (let i = 0; i < particleCount; i++) {
+      // Scatter in a cone roughly "upward" (sail hangs above deck), with some spread
+      const angle = -Math.PI * 0.5 + (Math.random() - 0.5) * Math.PI * 1.4;
+      const speed = 60 + Math.random() * 140;
+      const lifetime = 1.0 + Math.random() * 1.2;
+
+      particles.push({
+        position: position.add(Vec2.from(
+          (Math.random() - 0.5) * 20,
+          (Math.random() - 0.5) * 20
+        )),
+        velocity: Vec2.from(Math.cos(angle) * speed, Math.sin(angle) * speed),
+        life: 0,
+        maxLife: lifetime,
+        size: 2 + Math.random() * 5,
+        color: clothColors[Math.floor(Math.random() * clothColors.length)],
+        alpha: 0.9,
+        gravity: 120  // Cloth strips fall faster than smoke
+      });
+    }
+
+    this.effects.push({
+      position: position.clone(),
+      type: ParticleEffectType.SAIL_FIBER,
+      intensity,
+      particles
+    });
+  }
+
   /**
    * Update particle quality
    */

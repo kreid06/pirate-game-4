@@ -5,6 +5,9 @@
 #include <stdbool.h>
 #include "core/math.h"
 
+/** Cannon reload time: shared by all sources so every cannon reloads identically. */
+#define CANNON_RELOAD_TIME_MS 3000
+
 /**
  * Module Type IDs - matches client ModuleTypeId enum
  * These are used for efficient network serialization
@@ -32,14 +35,21 @@ typedef enum {
     MODULE_STATE_RELOADING = (1 << 4),   // Cannon is reloading
     MODULE_STATE_OCCUPIED = (1 << 5),    // Seat/helm is occupied
     MODULE_STATE_DEPLOYED = (1 << 6),    // Sail/ladder is deployed
-    MODULE_STATE_LOCKED = (1 << 7)       // Module is locked/unusable
+    MODULE_STATE_LOCKED = (1 << 7),      // Module is locked/unusable
+    MODULE_STATE_REPAIRING = (1 << 8),   // Repair has been initiated (enables passive regen)
+    /** Cannon needs a gunner: player is aiming at it but no crew is stationed.
+     *  Set by handle_cannon_aim() on the SimpleShip module; cleared when an NPC
+     *  arrives at AT_CANNON.  NPCs treat NEEDED cannons as their top-priority
+     *  destination regardless of weapon-group membership. */
+    MODULE_STATE_NEEDED = (1 << 9)
 } ModuleStateBits;
 
 /**
  * Cannon-specific module data
  */
 typedef struct {
-    q16_t aim_direction;        // Angle the cannon is aimed at
+    q16_t aim_direction;         // Current angle the cannon is rotated to
+    q16_t desired_aim_direction; // Target angle — actual rotates toward this each tick
     uint8_t ammunition;         // Remaining ammunition
     uint32_t time_since_fire;   // Time since last fire (ms)
     uint32_t reload_time;       // Time required to reload (ms)
@@ -51,7 +61,9 @@ typedef struct {
 typedef struct {
     q16_t angle;                // Sail rotation angle
     uint8_t openness;           // Sail deployment percentage (0-100)
-    q16_t wind_efficiency;      // Current wind capture efficiency
+    q16_t wind_efficiency;      // Current wind capture efficiency (derived from fiber_health)
+    q16_t fiber_health;         // Sail cloth HP — same base as mast pole (15000)
+    q16_t fiber_max_health;     // Sail cloth max HP
 } MastModuleData;
 
 /**
@@ -73,8 +85,7 @@ typedef struct {
  * Plank-specific module data
  */
 typedef struct {
-    q16_t health;               // Plank structural health
-    q16_t max_health;           // Maximum health
+    // Health is tracked at the ShipModule level (module.health / module.max_health)
 } PlankModuleData;
 
 /**
@@ -86,7 +97,11 @@ typedef struct {
     uint16_t deck_id;           // Which deck this module belongs to
     Vec2Q16 local_pos;          // Position relative to ship center
     q16_t local_rot;            // Rotation relative to ship
-    uint8_t state_bits;         // Compact state flags
+    uint16_t state_bits;        // Compact state flags
+    q16_t health;               // Current HP (all module types)
+    q16_t max_health;           // Maximum HP:
+                                //   plank: 10000, cannon: 8000
+                                //   mast: 15000, helm: 10000
     
     // Type-specific data (union to save memory)
     union {

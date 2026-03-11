@@ -1,6 +1,7 @@
 import { Vec2 } from '../common/Vec2.js';
 import { ShipModule } from './modules.js';
 import { CarrierDetectionState } from './CarrierDetection.js';
+import { PlayerInventory } from './Inventory.js';
 
 /**
  * Player input frame for deterministic simulation
@@ -32,6 +33,19 @@ export interface Ship {
   waterDrag: number;         // 0-1 coefficient (multiply velocity each frame)
   angularDrag: number;       // 0-1 coefficient (multiply angular velocity each frame)
   rudderAngle: number;       // Radians - visual indicator for turning (-π/4 to π/4)
+
+  // Ship-level ammunition
+  cannonAmmo: number;        // Remaining cannonballs (shared pool)
+  infiniteAmmo: boolean;     // When true, cannons never run out
+
+  // Hull integrity / water ingress (0–100; 100 = intact, 0 = sinking)
+  hullHealth: number;
+
+  // Company/faction (COMPANY_* constants)
+  companyId: number;
+
+  // Ship progression (from server levelStats; optional until server sends it)
+  levelStats?: ShipLevelStats;
 }
 
 /**
@@ -59,6 +73,12 @@ export interface Player {
   // Enhanced movement data from server (for reconciliation & debugging)
   isMoving?: boolean; // Is player actively moving (from hybrid protocol)
   movementDirection?: Vec2; // Server's stored movement direction (normalized)
+
+  // Inventory
+  inventory: PlayerInventory;
+
+  // Company/faction (COMPANY_* constants)
+  companyId: number;
 }
 
 /**
@@ -74,11 +94,110 @@ export interface Cannonball {
   distanceTraveled: number;
   timeAlive: number; // Time since firing (seconds)
   firedFrom: number; // ship id that fired this cannonball
+  /** 0 = cannonball (default), 1 = bar shot */
+  ammoType: number;
   smokeTrail: Array<{
     position: Vec2;
     age: number; // 0 to 1, where 1 is fully faded
     maxAge: number;
   }>;
+}
+
+// Company identifiers (mirror server COMPANY_* constants)
+export const COMPANY_NEUTRAL = 0;
+export const COMPANY_PIRATES = 1;
+export const COMPANY_NAVY    = 2;
+
+// ─── Ship levelling ───────────────────────────────────────────────────────────
+
+/** Mirrors server ShipAttribute enum (ship_level.h) */
+export const SHIP_ATTR_WEIGHT     = 0;
+export const SHIP_ATTR_RESISTANCE = 1;
+export const SHIP_ATTR_DAMAGE     = 2;
+export const SHIP_ATTR_CREW       = 3;
+export const SHIP_ATTR_STURDINESS = 4;
+export const SHIP_ATTR_COUNT      = 5;
+
+/** Hard limits (mirrors ship_level.h constants) */
+export const SHIP_LEVEL_ATTR_POINT_CAP  = 50;
+export const SHIP_LEVEL_TOTAL_POINT_CAP = 65;
+export const SHIP_LEVEL_XP_BASE         = 100;
+
+/** Per-attribute point caps (mirrors SHIP_ATTR_POINTS_* constants) */
+export const SHIP_ATTR_CAPS: Record<number, number> = {
+  [SHIP_ATTR_WEIGHT]:     50,
+  [SHIP_ATTR_RESISTANCE]: 35,
+  [SHIP_ATTR_DAMAGE]:     35,
+  [SHIP_ATTR_CREW]:       50,
+  [SHIP_ATTR_STURDINESS]: 25,
+};
+
+export const SHIP_ATTR_NAMES: Record<number, string> = {
+  [SHIP_ATTR_WEIGHT]:     'Weight',
+  [SHIP_ATTR_RESISTANCE]: 'Resistance',
+  [SHIP_ATTR_DAMAGE]:     'Cannon Dmg',
+  [SHIP_ATTR_CREW]:       'Crew Cap',
+  [SHIP_ATTR_STURDINESS]: 'Sturdiness',
+};
+
+export const SHIP_ATTR_DESC: Record<number, string> = {
+  [SHIP_ATTR_WEIGHT]:     '+5% hull mass/lvl (WIP)',
+  [SHIP_ATTR_RESISTANCE]: '−2% dmg taken/lvl  →  floor 30%',
+  [SHIP_ATTR_DAMAGE]:     '+4% cannon dmg/lvl  →  ceil 240%',
+  [SHIP_ATTR_CREW]:       '+2 max crew/lvl (WIP)',
+  [SHIP_ATTR_STURDINESS]: '−3% sink rate/lvl  →  floor 25%',
+};
+
+/**
+ * Mirrors server ShipLevelStats (ship_level.h).
+ * Received in every ship world-state snapshot under `levelStats`.
+ */
+export interface ShipLevelStats {
+  /** Current level (1 = baseline) for each attribute, indexed by SHIP_ATTR_* */
+  levels: number[];   // length 5
+  /** Unspent XP pool */
+  xp: number;
+  /** Pre-computed max crew from server */
+  maxCrew: number;
+  /** Ship level = sum of all points spent across all attributes (= sum of levels[i] − 1) */
+  shipLevel: number;
+  /** Cap for total ship level (= SHIP_LEVEL_TOTAL_POINT_CAP) */
+  totalCap: number;
+  /**
+   * Unified cost for the NEXT upgrade of ANY attribute at the current ship level.
+   * Formula: XP_BASE * (shipLevel + 1).  0 when fully capped.
+   */
+  nextUpgradeCost: number;
+  /** Per-attribute point caps sent by server */
+  attrCaps: number[];  // length 5
+}
+
+// All NPCs are sailors for now — company/alliance system will handle friend/foe later.
+// NPC_TYPE_SAILOR is always 0 from the server; kept for future protocol compatibility.
+export const NPC_TYPE_SAILOR = 0;
+
+// NPC movement/AI state (mirrors server WorldNpcState enum)
+export const NPC_STATE_IDLE      = 0;
+export const NPC_STATE_MOVING    = 1;
+export const NPC_STATE_AT_CANNON = 2;
+export const NPC_STATE_REPAIRING = 3;
+
+/**
+ * Visible world NPC entity (sailor crew member)
+ */
+export interface Npc {
+  id: number;
+  name: string;
+  type: number;           // Always NPC_TYPE_SAILOR (0) for now
+  position: Vec2;         // World position (fallback when not on a ship)
+  localPosition: Vec2;    // Ship-local position in client pixels (used when shipId != 0)
+  rotation: number;       // Facing direction in radians
+  interactRadius: number; // Distance within which the player can press E
+  shipId: number;         // 0 = free-standing in the world
+  state: number;          // NPC_STATE_* — used for movement animation
+  role: number;           // NPC_ROLE_* — 1=gunner, 3=rigger
+  companyId: number;      // COMPANY_* — faction this NPC belongs to
+  assignedCannonId: number; // Module ID of cannon/mast this NPC is stationed at (0 if none)
 }
 
 /**
@@ -89,6 +208,7 @@ export interface WorldState {
   ships: Ship[];
   players: Player[];
   cannonballs: Cannonball[];
+  npcs: Npc[];
   timestamp: number;
   // Phase 2: Add carrier detection state per player
   carrierDetection: Map<number, CarrierDetectionState>; // playerId -> detection state
@@ -129,3 +249,46 @@ export const PhysicsConfig = {
   CANNONBALL_RELOAD_TIME: 3.0, // seconds to reload after firing
   SPLASH_RADIUS: 50, // splash effect radius
 } as const;
+
+// ── Build / Ghost placement system ──────────────────────────────────────────
+
+/**
+ * Module kinds that can be ghost-placed as planning markers.
+ * Subset of ModuleKind — only buildable module types.
+ */
+export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck';
+
+/**
+ * A client-local "ghost" placement — a translucent planning marker showing
+ * where the player intends to place a module in the future.
+ * Ghost placements are purely client-side and never sent to the server.
+ * (Exception: server-side destroyed-module slots are shown via the existing
+ * snap-point ghost system and not tracked here.)
+ */
+export interface GhostPlacement {
+  /** Unique client-local identifier. */
+  id: string;
+  /** Type of module this ghost represents. */
+  kind: GhostModuleKind;
+  /** ID of the ship this ghost is attached to. */
+  shipId: number;
+  /** Ship-local position. */
+  localPos: { x: number; y: number };
+  /** Ship-local rotation in radians. */
+  localRot: number;
+}
+
+// ── Weapon control groups ──────────────────────────────────────────────────
+
+/** Firing mode for a weapon control group. */
+export type WeaponGroupMode = 'aiming' | 'freefire' | 'haltfire' | 'targetfire';
+
+/** State for one of the 10 user-defined weapon control groups. */
+export interface WeaponGroupState {
+  /** Module IDs of cannons assigned to this group. */
+  cannonIds: number[];
+  /** Current firing mode for this group. */
+  mode: WeaponGroupMode;
+  /** For targetfire mode: the ship ID the group is locked onto. -1 = none. */
+  targetId: number;
+}

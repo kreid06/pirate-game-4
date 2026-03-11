@@ -333,8 +333,8 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
             if (module->type_id == MODULE_TYPE_PLANK) {
                 // Plank: send only ID and health (client has hard-coded positions)
                 offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
-                    "{\"id\":%u,\"typeId\":%u,\"health\":%u}%s",
-                    module->id, module->type_id, module->data.plank.health,
+                    "{\"id\":%u,\"typeId\":%u,\"health\":%d,\"maxHealth\":%d}%s",
+                    module->id, module->type_id, (int)module->health, (int)module->max_health,
                     (m + 1 < ship->module_count) ? "," : ""
                 );
             } else if (module->type_id == MODULE_TYPE_DECK) {
@@ -644,5 +644,31 @@ int admin_api_input_tiers(struct HttpResponse* resp) {
     resp->body_length = len;
     resp->cache_control = true;
 
+    return 0;
+}
+
+int admin_api_create_ship(struct HttpResponse* resp, float x, float y, uint8_t company) {
+    if (!resp) return -1;
+
+    uint32_t new_id = websocket_server_create_ship(x, y, company);
+
+    int len;
+    if (new_id == 0) {
+        resp->status_code = 503;
+        resp->content_type = "application/json";
+        len = snprintf(json_buffer, sizeof(json_buffer),
+            "{\"success\":false,\"error\":\"Failed to create ship (sim full or not linked)\"}");
+    } else {
+        resp->status_code = 200;
+        resp->content_type = "application/json";
+        len = snprintf(json_buffer, sizeof(json_buffer),
+            "{\"success\":true,\"shipId\":%u,\"x\":%.1f,\"y\":%.1f,\"company\":%u}",
+            new_id, x, y, (unsigned)company);
+    }
+
+    if (len < 0 || len >= (int)sizeof(json_buffer)) return -1;
+    resp->body = json_buffer;
+    resp->body_length = (size_t)len;
+    resp->cache_control = false;
     return 0;
 }

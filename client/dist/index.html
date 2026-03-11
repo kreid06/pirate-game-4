@@ -13,11 +13,31 @@
         color: white;
       }
       
+      #canvas-wrapper {
+        display: block;
+        margin: 20px auto;
+        width: fit-content;
+        position: relative;
+      }
+
       canvas {
         border: 1px solid #444;
         background: #000033;
         display: block;
-        margin: 20px auto;
+      }
+
+      #zoom-controls {
+        position: absolute;
+        /* Equip panel: 110px wide, 90px tall, 8px from bottom-right of canvas.
+           Centre buttons (36px each) horizontally over the 110px equip box:
+           right = 8 + (110 - 36) / 2 = 45px
+           bottom = 8 (equip margin) + 90 (equip height) + 6 (gap) = 104px */
+        right: 45px;
+        bottom: 104px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        z-index: 10;
       }
       
       .controls {
@@ -31,14 +51,20 @@
         font-size: 14px;
       }
     </style>
-    <script type="module" crossorigin src="/pirate-game-4/assets/index-46325372.js"></script>
+    <script type="module" crossorigin src="/pirate-game-4/assets/index-bb3cb8de.js"></script>
   </head>
   <body>
     <h1>🏴‍☠️ Enhanced Pirate Game - Week 3-4 Client</h1>
     <div class="info">
       Enhanced multiplayer client with server-side prediction, rollback networking, and Week 3-4 server integration.
     </div>
-    <canvas id="gameCanvas" width="1200" height="800"></canvas>
+    <div id="canvas-wrapper">
+      <canvas id="gameCanvas" width="1200" height="800"></canvas>
+      <div id="zoom-controls">
+        <button id="zoom-in-btn" title="Zoom In" style="width:36px;height:36px;font-size:20px;font-weight:bold;background:rgba(0,0,0,0.65);color:#fff;border:1px solid #666;border-radius:6px;cursor:pointer;line-height:1;">+</button>
+        <button id="zoom-out-btn" title="Zoom Out" style="width:36px;height:36px;font-size:20px;font-weight:bold;background:rgba(0,0,0,0.65);color:#fff;border:1px solid #666;border-radius:6px;cursor:pointer;line-height:1;">−</button>
+      </div>
+    </div>
     <div class="controls">
       <p>Network Features: Client-server protocol • WebSocket connectivity • Private network support</p>
       <p><strong>Controls:</strong> WASD/Arrow Keys = Move | Space = Jump/Action | E = Interact | Q = Dismount | F = Destroy Plank</p>

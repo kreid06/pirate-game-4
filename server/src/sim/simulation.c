@@ -1,4 +1,6 @@
 #include "sim/simulation.h"
+#include "sim/module_types.h"
+#include "sim/ship_level.h"
 #include "net/protocol.h"
 #include "core/hash.h"
 #include "core/math.h"
@@ -88,6 +90,9 @@ void sim_cleanup(struct Sim* sim) {
 
 void sim_step(struct Sim* sim, q16_t dt) {
     if (!sim) return;
+
+    // Clear hit events from the previous tick before any subsystem runs
+    sim->hit_event_count = 0;
     
     // Increment simulation tick
     sim->tick++;
@@ -107,7 +112,6 @@ void sim_step(struct Sim* sim, q16_t dt) {
 
 void sim_update_ships(struct Sim* sim, q16_t dt) {
     // Sort ships by ID to ensure deterministic order
-    // Simple bubble sort is fine for small counts
     for (uint16_t i = 0; i < sim->ship_count; i++) {
         for (uint16_t j = i + 1; j < sim->ship_count; j++) {
             if (sim->ships[i].id > sim->ships[j].id) {
@@ -117,10 +121,103 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
             }
         }
     }
-    
-    // Update each ship's physics
+
+    float dt_secs = Q16_TO_FLOAT(dt);
+
+    // Update each ship's physics and sinking
     for (uint16_t i = 0; i < sim->ship_count; i++) {
-        update_ship_physics(&sim->ships[i], dt);
+        struct Ship* ship = &sim->ships[i];
+        update_ship_physics(ship, dt);
+
+        // Update per-module state (reload timers, etc.)
+        for (uint8_t m = 0; m < ship->module_count; m++) {
+            module_update(&ship->modules[m], dt);
+        }
+
+        // ---- Sinking / water mechanic ----
+        // Count remaining planks and detect leaks (< 30% HP).
+        // Leaking planks do NOT self-damage — they stay at their current HP but
+        // contribute to the hull drain rate at half the missing-plank rate.
+        int planks_remaining = 0;
+        int planks_leaking = 0;
+
+        for (uint8_t m = 0; m < ship->module_count; m++) {
+            ShipModule* mod = &ship->modules[m];
+            if (mod->type_id != MODULE_TYPE_PLANK) continue;
+            if (mod->health <= 0) continue; // already destroyed elsewhere
+
+            bool is_leaking = (mod->health < mod->max_health * 30 / 100);
+
+            if (is_leaking) {
+                planks_leaking++;
+            }
+            planks_remaining++;
+
+            // Passive healing at 2.5%/s — only while repair has been initiated
+            if ((mod->state_bits & MODULE_STATE_REPAIRING) &&
+                mod->health < (int32_t)mod->max_health) {
+                float heal = (float)mod->max_health * 0.025f * dt_secs;
+                mod->health += (int32_t)heal;
+                if (mod->health >= (int32_t)mod->max_health) {
+                    mod->health = (int32_t)mod->max_health;
+                    mod->state_bits &= (uint16_t)~MODULE_STATE_REPAIRING;
+                }
+            }
+        }
+
+        // Passive healing for deck at same 2.5%/s rate
+        for (uint8_t m = 0; m < ship->module_count; m++) {
+            ShipModule* mod = &ship->modules[m];
+            if (mod->type_id != MODULE_TYPE_DECK) continue;
+            if (mod->health <= 0 || mod->health >= (int32_t)mod->max_health) continue;
+            if (!(mod->state_bits & MODULE_STATE_REPAIRING)) continue;
+            float heal = (float)mod->max_health * 0.025f * dt_secs;
+            mod->health += (int32_t)heal;
+            if (mod->health >= (int32_t)mod->max_health) {
+                mod->health = (int32_t)mod->max_health;
+                mod->state_bits &= (uint16_t)~MODULE_STATE_REPAIRING;
+                mod->state_bits &= (uint16_t)~MODULE_STATE_DAMAGED;
+            }
+        }
+
+        int missing = (int)ship->initial_plank_count - planks_remaining;
+
+        if (missing == 0 && planks_leaking == 0) {
+            // Full integrity: crew bails water — hull_health rises at 1 HP/s (capped at 100)
+            float health = Q16_TO_FLOAT(ship->hull_health) + 1.0f * dt_secs;
+            if (health > 100.0f) health = 100.0f;
+            ship->hull_health = Q16_FROM_FLOAT(health);
+        } else {
+            // Hull is compromised — compute drain rate
+            float drain_rate = 0.0f;
+
+            // Missing planks: exponential drain (1/1.2) * 2^(missing-1)
+            if (missing > 0) {
+                int shift = missing - 1;
+                if (shift > 15) shift = 15;
+                drain_rate += (1.0f / 1.2f) * (float)(1 << shift);
+            }
+
+            // Each leaking plank contributes half the single-missing-plank base rate
+            drain_rate += 0.5f * (1.0f / 1.2f) * (float)planks_leaking;
+
+            float drain = drain_rate * ship_level_sturdiness_mult(&ship->level_stats) * dt_secs;
+            float health = Q16_TO_FLOAT(ship->hull_health) - drain;
+            if (health <= 0.0f) {
+                health = 0.0f;
+                // Fire SHIP_SINK event (once, when health first hits 0)
+                if (ship->hull_health > 0 && sim->hit_event_count < MAX_HIT_EVENTS) {
+                    struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                    ev->ship_id   = ship->id;
+                    ev->module_id = 0;
+                    ev->is_breach = false;
+                    ev->is_sink   = true;
+                    ev->hit_x     = Q16_TO_FLOAT(ship->position.x);
+                    ev->hit_y     = Q16_TO_FLOAT(ship->position.y);
+                }
+            }
+            ship->hull_health = Q16_FROM_FLOAT(health);
+        }
     }
 }
 
@@ -226,6 +323,8 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
     ship->desired_sail_openness = 0;  // Sails start closed
     ship->rudder_angle = 0.0f;        // Rudder centered
     ship->target_rudder_angle = 0.0f; // No input
+
+    ship_level_init(&ship->level_stats);
     
     // Create brigantine hull with curved bow/stern sections (47 vertices)
     // Matches client-side createCurvedShipHull() from ShipUtils.ts
@@ -300,8 +399,10 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
     
     // Initialize BROADSIDE loadout modules
     // Matches BrigantineLoadouts.BROADSIDE from BrigantineTestBuilder.ts
+    // Module IDs are based on ship entity ID so two ships have distinct IDs
+    // (ship 1 → 1000-1010, ship 2 → 2000-2010, etc.)
     ship->module_count = 0;
-    uint16_t module_id = 1000;
+    uint16_t module_id = (uint16_t)(ship->id * 1000);
     
     // Helm
     ship->modules[ship->module_count++] = module_create(
@@ -310,38 +411,38 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         0
     );
     
-    // Port side cannons (3)
+    // Port side cannons (3) — local_rot = -PI/2 (barrel faces port/left)
     ship->modules[ship->module_count++] = module_create(
         module_id++, MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
-        Q16_FROM_FLOAT(3.14159f) // PI (180 degrees)
+        Q16_FROM_FLOAT(3.1415927f) // -PI/2: port barrel faces left
     );
     ship->modules[ship->module_count++] = module_create(
         module_id++, MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(65.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
-        Q16_FROM_FLOAT(3.14159f)
+        Q16_FROM_FLOAT(3.1415927f)
     );
     ship->modules[ship->module_count++] = module_create(
         module_id++, MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
-        Q16_FROM_FLOAT(3.14159f)
+        Q16_FROM_FLOAT(3.1415927f)
     );
     
-    // Starboard side cannons (3)
+    // Starboard side cannons (3) — local_rot = PI/2 (barrel faces starboard/right)
     ship->modules[ship->module_count++] = module_create(
         module_id++, MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
-        0
+        Q16_FROM_FLOAT(0.0f) // PI/2: starboard barrel faces right
     );
     ship->modules[ship->module_count++] = module_create(
         module_id++, MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(65.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
-        0
+        Q16_FROM_FLOAT(0.0f)
     );
     ship->modules[ship->module_count++] = module_create(
         module_id++, MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
-        0
+        Q16_FROM_FLOAT(0.0f)
     );
     
     // Three masts (front, middle, back)
@@ -368,19 +469,32 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         0
     );
     
-    // Initialize 10 hull planks (health tracking only - client creates positions from hull geometry)
-    // Plank IDs: 100-109 (hard-coded indices matching client createCompleteHullSegments())
-    // Order: bow_port, bow_starboard, 3x starboard_side, stern_starboard, stern_port, 3x port_side
+    // Initialize 10 hull planks with positions matching client hull geometry.
+    // Positions are the segment midpoints derived from createCompleteHullSegments()
+    // in modules.ts using HULL_POINTS. Order: bow_port, bow_starboard,
+    // 3x starboard_side, stern_starboard, stern_port, 3x port_side.
+    // All values in client-space coords (divided by WORLD_SCALE_FACTOR to get server units).
+    static const float plank_cx[10] = {
+         246.25f,  246.25f,   // bow_port, bow_starboard
+         115.0f,  -35.0f, -185.0f,  // starboard_side [0-2]
+        -281.25f, -281.25f,  // stern_starboard, stern_port
+        -185.0f,  -35.0f,   115.0f   // port_side [0-2]
+    };
+    static const float plank_cy[10] = {
+         45.0f,  -45.0f,
+        -90.0f,  -90.0f,  -90.0f,
+        -45.0f,   45.0f,
+         90.0f,   90.0f,   90.0f
+    };
     for (int i = 0; i < 10; i++) {
-        ShipModule plank = module_create(
-            100 + i, MODULE_TYPE_PLANK,
-            (Vec2Q16){0, 0}, // Position not used - client generates from hull
-            0 // Rotation not used - client calculates from segment
-        );
-        // Set initial health to 100%
-        plank.data.plank.health = 100;
+        Vec2Q16 pos = {
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(plank_cx[i])),
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(plank_cy[i]))
+        };
+        ShipModule plank = module_create(100 + i, MODULE_TYPE_PLANK, pos, 0);
         ship->modules[ship->module_count++] = plank;
     }
+    ship->initial_plank_count = 10;
     
     // Deck module (ID 200) - position not used, client generates from hull polygon
     ship->modules[ship->module_count++] = module_create(
@@ -430,7 +544,7 @@ entity_id sim_create_player(struct Sim* sim, Vec2Q16 position, entity_id ship_id
     return id;
 }
 
-entity_id sim_create_projectile(struct Sim* sim, Vec2Q16 position, Vec2Q16 velocity, entity_id shooter_id) {
+entity_id sim_create_projectile(struct Sim* sim, Vec2Q16 position, Vec2Q16 velocity, entity_id shooter_id, uint8_t proj_type) {
     if (!sim || sim->projectile_count >= MAX_PROJECTILES) {
         return INVALID_ENTITY_ID;
     }
@@ -445,11 +559,10 @@ entity_id sim_create_projectile(struct Sim* sim, Vec2Q16 position, Vec2Q16 veloc
     proj->owner_id = shooter_id;
     proj->position = position;
     proj->velocity = velocity;
-    proj->damage = Q16_FROM_INT(25); // 25 damage per hit
+    proj->damage = 3000; // 3000 base damage (x weapon_damage multiplier 1.0)
     proj->lifetime = Q16_FROM_INT(10); // 10 second lifetime
     proj->spawn_time = sim->time_ms;
-    proj->damage = 50;
-    proj->type = 0; // Cannonball
+    proj->type = proj_type;
     
     sim->projectile_count++;
     
@@ -541,7 +654,7 @@ void sim_process_input(struct Sim* sim, const struct InputCmd* cmd) {
                     ship->velocity.x + q16_mul(Q16_FROM_INT(200), q16_cos(ship->rotation)),
                     ship->velocity.y + q16_mul(Q16_FROM_INT(200), q16_sin(ship->rotation))
                 };
-                entity_id projectile = sim_create_projectile(sim, cannon_pos, cannon_velocity, player->id);
+                entity_id projectile = sim_create_projectile(sim, cannon_pos, cannon_velocity, player->id, PROJ_TYPE_CANNONBALL);
                 log_info("🔥 Player %u fired cannon from ship %u (projectile %u)", 
                         player->id, ship->id, projectile);
             }
@@ -621,16 +734,7 @@ static void update_player_physics(struct Player* player, struct Sim* sim, q16_t 
 static void update_projectile_physics(struct Projectile* projectile, q16_t dt) {
     if (!projectile) return;
     
-    // Apply gravity
-    Vec2Q16 gravity_acc = {0, GRAVITY_Q16};
-    projectile->velocity = vec2_add(projectile->velocity, 
-                                   vec2_mul_scalar(gravity_acc, dt));
-    
-    // Apply air friction
-    q16_t air_friction = Q16_FROM_FLOAT(0.999f);
-    projectile->velocity = vec2_mul_scalar(projectile->velocity, air_friction);
-    
-    // Integrate position
+    // Integrate position (straight-line travel — no gravity in top-down view)
     Vec2Q16 displacement = vec2_mul_scalar(projectile->velocity, dt);
     projectile->position = vec2_add(projectile->position, displacement);
 }
@@ -946,71 +1050,492 @@ void spatial_hash_add_projectile(struct Sim* sim, struct Projectile* projectile)
 }
 
 // Enhanced collision detection functions
+// Map a hull vertex index (0..hull_vertex_count-1) to a plank index (0-9).
+// Hull layout for brigantine (47 vertices):
+//   0-12  : bow curve  (0-6 = bow_port plank 0, 7-12 = bow_stbd plank 1)
+//   13-24 : stbd straight side split into 3 sections (planks 2,3,4)
+//   25-36 : stern curve (25-30 = stern_stbd plank 5, 31-36 = stern_port plank 6)
+//   37-47 : port straight side split into 3 sections (planks 7,8,9)
+static int hull_vertex_to_plank_index(int v) {
+    if (v <= 6)  return 0; // bow_port
+    if (v <= 12) return 1; // bow_stbd
+    if (v <= 16) return 2; // stbd_front
+    if (v <= 20) return 3; // stbd_mid
+    if (v <= 24) return 4; // stbd_rear
+    if (v <= 30) return 5; // stern_stbd
+    if (v <= 36) return 6; // stern_port
+    if (v <= 39) return 7; // port_rear
+    if (v <= 43) return 8; // port_mid
+    return 9;              // port_front
+}
+
+// Find the simulation module index that a breaching cannonball hits.
+// lx/ly are in ship-local server units.  Returns -1 if no module is close enough.
+static int find_module_hit(const struct Ship* ship, float lx, float ly) {
+    for (int m = 0; m < ship->module_count; m++) {
+        const ShipModule* mod = &ship->modules[m];
+        if (mod->type_id != MODULE_TYPE_CANNON &&
+            mod->type_id != MODULE_TYPE_MAST   &&
+            mod->type_id != MODULE_TYPE_HELM)   continue;
+        if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
+
+        float radius;
+        switch (mod->type_id) {
+            case MODULE_TYPE_CANNON: radius = CLIENT_TO_SERVER(20.0f); break;
+            case MODULE_TYPE_MAST:   radius = CLIENT_TO_SERVER(30.0f); break;
+            case MODULE_TYPE_HELM:   radius = CLIENT_TO_SERVER(20.0f); break;
+            default:                 radius = 0.0f;                    break;
+        }
+        float mx = Q16_TO_FLOAT(mod->local_pos.x);
+        float my = Q16_TO_FLOAT(mod->local_pos.y);
+        float dx = mx - lx, dy = my - ly;
+        if (dx*dx + dy*dy < radius*radius)
+            return m;
+    }
+    return -1;
+}
+
+// Ray-casting point-in-polygon test (works for convex or concave polygons).
+// Vertices are in server units (Q16 float values).
+static bool point_in_hull(float px, float py, const Vec2Q16* verts, int n) {
+    bool inside = false;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+        float xi = Q16_TO_FLOAT(verts[i].x), yi = Q16_TO_FLOAT(verts[i].y);
+        float xj = Q16_TO_FLOAT(verts[j].x), yj = Q16_TO_FLOAT(verts[j].y);
+        if (((yi > py) != (yj > py)) &&
+            (px < (xj - xi) * (py - yi) / (yj - yi) + xi))
+            inside = !inside;
+    }
+    return inside;
+}
+
+/*
+ * Bar shot hit zones (client-px, matching sail geometry in modules.ts):
+ *   SAIL_HALF_WIDTH = 40  (sailWidth=80, half = 40) — outer edge of sail cloth
+ *   MAST_POLE_RADIUS = 15 — solid mast centre; structural HP damage
+ *
+ * A shot inside SAIL_HALF_WIDTH hits the fibers.
+ * A shot also inside MAST_POLE_RADIUS additionally damages the mast structure.
+ */
+#define BAR_SHOT_SAIL_RADIUS   CLIENT_TO_SERVER(40.0f)
+#define BAR_SHOT_MAST_RADIUS   CLIENT_TO_SERVER(15.0f)
+
+/* Return value: index into ship->modules[], or -1 for no hit.
+ * *out_center_hit  is set to true only when the bar overlaps the mast pole. */
+static int find_mast_hit(const struct Ship* ship, float lx, float ly,
+                         uint16_t skip_module_id, bool* out_center_hit) {
+    for (int m = 0; m < ship->module_count; m++) {
+        const ShipModule* mod = &ship->modules[m];
+        if (mod->id == skip_module_id) continue;  // still inside radius of last-hit mast
+        if (mod->type_id != MODULE_TYPE_MAST) continue;
+        if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
+
+        float mx = Q16_TO_FLOAT(mod->local_pos.x);
+        float my = Q16_TO_FLOAT(mod->local_pos.y);
+        float dx = mx - lx, dy = my - ly;
+        float dist_sq = dx*dx + dy*dy;
+
+        if (dist_sq < BAR_SHOT_SAIL_RADIUS * BAR_SHOT_SAIL_RADIUS) {
+            *out_center_hit = (dist_sq < BAR_SHOT_MAST_RADIUS * BAR_SHOT_MAST_RADIUS);
+            return m;
+        }
+    }
+    return -1;
+}
+
 void handle_projectile_collisions(struct Sim* sim) {
-    for (uint32_t i = 0; i < sim->projectile_count; i++) {
+    // NOTE: hit_event_count is NOT reset here — sim_update_ships may have already
+    // queued SHIP_SINK events this tick. The count is reset at the start of the
+    // next tick by the caller (websocket_server.c drains events after sim_step).
+
+    uint32_t i = 0;
+    while (i < sim->projectile_count) {
         struct Projectile* proj = &sim->projectiles[i];
-        
-        // Get spatial cell for projectile
-        int32_t cell_x = Q16_TO_INT(proj->position.x) / 1024;
-        int32_t cell_y = Q16_TO_INT(proj->position.y) / 1024;
-        
-        if (cell_x < 0 || cell_y < 0 || cell_x >= SPATIAL_HASH_SIZE || cell_y >= SPATIAL_HASH_SIZE) {
-            continue; // Out of bounds
-        }
-        
-        uint32_t hash_index __attribute__((unused)) = cell_y * SPATIAL_HASH_SIZE + cell_x;
-        struct SpatialCell* cell = &sim->spatial_hash[hash_index];
-        
-        // Check collision with ships in this cell
-        for (uint16_t j = 0; j < cell->ship_count; j++) {
-            struct Ship* ship = cell->ships[j];
-            if (ship->id == proj->owner_id) continue; // Can't hit own ship
-            
-            // Simple distance check (ship radius ~50 units)
-            q16_t dx = ship->position.x - proj->position.x;
-            q16_t dy = ship->position.y - proj->position.y;
-            q16_t dist_sq = q16_mul(dx, dx) + q16_mul(dy, dy);
-            q16_t hit_radius_sq = Q16_FROM_INT(50 * 50); // 50 unit radius
-            
-            if (dist_sq < hit_radius_sq) {
-                // Hit! Apply damage and remove projectile
-                ship->hull_health = ship->hull_health > proj->damage ? 
-                                   ship->hull_health - proj->damage : 0;
-                
-                log_info("🎯 Projectile %u hit ship %u for %d damage (hull: %d)", 
-                        proj->id, ship->id, Q16_TO_INT(proj->damage), 
-                        Q16_TO_INT(ship->hull_health));
-                
-                // Mark projectile for removal
-                proj->lifetime = 0;
+        bool removed = false;
+
+        // ---- Broad-phase: iterate all ships (small count, skip spatial hash) ----
+        for (uint16_t s = 0; s < sim->ship_count && !removed; s++) {
+            struct Ship* ship = &sim->ships[s];
+            if (ship->id == proj->owner_id) continue;
+            // Skip friendly-fire (same company, both non-neutral)
+            if (proj->firing_company != 0 && proj->firing_company == ship->company_id) continue;
+
+            // Broad-phase bounding radius
+            float dx = Q16_TO_FLOAT(ship->position.x) - Q16_TO_FLOAT(proj->position.x);
+            float dy = Q16_TO_FLOAT(ship->position.y) - Q16_TO_FLOAT(proj->position.y);
+            float dist_sq = dx*dx + dy*dy;
+            float brad = Q16_TO_FLOAT(ship->bounding_radius);
+            if (dist_sq > brad * brad) {
+                // Ball is outside bounding circle - clear breach flag if it was set for this ship
+                if (proj->inside_ship_id == ship->id) proj->inside_ship_id = 0;
+                continue;
+            }
+
+            // ---- Narrow-phase: transform projectile into ship-local coords ----
+            float rot = Q16_TO_FLOAT(ship->rotation);
+            float rel_x = Q16_TO_FLOAT(proj->position.x) - Q16_TO_FLOAT(ship->position.x);
+            float rel_y = Q16_TO_FLOAT(proj->position.y) - Q16_TO_FLOAT(ship->position.y);
+            float lx = rel_x * cosf(-rot) - rel_y * sinf(-rot);
+            float ly = rel_x * sinf(-rot) + rel_y * cosf(-rot);
+
+            // ---- BAR SHOT: bypass hull entirely, slices through mast/sail modules ----
+            if (proj->type == PROJ_TYPE_BAR_SHOT) {
+                bool center_hit = false;
+                int hit_m = find_mast_hit(ship, lx, ly, (uint16_t)proj->last_hit_module_id, &center_hit);
+                if (hit_m >= 0) {
+                    ShipModule* hit_mod = &ship->modules[hit_m];
+                    uint16_t mod_id = hit_mod->id;
+
+                    float damage_dealt = 0.0f;
+                    bool mast_destroyed = false;
+
+                    if (center_hit) {
+                        // ── Mast pole hit: full structural damage ──
+                        float dmg_before = (float)hit_mod->health;
+                        q16_t effective_damage = Q16_FROM_FLOAT(
+                            Q16_TO_FLOAT(proj->damage)
+                            * ship_level_resistance_mult(&ship->level_stats)
+                        );
+                        module_apply_damage(hit_mod, effective_damage);
+                        damage_dealt = dmg_before - (float)hit_mod->health;
+                        if (damage_dealt < 0) damage_dealt = 0;
+
+                        mast_destroyed = (hit_mod->health <= 0);
+                        if (mast_destroyed) {
+                            log_info("⛵💥 Bar shot %u destroyed mast %u (pole hit) on ship %u",
+                                     proj->id, mod_id, ship->id);
+                            memmove(&ship->modules[hit_m], &ship->modules[hit_m + 1],
+                                    (ship->module_count - hit_m - 1) * sizeof(ShipModule));
+                            ship->module_count--;
+                        } else {
+                            log_info("⛵💥 Bar shot %u hit mast pole %u on ship %u — %d HP remaining",
+                                     proj->id, mod_id, ship->id, (int)hit_mod->health);
+                        }
+                    } else {
+                        // ── Sail fiber hit: damage fiber_health, derive wind_efficiency from HP ratio ──
+                        // NOTE: fiber_health is stored as a proper Q16 float (Q16_FROM_FLOAT(15000.0)).
+                        // proj->damage is stored as a plain integer in q16_t (e.g. 3000 raw ≠ Q16 for 3000.0).
+                        // Using Q16_TO_FLOAT(proj->damage) gives ~0.046, not 3000 — so bypass Q16 here.
+                        float fh = Q16_TO_FLOAT(hit_mod->data.mast.fiber_health);
+                        float fhmax = Q16_TO_FLOAT(hit_mod->data.mast.fiber_max_health);
+                        if (fhmax <= 0.0f) fhmax = 15000.0f;
+
+                        float fiber_dmg = (float)proj->damage
+                                          * ship_level_resistance_mult(&ship->level_stats);
+                        fh -= fiber_dmg;
+                        if (fh < 0.0f) fh = 0.0f;
+                        hit_mod->data.mast.fiber_health = Q16_FROM_FLOAT(fh);
+
+                        // wind_efficiency tracks fiber HP ratio (0.0 at destroyed, 1.0 at full)
+                        float new_eff = fh / fhmax;
+                        hit_mod->data.mast.wind_efficiency = Q16_FROM_FLOAT(new_eff);
+
+                        damage_dealt = fiber_dmg;
+                        log_info("⛵🧵 Bar shot %u shredded sail fiber %u on ship %u (fiber HP %.0f/%.0f, eff %.2f)",
+                                 proj->id, mod_id, ship->id, fh, fhmax, new_eff);
+                    }
+
+                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                        ev->ship_id         = ship->id;
+                        ev->module_id       = mod_id;
+                        ev->is_breach       = true;
+                        ev->is_sink         = false;
+                        ev->destroyed       = mast_destroyed;
+                        ev->damage_dealt    = damage_dealt;
+                        ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                        ev->shooter_ship_id = proj->firing_ship_id;
+                    }
+
+                    if (center_hit && proj->firing_ship_id != INVALID_ENTITY_ID) {
+                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                        if (attacker)
+                            attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
+                    }
+
+                    if (center_hit) {
+                        // Bar shot hit the mast pole directly — stop it here.
+                        memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                                (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                        sim->projectile_count--;
+                        removed = true;
+                    } else {
+                        // Sail fiber hit — record which mast was just hit so it's skipped next
+                        // tick while still in range; projectile keeps flying.
+                        proj->last_hit_module_id = mod_id;
+                    }
+                    break;
+                }
+                // Bar shot outside all mast radii: clear the skip lock
+                if (proj->last_hit_module_id != 0) proj->last_hit_module_id = 0;
+                // Bar shot misses: keep flying (no hull interaction)
+                continue;
+            }
+
+            // Point-in-polygon test
+            bool inside_hull = point_in_hull(lx, ly, ship->hull_vertices, ship->hull_vertex_count);
+
+            // If ball was marked as breaching this ship but has now exited the hull, clear it
+            if (proj->inside_ship_id == ship->id && !inside_hull) {
+                proj->inside_ship_id = 0;
+                if (proj->last_hit_module_id == 200) proj->last_hit_module_id = 0; // clear deck hit flag
+                continue;
+            }
+
+            if (!inside_hull) continue;
+
+            // ---- Ball is inside the hull polygon ----
+
+            if (proj->inside_ship_id == ship->id) {
+                // ---- Deck pass-through: damage deck once per hull entry (priority) ----
+                // Deck ID is always 200; use last_hit_module_id==200 to fire only once per pass.
+                if (proj->last_hit_module_id != 200) {
+                    for (uint8_t m = 0; m < ship->module_count; m++) {
+                        ShipModule* deck = &ship->modules[m];
+                        if (deck->type_id != MODULE_TYPE_DECK) continue;
+                        if (deck->health <= 0) break;
+
+                        proj->last_hit_module_id = 200; // mark deck as hit for this pass
+
+                        float dmg_before = (float)deck->health;
+                        q16_t eff_dmg = Q16_FROM_FLOAT(
+                            Q16_TO_FLOAT(proj->damage)
+                            * ship_level_resistance_mult(&ship->level_stats));
+                        module_apply_damage(deck, eff_dmg);
+                        float deck_dmg = dmg_before - (float)deck->health;
+                        if (deck_dmg < 0) deck_dmg = 0;
+
+                        log_info("🪵 Projectile %u grazed deck on ship %u (%.0f HP remaining) — passing through",
+                                 proj->id, ship->id, (float)deck->health);
+
+                        if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                            struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                            ev->ship_id         = ship->id;
+                            ev->module_id       = deck->id;
+                            ev->is_breach       = true;
+                            ev->is_sink         = false;
+                            ev->destroyed       = (deck->health <= 0);
+                            ev->damage_dealt    = deck_dmg;
+                            ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                            ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                            ev->shooter_ship_id = proj->firing_ship_id;
+                        }
+                        if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                            struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                            if (attacker)
+                                attacker->level_stats.xp += 10u + (uint32_t)(deck_dmg / 100.0f);
+                        }
+                        break;
+                    }
+                }
+
+                // Ball already breached this hull — check for interior module hits at current position
+                int hit_m = find_module_hit(ship, lx, ly);
+                if (hit_m >= 0) {
+                    ShipModule* hit_mod = &ship->modules[hit_m];
+                    uint16_t mod_id = hit_mod->id;
+
+                    float dmg_before = (float)hit_mod->health;
+                    q16_t effective_damage = Q16_FROM_FLOAT(
+                        Q16_TO_FLOAT(proj->damage)
+                        * ship_level_resistance_mult(&ship->level_stats)
+                    );
+                    module_apply_damage(hit_mod, effective_damage);
+                    float damage_dealt = dmg_before - (float)hit_mod->health;
+                    if (damage_dealt < 0) damage_dealt = 0;
+
+                    if (hit_mod->health <= 0) {
+                        // Module destroyed — emit event and remove it
+                        log_info("💥 Projectile %u (inside hull) destroyed module %u on ship %u",
+                                 proj->id, mod_id, ship->id);
+
+                        if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                            struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                            ev->ship_id          = ship->id;
+                            ev->module_id        = mod_id;
+                            ev->is_breach        = true;
+                            ev->is_sink          = false;
+                            ev->destroyed        = true;
+                            ev->damage_dealt     = damage_dealt;
+                            ev->hit_x            = Q16_TO_FLOAT(proj->position.x);
+                            ev->hit_y            = Q16_TO_FLOAT(proj->position.y);
+                            ev->shooter_ship_id  = proj->firing_ship_id;
+                        }
+
+                        /* Award XP to the attacker ship */
+                        if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                            struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                            if (attacker)
+                                attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
+                        }
+
+                        memmove(&ship->modules[hit_m], &ship->modules[hit_m + 1],
+                                (ship->module_count - hit_m - 1) * sizeof(ShipModule));
+                        ship->module_count--;
+                    } else {
+                        log_info("💥 Projectile %u hit module %u on ship %u — %d HP remaining",
+                                 proj->id, mod_id, ship->id, (int)hit_mod->health);
+
+                        // Non-fatal hit — still emit event for damage numbers
+                        if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                            struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                            ev->ship_id          = ship->id;
+                            ev->module_id        = mod_id;
+                            ev->is_breach        = true;
+                            ev->is_sink          = false;
+                            ev->destroyed        = false;
+                            ev->damage_dealt     = damage_dealt;
+                            ev->hit_x            = Q16_TO_FLOAT(proj->position.x);
+                            ev->hit_y            = Q16_TO_FLOAT(proj->position.y);
+                            ev->shooter_ship_id  = proj->firing_ship_id;
+                        }
+
+                        /* Award XP to the attacker ship */
+                        if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                            struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                            if (attacker)
+                                attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
+                        }
+                    }
+
+                    // Projectile absorbed regardless of whether module was destroyed
+                    memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                            (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                    sim->projectile_count--;
+                    removed = true;
+                }
+                // No module hit yet — ball keeps traveling
+                continue;
+            }
+
+            // ---- Ball is entering the hull for the first time — check entry plank ----
+
+            // Find nearest hull vertex to determine which plank was hit
+            int nearest_v = 0;
+            float nearest_d2 = 1e30f;
+            for (int v = 0; v < ship->hull_vertex_count; v++) {
+                float vx = Q16_TO_FLOAT(ship->hull_vertices[v].x) - lx;
+                float vy = Q16_TO_FLOAT(ship->hull_vertices[v].y) - ly;
+                float d2 = vx*vx + vy*vy;
+                if (d2 < nearest_d2) { nearest_d2 = d2; nearest_v = v; }
+            }
+
+            // Map vertex → plank module
+            int plank_idx = hull_vertex_to_plank_index(nearest_v);
+            uint16_t plank_module_id = (uint16_t)(100 + plank_idx);
+
+            // Find and destroy the plank module
+            int hit_plank_idx = -1;
+            for (uint8_t m = 0; m < ship->module_count; m++) {
+                if (ship->modules[m].id == plank_module_id) {
+                    hit_plank_idx = m;
+                    break;
+                }
+            }
+
+            if (hit_plank_idx >= 0 && !(ship->modules[hit_plank_idx].state_bits & MODULE_STATE_DESTROYED)) {
+                ShipModule* hit_plank = &ship->modules[hit_plank_idx];
+
+                float plank_hp_before = (float)hit_plank->health;
+                q16_t effective_damage = Q16_FROM_FLOAT(
+                    Q16_TO_FLOAT(proj->damage)
+                    * ship_level_resistance_mult(&ship->level_stats)
+                );
+                module_apply_damage(hit_plank, effective_damage);
+                float plank_damage_dealt = plank_hp_before - (float)hit_plank->health;
+                if (plank_damage_dealt < 0) plank_damage_dealt = 0;
+
+                if (hit_plank->health <= 0) {
+                    // Plank destroyed — emit event and remove it
+                    log_info("🎯 Projectile %u destroyed plank %u on ship %u (vertex %d)",
+                             proj->id, plank_module_id, ship->id, nearest_v);
+
+                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                        ev->ship_id         = ship->id;
+                        ev->module_id       = plank_module_id;
+                        ev->is_breach       = false;
+                        ev->is_sink         = false;
+                        ev->destroyed       = true;
+                        ev->damage_dealt    = plank_damage_dealt;
+                        ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                        ev->shooter_ship_id = proj->firing_ship_id;
+                    }
+
+                    /* Award XP to the attacker ship */
+                    if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                        if (attacker)
+                            attacker->level_stats.xp += 10u + (uint32_t)(plank_damage_dealt / 100.0f);
+                    }
+
+                    memmove(&ship->modules[hit_plank_idx], &ship->modules[hit_plank_idx + 1],
+                            (ship->module_count - hit_plank_idx - 1) * sizeof(ShipModule));
+                    ship->module_count--;
+                } else {
+                    log_info("🎯 Projectile %u hit plank %u on ship %u — %d HP remaining",
+                             proj->id, plank_module_id, ship->id, (int)hit_plank->health);
+
+                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                        ev->ship_id         = ship->id;
+                        ev->module_id       = plank_module_id;
+                        ev->is_breach       = false;
+                        ev->is_sink         = false;
+                        ev->destroyed       = false;
+                        ev->damage_dealt    = plank_damage_dealt;
+                        ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                        ev->shooter_ship_id = proj->firing_ship_id;
+                    }
+
+                    /* Award XP to the attacker ship */
+                    if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                        if (attacker)
+                            attacker->level_stats.xp += 10u + (uint32_t)(plank_damage_dealt / 100.0f);
+                    }
+                }
+
+                // Projectile absorbed by plank (intact or destroyed)
+                memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                        (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                sim->projectile_count--;
+                removed = true;
+            } else {
+                // --- Plank already removed: ball passes through the breach ---
+                proj->inside_ship_id = ship->id;
+                log_info("🕳️  Projectile %u entered breach at plank %u on ship %u — traveling inside",
+                         proj->id, plank_module_id, ship->id);
             }
         }
-        
-        // Check collision with players
-        for (uint16_t j = 0; j < cell->player_count; j++) {
-            struct Player* player = cell->players[j];
-            
-            // Skip if player is on the same ship as the projectile owner
-            if (player->id == proj->owner_id) continue; // Can't hit self (manually fired)
-            if (player->ship_id == proj->owner_id) continue; // Can't hit crew on same ship (helm fired)
-            
-            q16_t dx = player->position.x - proj->position.x;
-            q16_t dy = player->position.y - proj->position.y;
-            q16_t dist_sq = q16_mul(dx, dx) + q16_mul(dy, dy);
-            q16_t hit_radius_sq = Q16_FROM_INT(16 * 16); // Smaller player radius
-            
-            if (dist_sq < hit_radius_sq) {
-                // Player hit! Apply damage
-                player->health = player->health > proj->damage ? 
-                                player->health - proj->damage : 0;
-                
-                log_info("💀 Projectile %u hit player %u for %d damage (health: %d)", 
-                        proj->id, player->id, Q16_TO_INT(proj->damage), 
-                        Q16_TO_INT(player->health));
-                
-                proj->lifetime = 0; // Remove projectile
+
+        // ---- Player collision (unchanged) ----
+        for (uint16_t j = 0; j < sim->player_count && !removed; j++) {
+            struct Player* player = &sim->players[j];
+            if (player->id == proj->owner_id) continue;
+            if (player->ship_id == proj->owner_id) continue;
+
+            float dx = Q16_TO_FLOAT(player->position.x) - Q16_TO_FLOAT(proj->position.x);
+            float dy = Q16_TO_FLOAT(player->position.y) - Q16_TO_FLOAT(proj->position.y);
+            float dist_sq = dx*dx + dy*dy;
+            const float player_r = CLIENT_TO_SERVER(16.0f);
+            if (dist_sq < player_r * player_r) {
+                player->health = player->health > Q16_TO_INT(proj->damage) ?
+                                 player->health - Q16_TO_INT(proj->damage) : 0;
+                log_info("💀 Projectile %u hit player %u for %d damage (health: %d)",
+                         proj->id, player->id, Q16_TO_INT(proj->damage), player->health);
+
+                memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                        (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                sim->projectile_count--;
+                removed = true;
             }
         }
+
+        if (!removed) i++;
     }
 }
 

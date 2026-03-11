@@ -6,6 +6,7 @@
 #include "core/math.h"
 #include "core/rng.h"
 #include "sim/module_types.h"
+#include "sim/ship_level.h"
 
 // Maximum entity counts
 #define MAX_SHIPS 50
@@ -58,6 +59,18 @@ struct Ship {
     // Ship state flags
     uint16_t flags;
     uint8_t reserved[1];
+
+    // Sinking mechanics
+    // Each missing plank halves the time to sink:
+    //   1 plank missing -> 120s to drain 100 HP -> 0.833 HP/s
+    //   2 planks        ->  60s                 -> 1.667 HP/s
+    //   N planks        ->  (1/1.2) * 2^(N-1) HP/s
+    uint8_t initial_plank_count; // Set once when ship is created (typically 10)
+    uint8_t company_id;           // 0=neutral; set by websocket layer to enable friendly-fire skip
+    uint8_t has_crew;             // 1 if ≥1 player is aboard; updated by websocket layer before each sim step
+
+    /* Ship progression — levelled attributes and XP pool. */
+    ShipLevelStats level_stats;
 };
 
 // Player state  
@@ -76,6 +89,10 @@ struct Player {
     uint8_t reserved[2];
 };
 
+/* Projectile ammo types */
+#define PROJ_TYPE_CANNONBALL  0
+#define PROJ_TYPE_BAR_SHOT    1
+
 // Projectile state (cannonballs, etc)  
 struct Projectile {
     entity_id id;
@@ -87,7 +104,10 @@ struct Projectile {
     uint32_t spawn_time;    // Server tick when created
     uint16_t flags;         // Projectile flags
     uint8_t type;           // Cannonball, grapeshot, etc
-    uint8_t reserved;
+    uint8_t firing_company; // Company owning this projectile (0=unset; skip if == target ship company)
+    uint16_t last_hit_module_id; // Bar shot: ID of the last mast hit — skip it until the proj moves away
+    entity_id inside_ship_id;   // 0 = not inside any hull; set when ball passes through a breach
+    entity_id firing_ship_id;   // Ship that fired this projectile (for XP award on hit)
 };
 
 // Input command from client
@@ -113,6 +133,20 @@ struct SpatialCell {
     uint8_t player_count;
     uint8_t projectile_count;
     uint8_t reserved;
+};
+
+// Hit event emitted when a cannonball damages a plank or breaches to hit a module
+#define MAX_HIT_EVENTS 64
+struct HitEvent {
+    entity_id ship_id;
+    uint16_t  module_id;   // ID of the module hit (0 for SHIP_SINK)
+    bool      is_breach;   // false = plank hit / sink; true = interior module hit through breach
+    bool      is_sink;     // true = ship hull_health reached 0
+    bool      destroyed;        // true = module was destroyed by this hit
+    float     damage_dealt;     // how much damage this hit dealt (in HP units)
+    float     hit_x;
+    float     hit_y;
+    entity_id shooter_ship_id;  // Ship that fired the projectile (for XP award)
 };
 
 // Complete simulation state
@@ -142,6 +176,10 @@ struct Sim {
     // Global wind state (affects all ships)
     float wind_power;           // Wind strength (0.0 to 1.0, where 1.0 = full wind)
     float wind_direction;       // Wind direction in radians (for future use)
+
+    // Hit events produced this tick; drained by websocket layer for broadcast
+    struct HitEvent hit_events[MAX_HIT_EVENTS];
+    uint8_t         hit_event_count;
 };
 
 // Simulation configuration

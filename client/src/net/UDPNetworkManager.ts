@@ -647,7 +647,11 @@ export class UDPNetworkManager {
           turnRate: BRIGANTINE_PHYSICS.turnRate,
           waterDrag: BRIGANTINE_PHYSICS.waterDrag,
           angularDrag: BRIGANTINE_PHYSICS.angularDrag,
-          rudderAngle: 0
+          rudderAngle: 0,
+          cannonAmmo: 0,
+          infiniteAmmo: true,
+          hullHealth: 100,
+          companyId: 0
         });
       } else {
         // Projectile entities  
@@ -661,6 +665,7 @@ export class UDPNetworkManager {
           distanceTraveled: 0,
           timeAlive: 0,
           firedFrom: 0, // Unknown for now
+          ammoType: 0,
           smokeTrail: []
         });
       }
@@ -671,6 +676,7 @@ export class UDPNetworkManager {
       ships,
       cannonballs,
       players,
+      npcs: [],
       timestamp: header.serverTime,
       carrierDetection: new Map()
     };
