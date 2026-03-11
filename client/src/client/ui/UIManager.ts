@@ -215,11 +215,12 @@ export class UIManager {
     for (let i = 0; i < INVENTORY_SLOTS; i++) {
       const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
       if (x >= sx && x <= sx + SLOT_SIZE) {
-        const state = this._cachedControlGroups.get(i);
+        const groupIdx = (i + 1) % 10; // slot 0→G1, …, slot 8→G9, slot 9→G0
+        const state = this._cachedControlGroups.get(groupIdx);
         if (!state) return false;
         const CYCLE: WeaponGroupMode[] = ['aiming', 'freefire', 'haltfire', 'targetfire'];
         const next = CYCLE[(CYCLE.indexOf(state.mode) + 1) % CYCLE.length];
-        if (this.onGroupModeChange) this.onGroupModeChange(i, next);
+        if (this.onGroupModeChange) this.onGroupModeChange(groupIdx, next);
         return true;
       }
     }
@@ -1266,8 +1267,9 @@ class HUDElement implements UIElement {
       const def  = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
       const sx   = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
       const sy   = startY + PADDING;
+      const groupIdx = (i + 1) % 10; // slot 0→G1, …, slot 8→G9, slot 9→G0
       const isActive = weaponMode
-        ? weaponMode.activeGroups.has(i)
+        ? weaponMode.activeGroups.has(groupIdx)
         : (i === activeSlot && activeSlot < 10);
 
       // Slot background
@@ -1282,7 +1284,7 @@ class HUDElement implements UIElement {
       if (weaponMode) {
         // ── Ship / helm mode: show weapon control group ──────────────────────
         const cgroups  = weaponMode.controlGroups ?? new Map<number, WeaponGroupState>();
-        const state    = cgroups.get(i);
+        const state    = cgroups.get(groupIdx);
         const count    = state?.cannonIds.length ?? 0;
         const mode     = state?.mode ?? 'haltfire';
         const modeCol  = MODE_COLORS[mode] ?? '#555';
@@ -1294,7 +1296,7 @@ class HUDElement implements UIElement {
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'top';
         ctx.fillStyle    = isActive ? '#ffd700' : 'rgba(160,160,180,0.75)';
-        ctx.fillText(`G${i}`, sx + SLOT_SIZE / 2, sy + 3);
+        ctx.fillText(`G${groupIdx}`, sx + SLOT_SIZE / 2, sy + 3);
 
         // Cannon count (large, centre)
         if (count > 0) {

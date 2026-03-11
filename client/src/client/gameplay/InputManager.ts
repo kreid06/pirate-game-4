@@ -976,7 +976,7 @@ export class InputManager {
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
         if (this.mountKind === 'helm') {
           const digit = parseInt(event.code.replace('Digit', ''));
-          const groupIdx = digit - 1;
+          const groupIdx = digit; // Key 1→G1, Key 2→G2, …, Key 9→G9
           if (this.isCtrlHeld()) {
             // Ctrl+Digit: assign hovered cannon to this group without changing selection
             if (this.onGroupAssignTo) this.onGroupAssignTo(groupIdx);
@@ -1003,7 +1003,7 @@ export class InputManager {
         break;
       case 'Digit0':
         if (this.mountKind === 'helm') {
-          const groupIdx = 9;
+          const groupIdx = 0; // Key 0→G0
           if (this.isCtrlHeld()) {
             // Ctrl+0: assign hovered cannon to group 9 without changing selection
             if (this.onGroupAssignTo) this.onGroupAssignTo(groupIdx);

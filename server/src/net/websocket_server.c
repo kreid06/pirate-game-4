@@ -3841,23 +3841,23 @@ static void ship_init_default_weapon_groups(SimpleShip* ship) {
         ship->weapon_groups[g].target_ship_id = 0;
     }
 
-    /* Partition cannons: port (local_y > 0) → group 0, starboard → group 1 */
+    /* Partition cannons: port (local_y > 0) → group 1, starboard → group 2 */
     for (int m = 0; m < ship->module_count; m++) {
         ShipModule* mod = &ship->modules[m];
         if (mod->type_id != MODULE_TYPE_CANNON) continue;
 
         float local_y = Q16_TO_FLOAT(mod->local_pos.y);
-        int   target_group = (local_y > 0.0f) ? 0 : 1;
+        int   target_group = (local_y > 0.0f) ? 1 : 2;
         WeaponGroup* grp = &ship->weapon_groups[target_group];
         if (grp->cannon_count < MAX_CANNONS_PER_GROUP) {
             grp->cannon_ids[grp->cannon_count++] = mod->id;
         }
     }
 
-    log_info("🔫 Ship %u: default groups — port=%d cannons (grp0), starboard=%d cannons (grp1)",
+    log_info("🔫 Ship %u: default groups — port=%d cannons (grp1), starboard=%d cannons (grp2)",
              ship->ship_id,
-             ship->weapon_groups[0].cannon_count,
-             ship->weapon_groups[1].cannon_count);
+             ship->weapon_groups[1].cannon_count,
+             ship->weapon_groups[2].cannon_count);
 }
 
 // Initialize a brigantine ship at the given slot index, world position (client pixels), module ID base, and company
