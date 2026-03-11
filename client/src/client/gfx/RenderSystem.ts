@@ -2034,7 +2034,7 @@ export class RenderSystem {
     };
 
     const activeGroups = this.activeWeaponGroups;
-    const showAll = this.showGroupOverlay; // Shift held → show every group
+    const showAll = this.showGroupOverlay; // Ctrl held → show every group
 
     // Build cannonId → { group index, mode } lookup
     const cannonGroupMap = new Map<number, { g: number; mode: string }>();

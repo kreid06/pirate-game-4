@@ -147,6 +147,14 @@ export class InputManager {
   public isShiftHeld(): boolean {
     return this.inputState.pressedKeys.has('ShiftLeft') || this.inputState.pressedKeys.has('ShiftRight');
   }
+  /**
+   * Returns true when either Ctrl key is held.
+   * Detects ControlLeft and ControlRight so it works consistently across
+   * macOS (Control ≠ Command), Windows, and Linux keyboards.
+   */
+  public isCtrlHeld(): boolean {
+    return this.inputState.pressedKeys.has('ControlLeft') || this.inputState.pressedKeys.has('ControlRight');
+  }
   private currentSailOpenness: number = 100; // Start at 100% (full sails)
   private currentSailAngle: number = 0; // Start at 0 degrees
   private lastRudderState: { left: boolean; right: boolean } = { left: false, right: false };
@@ -1081,8 +1089,8 @@ export class InputManager {
         if (this.onActionEvent) {
           this.onActionEvent('attack', this.inputState.mouseWorldPosition);
         }
-      } else {
-        // Mounted to helm or cannon: fire cannon(s)
+      } else if (!this.isCtrlHeld()) {
+        // Mounted to helm or cannon: fire cannon(s) — blocked while Ctrl is held (group edit mode)
         if (isDoubleClick) {
           console.log('💥💥 Double-click: Fire ALL cannons!');
           if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
@@ -1099,6 +1107,8 @@ export class InputManager {
       this.lastLeftClickTime = now;
       
     } else if (event.button === 2) { // Right mouse button
+      // Ctrl held: block aim and firing entirely (group edit mode)
+      if (this.isCtrlHeld()) return;
       // Build menu: right-click fires ghost-cancel / ghost-remove callback
       if (this.buildMenuOpen && this.onBuildRightClick) {
         this.onBuildRightClick(this.inputState.mouseWorldPosition);
@@ -1124,8 +1134,10 @@ export class InputManager {
       this.inputState.leftMouseDown = false;
       this.inputState.leftMouseReleased = true;
     } else if (event.button === 2) { // Right mouse button
-      this.inputState.rightMouseDown = false;
-      if (this.onAimEnd) this.onAimEnd();
+      if (this.inputState.rightMouseDown) {
+        this.inputState.rightMouseDown = false;
+        if (this.onAimEnd) this.onAimEnd();
+      }
     }
   }
   
