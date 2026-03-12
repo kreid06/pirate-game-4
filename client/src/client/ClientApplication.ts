@@ -2387,16 +2387,12 @@ export class ClientApplication {
           return;
         }
 
-        if (this._ladderHoldOnShip) {
-          // On ship: tap toggles extend/retract via module_interact (no company check)
+        if (this._ladderHoldIsExtended) {
+          // Extended: tap = climb (any position) or retract (on ship)
           this.networkManager.sendModuleInteract(moduleId);
-          console.log(`🪜 tap: ${this._ladderHoldIsExtended ? 'retract' : 'extend'} ladder ${moduleId}`);
-        } else if (this._ladderHoldIsExtended) {
-          // Off ship, extended: tap = climb
-          this.networkManager.sendModuleInteract(moduleId);
-          console.log(`🪜 tap: climb ladder ${moduleId}`);
+          console.log(`🪜 tap: ${this._ladderHoldOnShip ? 'retract' : 'climb'} ladder ${moduleId}`);
         } else {
-          // Off ship, retracted: tap = extend
+          // Retracted: tap = extend (toggle_ladder, works on-ship and off)
           this.networkManager.sendToggleLadder(moduleId);
           console.log(`🪜 tap: extend ladder ${moduleId}`);
         }
@@ -2414,14 +2410,12 @@ export class ClientApplication {
 
         console.log(`🪜 radial: ${selected} ladder ${moduleId}`);
 
-        if (selected === 'climb') {
+        if (selected === 'climb' || selected === 'retract') {
+          // climb and retract both use module_interact (ladder must be extended)
           this.networkManager.sendModuleInteract(moduleId);
-        } else if (selected === 'retract' || selected === 'extend') {
-          if (this._ladderHoldOnShip) {
-            this.networkManager.sendModuleInteract(moduleId);
-          } else {
-            this.networkManager.sendToggleLadder(moduleId);
-          }
+        } else if (selected === 'extend') {
+          // extend always uses toggle_ladder — module_interact on retracted = climb attempt
+          this.networkManager.sendToggleLadder(moduleId);
         }
       }
     });
