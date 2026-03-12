@@ -530,7 +530,8 @@ export class ClientApplication {
                 const isExtended = (hoveredModule.module.moduleData as any)?.extended !== false;
                 console.log(`🪜 hover: ladder ${hoveredModule.module.id} onShip=${onShip} extended=${isExtended}`);
                 if (onShip) {
-                  this.networkManager.sendToggleLadder(hoveredModule.module.id);
+                  // On-ship E press → module_interact → server's handle_ladder_interact toggles retract (no company check)
+                  this.networkManager.sendModuleInteract(hoveredModule.module.id);
                 } else if (isExtended) {
                   this.networkManager.sendModuleInteract(hoveredModule.module.id);
                 }
@@ -586,7 +587,8 @@ export class ClientApplication {
                 const isExtended = (nearestLadder.module.moduleData as any)?.extended !== false;
                 console.log(`🪜 proximity: ladder ${nearestLadder.module.id} onShip=${onShip} extended=${isExtended} dist=${nearestDist.toFixed(0)}px`);
                 if (onShip) {
-                  this.networkManager.sendToggleLadder(nearestLadder.module.id);
+                  // On-ship E press → module_interact → server's handle_ladder_interact toggles retract (no company check)
+                  this.networkManager.sendModuleInteract(nearestLadder.module.id);
                 } else if (isExtended) {
                   this.networkManager.sendModuleInteract(nearestLadder.module.id);
                 }

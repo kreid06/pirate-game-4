@@ -3527,7 +3527,7 @@ static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClie
         return;
     }
     
-    // log_info("🎮 [MODULE_INTERACT] Player %u -> Module %u", player->player_id, module_id);
+    log_info("🎮 [MODULE_INTERACT] Player %u -> Module %u", player->player_id, module_id);
     
     // For ladder interactions, we need to find which ship has this ladder
     // For other modules, player must be on the ship
@@ -4825,7 +4825,7 @@ int websocket_server_update(struct Sim* sim) {
                             
                         } else if (strstr(payload, "\"type\":\"module_interact\"")) {
                             // MODULE_INTERACT message
-                            // log_info("🎮 Processing MODULE_INTERACT message");
+                            log_info("🎮 Processing MODULE_INTERACT from player %u", client->player_id);
                             
                             if (client->player_id == 0) {
                                 log_warn("Module interact from client %s:%u with no player ID", client->ip_address, client->port);
