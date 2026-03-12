@@ -464,6 +464,13 @@ export class ClientApplication {
           // Exit build/plan mode on any interaction attempt
           this.exitAllBuildModes();
 
+          // E key: open crew level menu if hovering an NPC
+          const hovNpc = this.renderSystem.getHoveredNpc();
+          if (hovNpc) {
+            this.uiManager?.openCrewMenuForNpc(hovNpc);
+            return;
+          }
+
           const playerId = this.networkManager.getAssignedPlayerId();
           const worldState = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
           const player = playerId !== null ? worldState?.players.find(p => p.id === playerId) : null;
@@ -726,12 +733,6 @@ export class ClientApplication {
       // Let UI panels (e.g. manning priority panel) consume clicks before game logic
       this.inputManager.onUIClick = (x, y) => {
         if (this.uiManager?.handleClick(x, y)) return true;
-        // Not consumed by UI — check if hovering an NPC to open the crew level menu
-        const hovNpc = this.renderSystem.getHoveredNpc();
-        if (hovNpc) {
-          this.uiManager?.openCrewMenuForNpc(hovNpc);
-          return true;
-        }
         return false;
       };
 
