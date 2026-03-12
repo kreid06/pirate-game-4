@@ -14,9 +14,11 @@ export interface RadialOption {
   label: string;
 }
 
-const HOLD_OPEN_RADIUS  = 70;   // px — distance from center to option pill
-const PILL_RADIUS       = 22;   // px — option pill hit/draw radius
-const DEAD_ZONE         = 24;   // px — mouse inside this => keep current selection
+const RING_INNER        = 40;   // px — inner radius of the ring
+const RING_OUTER        = 90;   // px — outer radius of the ring
+const RING_MID          = (RING_INNER + RING_OUTER) / 2;  // label placement radius
+const DEAD_ZONE         = 24;   // px — mouse inside this => cancel (null selection)
+const GAP_ANGLE         = 0.08; // radians — gap between slices
 
 export class RadialMenu {
   private _options: RadialOption[] = [];
@@ -88,75 +90,63 @@ export class RadialMenu {
     if (!this._open || !this._center || this._options.length === 0) return;
 
     const { x: cx, y: cy } = this._center;
-    const n     = this._options.length;
-    const slice = (Math.PI * 2) / n;
-    const base  = -Math.PI / 2;
+    const n          = this._options.length;
+    const slice      = (Math.PI * 2) / n;
+    const base       = -Math.PI / 2;
+    const isCancelling = this._hoveredId === null;
 
     ctx.save();
 
-    // ── Background disc ────────────────────────────────────────
-    ctx.beginPath();
-    ctx.arc(cx, cy, HOLD_OPEN_RADIUS + PILL_RADIUS + 8, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(10, 14, 20, 0.78)';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(180, 140, 60, 0.35)';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-
-    // ── Center dot — red when in dead zone (cancel), gold when selecting ──
-    const isCancelling = this._hoveredId === null;
-    ctx.beginPath();
-    ctx.arc(cx, cy, 6, 0, Math.PI * 2);
-    ctx.fillStyle = isCancelling ? 'rgba(200, 60, 60, 0.9)' : 'rgba(200, 160, 60, 0.9)';
-    ctx.fill();
-    // Dead zone ring hint
-    ctx.beginPath();
-    ctx.arc(cx, cy, DEAD_ZONE, 0, Math.PI * 2);
-    ctx.strokeStyle = isCancelling ? 'rgba(200, 60, 60, 0.35)' : 'rgba(180, 140, 60, 0.18)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-
-    // ── Option pills ───────────────────────────────────────────
+    // ── Ring slices ────────────────────────────────────────────
     for (let i = 0; i < n; i++) {
-      const opt      = this._options[i];
-      const angle    = base + i * slice;
-      const ox       = cx + Math.cos(angle) * HOLD_OPEN_RADIUS;
-      const oy       = cy + Math.sin(angle) * HOLD_OPEN_RADIUS;
+      const opt       = this._options[i];
       const isHovered = opt.id === this._hoveredId;
 
-      // Connector line from center to pill
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(ox, oy);
-      ctx.strokeStyle = isHovered
-        ? 'rgba(255, 200, 60, 0.7)'
-        : 'rgba(120, 100, 60, 0.35)';
-      ctx.lineWidth = isHovered ? 2 : 1;
-      ctx.stroke();
+      const startAngle = base + i * slice + GAP_ANGLE / 2;
+      const endAngle   = base + (i + 1) * slice - GAP_ANGLE / 2;
 
-      // Pill background
+      // Slice fill (annulus sector)
       ctx.beginPath();
-      ctx.arc(ox, oy, PILL_RADIUS, 0, Math.PI * 2);
+      ctx.arc(cx, cy, RING_OUTER, startAngle, endAngle);
+      ctx.arc(cx, cy, RING_INNER, endAngle, startAngle, true);
+      ctx.closePath();
+
       if (isHovered) {
-        ctx.fillStyle = 'rgba(200, 140, 20, 0.92)';
+        ctx.fillStyle   = 'rgba(200, 145, 20, 0.90)';
         ctx.strokeStyle = 'rgba(255, 220, 80, 1.0)';
-        ctx.lineWidth = 2;
+        ctx.lineWidth   = 2;
       } else {
-        ctx.fillStyle = 'rgba(30, 35, 45, 0.88)';
-        ctx.strokeStyle = 'rgba(100, 85, 50, 0.6)';
-        ctx.lineWidth = 1.5;
+        ctx.fillStyle   = 'rgba(14, 18, 26, 0.82)';
+        ctx.strokeStyle = 'rgba(130, 105, 55, 0.55)';
+        ctx.lineWidth   = 1.5;
       }
       ctx.fill();
       ctx.stroke();
 
-      // Label
-      const labelSize = isHovered ? 11 : 10;
-      ctx.font = `${isHovered ? 'bold ' : ''}${labelSize}px sans-serif`;
-      ctx.fillStyle = isHovered ? '#fff8e0' : 'rgba(200, 185, 140, 0.85)';
-      ctx.textAlign = 'center';
+      // Label at the midpoint of the arc at mid-radius
+      const midAngle = base + (i + 0.5) * slice;
+      const lx = cx + Math.cos(midAngle) * RING_MID;
+      const ly = cy + Math.sin(midAngle) * RING_MID;
+
+      ctx.font         = isHovered ? 'bold 11px sans-serif' : '10px sans-serif';
+      ctx.fillStyle    = isHovered ? '#fff8e0' : 'rgba(200, 185, 140, 0.85)';
+      ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(opt.label, ox, oy);
+      ctx.fillText(opt.label, lx, ly);
     }
+
+    // ── Center dot — red when cancelling, gold when selecting ─────────────
+    ctx.beginPath();
+    ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+    ctx.fillStyle = isCancelling ? 'rgba(200, 60, 60, 0.9)' : 'rgba(200, 160, 60, 0.9)';
+    ctx.fill();
+
+    // Dead-zone ring hint
+    ctx.beginPath();
+    ctx.arc(cx, cy, DEAD_ZONE, 0, Math.PI * 2);
+    ctx.strokeStyle = isCancelling ? 'rgba(200, 60, 60, 0.30)' : 'rgba(180, 140, 60, 0.15)';
+    ctx.lineWidth   = 1;
+    ctx.stroke();
 
     ctx.restore();
   }
