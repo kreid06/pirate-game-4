@@ -1691,7 +1691,7 @@ static uint32_t spawn_ship_crew(uint32_t ship_id, const char* name) {
     npc->active         = true;
     npc->role           = NPC_ROLE_NONE;  /* assigned dynamically by manning panel */
     npc->ship_id        = ship_id;
-    npc->company_id     = ship->company_id; /* inherit faction from ship */
+    npc->company_id     = ship->company_id; /* faction set once at spawn — never changed by ship transfers */
     npc->wants_cannon   = false;
     npc->move_speed     = 80.0f;
     npc->interact_radius= 40.0f;
@@ -6227,9 +6227,30 @@ int websocket_server_update(struct Sim* sim) {
                             p = strstr(payload, "\"npc_id\":");  if (p) sscanf(p +  9, "%u", &ca_npc);
                             p = strstr(payload, "\"task\":\"");
                             if (p) sscanf(p + 8, "%15[^\"]s", ca_task);
-                            if (ca_ship != 0 && ca_npc != 0)
-                                handle_crew_assign(ca_ship, ca_npc, ca_task);
-                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"crew_assigned\"}");
+                            if (ca_ship != 0 && ca_npc != 0) {
+                                // Company check: player may only command NPCs of their own company.
+                                // Neutral players (company 0) cannot command any company-owned NPC.
+                                WebSocketPlayer* ca_player = find_player(client->player_id);
+                                WorldNpc* ca_npc_ptr = NULL;
+                                for (int _ci = 0; _ci < world_npc_count; _ci++) {
+                                    if (world_npcs[_ci].active && world_npcs[_ci].id == ca_npc) {
+                                        ca_npc_ptr = &world_npcs[_ci]; break;
+                                    }
+                                }
+                                if (ca_player && ca_npc_ptr &&
+                                    ca_npc_ptr->company_id != 0 &&
+                                    ca_npc_ptr->company_id != ca_player->company_id) {
+                                    log_warn("⛔ Player %u (company %u) cannot command NPC %u (company %u)",
+                                             ca_player->player_id, ca_player->company_id,
+                                             ca_npc_ptr->id, ca_npc_ptr->company_id);
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"company_mismatch\"}");
+                                } else {
+                                    handle_crew_assign(ca_ship, ca_npc, ca_task);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"crew_assigned\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"crew_assigned\"}");
+                            }
                             handled = true;
 
                         } else if (strstr(payload, "\"type\":\"upgrade_ship\"")) {
