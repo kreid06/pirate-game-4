@@ -2186,6 +2186,12 @@ export class ClientApplication {
 
           if (MOUNTABLE.has(hov.module.kind)) {
             // ── Mount ──────────────────────────────────────────────────────────
+            // Player must be on the ship — can't mount a helm/cannon/mast from off-ship.
+            if (meE.carrierId !== hov.ship.id) {
+              console.warn(`🎮 E: can't mount ${hov.module.kind} — player is off-ship`);
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+              break;
+            }
             this._interactKind = 'mount';
             this._suppressLadderInteract = true;
             this._ladderHoldWasMounted = false;
