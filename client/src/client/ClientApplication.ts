@@ -945,6 +945,17 @@ export class ClientApplication {
         this.renderSystem.notifyEntityDamaged(id, entityType === 'npc');
       };
 
+      this.networkManager.onLadderState = (shipId, moduleId, retracted) => {
+        const ws = this.authoritativeWorldState || this.predictedWorldState;
+        if (!ws) return;
+        const ship = ws.ships.find(s => s.id === shipId);
+        if (!ship) return;
+        const mod = ship.modules.find(m => m.id === moduleId);
+        if (!mod || mod.kind !== 'ladder' || !mod.moduleData || mod.moduleData.kind !== 'ladder') return;
+        mod.moduleData.extended = !retracted;
+        console.log(`🪤 Ladder ${moduleId} on ship ${shipId}: ${retracted ? 'retracted' : 'extended'}`);
+      };
+
       // Handle SWORD_SWING: show arc for other players' sword attacks
       this.networkManager.onSwordSwing = (playerId, x, y, angle, _range) => {
         const myId = this.networkManager.getAssignedPlayerId();
@@ -2043,6 +2054,27 @@ export class ClientApplication {
       }
 
       switch (e.key) {
+        case 'l':
+        case 'L': {
+          // Toggle retract/extend the ladder on the player's current ship
+          const ws = this.authoritativeWorldState || this.predictedWorldState;
+          const myId = this.networkManager.getAssignedPlayerId();
+          const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
+          const shipId = me?.carrierId ?? 0;
+          if (shipId > 0) {
+            const ship = ws?.ships.find(s => s.id === shipId);
+            const ladder = ship?.modules.find(m => m.kind === 'ladder');
+            if (ladder) {
+              this.networkManager.sendToggleLadder(ladder.id);
+            } else {
+              console.log('No ladder found on current ship');
+            }
+          } else {
+            console.log('Not on a ship — cannot toggle ladder');
+          }
+          e.preventDefault();
+          break;
+        }
         case ']':
           this.renderSystem.toggleHoverBoundaries();
           e.preventDefault();

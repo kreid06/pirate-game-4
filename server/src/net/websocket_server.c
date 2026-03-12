@@ -971,6 +971,11 @@ static void handle_mast_interact(WebSocketPlayer* player, struct WebSocketClient
 }
 
 static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
+    // Check if ladder is retracted — nobody can board via a retracted ladder
+    if (module->state_bits & MODULE_STATE_RETRACTED) {
+        send_interaction_failure(client, "ladder_retracted");
+        return;
+    }
     // Check if player is already on this ship
     if (player->parent_ship_id == ship->ship_id) {
         log_info("🪜 Player %u already on ship %u, no need to board", player->player_id, ship->ship_id);
@@ -980,6 +985,15 @@ static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClie
     
     // Player is swimming - board them onto the ship at the ladder position
     if (player->parent_ship_id == 0) {
+        // Company check: cannot board a ship belonging to another company
+        // Neutral players (company 0) are also blocked from company ships.
+        if (ship->company_id != 0 &&
+            ship->company_id != player->company_id) {
+            log_warn("⛔ Player %u (company %u) cannot board ship %u (company %u): different company",
+                     player->player_id, player->company_id, ship->ship_id, ship->company_id);
+            send_interaction_failure(client, "company_mismatch");
+            return;
+        }
         // Get ladder position in ship-local coordinates (convert from server to client)
         float ladder_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
         float ladder_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
@@ -3487,7 +3501,30 @@ static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClie
     
     // Special handling for ladders - can be used from water or different ships
     bool is_ladder = (module->type_id == MODULE_TYPE_LADDER);
-    
+
+    // NPC occupancy check: if an enemy NPC is currently stationed at this module, block it.
+    // (Enemy ship modules are otherwise freely usable — only NPC presence blocks access.)
+    if (!is_ladder) {
+        for (int _ni = 0; _ni < world_npc_count; _ni++) {
+            WorldNpc* _npc = &world_npcs[_ni];
+            if (!_npc->active) continue;
+            if (_npc->assigned_cannon_id != module->id) continue;
+            // Only block when the NPC is physically at the module, not just en route
+            if (_npc->state != WORLD_NPC_STATE_AT_CANNON &&
+                _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
+            // Neutral NPCs (company 0) never block anyone
+            if (_npc->company_id == 0) continue;
+            // Friendly NPC — fine to share the module
+            if (player->company_id != 0 && _npc->company_id == player->company_id) continue;
+            // Enemy NPC is stationed here
+            log_warn("⛔ Player %u (company %u) blocked from module %u: NPC %u (company %u) is stationed there",
+                     player->player_id, player->company_id, module_id,
+                     _npc->id, _npc->company_id);
+            send_interaction_failure(client, "npc_occupied");
+            return;
+        }
+    }
+
     // For non-ladder modules, player must be on the same ship
     if (!is_ladder && player->parent_ship_id != target_ship->ship_id) {
         if (player->parent_ship_id == 0) {
@@ -4910,10 +4947,9 @@ int websocket_server_update(struct Sim* sim) {
                                                 for (int ni = 0; ni < world_npc_count; ni++) {
                                                     WorldNpc* tnpc = &world_npcs[ni];
                                                     if (!tnpc->active) continue;
-                                                    // No friendly fire
-                                                    if (player->parent_ship_id != 0 &&
-                                                        tnpc->ship_id == player->parent_ship_id) continue;
-
+                                    // No friendly fire: skip NPCs of the same company
+                                    if (player->company_id != 0 &&
+                                        tnpc->company_id == player->company_id) continue;
                                                     float nx = tnpc->x - player->x;
                                                     float ny = tnpc->y - player->y;
                                                     if (nx*nx + ny*ny > SWORD_RANGE2) continue;
@@ -4962,9 +4998,9 @@ int websocket_server_update(struct Sim* sim) {
                                                 for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
                                                     WebSocketPlayer* tp = &players[wpi];
                                                     if (!tp->active || tp->player_id == player->player_id) continue;
-                                                    if (player->parent_ship_id != 0 &&
-                                                        tp->parent_ship_id == player->parent_ship_id) continue;
-
+                                    // No friendly fire: skip players of the same company
+                                    if (player->company_id != 0 &&
+                                        tp->company_id == player->company_id) continue;
                                                     float px2 = tp->x - player->x;
                                                     float py2 = tp->y - player->y;
                                                     if (px2*px2 + py2*py2 > SWORD_RANGE2) continue;
@@ -6199,6 +6235,7 @@ int websocket_server_update(struct Sim* sim) {
                         } else if (strstr(payload, "\"type\":\"upgrade_ship\"")) {
                             // UPGRADE SHIP: spend XP to advance one attribute on the player's ship.
                             // {"type":"upgrade_ship","shipId":N,"attribute":"resistance"}
+                            WebSocketPlayer* player = find_player(client->player_id);
                             uint32_t upg_ship_id = 0;
                             char upg_attr[32] = "";
                             char* p2;
@@ -6211,6 +6248,12 @@ int websocket_server_update(struct Sim* sim) {
                                 struct Ship* upg_sim_ship = sim_get_ship(global_sim, (entity_id)upg_ship_id);
                                 if (!upg_sim_ship) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                } else if (upg_sim_ship->company_id != 0 &&
+                                           upg_sim_ship->company_id != player->company_id) {
+                                    log_warn("⛔ Player %u (company %u) cannot upgrade ship %u (company %u)",
+                                             player->player_id, player->company_id,
+                                             upg_ship_id, upg_sim_ship->company_id);
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"company_mismatch\"}");
                                 } else {
                                     ShipAttribute attr = ship_attr_from_name(upg_attr);
                                     if (attr == SHIP_ATTR_COUNT) {
@@ -6277,6 +6320,7 @@ int websocket_server_update(struct Sim* sim) {
                             // Cost: 1 stat point (earned per global level-up, no XP deducted).
                             // Stat points available = (npc_level - 1) - total_stats_spent.
                             // No per-stat cap — all 65 points can go into any one stat.
+                            WebSocketPlayer* player = find_player(client->player_id);
                             uint32_t uc_npc_id = 0;
                             char uc_stat[32] = "";
                             char* p3;
@@ -6291,6 +6335,12 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             if (!uc_npc) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"npc_not_found\"}");
+                            } else if (uc_npc->company_id != 0 &&
+                                       uc_npc->company_id != player->company_id) {
+                                log_warn("⛔ Player %u (company %u) cannot upgrade NPC %u (company %u)",
+                                         player->player_id, player->company_id,
+                                         uc_npc->id, uc_npc->company_id);
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"company_mismatch\"}");
                             } else {
                                 uint8_t* stat_ptr = NULL;
                                 if      (strcmp(uc_stat, "health")  == 0) stat_ptr = &uc_npc->stat_health;
@@ -6350,6 +6400,50 @@ int websocket_server_update(struct Sim* sim) {
                                             uc_stat, *stat_ptr, stat_points_left);
                                     }
                                 }
+                            }
+                            handled = true;
+
+                        } else if (strstr(payload, "\"type\":\"toggle_ladder\"")) {
+                            // TOGGLE LADDER: retract or extend a ladder on the player's current ship.
+                            // {"type":"toggle_ladder","moduleId":N}
+                            WebSocketPlayer* player = find_player(client->player_id);
+                            uint32_t tl_module_id = 0;
+                            char *p_tl = strstr(payload, "\"moduleId\":");
+                            if (p_tl) tl_module_id = (uint32_t)atoi(p_tl + 11);
+
+                            SimpleShip* tl_ship = NULL;
+                            ShipModule* tl_module = NULL;
+                            for (int si = 0; si < ship_count && !tl_module; si++) {
+                                if (!ships[si].active) continue;
+                                ShipModule* fm = find_module_by_id(&ships[si], tl_module_id);
+                                if (fm) { tl_ship = &ships[si]; tl_module = fm; }
+                            }
+
+                            if (!tl_module || !tl_ship || tl_module->type_id != MODULE_TYPE_LADDER) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"ladder_not_found\"}");
+                            } else if (player->parent_ship_id != tl_ship->ship_id) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                            } else if (tl_ship->company_id != 0 &&
+                                       player->company_id != tl_ship->company_id) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"company_mismatch\"}");
+                            } else {
+                                bool now_retracted = !(tl_module->state_bits & MODULE_STATE_RETRACTED);
+                                if (now_retracted)
+                                    tl_module->state_bits |= MODULE_STATE_RETRACTED;
+                                else
+                                    tl_module->state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
+                                log_info("🪜 Player %u toggled ladder %u → %s",
+                                         player->player_id, tl_module_id,
+                                         now_retracted ? "RETRACTED" : "EXTENDED");
+                                char tl_msg[192];
+                                snprintf(tl_msg, sizeof(tl_msg),
+                                    "{\"type\":\"ladder_state\",\"ship_id\":%u,\"module_id\":%u,\"retracted\":%s}",
+                                    tl_ship->ship_id, tl_module_id,
+                                    now_retracted ? "true" : "false");
+                                websocket_server_broadcast(tl_msg);
+                                snprintf(response, sizeof(response),
+                                    "{\"type\":\"message_ack\",\"status\":\"ladder_toggled\",\"retracted\":%s}",
+                                    now_retracted ? "true" : "false");
                             }
                             handled = true;
 

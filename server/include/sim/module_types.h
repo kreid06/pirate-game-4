@@ -41,7 +41,9 @@ typedef enum {
      *  Set by handle_cannon_aim() on the SimpleShip module; cleared when an NPC
      *  arrives at AT_CANNON.  NPCs treat NEEDED cannons as their top-priority
      *  destination regardless of weapon-group membership. */
-    MODULE_STATE_NEEDED = (1 << 9)
+    MODULE_STATE_NEEDED = (1 << 9),
+    /** Set by toggle_ladder: ladder is pulled up and cannot be climbed. */
+    MODULE_STATE_RETRACTED = (1 << 10)
 } ModuleStateBits;
 
 /**

@@ -435,6 +435,7 @@ export class NetworkManager {
     damage: number, health: number, maxHealth: number, killed: boolean) => void) | null = null;
   /** Fired when a player performs a sword swing (for arc animation). */
   public onSwordSwing: ((playerId: number, x: number, y: number, angle: number, range: number) => void) | null = null;
+  public onLadderState: ((shipId: number, moduleId: number, retracted: boolean) => void) | null = null;
   /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
   public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
   /** Fired when the server confirms the player has boarded a ship (via ladder). */
@@ -1647,6 +1648,15 @@ export class NetworkManager {
         break;
       }
 
+      case 'ladder_state': {
+        this.onLadderState?.(
+          message.ship_id  ?? 0,
+          message.module_id ?? 0,
+          message.retracted ?? false,
+        );
+        break;
+      }
+
       case 'SWORD_SWING': {
         this.onSwordSwing?.(
           message.playerId ?? 0,
@@ -1723,6 +1733,11 @@ export class NetworkManager {
   /**
    * Send module interaction to server
    */
+  sendToggleLadder(moduleId: number): void {
+    this.sendMessage({ type: 'toggle_ladder' as any, module_id: moduleId, moduleId, timestamp: Date.now() } as any);
+    console.log(`🪜 Toggle ladder: module ${moduleId}`);
+  }
+
   sendModuleInteract(moduleId: number): void {
     const message: ModuleInteractMessage = {
       type: MessageType.MODULE_INTERACT,
