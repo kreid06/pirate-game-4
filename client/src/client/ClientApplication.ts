@@ -2239,15 +2239,15 @@ export class ClientApplication {
         if (moduleId === null) return;
 
         if (this._ladderHoldOnShip) {
-          // On ship: tap toggles extend/retract
-          this.networkManager.sendToggleLadder(moduleId);
+          // On ship: tap toggles extend/retract via module_interact (no company check)
+          this.networkManager.sendModuleInteract(moduleId);
           console.log(`🪜 tap: ${this._ladderHoldIsExtended ? 'retract' : 'extend'} ladder ${moduleId}`);
         } else if (this._ladderHoldIsExtended) {
           // Off ship, extended: tap = climb
           this.networkManager.sendModuleInteract(moduleId);
           console.log(`🪜 tap: climb ladder ${moduleId}`);
         } else {
-          // Off ship, retracted: tap = extend (same-company)
+          // Off ship, retracted: tap = extend (same-company only via toggle_ladder)
           this.networkManager.sendToggleLadder(moduleId);
           console.log(`🪜 tap: extend ladder ${moduleId}`);
         }
@@ -2263,8 +2263,8 @@ export class ClientApplication {
           // Off-ship board
           this.networkManager.sendModuleInteract(moduleId);
         } else if (selected === 'retract' || selected === 'extend') {
-          // On-ship toggle
-          this.networkManager.sendToggleLadder(moduleId);
+          // On-ship toggle via module_interact (no company check)
+          this.networkManager.sendModuleInteract(moduleId);
         }
       }
     });
