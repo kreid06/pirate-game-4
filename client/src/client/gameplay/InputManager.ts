@@ -115,6 +115,7 @@ export class InputManager {
   // Explicit build mode (toggled with B key — independent of hotbar items)
   public explicitBuildMode: boolean = false;
   public onBuildModeToggle: (() => void) | null = null;
+  public onToggleAllLadders: (() => void) | null = null;
   public onBuildRotate: ((deltaDeg: number) => void) | null = null;
   /** Called when R is pressed while hovering a damaged mast (not in explicit build mode). */
   public onRepairSail: (() => void) | null = null;
@@ -913,7 +914,8 @@ export class InputManager {
     // Handle debug toggles immediately (not part of simulation input)
     switch (event.code) {
       case 'KeyL':
-        // Debug toggle handled by client application
+        if (this.onToggleAllLadders) this.onToggleAllLadders();
+        event.preventDefault();
         break;
       case 'KeyP':
         // Plank bounds toggle handled by client application

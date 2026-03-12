@@ -534,24 +534,11 @@ export class ClientApplication {
             const maxInteractDistance = 120;
 
             if (distance <= maxInteractDistance) {
-              if (hoveredModule.module.kind === 'ladder') {
-                if (this._suppressLadderInteract) return;
-                const onShip = player.carrierId === hoveredModule.ship.id;
-                const isExtended = (hoveredModule.module.moduleData as any)?.extended !== false;
-                console.log(`🪜 hover: ladder ${hoveredModule.module.id} onShip=${onShip} extended=${isExtended}`);
-                if (onShip) {
-                  this.networkManager.sendModuleInteract(hoveredModule.module.id);
-                } else if (isExtended) {
-                  this.networkManager.sendModuleInteract(hoveredModule.module.id);
-                } else {
-                  this.networkManager.sendToggleLadder(hoveredModule.module.id);
-                }
-                return;
-              }
-              // Non-ladder modules (helm, cannon, mast): handled by E keydown → keyup path.
-              // The keydown handler sets _suppressLadderInteract=true when a mountable is found,
-              // so this code is only reached if keydown found nothing OR player is using a gamepad.
-              // In either case, skip the game-loop path to avoid firing sendModuleInteract every tick.
+              // All module interactions (including ladders) are handled by the E
+              // keydown → keyup path in setupDebugKeys. That handler sets
+              // _suppressLadderInteract=true before InputManager can fire a second
+              // event, so nothing should be dispatched here. Falling through to the
+              // proximity / NPC paths is intentional.
             }
           }
 
@@ -563,9 +550,12 @@ export class ClientApplication {
           }
 
           if (!hoveredModule && !this._suppressLadderInteract) {
-            // Proximity fallback: scan for nearest ladder without requiring mouse hover
+            // Proximity fallback: scan for nearest ladder WITHOUT requiring mouse hover.
+            // This is only for off-ship players trying to board — once on a ship the
+            // hover path above always works and the distance-only scan would fire on
+            // the wrong ladder (e.g. retracting a ladder you just climbed).
             const wsL = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
-            if (wsL && player) {
+            if (wsL && player && player.carrierId === 0) {
               const LADDER_RANGE = 200;
               let nearestLadder: { ship: any; module: any } | null = null;
               let nearestDist = Infinity;
@@ -2117,7 +2107,6 @@ export class ClientApplication {
     window.addEventListener('keydown', (e) => {
       // Only handle if not typing in an input field
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if (e.repeat) return; // no auto-repeat for E-hold logic
 
       // Route Space / Enter to UIManager for minigame handling first
       if (this.uiManager?.handleKeyDown(e.key)) {
@@ -2128,6 +2117,7 @@ export class ClientApplication {
       switch (e.key) {
         case 'e':
         case 'E': {
+          if (e.repeat) break; // no auto-repeat for E-hold logic
           const wsE = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
           const myIdE = this.networkManager.getAssignedPlayerId();
           if (!wsE) { console.warn('🪜 E: no world state'); break; }
@@ -2173,6 +2163,22 @@ export class ClientApplication {
           if (!hov) {
             console.warn('🪜 E: no module under cursor');
             break;
+          }
+
+          // ── Range check at keydown — flash red and bail immediately if too far ─
+          {
+            const hovCos = Math.cos(hov.ship.rotation);
+            const hovSin = Math.sin(hov.ship.rotation);
+            const mwx = hov.ship.position.x + (hov.module.localPos.x * hovCos - hov.module.localPos.y * hovSin);
+            const mwy = hov.ship.position.y + (hov.module.localPos.x * hovSin + hov.module.localPos.y * hovCos);
+            const hovDist = (meE.carrierId === hov.ship.id && meE.localPosition)
+              ? Math.hypot((meE.localPosition as any).x - hov.module.localPos.x, (meE.localPosition as any).y - hov.module.localPos.y)
+              : Math.hypot(meE.position.x - mwx, meE.position.y - mwy);
+            if (hovDist > 120) {
+              console.warn(`🪜 E: module out of range (dist=${hovDist.toFixed(0)})`);
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+              break;
+            }
           }
 
           const MOUNTABLE = new Set(['helm', 'cannon', 'mast']);
@@ -2241,39 +2247,31 @@ export class ClientApplication {
           console.warn(`🪜 E: hovered module kind '${hov.module.kind}' has no interact handler`);
           break;
         }
-        case 'l':
-        case 'L': {
-          // Toggle all ladders on all ships belonging to player's company
-          const ws = this.authoritativeWorldState || this.predictedWorldState;
-          const myId = this.networkManager.getAssignedPlayerId();
-          const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
-          if (!me || !ws) { e.preventDefault(); break; }
-          const companyId = me.companyId ?? 0;
-          if (companyId === 0) {
-            console.log('Neutral company — cannot mass-toggle ladders');
-            e.preventDefault();
-            break;
-          }
-          let ladderCount = 0;
-          for (const ship of ws.ships) {
-            if (ship.companyId !== companyId) continue;
-            for (const mod of ship.modules) {
-              if (mod.kind === 'ladder') {
-                this.networkManager.sendToggleLadder(mod.id);
-                ladderCount++;
-              }
-            }
-          }
-          console.log(`🪜 [LADDER] Toggled ${ladderCount} ladder(s) on company ${companyId} ships`);
-          e.preventDefault();
-          break;
-        }
         case ']':
           this.renderSystem.toggleHoverBoundaries();
           e.preventDefault();
           break;
       }
     });
+
+    // L key — mass-toggle all company ladders, wired via InputManager.onToggleAllLadders
+    // so it fires correctly while moving (same pattern as build mode toggle).
+    this.inputManager.onToggleAllLadders = () => {
+      const ws = this.authoritativeWorldState || this.predictedWorldState;
+      const myId = this.networkManager.getAssignedPlayerId();
+      const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
+      if (!me || !ws) return;
+      const companyId = me.companyId ?? 0;
+      if (companyId === 0) { console.log('Neutral company — cannot mass-toggle ladders'); return; }
+      let ladderCount = 0;
+      for (const ship of ws.ships) {
+        if (ship.companyId !== companyId) continue;
+        for (const mod of ship.modules) {
+          if (mod.kind === 'ladder') { this.networkManager.sendToggleLadder(mod.id); ladderCount++; }
+        }
+      }
+      console.log(`🪜 [LADDER] Toggled ${ladderCount} ladder(s) on company ${companyId} ships`);
+    };
 
     // E keyup: execute action based on how long E was held
     window.addEventListener('keyup', (e) => {
