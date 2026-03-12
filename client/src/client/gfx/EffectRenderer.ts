@@ -16,7 +16,8 @@ export enum EffectType {
   WATER_WAKE = 'water_wake',
   SHIP_FOAM = 'ship_foam',
   EXPLOSION_FLASH = 'explosion_flash',
-  DAMAGE_NUMBER = 'damage_number'
+  DAMAGE_NUMBER = 'damage_number',
+  SWORD_ARC = 'sword_arc'
 }
 
 /** Category controls the colour and icon of a top-centre announcement banner. */
@@ -54,6 +55,16 @@ interface WaterWakeEffect extends Effect {
 }
 
 /**
+ * Sword swing arc effect
+ */
+interface SwordArcEffect extends Effect {
+  type: EffectType.SWORD_ARC;
+  direction: number; // attack angle in radians
+  arcHalf: number;   // half arc spread in radians (PI/3 = 60°)
+  radius: number;    // reach in world pixels
+}
+
+/**
  * Damage number floating text effect
  */
 interface DamageNumberEffect extends Effect {
@@ -74,7 +85,7 @@ interface Announcement {
 /**
  * Effect union type
  */
-type VisualEffect = MuzzleFlashEffect | WaterWakeEffect | DamageNumberEffect | Effect;
+type VisualEffect = MuzzleFlashEffect | WaterWakeEffect | DamageNumberEffect | SwordArcEffect | Effect;
 
 /**
  * Effect renderer system
@@ -149,6 +160,9 @@ export class EffectRenderer {
           break;
         case EffectType.DAMAGE_NUMBER:
           this.renderDamageNumber(effect as DamageNumberEffect, camera);
+          break;
+        case EffectType.SWORD_ARC:
+          this.renderSwordArc(effect as SwordArcEffect, camera);
           break;
       }
     }
@@ -305,6 +319,27 @@ export class EffectRenderer {
   }
 
   /**
+   * Create a sword swing arc effect at a world position.
+   * @param position  World position of the attacker.
+   * @param direction Attack angle in radians.
+   * @param radius    Reach in world pixels (default 80).
+   */
+  createSwordArc(position: Vec2, direction: number, radius: number = 80): void {
+    const effect: SwordArcEffect = {
+      id: this.nextEffectId++,
+      type: EffectType.SWORD_ARC,
+      position: position.clone(),
+      direction,
+      arcHalf: Math.PI / 3, // ±60° sweep
+      radius,
+      age: 0,
+      maxAge: 0.25,
+      intensity: 1.0
+    };
+    this.effects.push(effect);
+  }
+
+  /**
    * Create explosion flash effect
    */
   createExplosionFlash(position: Vec2, intensity: number = 1.0): void {
@@ -439,6 +474,54 @@ export class EffectRenderer {
     // Main text: red for kill, orange for damage
     this.ctx.fillStyle = effect.isKill ? '#ff3030' : '#ffaa00';
     this.ctx.fillText(label, x, y);
+    this.ctx.restore();
+  }
+
+  private renderSwordArc(effect: SwordArcEffect, camera: Camera): void {
+    const screenPos = camera.worldToScreen(effect.position);
+    const cameraState = camera.getState();
+    const t = effect.age / effect.maxAge; // 0 → 1
+
+    // Swing progress: arc sweeps from (direction - arcHalf) → (direction + arcHalf)
+    const startAngle = effect.direction - effect.arcHalf - cameraState.rotation;
+    const endAngle   = effect.direction + effect.arcHalf - cameraState.rotation;
+    const scaledRadius = effect.radius * cameraState.zoom;
+
+    // Fade out quickly
+    const alpha = Math.max(0, 1.0 - t);
+
+    this.ctx.save();
+    this.ctx.globalAlpha = alpha;
+
+    // Outer glow
+    this.ctx.strokeStyle = `rgba(220, 220, 255, ${alpha * 0.4})`;
+    this.ctx.lineWidth = 10 * cameraState.zoom;
+    this.ctx.lineCap = 'round';
+    this.ctx.beginPath();
+    this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, startAngle, endAngle);
+    this.ctx.stroke();
+
+    // Sharp inner arc
+    this.ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+    this.ctx.lineWidth = 2.5 * cameraState.zoom;
+    this.ctx.beginPath();
+    this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, startAngle, endAngle);
+    this.ctx.stroke();
+
+    // Short radial lines at arc ends
+    for (const angle of [startAngle, endAngle]) {
+      const ex = screenPos.x + Math.cos(angle) * scaledRadius * 0.65;
+      const ey = screenPos.y + Math.sin(angle) * scaledRadius * 0.65;
+      const tx = screenPos.x + Math.cos(angle) * scaledRadius;
+      const ty = screenPos.y + Math.sin(angle) * scaledRadius;
+      this.ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.7})`;
+      this.ctx.lineWidth = 1.5 * cameraState.zoom;
+      this.ctx.beginPath();
+      this.ctx.moveTo(ex, ey);
+      this.ctx.lineTo(tx, ty);
+      this.ctx.stroke();
+    }
+
     this.ctx.restore();
   }
 

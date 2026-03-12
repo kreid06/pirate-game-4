@@ -4864,7 +4864,7 @@ int websocket_server_update(struct Sim* sim) {
                                         if (player->is_mounted) {
                                             log_warn("⚔️ Player %u attack rejected (mounted)", player->player_id);
                                         } else {
-                                            // Parse optional target position from "target":{x,y}
+                                            // Parse target position from "target":{x,y}
                                             float target_x = player->x;
                                             float target_y = player->y;
                                             char* target_start = strstr(payload, "\"target\":{");
@@ -4874,15 +4874,138 @@ int websocket_server_update(struct Sim* sim) {
                                                 if (xp) target_x = strtof(xp + 4, NULL);
                                                 if (yp) target_y = strtof(yp + 4, NULL);
                                             }
-                                            log_info("⚔️ Player %u attacked toward (%.1f, %.1f)",
-                                                     player->player_id, target_x, target_y);
-                                            // Broadcast attack event to all players nearby
-                                            char attack_msg[256];
-                                            snprintf(attack_msg, sizeof(attack_msg),
-                                                "{\"type\":\"player_attack\",\"player_id\":%u,\"target_x\":%.2f,\"target_y\":%.2f}",
-                                                player->player_id, target_x, target_y);
-                                            websocket_server_broadcast(attack_msg);
+
+                                            // ── Sword attack ──────────────────────────────
+                                            uint8_t aslot = player->inventory.active_slot;
+                                            bool holding_sword = (aslot < INVENTORY_SLOTS &&
+                                                player->inventory.slots[aslot].item == ITEM_SWORD &&
+                                                player->inventory.slots[aslot].quantity > 0);
+
+                                            if (holding_sword) {
+                                                const uint32_t SWORD_COOLDOWN_MS = 600u;
+                                                uint32_t now_ms = get_time_ms();
+                                                if (now_ms - player->sword_last_attack_ms < SWORD_COOLDOWN_MS) {
+                                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"sword_cooldown\"}");
+                                                    goto sword_attack_done;
+                                                }
+                                                player->sword_last_attack_ms = now_ms;
+
+                                                const float SWORD_RANGE  = 80.0f;
+                                                const float SWORD_DAMAGE = 30.0f;
+                                                const float SWORD_RANGE2 = SWORD_RANGE * SWORD_RANGE;
+
+                                                // Direction vector toward target
+                                                float atk_dx = target_x - player->x;
+                                                float atk_dy = target_y - player->y;
+                                                float atk_len = sqrtf(atk_dx*atk_dx + atk_dy*atk_dy);
+                                                if (atk_len < 0.1f) { atk_dx = 1.0f; atk_dy = 0.0f; }
+                                                else { atk_dx /= atk_len; atk_dy /= atk_len; }
+                                                float atk_angle = atan2f(atk_dy, atk_dx);
+
+                                                // ── Hit NPCs ──────────────────────────────
+                                                for (int ni = 0; ni < world_npc_count; ni++) {
+                                                    WorldNpc* tnpc = &world_npcs[ni];
+                                                    if (!tnpc->active) continue;
+                                                    // No friendly fire
+                                                    if (player->parent_ship_id != 0 &&
+                                                        tnpc->ship_id == player->parent_ship_id) continue;
+
+                                                    float nx = tnpc->x - player->x;
+                                                    float ny = tnpc->y - player->y;
+                                                    if (nx*nx + ny*ny > SWORD_RANGE2) continue;
+
+                                                    // 120-degree arc (±60°)
+                                                    float npc_angle = atan2f(ny, nx);
+                                                    float diff = npc_angle - atk_angle;
+                                                    while (diff >  (float)M_PI) diff -= 2.0f*(float)M_PI;
+                                                    while (diff < -(float)M_PI) diff += 2.0f*(float)M_PI;
+                                                    if (fabsf(diff) > (float)M_PI / 3.0f * 2.0f) continue;
+
+                                                    uint16_t dmg16 = (uint16_t)SWORD_DAMAGE;
+                                                    bool killed_npc = false;
+                                                    if (tnpc->health <= dmg16) {
+                                                        tnpc->health = 0;
+                                                        tnpc->active = false;
+                                                        killed_npc = true;
+                                                    } else {
+                                                        tnpc->health -= dmg16;
+                                                    }
+
+                                                    // Small knockback impulse
+                                                    float dist = sqrtf(nx*nx + ny*ny);
+                                                    float kx = (dist > 0.1f) ? (nx/dist) : atk_dx;
+                                                    float ky = (dist > 0.1f) ? (ny/dist) : atk_dy;
+                                                    tnpc->velocity_x += kx * 30.0f;
+                                                    tnpc->velocity_y += ky * 30.0f;
+
+                                                    char hit_msg[256];
+                                                    snprintf(hit_msg, sizeof(hit_msg),
+                                                        "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
+                                                        "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                                                        "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                                                        tnpc->id, tnpc->x, tnpc->y, SWORD_DAMAGE,
+                                                        (unsigned)tnpc->health, (unsigned)tnpc->max_health,
+                                                        killed_npc ? "true" : "false");
+                                                    websocket_server_broadcast(hit_msg);
+
+                                                    log_info("⚔️  Player %u sword hit NPC %u (HP %u/%u)%s",
+                                                             player->player_id, tnpc->id,
+                                                             (unsigned)tnpc->health, (unsigned)tnpc->max_health,
+                                                             killed_npc ? " KILLED" : "");
+                                                }
+
+                                                // ── Hit Players (PvP) ─────────────────────
+                                                for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
+                                                    WebSocketPlayer* tp = &players[wpi];
+                                                    if (!tp->active || tp->player_id == player->player_id) continue;
+                                                    if (player->parent_ship_id != 0 &&
+                                                        tp->parent_ship_id == player->parent_ship_id) continue;
+
+                                                    float px2 = tp->x - player->x;
+                                                    float py2 = tp->y - player->y;
+                                                    if (px2*px2 + py2*py2 > SWORD_RANGE2) continue;
+
+                                                    float p_angle = atan2f(py2, px2);
+                                                    float pdiff   = p_angle - atk_angle;
+                                                    while (pdiff >  (float)M_PI) pdiff -= 2.0f*(float)M_PI;
+                                                    while (pdiff < -(float)M_PI) pdiff += 2.0f*(float)M_PI;
+                                                    if (fabsf(pdiff) > (float)M_PI / 3.0f * 2.0f) continue;
+
+                                                    uint16_t dmg16 = (uint16_t)SWORD_DAMAGE;
+                                                    if (tp->health <= dmg16) tp->health = 0;
+                                                    else tp->health -= dmg16;
+
+                                                    char hit_msg[256];
+                                                    snprintf(hit_msg, sizeof(hit_msg),
+                                                        "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
+                                                        "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                                                        "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                                                        tp->player_id, tp->x, tp->y, SWORD_DAMAGE,
+                                                        (unsigned)tp->health, (unsigned)tp->max_health,
+                                                        tp->health == 0 ? "true" : "false");
+                                                    websocket_server_broadcast(hit_msg);
+                                                }
+
+                                                // Broadcast sword swing (for client animation)
+                                                char swing_msg[256];
+                                                snprintf(swing_msg, sizeof(swing_msg),
+                                                    "{\"type\":\"SWORD_SWING\",\"playerId\":%u,"
+                                                    "\"x\":%.1f,\"y\":%.1f,\"angle\":%.3f,\"range\":%.0f}",
+                                                    player->player_id, player->x, player->y,
+                                                    atk_angle, SWORD_RANGE);
+                                                websocket_server_broadcast(swing_msg);
+
+                                            } else {
+                                                // Unarmed / generic attack broadcast
+                                                char attack_msg[256];
+                                                snprintf(attack_msg, sizeof(attack_msg),
+                                                    "{\"type\":\"player_attack\",\"player_id\":%u,"
+                                                    "\"target_x\":%.2f,\"target_y\":%.2f}",
+                                                    player->player_id, target_x, target_y);
+                                                websocket_server_broadcast(attack_msg);
+                                            }
                                         }
+                                        sword_attack_done:;
                                     } else if (strcmp(action, "block") == 0) {
                                         // Walking block — reject if mounted
                                         if (player->is_mounted) {

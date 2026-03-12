@@ -153,6 +153,15 @@ export class RenderSystem {
   }
 
   /**
+   * Spawn a sword swing arc effect at a world position.
+   * @param worldPos  Attacker's world position.
+   * @param direction Attack angle in radians.
+   */
+  spawnSwordArc(worldPos: Vec2, direction: number): void {
+    this.effectRenderer.createSwordArc(worldPos, direction);
+  }
+
+  /**
    * Spawn sail fiber tear particles at a world position (bar shot mast hit)
    */
   spawnSailFiberEffect(worldPos: Vec2, intensity: number = 1.0): void {

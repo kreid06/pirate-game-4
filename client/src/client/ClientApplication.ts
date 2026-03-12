@@ -445,7 +445,17 @@ export class ClientApplication {
             });
             return;
           }
-          // Not a hammer click — pass to server
+          // Not a hammer click — check for sword
+          if (activeItem === 'sword' && player && !player.isMounted) {
+            const dir = target
+              ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
+              : player.rotation;
+            this.networkManager.sendAction(action, target);
+            // Optimistic local arc (appears immediately without waiting for server)
+            this.renderSystem.spawnSwordArc(player.position, dir);
+            return;
+          }
+          // Not a hammer or sword click — pass to server
           this.networkManager.sendAction(action, target);
           return;
         }
@@ -918,6 +928,14 @@ export class ClientApplication {
           }
         }
         this.renderSystem.spawnDamageNumber(Vec2.from(x, y), damage, killed);
+      };
+
+      // Handle SWORD_SWING: show arc for other players' sword attacks
+      this.networkManager.onSwordSwing = (playerId, x, y, angle, _range) => {
+        const myId = this.networkManager.getAssignedPlayerId();
+        // Skip own swing — already shown optimistically in onActionEvent
+        if (playerId === myId) return;
+        this.renderSystem.spawnSwordArc(Vec2.from(x, y), angle);
       };
 
       // Build mode item selection (cannon/sail buttons in build mode panel)

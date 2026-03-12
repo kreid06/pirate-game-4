@@ -264,6 +264,9 @@ typedef struct WebSocketPlayer {
     uint16_t health;             // Current HP (0 = dead)
     uint16_t max_health;         // Max HP (default 100)
 
+    // Melee combat
+    uint32_t sword_last_attack_ms; // Wall-clock ms of last sword swing (0 = never)
+
     // Inventory
     PlayerInventory inventory;
 } WebSocketPlayer;

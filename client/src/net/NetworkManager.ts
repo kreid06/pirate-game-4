@@ -433,6 +433,8 @@ export class NetworkManager {
   /** Fired when a cannonball hits an NPC or player. */
   public onEntityHit: ((entityType: 'npc' | 'player', id: number, x: number, y: number,
     damage: number, health: number, maxHealth: number, killed: boolean) => void) | null = null;
+  /** Fired when a player performs a sword swing (for arc animation). */
+  public onSwordSwing: ((playerId: number, x: number, y: number, angle: number, range: number) => void) | null = null;
   /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
   public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
   /** Fired when the server confirms the player has boarded a ship (via ladder). */
@@ -1641,6 +1643,17 @@ export class NetworkManager {
           message.health   ?? 0,
           message.maxHealth ?? 100,
           message.killed   ?? false,
+        );
+        break;
+      }
+
+      case 'SWORD_SWING': {
+        this.onSwordSwing?.(
+          message.playerId ?? 0,
+          message.x        ?? 0,
+          message.y        ?? 0,
+          message.angle    ?? 0,
+          message.range    ?? 80,
         );
         break;
       }
