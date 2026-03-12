@@ -891,7 +891,19 @@ static void handle_helm_interact(WebSocketPlayer* player, struct WebSocketClient
         send_interaction_failure(client, "module_occupied");
         return;
     }
-    
+
+    // NPC occupancy check: if an enemy NPC helmsman is stationed at this helm, block mounting.
+    for (int _ni = 0; _ni < world_npc_count; _ni++) {
+        WorldNpc* _npc = &world_npcs[_ni];
+        if (!_npc->active) continue;
+        if (_npc->assigned_cannon_id != module->id) continue;
+        if (_npc->state != WORLD_NPC_STATE_AT_CANNON && _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
+        if (_npc->company_id == 0) continue;  // neutral never blocks
+        if (player->company_id != 0 && _npc->company_id == player->company_id) continue;  // friendly OK
+        send_interaction_failure(client, "npc_occupied");
+        return;
+    }
+
     // Mount player and grant ship control
     module->data.helm.occupied_by = player->player_id;
     module->state_bits |= MODULE_STATE_OCCUPIED;
@@ -976,24 +988,29 @@ static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClie
         send_interaction_failure(client, "ladder_retracted");
         return;
     }
-    // Check if player is already on this ship
+    // Check if player is already on this ship — pressing E at a ladder toggles its retract state.
+    // Any player already on the ship can do this; no company check.
     if (player->parent_ship_id == ship->ship_id) {
-        log_info("🪜 Player %u already on ship %u, no need to board", player->player_id, ship->ship_id);
-        send_interaction_success(client, "already_aboard");
+        bool now_retracted = !(module->state_bits & MODULE_STATE_RETRACTED);
+        if (now_retracted)
+            module->state_bits |= MODULE_STATE_RETRACTED;
+        else
+            module->state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
+        log_info("🪜 Player %u toggled ladder %u on ship %u → %s (via E-interact)",
+                 player->player_id, module->id, ship->ship_id,
+                 now_retracted ? "RETRACTED" : "EXTENDED");
+        char lad_msg[192];
+        snprintf(lad_msg, sizeof(lad_msg),
+                 "{\"type\":\"ladder_state\",\"ship_id\":%u,\"module_id\":%u,\"retracted\":%s}",
+                 ship->ship_id, module->id, now_retracted ? "true" : "false");
+        websocket_server_broadcast(lad_msg);
+        send_interaction_success(client, now_retracted ? "ladder_retracted" : "ladder_extended");
         return;
     }
     
-    // Player is swimming - board them onto the ship at the ladder position
+    // Player is swimming or on another ship — board via ladder.
+    // Any player may board an unretracted ladder; no company restriction.
     if (player->parent_ship_id == 0) {
-        // Company check: cannot board a ship belonging to another company
-        // Neutral players (company 0) are also blocked from company ships.
-        if (ship->company_id != 0 &&
-            ship->company_id != player->company_id) {
-            log_warn("⛔ Player %u (company %u) cannot board ship %u (company %u): different company",
-                     player->player_id, player->company_id, ship->ship_id, ship->company_id);
-            send_interaction_failure(client, "company_mismatch");
-            return;
-        }
         // Get ladder position in ship-local coordinates (convert from server to client)
         float ladder_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
         float ladder_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
@@ -1143,20 +1160,40 @@ static bool is_mast_manned(uint32_t ship_id, uint32_t mast_id) {
     return false;
 }
 
+/** Returns true if a friendly rigger (same company as player_company_id, or neutral NPC)
+ *  is stationed at mast_id. A neutral NPC (company 0) obeys any player.
+ *  A player with company 0 can only command neutral NPCs. */
+static bool is_mast_manned_by_friendly(uint32_t ship_id, uint32_t mast_id, uint8_t player_company_id) {
+    for (int i = 0; i < world_npc_count; i++) {
+        WorldNpc* w = &world_npcs[i];
+        if (!w->active || w->ship_id != ship_id) continue;
+        if (w->role != NPC_ROLE_RIGGER) continue;
+        if (w->assigned_cannon_id != mast_id) continue;
+        if (w->state != WORLD_NPC_STATE_AT_CANNON) continue;
+        // A rigger is here — is it friendly?
+        if (w->company_id == 0) return true;            // neutral obeys anyone
+        if (player_company_id != 0 &&
+            w->company_id == player_company_id) return true;  // same company
+        return false;  // enemy rigger
+    }
+    return false;  // no rigger at this mast
+}
+
 /**
  * Handle sail openness control from helm-mounted player
  * Sets the desired openness - actual openness will gradually adjust in tick
  */
 static void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, int desired_openness) {
-    /* Gate: at least one rigger must be stationed at a mast before allowing sail control. */
+/* Gate: at least one friendly rigger must be stationed at a mast before allowing sail control.
+     * Enemy/neutral-to-player riggers on a mast cannot be commanded. */
     {
         bool any_rigger = false;
         for (int m = 0; m < ship->module_count && !any_rigger; m++) {
             if (ship->modules[m].type_id == MODULE_TYPE_MAST)
-                any_rigger = is_mast_manned(ship->ship_id, ship->modules[m].id);
+                any_rigger = is_mast_manned_by_friendly(ship->ship_id, ship->modules[m].id, player->company_id);
         }
         if (!any_rigger) {
-            log_info("⛵ Sail control rejected for player %u — no rigger manning any mast on ship %u",
+            log_info("⛵ Sail control rejected for player %u — no friendly rigger manning any mast on ship %u",
                      player->player_id, ship->ship_id);
             return;
         }
@@ -1260,7 +1297,7 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
                 struct Ship* sim_ship = &global_sim->ships[s];
                 for (uint8_t m = 0; m < sim_ship->module_count; m++) {
                     if (sim_ship->modules[m].type_id == MODULE_TYPE_MAST &&
-                        is_mast_manned(ship->ship_id, sim_ship->modules[m].id)) {
+                        is_mast_manned_by_friendly(ship->ship_id, sim_ship->modules[m].id, player->company_id)) {
                         sim_ship->modules[m].data.mast.angle = angle_q16;
                         // log_info("  🌀 Mast %u angle set to %.1f° (%.3f rad)",
                         //          sim_ship->modules[m].id, desired_angle, angle_radians);
@@ -1274,7 +1311,7 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
     // Also update SimpleShip for compatibility (manned masts only)
     for (int i = 0; i < ship->module_count; i++) {
         if (ship->modules[i].type_id == MODULE_TYPE_MAST &&
-            is_mast_manned(ship->ship_id, ship->modules[i].id)) {
+            is_mast_manned_by_friendly(ship->ship_id, ship->modules[i].id, player->company_id)) {
             ship->modules[i].data.mast.angle = angle_q16;
         }
     }
