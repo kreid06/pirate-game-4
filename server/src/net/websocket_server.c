@@ -673,6 +673,8 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].inventory.slots[6].quantity = 1;
             players[i].inventory.slots[7].item     = ITEM_DECK;
             players[i].inventory.slots[7].quantity = 3;
+            players[i].inventory.slots[8].item     = ITEM_SWORD;
+            players[i].inventory.slots[8].quantity = 1;
 
             return &players[i];
         }
@@ -4890,7 +4892,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                                 player->sword_last_attack_ms = now_ms;
 
-                                                const float SWORD_RANGE  = 80.0f;
+                                                const float SWORD_RANGE  = 20.0f;
                                                 const float SWORD_DAMAGE = 30.0f;
                                                 const float SWORD_RANGE2 = SWORD_RANGE * SWORD_RANGE;
 
