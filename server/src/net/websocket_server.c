@@ -6480,11 +6480,13 @@ int websocket_server_update(struct Sim* sim) {
 
                             if (!tl_module || !tl_ship || tl_module->type_id != MODULE_TYPE_LADDER) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"ladder_not_found\"}");
-                            } else if (player->parent_ship_id != tl_ship->ship_id) {
-                                strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                             } else if (tl_ship->company_id != 0 &&
                                        player->company_id != tl_ship->company_id) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"company_mismatch\"}");
+                            } else if (player->parent_ship_id != tl_ship->ship_id &&
+                                       player->parent_ship_id != 0) {
+                                /* Player is on a DIFFERENT ship — block, but allow from water */ 
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                             } else {
                                 bool now_retracted = !(tl_module->state_bits & MODULE_STATE_RETRACTED);
                                 if (now_retracted)

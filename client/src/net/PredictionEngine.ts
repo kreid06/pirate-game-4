@@ -327,11 +327,6 @@ export class PredictionEngine {
     // Be conservative with alpha - stay within known data
     const clampedAlpha = Math.max(0, Math.min(1.0, alpha));
     
-    // Debug log occasionally to confirm interpolation is happening
-    if (Math.random() < 0.002) { // ~0.2% chance per frame = once every few seconds
-      console.log(`🔄 Interpolating: alpha=${clampedAlpha.toFixed(3)}, from tick ${fromState.worldState.tick} to ${toState.worldState.tick}`);
-    }
-    
     // Interpolate between the two states
     return this.interpolateStates(fromState.worldState, toState.worldState, clampedAlpha);
   }
@@ -383,15 +378,6 @@ export class PredictionEngine {
       this.serverStateBuffer.shift();
     }
     
-    // DEBUG: Log enhanced movement data from server (sample rate to avoid spam)
-    if (Math.random() < 0.05 && worldState.players.length > 0) { // 5% sample rate
-      const player = worldState.players[0];
-      if (player.isMoving !== undefined || player.movementDirection !== undefined) {
-        console.log(`📊 Server Player State - Velocity: (${player.velocity.x.toFixed(2)}, ${player.velocity.y.toFixed(2)}), ` +
-                    `isMoving: ${player.isMoving}, ` +
-                    `movementDir: ${player.movementDirection ? `(${player.movementDirection.x.toFixed(2)}, ${player.movementDirection.y.toFixed(2)})` : 'N/A'}`);
-      }
-    }
   }
   
   /**
@@ -450,11 +436,6 @@ export class PredictionEngine {
         rotation: this.lerpAngle(fromShip.rotation, toShip.rotation, alpha),
         angularVelocity: fromShip.angularVelocity + (toShip.angularVelocity - fromShip.angularVelocity) * alpha
       };
-      
-      // Log interpolated ship state occasionally
-      if (Math.random() < 0.02) { // 2% sample
-        console.log(`🚢 Ship ${toShip.id} interpolated (α=${alpha.toFixed(3)}) | From pos: (${fromShip.position.x.toFixed(1)}, ${fromShip.position.y.toFixed(1)}) rot: ${fromShip.rotation.toFixed(2)} | To pos: (${toShip.position.x.toFixed(1)}, ${toShip.position.y.toFixed(1)}) rot: ${toShip.rotation.toFixed(2)} | Result pos: (${interpolated.position.x.toFixed(1)}, ${interpolated.position.y.toFixed(1)}) rot: ${interpolated.rotation.toFixed(2)}`);
-      }
       
       result.push(interpolated);
     }

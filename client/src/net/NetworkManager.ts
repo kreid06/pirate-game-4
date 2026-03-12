@@ -687,8 +687,6 @@ export class NetworkManager {
     const shouldSend = true; // Always send for debugging
     
     if (shouldSend) {
-      console.log(`🔍 Input frame check - Movement: ${hasMovement}, Actions: ${hasActions}, Sending: ${shouldSend}`);
-      
       // Validate movement vector before sending
       const movementMagnitude = Math.sqrt(inputFrame.movement.lengthSq());
       if (movementMagnitude > 1.1) { // Allow small tolerance for floating point precision
@@ -710,7 +708,6 @@ export class NetworkManager {
         actions: inputFrame.actions
       };
       
-      console.log(`🎮 Sending input - Movement: (${inputFrame.movement.x.toFixed(2)}, ${inputFrame.movement.y.toFixed(2)}), Rotation: ${inputFrame.rotation.toFixed(2)} rad, Magnitude: ${movementMagnitude.toFixed(2)}, Actions: ${inputFrame.actions}`);
       this.sendMessage(message);
     }
   }
@@ -774,7 +771,9 @@ export class NetworkManager {
       } : undefined
     };
 
-    console.log(`⚡ Action: ${action}${target ? ` at (${target.x.toFixed(1)}, ${target.y.toFixed(1)})` : ''}`);
+    if (action !== 'block') {
+      console.log(`⚡ Action: ${action}${target ? ` at (${target.x.toFixed(1)}, ${target.y.toFixed(1)})` : ''}`);
+    }
     this.sendMessage(message);
   }
 
@@ -1684,7 +1683,6 @@ export class NetworkManager {
       }
 
       default:
-        console.log('📦 Received message:', message.type, message);
         break;
     }
   }
@@ -1737,7 +1735,6 @@ export class NetworkManager {
    */
   sendToggleLadder(moduleId: number): void {
     this.sendMessage({ type: 'toggle_ladder' as any, module_id: moduleId, moduleId, timestamp: Date.now() } as any);
-    console.log(`🪜 Toggle ladder: module ${moduleId}`);
   }
 
   sendModuleInteract(moduleId: number): void {

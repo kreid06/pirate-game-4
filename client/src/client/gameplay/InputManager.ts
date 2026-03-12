@@ -330,11 +330,7 @@ export class InputManager {
       this.onInputFrame(this.currentInputFrame);
       this.lastInputFrame = { ...this.currentInputFrame };
       
-      if (this.hasActiveInput) {
-        console.log(`📤 Input changed - sending frame: Movement(${this.currentInputFrame.movement.x.toFixed(2)}, ${this.currentInputFrame.movement.y.toFixed(2)}), Actions: ${this.currentInputFrame.actions}`);
-      } else {
-        console.log(`💓 Heartbeat sent - keeping connection alive`);
-      }
+
     }
     
     // Walking right-click = block

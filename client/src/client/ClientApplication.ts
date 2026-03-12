@@ -524,12 +524,11 @@ export class ClientApplication {
             const maxInteractDistance = 120;
 
             if (distance <= maxInteractDistance) {
-              console.log(`🎯 [INTERACTION] Player interacting with ${hoveredModule.module.kind.toUpperCase()} (ID: ${hoveredModule.module.id}) at distance ${distance.toFixed(1)}px`);
               if (hoveredModule.module.kind === 'ladder') {
                 if (this._suppressLadderInteract) return;
                 const onShip = player.carrierId === hoveredModule.ship.id;
                 const isExtended = (hoveredModule.module.moduleData as any)?.extended !== false;
-                console.log(`🪜 [LADDER] game-loop hover interact: onShip=${onShip} extended=${isExtended}`);
+                console.log(`🪜 hover: ladder ${hoveredModule.module.id} onShip=${onShip} extended=${isExtended}`);
                 if (onShip) {
                   this.networkManager.sendToggleLadder(hoveredModule.module.id);
                 } else if (isExtended) {
@@ -540,9 +539,6 @@ export class ClientApplication {
                 this.networkManager.sendModuleInteract(hoveredModule.module.id);
                 return;
               }
-            } else {
-              console.log(`❌ [INTERACTION] ${hoveredModule.module.kind.toUpperCase()} too far: ${distance.toFixed(1)}px > ${maxInteractDistance}px`);
-              console.log(`   Player: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}), Module: (${moduleWorldPos.x.toFixed(1)}, ${moduleWorldPos.y.toFixed(1)})`);
             }
           }
 
@@ -555,28 +551,31 @@ export class ClientApplication {
 
           if (!hoveredModule && !this._suppressLadderInteract) {
             // Proximity fallback: scan for nearest ladder without requiring mouse hover
-            const wsL = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+            const wsL = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
             if (wsL && player) {
-              const LADDER_RANGE = 120;
+              const LADDER_RANGE = 200;
               let nearestLadder: { ship: any; module: any } | null = null;
               let nearestDist = Infinity;
+              let nearestAnyDist = Infinity;
               for (const ship of wsL.ships) {
                 const cos = Math.cos(ship.rotation);
                 const sin = Math.sin(ship.rotation);
                 for (const mod of ship.modules) {
                   if (mod.kind !== 'ladder') continue;
+                  const mwx = ship.position.x + (mod.localPos.x * cos - mod.localPos.y * sin);
+                  const mwy = ship.position.y + (mod.localPos.x * sin + mod.localPos.y * cos);
                   let dist: number;
-                  if (player.carrierId === ship.id && (player as any).localPosition) {
+                  // Only use local coords when genuinely on this ship (carrierId !== 0)
+                  if (player.carrierId !== 0 && player.carrierId === ship.id && player.localPosition) {
                     dist = Math.hypot(
-                      (player as any).localPosition.x - mod.localPos.x,
-                      (player as any).localPosition.y - mod.localPos.y
+                      (player.localPosition as any).x - mod.localPos.x,
+                      (player.localPosition as any).y - mod.localPos.y
                     );
                   } else {
-                    const mwx = ship.position.x + (mod.localPos.x * cos - mod.localPos.y * sin);
-                    const mwy = ship.position.y + (mod.localPos.x * sin + mod.localPos.y * cos);
                     dist = Math.hypot(player.position.x - mwx, player.position.y - mwy);
                   }
-                  if (dist < nearestDist && dist <= LADDER_RANGE) {
+                  if (dist < nearestAnyDist) nearestAnyDist = dist;
+                  if (dist <= LADDER_RANGE && dist < nearestDist) {
                     nearestDist = dist;
                     nearestLadder = { ship, module: mod };
                   }
@@ -585,17 +584,13 @@ export class ClientApplication {
               if (nearestLadder) {
                 const onShip = player.carrierId === nearestLadder.ship.id;
                 const isExtended = (nearestLadder.module.moduleData as any)?.extended !== false;
-                console.log(`🪜 [LADDER] game-loop proximity fallback: onShip=${onShip} extended=${isExtended} dist=${nearestDist.toFixed(1)}`);
+                console.log(`🪜 proximity: ladder ${nearestLadder.module.id} onShip=${onShip} extended=${isExtended} dist=${nearestDist.toFixed(0)}px`);
                 if (onShip) {
                   this.networkManager.sendToggleLadder(nearestLadder.module.id);
                 } else if (isExtended) {
                   this.networkManager.sendModuleInteract(nearestLadder.module.id);
                 }
-              } else {
-                console.log(`⚠️ [INTERACTION] No module hovered and no ladder within ${LADDER_RANGE}px`);
               }
-            } else {
-              console.log(`⚠️ [INTERACTION] No module hovered - move mouse over a module and press E`);
             }
           }
         } else {
@@ -2111,62 +2106,53 @@ export class ClientApplication {
       switch (e.key) {
         case 'e':
         case 'E': {
-          const wsE = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+          // Auth state has the most reliable positions; fall through to predicted then demo
+          const wsE = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
           const myIdE = this.networkManager.getAssignedPlayerId();
-          // In demo/offline mode getAssignedPlayerId() returns null — fall back to first player
-          const meE = myIdE !== null
-            ? wsE?.players.find(p => p.id === myIdE) ?? null
-            : wsE?.players[0] ?? null;
-          if (!meE || !wsE) {
-            console.log(`🪜 [LADDER] E keydown: no world state (ws=${!!wsE}) or player (me=${!!meE})`);
-            break;
-          }
+          if (!wsE) { console.warn('🪜 E: no world state'); break; }
 
-          // Find nearest ladder within interaction range (proximity-based)
-          const LADDER_RANGE = 120;
+          // Try specific ID first; fall back to first player (demo / offline mode)
+          let meE = (myIdE !== null ? wsE.players.find(p => p.id === myIdE) : null) ?? wsE.players[0] ?? null;
+          if (!meE) { console.warn('🪜 E: player not found'); break; }
+
+          // Find nearest ladder — always recompute world coords explicitly for correctness
+          const LADDER_RANGE = 200;
           let bestLadder: { ship: any; module: any } | null = null;
-          let bestDist = Infinity;
+          let bestDist = Infinity;    // distance of bestLadder (within range)
+          let nearestAny = Infinity;  // closest ladder regardless of range (for diagnostics)
 
           for (const ship of wsE.ships) {
             const cos = Math.cos(ship.rotation);
             const sin = Math.sin(ship.rotation);
             for (const mod of ship.modules) {
               if (mod.kind !== 'ladder') continue;
+              const mwx = ship.position.x + (mod.localPos.x * cos - mod.localPos.y * sin);
+              const mwy = ship.position.y + (mod.localPos.x * sin + mod.localPos.y * cos);
               let dist: number;
-              if (meE.carrierId === ship.id && meE.localPosition) {
+              if (meE.carrierId !== 0 && meE.carrierId === ship.id && meE.localPosition) {
                 dist = Math.hypot(
                   (meE.localPosition as any).x - mod.localPos.x,
                   (meE.localPosition as any).y - mod.localPos.y
                 );
               } else {
-                const mwx = ship.position.x + (mod.localPos.x * cos - mod.localPos.y * sin);
-                const mwy = ship.position.y + (mod.localPos.x * sin + mod.localPos.y * cos);
                 dist = Math.hypot(meE.position.x - mwx, meE.position.y - mwy);
               }
-              if (dist < bestDist && dist <= LADDER_RANGE) {
-                bestDist = dist;
-                bestLadder = { ship, module: mod };
-              }
+              if (dist < nearestAny) nearestAny = dist;
+              if (dist <= LADDER_RANGE && dist < bestDist) { bestDist = dist; bestLadder = { ship, module: mod }; }
             }
           }
 
-          console.log(`🪜 [LADDER] E keydown — pos=(${meE.position.x.toFixed(0)},${meE.position.y.toFixed(0)}) carrierId=${meE.carrierId} nearest=${ bestLadder ? `id=${bestLadder.module.id} dist=${bestDist.toFixed(1)}` : 'none in range' }`);
-          if (!bestLadder) break;
+          if (!bestLadder) {
+            console.warn(`🪜 E: no ladder in range (nearest ${nearestAny === Infinity ? '-' : nearestAny.toFixed(0)}px, range ${LADDER_RANGE}px)`);
+            break;
+          }
 
           this._suppressLadderInteract = true;
           this._ladderHoldModuleId = bestLadder.module.id;
           this._ladderHoldIsExtended = (bestLadder.module.moduleData as any)?.extended !== false;
           this._ladderHoldOnShip = meE.carrierId === bestLadder.ship.id;
 
-          console.log(`🪜 [LADDER] onShip=${this._ladderHoldOnShip} extended=${this._ladderHoldIsExtended} stateBits=${bestLadder.module.stateBits}`);
-
-          // If ladder is retracted and player is off-ship, nothing to do
-          if (!this._ladderHoldIsExtended && !this._ladderHoldOnShip) {
-            this._suppressLadderInteract = false;
-            this._ladderHoldModuleId = null;
-            console.log(`🚫 [LADDER] Ladder retracted and player not on ship — no interaction`);
-            break;
-          }
+          console.log(`🪜 E: ladder ${bestLadder.module.id} dist=${bestDist.toFixed(0)}px onShip=${this._ladderHoldOnShip} extended=${this._ladderHoldIsExtended}`);
 
           // Start hold ring immediately
           this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
@@ -2184,9 +2170,16 @@ export class ClientApplication {
                   ? { id: 'retract', label: 'Retract' }
                   : { id: 'extend',  label: 'Extend'  },
               ]);
-            } else {
+            } else if (extendedAtPress) {
+              // Off-ship, ladder extended: can climb up or retract
               this._radialMenu.open(mp.x, mp.y, [
-                { id: 'climb', label: 'Climb' },
+                { id: 'climb',   label: 'Climb'   },
+                { id: 'retract', label: 'Retract' },
+              ]);
+            } else {
+              // Off-ship, ladder retracted: same-company can extend
+              this._radialMenu.open(mp.x, mp.y, [
+                { id: 'extend', label: 'Extend' },
               ]);
             }
           }, 300);
@@ -2244,13 +2237,17 @@ export class ClientApplication {
         if (moduleId === null) return;
 
         if (this._ladderHoldOnShip) {
-          // On ship: toggle retract/extend via toggle_ladder
+          // On ship: tap toggles extend/retract
           this.networkManager.sendToggleLadder(moduleId);
-          console.log(`🪜 [LADDER] Tap E → ${this._ladderHoldIsExtended ? 'retract' : 'extend'} ladder ${moduleId}`);
-        } else {
-          // Off ship + extended: board via module_interact
+          console.log(`🪜 tap: ${this._ladderHoldIsExtended ? 'retract' : 'extend'} ladder ${moduleId}`);
+        } else if (this._ladderHoldIsExtended) {
+          // Off ship, extended: tap = climb
           this.networkManager.sendModuleInteract(moduleId);
-          console.log(`🪜 [LADDER] Tap E → climb ladder ${moduleId}`);
+          console.log(`🪜 tap: climb ladder ${moduleId}`);
+        } else {
+          // Off ship, retracted: tap = extend (same-company)
+          this.networkManager.sendToggleLadder(moduleId);
+          console.log(`🪜 tap: extend ladder ${moduleId}`);
         }
       } else if (this._radialMenu.isOpen) {
         // Radial was open — execute selected option
@@ -2258,7 +2255,7 @@ export class ClientApplication {
         this._radialMenu.close();
 
         if (!selected || moduleId === null) return;
-        console.log(`🪜 [LADDER] Radial → ${selected} ladder ${moduleId}`);
+        console.log(`🪜 radial: ${selected} ladder ${moduleId}`);
 
         if (selected === 'climb') {
           // Off-ship board
@@ -2309,19 +2306,7 @@ export class ClientApplication {
       this.currentFPS = Math.round((this.frameCount * 1000) / this.fpsTimer);
       const avgFrameTime = this.fpsTimer / this.frameCount;
       
-      // Log FPS and frame time for diagnostics
-      console.log(`📊 Render FPS: ${this.currentFPS} | Avg frame time: ${avgFrameTime.toFixed(2)}ms | Client tick: ${this.clientTickDuration.toFixed(2)}ms (${(1000/this.clientTickDuration).toFixed(0)}Hz)`);
-      
-      // Detect capping
-      if (this.currentFPS >= 59 && this.currentFPS <= 61) {
-        console.warn('⚠️ Rendering capped at 60 FPS (likely VSync or monitor refresh rate)');
-      } else if (this.currentFPS >= 119 && this.currentFPS <= 121) {
-        console.log('✅ Rendering at 120 FPS - excellent!');
-      } else if (this.currentFPS >= 143 && this.currentFPS <= 145) {
-        console.log('✅ Rendering at 144 FPS - excellent!');
-      } else if (this.currentFPS >= 29 && this.currentFPS <= 31) {
-        console.warn('⚠️ Low FPS (30) - performance bottleneck detected');
-      }
+
       
       this.frameCount = 0;
       this.fpsTimer = 0;
