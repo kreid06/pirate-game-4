@@ -2475,8 +2475,22 @@ export class RenderSystem {
         const FADE_RAD         = 15 * Math.PI / 180;
         const shipNpcs    = worldState.npcs.filter(n => n.shipId === ship.id);
         const shipPlayers = worldState.players.filter(p => p.carrierId === ship.id && p.isMounted);
+
+        // Build the set of cannon IDs that belong to an active weapon group.
+        // Only cannons in a selected group show trajectory lines.
+        const activeCannonIds = new Set<number>();
+        if (this.controlGroups) {
+          this.controlGroups.forEach((state, g) => {
+            if (this.activeWeaponGroups.has(g)) {
+              for (const id of state.cannonIds) activeCannonIds.add(id);
+            }
+          });
+        }
+
         for (const m of ship.modules) {
           if (m.kind !== 'cannon') continue;
+          // Only show trajectory for cannons in an active weapon group
+          if (!activeCannonIds.has(m.id)) continue;
           // Angular offset from cannon's natural axis (server convention)
           let offset = aim - (m.localRot || 0) + Math.PI / 2;
           // Normalize to [-π, π]
