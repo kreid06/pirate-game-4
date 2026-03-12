@@ -131,6 +131,8 @@ export class ClientApplication {
   private _interactKind: 'ladder' | 'mount' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
+  /** Ship ID that owns the locked-in module (for keyup range validation). */
+  private _ladderHoldShipId: number | null = null;
   /** Generic radial action menu instance (rendered by RenderSystem). */
   private _radialMenu = new RadialMenu();
   private accumulator = 0;
@@ -2126,60 +2128,38 @@ export class ClientApplication {
       switch (e.key) {
         case 'e':
         case 'E': {
-          // Auth state has the most reliable positions; fall through to predicted then demo
           const wsE = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
           const myIdE = this.networkManager.getAssignedPlayerId();
           if (!wsE) { console.warn('🪜 E: no world state'); break; }
 
-          // Try specific ID first; fall back to first player (demo / offline mode)
-          let meE = (myIdE !== null ? wsE.players.find(p => p.id === myIdE) : null) ?? wsE.players[0] ?? null;
+          const meE = (myIdE !== null ? wsE.players.find(p => p.id === myIdE) : null) ?? wsE.players[0] ?? null;
           if (!meE) { console.warn('🪜 E: player not found'); break; }
 
-          // ── STEP 1: Player is mounted → dismount (hold ring + radial) ────────
-          // Checked first so dismounting never accidentally opens a ladder radial.
+          // ── Dismount: player is already mounted ──────────────────────────────
+          // No hover required — player is physically AT the mounted module.
           if (meE.isMounted && meE.carrierId !== 0) {
-            const MOUNT_RANGE = 180;
+            // Find the module by ID if known, else fall back to kind search on current ship
             const MOUNTABLE = new Set(['helm', 'cannon', 'mast']);
-            let dismountModule: { ship: any; module: any; kind: string } | null = null;
-            let dismountDist = Infinity;
-
+            let dismountMod: { ship: any; module: any; kind: string } | null = null;
             for (const ship of wsE.ships) {
               if (ship.id !== meE.carrierId) continue;
               for (const mod of ship.modules) {
                 if (!MOUNTABLE.has(mod.kind)) continue;
-                // Prefer exact mounted module ID when available
                 if (meE.mountedModuleId !== undefined && mod.id === meE.mountedModuleId) {
-                  dismountModule = { ship, module: mod, kind: mod.kind };
-                  dismountDist = 0;
+                  dismountMod = { ship, module: mod, kind: mod.kind };
                   break;
                 }
-                let dist: number;
-                if (meE.localPosition) {
-                  dist = Math.hypot(
-                    (meE.localPosition as any).x - mod.localPos.x,
-                    (meE.localPosition as any).y - mod.localPos.y
-                  );
-                } else {
-                  const cos = Math.cos(ship.rotation);
-                  const sin = Math.sin(ship.rotation);
-                  const mwx = ship.position.x + (mod.localPos.x * cos - mod.localPos.y * sin);
-                  const mwy = ship.position.y + (mod.localPos.x * sin + mod.localPos.y * cos);
-                  dist = Math.hypot(meE.position.x - mwx, meE.position.y - mwy);
-                }
-                if (dist <= MOUNT_RANGE && dist < dismountDist) {
-                  dismountDist = dist;
-                  dismountModule = { ship, module: mod, kind: mod.kind };
-                }
+                if (!dismountMod) dismountMod = { ship, module: mod, kind: mod.kind }; // first match
               }
-              if (dismountDist === 0) break;
+              if (dismountMod) break;
             }
 
-            if (dismountModule) {
+            if (dismountMod) {
               this._interactKind = 'mount';
               this._suppressLadderInteract = true;
               this._ladderHoldWasMounted = true;
-              this._ladderHoldModuleId = dismountModule.module.id;
-              console.log(`🎮 E: dismount ${dismountModule.kind} ${dismountModule.module.id}`);
+              this._ladderHoldModuleId = dismountMod.module.id;
+              console.log(`🎮 E: dismount ${dismountMod.kind} ${dismountMod.module.id}`);
               this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
               this._ladderHoldTimer = setTimeout(() => {
                 this._ladderHoldTimer = null;
@@ -2191,95 +2171,48 @@ export class ClientApplication {
             }
           }
 
-          // ── STEP 2: Nearest mountable on player's ship (120 px) ──────────────
-          // Only when not already mounted — mount is deferred to keyup via radial.
-          if (!meE.isMounted && meE.carrierId !== 0) {
-            const MOUNT_RANGE = 120;
-            const MOUNTABLE = new Set(['helm', 'cannon', 'mast']);
-            let bestMount: { ship: any; module: any; kind: string } | null = null;
-            let bestMountDist = Infinity;
-
-            for (const ship of wsE.ships) {
-              if (ship.id !== meE.carrierId) continue;
-              for (const mod of ship.modules) {
-                if (!MOUNTABLE.has(mod.kind)) continue;
-                let dist: number;
-                if (meE.localPosition) {
-                  dist = Math.hypot(
-                    (meE.localPosition as any).x - mod.localPos.x,
-                    (meE.localPosition as any).y - mod.localPos.y
-                  );
-                } else {
-                  const cos = Math.cos(ship.rotation);
-                  const sin = Math.sin(ship.rotation);
-                  const mwx = ship.position.x + (mod.localPos.x * cos - mod.localPos.y * sin);
-                  const mwy = ship.position.y + (mod.localPos.x * sin + mod.localPos.y * cos);
-                  dist = Math.hypot(meE.position.x - mwx, meE.position.y - mwy);
-                }
-                if (dist <= MOUNT_RANGE && dist < bestMountDist) {
-                  bestMountDist = dist;
-                  bestMount = { ship, module: mod, kind: mod.kind };
-                }
-              }
-            }
-
-            if (bestMount) {
-              this._interactKind = 'mount';
-              this._suppressLadderInteract = true;
-              this._ladderHoldWasMounted = false;
-              this._ladderHoldModuleId = bestMount.module.id;
-              console.log(`🎮 E: mount ${bestMount.kind} ${bestMount.module.id} dist=${bestMountDist.toFixed(0)}px`);
-              this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
-              const mountKindLabel = bestMount.kind.charAt(0).toUpperCase() + bestMount.kind.slice(1);
-              this._ladderHoldTimer = setTimeout(() => {
-                this._ladderHoldTimer = null;
-                this.renderSystem.stopLadderHoldRing();
-                const mp = this.inputManager.getMouseScreenPosition();
-                this._radialMenu.open(mp.x, mp.y, [{ id: 'mount', label: `Mount ${mountKindLabel}` }]);
-              }, 300);
-              break;
-            }
+          // ── Mount / ladder: target is locked in HERE at keydown from the
+          // hovered module. Continued hover is NOT required — the module ID and
+          // ship ID are cached and used for the entire hold/keyup sequence.
+          // A range check at keyup confirmation ensures the player hasn't wandered
+          // too far before releasing E.
+          const hov = this.renderSystem.getHoveredModule();
+          if (!hov) {
+            console.warn('🪜 E: no module under cursor');
+            break;
           }
 
-          // ── STEP 3: Nearest ladder (200 px) ──────────────────────────────────
-          const LADDER_RANGE = 200;
-          let bestLadder: { ship: any; module: any } | null = null;
-          let bestLadderDist = Infinity;
-          let nearestAny = Infinity;
+          const MOUNTABLE = new Set(['helm', 'cannon', 'mast']);
 
-          for (const ship of wsE.ships) {
-            const cos = Math.cos(ship.rotation);
-            const sin = Math.sin(ship.rotation);
-            for (const mod of ship.modules) {
-              if (mod.kind !== 'ladder') continue;
-              const mwx = ship.position.x + (mod.localPos.x * cos - mod.localPos.y * sin);
-              const mwy = ship.position.y + (mod.localPos.x * sin + mod.localPos.y * cos);
-              let dist: number;
-              if (meE.carrierId !== 0 && meE.carrierId === ship.id && meE.localPosition) {
-                dist = Math.hypot(
-                  (meE.localPosition as any).x - mod.localPos.x,
-                  (meE.localPosition as any).y - mod.localPos.y
-                );
-              } else {
-                dist = Math.hypot(meE.position.x - mwx, meE.position.y - mwy);
-              }
-              if (dist < nearestAny) nearestAny = dist;
-              if (dist <= LADDER_RANGE && dist < bestLadderDist) { bestLadderDist = dist; bestLadder = { ship, module: mod }; }
-            }
+          if (MOUNTABLE.has(hov.module.kind)) {
+            // ── Mount ──────────────────────────────────────────────────────────
+            this._interactKind = 'mount';
+            this._suppressLadderInteract = true;
+            this._ladderHoldWasMounted = false;
+            this._ladderHoldModuleId = hov.module.id;
+            this._ladderHoldShipId = hov.ship.id;
+            console.log(`🎮 E: mount ${hov.module.kind} ${hov.module.id}`);
+            this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
+            const mountKindLabel = hov.module.kind.charAt(0).toUpperCase() + hov.module.kind.slice(1);
+            this._ladderHoldTimer = setTimeout(() => {
+              this._ladderHoldTimer = null;
+              this.renderSystem.stopLadderHoldRing();
+              const mp = this.inputManager.getMouseScreenPosition();
+              this._radialMenu.open(mp.x, mp.y, [{ id: 'mount', label: `Mount ${mountKindLabel}` }]);
+            }, 300);
+            break;
           }
 
-          if (bestLadder) {
-            // ── LADDER INTERACTION ───────────────────────────────────────────
+          if (hov.module.kind === 'ladder') {
+            // ── Ladder ─────────────────────────────────────────────────────────
             this._interactKind = 'ladder';
             this._suppressLadderInteract = true;
-            this._ladderHoldModuleId = bestLadder.module.id;
-            this._ladderHoldIsExtended = (bestLadder.module.moduleData as any)?.extended !== false;
-            this._ladderHoldOnShip = meE.carrierId === bestLadder.ship.id;
-
-            console.log(`🪜 E: ladder ${bestLadder.module.id} dist=${bestLadderDist.toFixed(0)}px onShip=${this._ladderHoldOnShip} extended=${this._ladderHoldIsExtended}`);
-
+            this._ladderHoldModuleId = hov.module.id;
+            this._ladderHoldShipId = hov.ship.id;
+            this._ladderHoldIsExtended = (hov.module.moduleData as any)?.extended !== false;
+            this._ladderHoldOnShip = meE.carrierId === hov.ship.id;
+            console.log(`🪜 E: ladder ${hov.module.id} onShip=${this._ladderHoldOnShip} extended=${this._ladderHoldIsExtended}`);
             this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
-
             const onShipAtPress = this._ladderHoldOnShip;
             const extendedAtPress = this._ladderHoldIsExtended;
             this._ladderHoldTimer = setTimeout(() => {
@@ -2306,8 +2239,7 @@ export class ClientApplication {
             break;
           }
 
-          // Nothing found
-          console.warn(`🪜 E: nothing in range (nearest ladder ${nearestAny === Infinity ? '-' : nearestAny.toFixed(0)}px)`);
+          console.warn(`🪜 E: hovered module kind '${hov.module.kind}' has no interact handler`);
           break;
         }
         case 'l':
@@ -2350,17 +2282,70 @@ export class ClientApplication {
       if (e.key !== 'e' && e.key !== 'E') return;
 
       const moduleId = this._ladderHoldModuleId;
+      const shipId   = this._ladderHoldShipId;
       const interactKind = this._interactKind;
       const wasMounted = this._ladderHoldWasMounted;
       this._suppressLadderInteract = false;
       this._ladderHoldModuleId = null;
+      this._ladderHoldShipId = null;
       this._interactKind = null;
       this._ladderHoldWasMounted = false;
+
+      // Range validation: re-check player ↔ module distance at confirmation time.
+      // The target was locked in at keydown (hover) so continued hover is NOT required,
+      // but the player must still be within interaction range so they can't reach across
+      // the ship to interact with a distant module.
+      // • Same ship  → local coords (server units), threshold matches onActionEvent (120 px)
+      // • Off-ship   → world coords, lenient threshold for boarding/ladder ops
+      // • Dismount   → always pass (player is physically AT the mounted module)
+      const CONFIRM_RANGE_LOCAL    = 150; // local/world px — slightly lenient of the 120 keydown hover
+      const CONFIRM_RANGE_OFFSHIP  = 300; // world px — lenient for off-ship ops
+      const isInRange = (): boolean => {
+        if (wasMounted) return true; // dismount: always at the module
+        if (moduleId === null || shipId === null) return false;
+        const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+        const myId = this.networkManager.getAssignedPlayerId();
+        const me = (myId !== null ? ws?.players.find(p => p.id === myId) : null) ?? ws?.players[0] ?? null;
+        if (!me || !ws) return true; // no state yet — allow it
+        const ship = ws.ships.find(s => s.id === shipId);
+        if (!ship) return false;
+        const mod = ship.modules.find(m => m.id === moduleId);
+        if (!mod) return false;
+        // Same ship + not a ladder: use local coords (server units, unaffected by
+        // ship motion) for range check.  Ladders always use world coords because an
+        // off-ship player may be boarding and carrierId can lag mid-transition.
+        if (interactKind !== 'ladder' && me.carrierId === shipId) {
+          if (!me.localPosition) {
+            // localPosition is temporarily null (e.g. first tick on ship).
+            // Player is confirmed on-ship so proximity at keydown was valid — allow it.
+            return true;
+          }
+          const localDist = Math.hypot(
+            (me.localPosition as any).x - mod.localPos.x,
+            (me.localPosition as any).y - mod.localPos.y
+          );
+          if (localDist > CONFIRM_RANGE_LOCAL) console.warn(`📏 range fail (local): dist=${localDist.toFixed(1)} > ${CONFIRM_RANGE_LOCAL} | playerLocal=(${(me.localPosition as any).x.toFixed(1)},${(me.localPosition as any).y.toFixed(1)}) modLocal=(${mod.localPos.x.toFixed(1)},${mod.localPos.y.toFixed(1)})`);
+          return localDist <= CONFIRM_RANGE_LOCAL;
+        }
+        // Off-ship or ladder: world distance.
+        // mod.localPos is already in client pixels (same space as ship.position).
+        const cos = Math.cos(ship.rotation);
+        const sin = Math.sin(ship.rotation);
+        const mwx = ship.position.x + (mod.localPos.x * cos - mod.localPos.y * sin);
+        const mwy = ship.position.y + (mod.localPos.x * sin + mod.localPos.y * cos);
+        const worldDist = Math.hypot(me.position.x - mwx, me.position.y - mwy);
+        if (worldDist > CONFIRM_RANGE_OFFSHIP) console.warn(`📏 range fail (world): dist=${worldDist.toFixed(1)} > ${CONFIRM_RANGE_OFFSHIP} | player=(${me.position.x.toFixed(1)},${me.position.y.toFixed(1)}) modWorld=(${mwx.toFixed(1)},${mwy.toFixed(1)}) carrierId=${me.carrierId} shipId=${shipId}`);
+        return worldDist <= CONFIRM_RANGE_OFFSHIP;
+      };
 
       // ── MOUNTABLE MODULES (helm / cannon / mast) — mount or dismount ────────
       if (interactKind === 'mount') {
         // Route to the correct network call based on whether the player was mounted.
         const doMountAction = (): void => {
+          if (!isInRange()) {
+            console.warn('🎮 interact cancelled: moved out of range');
+            return;
+          }
           if (wasMounted) {
             this.networkManager.sendAction('dismount');
             console.log(`🎮 dismount (module ${moduleId})`);
@@ -2391,12 +2376,16 @@ export class ClientApplication {
 
       // ── LADDER ───────────────────────────────────────────────────────────
       if (this._ladderHoldTimer !== null) {
-        // Released before 300 ms — execute PRIMARY action immediately (no radial shown)
         clearTimeout(this._ladderHoldTimer);
         this._ladderHoldTimer = null;
         this.renderSystem.stopLadderHoldRing();
 
         if (moduleId === null) return;
+
+        if (!isInRange()) {
+          console.warn('🪜 ladder interact cancelled: moved out of range');
+          return;
+        }
 
         if (this._ladderHoldOnShip) {
           // On ship: tap toggles extend/retract via module_interact (no company check)
@@ -2412,11 +2401,17 @@ export class ClientApplication {
           console.log(`🪜 tap: extend ladder ${moduleId}`);
         }
       } else if (this._radialMenu.isOpen) {
-        // Radial was open — execute selected option
+        // Radial was open — execute selected option or cancel if centre dead zone / out of range
         const selected = this._radialMenu.getHoveredId();
         this._radialMenu.close();
 
         if (!selected || moduleId === null) return;
+
+        if (!isInRange()) {
+          console.warn('🪜 ladder radial cancelled: moved out of range');
+          return;
+        }
+
         console.log(`🪜 radial: ${selected} ladder ${moduleId}`);
 
         if (selected === 'climb') {
