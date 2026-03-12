@@ -191,6 +191,17 @@ export class RenderSystem {
     this.effectRenderer.update(deltaTime);
   }
   
+  private swordCursorMousePos: Vec2 | null = null;
+  private swordCursorLastAttackMs = 0;
+  private swordCursorCooldownMs   = 1000;
+
+  /** Called each frame from ClientApplication to keep sword cursor ring in sync. */
+  updateSwordCooldownCursor(mouseScreenPos: Vec2 | null, lastAttackMs: number, cooldownMs: number): void {
+    this.swordCursorMousePos    = mouseScreenPos;
+    this.swordCursorLastAttackMs = lastAttackMs;
+    this.swordCursorCooldownMs   = cooldownMs;
+  }
+
   /**
    * Update mouse position for hover detection
    */
@@ -723,6 +734,9 @@ export class RenderSystem {
     this.effectRenderer.render(camera);
     // Screen-space announcement banners (on top of everything)
     this.effectRenderer.renderAnnouncements(this.canvas);
+
+    // Sword cooldown cursor ring (topmost — always in screen space)
+    this.drawSwordCooldownCursor();
     
     // Draw hover boundaries debug if enabled
     if (this.showHoverBoundaries) {
@@ -808,6 +822,49 @@ export class RenderSystem {
     // Clean up any resources
     this.particleSystem.shutdown();
     this.effectRenderer.shutdown();
+  }
+
+  /** Draw the sword cooldown ring around the mouse cursor (screen space). */
+  private drawSwordCooldownCursor(): void {
+    if (!this.swordCursorMousePos) return;
+
+    const ctx  = this.ctx;
+    const cx   = this.swordCursorMousePos.x;
+    const cy   = this.swordCursorMousePos.y;
+    const R    = 14; // ring radius (px)
+    const now  = performance.now();
+    const elapsed = now - this.swordCursorLastAttackMs;
+    const progress = Math.min(elapsed / this.swordCursorCooldownMs, 1); // 0→1
+
+    ctx.save();
+
+    // Background track
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    if (progress >= 1) {
+      // Ready: full bright ring
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(200, 220, 255, 0.9)';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    } else {
+      // Filling clockwise from top (−π/2) proportional to progress
+      const startAngle = -Math.PI / 2;
+      const endAngle   = startAngle + progress * Math.PI * 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, startAngle, endAngle);
+      ctx.strokeStyle = 'rgba(140, 180, 255, 0.85)';
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+
+    ctx.restore();
   }
   
   // Private rendering methods

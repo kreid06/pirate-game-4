@@ -4884,7 +4884,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 player->inventory.slots[aslot].quantity > 0);
 
                                             if (holding_sword) {
-                                                const uint32_t SWORD_COOLDOWN_MS = 600u;
+                                                const uint32_t SWORD_COOLDOWN_MS = 1000u;
                                                 uint32_t now_ms = get_time_ms();
                                                 if (now_ms - player->sword_last_attack_ms < SWORD_COOLDOWN_MS) {
                                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"sword_cooldown\"}");
