@@ -167,6 +167,9 @@ typedef struct WorldNpc {
 
     uint8_t       company_id;     // Inherited from ship at spawn time (COMPANY_*)
 
+    // Knockback velocity (client units/s, decays each tick)
+    float         velocity_x, velocity_y;
+
     // ── Crew levelling ───────────────────────────────────────────────────────
     uint8_t       npc_level;      // 1–10
     uint16_t      health;         // current HP

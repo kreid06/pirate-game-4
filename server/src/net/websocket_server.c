@@ -2192,6 +2192,19 @@ static void tick_world_npcs(float dt) {
             }
         }
 
+        // Integrate knockback velocity and apply drag
+        if (npc->velocity_x != 0.0f || npc->velocity_y != 0.0f) {
+            const float DRAG = 8.0f; // decay rate (higher = stops faster)
+            npc->local_x   += npc->velocity_x * dt;
+            npc->local_y   += npc->velocity_y * dt;
+            float decay     = 1.0f - DRAG * dt;
+            if (decay < 0.0f) decay = 0.0f;
+            npc->velocity_x *= decay;
+            npc->velocity_y *= decay;
+            if (fabsf(npc->velocity_x) < 0.5f) npc->velocity_x = 0.0f;
+            if (fabsf(npc->velocity_y) < 0.5f) npc->velocity_y = 0.0f;
+        }
+
         // Keep world position in sync with ship transform
         if (npc->ship_id != 0) {
             SimpleShip* ship = find_ship(npc->ship_id);
@@ -7183,7 +7196,7 @@ void websocket_server_tick(float dt) {
     if (global_sim) {
         const float ENTITY_HIT_RADIUS    = 40.0f;   // client pixels
         const float ENTITY_BASE_DAMAGE   = 75.0f;
-        const float ENTITY_KNOCKBACK     = 100.0f;  // client pixels position delta
+        const float ENTITY_KNOCKBACK     = 40.0f;   // velocity impulse (client px/s)
 
         uint16_t pi = 0;
         while (pi < global_sim->projectile_count) {
@@ -7227,29 +7240,15 @@ void websocket_server_tick(float dt) {
                     npc->health -= dmg16;
                 }
 
-                // Knockback — skip if NPC is stationed at a module
+                // Knockback via velocity — skip if stationed at a module
                 bool npc_at_station = (npc->state == WORLD_NPC_STATE_AT_CANNON ||
                                        npc->state == WORLD_NPC_STATE_REPAIRING);
                 if (!npc_at_station) {
                     float dist = sqrtf(dx * dx + dy * dy);
                     float kx   = (dist > 0.1f) ? (dx / dist) : 1.0f;
                     float ky   = (dist > 0.1f) ? (dy / dist) : 0.0f;
-                    if (npc->ship_id != 0) {
-                        // On a ship: push local position, then recalc world pos
-                        npc->local_x += kx * ENTITY_KNOCKBACK;
-                        npc->local_y += ky * ENTITY_KNOCKBACK;
-                        SimpleShip* npc_ship = NULL;
-                        for (int s = 0; s < ship_count; s++) {
-                            if (ships[s].active && ships[s].ship_id == npc->ship_id) {
-                                npc_ship = &ships[s]; break;
-                            }
-                        }
-                        if (npc_ship) ship_local_to_world(npc_ship, npc->local_x, npc->local_y,
-                                                           &npc->x, &npc->y);
-                    } else {
-                        npc->x += kx * ENTITY_KNOCKBACK;
-                        npc->y += ky * ENTITY_KNOCKBACK;
-                    }
+                    npc->velocity_x += kx * ENTITY_KNOCKBACK;
+                    npc->velocity_y += ky * ENTITY_KNOCKBACK;
                 }
 
                 // Broadcast ENTITY_HIT
