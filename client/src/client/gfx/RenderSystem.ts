@@ -116,6 +116,10 @@ export class RenderSystem {
   private lastAttackerOf: Map<number, number> = new Map();
   /** Last splash emit time (ms) per sinking ship — throttles particle emission. */
   private sinkSplashTimers: Map<number, number> = new Map();
+  /** playerId → timestamp of last damage hit, for red flash overlay. */
+  private playerDamageFlash: Map<number, number> = new Map();
+  /** npcId → timestamp of last damage hit, for red flash overlay. */
+  private npcDamageFlash: Map<number, number> = new Map();
   
   // Debug flags
   private showHoverBoundaries: boolean = false;
@@ -156,6 +160,15 @@ export class RenderSystem {
    */
   spawnDamageNumber(worldPos: Vec2, damage: number, isKill: boolean = false): void {
     this.effectRenderer.createDamageNumber(worldPos, damage, isKill);
+  }
+
+  /**
+   * Record a damage hit on an entity so the next ~300 ms of frames
+   * render a red flash overlay on that entity's circle.
+   */
+  notifyEntityDamaged(id: number, isNpc: boolean): void {
+    if (isNpc) this.npcDamageFlash.set(id, performance.now());
+    else        this.playerDamageFlash.set(id, performance.now());
   }
 
   /**
@@ -793,9 +806,9 @@ export class RenderSystem {
     ctx.stroke();
 
     if (onCooldown) {
-      // Filling arc: draws from empty → full as cooldown completes (red-orange)
+      // Filling arc: draws from empty → full as cooldown completes (red)
       const END = START + progress * Math.PI * 2;
-      ctx.strokeStyle = 'rgba(220, 90, 60, 0.9)';
+      ctx.strokeStyle = 'rgba(220, 40, 40, 0.9)';
       ctx.lineWidth   = TRACK_W;
       ctx.lineCap     = 'round';
       ctx.beginPath();
@@ -3389,6 +3402,21 @@ export class RenderSystem {
     this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, 0, Math.PI * 2);
     this.ctx.fill();
     this.ctx.stroke();
+
+    // Damage flash — red overlay that fades out over 300 ms
+    const _pFlashAt = this.playerDamageFlash.get(player.id);
+    if (_pFlashAt !== undefined) {
+      const _pFlashElapsed = performance.now() - _pFlashAt;
+      const PLAYER_FLASH_MS = 300;
+      if (_pFlashElapsed < PLAYER_FLASH_MS) {
+        this.ctx.fillStyle = `rgba(255,40,40,${((1 - _pFlashElapsed / PLAYER_FLASH_MS) * 0.65).toFixed(3)})`;
+        this.ctx.beginPath();
+        this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, 0, Math.PI * 2);
+        this.ctx.fill();
+      } else {
+        this.playerDamageFlash.delete(player.id);
+      }
+    }
     
     // If mounted, draw mount indicator
     if (player.isMounted) {
@@ -3578,6 +3606,21 @@ export class RenderSystem {
     this.ctx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
     this.ctx.fill();
     this.ctx.stroke();
+
+    // Damage flash — red overlay that fades out over 300 ms
+    const _nFlashAt = this.npcDamageFlash.get(npc.id);
+    if (_nFlashAt !== undefined) {
+      const _nFlashElapsed = performance.now() - _nFlashAt;
+      const NPC_FLASH_MS = 300;
+      if (_nFlashElapsed < NPC_FLASH_MS) {
+        this.ctx.fillStyle = `rgba(255,40,40,${((1 - _nFlashElapsed / NPC_FLASH_MS) * 0.65).toFixed(3)})`;
+        this.ctx.beginPath();
+        this.ctx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
+        this.ctx.fill();
+      } else {
+        this.npcDamageFlash.delete(npc.id);
+      }
+    }
 
     // Facing direction indicator
     this.ctx.strokeStyle = '#ffffff';

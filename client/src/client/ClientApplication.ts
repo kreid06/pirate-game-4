@@ -129,7 +129,6 @@ export class ClientApplication {
   private lastRenderLogTime = 0;
   /** Timestamp (ms) of the last sword swing, for cursor cooldown ring. */
   private swordLastAttackMs = 0;
-  private readonly SWORD_COOLDOWN_MS = 1000;
   
   constructor(canvas: HTMLCanvasElement, config: ClientConfig) {
     this.canvas = canvas;
@@ -475,13 +474,6 @@ export class ClientApplication {
           // Exit build/plan mode on any interaction attempt
           this.exitAllBuildModes();
 
-          // E key: open crew level menu if hovering an NPC
-          const hovNpc = this.renderSystem.getHoveredNpc();
-          if (hovNpc) {
-            this.uiManager?.openCrewMenuForNpc(hovNpc);
-            return;
-          }
-
           const playerId = this.networkManager.getAssignedPlayerId();
           const worldState = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
           const player = playerId !== null ? worldState?.players.find(p => p.id === playerId) : null;
@@ -495,9 +487,9 @@ export class ClientApplication {
             return;
           }
 
-          // Player pressed E - interact with hovered module
+          // Module interaction takes priority over NPC menu
           const hoveredModule = this.renderSystem.getHoveredModule();
-          
+
           if (hoveredModule) {
             if (playerId !== null) {
               // Check if player is close enough to the module
@@ -533,13 +525,23 @@ export class ClientApplication {
                   console.log(`🎯 [INTERACTION] Player interacting with ${hoveredModule.module.kind.toUpperCase()} (ID: ${hoveredModule.module.id}) at distance ${distance.toFixed(1)}px`);
                   console.log(`   Player world: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}), Module world: (${moduleWorldPos.x.toFixed(1)}, ${moduleWorldPos.y.toFixed(1)})`);
                   this.networkManager.sendModuleInteract(hoveredModule.module.id);
+                  return;
                 } else {
                   console.log(`❌ [INTERACTION] ${hoveredModule.module.kind.toUpperCase()} too far: ${distance.toFixed(1)}px > ${maxInteractDistance}px`);
                   console.log(`   Player world: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}), Module world: (${moduleWorldPos.x.toFixed(1)}, ${moduleWorldPos.y.toFixed(1)})`);
                 }
               }
             }
-          } else {
+          }
+
+          // E key: open crew level menu if hovering an NPC (fallback when no module interacted)
+          const hovNpc = this.renderSystem.getHoveredNpc();
+          if (hovNpc) {
+            this.uiManager?.openCrewMenuForNpc(hovNpc);
+            return;
+          }
+
+          if (!hoveredModule) {
             console.log(`⚠️ [INTERACTION] No module hovered - move mouse over a module and press E`);
           }
         } else {
@@ -940,6 +942,7 @@ export class ClientApplication {
           }
         }
         this.renderSystem.spawnDamageNumber(Vec2.from(x, y), damage, killed);
+        this.renderSystem.notifyEntityDamaged(id, entityType === 'npc');
       };
 
       // Handle SWORD_SWING: show arc for other players' sword attacks
