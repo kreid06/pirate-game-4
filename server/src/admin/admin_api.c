@@ -557,6 +557,7 @@ int admin_api_websocket_entities(struct HttpResponse* resp) {
             "      \"ship_id\": %u,\n"
             "      \"local_x\": %.1f,\n"
             "      \"local_y\": %.1f,\n"
+            "      \"company\": %u,\n"
             "      \"state\": \"%s\"\n"
             "    }",
             players[i].player_id,
@@ -566,6 +567,7 @@ int admin_api_websocket_entities(struct HttpResponse* resp) {
             players[i].velocity_x, players[i].velocity_y,
             players[i].parent_ship_id,
             players[i].local_x, players[i].local_y,
+            (unsigned)players[i].company_id,
             state_str);
     }
     
@@ -667,6 +669,31 @@ int admin_api_create_ship(struct HttpResponse* resp, float x, float y, uint8_t c
     }
 
     if (len < 0 || len >= (int)sizeof(json_buffer)) return -1;
+    resp->body = json_buffer;
+    resp->body_length = (size_t)len;
+    resp->cache_control = false;
+    return 0;
+}
+
+int admin_api_set_player_company(struct HttpResponse* resp, uint32_t player_id, uint8_t company_id) {
+    if (!resp) return -1;
+
+    int result = websocket_server_set_player_company(player_id, company_id);
+
+    int len;
+    if (result == 0) {
+        resp->status_code = 200;
+        len = snprintf(json_buffer, sizeof(json_buffer),
+            "{\"success\":true,\"playerId\":%u,\"company\":%u}",
+            player_id, (unsigned)company_id);
+    } else {
+        resp->status_code = 404;
+        len = snprintf(json_buffer, sizeof(json_buffer),
+            "{\"success\":false,\"error\":\"Player not found\"}");
+    }
+
+    if (len < 0 || len >= (int)sizeof(json_buffer)) return -1;
+    resp->content_type = "application/json";
     resp->body = json_buffer;
     resp->body_length = (size_t)len;
     resp->cache_control = false;

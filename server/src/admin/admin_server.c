@@ -80,6 +80,7 @@ static const char* dashboard_html =
 "</div>\n"
 "<div id=\"spawn-result\" class=\"spawn-result\"></div>\n"
 "</div>\n"
+"<div class=\"card\"><h3>👥 Players</h3><div id=\"player-list\">Loading...</div></div>\n"
 "</div></div>\n"
 "<div id=\"map\" class=\"tab-pane\">\n"
 "<h2>🗺️ Live World Map</h2>\n"
@@ -340,6 +341,83 @@ static const char* dashboard_html =
 "function refreshAll() {\n"
 "updateServerStatus(); updatePhysicsObjects(); updateNetworkStats(); updateMessageStats();\n"
 "if (document.getElementById('map').classList.contains('active')) updateMap();\n"
+"// Players panel refreshes separately — skip if user is actively editing a dropdown\n"
+"const playerList = document.getElementById('player-list');\n"
+"const focused = playerList && playerList.querySelector('select:focus, button:focus');\n"
+"if (!focused) updatePlayers();\n"
+"}\n"
+"const COMPANY_NAMES = ['Neutral', 'Pirates', 'Navy'];\n"
+"const COMPANY_COLORS = ['#95a5a6', '#e74c3c', '#3498db'];\n"
+"async function updatePlayers() {\n"
+"const data = await fetchJson('/api/websocket');\n"
+"const el = document.getElementById('player-list');\n"
+"if (!el) return;\n"
+"if (!data || !data.players || data.players.length === 0) {\n"
+"  el.innerHTML = '<p style=\"color:#888;font-size:0.9rem\">No players connected.</p>';\n"
+"  return;\n"
+"}\n"
+"// Don't rebuild if any select/button inside the panel is focused\n"
+"if (el.querySelector('select:focus, button:focus')) return;\n"
+"let html = '<table style=\"width:100%;border-collapse:collapse;font-size:0.88rem\">';\n"
+"html += '<tr style=\"background:#dee2e6\">';\n"
+"html += '<th style=\"padding:4px 8px;text-align:left\">ID</th>';\n"
+"html += '<th style=\"padding:4px 8px;text-align:left\">Name</th>';\n"
+"html += '<th style=\"padding:4px 8px;text-align:left\">Current Company</th>';\n"
+"html += '<th style=\"padding:4px 8px;text-align:left\">Ship</th>';\n"
+"html += '<th style=\"padding:4px 8px;text-align:left\">Change To</th>';\n"
+"html += '</tr>';\n"
+"data.players.forEach(p => {\n"
+"  const company = typeof p.company === 'number' ? p.company : 0;\n"
+"  const color = COMPANY_COLORS[company] || '#95a5a6';\n"
+"  const companyName = COMPANY_NAMES[company] || 'Unknown';\n"
+"  // Default the dropdown to the next company (not current), so it's obvious what will change\n"
+"  const defaultNew = (company + 1) % COMPANY_NAMES.length;\n"
+"  html += `<tr style=\"border-bottom:1px solid #dee2e6\">`;\n"
+"  html += `<td style=\"padding:6px 8px\">${p.id}</td>`;\n"
+"  html += `<td style=\"padding:6px 8px\">${p.name || 'Player'}</td>`;\n"
+"  html += `<td style=\"padding:6px 8px\">`;\n"
+"  html += `  <span style=\"background:${color};color:#fff;padding:3px 10px;border-radius:4px;font-size:0.82rem;font-weight:bold\">${companyName}</span>`;\n"
+"  html += `</td>`;\n"
+"  html += `<td style=\"padding:6px 8px\">${p.ship_id > 0 ? 'Ship #'+p.ship_id : '—'}</td>`;\n"
+"  html += `<td style=\"padding:6px 8px;display:flex;gap:6px;align-items:center\">`;\n"
+"  html += `<select id=\"pc-${p.id}\" style=\"padding:3px 6px;border-radius:4px;border:1px solid #aaa;font-size:0.85rem\">`;\n"
+"  COMPANY_NAMES.forEach((name, idx) => {\n"
+"    const sel = idx === defaultNew ? ' selected' : '';\n"
+"    html += `<option value=\"${idx}\"${sel}>${name}</option>`;\n"
+"  });\n"
+"  html += `</select>`;\n"
+"  html += `<button onclick=\"assignPlayerCompany(${p.id})\" style=\"padding:3px 12px;border-radius:4px;border:none;background:#27ae60;color:#fff;cursor:pointer;font-size:0.85rem;font-weight:bold\">Set</button>`;\n"
+"  html += `</td>`;\n"
+"  html += `</tr>`;\n"
+"});\n"
+"html += '</table>';\n"
+"el.innerHTML = html;\n"
+"}\n"
+"async function assignPlayerCompany(playerId) {\n"
+"const sel = document.getElementById('pc-'+playerId);\n"
+"if (!sel) return;\n"
+"const company = parseInt(sel.value);\n"
+"const btn = sel.nextElementSibling;\n"
+"if (btn) { btn.disabled = true; btn.textContent = '...'; }\n"
+"try {\n"
+"  const r = await fetch('/api/admin/player/company', {\n"
+"    method: 'POST',\n"
+"    headers: {'Content-Type': 'application/json'},\n"
+"    body: JSON.stringify({playerId, company})\n"
+"  });\n"
+"  const data = await r.json();\n"
+"  if (data.success) {\n"
+"    // Brief success flash then force-refresh the player list\n"
+"    if (btn) { btn.style.background='#2ecc71'; btn.textContent='✓'; }\n"
+"    setTimeout(updatePlayers, 300);\n"
+"  } else {\n"
+"    if (btn) { btn.disabled=false; btn.style.background='#e74c3c'; btn.textContent='Set'; }\n"
+"    alert('Failed: ' + (data.error || 'unknown'));\n"
+"  }\n"
+"} catch(e) {\n"
+"  if (btn) { btn.disabled=false; btn.textContent='Set'; }\n"
+"  alert('Request failed: ' + e.message);\n"
+"}\n"
 "}\n"
 "async function spawnShip() {\n"
 "const x = parseFloat(document.getElementById('spawn-x').value) || 400;\n"
@@ -501,18 +579,18 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                 post_start += 5;
                 char *path_end = strchr(post_start, ' ');
                 if (path_end) {
+                    // Search for the body BEFORE null-terminating the path, so strstr
+                    // on the full buffer still works (inserting '\0' would cut it short).
+                    char *body = strstr(path_end, "\r\n\r\n");
+                    if (body) body += 4;
+
                     *path_end = '\0';
 
                     struct HttpResponse resp = {0};
                     if (strcmp(post_start, "/api/admin/ship") == 0) {
-                        // Parse JSON body for x, y, company
-                        // Body starts after the blank line (\r\n\r\n)
                         float x = 400.0f, y = 400.0f;
                         uint8_t company = 1; // COMPANY_PIRATES default
-                        char *body = strstr(buffer, "\r\n\r\n");
                         if (body) {
-                            body += 4;
-                            // Simple extraction — no full JSON parser needed
                             char *p;
                             p = strstr(body, "\"x\"");
                             if (p) { p = strchr(p, ':'); if (p) x = (float)atof(p + 1); }
@@ -522,6 +600,17 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                             if (p) { p = strchr(p, ':'); if (p) company = (uint8_t)atoi(p + 1); }
                         }
                         admin_api_create_ship(&resp, x, y, company);
+                    } else if (strcmp(post_start, "/api/admin/player/company") == 0) {
+                        uint32_t player_id = 0;
+                        uint8_t company = 0;
+                        if (body) {
+                            char *p;
+                            p = strstr(body, "\"playerId\"");
+                            if (p) { p = strchr(p, ':'); if (p) player_id = (uint32_t)atoi(p + 1); }
+                            p = strstr(body, "\"company\"");
+                            if (p) { p = strchr(p, ':'); if (p) company = (uint8_t)atoi(p + 1); }
+                        }
+                        admin_api_set_player_company(&resp, player_id, company);
                     } else {
                         resp.status_code = 404;
                         resp.body = "Not Found";

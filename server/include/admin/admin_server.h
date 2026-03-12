@@ -86,6 +86,7 @@ int admin_api_message_stats(struct HttpResponse* resp);
 int admin_api_input_tiers(struct HttpResponse* resp);
 int admin_api_websocket_entities(struct HttpResponse* resp);
 int admin_api_create_ship(struct HttpResponse* resp, float x, float y, uint8_t company);
+int admin_api_set_player_company(struct HttpResponse* resp, uint32_t player_id, uint8_t company_id);
 
 // Static content serving
 int admin_serve_dashboard(struct HttpResponse* resp);

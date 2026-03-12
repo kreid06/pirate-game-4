@@ -373,3 +373,5 @@ void websocket_server_npc_set_target(uint32_t npc_id, uint32_t target_ship_id);
  * @return 0 on success, -1 on error
  */
 int websocket_server_get_players(WebSocketPlayer** out_players, int* out_count);
+/** Set the company of a connected player (admin use). Returns 0 on success, -1 if not found. */
+int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id);

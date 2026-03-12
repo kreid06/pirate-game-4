@@ -355,7 +355,7 @@ static void resolve_player_npc_collisions(const SimpleShip* ship,
 // Helper to board a player onto a ship
 static void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y) {
     player->parent_ship_id = ship->ship_id;
-    player->company_id     = ship->company_id;  // inherit faction from ship
+    // company_id is NOT inherited from ship — assigned by admin or player choice
     player->local_x = local_x;
     player->local_y = local_y;
     player->movement_state = PLAYER_STATE_WALKING;
@@ -7096,6 +7096,17 @@ int websocket_server_get_players(WebSocketPlayer** out_players, int* out_count) 
     *out_players = players;
     *out_count = active_count;
     return 0;
+}
+
+int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id) {
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (players[i].active && players[i].player_id == player_id) {
+            players[i].company_id = company_id;
+            log_info("🏴 Admin set player %u company → %u", player_id, company_id);
+            return 0;
+        }
+    }
+    return -1; // not found
 }
 
 // HYBRID: Apply movement state to all active players (called every server tick)
