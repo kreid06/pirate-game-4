@@ -4795,6 +4795,7 @@ int websocket_server_update(struct Sim* sim) {
                                     
                                     // log_info("⚡ Player %u action: %s", player->player_id, action);
                                     
+                                    response[0] = '\0'; /* prevent action_processed from overwriting per-action responses */
                                     // Process action immediately (no state persistence)
                                     if (strcmp(action, "fire_cannon") == 0) {
                                         // TODO: Implement cannon firing
@@ -4887,6 +4888,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 const uint32_t SWORD_COOLDOWN_MS = 1000u;
                                                 uint32_t now_ms = get_time_ms();
                                                 if (now_ms - player->sword_last_attack_ms < SWORD_COOLDOWN_MS) {
+                                                    log_warn("Player %u sword attack rejected: on cooldown", player->player_id);
                                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"sword_cooldown\"}");
                                                     goto sword_attack_done;
                                                 }
@@ -5022,7 +5024,7 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                     }
                                     
-                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"action_processed\"}");
+                                    if (response[0] == '\0') strcpy(response, "{\"type\":\"message_ack\",\"status\":\"action_processed\"}");
                                 } else {
                                     log_warn("Action event for non-existent player %u", client->player_id);
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"player_not_found\"}");

@@ -116,6 +116,9 @@ export class ClientApplication {
   // Timing
   private running = false;
   private lastFrameTime = 0;
+  /** Timestamp (ms) of the last sword attack sent to the server — enforces client-side cooldown matching the server's 600ms. */
+  private lastSwordSwingMs = 0;
+  private readonly SWORD_COOLDOWN_MS = 600;
   private accumulator = 0;
   private readonly clientTickDuration: number; // milliseconds per client tick
   
@@ -459,6 +462,8 @@ export class ClientApplication {
             this.networkManager.sendAction(action, target);
             // Optimistic local arc (appears immediately without waiting for server)
             this.renderSystem.spawnSwordArc(player.position, dir);
+            // Start cooldown ring around cursor (visual, matches server cooldown)
+            this.renderSystem.notifySwordSwing(this.SWORD_COOLDOWN_MS);
             return;
           }
           // Not a hammer or sword click — pass to server
@@ -1253,7 +1258,12 @@ export class ClientApplication {
       this.renderSystem.showGroupOverlay = this.inputManager?.isCtrlHeld() ?? false;
       this.renderSystem.activeWeaponGroups = this.inputManager?.activeWeaponGroups ?? new Set();
 
-      // Keep explicit build mode UI in sync with latest world state (sail count may change)
+      // Sword cooldown ring: only visible when sword is the active item and player is unmounted
+      const _localPlayer = worldToRender.players.find(p => p.id === this.networkManager.getAssignedPlayerId());
+      const _activeSlot  = _localPlayer?.inventory?.activeSlot ?? 0;
+      this.renderSystem.swordEquipped =
+        (_localPlayer?.inventory?.slots[_activeSlot]?.item === 'sword') &&
+        !(_localPlayer?.isMounted ?? false);
       if (this.explicitBuildMode) this.syncBuildModeState();
 
       // Render game world with hybrid state

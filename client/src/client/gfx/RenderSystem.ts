@@ -54,6 +54,12 @@ export class RenderSystem {
   private hoveredModule: { ship: Ship; module: any } | null = null;
   private hoveredNpc: Npc | null = null;
 
+  /** Timestamp (ms) of the last sword swing, used to draw a cooldown ring. */
+  private lastSwordSwingAt: number = 0;
+  private swordCooldownMs: number = 800;
+  /** Set to true each frame when the local player has the sword as their active item. */
+  public swordEquipped: boolean = false;
+
   // Build mode state
   private buildMode: boolean = false;
   /** Whether cannon replacement build mode is active (cannon item held). */
@@ -207,6 +213,16 @@ export class RenderSystem {
    */
   updateMousePosition(worldPos: Vec2): void {
     this.mouseWorldPos = worldPos;
+  }
+
+  /**
+   * Notify the render system that a sword swing just happened.
+   * Starts the cooldown ring animation around the cursor.
+   * @param cooldownMs Total cooldown duration in milliseconds (default 800ms).
+   */
+  notifySwordSwing(cooldownMs: number = 800): void {
+    this.lastSwordSwingAt = performance.now();
+    this.swordCooldownMs  = cooldownMs;
   }
   
   /**
@@ -748,6 +764,56 @@ export class RenderSystem {
     this.drawNpcTooltip(camera);
   }
   
+  /**
+   * Draws a shrinking arc ring around the mouse cursor while the sword is on cooldown.
+   * Full ring = just swung; empty ring = ready.
+   */
+  private drawSwordCooldownIndicator(camera: Camera): void {
+    if (!this.mouseWorldPos) return;
+    if (!this.swordEquipped) return;
+
+    const elapsed   = performance.now() - this.lastSwordSwingAt;
+    const onCooldown = elapsed < this.swordCooldownMs;
+    const progress  = onCooldown ? elapsed / this.swordCooldownMs : 1; // 0→1 as cooldown fills
+
+    const screenPos = camera.worldToScreen(this.mouseWorldPos);
+    const RADIUS    = 12;
+    const TRACK_W   = 2.5;
+    const START     = -Math.PI / 2; // 12 o'clock
+
+    const ctx = this.ctx;
+    ctx.save();
+
+    // Dim background track (always shown)
+    ctx.strokeStyle = 'rgba(0,0,0,0.40)';
+    ctx.lineWidth   = TRACK_W + 1;
+    ctx.lineCap     = 'butt';
+    ctx.beginPath();
+    ctx.arc(screenPos.x, screenPos.y, RADIUS, 0, Math.PI * 2);
+    ctx.stroke();
+
+    if (onCooldown) {
+      // Filling arc: draws from empty → full as cooldown completes (red-orange)
+      const END = START + progress * Math.PI * 2;
+      ctx.strokeStyle = 'rgba(220, 90, 60, 0.9)';
+      ctx.lineWidth   = TRACK_W;
+      ctx.lineCap     = 'round';
+      ctx.beginPath();
+      ctx.arc(screenPos.x, screenPos.y, RADIUS, START, END);
+      ctx.stroke();
+    } else {
+      // Ready — full green circle
+      ctx.strokeStyle = 'rgba(80, 220, 100, 0.85)';
+      ctx.lineWidth   = TRACK_W;
+      ctx.lineCap     = 'butt';
+      ctx.beginPath();
+      ctx.arc(screenPos.x, screenPos.y, RADIUS, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
   /**
    * Render loading/connection screen
    */
