@@ -22,6 +22,7 @@ import { PhysicsConfig } from '../sim/Types.js';
 
 // UI System
 import { UIManager } from './ui/UIManager.js';
+import { RadialMenu } from './ui/RadialMenu.js';
 
 // Audio System
 import { AudioManager } from './audio/AudioManager.js';
@@ -119,6 +120,15 @@ export class ClientApplication {
   /** Timestamp (ms) of the last sword attack sent to the server — enforces client-side cooldown matching the server's 600ms. */
   private lastSwordSwingMs = 0;
   private readonly SWORD_COOLDOWN_MS = 600;
+  /** Ladder E-hold state. */
+  private _ladderHoldTimer: ReturnType<typeof setTimeout> | null = null;
+  private _suppressLadderInteract = false;
+  private _ladderHoldModuleId: number | null = null;
+  private _ladderHoldIsExtended = false;
+  /** True if player was on the ladder's ship when E was pressed. */
+  private _ladderHoldOnShip = false;
+  /** Generic radial action menu instance (rendered by RenderSystem). */
+  private _radialMenu = new RadialMenu();
   private accumulator = 0;
   private readonly clientTickDuration: number; // milliseconds per client tick
   
@@ -155,6 +165,7 @@ export class ClientApplication {
       // Initialize Graphics System
       this.renderSystem = new RenderSystem(this.canvas, this.config.graphics);
       await this.renderSystem.initialize();
+      this.renderSystem.setRadialMenu(this._radialMenu);
       
       // Initialize Network System
       this.networkManager = new NetworkManager(this.config.network);
@@ -490,47 +501,48 @@ export class ClientApplication {
           // Module interaction takes priority over NPC menu
           const hoveredModule = this.renderSystem.getHoveredModule();
 
-          if (hoveredModule) {
-            if (playerId !== null) {
-              // Check if player is close enough to the module
-              if (!worldState) return;
-              
-              
-              if (player) {
-                let distance: number;
-                let moduleWorldPos: Vec2;
-                
-                // Calculate module world position
-                const cos = Math.cos(hoveredModule.ship.rotation);
-                const sin = Math.sin(hoveredModule.ship.rotation);
-                const moduleWorldX = hoveredModule.ship.position.x + 
-                  (hoveredModule.module.localPos.x * cos - hoveredModule.module.localPos.y * sin);
-                const moduleWorldY = hoveredModule.ship.position.y + 
-                  (hoveredModule.module.localPos.x * sin + hoveredModule.module.localPos.y * cos);
-                moduleWorldPos = Vec2.from(moduleWorldX, moduleWorldY);
-                
-                // If player is on the same ship as the module, use local (ship-relative) coordinates
-                if (player.carrierId === hoveredModule.ship.id && player.localPosition) {
-                  // Both player and module are on the same ship - use local coordinates
-                  const moduleLocalPos = hoveredModule.module.localPos;
-                  distance = player.localPosition.sub(moduleLocalPos).length();
-                } else {
-                  // Player not on ship or on different ship - use world coordinates
-                  distance = player.position.sub(moduleWorldPos).length();
-                }
-                
-                const maxInteractDistance = 50; // Maximum interaction range
-                
-                if (distance <= maxInteractDistance) {
-                  console.log(`🎯 [INTERACTION] Player interacting with ${hoveredModule.module.kind.toUpperCase()} (ID: ${hoveredModule.module.id}) at distance ${distance.toFixed(1)}px`);
-                  console.log(`   Player world: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}), Module world: (${moduleWorldPos.x.toFixed(1)}, ${moduleWorldPos.y.toFixed(1)})`);
+          if (hoveredModule && player) {
+            if (!worldState) return;
+
+            // Calculate module world position
+            const cos = Math.cos(hoveredModule.ship.rotation);
+            const sin = Math.sin(hoveredModule.ship.rotation);
+            const moduleWorldX = hoveredModule.ship.position.x +
+              (hoveredModule.module.localPos.x * cos - hoveredModule.module.localPos.y * sin);
+            const moduleWorldY = hoveredModule.ship.position.y +
+              (hoveredModule.module.localPos.x * sin + hoveredModule.module.localPos.y * cos);
+            const moduleWorldPos = Vec2.from(moduleWorldX, moduleWorldY);
+
+            // Use local distance when both player and module are on the same ship
+            let distance: number;
+            if (player.carrierId === hoveredModule.ship.id && player.localPosition) {
+              distance = player.localPosition.sub(hoveredModule.module.localPos).length();
+            } else {
+              distance = player.position.sub(moduleWorldPos).length();
+            }
+
+            const maxInteractDistance = 120;
+
+            if (distance <= maxInteractDistance) {
+              console.log(`🎯 [INTERACTION] Player interacting with ${hoveredModule.module.kind.toUpperCase()} (ID: ${hoveredModule.module.id}) at distance ${distance.toFixed(1)}px`);
+              if (hoveredModule.module.kind === 'ladder') {
+                if (this._suppressLadderInteract) return;
+                const onShip = player.carrierId === hoveredModule.ship.id;
+                const isExtended = (hoveredModule.module.moduleData as any)?.extended !== false;
+                console.log(`🪜 [LADDER] game-loop hover interact: onShip=${onShip} extended=${isExtended}`);
+                if (onShip) {
+                  this.networkManager.sendToggleLadder(hoveredModule.module.id);
+                } else if (isExtended) {
                   this.networkManager.sendModuleInteract(hoveredModule.module.id);
-                  return;
-                } else {
-                  console.log(`❌ [INTERACTION] ${hoveredModule.module.kind.toUpperCase()} too far: ${distance.toFixed(1)}px > ${maxInteractDistance}px`);
-                  console.log(`   Player world: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}), Module world: (${moduleWorldPos.x.toFixed(1)}, ${moduleWorldPos.y.toFixed(1)})`);
                 }
+                return;
+              } else {
+                this.networkManager.sendModuleInteract(hoveredModule.module.id);
+                return;
               }
+            } else {
+              console.log(`❌ [INTERACTION] ${hoveredModule.module.kind.toUpperCase()} too far: ${distance.toFixed(1)}px > ${maxInteractDistance}px`);
+              console.log(`   Player: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}), Module: (${moduleWorldPos.x.toFixed(1)}, ${moduleWorldPos.y.toFixed(1)})`);
             }
           }
 
@@ -541,8 +553,50 @@ export class ClientApplication {
             return;
           }
 
-          if (!hoveredModule) {
-            console.log(`⚠️ [INTERACTION] No module hovered - move mouse over a module and press E`);
+          if (!hoveredModule && !this._suppressLadderInteract) {
+            // Proximity fallback: scan for nearest ladder without requiring mouse hover
+            const wsL = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+            if (wsL && player) {
+              const LADDER_RANGE = 120;
+              let nearestLadder: { ship: any; module: any } | null = null;
+              let nearestDist = Infinity;
+              for (const ship of wsL.ships) {
+                const cos = Math.cos(ship.rotation);
+                const sin = Math.sin(ship.rotation);
+                for (const mod of ship.modules) {
+                  if (mod.kind !== 'ladder') continue;
+                  let dist: number;
+                  if (player.carrierId === ship.id && (player as any).localPosition) {
+                    dist = Math.hypot(
+                      (player as any).localPosition.x - mod.localPos.x,
+                      (player as any).localPosition.y - mod.localPos.y
+                    );
+                  } else {
+                    const mwx = ship.position.x + (mod.localPos.x * cos - mod.localPos.y * sin);
+                    const mwy = ship.position.y + (mod.localPos.x * sin + mod.localPos.y * cos);
+                    dist = Math.hypot(player.position.x - mwx, player.position.y - mwy);
+                  }
+                  if (dist < nearestDist && dist <= LADDER_RANGE) {
+                    nearestDist = dist;
+                    nearestLadder = { ship, module: mod };
+                  }
+                }
+              }
+              if (nearestLadder) {
+                const onShip = player.carrierId === nearestLadder.ship.id;
+                const isExtended = (nearestLadder.module.moduleData as any)?.extended !== false;
+                console.log(`🪜 [LADDER] game-loop proximity fallback: onShip=${onShip} extended=${isExtended} dist=${nearestDist.toFixed(1)}`);
+                if (onShip) {
+                  this.networkManager.sendToggleLadder(nearestLadder.module.id);
+                } else if (isExtended) {
+                  this.networkManager.sendModuleInteract(nearestLadder.module.id);
+                }
+              } else {
+                console.log(`⚠️ [INTERACTION] No module hovered and no ladder within ${LADDER_RANGE}px`);
+              }
+            } else {
+              console.log(`⚠️ [INTERACTION] No module hovered - move mouse over a module and press E`);
+            }
           }
         } else {
           // Other actions go to server
@@ -2013,6 +2067,8 @@ export class ClientApplication {
       
       // Update render system for hover detection
       this.renderSystem.updateMousePosition(worldPos);
+      // Feed radial menu mouse position (screen space)
+      this._radialMenu.updateMouse(screenX, screenY);
     });
     
     console.log('🖱️ Mouse tracking initialized for directional movement');
@@ -2043,9 +2099,8 @@ export class ClientApplication {
   private setupDebugKeys(): void {
     window.addEventListener('keydown', (e) => {
       // Only handle if not typing in an input field
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return;
-      }
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.repeat) return; // no auto-repeat for E-hold logic
 
       // Route Space / Enter to UIManager for minigame handling first
       if (this.uiManager?.handleKeyDown(e.key)) {
@@ -2054,24 +2109,113 @@ export class ClientApplication {
       }
 
       switch (e.key) {
+        case 'e':
+        case 'E': {
+          const wsE = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+          const myIdE = this.networkManager.getAssignedPlayerId();
+          // In demo/offline mode getAssignedPlayerId() returns null — fall back to first player
+          const meE = myIdE !== null
+            ? wsE?.players.find(p => p.id === myIdE) ?? null
+            : wsE?.players[0] ?? null;
+          if (!meE || !wsE) {
+            console.log(`🪜 [LADDER] E keydown: no world state (ws=${!!wsE}) or player (me=${!!meE})`);
+            break;
+          }
+
+          // Find nearest ladder within interaction range (proximity-based)
+          const LADDER_RANGE = 120;
+          let bestLadder: { ship: any; module: any } | null = null;
+          let bestDist = Infinity;
+
+          for (const ship of wsE.ships) {
+            const cos = Math.cos(ship.rotation);
+            const sin = Math.sin(ship.rotation);
+            for (const mod of ship.modules) {
+              if (mod.kind !== 'ladder') continue;
+              let dist: number;
+              if (meE.carrierId === ship.id && meE.localPosition) {
+                dist = Math.hypot(
+                  (meE.localPosition as any).x - mod.localPos.x,
+                  (meE.localPosition as any).y - mod.localPos.y
+                );
+              } else {
+                const mwx = ship.position.x + (mod.localPos.x * cos - mod.localPos.y * sin);
+                const mwy = ship.position.y + (mod.localPos.x * sin + mod.localPos.y * cos);
+                dist = Math.hypot(meE.position.x - mwx, meE.position.y - mwy);
+              }
+              if (dist < bestDist && dist <= LADDER_RANGE) {
+                bestDist = dist;
+                bestLadder = { ship, module: mod };
+              }
+            }
+          }
+
+          console.log(`🪜 [LADDER] E keydown — pos=(${meE.position.x.toFixed(0)},${meE.position.y.toFixed(0)}) carrierId=${meE.carrierId} nearest=${ bestLadder ? `id=${bestLadder.module.id} dist=${bestDist.toFixed(1)}` : 'none in range' }`);
+          if (!bestLadder) break;
+
+          this._suppressLadderInteract = true;
+          this._ladderHoldModuleId = bestLadder.module.id;
+          this._ladderHoldIsExtended = (bestLadder.module.moduleData as any)?.extended !== false;
+          this._ladderHoldOnShip = meE.carrierId === bestLadder.ship.id;
+
+          console.log(`🪜 [LADDER] onShip=${this._ladderHoldOnShip} extended=${this._ladderHoldIsExtended} stateBits=${bestLadder.module.stateBits}`);
+
+          // If ladder is retracted and player is off-ship, nothing to do
+          if (!this._ladderHoldIsExtended && !this._ladderHoldOnShip) {
+            this._suppressLadderInteract = false;
+            this._ladderHoldModuleId = null;
+            console.log(`🚫 [LADDER] Ladder retracted and player not on ship — no interaction`);
+            break;
+          }
+
+          // Start hold ring immediately
+          this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
+
+          // 300 ms → open radial
+          const onShipAtPress = this._ladderHoldOnShip;
+          const extendedAtPress = this._ladderHoldIsExtended;
+          this._ladderHoldTimer = setTimeout(() => {
+            this._ladderHoldTimer = null;
+            this.renderSystem.stopLadderHoldRing();
+            const mp = this.inputManager.getMouseScreenPosition();
+            if (onShipAtPress) {
+              this._radialMenu.open(mp.x, mp.y, [
+                extendedAtPress
+                  ? { id: 'retract', label: 'Retract' }
+                  : { id: 'extend',  label: 'Extend'  },
+              ]);
+            } else {
+              this._radialMenu.open(mp.x, mp.y, [
+                { id: 'climb', label: 'Climb' },
+              ]);
+            }
+          }, 300);
+          break;
+        }
         case 'l':
         case 'L': {
-          // Toggle retract/extend the ladder on the player's current ship
+          // Toggle all ladders on all ships belonging to player's company
           const ws = this.authoritativeWorldState || this.predictedWorldState;
           const myId = this.networkManager.getAssignedPlayerId();
           const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
-          const shipId = me?.carrierId ?? 0;
-          if (shipId > 0) {
-            const ship = ws?.ships.find(s => s.id === shipId);
-            const ladder = ship?.modules.find(m => m.kind === 'ladder');
-            if (ladder) {
-              this.networkManager.sendToggleLadder(ladder.id);
-            } else {
-              console.log('No ladder found on current ship');
-            }
-          } else {
-            console.log('Not on a ship — cannot toggle ladder');
+          if (!me || !ws) { e.preventDefault(); break; }
+          const companyId = me.companyId ?? 0;
+          if (companyId === 0) {
+            console.log('Neutral company — cannot mass-toggle ladders');
+            e.preventDefault();
+            break;
           }
+          let ladderCount = 0;
+          for (const ship of ws.ships) {
+            if (ship.companyId !== companyId) continue;
+            for (const mod of ship.modules) {
+              if (mod.kind === 'ladder') {
+                this.networkManager.sendToggleLadder(mod.id);
+                ladderCount++;
+              }
+            }
+          }
+          console.log(`🪜 [LADDER] Toggled ${ladderCount} ladder(s) on company ${companyId} ships`);
           e.preventDefault();
           break;
         }
@@ -2081,7 +2225,51 @@ export class ClientApplication {
           break;
       }
     });
-    
+
+    // E keyup: execute action based on how long E was held
+    window.addEventListener('keyup', (e) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key !== 'e' && e.key !== 'E') return;
+
+      const moduleId = this._ladderHoldModuleId;
+      this._suppressLadderInteract = false;
+      this._ladderHoldModuleId = null;
+
+      if (this._ladderHoldTimer !== null) {
+        // Released before 300 ms — execute PRIMARY action immediately (no radial shown)
+        clearTimeout(this._ladderHoldTimer);
+        this._ladderHoldTimer = null;
+        this.renderSystem.stopLadderHoldRing();
+
+        if (moduleId === null) return;
+
+        if (this._ladderHoldOnShip) {
+          // On ship: toggle retract/extend via toggle_ladder
+          this.networkManager.sendToggleLadder(moduleId);
+          console.log(`🪜 [LADDER] Tap E → ${this._ladderHoldIsExtended ? 'retract' : 'extend'} ladder ${moduleId}`);
+        } else {
+          // Off ship + extended: board via module_interact
+          this.networkManager.sendModuleInteract(moduleId);
+          console.log(`🪜 [LADDER] Tap E → climb ladder ${moduleId}`);
+        }
+      } else if (this._radialMenu.isOpen) {
+        // Radial was open — execute selected option
+        const selected = this._radialMenu.getHoveredId();
+        this._radialMenu.close();
+
+        if (!selected || moduleId === null) return;
+        console.log(`🪜 [LADDER] Radial → ${selected} ladder ${moduleId}`);
+
+        if (selected === 'climb') {
+          // Off-ship board
+          this.networkManager.sendModuleInteract(moduleId);
+        } else if (selected === 'retract' || selected === 'extend') {
+          // On-ship toggle
+          this.networkManager.sendToggleLadder(moduleId);
+        }
+      }
+    });
+
     console.log('⌨️ Debug keys initialized (] = toggle hover boundaries)');
   }
   

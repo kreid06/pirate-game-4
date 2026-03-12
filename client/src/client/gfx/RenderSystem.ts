@@ -14,6 +14,7 @@ import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, 
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
+import { RadialMenu } from '../ui/RadialMenu.js';
 
 /** NPC fill colours keyed by assigned task name (matches ManningPriorityPanel task colours). */
 const NPC_TASK_COLORS: Record<string, string> = {
@@ -213,6 +214,28 @@ export class RenderSystem {
   private swordCursorMousePos: Vec2 | null = null;
   private swordCursorLastAttackMs = 0;
   private swordCursorCooldownMs   = 1000;
+
+  /** Ladder hold-progress ring (fills over the hold threshold while E is held near a ladder). */
+  private ladderHoldMousePos: Vec2 | null = null;
+  private ladderHoldStartMs = 0;
+  private ladderHoldActive  = false;
+
+  /** Generic radial action menu (set by ClientApplication). */
+  private _radialMenu: RadialMenu | null = null;
+  setRadialMenu(menu: RadialMenu): void { this._radialMenu = menu; }
+
+  /** Begin drawing the ladder hold-progress ring at the given screen position. */
+  startLadderHoldRing(mouseScreenPos: Vec2): void {
+    this.ladderHoldMousePos = mouseScreenPos;
+    this.ladderHoldStartMs  = performance.now();
+    this.ladderHoldActive   = true;
+  }
+
+  /** Stop drawing the ladder hold-progress ring. */
+  stopLadderHoldRing(): void {
+    this.ladderHoldActive   = false;
+    this.ladderHoldMousePos = null;
+  }
 
   /** Called each frame from ClientApplication to keep sword cursor ring in sync. */
   updateSwordCooldownCursor(mouseScreenPos: Vec2 | null, lastAttackMs: number, cooldownMs: number): void {
@@ -494,9 +517,10 @@ export class RenderSystem {
         const moduleData = module.moduleData;
         if (moduleData.kind !== 'ladder') continue;
         
-        // Ladder renders as fillRect(-10, -20, 20, 40) centered at localPos with localRot
-        const halfWidth = 10;  // 20 / 2
-        const halfHeight = 20; // 40 / 2
+        // Hover bounds match rendered size: 20x40 when extended, 20x12 when retracted
+        const isLadderExtended = (moduleData as any).extended !== false;
+        const halfWidth = 10;
+        const halfHeight = isLadderExtended ? 20 : 6;
         
         const mdx = localX - module.localPos.x;
         const mdy = localY - module.localPos.y;
@@ -766,6 +790,10 @@ export class RenderSystem {
 
     // Sword cooldown cursor ring (topmost — always in screen space)
     this.drawSwordCooldownCursor();
+    // Ladder hold-progress ring
+    this.drawLadderHoldRing();
+    // Radial action menu (topmost)
+    this._radialMenu?.render(this.ctx);
     
     // Draw hover boundaries debug if enabled
     if (this.showHoverBoundaries) {
@@ -904,6 +932,42 @@ export class RenderSystem {
   }
 
   /** Draw the sword cooldown ring around the mouse cursor (screen space). */
+  private drawLadderHoldRing(): void {
+    if (!this.ladderHoldActive || !this.ladderHoldMousePos) return;
+
+    const ctx  = this.ctx;
+    const cx   = this.ladderHoldMousePos.x;
+    const cy   = this.ladderHoldMousePos.y;
+    const R    = 18; // slightly larger than sword ring
+    const HOLD_MS = 1000;
+    const progress = Math.min((performance.now() - this.ladderHoldStartMs) / HOLD_MS, 1);
+
+    ctx.save();
+
+    // Dark track
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.lineWidth = 3.5;
+    ctx.stroke();
+
+    // Amber fill arc, clockwise from top
+    if (progress > 0) {
+      const startAngle = -Math.PI / 2;
+      const endAngle   = startAngle + progress * Math.PI * 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, startAngle, endAngle);
+      ctx.strokeStyle = progress >= 1
+        ? 'rgba(255, 220, 80, 1.0)'   // bright gold when complete
+        : 'rgba(255, 160, 30, 0.9)';  // amber while filling
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
   private drawSwordCooldownCursor(): void {
     if (!this.swordCursorMousePos) return;
 
@@ -2856,19 +2920,53 @@ export class RenderSystem {
       const x = ladder.localPos.x;
       const y = ladder.localPos.y;
       const rot = ladder.localRot || 0;
-      
-      // Save context for this ladder
+      const isExtended = (ladder.moduleData as any)?.extended !== false; // default to extended if unknown
+
       this.ctx.save();
-      
-      // Move to ladder position and apply rotation
       this.ctx.translate(x, y);
       this.ctx.rotate(rot);
-      
-      // Draw ladder as a black rectangle (20x40 pixels)
-      this.ctx.fillStyle = '#000000';
-      this.ctx.fillRect(-10, -20, 20, 40);
-      
-      // Restore ladder transform
+
+      if (isExtended) {
+        // --- Extended ladder: wooden frame with rungs ---
+        const lw = 20; // total width
+        const lh = 40; // total height
+        const railW = 3;
+        const rungCount = 4;
+
+        // Side rails (dark brown)
+        this.ctx.fillStyle = '#5C3A1E';
+        this.ctx.fillRect(-lw / 2, -lh / 2, railW, lh);           // left rail
+        this.ctx.fillRect(lw / 2 - railW, -lh / 2, railW, lh);    // right rail
+
+        // Rungs (lighter tan wood)
+        this.ctx.fillStyle = '#8B5E3C';
+        const rungH = 3;
+        const rungSpacing = lh / (rungCount + 1);
+        for (let i = 1; i <= rungCount; i++) {
+          const ry = -lh / 2 + i * rungSpacing - rungH / 2;
+          this.ctx.fillRect(-lw / 2 + railW, ry, lw - railW * 2, rungH);
+        }
+
+        // Thin outline
+        this.ctx.strokeStyle = '#3A2010';
+        this.ctx.lineWidth = 1;
+        this.ctx.strokeRect(-lw / 2, -lh / 2, lw, lh);
+      } else {
+        // --- Retracted ladder: flat stowed plank, grey-brown, narrow ---
+        this.ctx.fillStyle = '#6B5040';
+        this.ctx.fillRect(-10, -6, 20, 12);
+        this.ctx.strokeStyle = '#3A2010';
+        this.ctx.lineWidth = 1;
+        this.ctx.strokeRect(-10, -6, 20, 12);
+        // Small diagonal lines to suggest folded/stowed state
+        this.ctx.strokeStyle = '#4A3020';
+        this.ctx.lineWidth = 1;
+        this.ctx.beginPath();
+        this.ctx.moveTo(-7, -4); this.ctx.lineTo( 7,  4);
+        this.ctx.moveTo(-7,  4); this.ctx.lineTo( 7, -4);
+        this.ctx.stroke();
+      }
+
       this.ctx.restore();
     }
     

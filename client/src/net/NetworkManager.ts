@@ -1328,7 +1328,9 @@ export class NetworkManager {
                       length: 40,
                       width: 20,
                       climbSpeed: 2.0,
-                      deployState: 'deployed'
+                      deployState: 'deployed',
+                      // Derive extended from state bits: bit 0 = MODULE_STATE_RETRACTED
+                      extended: !((mod.state ?? 0) & 1),
                     };
                   }
                   

@@ -3614,7 +3614,8 @@ static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClie
     }
     
     distance = sqrtf(dx * dx + dy * dy);
-    const float MAX_INTERACT_RANGE = 60.0f; // Slightly more lenient on server
+    // Ladders allow boarding from water — use a generous range; other modules require proximity
+    const float MAX_INTERACT_RANGE = (module->type_id == MODULE_TYPE_LADDER) ? 120.0f : 60.0f;
     
     if (distance > MAX_INTERACT_RANGE) {
         log_warn("Player %u too far from module %u (%.1fpx > %.1fpx)", 
