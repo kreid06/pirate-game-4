@@ -34,8 +34,10 @@ export class RadialMenu {
     this._center  = { x: cx, y: cy };
     this._options = options;
     this._open    = true;
-    // Pre-select first option so single-option menus always have something chosen
-    this._hoveredId = options.length > 0 ? options[0].id : null;
+    // Start with null (no selection); evaluate current mouse position immediately
+    // so the selection is correct if the mouse is already outside the dead zone.
+    this._hoveredId = null;
+    this.updateMouse(this._mouseX, this._mouseY);
   }
 
   close(): void {
@@ -57,9 +59,9 @@ export class RadialMenu {
     const dy = y - this._center.y;
     const dist = Math.hypot(dx, dy);
 
-    if (dist < DEAD_ZONE || this._options.length === 1) {
-      // Inside dead zone or only one option — keep/use first
-      this._hoveredId = this._options[0]?.id ?? null;
+    if (dist < DEAD_ZONE) {
+      // Inside dead zone — null signals a cancelled interaction
+      this._hoveredId = null;
       return;
     }
 
@@ -101,11 +103,18 @@ export class RadialMenu {
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
-    // ── Center dot ─────────────────────────────────────────────
+    // ── Center dot — red when in dead zone (cancel), gold when selecting ──
+    const isCancelling = this._hoveredId === null;
     ctx.beginPath();
-    ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(200, 160, 60, 0.9)';
+    ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+    ctx.fillStyle = isCancelling ? 'rgba(200, 60, 60, 0.9)' : 'rgba(200, 160, 60, 0.9)';
     ctx.fill();
+    // Dead zone ring hint
+    ctx.beginPath();
+    ctx.arc(cx, cy, DEAD_ZONE, 0, Math.PI * 2);
+    ctx.strokeStyle = isCancelling ? 'rgba(200, 60, 60, 0.35)' : 'rgba(180, 140, 60, 0.18)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
 
     // ── Option pills ───────────────────────────────────────────
     for (let i = 0; i < n; i++) {

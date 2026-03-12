@@ -1711,6 +1711,25 @@ export class NetworkManager {
    * Handle successful module interaction (mounting)
    */
   private handleModuleInteractSuccess(message: ModuleInteractSuccessMessage): void {
+    // Ladder toggle responses have an "action" field instead of "module_kind".
+    // They are not mount events — just acknowledge the state change.
+    const action = (message as any).action as string | undefined;
+    if (action === 'ladder_retracted' || action === 'ladder_extended') {
+      console.log(`🪜 Ladder interact success: ${action}`);
+      return;
+    }
+    if (action === 'unmounted') {
+      // Server acknowledged dismount — mount state is updated via GAME_STATE / onMountStateUpdate
+      console.log('🎮 Module interact success: unmounted');
+      return;
+    }
+
+    // Guard: module_kind missing on unexpected response shapes
+    if (!message.module_kind) {
+      console.warn('⚠️ module_interact_success missing module_kind, ignoring', message);
+      return;
+    }
+
     console.log(`✅ [MOUNT] Successfully mounted to ${message.module_kind.toUpperCase()} (ID: ${message.module_id})`);
     
     // Parse mount offset if provided
