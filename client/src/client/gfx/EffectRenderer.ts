@@ -324,7 +324,7 @@ export class EffectRenderer {
    * @param direction Attack angle in radians.
    * @param radius    Reach in world pixels (default 80).
    */
-  createSwordArc(position: Vec2, direction: number, radius: number = 20): void {
+  createSwordArc(position: Vec2, direction: number, radius: number = 30): void {
     const effect: SwordArcEffect = {
       id: this.nextEffectId++,
       type: EffectType.SWORD_ARC,

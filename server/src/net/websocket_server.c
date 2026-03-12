@@ -4892,7 +4892,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                                 player->sword_last_attack_ms = now_ms;
 
-                                                const float SWORD_RANGE  = 20.0f;
+                                                const float SWORD_RANGE  = 30.0f;
                                                 const float SWORD_DAMAGE = 30.0f;
                                                 const float SWORD_RANGE2 = SWORD_RANGE * SWORD_RANGE;
 
