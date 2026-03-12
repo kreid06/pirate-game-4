@@ -259,7 +259,9 @@ export class UIManager {
     
     // Render manning priority panel (always on top, left side)
     const shipId = context.playerShipId ?? 0;
-    this.manningPanel.render(ctx, context.worldState.npcs ?? [], shipId);
+    const _localPlayer = context.worldState.players.find(p => p.id === context.assignedPlayerId);
+    const _localCompanyId = _localPlayer?.companyId ?? 0;
+    this.manningPanel.render(ctx, context.worldState.npcs ?? [], shipId, _localCompanyId);
     
     // Always render FPS in top-right corner
     this.renderFPS(ctx, context);
@@ -588,8 +590,8 @@ export class UIManager {
    * Called when the local player boards a new ship.
    * Seeds the crew panel from the ship's authoritative NPC states and resets delta tracking.
    */
-  syncCrewFromBoarding(npcs: Npc[], shipId: number): void {
-    this.manningPanel.syncFromBoarding(npcs, shipId);
+  syncCrewFromBoarding(npcs: Npc[], shipId: number, localCompanyId: number = 0): void {
+    this.manningPanel.syncFromBoarding(npcs, shipId, localCompanyId);
   }
 
   // -----------------------------------------------------------------------

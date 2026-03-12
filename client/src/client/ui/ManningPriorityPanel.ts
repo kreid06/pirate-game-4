@@ -20,7 +20,7 @@ const TASK_COLORS: Record<ManningTask, string> = {
   Sails:   '#5aafff',
   Cannons: '#ffaa44',
   Repairs: '#55dd66',
-  Combat:  '#ff5555',
+  Combat:  '#aa44ff',
 };
 
 interface HitArea {
@@ -49,6 +49,7 @@ export class ManningPriorityPanel {
   private lastSentAssignment: Map<number, string> = new Map();
   private _currentShipId = 0;
   private _currentNpcs: Npc[] = [];
+  private _localCompanyId = 0;
 
   /**
    * Fires whenever assignments change. Carries the full list of {npcId, task} including
@@ -65,14 +66,15 @@ export class ManningPriorityPanel {
    * Seeds the task panel from the authoritative NPC states already in the world state
    * so the UI reflects reality instead of stale assignments from the previous ship.
    */
-  syncFromBoarding(npcs: Npc[], shipId: number): void {
+  syncFromBoarding(npcs: Npc[], shipId: number, localCompanyId: number = 0): void {
     this._currentShipId = shipId;
+    this._localCompanyId = localCompanyId;
     this.lastSentAssignment.clear();
     for (const list of this.taskNpcs.values()) list.length = 0;
     this.lastTaskMap.clear();
     if (shipId === 0) return;
 
-    const shipNpcs = npcs.filter(n => n.shipId === shipId);
+    const shipNpcs = npcs.filter(n => n.shipId === shipId && (localCompanyId === 0 || n.companyId === localCompanyId));
 
     // Seed task lists from the server-authoritative NPC role field.
     // role 1 = Gunner  → Cannons
@@ -131,7 +133,7 @@ export class ManningPriorityPanel {
    * @param npcs  Full NPC list from WorldState (will be filtered to shipId)
    * @param shipId  Player's current ship. Pass 0 when not aboard — hides panel.
    */
-  render(ctx: CanvasRenderingContext2D, npcs: Npc[], shipId: number): void {
+  render(ctx: CanvasRenderingContext2D, npcs: Npc[], shipId: number, localCompanyId: number = 0): void {
     this.hitAreas = [];
     if (shipId === 0) return; // Not on a ship — nothing to manage
 
@@ -143,6 +145,7 @@ export class ManningPriorityPanel {
     }
     this._currentShipId = shipId;
     this._currentNpcs = npcs;
+    this._localCompanyId = localCompanyId;
 
     const tasks = this.priorityOrder;
     const { PX: px, PY: py, PW: pw, HEADER_H, ROW_H } = this;
@@ -169,9 +172,9 @@ export class ManningPriorityPanel {
     ctx.textBaseline = 'middle';
     ctx.fillText('CREW PRIORITY', px + pw / 2, py + HEADER_H / 2);
 
-    // ---- NPC pool: sort by ID (stable) ----
+    // ---- NPC pool: sort by ID (stable), same company only ----
     const shipNpcs = npcs
-      .filter(n => n.shipId === shipId)
+      .filter(n => n.shipId === shipId && (localCompanyId === 0 || n.companyId === localCompanyId))
       .sort((a, b) => a.id - b.id);
 
     // Prune stale NPC IDs (left ship / disconnected)
@@ -312,7 +315,7 @@ export class ManningPriorityPanel {
 
   private increment(task: ManningTask): void {
     const shipNpcs = this._currentNpcs
-      .filter(n => n.shipId === this._currentShipId)
+      .filter(n => n.shipId === this._currentShipId && (this._localCompanyId === 0 || n.companyId === this._localCompanyId))
       .sort((a, b) => a.id - b.id);
     const assigned = new Set(Array.from(this.taskNpcs.values()).flat());
     // Only pick from genuinely idle NPCs — never steal from another task
@@ -335,7 +338,7 @@ export class ManningPriorityPanel {
     if (!this.onAssignmentChanged || this._currentShipId === 0) return;
     // Use the same stable ID-only sort so computed assignments match the displayed panel
     const shipNpcs = this._currentNpcs
-      .filter(n => n.shipId === this._currentShipId)
+      .filter(n => n.shipId === this._currentShipId && (this._localCompanyId === 0 || n.companyId === this._localCompanyId))
       .sort((a, b) => a.id - b.id);
     const assignments = this.computeAssignments(shipNpcs);
 

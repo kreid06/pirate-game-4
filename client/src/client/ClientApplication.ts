@@ -1426,7 +1426,7 @@ export class ClientApplication {
           if (newCarrierId) {
             console.log(`⚓ [BOARD] Boarded ship ${newCarrierId} (was: ${this.previousCarrierId ?? 'none'}) — syncing ammo type & crew tasks`);
             this.inputManager.resetAmmoType();
-            this.uiManager.syncCrewFromBoarding(worldState.npcs, newCarrierId);
+            this.uiManager.syncCrewFromBoarding(worldState.npcs, newCarrierId, player.companyId ?? 0);
           }
           this.previousCarrierId = newCarrierId;
         }

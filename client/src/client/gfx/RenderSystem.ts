@@ -20,7 +20,7 @@ const NPC_TASK_COLORS: Record<string, string> = {
   Sails:   '#5aafff',
   Cannons: '#ffaa44',
   Repairs: '#55dd66',
-  Combat:  '#ff5555',
+  Combat:  '#aa44ff',
   Idle:    '#DAA520',
 };
 
@@ -3597,9 +3597,11 @@ export class RenderSystem {
     this.ctx.save();
     this.ctx.globalAlpha = isMoving ? 0.7 : 1.0;
 
-    // Colour NPC by their current task assignment (darkened via globalAlpha when moving)
+    // Colour NPC by company then task assignment (darkened via globalAlpha when moving)
     const npcTask = this.npcTaskMap.get(npc.id) ?? 'Idle';
-    this.ctx.fillStyle = NPC_TASK_COLORS[npcTask] ?? '#DAA520';
+    const _npcIsEnemy   = this._localCompanyId !== 0 && npc.companyId !== 0 && npc.companyId !== this._localCompanyId;
+    const _npcIsNeutral = npc.companyId === COMPANY_NEUTRAL;
+    this.ctx.fillStyle = _npcIsNeutral ? '#222222' : _npcIsEnemy ? '#cc2222' : (NPC_TASK_COLORS[npcTask] ?? '#DAA520');
     this.ctx.strokeStyle = '#ffffff';
     this.ctx.lineWidth = 2;
     this.ctx.beginPath();
@@ -3875,11 +3877,13 @@ export class RenderSystem {
     this.ctx.textAlign = 'left';
     this.ctx.textBaseline = 'top';
 
-    const titleText = `${npc.name}  Lv.${npc.npcLevel}`;
-    const subText   = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
-    const hpText    = `HP ${npc.health}/${npc.maxHealth} (${Math.round(hpPct * 100)}%)`;
+    const COMPANY_NAMES: Record<number, string> = { [COMPANY_NEUTRAL]: 'Neutral', [COMPANY_PIRATES]: 'Pirates', [COMPANY_NAVY]: 'Navy' };
+    const titleText   = `${npc.name}  Lv.${npc.npcLevel}`;
+    const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
+    const companyText = `Company: ${COMPANY_NAMES[npc.companyId] ?? `#${npc.companyId}`}`;
+    const hpText      = `HP ${npc.health}/${npc.maxHealth} (${Math.round(hpPct * 100)}%)`;
 
-    const lines = [titleText, subText, hpText];
+    const lines = [titleText, subText, companyText, hpText];
     let boxW = Math.max(barW + padding * 2, ...lines.map(l => this.ctx.measureText(l).width + padding * 2));
     // height: 3 text lines + 2 bars (hp always, xp if sameCompany)
     const barRowH = barH + 4;
