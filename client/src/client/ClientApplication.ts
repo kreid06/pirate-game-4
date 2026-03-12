@@ -127,6 +127,9 @@ export class ClientApplication {
   private fpsTimer = 0;
   private currentFPS = 0;
   private lastRenderLogTime = 0;
+  /** Timestamp (ms) of the last sword swing, for cursor cooldown ring. */
+  private swordLastAttackMs = 0;
+  private readonly SWORD_COOLDOWN_MS = 1000;
   
   constructor(canvas: HTMLCanvasElement, config: ClientConfig) {
     this.canvas = canvas;
@@ -451,8 +454,8 @@ export class ClientApplication {
           // Not a hammer click — check for sword
           if (activeItem === 'sword' && player && !player.isMounted) {
             const now = performance.now();
-            if (now - this.lastSwordSwingMs < this.SWORD_COOLDOWN_MS) return; // still on cooldown
-            this.lastSwordSwingMs = now;
+            if (now - this.swordLastAttackMs < this.SWORD_COOLDOWN_MS) return;
+            this.swordLastAttackMs = now;
             const dir = target
               ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
               : player.rotation;
@@ -1265,11 +1268,22 @@ export class ClientApplication {
 
       // Render game world with hybrid state
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
-      
-      // Pipe screen-space mouse position so UIManager can render hotbar tooltips
+
+      // Update sword cooldown cursor ring
       if (this.inputManager) {
         const mp = this.inputManager.getMouseScreenPosition();
         this.uiManager.setMousePos(mp.x, mp.y);
+
+        // Pass sword cooldown state so RenderSystem can draw the cursor ring
+        const assignedId = this.networkManager.getAssignedPlayerId();
+        const pl = assignedId !== null ? worldToRender.players.find(p => p.id === assignedId) : null;
+        const activeSlot2 = pl?.inventory?.activeSlot ?? 0;
+        const activeItem2 = pl?.inventory?.slots[activeSlot2]?.item ?? 'none';
+        if (activeItem2 === 'sword') {
+          this.renderSystem.updateSwordCooldownCursor(mp, this.swordLastAttackMs, this.SWORD_COOLDOWN_MS);
+        } else {
+          this.renderSystem.updateSwordCooldownCursor(null, 0, this.SWORD_COOLDOWN_MS);
+        }
       }
 
       // Render UI overlay
