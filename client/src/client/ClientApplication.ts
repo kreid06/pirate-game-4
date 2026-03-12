@@ -905,6 +905,21 @@ export class ClientApplication {
         }
       };
 
+      // Handle ENTITY_HIT: update NPC/player health and show floating damage number
+      this.networkManager.onEntityHit = (entityType, id, x, y, damage, health, maxHealth, killed) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          if (entityType === 'npc') {
+            const npc = ws.npcs.find(n => n.id === id);
+            if (npc) { npc.health = health; npc.maxHealth = maxHealth; if (killed) npc.health = 0; }
+          } else {
+            const player = ws.players.find(p => p.id === id);
+            if (player) { player.health = health; player.maxHealth = maxHealth; }
+          }
+        }
+        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), damage, killed);
+      };
+
       // Build mode item selection (cannon/sail buttons in build mode panel)
       this.uiManager.onBuildItemSelect = (item) => {
         this.buildSelectedItem = item;
@@ -2160,6 +2175,8 @@ export class ClientApplication {
           onDeck: true,
           isMounted: false,
           companyId: 0,
+          health: 100,
+          maxHealth: 100,
           inventory: createEmptyInventory()
         }
       ],

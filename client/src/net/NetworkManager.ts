@@ -430,6 +430,9 @@ export class NetworkManager {
     maxHealth: number, npcLevel: number,
     statHealth: number, statDamage: number, statStamina: number, statWeight: number,
     statPoints: number) => void) | null = null;
+  /** Fired when a cannonball hits an NPC or player. */
+  public onEntityHit: ((entityType: 'npc' | 'player', id: number, x: number, y: number,
+    damage: number, health: number, maxHealth: number, killed: boolean) => void) | null = null;
   /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
   public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
   /** Fired when the server confirms the player has boarded a ship (via ladder). */
@@ -1448,6 +1451,8 @@ export class NetworkManager {
               : createEmptyInventory(),
 
             companyId: player.company ?? 0,
+            health: player.health ?? 100,
+            maxHealth: player.max_health ?? 100,
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,
@@ -1622,6 +1627,21 @@ export class NetworkManager {
         const sinkingShipId: number = message.shipId || 0;
         console.log(`🌊 SHIP_SINKING: ship ${sinkingShipId} is sinking!`);
         this.onShipSinking?.(sinkingShipId);
+        break;
+      }
+
+      case 'ENTITY_HIT': {
+        const hitEntityType: 'npc' | 'player' = message.entityType === 'player' ? 'player' : 'npc';
+        this.onEntityHit?.(
+          hitEntityType,
+          message.id       ?? 0,
+          message.x        ?? 0,
+          message.y        ?? 0,
+          message.damage   ?? 0,
+          message.health   ?? 0,
+          message.maxHealth ?? 100,
+          message.killed   ?? false,
+        );
         break;
       }
 

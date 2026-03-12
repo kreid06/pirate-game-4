@@ -117,6 +117,8 @@ export class GameEngine {
         deckId: ship.modules[0].id,
         isMounted: false,
         companyId: 0,
+        health: 100,
+        maxHealth: 100,
         inventory: createEmptyInventory()
       }],
       cannonballs: [],

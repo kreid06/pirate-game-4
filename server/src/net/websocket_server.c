@@ -584,6 +584,8 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].local_x = 0.0f;
             players[i].local_y = 0.0f;
             players[i].movement_state = PLAYER_STATE_SWIMMING;
+            players[i].health = 100;
+            players[i].max_health = 100;
             
             // ===== ADD PLAYER TO C SIMULATION FOR COLLISION DETECTION =====
             if (global_sim) {
@@ -6670,7 +6672,7 @@ int websocket_server_update(struct Sim* sim) {
                         "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
                         "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\","
                         "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
-                        "\"company\":%u%s}",
+                        "\"company\":%u,\"health\":%u,\"max_health\":%u%s}",
                         players[p].player_id, players[p].player_id,
                         players[p].x, players[p].y, players[p].rotation,
                         players[p].velocity_x, players[p].velocity_y,
@@ -6682,6 +6684,7 @@ int websocket_server_update(struct Sim* sim) {
                         players[p].mounted_module_id,
                         players[p].controlling_ship_id,
                         players[p].company_id,
+                        players[p].health, players[p].max_health,
                         inv_buf);
                 players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "%s", player_entry);
                 first_player = false;
@@ -7171,6 +7174,202 @@ void websocket_server_tick(float dt) {
             }
         }
         global_sim->hit_event_count = 0;
+    }
+
+    // ===== CANNONBALL vs ENTITY HIT DETECTION =====
+    // Cannonballs (PROJ_TYPE_CANNONBALL) deal base 75 HP damage to NPCs and
+    // players, scaled by the firing ship's damage level.  Unmounted entities
+    // are knocked back; mounted ones are not.  The projectile is consumed on hit.
+    if (global_sim) {
+        const float ENTITY_HIT_RADIUS    = 40.0f;   // client pixels
+        const float ENTITY_BASE_DAMAGE   = 75.0f;
+        const float ENTITY_KNOCKBACK     = 100.0f;  // client pixels position delta
+
+        uint16_t pi = 0;
+        while (pi < global_sim->projectile_count) {
+            struct Projectile* proj = &global_sim->projectiles[pi];
+
+            // Only cannonballs damage entities
+            if (proj->type != PROJ_TYPE_CANNONBALL) { pi++; continue; }
+
+            float px = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
+            float py = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
+
+            // Damage multiplier from firing ship level stats
+            float dmg_mult = 1.0f;
+            if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                struct Ship* fship = sim_get_ship(global_sim, (entity_id)proj->firing_ship_id);
+                if (fship) dmg_mult = ship_level_damage_mult(&fship->level_stats);
+            }
+            float damage = ENTITY_BASE_DAMAGE * dmg_mult;
+            float hit_r2  = ENTITY_HIT_RADIUS * ENTITY_HIT_RADIUS;
+
+            bool proj_consumed = false;
+
+            // ── Check NPCs ──────────────────────────────────────────────────
+            for (int ni = 0; ni < world_npc_count && !proj_consumed; ni++) {
+                WorldNpc* npc = &world_npcs[ni];
+                if (!npc->active) continue;
+                // No friendly fire: skip NPCs on the firing ship
+                if (proj->firing_ship_id != INVALID_ENTITY_ID &&
+                    npc->ship_id == (uint32_t)proj->firing_ship_id) continue;
+
+                float dx = npc->x - px;
+                float dy = npc->y - py;
+                if (dx * dx + dy * dy > hit_r2) continue;
+
+                // Apply damage
+                uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
+                if (npc->health <= dmg16) {
+                    npc->health = 0;
+                    npc->active = false; // NPC killed
+                } else {
+                    npc->health -= dmg16;
+                }
+
+                // Knockback — skip if NPC is stationed at a module
+                bool npc_at_station = (npc->state == WORLD_NPC_STATE_AT_CANNON ||
+                                       npc->state == WORLD_NPC_STATE_REPAIRING);
+                if (!npc_at_station) {
+                    float dist = sqrtf(dx * dx + dy * dy);
+                    float kx   = (dist > 0.1f) ? (dx / dist) : 1.0f;
+                    float ky   = (dist > 0.1f) ? (dy / dist) : 0.0f;
+                    if (npc->ship_id != 0) {
+                        // On a ship: push local position, then recalc world pos
+                        npc->local_x += kx * ENTITY_KNOCKBACK;
+                        npc->local_y += ky * ENTITY_KNOCKBACK;
+                        SimpleShip* npc_ship = NULL;
+                        for (int s = 0; s < ship_count; s++) {
+                            if (ships[s].active && ships[s].ship_id == npc->ship_id) {
+                                npc_ship = &ships[s]; break;
+                            }
+                        }
+                        if (npc_ship) ship_local_to_world(npc_ship, npc->local_x, npc->local_y,
+                                                           &npc->x, &npc->y);
+                    } else {
+                        npc->x += kx * ENTITY_KNOCKBACK;
+                        npc->y += ky * ENTITY_KNOCKBACK;
+                    }
+                }
+
+                // Broadcast ENTITY_HIT
+                char hit_msg[256];
+                snprintf(hit_msg, sizeof(hit_msg),
+                    "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
+                    "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                    "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                    npc->id, npc->x, npc->y, damage,
+                    (unsigned)npc->health, (unsigned)npc->max_health,
+                    (!npc->active) ? "true" : "false");
+                char hit_frame[320];
+                size_t hfl = websocket_create_frame(WS_OPCODE_TEXT, hit_msg, strlen(hit_msg),
+                                                    hit_frame, sizeof(hit_frame));
+                if (hfl > 0) {
+                    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                        struct WebSocketClient* wc = &ws_server.clients[ci];
+                        if (wc->connected && wc->handshake_complete)
+                            send(wc->fd, hit_frame, hfl, 0);
+                    }
+                }
+
+                proj_consumed = true;
+            }
+
+            // ── Check Players ────────────────────────────────────────────────
+            for (int wpi = 0; wpi < WS_MAX_CLIENTS && !proj_consumed; wpi++) {
+                WebSocketPlayer* wp = &players[wpi];
+                if (!wp->active) continue;
+                // No friendly fire: skip players on the firing ship
+                if (proj->firing_ship_id != INVALID_ENTITY_ID &&
+                    wp->parent_ship_id == (uint32_t)proj->firing_ship_id) continue;
+
+                float dx = wp->x - px;
+                float dy = wp->y - py;
+                if (dx * dx + dy * dy > hit_r2) continue;
+
+                // Apply damage
+                uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
+                if (wp->health <= dmg16) {
+                    wp->health = 0;
+                } else {
+                    wp->health -= dmg16;
+                }
+
+                // Knockback — skip if mounted to a module
+                if (!wp->is_mounted) {
+                    float dist = sqrtf(dx * dx + dy * dy);
+                    float kx   = (dist > 0.1f) ? (dx / dist) : 1.0f;
+                    float ky   = (dist > 0.1f) ? (dy / dist) : 0.0f;
+                    if (wp->parent_ship_id != 0) {
+                        // On a ship: push local position, then recalc world pos
+                        wp->local_x += kx * ENTITY_KNOCKBACK;
+                        wp->local_y += ky * ENTITY_KNOCKBACK;
+                        SimpleShip* wp_ship = NULL;
+                        for (int s = 0; s < ship_count; s++) {
+                            if (ships[s].active && ships[s].ship_id == wp->parent_ship_id) {
+                                wp_ship = &ships[s]; break;
+                            }
+                        }
+                        if (wp_ship) ship_local_to_world(wp_ship, wp->local_x, wp->local_y,
+                                                          &wp->x, &wp->y);
+                    } else {
+                        // Swimming: instant position delta + velocity impulse
+                        wp->x += kx * ENTITY_KNOCKBACK;
+                        wp->y += ky * ENTITY_KNOCKBACK;
+                        wp->velocity_x += kx * ENTITY_KNOCKBACK * 3.0f;
+                        wp->velocity_y += ky * ENTITY_KNOCKBACK * 3.0f;
+                        // Sync to sim player
+                        if (wp->sim_entity_id != 0) {
+                            for (uint16_t spi = 0; spi < global_sim->player_count; spi++) {
+                                if (global_sim->players[spi].id == wp->sim_entity_id) {
+                                    global_sim->players[spi].position.x =
+                                        Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->x));
+                                    global_sim->players[spi].position.y =
+                                        Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->y));
+                                    global_sim->players[spi].velocity.x =
+                                        Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->velocity_x));
+                                    global_sim->players[spi].velocity.y =
+                                        Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->velocity_y));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Broadcast ENTITY_HIT
+                char hit_msg[256];
+                snprintf(hit_msg, sizeof(hit_msg),
+                    "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
+                    "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                    "\"health\":%u,\"maxHealth\":%u}",
+                    wp->player_id, wp->x, wp->y, damage,
+                    (unsigned)wp->health, (unsigned)wp->max_health);
+                char hit_frame[320];
+                size_t hfl = websocket_create_frame(WS_OPCODE_TEXT, hit_msg, strlen(hit_msg),
+                                                    hit_frame, sizeof(hit_frame));
+                if (hfl > 0) {
+                    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                        struct WebSocketClient* wc = &ws_server.clients[ci];
+                        if (wc->connected && wc->handshake_complete)
+                            send(wc->fd, hit_frame, hfl, 0);
+                    }
+                }
+
+                proj_consumed = true;
+            }
+
+            if (proj_consumed) {
+                // Remove the projectile from the simulation
+                memmove(&global_sim->projectiles[pi],
+                        &global_sim->projectiles[pi + 1],
+                        (global_sim->projectile_count - pi - 1) * sizeof(struct Projectile));
+                global_sim->projectile_count--;
+                // Don't advance pi — re-check this slot
+            } else {
+                pi++;
+            }
+        }
     }
 
     // ===== TICK NPC AGENTS =====

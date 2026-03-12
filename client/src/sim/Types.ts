@@ -79,6 +79,10 @@ export interface Player {
 
   // Company/faction (COMPANY_* constants)
   companyId: number;
+
+  // Health
+  health: number;      // current HP
+  maxHealth: number;   // max HP (default 100)
 }
 
 /**

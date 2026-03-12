@@ -257,6 +257,10 @@ typedef struct WebSocketPlayer {
 
     uint8_t company_id;            // Inherited from the ship this player boards
 
+    // Health
+    uint16_t health;             // Current HP (0 = dead)
+    uint16_t max_health;         // Max HP (default 100)
+
     // Inventory
     PlayerInventory inventory;
 } WebSocketPlayer;
