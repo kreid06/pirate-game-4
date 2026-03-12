@@ -482,6 +482,10 @@ export class ClientApplication {
         }
 
         if (action === 'interact') {
+          // If the dedicated E keydown ladder handler is active, suppress all
+          // game-loop interact events to prevent mount/other modules firing.
+          if (this._suppressLadderInteract) return;
+
           // Exit build/plan mode on any interaction attempt
           this.exitAllBuildModes();
 

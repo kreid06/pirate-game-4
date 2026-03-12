@@ -6498,7 +6498,10 @@ int websocket_server_update(struct Sim* sim) {
                             if (!tl_module || !tl_ship || tl_module->type_id != MODULE_TYPE_LADDER) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"ladder_not_found\"}");
                             } else if (tl_ship->company_id != 0 &&
+                                       player->company_id != 0 &&
                                        player->company_id != tl_ship->company_id) {
+                                /* Only block if both have a company and they differ.
+                                 * Neutral players (company_id==0) may extend any ladder. */
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"company_mismatch\"}");
                             } else if (player->parent_ship_id != tl_ship->ship_id &&
                                        player->parent_ship_id != 0) {
