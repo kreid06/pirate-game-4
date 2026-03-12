@@ -576,6 +576,10 @@ export class RenderSystem {
         } else if (moduleKind === 'cannon') {
           width = 30;
           height = 20;
+        } else if (moduleKind === 'swivel') {
+          // Swivel: circular pivot — use diameter for hit-box
+          width = 22;
+          height = 22;
         } else if (moduleKind === 'mast') {
           // Masts are circles, so use radius for both width and height
           const radius = (module.moduleData?.kind === 'mast' && module.moduleData.radius) || 15;
@@ -1281,9 +1285,10 @@ export class RenderSystem {
       }
     }
     
-    // Queue cannons and steering wheels (layers 4-6)
+    // Queue cannons, swivel guns, and steering wheels (layers 4-6)
     for (const ship of worldState.ships) {
       this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
+      this.queueRenderItem(4, 'swivel-guns', () => this.drawShipSwivelGuns(ship, camera));
       this.queueRenderItem(4, 'cannon-aim-guides', () => this.drawCannonAimGuides(ship, worldState, camera), 1);
       this.queueRenderItem(4, 'rudder', () => this.drawShipRudder(ship, camera));
       if ((this.showGroupOverlay || this.activeWeaponGroups.size > 0) && this.controlGroups) {
@@ -1340,6 +1345,7 @@ export class RenderSystem {
       this.queueRenderItem(1, `ghost-hull-${id}`,       () => this.drawShipHull(ghost, camera));
       this.queueRenderItem(3, `ghost-planks-${id}`,     () => this.drawShipPlanks(ghost, camera));
       this.queueRenderItem(4, `ghost-cannons-${id}`,    () => this.drawShipCannons(ghost, camera));
+      this.queueRenderItem(4, `ghost-swivelguns-${id}`, () => this.drawShipSwivelGuns(ghost, camera));
       this.queueRenderItem(4, `ghost-rudder-${id}`,     () => this.drawShipRudder(ghost, camera));
       this.queueRenderItem(5, `ghost-wheels-${id}`,     () => this.drawShipSteeringWheels(ghost, camera));
       this.queueRenderItem(5, `ghost-ladders-${id}`,    () => this.drawShipLadders(ghost, camera));
@@ -2462,7 +2468,69 @@ export class RenderSystem {
     
     this.ctx.restore();
   }
-  
+
+  /**
+   * Draw swivel guns — small, fast-reload anti-personnel weapons on ship edges.
+   * Visual: circular pivot base + short rotating barrel.
+   */
+  private drawShipSwivelGuns(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const { phase2Alpha } = this.computeSinkState(ship);
+    if (phase2Alpha <= 0) return;
+
+    this.ctx.save();
+    if (phase2Alpha < 1) this.ctx.globalAlpha = phase2Alpha;
+
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const swivels = ship.modules.filter(m => m.kind === 'swivel');
+
+    for (const swivel of swivels) {
+      if (!swivel.moduleData || swivel.moduleData.kind !== 'swivel') continue;
+
+      const swivelData = swivel.moduleData;
+      const x = swivel.localPos.x;
+      const y = swivel.localPos.y;
+      const turretAngle = swivelData.aimDirection || 0;
+      const localRot = swivel.localRot || 0;
+      const healthRatio = Math.max(0, swivelData.health / (swivelData.maxHealth || 4000));
+      const lineWidth = 1 / cameraState.zoom;
+
+      this.ctx.save();
+      this.ctx.translate(x, y);
+      this.ctx.rotate(localRot);
+
+      // Pivot base — small circle
+      this.ctx.beginPath();
+      this.ctx.arc(0, 0, 8, 0, Math.PI * 2);
+      this.ctx.fillStyle = this.darkenByDamage('#5C3A1E', healthRatio);
+      this.ctx.strokeStyle = '#000000';
+      this.ctx.lineWidth = lineWidth;
+      this.ctx.fill();
+      this.ctx.stroke();
+
+      // Rotating barrel
+      this.ctx.save();
+      this.ctx.rotate(turretAngle);
+      this.ctx.fillStyle = this.darkenByDamage('#2a2a2a', healthRatio);
+      this.ctx.strokeStyle = '#000000';
+      this.ctx.lineWidth = lineWidth;
+      this.ctx.fillRect(-3, 0, 6, -22);   // Short barrel: 6 wide, 22 long
+      this.ctx.strokeRect(-3, 0, 6, -22);
+      this.ctx.restore();
+
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
   /**
    * Draw trajectory aim guides for cannons that are currently being manned.
    * A dashed line fans out from the barrel tip in the fire direction, with
@@ -4454,6 +4522,22 @@ export class RenderSystem {
           }
           break;
         }
+        case 'swivel': {
+          this.ctx.fillStyle = ghostFill;
+          this.ctx.strokeStyle = ghostStroke;
+          this.ctx.lineWidth = 1.2;
+          this.ctx.setLineDash([3, 2]);
+          // Pivot base circle
+          this.ctx.beginPath();
+          this.ctx.arc(0, 0, 8, 0, Math.PI * 2);
+          this.ctx.fill();
+          this.ctx.stroke();
+          // Barrel stub (pointing up)
+          this.ctx.fillRect(-3, -22, 6, 22);
+          this.ctx.strokeRect(-3, -22, 6, 22);
+          this.ctx.setLineDash([]);
+          break;
+        }
         case 'deck': {
           this.ctx.fillStyle = ghostFill;
           this.ctx.strokeStyle = ghostStroke;
@@ -4644,6 +4728,18 @@ export class RenderSystem {
           this.ctx.lineTo(Math.cos(a) * R, Math.sin(a) * R);
           this.ctx.strokeStyle = okColor; this.ctx.lineWidth = 1; this.ctx.stroke();
         }
+        break;
+      }
+      case 'swivel': {
+        // Pivot circle + barrel stub
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, 8, 0, Math.PI * 2);
+        this.ctx.fillStyle = fillColor; this.ctx.fill();
+        this.ctx.strokeStyle = okColor; this.ctx.lineWidth = 1.5; this.ctx.stroke();
+        this.ctx.fillStyle = fillColor;
+        this.ctx.strokeStyle = okColor;
+        this.ctx.fillRect(-3, -22, 6, 22);
+        this.ctx.strokeRect(-3, -22, 6, 22);
         break;
       }
       case 'deck': {

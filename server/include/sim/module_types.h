@@ -8,6 +8,9 @@
 /** Cannon reload time: shared by all sources so every cannon reloads identically. */
 #define CANNON_RELOAD_TIME_MS 3000
 
+/** Swivel gun reload time: faster than cannon, anti-personnel weapon. */
+#define SWIVEL_RELOAD_TIME_MS 1200
+
 /**
  * Module Type IDs - matches client ModuleTypeId enum
  * These are used for efficient network serialization
@@ -21,6 +24,7 @@ typedef enum {
     MODULE_TYPE_LADDER = 5,         // Boarding ladder
     MODULE_TYPE_PLANK = 6,          // Hull segment
     MODULE_TYPE_DECK = 7,           // Floor surface
+    MODULE_TYPE_SWIVEL = 8,         // Swivel gun — fast, low-damage, anti-personnel
     MODULE_TYPE_CUSTOM = 255        // User-defined
 } ModuleTypeId;
 
@@ -91,6 +95,17 @@ typedef struct {
 } PlankModuleData;
 
 /**
+ * Swivel gun — fast, low-damage, anti-personnel weapon mounted at ship edges.
+ * Skeleton: mount/dismount wired; aiming and firing are future work.
+ */
+typedef struct {
+    q16_t aim_direction;         // Current aim direction (ship-relative, radians)
+    q16_t desired_aim_direction; // Target aim direction
+    uint32_t time_since_fire;    // Time since last fire (ms)
+    uint32_t reload_time;        // Reload time (ms) — defaults to SWIVEL_RELOAD_TIME_MS
+} SwivelModuleData;
+
+/**
  * Generic ship module structure
  */
 typedef struct {
@@ -112,6 +127,7 @@ typedef struct {
         HelmModuleData helm;
         SeatModuleData seat;
         PlankModuleData plank;
+        SwivelModuleData swivel;
     } data;
 } ShipModule;
 

@@ -2129,7 +2129,7 @@ export class ClientApplication {
           // No hover required — player is physically AT the mounted module.
           if (meE.isMounted && meE.carrierId !== 0) {
             // Find the module by ID if known, else fall back to kind search on current ship
-            const MOUNTABLE = new Set(['helm', 'cannon', 'mast']);
+            const MOUNTABLE = new Set(['helm', 'cannon', 'mast', 'swivel']);
             let dismountMod: { ship: any; module: any; kind: string } | null = null;
             for (const ship of wsE.ships) {
               if (ship.id !== meE.carrierId) continue;
@@ -2181,7 +2181,7 @@ export class ClientApplication {
             }
           }
 
-          const MOUNTABLE = new Set(['helm', 'cannon', 'mast']);
+          const MOUNTABLE = new Set(['helm', 'cannon', 'mast', 'swivel']);
 
           if (MOUNTABLE.has(hov.module.kind)) {
             // ── Mount ──────────────────────────────────────────────────────────
