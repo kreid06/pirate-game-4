@@ -996,6 +996,23 @@ static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClie
             module->state_bits |= MODULE_STATE_RETRACTED;
         else
             module->state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
+        // Mirror state change into the simulation ship module array
+        if (global_sim) {
+            for (uint32_t _s = 0; _s < global_sim->ship_count; _s++) {
+                if (global_sim->ships[_s].id == ship->ship_id) {
+                    for (uint8_t _m = 0; _m < global_sim->ships[_s].module_count; _m++) {
+                        if (global_sim->ships[_s].modules[_m].id == module->id) {
+                            if (now_retracted)
+                                global_sim->ships[_s].modules[_m].state_bits |= MODULE_STATE_RETRACTED;
+                            else
+                                global_sim->ships[_s].modules[_m].state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
         log_info("🪜 Player %u toggled ladder %u on ship %u → %s (via E-interact)",
                  player->player_id, module->id, ship->ship_id,
                  now_retracted ? "RETRACTED" : "EXTENDED");
@@ -6493,6 +6510,23 @@ int websocket_server_update(struct Sim* sim) {
                                     tl_module->state_bits |= MODULE_STATE_RETRACTED;
                                 else
                                     tl_module->state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
+                                // Mirror state change into the simulation ship module array
+                                if (global_sim) {
+                                    for (uint32_t _s = 0; _s < global_sim->ship_count; _s++) {
+                                        if (global_sim->ships[_s].id == tl_ship->ship_id) {
+                                            for (uint8_t _m = 0; _m < global_sim->ships[_s].module_count; _m++) {
+                                                if (global_sim->ships[_s].modules[_m].id == tl_module_id) {
+                                                    if (now_retracted)
+                                                        global_sim->ships[_s].modules[_m].state_bits |= MODULE_STATE_RETRACTED;
+                                                    else
+                                                        global_sim->ships[_s].modules[_m].state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
+                                                    break;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
                                 log_info("🪜 Player %u toggled ladder %u → %s",
                                          player->player_id, tl_module_id,
                                          now_retracted ? "RETRACTED" : "EXTENDED");
