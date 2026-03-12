@@ -2155,18 +2155,11 @@ export class ClientApplication {
             }
 
             if (dismountMod) {
-              this._interactKind = 'mount';
-              this._suppressLadderInteract = true;
-              this._ladderHoldWasMounted = true;
-              this._ladderHoldModuleId = dismountMod.module.id;
+              // Dismount immediately on keydown — no hold ring or radial needed.
+              this._suppressLadderInteract = true; // cleared on keyup; blocks game-loop double-fire
+              this.networkManager.sendAction('dismount');
+              this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
               console.log(`🎮 E: dismount ${dismountMod.kind} ${dismountMod.module.id}`);
-              this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
-              this._ladderHoldTimer = setTimeout(() => {
-                this._ladderHoldTimer = null;
-                this.renderSystem.stopLadderHoldRing();
-                const mp = this.inputManager.getMouseScreenPosition();
-                this._radialMenu.open(mp.x, mp.y, [{ id: 'dismount', label: 'Dismount' }]);
-              }, 300);
               break;
             }
           }
