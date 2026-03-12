@@ -245,6 +245,12 @@ export class RenderSystem {
     this._quickFlashStartMs = performance.now();
   }
 
+  /** Flash a red cancel ring at the given screen position. */
+  flashCancel(pos: Vec2): void {
+    this._quickFlashPos     = pos;
+    this._quickFlashStartMs = -(performance.now()); // negative = red
+  }
+
   /** Called each frame from ClientApplication to keep sword cursor ring in sync. */
   updateSwordCooldownCursor(mouseScreenPos: Vec2 | null, lastAttackMs: number, cooldownMs: number): void {
     this.swordCursorMousePos    = mouseScreenPos;
@@ -976,20 +982,24 @@ export class RenderSystem {
       }
     }
 
-    // ── Quick-interact flash ring (expands + fades green) ─────────────────
-    if (this._quickFlashPos && this._quickFlashStartMs >= 0) {
-      const FLASH_MS = 380;
-      const fp = (now - this._quickFlashStartMs) / FLASH_MS;
-      if (fp < 1) {
+    // ── Quick-interact flash ring (expands + fades, green = confirm / red = cancel) ─
+    if (this._quickFlashPos && this._quickFlashStartMs !== -1) {
+      const FLASH_MS  = 380;
+      const isCancel  = this._quickFlashStartMs < 0;
+      const startMs   = isCancel ? -this._quickFlashStartMs : this._quickFlashStartMs;
+      const fp = (now - startMs) / FLASH_MS;
+      if (fp >= 0 && fp < 1) {
         const alpha = (1 - fp) * 0.9;
         const fr    = R + fp * 10;
         ctx.beginPath();
         ctx.arc(this._quickFlashPos.x, this._quickFlashPos.y, fr, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(80, 220, 100, ${alpha.toFixed(3)})`;
+        ctx.strokeStyle = isCancel
+          ? `rgba(220, 70, 60, ${alpha.toFixed(3)})`
+          : `rgba(80, 220, 100, ${alpha.toFixed(3)})`;
         ctx.lineWidth = 3;
         ctx.lineCap   = 'butt';
         ctx.stroke();
-      } else {
+      } else if (fp >= 1) {
         this._quickFlashPos     = null;
         this._quickFlashStartMs = -1;
       }

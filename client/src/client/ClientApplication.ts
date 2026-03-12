@@ -2371,9 +2371,14 @@ export class ClientApplication {
           const selected = this._radialMenu.getHoveredId();
           this._radialMenu.close();
           if (selected) {
-            doMountAction();
+            if (doMountAction()) {
+              this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            } else {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            }
           } else {
             console.log('🎮 radial: cancelled (centre dead zone)');
+            this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
           }
         }
         return;
@@ -2389,6 +2394,7 @@ export class ClientApplication {
 
         if (!isInRange()) {
           console.warn('🪜 ladder interact cancelled: moved out of range');
+          this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
           return;
         }
 
@@ -2408,10 +2414,14 @@ export class ClientApplication {
         const selected = this._radialMenu.getHoveredId();
         this._radialMenu.close();
 
-        if (!selected || moduleId === null) return;
+        if (!selected || moduleId === null) {
+          this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+          return;
+        }
 
         if (!isInRange()) {
           console.warn('🪜 ladder radial cancelled: moved out of range');
+          this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
           return;
         }
 
@@ -2420,9 +2430,11 @@ export class ClientApplication {
         if (selected === 'climb' || selected === 'retract') {
           // climb and retract both use module_interact (ladder must be extended)
           this.networkManager.sendModuleInteract(moduleId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
         } else if (selected === 'extend') {
           // extend always uses toggle_ladder — module_interact on retracted = climb attempt
           this.networkManager.sendToggleLadder(moduleId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
         }
       }
     });
