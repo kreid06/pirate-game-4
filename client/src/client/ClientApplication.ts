@@ -2341,10 +2341,10 @@ export class ClientApplication {
       // ── MOUNTABLE MODULES (helm / cannon / mast) — mount or dismount ────────
       if (interactKind === 'mount') {
         // Route to the correct network call based on whether the player was mounted.
-        const doMountAction = (): void => {
+        const doMountAction = (): boolean => {
           if (!isInRange()) {
             console.warn('🎮 interact cancelled: moved out of range');
-            return;
+            return false;
           }
           if (wasMounted) {
             this.networkManager.sendAction('dismount');
@@ -2352,7 +2352,10 @@ export class ClientApplication {
           } else if (moduleId !== null) {
             this.networkManager.sendModuleInteract(moduleId);
             console.log(`🎮 mount module ${moduleId}`);
+          } else {
+            return false;
           }
+          return true;
         };
 
         if (this._ladderHoldTimer !== null) {
@@ -2360,7 +2363,9 @@ export class ClientApplication {
           clearTimeout(this._ladderHoldTimer);
           this._ladderHoldTimer = null;
           this.renderSystem.stopLadderHoldRing();
-          doMountAction();
+          if (doMountAction()) {
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          }
         } else if (this._radialMenu.isOpen) {
           // Hold — execute selected option or cancel if centre dead zone
           const selected = this._radialMenu.getHoveredId();
@@ -2390,10 +2395,12 @@ export class ClientApplication {
         if (this._ladderHoldIsExtended) {
           // Extended: tap = climb (any position) or retract (on ship)
           this.networkManager.sendModuleInteract(moduleId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
           console.log(`🪜 tap: ${this._ladderHoldOnShip ? 'retract' : 'climb'} ladder ${moduleId}`);
         } else {
           // Retracted: tap = extend (toggle_ladder, works on-ship and off)
           this.networkManager.sendToggleLadder(moduleId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
           console.log(`🪜 tap: extend ladder ${moduleId}`);
         }
       } else if (this._radialMenu.isOpen) {

@@ -219,6 +219,8 @@ export class RenderSystem {
   private ladderHoldMousePos: Vec2 | null = null;
   private ladderHoldStartMs = 0;
   private ladderHoldActive  = false;
+  private _quickFlashPos: Vec2 | null = null;
+  private _quickFlashStartMs = -1;
 
   /** Generic radial action menu (set by ClientApplication). */
   private _radialMenu: RadialMenu | null = null;
@@ -235,6 +237,12 @@ export class RenderSystem {
   stopLadderHoldRing(): void {
     this.ladderHoldActive   = false;
     this.ladderHoldMousePos = null;
+  }
+
+  /** Flash a green confirmation ring at the given screen position (quick tap feedback). */
+  flashInteract(pos: Vec2): void {
+    this._quickFlashPos     = pos;
+    this._quickFlashStartMs = performance.now();
   }
 
   /** Called each frame from ClientApplication to keep sword cursor ring in sync. */
@@ -933,36 +941,58 @@ export class RenderSystem {
 
   /** Draw the sword cooldown ring around the mouse cursor (screen space). */
   private drawLadderHoldRing(): void {
-    if (!this.ladderHoldActive || !this.ladderHoldMousePos) return;
-
-    const ctx  = this.ctx;
-    const cx   = this.ladderHoldMousePos.x;
-    const cy   = this.ladderHoldMousePos.y;
-    const R    = 18; // slightly larger than sword ring
-    const HOLD_MS = 1000;
-    const progress = Math.min((performance.now() - this.ladderHoldStartMs) / HOLD_MS, 1);
+    const ctx = this.ctx;
+    const R   = 18;
+    const now = performance.now();
 
     ctx.save();
 
-    // Dark track
-    ctx.beginPath();
-    ctx.arc(cx, cy, R, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
-    ctx.lineWidth = 3.5;
-    ctx.stroke();
+    // ── Hold progress ring ────────────────────────────────────────────────
+    if (this.ladderHoldActive && this.ladderHoldMousePos) {
+      const cx = this.ladderHoldMousePos.x;
+      const cy = this.ladderHoldMousePos.y;
+      const HOLD_MS = 300;
+      const progress = Math.min((now - this.ladderHoldStartMs) / HOLD_MS, 1);
 
-    // Amber fill arc, clockwise from top
-    if (progress > 0) {
-      const startAngle = -Math.PI / 2;
-      const endAngle   = startAngle + progress * Math.PI * 2;
+      // Dark track
       ctx.beginPath();
-      ctx.arc(cx, cy, R, startAngle, endAngle);
-      ctx.strokeStyle = progress >= 1
-        ? 'rgba(255, 220, 80, 1.0)'   // bright gold when complete
-        : 'rgba(255, 160, 30, 0.9)';  // amber while filling
-      ctx.lineWidth = 3;
-      ctx.lineCap = 'round';
+      ctx.arc(cx, cy, R, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+      ctx.lineWidth = 3.5;
       ctx.stroke();
+
+      // Amber fill arc, clockwise from top
+      if (progress > 0) {
+        const startAngle = -Math.PI / 2;
+        const endAngle   = startAngle + progress * Math.PI * 2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, R, startAngle, endAngle);
+        ctx.strokeStyle = progress >= 1
+          ? 'rgba(255, 220, 80, 1.0)'   // bright gold when complete
+          : 'rgba(255, 160, 30, 0.9)';  // amber while filling
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      }
+    }
+
+    // ── Quick-interact flash ring (expands + fades green) ─────────────────
+    if (this._quickFlashPos && this._quickFlashStartMs >= 0) {
+      const FLASH_MS = 380;
+      const fp = (now - this._quickFlashStartMs) / FLASH_MS;
+      if (fp < 1) {
+        const alpha = (1 - fp) * 0.9;
+        const fr    = R + fp * 10;
+        ctx.beginPath();
+        ctx.arc(this._quickFlashPos.x, this._quickFlashPos.y, fr, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(80, 220, 100, ${alpha.toFixed(3)})`;
+        ctx.lineWidth = 3;
+        ctx.lineCap   = 'butt';
+        ctx.stroke();
+      } else {
+        this._quickFlashPos     = null;
+        this._quickFlashStartMs = -1;
+      }
     }
 
     ctx.restore();
