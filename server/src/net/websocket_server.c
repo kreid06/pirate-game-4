@@ -6692,10 +6692,10 @@ int websocket_server_update(struct Sim* sim) {
         // Log which ship source we're using
         static uint32_t last_ship_source_log = 0;
         if (current_time - last_ship_source_log > 5000) {
-            log_info("📦 Ship source: sim=%p, sim->ship_count=%d, simple_ship_count=%d",
-                     (void*)sim, sim ? sim->ship_count : 0, ship_count);
+            // log_info("📦 Ship source: sim=%p, sim->ship_count=%d, simple_ship_count=%d",
+            //          (void*)sim, sim ? sim->ship_count : 0, ship_count);
             if (ship_count > 0) {
-                log_info("📦 Simple ship[0]: module_count=%d", ships[0].module_count);
+                // log_info("📦 Simple ship[0]: module_count=%d", ships[0].module_count);
             }
             last_ship_source_log = current_time;
         }

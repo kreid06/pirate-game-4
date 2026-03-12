@@ -233,9 +233,9 @@ void sim_update_players(struct Sim* sim, q16_t dt) {
         }
     }
     
-    // Log player positions periodically
-    static uint32_t pos_log_count = 0;
-    if (pos_log_count++ % 100 == 0 && sim->player_count > 0) {
+    // Periodic player position log disabled — too noisy
+    static uint32_t pos_log_count = 0; (void)(pos_log_count++);
+    if (false && pos_log_count > 0 && sim->player_count > 0) {
         log_info("📍 Player positions:");
         for (uint16_t i = 0; i < sim->player_count; i++) {
             struct Player* p = &sim->players[i];
@@ -1745,9 +1745,9 @@ static Vec2Q16 closest_point_on_hull(Vec2Q16 player_pos, const struct Ship* ship
 }
 
 void handle_player_ship_collisions(struct Sim* sim) {
-    // Debug log periodically
+    // Debug log periodically (disabled — too noisy)
     static uint32_t debug_count = 0;
-    bool should_log = (debug_count++ % 30 == 0);
+    bool should_log = false; (void)(debug_count++);
     
     // First, check for swimming player collisions with ship hulls
     for (uint16_t i = 0; i < sim->player_count; i++) {
