@@ -76,7 +76,7 @@ export class RadialMenu {
     let bestIdx = 0;
     let bestDiff = Infinity;
     for (let i = 0; i < n; i++) {
-      const optAngle = base + i * slice;
+      const optAngle = base + (i + 0.5) * slice;
       let diff = Math.abs(angle - optAngle);
       if (diff > Math.PI) diff = Math.PI * 2 - diff;
       if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
