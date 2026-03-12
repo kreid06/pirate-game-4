@@ -74,7 +74,7 @@ export class ManningPriorityPanel {
     this.lastTaskMap.clear();
     if (shipId === 0) return;
 
-    const shipNpcs = npcs.filter(n => n.shipId === shipId && (localCompanyId === 0 || n.companyId === localCompanyId));
+    const shipNpcs = npcs.filter(n => n.shipId === shipId && n.companyId === localCompanyId);
 
     // Seed task lists from the server-authoritative NPC role field.
     // role 1 = Gunner  → Cannons
@@ -174,7 +174,7 @@ export class ManningPriorityPanel {
 
     // ---- NPC pool: sort by ID (stable), same company only ----
     const shipNpcs = npcs
-      .filter(n => n.shipId === shipId && (localCompanyId === 0 || n.companyId === localCompanyId))
+      .filter(n => n.shipId === shipId && n.companyId === localCompanyId)
       .sort((a, b) => a.id - b.id);
 
     // Prune stale NPC IDs (left ship / disconnected)
@@ -315,7 +315,7 @@ export class ManningPriorityPanel {
 
   private increment(task: ManningTask): void {
     const shipNpcs = this._currentNpcs
-      .filter(n => n.shipId === this._currentShipId && (this._localCompanyId === 0 || n.companyId === this._localCompanyId))
+      .filter(n => n.shipId === this._currentShipId && n.companyId === this._localCompanyId)
       .sort((a, b) => a.id - b.id);
     const assigned = new Set(Array.from(this.taskNpcs.values()).flat());
     // Only pick from genuinely idle NPCs — never steal from another task
@@ -338,7 +338,7 @@ export class ManningPriorityPanel {
     if (!this.onAssignmentChanged || this._currentShipId === 0) return;
     // Use the same stable ID-only sort so computed assignments match the displayed panel
     const shipNpcs = this._currentNpcs
-      .filter(n => n.shipId === this._currentShipId && (this._localCompanyId === 0 || n.companyId === this._localCompanyId))
+      .filter(n => n.shipId === this._currentShipId && n.companyId === this._localCompanyId)
       .sort((a, b) => a.id - b.id);
     const assignments = this.computeAssignments(shipNpcs);
 

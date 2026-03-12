@@ -75,7 +75,7 @@ export class UIManager {
   // Manning priority panel
   private manningPanel = new ManningPriorityPanel();
 
-  // Company menu (toggled by [L])
+  // Company menu (toggled by [K])
   private companyMenu = new CompanyMenu();
   // Player character menu (toggled by [E] when menu is open)
   private playerMenu = new PlayerMenu();
@@ -1000,8 +1000,8 @@ export class UIManager {
     }
 
     switch (event.code) {
-      case 'KeyL':
-        // [L] toggles (opens or closes) the company ledger menu
+      case 'KeyK':
+        // [K] toggles (opens or closes) the company ledger menu
         this.companyMenu.toggle();
         // Close sibling menus so only one is open at a time
         if (this.companyMenu.visible) { this.playerMenu.close(); this.shipMenu.close(); }
