@@ -1352,6 +1352,16 @@ export class NetworkManager {
                       // NOTE: bit 0 is MODULE_STATE_ACTIVE (always set) — do NOT use & 1
                       extended: !((mod.state ?? 0) & 1024),
                     };
+                  } else if (kind === 'swivel') {
+                    moduleData = {
+                      kind: 'swivel',
+                      aimDirection: mod.aimDir ?? 0,
+                      desiredAimDirection: mod.aimDir ?? 0,
+                      reloadTime: 1.2,
+                      timeSinceLastFire: 0,
+                      health: mod.health ?? 4000,
+                      maxHealth: mod.maxHealth ?? 4000,
+                    };
                   }
                   
                   gameplayModules.push({

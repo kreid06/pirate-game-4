@@ -71,6 +71,8 @@ export class RenderSystem {
   private mastBuildMode: boolean = false;
   /** The mast slot (mastIndex+ship) currently under the cursor in mast build mode. */
   private hoveredMastSlot: { ship: Ship; mastIndex: number } | null = null;
+  /** Whether swivel gun placement build mode is active (swivel item held). */
+  private swivelBuildMode: boolean = false;
   /** An existing but fiber-damaged mast within sail radius of the cursor — for R-key repair. */
   private hoveredDamagedMast: { ship: Ship; mastIndex: number } | null = null;
   /** Whether helm replacement build mode is active (helm_kit item held). */
@@ -304,6 +306,20 @@ export class RenderSystem {
    */
   isInMastBuildMode(): boolean {
     return this.mastBuildMode;
+  }
+
+  /**
+   * Enable or disable swivel gun placement build mode
+   */
+  setSwivelBuildMode(active: boolean): void {
+    this.swivelBuildMode = active;
+  }
+
+  /**
+   * Whether swivel build mode is currently active
+   */
+  isInSwivelBuildMode(): boolean {
+    return this.swivelBuildMode;
   }
 
   /**
@@ -1248,7 +1264,7 @@ export class RenderSystem {
 
     // Ghost placement plan markers — visible in build menu mode, B-key mode, or hotbar build mode
     if (this.ghostPlacements.length > 0 &&
-        (this.buildMenuOpen || this.explicitBuildState !== null || this.cannonBuildMode || this.mastBuildMode)) {
+        (this.buildMenuOpen || this.explicitBuildState !== null || this.cannonBuildMode || this.mastBuildMode || this.swivelBuildMode)) {
       for (const ship of worldState.ships) {
         const shipGhosts = this.ghostPlacements.filter(g => g.shipId === ship.id);
         if (shipGhosts.length > 0) {
@@ -2492,14 +2508,14 @@ export class RenderSystem {
     const swivels = ship.modules.filter(m => m.kind === 'swivel');
 
     for (const swivel of swivels) {
-      if (!swivel.moduleData || swivel.moduleData.kind !== 'swivel') continue;
+      // Use moduleData if present; fall back to safe defaults so newly-placed swivels always render
+      const swivelData = (swivel.moduleData?.kind === 'swivel') ? swivel.moduleData : null;
 
-      const swivelData = swivel.moduleData;
       const x = swivel.localPos.x;
       const y = swivel.localPos.y;
-      const turretAngle = swivelData.aimDirection || 0;
+      const turretAngle = swivelData?.aimDirection ?? 0;
       const localRot = swivel.localRot || 0;
-      const healthRatio = Math.max(0, swivelData.health / (swivelData.maxHealth || 4000));
+      const healthRatio = swivelData ? Math.max(0, swivelData.health / (swivelData.maxHealth || 4000)) : 1;
       const lineWidth = 1 / cameraState.zoom;
 
       this.ctx.save();
@@ -4436,8 +4452,9 @@ export class RenderSystem {
 
     // In hotbar mode, find the nearest matching ghost within the 80u snap radius
     const hotbarKind: GhostModuleKind | null =
-      this.cannonBuildMode && !this.explicitBuildState ? 'cannon' :
-      this.mastBuildMode  && !this.explicitBuildState ? 'mast' : null;
+      this.cannonBuildMode  && !this.explicitBuildState ? 'cannon' :
+      this.mastBuildMode   && !this.explicitBuildState ? 'mast' :
+      this.swivelBuildMode && !this.explicitBuildState ? 'swivel' : null;
     let snapGhostId: string | null = null;
     if (hotbarKind && this.mouseWorldPos) {
       let bestDist = 80;

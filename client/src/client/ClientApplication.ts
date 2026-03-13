@@ -1306,10 +1306,11 @@ export class ClientApplication {
         if (entries.length === 0) { this.localPendingModules.delete(ship.id); return ship; }
         this.localPendingModules.set(ship.id, entries);
         anyPending = true;
-        // Don't add duplicates — skip if server already sent a module at same spot
+        // Don't add duplicates — skip if server already sent a module of the SAME KIND at same spot
         const newMods = entries
           .map(e => e.module)
           .filter(pm => !ship.modules.some(m =>
+            m.kind === pm.kind &&
             Math.abs(m.localPos.x - pm.localPos.x) < 5 &&
             Math.abs(m.localPos.y - pm.localPos.y) < 5
           ));
@@ -1604,8 +1605,9 @@ export class ClientApplication {
     const activeSlot  = player?.inventory?.activeSlot ?? 0;
     const activeItem  = player?.inventory?.slots[activeSlot]?.item ?? 'none';
     const inBuildMode       = activeItem === 'plank';
-    const inCannonBuildMode = activeItem === 'cannon';
-    const inMastBuildMode   = activeItem === 'sail';
+    const inCannonBuildMode  = activeItem === 'cannon';
+    const inMastBuildMode    = activeItem === 'sail';
+    const inSwivelBuildMode  = activeItem === 'swivel';
     const inHelmBuildMode   = activeItem === 'helm_kit';
     const inDeckBuildMode   = activeItem === 'deck';
 
@@ -1638,10 +1640,11 @@ export class ClientApplication {
     this.renderSystem.setBuildMode(!this.explicitBuildMode && inBuildMode);
     this.renderSystem.setCannonBuildMode(!this.explicitBuildMode && inCannonBuildMode);
     this.renderSystem.setMastBuildMode(!this.explicitBuildMode && inMastBuildMode);
+    this.renderSystem.setSwivelBuildMode(!this.explicitBuildMode && inSwivelBuildMode);
     this.renderSystem.setHelmBuildMode(!this.explicitBuildMode && inHelmBuildMode);
     this.renderSystem.setDeckBuildMode(!this.explicitBuildMode && inDeckBuildMode);
     this.inputManager.buildMode = this.explicitBuildMode || this.buildMenuOpen
-      || inBuildMode || inCannonBuildMode || inMastBuildMode || inHelmBuildMode || inDeckBuildMode;
+      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode;
   }
 
   /**
