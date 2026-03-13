@@ -88,7 +88,7 @@ export class ClientApplication {
 
   // Explicit build mode (B key) — independent of hotbar item build modes
   private explicitBuildMode = false;
-  private buildSelectedItem: 'cannon' | 'sail' = 'cannon';
+  private buildSelectedItem: 'cannon' | 'sail' | 'swivel' = 'cannon';
   private buildRotationDeg = 0;
 
   // Ghost placement system — B key opens build menu, player places planning markers
@@ -770,9 +770,9 @@ export class ClientApplication {
           // If a buildable item is in the hotbar, also enter free-placement mode
           const activeSlot = player.inventory?.activeSlot ?? 0;
           const activeItem = player.inventory?.slots[activeSlot]?.item ?? 'none';
-          if (activeItem === 'cannon' || activeItem === 'sail') {
+          if (activeItem === 'cannon' || activeItem === 'sail' || activeItem === 'swivel') {
             this.explicitBuildMode = true;
-            this.buildSelectedItem = activeItem as 'cannon' | 'sail';
+            this.buildSelectedItem = activeItem as 'cannon' | 'sail' | 'swivel';
           }
           console.log(`🏗️ [BUILD MENU] OPENED${this.explicitBuildMode ? ` (free-place: ${this.buildSelectedItem})` : ' (plan mode)'}`);
         }
@@ -1611,7 +1611,7 @@ export class ClientApplication {
 
     // Track whether the active item changed while in explicit build mode
     if (this.explicitBuildMode) {
-      if (activeItem === 'cannon' || activeItem === 'sail') {
+      if (activeItem === 'cannon' || activeItem === 'sail' || activeItem === 'swivel') {
         // Keep item type in sync with hotbar
         if (this.buildSelectedItem !== activeItem) {
           this.buildSelectedItem = activeItem;
@@ -1626,7 +1626,7 @@ export class ClientApplication {
         this.syncBuildModeState();
         console.log('🔨 [BUILD MODE] EXITED (item changed)');
       }
-    } else if (this.buildMenuOpen && (activeItem === 'cannon' || activeItem === 'sail')) {
+    } else if (this.buildMenuOpen && (activeItem === 'cannon' || activeItem === 'sail' || activeItem === 'swivel')) {
       // Plan mode is open and player equipped a buildable item — jump straight into build
       this.explicitBuildMode = true;
       this.buildSelectedItem = activeItem;
@@ -1832,7 +1832,7 @@ export class ClientApplication {
     const activeSlot  = player.inventory?.activeSlot ?? 0;
     const activeItem  = player.inventory?.slots[activeSlot]?.item ?? 'none';
     const itemToKind: Partial<Record<string, GhostModuleKind>> = {
-      cannon: 'cannon', sail: 'mast',
+      cannon: 'cannon', sail: 'mast', swivel: 'swivel',
     };
     const matchKind = itemToKind[activeItem];
     if (!matchKind) return false;
@@ -1891,6 +1891,18 @@ export class ClientApplication {
       pending.push({ module: newCannon, expiry: Date.now() + 5000 });
       this.localPendingModules.set(ship.id, pending);
       this.networkManager.sendPlaceCannonAt(ship.id, localX, localY, localRot);
+    } else if (matchKind === 'swivel') {
+      console.log(`🔫 [GHOST SNAP] Placing swivel at ghost pos (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${(localRot * 180 / Math.PI).toFixed(0)}°`);
+      const newSwivel = ModuleUtils.createDefaultModule(tempId, 'swivel', Vec2.from(localX, localY));
+      newSwivel.localRot = localRot;
+      for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
+        const s = state?.ships.find(sh => sh.id === ship.id);
+        if (s) s.modules.push(newSwivel);
+      }
+      const pending = this.localPendingModules.get(ship.id) ?? [];
+      pending.push({ module: newSwivel, expiry: Date.now() + 5000 });
+      this.localPendingModules.set(ship.id, pending);
+      this.networkManager.sendPlaceSwivelAt(ship.id, localX, localY, localRot);
     } else {
       // mast
       const mastCount = ship.modules.filter(m => m.kind === 'mast').length;
@@ -1953,7 +1965,9 @@ export class ClientApplication {
     if (this.buildSelectedItem === 'sail') localY = 0;
 
     // Geometry-based overlap check against existing non-plank, non-deck modules
-    const newKind = this.buildSelectedItem === 'cannon' ? 'cannon' as const : 'mast' as const;
+    const newKind = this.buildSelectedItem === 'cannon' ? 'cannon' as const
+                  : this.buildSelectedItem === 'swivel' ? 'swivel' as const
+                  : 'mast' as const;
 
     // Cannon base half-width = 15; mast radius = 15 — center must be at least this far from hull edge
     const placementMargin = 15;
@@ -2017,6 +2031,18 @@ export class ClientApplication {
       pending.push({ module: newCannon, expiry: Date.now() + 5000 });
       this.localPendingModules.set(shipRef.id, pending);
       this.networkManager.sendPlaceCannonAt(shipRef.id, localX, localY, rotationRad);
+    } else if (this.buildSelectedItem === 'swivel') {
+      console.log(`🔫 [BUILD] Placing swivel at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${this.buildRotationDeg}° on ship ${shipRef.id}`);
+      const newSwivel = ModuleUtils.createDefaultModule(tempId, 'swivel', Vec2.from(localX, localY));
+      newSwivel.localRot = rotationRad;
+      for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
+        const s = state?.ships.find(sh => sh.id === shipRef.id);
+        if (s) s.modules.push(newSwivel);
+      }
+      const pending = this.localPendingModules.get(shipRef.id) ?? [];
+      pending.push({ module: newSwivel, expiry: Date.now() + 5000 });
+      this.localPendingModules.set(shipRef.id, pending);
+      this.networkManager.sendPlaceSwivelAt(shipRef.id, localX, localY, rotationRad);
     } else {
       // Sail — constrain to rectangular body of ship (away from bow/stern curves)
       const MAST_X_MIN = -240, MAST_X_MAX = 200;

@@ -382,7 +382,7 @@ export class RenderSystem {
   }
 
   // Explicit B-key build mode ghost preview state
-  private explicitBuildState: { item: 'cannon' | 'sail'; rotationDeg: number } | null = null;
+  private explicitBuildState: { item: 'cannon' | 'sail' | 'swivel'; rotationDeg: number } | null = null;
 
   // Ghost placement plan markers and pending ghost cursor
   private ghostPlacements: GhostPlacement[] = [];
@@ -393,7 +393,7 @@ export class RenderSystem {
    * Set explicit build mode state for ghost preview rendering.
    * Pass null to disable.
    */
-  setExplicitBuildMode(state: { item: 'cannon' | 'sail'; rotationDeg: number } | null): void {
+  setExplicitBuildMode(state: { item: 'cannon' | 'sail' | 'swivel'; rotationDeg: number } | null): void {
     this.explicitBuildState = state;
   }
 
@@ -4815,7 +4815,9 @@ export class RenderSystem {
 
     // Validate placement using geometry (OBB/circle) overlap — not a simple radius check
     const rotRad = (rotationDeg * Math.PI) / 180;
-    const newKind = item === 'cannon' ? 'cannon' as const : 'mast' as const;
+    const newKind = item === 'cannon' ? 'cannon' as const
+                  : item === 'swivel' ? 'swivel' as const
+                  : 'mast' as const;
     const newFp = getModuleFootprint(newKind);
     let overlaps = false;
     let ghostBlocked = false;
@@ -4897,6 +4899,19 @@ export class RenderSystem {
       this.ctx.strokeStyle = valid ? '#55ee55' : ghostSnap ? '#33ccbb' : ghostBlocked ? '#ee9933' : '#ee5555';
       this.ctx.fillRect(-8, -38, 16, 30);
       this.ctx.strokeRect(-8, -38, 16, 30);
+    } else if (item === 'swivel') {
+      // -- Swivel base (smaller than cannon) --
+      this.ctx.fillStyle   = valid ? '#336633' : ghostSnap ? '#1a4d44' : ghostBlocked ? '#664422' : '#663333';
+      this.ctx.strokeStyle = valid ? '#88ff88' : ghostSnap ? '#44ddcc' : ghostBlocked ? '#ffaa44' : '#ff8888';
+      this.ctx.lineWidth   = 1 / zoom;
+      this.ctx.fillRect(-8, -8, 16, 16);
+      this.ctx.strokeRect(-8, -8, 16, 16);
+
+      // -- Short barrel --
+      this.ctx.fillStyle   = valid ? '#225522' : ghostSnap ? '#1a4d44' : ghostBlocked ? '#553311' : '#552222';
+      this.ctx.strokeStyle = valid ? '#55ee55' : ghostSnap ? '#33ccbb' : ghostBlocked ? '#ee9933' : '#ee5555';
+      this.ctx.fillRect(-4, -22, 8, 16);
+      this.ctx.strokeRect(-4, -22, 8, 16);
     } else {
       // -- Mast pole --
       const radius = 15;
@@ -4923,7 +4938,7 @@ export class RenderSystem {
 
     // Status label in screen space (below ghost)
     const label = valid
-      ? (item === 'cannon' ? 'Place Cannon' : 'Place Sail')
+      ? (item === 'cannon' ? 'Place Cannon' : item === 'swivel' ? 'Place Swivel' : 'Place Sail')
       : ghostSnap        ? '⚡ Snap to plan!'
       : ghostBlocked      ? 'Remove plan first!'
       : overlaps         ? 'Blocked!'

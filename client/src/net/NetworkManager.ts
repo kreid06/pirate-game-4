@@ -74,6 +74,7 @@ export enum MessageType {
   PLACE_MAST_AT = 'place_mast_at',
   REPLACE_HELM = 'replace_helm',
   PLACE_DECK = 'place_deck',
+  PLACE_SWIVEL_AT = 'place_swivel_at',
   CREW_ASSIGN = 'crew_assign',
 
   PING = 'ping',
@@ -367,6 +368,15 @@ interface ReplaceHelmMessage extends NetworkMessage {
 interface PlaceDeckMessage extends NetworkMessage {
   type: MessageType.PLACE_DECK;
   timestamp: number;
+}
+
+interface PlaceSwivelAtMessage extends NetworkMessage {
+  type: MessageType.PLACE_SWIVEL_AT;
+  timestamp: number;
+  shipId: number;
+  localX: number;
+  localY: number;
+  rotation: number;
 }
 
 interface CrewAssignMessage extends NetworkMessage {
@@ -1036,6 +1046,16 @@ export class NetworkManager {
   sendPlaceMastAt(shipId: number, localX: number, localY: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_MAST_AT, timestamp: Date.now(), shipId, localX, localY });
+  }
+
+  /**
+   * Request the server to place a new swivel gun at an arbitrary ship-local position.
+   * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
+   * Consumes 1 ITEM_SWIVEL from the player's inventory.
+   */
+  sendPlaceSwivelAt(shipId: number, localX: number, localY: number, rotation: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_SWIVEL_AT, timestamp: Date.now(), shipId, localX, localY, rotation });
   }
 
   /**

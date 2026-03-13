@@ -675,6 +675,8 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].inventory.slots[7].quantity = 3;
             players[i].inventory.slots[8].item     = ITEM_SWORD;
             players[i].inventory.slots[8].quantity = 1;
+            players[i].inventory.slots[9].item     = ITEM_SWIVEL;
+            players[i].inventory.slots[9].quantity = 3;
 
             return &players[i];
         }
@@ -6002,6 +6004,93 @@ int websocket_server_update(struct Sim* sim) {
                                                      player->player_id, new_id, local_x, local_y, sim_ship->id);
                                             snprintf(response, sizeof(response),
                                                 "{\"type\":\"message_ack\",\"status\":\"mast_placed_at\",\"mast_id\":%u}",
+                                                new_id);
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strstr(payload, "\"type\":\"place_swivel_at\"")) {
+                            // FREE-PLACE SWIVEL: place a swivel gun at an arbitrary ship-local position.
+                            // Payload: {"type":"place_swivel_at","shipId":N,"localX":F,"localY":F,"rotation":F}
+                            // Consumes 1 ITEM_SWIVEL from the placing player's inventory.
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    int sw_slot = -1;
+                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                        if (player->inventory.slots[s].item == ITEM_SWIVEL &&
+                                            player->inventory.slots[s].quantity > 0) {
+                                            sw_slot = s; break;
+                                        }
+                                    }
+                                    if (sw_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_swivel\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        uint32_t target_ship_id = player->parent_ship_id;
+                                        const char* p_sid = strstr(payload, "\"shipId\":");
+                                        if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = sid; }
+
+                                        SimpleShip* sw_simple = find_ship(target_ship_id);
+                                        struct Ship* sw_sim = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == target_ship_id) {
+                                                sw_sim = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        if (!sw_sim || !sw_simple) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else if (sw_sim->module_count >= MAX_MODULES_PER_SHIP ||
+                                                   sw_simple->module_count >= MAX_MODULES_PER_SHIP) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                        } else {
+                                            float local_x = 0.0f, local_y = 0.0f, rotation = 0.0f;
+                                            const char* px = strstr(payload, "\"localX\":");
+                                            const char* py = strstr(payload, "\"localY\":");
+                                            const char* pr = strstr(payload, "\"rotation\":");
+                                            if (px) sscanf(px + 9,  "%f", &local_x);
+                                            if (py) sscanf(py + 9,  "%f", &local_y);
+                                            if (pr) sscanf(pr + 11, "%f", &rotation);
+
+                                            uint16_t max_id = 0;
+                                            for (uint8_t m = 0; m < sw_sim->module_count; m++)
+                                                if (sw_sim->modules[m].id > max_id) max_id = sw_sim->modules[m].id;
+                                            for (uint8_t m = 0; m < sw_simple->module_count; m++)
+                                                if (sw_simple->modules[m].id > max_id) max_id = sw_simple->modules[m].id;
+                                            uint16_t new_id = max_id + 1;
+
+                                            ShipModule ns;
+                                            memset(&ns, 0, sizeof(ShipModule));
+                                            ns.id          = new_id;
+                                            ns.type_id     = MODULE_TYPE_SWIVEL;
+                                            ns.local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_x));
+                                            ns.local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
+                                            ns.local_rot   = Q16_FROM_FLOAT(rotation);
+                                            ns.state_bits  = MODULE_STATE_ACTIVE;
+                                            ns.health      = 6000;
+                                            ns.max_health  = 6000;
+                                            ns.data.swivel.aim_direction         = Q16_FROM_FLOAT(0.0f);
+                                            ns.data.swivel.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+                                            ns.data.swivel.reload_time           = SWIVEL_RELOAD_TIME_MS;
+
+                                            sw_sim->modules[sw_sim->module_count++]       = ns;
+                                            sw_simple->modules[sw_simple->module_count++] = ns;
+
+                                            player->inventory.slots[sw_slot].quantity--;
+                                            if (player->inventory.slots[sw_slot].quantity == 0)
+                                                player->inventory.slots[sw_slot].item = ITEM_NONE;
+
+                                            log_info("🔫 Player %u placed swivel %u at (%.1f,%.1f) rot=%.2f on ship %u",
+                                                     player->player_id, new_id, local_x, local_y, rotation, sw_sim->id);
+                                            snprintf(response, sizeof(response),
+                                                "{\"type\":\"message_ack\",\"status\":\"swivel_placed_at\",\"swivel_id\":%u}",
                                                 new_id);
                                         }
                                     }

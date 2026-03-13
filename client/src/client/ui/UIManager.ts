@@ -96,14 +96,14 @@ export class UIManager {
   // Explicit build mode (B key) overlay state
   private buildModeState: {
     active: boolean;
-    selectedItem: 'cannon' | 'sail';
+    selectedItem: 'cannon' | 'sail' | 'swivel';
     rotationDeg: number;
     sailCount: number;
     maxSails: number;
   } | null = null;
 
-  /** Called when the player clicks a build item button (cannon/sail). */
-  public onBuildItemSelect: ((item: 'cannon' | 'sail') => void) | null = null;
+  /** Called when the player clicks a build item button (cannon/sail/swivel). */
+  public onBuildItemSelect: ((item: 'cannon' | 'sail' | 'swivel') => void) | null = null;
   /** Called when a weapon group has its mode cycled via right-click. */
   public onGroupModeChange: ((groupIndex: number, mode: WeaponGroupMode) => void) | null = null;
   /** Cached from last render frame — used by handleRightClick for hotbar hit-testing. */
@@ -510,7 +510,7 @@ export class UIManager {
    */
   setBuildModeState(state: {
     active: boolean;
-    selectedItem: 'cannon' | 'sail';
+    selectedItem: 'cannon' | 'sail' | 'swivel';
     rotationDeg: number;
     sailCount: number;
     maxSails: number;
@@ -704,6 +704,8 @@ export class UIManager {
 
     const itemLabel = selectedItem === 'cannon'
       ? '🔫 CANNON'
+      : selectedItem === 'swivel'
+      ? '🔫 SWIVEL'
       : `⛵ SAIL (${sailCount}/${maxSails})`;
     ctx.font = 'bold 22px Consolas, monospace';
     ctx.textAlign = 'center';
