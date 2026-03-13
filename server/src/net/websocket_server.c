@@ -3343,6 +3343,24 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             continue; /* ungrouped swivel in group mode */
         }
 
+        /* Only aim a swivel when a crew member is physically present at the station
+         * (same gate as the cannon Pass 2 occupant check above).
+         * A WorldNpc in WORLD_NPC_STATE_AT_GUN counts as present. */
+        {
+            bool swivel_has_occupant = false;
+            for (int ni = 0; ni < world_npc_count; ni++) {
+                WorldNpc* wnpc = &world_npcs[ni];
+                if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
+                    wnpc->ship_id == ship->ship_id &&
+                    wnpc->assigned_weapon_id == sw->id &&
+                    wnpc->state == WORLD_NPC_STATE_AT_GUN) {
+                    swivel_has_occupant = true;
+                    break;
+                }
+            }
+            if (!swivel_has_occupant) continue;
+        }
+
         /* Propagate helm aim angle onto swivel desired_aim_direction.
          * Uses the same offset convention as handle_swivel_aim. */
         float sw_base     = Q16_TO_FLOAT(sw->local_rot);
@@ -3908,14 +3926,14 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
         return;
     }
     
-    // Iterate through all modules to find cannons
+    // Iterate through all modules to find cannons and NPC-manned swivels
     for (uint8_t m = 0; m < sim_ship->module_count; m++) {
         ShipModule* module = &sim_ship->modules[m];
         
-        if (module->type_id != MODULE_TYPE_CANNON) continue;
+        if (module->type_id != MODULE_TYPE_CANNON && module->type_id != MODULE_TYPE_SWIVEL) continue;
 
-        // If the client sent an explicit cannon-ID list (weapon-group fire), only
-        // fire cannons that appear in that list.
+        // If the client sent an explicit id-list (weapon-group fire), only
+        // fire modules that appear in that list.
         if (explicit_ids && explicit_count > 0) {
             bool in_list = false;
             for (int ei = 0; ei < explicit_count; ei++) {
@@ -3923,7 +3941,30 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
             }
             if (!in_list) continue;
         } else if (at_cannon && module->id != mounted_cannon_id) {
-            // If mounted to a specific cannon, skip every other cannon
+            // If mounted to a specific cannon, skip every other cannon/swivel
+            continue;
+        }
+
+        /* ── Swivel branch: only fires when an NPC gunner is physically at the station ── */
+        if (module->type_id == MODULE_TYPE_SWIVEL) {
+            bool swivel_occupied = false;
+            for (int wn = 0; wn < world_npc_count; wn++) {
+                WorldNpc* wnpc = &world_npcs[wn];
+                if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
+                    wnpc->ship_id == ship->ship_id &&
+                    wnpc->assigned_weapon_id == module->id &&
+                    wnpc->state == WORLD_NPC_STATE_AT_GUN) {
+                    swivel_occupied = true;
+                    break;
+                }
+            }
+            if (!swivel_occupied) continue;
+            /* Find SimpleShip copy for timer check and fire_swivel() */
+            ShipModule* sw = find_module_by_id(ship, module->id);
+            if (!sw) continue;
+            if (sw->data.swivel.time_since_fire < sw->data.swivel.reload_time) continue;
+            fire_swivel(ship, sw, module, player, ammo_type);
+            cannons_fired++;
             continue;
         }
 
