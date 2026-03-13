@@ -9225,12 +9225,31 @@ void websocket_server_tick(float dt) {
         } /* end FLAME WAVE UPDATE */
 
         /* ===== FIRE DOT TICK (every 100ms) ===== */
-        /* NPCs on fire: 5 base HP + 1% max_health per 100ms tick */
+        /* NPCs on fire: 1 base HP + 0.25% max_health per 100ms tick */
         for (int ni = 0; ni < world_npc_count; ni++) {
             WorldNpc* npc = &world_npcs[ni];
             if (!npc->active || npc->fire_timer_ms == 0) continue;
-            uint16_t npc_fire_dmg = 5u + (uint16_t)(npc->max_health / 100u);
+            uint16_t npc_fire_dmg = 1u + (uint16_t)(npc->max_health / 400u);
             if (npc->health > npc_fire_dmg) npc->health -= npc_fire_dmg; else npc->health = 0;
+            if (npc->health == 0) {
+                npc->active = false;
+                npc->fire_timer_ms = 0;
+                char death_msg[192];
+                snprintf(death_msg, sizeof(death_msg),
+                    "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
+                    "\"x\":%.1f,\"y\":%.1f,\"damage\":%u,"
+                    "\"health\":0,\"maxHealth\":%u,\"killed\":true}",
+                    npc->id, npc->x, npc->y, (unsigned)npc_fire_dmg, (unsigned)npc->max_health);
+                char death_frame[256];
+                size_t dfl = websocket_create_frame(WS_OPCODE_TEXT, death_msg, strlen(death_msg), death_frame, sizeof(death_frame));
+                if (dfl > 0) {
+                    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                        struct WebSocketClient* wc = &ws_server.clients[ci];
+                        if (wc->connected && wc->handshake_complete) send(wc->fd, death_frame, dfl, 0);
+                    }
+                }
+                continue;
+            }
             if (npc->fire_timer_ms > time_elapsed) {
                 npc->fire_timer_ms -= time_elapsed;
             } else {
@@ -9251,11 +9270,11 @@ void websocket_server_tick(float dt) {
             }
         }
 
-        /* Players on fire: 5 base HP + 1% max_health per 100ms tick */
+        /* Players on fire: 1 base HP + 0.25% max_health per 100ms tick */
         for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
             WebSocketPlayer* wp = &players[wpi];
             if (!wp->active || wp->fire_timer_ms == 0) continue;
-            uint16_t pl_fire_dmg = 5u + (uint16_t)(wp->max_health / 100u);
+            uint16_t pl_fire_dmg = 1u + (uint16_t)(wp->max_health / 400u);
             if (wp->health > pl_fire_dmg) wp->health -= pl_fire_dmg; else wp->health = 0;
             if (wp->fire_timer_ms > time_elapsed) {
                 wp->fire_timer_ms -= time_elapsed;
@@ -9287,8 +9306,8 @@ void websocket_server_tick(float dt) {
                 if (mod->fire_timer_ms == 0) continue;
                 ModuleTypeId mt = mod->type_id;
                 if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK && mt != MODULE_TYPE_MAST) continue;
-                /* Apply 30 base + 0.5% of max_health per 100ms tick */
-                float fire_dot_f = 30.0f + Q16_TO_FLOAT(mod->max_health) * 0.005f;
+                /* Apply 7.5 base + 0.125% of max_health per 100ms tick */
+                float fire_dot_f = 7.5f + Q16_TO_FLOAT(mod->max_health) * 0.00125f;
                 q16_t fire_dot = Q16_FROM_FLOAT(fire_dot_f);
                 module_apply_damage(mod, fire_dot);
                 /* Tick module fire timer */
