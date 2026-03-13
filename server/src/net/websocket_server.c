@@ -216,6 +216,32 @@ static void ship_world_to_local(const SimpleShip* ship, float world_x, float wor
     *local_y = dx * sin_r + dy * cos_r;
 }
 
+// Helper: minimum distance from a local point (server float units) to the nearest hull edge segment.
+static float swivel_dist_to_hull_edge(float sx, float sy, const struct Ship* ship) {
+    float min_dist_sq = 1e20f;
+    uint8_t n = ship->hull_vertex_count;
+    for (uint8_t i = 0; i < n; i++) {
+        uint8_t j = (i + 1) % n;
+        float ax = Q16_TO_FLOAT(ship->hull_vertices[i].x);
+        float ay = Q16_TO_FLOAT(ship->hull_vertices[i].y);
+        float bx = Q16_TO_FLOAT(ship->hull_vertices[j].x);
+        float by = Q16_TO_FLOAT(ship->hull_vertices[j].y);
+        float dx = bx - ax, dy = by - ay;
+        float len_sq = dx*dx + dy*dy;
+        float t = 0.0f;
+        if (len_sq > 1e-10f) {
+            t = ((sx-ax)*dx + (sy-ay)*dy) / len_sq;
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+        }
+        float cx = ax + t*dx, cy = ay + t*dy;
+        float ex = sx - cx, ey = sy - cy;
+        float d = ex*ex + ey*ey;
+        if (d < min_dist_sq) min_dist_sq = d;
+    }
+    return sqrtf(min_dist_sq);
+}
+
 // Helper to check if player is outside hull polygon (using simulation ship hull)
 static bool is_outside_deck(uint32_t ship_id, float local_x, float local_y) {
     if (!global_sim) {
@@ -6059,6 +6085,20 @@ int websocket_server_update(struct Sim* sim) {
                                             if (py) sscanf(py + 9,  "%f", &local_y);
                                             if (pr) sscanf(pr + 11, "%f", &rotation);
 
+                                            // Swivels must be placed on the hull rail (plank band):
+                                            // edge distance must be within [0, 2.5] server units = [0, 25] client px.
+                                            if (is_outside_deck(target_ship_id, local_x, local_y)) {
+                                                strcpy(response, "{\"type\":\"error\",\"message\":\"outside_deck\"}");
+                                            } else {
+                                            float _sv_x = CLIENT_TO_SERVER(local_x);
+                                            float _sv_y = CLIENT_TO_SERVER(local_y);
+                                            float _edge_dist = swivel_dist_to_hull_edge(_sv_x, _sv_y, sw_sim);
+                                            if (_edge_dist > 2.5f) {
+                                                snprintf(response, sizeof(response),
+                                                    "{\"type\":\"error\",\"message\":\"swivel_must_be_on_rail\",\"edge_dist\":%.2f}",
+                                                    _edge_dist * WORLD_SCALE_FACTOR);
+                                            } else {
+
                                             uint16_t max_id = 0;
                                             for (uint8_t m = 0; m < sw_sim->module_count; m++)
                                                 if (sw_sim->modules[m].id > max_id) max_id = sw_sim->modules[m].id;
@@ -6092,6 +6132,8 @@ int websocket_server_update(struct Sim* sim) {
                                             snprintf(response, sizeof(response),
                                                 "{\"type\":\"message_ack\",\"status\":\"swivel_placed_at\",\"swivel_id\":%u}",
                                                 new_id);
+                                            } // edge check
+                                            } // outside_deck check
                                         }
                                     }
                                 }

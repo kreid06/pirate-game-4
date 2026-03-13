@@ -1749,11 +1749,19 @@ export class ClientApplication {
     }
 
     // Edge margin — ghost center must be at least module-radius inset from hull boundary
-    const ghostMargin = this.pendingGhostKind === 'cannon' ? 15 : this.pendingGhostKind === 'mast' ? 15 : 10;
     const ghostEdgeDist = PolygonUtils.distanceToPolygonEdge(Vec2.from(localX, localY), nearestShip.hull);
-    if (ghostEdgeDist < ghostMargin) {
-      console.log(`❌ [GHOST] Too close to hull edge (dist ${ghostEdgeDist.toFixed(1)}, min ${ghostMargin})`);
-      return;
+    if (this.pendingGhostKind === 'swivel') {
+      // Swivels mount on the hull rail — must be within the plank/edge band (2–30 px from hull)
+      if (ghostEdgeDist > 30 || ghostEdgeDist < 2) {
+        console.log(`❌ [GHOST] Swivel must be on ship rail (edge dist ${ghostEdgeDist.toFixed(1)}, need 2–30)`);
+        return;
+      }
+    } else {
+      const ghostMargin = this.pendingGhostKind === 'cannon' ? 15 : this.pendingGhostKind === 'mast' ? 15 : 10;
+      if (ghostEdgeDist < ghostMargin) {
+        console.log(`❌ [GHOST] Too close to hull edge (dist ${ghostEdgeDist.toFixed(1)}, min ${ghostMargin})`);
+        return;
+      }
     }
 
     // Geometry-based overlap check against existing ship modules (same logic as real placement)
@@ -1970,11 +1978,19 @@ export class ClientApplication {
                   : 'mast' as const;
 
     // Cannon base half-width = 15; mast radius = 15 — center must be at least this far from hull edge
-    const placementMargin = 15;
+    // Swivels are the exception: they mount ON the rail (2–30 px from the hull edge)
     const edgeDist = PolygonUtils.distanceToPolygonEdge(Vec2.from(localX, localY), nearestShip.hull);
-    if (edgeDist < placementMargin) {
-      console.log(`❌ [BUILD] Too close to hull edge (dist ${edgeDist.toFixed(1)}, min ${placementMargin})`);
-      return;
+    if (this.buildSelectedItem === 'swivel') {
+      if (edgeDist > 30 || edgeDist < 2) {
+        console.log(`❌ [BUILD] Swivel must be on ship rail (edge dist ${edgeDist.toFixed(1)}, need 2–30)`);
+        return;
+      }
+    } else {
+      const placementMargin = 15;
+      if (edgeDist < placementMargin) {
+        console.log(`❌ [BUILD] Too close to hull edge (dist ${edgeDist.toFixed(1)}, min ${placementMargin})`);
+        return;
+      }
     }
 
     const newFp = getModuleFootprint(newKind);

@@ -4675,10 +4675,16 @@ export class RenderSystem {
       }
 
       // Edge margin — module center must be at least module-radius inset from hull boundary
+      // Swivels are the exception: they mount on the rail within 2–30 px of the hull edge
       if (valid) {
-        const edgeMargin = (kind === 'cannon' || kind === 'mast') ? 15 : 10;
         const edgeDist = PolygonUtils.distanceToPolygonEdge(Vec2.from(localX, localY), nearestShip.hull);
-        if (edgeDist < edgeMargin) { valid = false; invalidReason = 'Too close to edge!'; }
+        if (kind === 'swivel') {
+          if (edgeDist > 30) { valid = false; invalidReason = 'Must be on ship rail!'; }
+          else if (edgeDist < 2) { valid = false; invalidReason = 'Too far outside rail!'; }
+        } else {
+          const edgeMargin = (kind === 'cannon' || kind === 'mast') ? 15 : 10;
+          if (edgeDist < edgeMargin) { valid = false; invalidReason = 'Too close to edge!'; }
+        }
       }
     }
 
@@ -4845,10 +4851,15 @@ export class RenderSystem {
       }
 
       // Edge margin — cannon base half-width / mast radius = 15; center must be that far from hull edge
+      // Swivels mount on the rail (within 2–30 px of hull edge)
       if (!overlaps && !ghostBlocked) {
-        const edgeMargin = newKind === 'cannon' ? 15 : 15;
         const edgeDist = PolygonUtils.distanceToPolygonEdge(Vec2.from(localX, localY), nearestShip.hull);
-        if (edgeDist < edgeMargin) edgeTooClose = true;
+        if (newKind === 'swivel') {
+          if (edgeDist > 30 || edgeDist < 2) edgeTooClose = true;
+        } else {
+          const edgeMargin = 15;
+          if (edgeDist < edgeMargin) edgeTooClose = true;
+        }
       }
     }
     const sailMaxed = item === 'sail' &&
