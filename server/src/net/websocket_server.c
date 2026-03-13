@@ -3962,7 +3962,12 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
             /* Find SimpleShip copy for timer check and fire_swivel() */
             ShipModule* sw = find_module_by_id(ship, module->id);
             if (!sw) continue;
-            if (sw->data.swivel.time_since_fire < sw->data.swivel.reload_time) continue;
+            /* Use the same effective-cooldown logic as handle_swivel_fire:
+             * liquid flame uses the fast stream interval, everything else the full reload. */
+            uint32_t eff_cd = (ammo_type == PROJ_TYPE_LIQUID_FLAME)
+                              ? SWIVEL_FLAME_INTERVAL_MS
+                              : sw->data.swivel.reload_time;
+            if (sw->data.swivel.time_since_fire < eff_cd) continue;
             fire_swivel(ship, sw, module, player, ammo_type);
             cannons_fired++;
             continue;

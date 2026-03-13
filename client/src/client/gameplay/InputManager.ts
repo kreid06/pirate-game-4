@@ -1180,12 +1180,17 @@ export class InputManager {
         }
       } else {
         // Mounted to helm, cannon, or swivel: fire weapon(s)
-        if (this.mountKind === 'swivel' && this.loadedAmmoType === 3) {
+        // Flame mode: ammo_type 3 (liquid flame) always streams regardless of activeAmmoGroup toggle
+        const isFlameMode = this.loadedAmmoType === 3 &&
+          (this.mountKind === 'swivel' || this.mountKind === 'helm');
+        if (isFlameMode) {
           // Liquid flame: fire immediately then stream while mouse is held
-          if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType);
+          const wg  = this.mountKind === 'helm' ? this.activeWeaponGroup  : undefined;
+          const wgs = this.mountKind === 'helm' ? this.activeWeaponGroups : undefined;
+          if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType, wg, wgs);
           if (this.flameStreamTimer === null) {
             this.flameStreamTimer = setInterval(() => {
-              if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType);
+              if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType, wg, wgs);
             }, 150);
           }
         } else if (isDoubleClick) {
