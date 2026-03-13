@@ -247,7 +247,7 @@ interface SwivelAimMessage extends NetworkMessage {
 interface CannonFireMessage extends NetworkMessage {
   type: MessageType.CANNON_FIRE;
   timestamp: number;
-  cannon_ids?: number[]; // Specific cannons to fire, or undefined for all aimed cannons
+  weapon_ids?: number[]; // Specific weapons to fire, or undefined for all aimed cannons
   fire_all?: boolean;    // True if double-click (fire all cannons)
   freefire?: boolean;    // True if freefire/targetfire mode — skip server aim-angle check
   ammo_type?: number;    // 0 = cannonball (default), 1 = bar shot
@@ -262,7 +262,7 @@ interface CannonGroupConfigMessage extends NetworkMessage {
   timestamp: number;
   group_index: number;          // 0–9
   mode: 'aiming' | 'freefire' | 'haltfire' | 'targetfire';
-  cannon_ids: number[];         // Module IDs of cannons in this group
+  weapon_ids: number[];         // Module IDs of cannons/swivels in this group
   target_ship_id: number;       // Server ship entity ID for targetfire; 0 otherwise
 }
 
@@ -935,7 +935,7 @@ export class NetworkManager {
     const message: CannonFireMessage = {
       type: MessageType.CANNON_FIRE,
       timestamp: Date.now(),
-      cannon_ids: cannonIds,
+      weapon_ids: cannonIds,
       fire_all: fireAll,
       freefire: freefire || undefined,
       ammo_type: ammoType
@@ -968,10 +968,10 @@ export class NetworkManager {
       timestamp: Date.now(),
       group_index: groupIndex,
       mode,
-      cannon_ids: cannonIds,
+      weapon_ids: cannonIds,
       target_ship_id: targetShipId
     };
-    console.log(`🎯 Group ${groupIndex} config → mode=${mode} cannons=[${cannonIds.join(',')}] target=${targetShipId}`);
+    console.log(`🎯 Group ${groupIndex} config → mode=${mode} weapons=[${cannonIds.join(',')}] target=${targetShipId}`);
     this.sendMessage(message);
   }
 
