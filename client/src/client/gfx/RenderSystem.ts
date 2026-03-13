@@ -2791,16 +2791,16 @@ export class RenderSystem {
     // (The canvas transform already applies cs.zoom, so 1 unit = 1 screen px at zoom=1.)
 
     for (const mod of ship.modules) {
-      if (mod.kind !== 'cannon') continue;
+      if (mod.kind !== 'cannon' && mod.kind !== 'swivel') continue;
       const info = cannonGroupMap.get(mod.id);
       const lx = mod.localPos.x;
       const ly = mod.localPos.y;
       const lr = (mod as { localRot?: number }).localRot ?? 0;
 
       // Decide visibility:
-      //  • cannon in an active group   → always visible (bright highlight)
-      //  • cannon in a non-active group → only visible when Shift is held
-      //  • unassigned cannon            → only visible when Shift is held
+      //  • weapon in an active group    → always visible (bright highlight)
+      //  • weapon in a non-active group → only visible when Shift is held
+      //  • unassigned weapon             → only visible when Shift is held
       const isActive = info != null && activeGroups.has(info.g);
       if (!isActive && !showAll) continue;
 
@@ -2977,8 +2977,8 @@ export class RenderSystem {
         }
 
         for (const m of ship.modules) {
-          if (m.kind !== 'cannon') continue;
-          // Only show trajectory for cannons in an active weapon group
+          if (m.kind !== 'cannon' && m.kind !== 'swivel') continue;
+          // Only show trajectory for weapons in an active weapon group
           if (!activeCannonIds.has(m.id)) continue;
           // Angular offset from cannon's natural axis (server convention)
           let offset = aim - (m.localRot || 0) + Math.PI / 2;

@@ -10,7 +10,7 @@
 
 import { Npc } from '../../sim/Types.js';
 
-export type ManningTask = 'Sails' | 'Cannons' | 'Repairs' | 'Combat';
+export type ManningTask = 'Sails' | 'Gunners' | 'Repairs' | 'Combat';
 
 /** NPC state constants (mirror server WorldNpcState) */
 const NPC_STATE_AT_GUN = 2;
@@ -18,7 +18,7 @@ const NPC_STATE_REPAIRING = 3;
 
 const TASK_COLORS: Record<ManningTask, string> = {
   Sails:   '#5aafff',
-  Cannons: '#ffaa44',
+  Gunners: '#ffaa44',
   Repairs: '#55dd66',
   Combat:  '#aa44ff',
 };
@@ -30,13 +30,13 @@ interface HitArea {
 
 export class ManningPriorityPanel {
   // Mutable priority order (index 0 = highest priority)
-  private priorityOrder: ManningTask[] = ['Sails', 'Cannons', 'Repairs', 'Combat'];
+  private priorityOrder: ManningTask[] = ['Sails', 'Gunners', 'Repairs', 'Combat'];
 
   // Explicit NPC ID lists per task. The only way an NPC enters a task is via + picking
   // from the idle pool. The only way it leaves is via −. Never implicitly re-allocated.
   private taskNpcs: Map<ManningTask, number[]> = new Map([
     ['Sails',   []],
-    ['Cannons', []],
+    ['Gunners', []],
     ['Repairs', []],
     ['Combat',  []],
   ]);
@@ -77,13 +77,13 @@ export class ManningPriorityPanel {
     const shipNpcs = npcs.filter(n => n.shipId === shipId && n.companyId === localCompanyId);
 
     // Seed task lists from the server-authoritative NPC role field.
-    // role 1 = Gunner  → Cannons
+    // role 1 = Gunner  → Gunners
     // role 3 = Rigger  → Sails
     // role 4 = Repairer → Repairs
     // role 0/2 (None/Helmsman) → unassigned/Idle
     for (const npc of shipNpcs) {
       if (npc.role === 1) {
-        this.taskNpcs.get('Cannons')?.push(npc.id);
+        this.taskNpcs.get('Gunners')?.push(npc.id);
       } else if (npc.role === 3) {
         this.taskNpcs.get('Sails')?.push(npc.id);
       } else if (npc.role === 4) {

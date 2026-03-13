@@ -1575,7 +1575,7 @@ static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float 
  * Apply a single crew task assignment from the client manning-priority panel.
  *
  * task == "Sails"   → become RIGGER, walk to the next free mast
- * task == "Cannons" → become GUNNER,  sector system places at closest cannon
+ * task == "Gunners" → become GUNNER,  sector system places at closest cannon
  * task == "Combat"  → same as Cannons
  * anything else     → become NONE,    walk back to idle spawn position
  */
@@ -1619,7 +1619,7 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
     dismount_npc(npc, ship);
 
     bool want_sails   = (strncmp(task, "Sails",   5) == 0);
-    bool want_cannons = (strncmp(task, "Cannons", 7) == 0 || strncmp(task, "Combat", 6) == 0);
+    bool want_cannons = (strncmp(task, "Gunners", 7) == 0 || strncmp(task, "Combat", 6) == 0);
     bool want_repairs = (strncmp(task, "Repairs", 7) == 0);
 
     if (want_sails) {

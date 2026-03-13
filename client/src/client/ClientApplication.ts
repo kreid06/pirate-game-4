@@ -820,8 +820,8 @@ export class ClientApplication {
           console.warn(`⚠️ GroupAssign: no module hovered`);
           return;
         }
-        if (hovered.module.kind !== 'cannon') {
-          console.warn(`⚠️ GroupAssign: hovered module is '${hovered.module.kind}', not a cannon`);
+        if (hovered.module.kind !== 'cannon' && hovered.module.kind !== 'swivel') {
+          console.warn(`⚠️ GroupAssign: hovered module is '${hovered.module.kind}', not a cannon or swivel`);
           return;
         }
         const cannonId = hovered.module.id;
@@ -860,7 +860,7 @@ export class ClientApplication {
 
       this.inputManager.onGroupAssignTo = (targetGroup: number) => {
         const hovered = this.renderSystem.getHoveredModule();
-        if (!hovered || hovered.module.kind !== 'cannon') return;
+        if (!hovered || (hovered.module.kind !== 'cannon' && hovered.module.kind !== 'swivel')) return;
         const cannonId = hovered.module.id;
         const state = this.controlGroups.get(targetGroup);
         if (!state) return;
