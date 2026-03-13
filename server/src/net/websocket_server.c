@@ -3818,6 +3818,11 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
                 fw->wave_dist = 0.0f;
             }
             /* Refresh / update every pulse */
+            if (fw->retreating) {
+                /* Re-fire while retreating — restart wave from barrel */
+                fw->wave_dist    = 0.0f;
+                fw->retreat_dist = 0.0f;
+            }
             fw->retreating  = false;
             fw->origin_x    = world_x;
             fw->origin_y    = world_y;
