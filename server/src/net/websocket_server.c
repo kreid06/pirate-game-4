@@ -3795,38 +3795,30 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
         }
         uint32_t now_fw = get_time_ms();
         int fw_slot = -1;
-        /* Look for existing entry for this swivel */
+        /* If an existing wave is active for this swivel, deactivate it so the
+           client lets it finish/retreat, then we open a clean new slot. */
         for (int fi = 0; fi < MAX_FLAME_WAVES; fi++) {
             if (flame_waves[fi].active && flame_waves[fi].swivel_id == sw->id) {
-                fw_slot = fi; break;
+                flame_waves[fi].active = false;
+                break;
             }
         }
-        /* Allocate a new slot if needed */
-        if (fw_slot < 0) {
-            for (int fi = 0; fi < MAX_FLAME_WAVES; fi++) {
-                if (!flame_waves[fi].active) { fw_slot = fi; break; }
-            }
+        /* Always allocate a fresh slot for the new burst */
+        for (int fi = 0; fi < MAX_FLAME_WAVES; fi++) {
+            if (!flame_waves[fi].active) { fw_slot = fi; break; }
         }
         if (fw_slot >= 0) {
             FlameWave* fw = &flame_waves[fw_slot];
-            if (!fw->active) {
-                /* Fresh wave — start from barrel */
-                memset(fw, 0, sizeof(*fw));
-                fw->active    = true;
-                fw->swivel_id = sw->id;
-                fw->ship_id   = ship->ship_id;
-                fw->wave_dist = 0.0f;
-            }
-            /* Refresh / update every pulse */
-            if (fw->retreating) {
-                /* Re-fire while retreating — restart wave from barrel */
-                fw->wave_dist    = 0.0f;
-                fw->retreat_dist = 0.0f;
-            }
-            fw->retreating  = false;
-            fw->origin_x    = world_x;
-            fw->origin_y    = world_y;
-            fw->fire_angle  = fire_angle;
+            memset(fw, 0, sizeof(*fw));
+            fw->active       = true;
+            fw->swivel_id    = sw->id;
+            fw->ship_id      = ship->ship_id;
+            fw->wave_dist    = 0.0f;
+            fw->retreat_dist = 0.0f;
+            fw->retreating   = false;
+            fw->origin_x     = world_x;
+            fw->origin_y     = world_y;
+            fw->fire_angle   = fire_angle;
             fw->last_fire_ms = now_fw;
         }
         } /* end LIQUID_FLAME wave registration */

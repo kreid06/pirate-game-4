@@ -199,13 +199,11 @@ export class RenderSystem {
     dead: boolean,
   ): void {
     if (dead) { this.flameWaves.delete(cannonId); return; }
-    const existing = this.flameWaves.get(cannonId);
     this.flameWaves.set(cannonId, {
       x, y, angle, halfCone,
-      // Snap to server value, but never smaller (avoids backward jump)
-      waveDist:    existing ? Math.max(existing.waveDist, waveDist)    : waveDist,
+      waveDist,
       retreating,
-      retreatDist: existing ? Math.max(existing.retreatDist, retreatDist) : retreatDist,
+      retreatDist,
       serverUpdateAt: performance.now(),
     });
   }
