@@ -272,6 +272,11 @@ export class UIManager {
       this.renderAmmoSelector(ctx, context.selectedAmmoType ?? 0, context.pendingAmmoType ?? context.selectedAmmoType ?? 0);
     }
 
+    // Swivel ammo selector — three types, shown when mounted to a swivel
+    if (context.mountKind === 'swivel') {
+      this.renderSwivelAmmoSelector(ctx, context.selectedAmmoType ?? 2, context.pendingAmmoType ?? context.selectedAmmoType ?? 2);
+    }
+
     // Company menu renders last so it sits above all other UI
     this.companyMenu.render(ctx, context.worldState, context.assignedPlayerId);
     this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId);
@@ -459,6 +464,142 @@ export class UIManager {
     ctx.textBaseline = 'top';
     ctx.fillStyle    = 'rgba(120,120,140,0.7)';
     const hint = switchPending ? '[X] cycle  |  hold X (0.5s) → force reload' : '[X] cycle ammo  |  hold X (0.5s) → force swap';
+    ctx.fillText(hint, x0 + 2, y0 + slotH + 3);
+
+    ctx.restore();
+  }
+
+  /**
+   * Swivel gun ammo selector widget — bottom-left corner.
+   * Shows three slots: Grapeshot, Liquid Flame, Canister Shot.
+   * Ammo IDs: 2 = GRAPESHOT, 3 = LIQUID FLAME, 4 = CANISTER SHOT
+   */
+  private renderSwivelAmmoSelector(ctx: CanvasRenderingContext2D, loadedAmmoType: number, pendingAmmoType: number): void {
+    ctx.save();
+
+    // Swivel ammos are IDs 2–4; normalise anything invalid to 2 (grapeshot)
+    const validIds = [2, 3, 4];
+    const safeLoaded  = validIds.includes(loadedAmmoType)  ? loadedAmmoType  : 2;
+    const safePending = validIds.includes(pendingAmmoType) ? pendingAmmoType : safeLoaded;
+
+    const ammoTypes = [
+      { id: 2, name: 'GRAPESHOT',  icon: '∷', color: '#c8c8b0', desc: 'crew damage'  },
+      { id: 3, name: 'LIQ. FLAME', icon: '≈',  color: '#ff8832', desc: 'fire damage'  },
+      { id: 4, name: 'CANISTER',   icon: '⊠',  color: '#90d890', desc: 'wide spread'  },
+    ];
+
+    const slotW  = 96;
+    const slotH  = 52;
+    const margin = 5;
+    const pad    = 6;
+    const x0     = 12;
+    const y0     = ctx.canvas.height - slotH - 14;
+
+    const switchPending = safePending !== safeLoaded;
+
+    // Header label
+    ctx.font         = 'bold 9px Consolas, monospace';
+    ctx.fillStyle    = 'rgba(200,160,80,0.80)';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('⚫ SWIVEL AMMO', x0, y0 - 4);
+
+    for (let i = 0; i < ammoTypes.length; i++) {
+      const ammo      = ammoTypes[i];
+      const isLoaded  = ammo.id === safeLoaded;
+      const isPending = ammo.id === safePending;
+      const sx        = x0 + i * (slotW + margin);
+
+      let bgColor: string;
+      let borderColor: string;
+      let borderWidth: number;
+      let textColor: string;
+      let iconColor: string;
+      let dotColor: string | null = null;
+
+      if (isLoaded) {
+        bgColor     = 'rgba(50,220,80,0.18)';
+        borderColor = '#44dd66';
+        borderWidth = 2;
+        iconColor   = ammo.color;
+        textColor   = '#ccffcc';
+        dotColor    = '#44dd66';
+      } else if (isPending) {
+        bgColor     = 'rgba(255,200,50,0.18)';
+        borderColor = '#ffd700';
+        borderWidth = 2;
+        iconColor   = ammo.color;
+        textColor   = '#fffccc';
+        dotColor    = '#ffd700';
+      } else {
+        bgColor     = 'rgba(0,0,0,0.55)';
+        borderColor = '#445';
+        borderWidth = 1;
+        iconColor   = '#556';
+        textColor   = '#668';
+      }
+
+      // Background
+      ctx.fillStyle = bgColor;
+      ctx.fillRect(sx, y0, slotW, slotH);
+
+      // Border
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth   = borderWidth;
+      ctx.strokeRect(sx, y0, slotW, slotH);
+
+      // Icon
+      ctx.font         = '17px Consolas, monospace';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = iconColor;
+      ctx.fillText(ammo.icon, sx + pad, y0 + slotH / 2 - 8);
+
+      // Name
+      ctx.font         = (isLoaded || isPending) ? 'bold 10px Consolas, monospace' : '10px Consolas, monospace';
+      ctx.fillStyle    = textColor;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(ammo.name, sx + pad, y0 + slotH / 2 + 5);
+
+      // Desc line
+      ctx.font      = '8px Consolas, monospace';
+      ctx.fillStyle = (isLoaded || isPending) ? 'rgba(180,220,180,0.65)' : 'rgba(100,100,120,0.5)';
+      ctx.fillText(ammo.desc, sx + pad, y0 + slotH / 2 + 17);
+
+      // LOADED / NEXT sub-label
+      if (isLoaded && switchPending) {
+        ctx.font         = '8px Consolas, monospace';
+        ctx.fillStyle    = '#44dd66';
+        ctx.textAlign    = 'right';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('LOADED', sx + slotW - 4, y0 + slotH - 3);
+        ctx.textAlign = 'left';
+      } else if (isPending && switchPending) {
+        ctx.font         = '8px Consolas, monospace';
+        ctx.fillStyle    = '#ffd700';
+        ctx.textAlign    = 'right';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('NEXT', sx + slotW - 4, y0 + slotH - 3);
+        ctx.textAlign = 'left';
+      }
+
+      // Status indicator dot (top-right of slot)
+      if (dotColor) {
+        ctx.fillStyle = dotColor;
+        ctx.beginPath();
+        ctx.arc(sx + slotW - 9, y0 + 9, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Key hint below the slots
+    ctx.font         = '10px Consolas, monospace';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle    = 'rgba(120,120,140,0.7)';
+    const hint = switchPending
+      ? '[X] cycle  |  hold X (0.5s) → force load'
+      : '[X] cycle ammo  |  hold X (0.5s) → force swap';
     ctx.fillText(hint, x0 + 2, y0 + slotH + 3);
 
     ctx.restore();
