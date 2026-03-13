@@ -131,6 +131,14 @@ export class RenderSystem {
     waveDist: number; retreating: boolean; retreatDist: number;
     serverUpdateAt: number;
   }> = new Map();
+  /** Client-side smoke trail: cannonball id → ring of past positions with timestamps. */
+  private cannonballTrails: Map<number, Array<{ x: number; y: number; t: number }>> = new Map();
+  /** Trail colour override per projectile — future customisation hook. */
+  public trailColor: string = 'rgba(180,180,180,{a})';
+  private readonly TRAIL_DURATION_MS = 420;  // how long each crumb lives
+  private readonly TRAIL_SPACING_MS  = 18;   // min ms between crumbs
+  /** Timestamp of last crumb per ball — prevents over-sampling. */
+  private trailLastEmit: Map<number, number> = new Map();
   
   // Debug flags
   private showHoverBoundaries: boolean = false;
@@ -1503,8 +1511,34 @@ export class RenderSystem {
       this.queueRenderItem(7, 'sail-masts', () => this.drawShipSailMasts(ship, camera));
     }
     
-    // Queue cannonballs (layer 8 - on top of everything)  
+    // Queue cannonballs (layer 8 - on top of everything)
+    const now = performance.now();
+    const liveIds = new Set(worldState.cannonballs.map(cb => cb.id));
+    // Prune trails for cannonballs that no longer exist
+    for (const id of this.cannonballTrails.keys()) {
+      if (!liveIds.has(id)) {
+        this.cannonballTrails.delete(id);
+        this.trailLastEmit.delete(id);
+      }
+    }
     for (const cannonball of worldState.cannonballs) {
+      // Only leave smoke trails for standard cannonballs (ammoType 0) and bar shot (1)
+      if (cannonball.ammoType === 0 || cannonball.ammoType === 1) {
+        const last = this.trailLastEmit.get(cannonball.id) ?? 0;
+        if (now - last >= this.TRAIL_SPACING_MS) {
+          if (!this.cannonballTrails.has(cannonball.id)) this.cannonballTrails.set(cannonball.id, []);
+          this.cannonballTrails.get(cannonball.id)!.push({ x: cannonball.position.x, y: cannonball.position.y, t: now });
+          this.trailLastEmit.set(cannonball.id, now);
+        }
+        // Expire old crumbs
+        const trail = this.cannonballTrails.get(cannonball.id);
+        if (trail) {
+          const cutoff = now - this.TRAIL_DURATION_MS;
+          let start = 0;
+          while (start < trail.length && trail[start].t < cutoff) start++;
+          if (start > 0) trail.splice(0, start);
+        }
+      }
       this.queueRenderItem(8, 'cannonballs', () => this.drawCannonball(cannonball, camera));
     }
 
@@ -3998,6 +4032,31 @@ export class RenderSystem {
 
     const screenPos = camera.worldToScreen(cannonball.position);
     const zoom      = camera.getState().zoom;
+    const now       = performance.now();
+
+    // ── Smoke trail (cannonball & bar shot only) ───────────────────────────
+    if (cannonball.ammoType === 0 || cannonball.ammoType === 1) {
+      const trail = this.cannonballTrails.get(cannonball.id);
+      if (trail && trail.length > 1) {
+        this.ctx.save();
+        for (let i = 0; i < trail.length; i++) {
+          const crumb = trail[i];
+          const age   = (now - crumb.t) / this.TRAIL_DURATION_MS; // 0=fresh … 1=gone
+          if (age >= 1) continue;
+          // Radius shrinks and fades as the crumb ages
+          const alpha  = (1 - age) * 0.45;
+          const radius = Math.max(0.5, (1 - age * 0.6) * 3.5 * zoom);
+          const sp     = camera.worldToScreen(Vec2.from(crumb.x, crumb.y));
+          this.ctx.globalAlpha = alpha;
+          this.ctx.fillStyle   = '#b4b4b4';
+          this.ctx.beginPath();
+          this.ctx.arc(sp.x, sp.y, radius, 0, Math.PI * 2);
+          this.ctx.fill();
+        }
+        this.ctx.globalAlpha = 1.0;
+        this.ctx.restore();
+      }
+    }
 
     if (cannonball.ammoType === 2) {
       // ── Grapeshot pellet ───────────────────────────────────────────────────
