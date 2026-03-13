@@ -224,9 +224,10 @@ export class RenderSystem {
 
       // Client-side interpolation: advance wave/retreat from last server report
       const dt = (now - fw.serverUpdateAt) / 1000;
+      const FLAME_RANGE  = 200;
       const waveDist    = fw.retreating ? fw.waveDist
-                                        : Math.min(fw.waveDist + dt * WAVE_SPEED, 125);
-      const retreatDist = fw.retreating ? Math.min(fw.retreatDist + dt * WAVE_SPEED, 125) : 0;
+                                        : Math.min(fw.waveDist + dt * WAVE_SPEED, FLAME_RANGE);
+      const retreatDist = fw.retreating ? Math.min(fw.retreatDist + dt * WAVE_SPEED, FLAME_RANGE) : 0;
 
       // Nothing to draw if retreat has consumed the whole cone
       if (retreatDist >= waveDist) continue;

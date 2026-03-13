@@ -3524,7 +3524,7 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
  * ══════════════════════════════════════════════════════════════════════════ */
 #define MAX_FLAME_WAVES   16
 #define FLAME_WAVE_SPEED  125.0f    /* px/s — matches old projectile speed   */
-#define FLAME_RANGE       125.0f    /* max reach, client px                  */
+#define FLAME_RANGE       200.0f    /* max reach, client px                  */
 #define FLAME_HALF_CONE   (15.0f * (float)(M_PI / 180.0f))  /* ±15°         */
 #define FLAME_STALE_MS    350u      /* ms without a pulse → start retreating  */
 #define FIRE_DURATION_MS  10000u    /* ms an entity burns after ignition      */
