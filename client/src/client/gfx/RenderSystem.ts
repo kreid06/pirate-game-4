@@ -135,8 +135,8 @@ export class RenderSystem {
   private cannonballTrails: Map<number, Array<{ x: number; y: number; t: number }>> = new Map();
   /** Trail colour override per projectile — future customisation hook. */
   public trailColor: string = 'rgba(180,180,180,{a})';
-  private readonly TRAIL_DURATION_MS = 420;  // how long each crumb lives
-  private readonly TRAIL_SPACING_MS  = 18;   // min ms between crumbs
+  private readonly TRAIL_DURATION_MS = 680;  // how long each crumb lives
+  private readonly TRAIL_SPACING_MS  = 10;   // min ms between crumbs
   /** Timestamp of last crumb per ball — prevents over-sampling. */
   private trailLastEmit: Map<number, number> = new Map();
   
@@ -2800,8 +2800,17 @@ export class RenderSystem {
     if (!mountedMod || mountedMod.kind !== 'swivel') return;
 
     const swivelData = (mountedMod.moduleData?.kind === 'swivel') ? mountedMod.moduleData : null;
-    const aimDir = swivelData?.aimDirection ?? 0;  // barrel offset from localRot, radians
     const localRot = mountedMod.localRot || 0;
+
+    // Client-predicted aim: mirror server formula (desired_offset = aim - localRot + PI/2),
+    // clamped to ±45°.  This gives zero-lag visual feedback instead of waiting for a
+    // server round-trip to update swivelData.aimDirection.
+    const SWIVEL_LIMIT = 45 * Math.PI / 180;
+    let predictedAimDir = this.playerAimAngleRelative - localRot + Math.PI / 2;
+    while (predictedAimDir >  Math.PI) predictedAimDir -= 2 * Math.PI;
+    while (predictedAimDir < -Math.PI) predictedAimDir += 2 * Math.PI;
+    predictedAimDir = Math.max(-SWIVEL_LIMIT, Math.min(SWIVEL_LIMIT, predictedAimDir));
+    const aimDir = predictedAimDir;
 
     this.ctx.save();
     const screenPos = camera.worldToScreen(ship.position);
@@ -3162,7 +3171,16 @@ export class RenderSystem {
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
       const cannonData = cannon.moduleData;
 
-      const totalAngle = (cannon.localRot || 0) + (cannonData.aimDirection || 0);
+      // Client-predicted aim direction — mirrors the server formula so the guide
+      // tracks the mouse instantly rather than waiting for a round-trip.
+      // Formula: desired_offset = playerAimAngleRelative - localRot + PI/2
+      const CANNON_LIMIT = 30 * Math.PI / 180;
+      let predictedAimDir = this.playerAimAngleRelative - (cannon.localRot || 0) + Math.PI / 2;
+      while (predictedAimDir >  Math.PI) predictedAimDir -= 2 * Math.PI;
+      while (predictedAimDir < -Math.PI) predictedAimDir += 2 * Math.PI;
+      predictedAimDir = Math.max(-CANNON_LIMIT, Math.min(CANNON_LIMIT, predictedAimDir));
+
+      const totalAngle = (cannon.localRot || 0) + predictedAimDir;
       const cx = cannon.localPos.x;
       const cy = cannon.localPos.y;
 
@@ -4036,6 +4054,7 @@ export class RenderSystem {
 
     // ── Smoke trail (cannonball & bar shot only) ───────────────────────────
     if (cannonball.ammoType === 0 || cannonball.ammoType === 1) {
+      const isBarShot = cannonball.ammoType === 1;
       const trail = this.cannonballTrails.get(cannonball.id);
       if (trail && trail.length > 1) {
         this.ctx.save();
@@ -4043,15 +4062,27 @@ export class RenderSystem {
           const crumb = trail[i];
           const age   = (now - crumb.t) / this.TRAIL_DURATION_MS; // 0=fresh … 1=gone
           if (age >= 1) continue;
-          // Radius shrinks and fades as the crumb ages
-          const alpha  = (1 - age) * 0.45;
-          const radius = Math.max(0.5, (1 - age * 0.6) * 3.5 * zoom);
+          const ease   = 1 - age * age; // quadratic — stays full longer, drops off at end
+          // Bar shot: thinner, more transparent, no dark core
+          const alpha  = ease * (isBarShot ? 0.32 : 0.72);
+          const radius = Math.max(1, ease * (isBarShot ? 4.5 : 9) * zoom);
           const sp     = camera.worldToScreen(Vec2.from(crumb.x, crumb.y));
+          // Outer puff — light grey
           this.ctx.globalAlpha = alpha;
-          this.ctx.fillStyle   = '#b4b4b4';
+          this.ctx.fillStyle   = '#c8c8c8';
           this.ctx.beginPath();
           this.ctx.arc(sp.x, sp.y, radius, 0, Math.PI * 2);
           this.ctx.fill();
+          // Inner dark core (cannonball only, fresh crumbs) for blackpowder depth
+          if (!isBarShot && age < 0.35) {
+            const coreAlpha  = (0.35 - age) / 0.35 * 0.55;
+            const coreRadius = radius * 0.45;
+            this.ctx.globalAlpha = coreAlpha;
+            this.ctx.fillStyle   = '#3a3a3a';
+            this.ctx.beginPath();
+            this.ctx.arc(sp.x, sp.y, coreRadius, 0, Math.PI * 2);
+            this.ctx.fill();
+          }
         }
         this.ctx.globalAlpha = 1.0;
         this.ctx.restore();
