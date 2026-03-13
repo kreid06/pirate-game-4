@@ -6035,7 +6035,11 @@ int websocket_server_update(struct Sim* sim) {
                                     uint8_t ammo_type = PROJ_TYPE_CANNONBALL;
                                     char* at = strstr(payload, "\"ammo_type\":");
                                     if (at) ammo_type = (uint8_t)atoi(at + 12);
-                                    /* Reject unknown values — allow 0-1 (cannon) and 10-12 (swivel) */
+                                    /* Translate client UI IDs (10/11/12) → internal PROJ_TYPE (2/3/4) */
+                                    if      (ammo_type == 10) ammo_type = PROJ_TYPE_GRAPESHOT;
+                                    else if (ammo_type == 11) ammo_type = PROJ_TYPE_LIQUID_FLAME;
+                                    else if (ammo_type == 12) ammo_type = PROJ_TYPE_CANISTER_SHOT;
+                                    /* Reject anything not a valid cannon (0-1) or swivel (2-4) type */
                                     if (ammo_type > 1 && (ammo_type < PROJ_TYPE_GRAPESHOT || ammo_type > PROJ_TYPE_CANISTER_SHOT))
                                         ammo_type = PROJ_TYPE_CANNONBALL;
                                     // Parse optional weapon_ids array

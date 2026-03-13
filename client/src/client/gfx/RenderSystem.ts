@@ -1590,8 +1590,8 @@ export class RenderSystem {
       }
     }
     for (const cannonball of worldState.cannonballs) {
-      // Only leave smoke trails for standard cannonballs (ammoType 0) and bar shot (1)
-      if (cannonball.ammoType === 0 || cannonball.ammoType === 1) {
+      // Leave smoke trails for cannonballs (0/1) and spark trails for grapeshot (10 or server type 2)
+      if (cannonball.ammoType === 0 || cannonball.ammoType === 1 || cannonball.ammoType === 10 || cannonball.ammoType === 2) {
         const last = this.trailLastEmit.get(cannonball.id) ?? 0;
         if (now - last >= this.TRAIL_SPACING_MS) {
           if (!this.cannonballTrails.has(cannonball.id)) this.cannonballTrails.set(cannonball.id, []);
@@ -4159,15 +4159,80 @@ export class RenderSystem {
 
     if (cannonball.ammoType === 10) {
       // ── Grapeshot pellet ───────────────────────────────────────────────────
-      // Small round pellet — fast, close-range, anti-personnel.
-      const r = Math.max(1.5, 2.5 * zoom);
-      this.ctx.fillStyle = '#8B4513';
+      // Hot iron pellet — fast, close-range, anti-personnel.
+      // Spark trail: white-hot crumbs cooling through orange → deep red.
+      const GRAPE_TRAIL_MS = 200;
+      const trail = this.cannonballTrails.get(cannonball.id);
+      if (trail && trail.length > 1) {
+        this.ctx.save();
+        for (let i = 0; i < trail.length; i++) {
+          const crumb = trail[i];
+          const age   = (now - crumb.t) / GRAPE_TRAIL_MS;
+          if (age >= 1) continue;
+          const ease   = 1 - age * age;
+          const alpha  = ease * 0.90;
+          const radius = Math.max(0.5, ease * 3 * zoom);
+          const sp = camera.worldToScreen(Vec2.from(crumb.x, crumb.y));
+          const color = age < 0.20 ? '#ffffc0'    // white-hot
+                      : age < 0.45 ? '#ff9420'    // orange
+                      : '#cc3300';               // deep red
+          this.ctx.globalAlpha = alpha;
+          this.ctx.fillStyle   = color;
+          this.ctx.beginPath();
+          this.ctx.arc(sp.x, sp.y, radius, 0, Math.PI * 2);
+          this.ctx.fill();
+        }
+        this.ctx.globalAlpha = 1.0;
+        this.ctx.restore();
+      }
+
+      // Motion blur streak along velocity direction
+      const vx = cannonball.velocity.x;
+      const vy = cannonball.velocity.y;
+      const speed = Math.sqrt(vx * vx + vy * vy);
+      if (speed > 0.1) {
+        const angle     = Math.atan2(vy, vx);
+        const streakLen = Math.max(4, Math.min(14, speed * 0.08)) * zoom;
+        const streakW   = Math.max(1, 1.8 * zoom);
+        this.ctx.save();
+        this.ctx.translate(screenPos.x, screenPos.y);
+        this.ctx.rotate(angle);
+        const streakGrd = this.ctx.createLinearGradient(streakLen * 0.5, 0, -streakLen * 1.2, 0);
+        streakGrd.addColorStop(0,   'rgba(255,220,80,0.85)');
+        streakGrd.addColorStop(0.4, 'rgba(255,100,0,0.55)');
+        streakGrd.addColorStop(1,   'rgba(180,30,0,0)');
+        this.ctx.fillStyle = streakGrd;
+        this.ctx.beginPath();
+        this.ctx.ellipse(-streakLen * 0.35, 0, streakLen, streakW, 0, 0, Math.PI * 2);
+        this.ctx.fill();
+        this.ctx.restore();
+      }
+
+      // Rim glow — orange halo around pellet
+      const r = Math.max(2, 3 * zoom);
+      this.ctx.globalAlpha = 0.50;
+      const rimGrd = this.ctx.createRadialGradient(screenPos.x, screenPos.y, r * 0.6, screenPos.x, screenPos.y, r * 2.4);
+      rimGrd.addColorStop(0,   'rgba(255,160,0,0.55)');
+      rimGrd.addColorStop(1,   'rgba(200,50,0,0)');
+      this.ctx.fillStyle = rimGrd;
+      this.ctx.beginPath();
+      this.ctx.arc(screenPos.x, screenPos.y, r * 2.4, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.globalAlpha = 1.0;
+
+      // Pellet core: radial gradient — white-hot centre → burnt dark brown rim
+      const coreGrd = this.ctx.createRadialGradient(
+        screenPos.x - r * 0.25, screenPos.y - r * 0.25, r * 0.05,
+        screenPos.x, screenPos.y, r
+      );
+      coreGrd.addColorStop(0,   '#ffffff');
+      coreGrd.addColorStop(0.3, '#ffcc44');
+      coreGrd.addColorStop(0.6, '#cc5500');
+      coreGrd.addColorStop(1,   '#3a1800');
+      this.ctx.fillStyle = coreGrd;
       this.ctx.beginPath();
       this.ctx.arc(screenPos.x, screenPos.y, r, 0, Math.PI * 2);
       this.ctx.fill();
-      this.ctx.strokeStyle = '#CD853F';
-      this.ctx.lineWidth = 0.5;
-      this.ctx.stroke();
     } else if (cannonball.ammoType === 1) {
       // ── Bar Shot ───────────────────────────────────────────────────────────
       // Two iron balls connected by a spinning bar.
@@ -4208,7 +4273,7 @@ export class RenderSystem {
       this.ctx.strokeStyle = '#ff8844';
       this.ctx.lineWidth   = 1;
       this.ctx.stroke();
-    } else if (cannonball.ammoType === 11) {
+    } else if (cannonball.ammoType === 11 || cannonball.ammoType === 3) {
       // ── Liquid Flame (Flamethrower) ─────────────────────────────────────────
       // Elongated flame jet oriented along the velocity vector.
       const ctx     = this.ctx;
@@ -4260,7 +4325,7 @@ export class RenderSystem {
 
       // Ember particle trail (world-space, behind the projectile)
       this.particleSystem.createFlameTrail(cannonball.position, angle);
-    } else if (cannonball.ammoType === 12) {
+    } else if (cannonball.ammoType === 12 || cannonball.ammoType === 4) {
       // ── Canister Shot pellet ───────────────────────────────────────────────
       // Wider spread than grapeshot — slightly larger, darker iron pellet.
       const r = Math.max(2, 3.5 * zoom);
