@@ -1190,6 +1190,21 @@ static void handle_swivel_aim(WebSocketPlayer* player, float aim_angle) {
 
     module->data.swivel.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
 
+    /* Mirror into global_sim so sim-path snapshots see the updated target */
+    if (global_sim) {
+        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+            if (global_sim->ships[si].id != ship->ship_id) continue;
+            for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
+                if (global_sim->ships[si].modules[mi].id == module->id) {
+                    global_sim->ships[si].modules[mi].data.swivel.desired_aim_direction =
+                        Q16_FROM_FLOAT(desired_offset);
+                    break;
+                }
+            }
+            break;
+        }
+    }
+
     log_info("🔫 swivel_aim: player %u swivel %u → %.1f°",
              player->player_id, module->id,
              desired_offset * 180.0f / (float)M_PI);
@@ -7073,6 +7088,15 @@ int websocket_server_update(struct Sim* sim) {
                                 module_x, module_y, module_rot, aim_direction,
                                 (unsigned)module->state_bits,
                                 (int)module->health, (int)module->max_health);
+                        } else if (module->type_id == MODULE_TYPE_SWIVEL) {
+                            // Swivel: include current aim direction, state, and health
+                            float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
+                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"maxHealth\":%d}",
+                                m > 0 ? "," : "", module->id, module->type_id,
+                                module_x, module_y, module_rot, aim_dir,
+                                (unsigned)module->state_bits,
+                                (int)module->health, (int)module->max_health);
                         } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                             // Helm: include wheel rotation, occupied status, state, and health
                             float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
@@ -7188,6 +7212,14 @@ int websocket_server_update(struct Sim* sim) {
                                 "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
                                 m > 0 ? "," : "", module->id, module->type_id,
                                 module_x, module_y, module_rot, aim_direction,
+                                (unsigned)module->state_bits);
+                        } else if (module->type_id == MODULE_TYPE_SWIVEL) {
+                            // Swivel: include current aim direction and state
+                            float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
+                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
+                                m > 0 ? "," : "", module->id, module->type_id,
+                                module_x, module_y, module_rot, aim_dir,
                                 (unsigned)module->state_bits);
                         } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                             // Helm: include wheel rotation, occupied status, state
@@ -8032,6 +8064,20 @@ void websocket_server_tick(float dt) {
                 while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
                 cur = (fabsf(diff) <= max_step) ? tgt : cur + (diff > 0.0f ? max_step : -max_step);
                 mod->data.swivel.aim_direction = Q16_FROM_FLOAT(cur);
+                /* Mirror into global_sim so sim-path snapshots reflect the interpolated angle */
+                if (global_sim) {
+                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                        if (global_sim->ships[si].id == ships[s].ship_id) {
+                            for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
+                                if (global_sim->ships[si].modules[mi].id == mod->id) {
+                                    global_sim->ships[si].modules[mi].data.swivel.aim_direction = mod->data.swivel.aim_direction;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
