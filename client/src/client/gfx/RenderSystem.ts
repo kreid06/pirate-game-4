@@ -125,6 +125,15 @@ export class RenderSystem {
   private npcDamageFlash: Map<number, number> = new Map();
   /** Key → fire expiry timestamp (ms). Key format: "npc:{id}" | "player:{id}" | "module:{shipId}:{moduleId}" */
   private burningEntities: Map<string, number> = new Map();
+  /**
+   * Short-lived hit-scan tracer lines for grapeshot / canister bursts.
+   * Each entry: origin (world px), angle (rad), range (px), spawnAt (ms), ttl (ms).
+   */
+  private grapeshotTracers: Array<{
+    x: number; y: number; angle: number; range: number;
+    spawnAt: number; ttl: number; ammoType: number;
+  }> = [];
+
   /** Active flamethrower wave states keyed by cannonId. Client interpolates between server ticks. */
   private flameWaves: Map<number, {
     x: number; y: number; angle: number; halfCone: number;
@@ -186,6 +195,24 @@ export class RenderSystem {
    * @deprecated Use updateFlameWave() — kept for backward compat with any remaining call sites.
    */
   spawnFlameCone(_x: number, _y: number, _angle: number, _halfCone: number): void { /* no-op */ }
+
+  /**
+   * Spawn hit-scan tracer lines for a grapeshot or canister burst.
+   * @param ammoType 2 = grapeshot, 4 = canister
+   */
+  spawnGrapeshotTracers(x: number, y: number, angle: number, ammoType: number): void {
+    // 3 tracers for grapeshot (±12°), 5 for canister (±20°)
+    const isCanister = ammoType === 4;
+    const count      = isCanister ? 5 : 3;
+    const halfSpread = isCanister ? (20 * Math.PI / 180) : (12 * Math.PI / 180);
+    const range      = isCanister ? 180 : 250;
+    const now        = performance.now();
+    for (let p = 0; p < count; p++) {
+      const t   = count > 1 ? p / (count - 1) : 0.5;
+      const ray = angle + halfSpread * (2 * t - 1);
+      this.grapeshotTracers.push({ x, y, angle: ray, range, spawnAt: now, ttl: 180, ammoType });
+    }
+  }
 
   /**
    * Called each time a FLAME_WAVE_UPDATE arrives from the server.
@@ -282,6 +309,45 @@ export class RenderSystem {
         retreatDist,
         waveDist,
       );
+    }
+  }
+
+  private drawGrapeshotTracers(camera: Camera): void {
+    if (this.grapeshotTracers.length === 0) return;
+    const now  = performance.now();
+    const ctx  = this.ctx;
+    const zoom = camera.getState().zoom;
+
+    this.grapeshotTracers = this.grapeshotTracers.filter(t => now - t.spawnAt < t.ttl);
+    for (const t of this.grapeshotTracers) {
+      const age    = now - t.spawnAt;
+      const frac   = age / t.ttl;               // 0 → 1 as tracer fades
+      const alpha  = (1 - frac) * 0.85;
+      const origin = camera.worldToScreen(Vec2.from(t.x, t.y));
+      const tipX   = t.x + Math.cos(t.angle) * t.range;
+      const tipY   = t.y + Math.sin(t.angle) * t.range;
+      const tip    = camera.worldToScreen(Vec2.from(tipX, tipY));
+
+      // Faded tracer line: bright white core → transparent tip
+      const grad = ctx.createLinearGradient(origin.x, origin.y, tip.x, tip.y);
+      if (t.ammoType === 4) {
+        // Canister: slightly wider, warm-white
+        grad.addColorStop(0,   `rgba(255,230,180,${alpha.toFixed(3)})`);
+        grad.addColorStop(0.5, `rgba(255,180,80,${(alpha * 0.6).toFixed(3)})`);
+        grad.addColorStop(1,    'rgba(255,120,0,0)');
+        ctx.lineWidth = Math.max(1, 1.5 * zoom);
+      } else {
+        // Grapeshot: thin white tracer
+        grad.addColorStop(0,   `rgba(255,255,220,${alpha.toFixed(3)})`);
+        grad.addColorStop(0.4, `rgba(200,200,160,${(alpha * 0.5).toFixed(3)})`);
+        grad.addColorStop(1,    'rgba(160,160,100,0)');
+        ctx.lineWidth = Math.max(0.5, 1 * zoom);
+      }
+      ctx.strokeStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(origin.x, origin.y);
+      ctx.lineTo(tip.x, tip.y);
+      ctx.stroke();
     }
   }
 
@@ -989,6 +1055,8 @@ export class RenderSystem {
     this.effectRenderer.render(camera);
     // Flamethrower instant cone flashes (on top of particles)
     this.drawFlameCones(camera);
+    // Grapeshot / canister hit-scan tracers
+    this.drawGrapeshotTracers(camera);
     // Screen-space announcement banners (on top of everything)
     this.effectRenderer.renderAnnouncements(this.canvas);
 

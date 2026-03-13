@@ -3759,31 +3759,79 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
     uint32_t owner_id = (player != NULL) ? player->player_id : ship->ship_id;
 
     if (ammo_type == PROJ_TYPE_GRAPESHOT) {
-        /* 3 pellets spread at -12°, 0°, +12° — anti-personnel */
-        const int   NUM_PELLETS = 3;
-        const float SPREAD_STEP = 12.0f * (float)(M_PI / 180.0f);
+        /* Pure hit-scan anti-personnel burst — 3 rays at -12°, 0°, +12°.
+         * No projectiles are spawned; modules are intentionally immune.
+         * Range: 250 px, damage: 60 HP per pellet hit. */
+        const float GRAPE_RANGE    = 250.0f;
+        const float GRAPE_DAMAGE   = 60.0f;
+        const float SPREAD_STEP    = 12.0f * (float)(M_PI / 180.0f);
+        const int   NUM_PELLETS    = 3;
+
+        /* Broadcast the visual shot event (reuses CANNON_FIRE format) so clients
+         * show the muzzle flash / tracer for each ray. Use id=0 for projectile
+         * since there is no real projectile entity. */
         for (int p = 0; p < NUM_PELLETS; p++) {
             float angle = fire_angle + SPREAD_STEP * (float)(p - 1);
-            float sx = world_x + cosf(angle) * BARREL_LEN;
-            float sy = world_y + sinf(angle) * BARREL_LEN;
-            Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(sx)),
-                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy)) };
-            Vec2Q16 vel = { Q16_FROM_FLOAT(cosf(angle) * SWIVEL_SPEED + ship_vx),
-                            Q16_FROM_FLOAT(sinf(angle) * SWIVEL_SPEED + ship_vy) };
-            entity_id pid = sim_create_projectile(global_sim, pos, vel, owner_id, PROJ_TYPE_GRAPESHOT);
-            if (pid != INVALID_ENTITY_ID) {
-                struct Projectile* proj = sim_get_projectile(global_sim, pid);
-                if (proj) {
-                    proj->damage         = Q16_FROM_FLOAT(450.0f);
-                    proj->lifetime       = Q16_FROM_FLOAT(1.5f);
-                    proj->firing_company = ship->company_id;
-                    proj->firing_ship_id = (entity_id)ship->ship_id;
-                    proj->type           = PROJ_TYPE_GRAPESHOT;
-                }
-                broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, angle, pid, PROJ_TYPE_GRAPESHOT);
-            }
+            broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, angle, 0, PROJ_TYPE_GRAPESHOT);
         }
-        log_info("Swivel %u fired GRAPESHOT (3 pellets) on ship %u", sw->id, ship->ship_id);
+
+        /* Scan NPCs */
+        for (int ni = 0; ni < world_npc_count; ni++) {
+            WorldNpc* npc = &world_npcs[ni];
+            if (!npc->active) continue;
+            if (npc->ship_id == ship->ship_id) continue; /* friendly */
+            float dx = npc->x - world_x, dy = npc->y - world_y;
+            float dist = sqrtf(dx*dx + dy*dy);
+            if (dist > GRAPE_RANGE) continue;
+            if (dist < 0.01f) { dx = 1.0f; dy = 0.0f; dist = 1.0f; }
+            float nx = dx / dist, ny = dy / dist;
+            float fdir_x = cosf(fire_angle), fdir_y = sinf(fire_angle);
+            /* Check if NPC falls within any of the 3 pellet rays (cone ±18°) */
+            float half_cone = 18.0f * (float)(M_PI / 180.0f);
+            float dot = nx * fdir_x + ny * fdir_y;
+            if (dot < cosf(half_cone)) continue;
+            uint16_t dmg = (uint16_t)GRAPE_DAMAGE;
+            bool killed = false;
+            if (npc->health <= dmg) { npc->health = 0; npc->active = false; killed = true; }
+            else { npc->health -= dmg; }
+            char hit_msg[256];
+            snprintf(hit_msg, sizeof(hit_msg),
+                "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
+                "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                npc->id, npc->x, npc->y, GRAPE_DAMAGE,
+                (unsigned)npc->health, (unsigned)npc->max_health,
+                killed ? "true" : "false");
+            broadcast_json_all(hit_msg);
+        }
+
+        /* Scan players */
+        for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
+            WebSocketPlayer* wp = &players[wpi];
+            if (!wp->active || wp->parent_ship_id == ship->ship_id) continue;
+            float dx = wp->x - world_x, dy = wp->y - world_y;
+            float dist = sqrtf(dx*dx + dy*dy);
+            if (dist > GRAPE_RANGE) continue;
+            if (dist < 0.01f) { dx = 1.0f; dy = 0.0f; dist = 1.0f; }
+            float nx = dx / dist, ny = dy / dist;
+            float fdir_x = cosf(fire_angle), fdir_y = sinf(fire_angle);
+            float half_cone = 18.0f * (float)(M_PI / 180.0f);
+            float dot = nx * fdir_x + ny * fdir_y;
+            if (dot < cosf(half_cone)) continue;
+            uint16_t dmg = (uint16_t)GRAPE_DAMAGE;
+            if (wp->health <= dmg) wp->health = 0; else wp->health -= dmg;
+            char hit_msg[256];
+            snprintf(hit_msg, sizeof(hit_msg),
+                "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
+                "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                wp->player_id, wp->x, wp->y, GRAPE_DAMAGE,
+                (unsigned)wp->health, (unsigned)wp->max_health,
+                wp->health == 0 ? "true" : "false");
+            broadcast_json_all(hit_msg);
+        }
+
+        log_info("Swivel %u fired GRAPESHOT (hit-scan) on ship %u", sw->id, ship->ship_id);
     } else if (ammo_type == PROJ_TYPE_LIQUID_FLAME) {
         /* ── Flamethrower wave: register / refresh this swivel's wave entry ──────
          * Hit application happens in update_flame_waves() each server tick so

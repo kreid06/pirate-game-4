@@ -1019,6 +1019,14 @@ export class ClientApplication {
         this.renderSystem.updateFlameWave(cannonId, shipId, x, y, angle, halfCone, waveDist, retreating, retreatDist, dead);
       };
 
+      // Handle CANNON_FIRE_EVENT: render hit-scan tracers for grapeshot / canister
+      this.networkManager.onCannonFireEvent = (_cannonId, _shipId, x, y, angle, projectileId, ammoType) => {
+        // Only spawn tracers for hit-scan ammo types (no real projectile, id=0)
+        if (projectileId === 0 && (ammoType === 2 || ammoType === 4)) {
+          this.renderSystem.spawnGrapeshotTracers(x, y, angle, ammoType);
+        }
+      };
+
       // Handle FIRE_EXTINGUISHED: clear burning state
       this.networkManager.onFireExtinguished = (entityType, id, shipId, moduleId) => {
         this.renderSystem.notifyFireExtinguished(entityType, id, shipId, moduleId);
