@@ -1394,6 +1394,7 @@ export class ClientApplication {
         selectedAmmoType: this.inputManager?.getLoadedAmmoType() ?? 0,
         pendingAmmoType: this.inputManager?.selectedAmmoType ?? 0,
         mountKind: this.inputManager?.getMountKind() ?? 'none',
+        activeAmmoGroup: this.inputManager?.activeAmmoGroup ?? 'cannon',
         activeWeaponGroup: this.inputManager?.activeWeaponGroup ?? -1,
         activeWeaponGroups: this.inputManager?.activeWeaponGroups,
         playerShip,

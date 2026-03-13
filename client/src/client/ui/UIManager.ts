@@ -41,6 +41,8 @@ export interface UIRenderContext {
   playerShip?: Ship | null;
   /** User-defined weapon control groups — set while on helm. */
   controlGroups?: Map<number, WeaponGroupState>;
+  /** Active ammo group on helm: 'cannon' (IDs 0-1) or 'swivel' (IDs 2-4). */
+  activeAmmoGroup?: 'cannon' | 'swivel';
 }
 
 /**
@@ -267,9 +269,17 @@ export class UIManager {
     // Always render FPS in top-right corner
     this.renderFPS(ctx, context);
 
-    // Ammo selector widget — show when mounted to a cannon or the helm
-    if (context.mountKind === 'cannon' || context.mountKind === 'helm') {
+    // Ammo selector widget
+    if (context.mountKind === 'cannon') {
       this.renderAmmoSelector(ctx, context.selectedAmmoType ?? 0, context.pendingAmmoType ?? context.selectedAmmoType ?? 0);
+    } else if (context.mountKind === 'helm') {
+      // Combined cannon+swivel row with [U] group switching
+      this.renderHelmCombinedAmmoSelector(
+        ctx,
+        context.selectedAmmoType ?? 0,
+        context.pendingAmmoType ?? context.selectedAmmoType ?? 0,
+        context.activeAmmoGroup ?? 'cannon'
+      );
     }
 
     // Swivel ammo selector — three types, shown when mounted to a swivel
@@ -339,6 +349,165 @@ export class UIManager {
     ctx.textBaseline = 'top';
     ctx.fillText(text, x + padding, y + padding);
     
+    ctx.restore();
+  }
+
+  /**
+   * Helm combined ammo selector — bottom-left corner.
+   * Shows all 5 ammo types in one row: [CANNONBALL][BAR SHOT] | [GRAPESHOT][LIQ.FLAME][CANISTER]
+   * Active group is fully opaque; inactive group is dimmed.
+   * [U] toggles between cannon/swivel group;  [X] cycles within the active group.
+   */
+  private renderHelmCombinedAmmoSelector(
+    ctx: CanvasRenderingContext2D,
+    loadedAmmoType: number,
+    pendingAmmoType: number,
+    activeGroup: 'cannon' | 'swivel'
+  ): void {
+    ctx.save();
+
+    const slotW  = 68;
+    const slotH  = 48;
+    const margin = 3;
+    const divW   = 12;   // gap for the | divider
+    const x0     = 12;
+    const y0     = ctx.canvas.height - slotH - 12;
+    const pad    = 4;
+
+    const cannonAmmos: { id: number; name: string; icon: string; color: string }[] = [
+      { id: 0, name: 'CANNONBALL', icon: '●',   color: '#c0c0a0' },
+      { id: 1, name: 'BAR SHOT',   icon: '◉━◉', color: '#ff7733' },
+    ];
+    const swivelAmmos: { id: number; name: string; icon: string; color: string; desc: string }[] = [
+      { id: 2, name: 'GRAPESHOT',  icon: '∷', color: '#c8c8b0', desc: 'crew dmg'  },
+      { id: 3, name: 'LIQ. FLAME', icon: '≈', color: '#ff8832', desc: 'fire dmg'  },
+      { id: 4, name: 'CANISTER',   icon: '⊠', color: '#90d890', desc: 'spread'    },
+    ];
+
+    const switchPending = pendingAmmoType !== loadedAmmoType;
+
+    const renderSlot = (
+      slotX: number,
+      ammo: { id: number; name: string; icon: string; color: string; desc?: string },
+      groupActive: boolean
+    ) => {
+      const isLoaded  = ammo.id === loadedAmmoType;
+      const isPending = ammo.id === pendingAmmoType && switchPending;
+
+      let bgColor: string;
+      let borderColor: string;
+      let borderWidth: number;
+      let textColor: string;
+      let iconColor: string;
+      let dotColor: string | null = null;
+
+      if (isLoaded) {
+        bgColor     = 'rgba(50,220,80,0.20)';
+        borderColor = '#44dd66';
+        borderWidth = 2;
+        iconColor   = ammo.color;
+        textColor   = '#ccffcc';
+        dotColor    = '#44dd66';
+      } else if (isPending) {
+        bgColor     = 'rgba(255,200,50,0.18)';
+        borderColor = '#ffd700';
+        borderWidth = 2;
+        iconColor   = ammo.color;
+        textColor   = '#fffccc';
+        dotColor    = '#ffd700';
+      } else {
+        bgColor     = 'rgba(0,0,0,0.55)';
+        borderColor = '#445';
+        borderWidth = 1;
+        iconColor   = '#556';
+        textColor   = '#668';
+      }
+
+      const alpha = groupActive ? 1.0 : 0.35;
+      ctx.globalAlpha = alpha;
+
+      ctx.fillStyle   = bgColor;
+      ctx.fillRect(slotX, y0, slotW, slotH);
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth   = borderWidth;
+      ctx.strokeRect(slotX, y0, slotW, slotH);
+
+      // Icon
+      ctx.font         = '11px Consolas, monospace';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = iconColor;
+      ctx.fillText(ammo.icon, slotX + pad + 1, y0 + slotH / 2 - 4);
+
+      // Name
+      ctx.font      = (isLoaded || isPending) ? 'bold 8px Consolas, monospace' : '8px Consolas, monospace';
+      ctx.fillStyle = textColor;
+      ctx.fillText(ammo.name, slotX + pad + 1, y0 + slotH / 2 + 5);
+
+      // Desc (swivel only)
+      if (ammo.desc) {
+        ctx.font      = '6px Consolas, monospace';
+        ctx.fillStyle = (isLoaded || isPending) ? 'rgba(160,200,160,0.65)' : 'rgba(90,100,100,0.50)';
+        ctx.fillText(ammo.desc, slotX + pad + 1, y0 + slotH / 2 + 13);
+      }
+
+      // Dot indicator
+      if (dotColor) {
+        ctx.fillStyle = dotColor;
+        ctx.beginPath();
+        ctx.arc(slotX + slotW - 7, y0 + 7, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.globalAlpha = 1.0;
+    };
+
+    // --- Cannon slots ---
+    for (let i = 0; i < cannonAmmos.length; i++) {
+      renderSlot(x0 + i * (slotW + margin), cannonAmmos[i], activeGroup === 'cannon');
+    }
+
+    // --- Divider ---
+    const divX = x0 + cannonAmmos.length * (slotW + margin);
+    ctx.globalAlpha = 0.55;
+    ctx.strokeStyle = 'rgba(160,160,200,0.70)';
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(divX + divW / 2, y0 + 5);
+    ctx.lineTo(divX + divW / 2, y0 + slotH - 5);
+    ctx.stroke();
+    ctx.globalAlpha = 1.0;
+
+    // --- Swivel slots ---
+    const swivelStartX = divX + divW;
+    for (let i = 0; i < swivelAmmos.length; i++) {
+      renderSlot(swivelStartX + i * (slotW + margin), swivelAmmos[i], activeGroup === 'swivel');
+    }
+
+    // --- Group labels above each section ---
+    ctx.font         = 'bold 6px Consolas, monospace';
+    ctx.textBaseline = 'bottom';
+    ctx.textAlign    = 'center';
+
+    const cannonCx = x0 + (cannonAmmos.length * slotW + (cannonAmmos.length - 1) * margin) / 2;
+    ctx.globalAlpha = activeGroup === 'cannon' ? 0.85 : 0.38;
+    ctx.fillStyle   = '#c8d8c8';
+    ctx.fillText('CANNON', cannonCx, y0 - 3);
+
+    const swivelCx = swivelStartX + (swivelAmmos.length * slotW + (swivelAmmos.length - 1) * margin) / 2;
+    ctx.globalAlpha = activeGroup === 'swivel' ? 0.85 : 0.38;
+    ctx.fillStyle   = '#c8d8c8';
+    ctx.fillText('SWIVEL', swivelCx, y0 - 3);
+
+    ctx.globalAlpha = 1.0;
+
+    // --- Hint row ---
+    ctx.font         = '9px Consolas, monospace';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle    = 'rgba(120,120,140,0.70)';
+    ctx.fillText('[U] switch group  |  [X] cycle  |  hold X (0.5s) → force reload', x0 + 2, y0 + slotH + 3);
+
     ctx.restore();
   }
 
