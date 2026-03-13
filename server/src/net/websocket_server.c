@@ -3527,7 +3527,7 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
         }
         log_info("Swivel %u fired GRAPESHOT (3 pellets) on ship %u", sw->id, ship->ship_id);
     } else if (ammo_type == PROJ_TYPE_LIQUID_FLAME) {
-        /* Single incendiary fireball — slower, area denial */
+        /* Single incendiary fireball — slower, area denial, zero direct HP damage */
         const float FLAME_SPEED = CLIENT_TO_SERVER(250.0f);
         float sx = world_x + cosf(fire_angle) * BARREL_LEN;
         float sy = world_y + sinf(fire_angle) * BARREL_LEN;
@@ -3539,7 +3539,7 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
         if (pid != INVALID_ENTITY_ID) {
             struct Projectile* proj = sim_get_projectile(global_sim, pid);
             if (proj) {
-                proj->damage         = Q16_FROM_FLOAT(800.0f);
+                proj->damage         = Q16_FROM_FLOAT(0.0f); /* fire DoT handled separately */
                 proj->lifetime       = Q16_FROM_FLOAT(3.0f);
                 proj->firing_company = ship->company_id;
                 proj->firing_ship_id = (entity_id)ship->ship_id;
@@ -7994,14 +7994,31 @@ void websocket_server_tick(float dt) {
         global_sim->hit_event_count = 0;
     }
 
-    // ===== CANNONBALL / GRAPESHOT vs ENTITY HIT DETECTION =====
+    // ===== CANNONBALL / GRAPESHOT / LIQUID FLAME / CANISTER SHOT vs ENTITY HIT DETECTION =====
     // Cannonballs (PROJ_TYPE_CANNONBALL) deal base 75 HP damage to NPCs and
     // players.  Grapeshot (PROJ_TYPE_GRAPESHOT) uses a tighter hit radius (20 px)
     // and lower damage (35 HP per pellet). Unmounted entities are knocked back.
+    // Liquid flame (PROJ_TYPE_LIQUID_FLAME) deals 0 direct HP damage but sets
+    // fire_timer_ms on hit entities (NPCs/players) and nearby wooden modules
+    // (planks, decks, masts). Fire burns for 10 seconds dealing DoT.
     if (global_sim) {
         const float ENTITY_HIT_RADIUS    = 40.0f;   // client pixels (cannonball)
         const float ENTITY_BASE_DAMAGE   = 75.0f;
         const float ENTITY_KNOCKBACK     = 40.0f;   // velocity impulse (client px/s)
+        const uint32_t FIRE_DURATION_MS  = 10000;   // 10 seconds
+
+        /* Helper: broadcast a FIRE_EFFECT event */
+        #define BROADCAST_FIRE_EFFECT(msg_buf, ...) do { \
+            snprintf((msg_buf), sizeof(msg_buf), __VA_ARGS__); \
+            char _ff[320]; \
+            size_t _ffl = websocket_create_frame(WS_OPCODE_TEXT, (msg_buf), strlen(msg_buf), _ff, sizeof(_ff)); \
+            if (_ffl > 0) { \
+                for (int _ci = 0; _ci < WS_MAX_CLIENTS; _ci++) { \
+                    struct WebSocketClient* _wc = &ws_server.clients[_ci]; \
+                    if (_wc->connected && _wc->handshake_complete) send(_wc->fd, _ff, _ffl, 0); \
+                } \
+            } \
+        } while (0)
 
         uint16_t pi = 0;
         while (pi < global_sim->projectile_count) {
@@ -8022,12 +8039,13 @@ void websocket_server_tick(float dt) {
             }
             /* Per-type hit radius and base entity damage */
             float ent_hit_radius, damage;
-            if (proj->type == PROJ_TYPE_GRAPESHOT || proj->type == PROJ_TYPE_CANISTER_SHOT) {
+            bool is_flame = (proj->type == PROJ_TYPE_LIQUID_FLAME);
+            if (is_flame) {
+                ent_hit_radius = 30.0f;
+                damage         = 0.0f; /* fire DoT handled in 100ms tick */
+            } else if (proj->type == PROJ_TYPE_GRAPESHOT || proj->type == PROJ_TYPE_CANISTER_SHOT) {
                 ent_hit_radius = (proj->type == PROJ_TYPE_CANISTER_SHOT) ? 15.0f : 20.0f;
                 damage         = (proj->type == PROJ_TYPE_CANISTER_SHOT) ? 25.0f * dmg_mult : 35.0f * dmg_mult;
-            } else if (proj->type == PROJ_TYPE_LIQUID_FLAME) {
-                ent_hit_radius = 30.0f;
-                damage         = 50.0f * dmg_mult;
             } else {
                 ent_hit_radius = ENTITY_HIT_RADIUS;
                 damage         = ENTITY_BASE_DAMAGE * dmg_mult;
@@ -8048,47 +8066,58 @@ void websocket_server_tick(float dt) {
                 float dy = npc->y - py;
                 if (dx * dx + dy * dy > hit_r2) continue;
 
-                // Apply damage
-                uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
-                if (npc->health <= dmg16) {
-                    npc->health = 0;
-                    npc->active = false; // NPC killed
+                if (is_flame) {
+                    /* Liquid flame: ignite the NPC, no direct HP damage */
+                    npc->fire_timer_ms = FIRE_DURATION_MS;
+                    char hit_msg[256];
+                    BROADCAST_FIRE_EFFECT(hit_msg,
+                        "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"npc\",\"id\":%u,"
+                        "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                        npc->id, npc->x, npc->y, FIRE_DURATION_MS);
+                    proj_consumed = true;
                 } else {
-                    npc->health -= dmg16;
-                }
-
-                // Knockback via velocity — skip if stationed at a module
-                bool npc_at_station = (npc->state == WORLD_NPC_STATE_AT_CANNON ||
-                                       npc->state == WORLD_NPC_STATE_REPAIRING);
-                if (!npc_at_station) {
-                    float dist = sqrtf(dx * dx + dy * dy);
-                    float kx   = (dist > 0.1f) ? (dx / dist) : 1.0f;
-                    float ky   = (dist > 0.1f) ? (dy / dist) : 0.0f;
-                    npc->velocity_x += kx * ENTITY_KNOCKBACK;
-                    npc->velocity_y += ky * ENTITY_KNOCKBACK;
-                }
-
-                // Broadcast ENTITY_HIT
-                char hit_msg[256];
-                snprintf(hit_msg, sizeof(hit_msg),
-                    "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
-                    "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
-                    "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
-                    npc->id, npc->x, npc->y, damage,
-                    (unsigned)npc->health, (unsigned)npc->max_health,
-                    (!npc->active) ? "true" : "false");
-                char hit_frame[320];
-                size_t hfl = websocket_create_frame(WS_OPCODE_TEXT, hit_msg, strlen(hit_msg),
-                                                    hit_frame, sizeof(hit_frame));
-                if (hfl > 0) {
-                    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
-                        struct WebSocketClient* wc = &ws_server.clients[ci];
-                        if (wc->connected && wc->handshake_complete)
-                            send(wc->fd, hit_frame, hfl, 0);
+                    // Apply damage
+                    uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
+                    if (npc->health <= dmg16) {
+                        npc->health = 0;
+                        npc->active = false; // NPC killed
+                    } else {
+                        npc->health -= dmg16;
                     }
-                }
 
-                proj_consumed = true;
+                    // Knockback via velocity — skip if stationed at a module
+                    bool npc_at_station = (npc->state == WORLD_NPC_STATE_AT_CANNON ||
+                                           npc->state == WORLD_NPC_STATE_REPAIRING);
+                    if (!npc_at_station) {
+                        float dist = sqrtf(dx * dx + dy * dy);
+                        float kx   = (dist > 0.1f) ? (dx / dist) : 1.0f;
+                        float ky   = (dist > 0.1f) ? (dy / dist) : 0.0f;
+                        npc->velocity_x += kx * ENTITY_KNOCKBACK;
+                        npc->velocity_y += ky * ENTITY_KNOCKBACK;
+                    }
+
+                    // Broadcast ENTITY_HIT
+                    char hit_msg[256];
+                    snprintf(hit_msg, sizeof(hit_msg),
+                        "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
+                        "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                        "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                        npc->id, npc->x, npc->y, damage,
+                        (unsigned)npc->health, (unsigned)npc->max_health,
+                        (!npc->active) ? "true" : "false");
+                    char hit_frame[320];
+                    size_t hfl = websocket_create_frame(WS_OPCODE_TEXT, hit_msg, strlen(hit_msg),
+                                                        hit_frame, sizeof(hit_frame));
+                    if (hfl > 0) {
+                        for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                            struct WebSocketClient* wc = &ws_server.clients[ci];
+                            if (wc->connected && wc->handshake_complete)
+                                send(wc->fd, hit_frame, hfl, 0);
+                        }
+                    }
+
+                    proj_consumed = true;
+                }
             }
 
             // ── Check Players ────────────────────────────────────────────────
@@ -8103,76 +8132,140 @@ void websocket_server_tick(float dt) {
                 float dy = wp->y - py;
                 if (dx * dx + dy * dy > hit_r2) continue;
 
-                // Apply damage
-                uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
-                if (wp->health <= dmg16) {
-                    wp->health = 0;
+                if (is_flame) {
+                    /* Liquid flame: ignite the player, no direct HP damage */
+                    wp->fire_timer_ms = FIRE_DURATION_MS;
+                    char hit_msg[256];
+                    BROADCAST_FIRE_EFFECT(hit_msg,
+                        "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"player\",\"id\":%u,"
+                        "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                        wp->player_id, wp->x, wp->y, FIRE_DURATION_MS);
+                    proj_consumed = true;
                 } else {
-                    wp->health -= dmg16;
-                }
-
-                // Knockback — skip if mounted to a module
-                if (!wp->is_mounted) {
-                    float dist = sqrtf(dx * dx + dy * dy);
-                    float kx   = (dist > 0.1f) ? (dx / dist) : 1.0f;
-                    float ky   = (dist > 0.1f) ? (dy / dist) : 0.0f;
-                    if (wp->parent_ship_id != 0) {
-                        // On a ship: push local position, then recalc world pos
-                        wp->local_x += kx * ENTITY_KNOCKBACK;
-                        wp->local_y += ky * ENTITY_KNOCKBACK;
-                        SimpleShip* wp_ship = NULL;
-                        for (int s = 0; s < ship_count; s++) {
-                            if (ships[s].active && ships[s].ship_id == wp->parent_ship_id) {
-                                wp_ship = &ships[s]; break;
-                            }
-                        }
-                        if (wp_ship) ship_local_to_world(wp_ship, wp->local_x, wp->local_y,
-                                                          &wp->x, &wp->y);
+                    // Apply damage
+                    uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
+                    if (wp->health <= dmg16) {
+                        wp->health = 0;
                     } else {
-                        // Swimming: instant position delta + velocity impulse
-                        wp->x += kx * ENTITY_KNOCKBACK;
-                        wp->y += ky * ENTITY_KNOCKBACK;
-                        wp->velocity_x += kx * ENTITY_KNOCKBACK * 3.0f;
-                        wp->velocity_y += ky * ENTITY_KNOCKBACK * 3.0f;
-                        // Sync to sim player
-                        if (wp->sim_entity_id != 0) {
-                            for (uint16_t spi = 0; spi < global_sim->player_count; spi++) {
-                                if (global_sim->players[spi].id == wp->sim_entity_id) {
-                                    global_sim->players[spi].position.x =
-                                        Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->x));
-                                    global_sim->players[spi].position.y =
-                                        Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->y));
-                                    global_sim->players[spi].velocity.x =
-                                        Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->velocity_x));
-                                    global_sim->players[spi].velocity.y =
-                                        Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->velocity_y));
-                                    break;
+                        wp->health -= dmg16;
+                    }
+
+                    // Knockback — skip if mounted to a module
+                    if (!wp->is_mounted) {
+                        float dist = sqrtf(dx * dx + dy * dy);
+                        float kx   = (dist > 0.1f) ? (dx / dist) : 1.0f;
+                        float ky   = (dist > 0.1f) ? (dy / dist) : 0.0f;
+                        if (wp->parent_ship_id != 0) {
+                            // On a ship: push local position, then recalc world pos
+                            wp->local_x += kx * ENTITY_KNOCKBACK;
+                            wp->local_y += ky * ENTITY_KNOCKBACK;
+                            SimpleShip* wp_ship = NULL;
+                            for (int s = 0; s < ship_count; s++) {
+                                if (ships[s].active && ships[s].ship_id == wp->parent_ship_id) {
+                                    wp_ship = &ships[s]; break;
+                                }
+                            }
+                            if (wp_ship) ship_local_to_world(wp_ship, wp->local_x, wp->local_y,
+                                                              &wp->x, &wp->y);
+                        } else {
+                            // Swimming: instant position delta + velocity impulse
+                            wp->x += kx * ENTITY_KNOCKBACK;
+                            wp->y += ky * ENTITY_KNOCKBACK;
+                            wp->velocity_x += kx * ENTITY_KNOCKBACK * 3.0f;
+                            wp->velocity_y += ky * ENTITY_KNOCKBACK * 3.0f;
+                            // Sync to sim player
+                            if (wp->sim_entity_id != 0) {
+                                for (uint16_t spi = 0; spi < global_sim->player_count; spi++) {
+                                    if (global_sim->players[spi].id == wp->sim_entity_id) {
+                                        global_sim->players[spi].position.x =
+                                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->x));
+                                        global_sim->players[spi].position.y =
+                                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->y));
+                                        global_sim->players[spi].velocity.x =
+                                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->velocity_x));
+                                        global_sim->players[spi].velocity.y =
+                                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->velocity_y));
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // Broadcast ENTITY_HIT
-                char hit_msg[256];
-                snprintf(hit_msg, sizeof(hit_msg),
-                    "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
-                    "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
-                    "\"health\":%u,\"maxHealth\":%u}",
-                    wp->player_id, wp->x, wp->y, damage,
-                    (unsigned)wp->health, (unsigned)wp->max_health);
-                char hit_frame[320];
-                size_t hfl = websocket_create_frame(WS_OPCODE_TEXT, hit_msg, strlen(hit_msg),
-                                                    hit_frame, sizeof(hit_frame));
-                if (hfl > 0) {
-                    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
-                        struct WebSocketClient* wc = &ws_server.clients[ci];
-                        if (wc->connected && wc->handshake_complete)
-                            send(wc->fd, hit_frame, hfl, 0);
+                    // Broadcast ENTITY_HIT
+                    char hit_msg[256];
+                    snprintf(hit_msg, sizeof(hit_msg),
+                        "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
+                        "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                        "\"health\":%u,\"maxHealth\":%u}",
+                        wp->player_id, wp->x, wp->y, damage,
+                        (unsigned)wp->health, (unsigned)wp->max_health);
+                    char hit_frame[320];
+                    size_t hfl = websocket_create_frame(WS_OPCODE_TEXT, hit_msg, strlen(hit_msg),
+                                                        hit_frame, sizeof(hit_frame));
+                    if (hfl > 0) {
+                        for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                            struct WebSocketClient* wc = &ws_server.clients[ci];
+                            if (wc->connected && wc->handshake_complete)
+                                send(wc->fd, hit_frame, hfl, 0);
+                        }
+                    }
+
+                    proj_consumed = true;
+                }
+            }
+
+            // ── Liquid flame: ignite nearby wooden modules if not consumed yet
+            //    (or even if it was — fire spreads to whatever it touches)
+            if (is_flame && !proj_consumed) {
+                const float MOD_FIRE_RADIUS = 35.0f; /* client pixels */
+                const float mfr2 = MOD_FIRE_RADIUS * MOD_FIRE_RADIUS;
+                for (int s = 0; s < ship_count && !proj_consumed; s++) {
+                    if (!ships[s].active) continue;
+                    SimpleShip* fship = &ships[s];
+                    /* Skip own ship — no self-fire from liquid flame */
+                    if (proj->firing_ship_id != INVALID_ENTITY_ID &&
+                        fship->ship_id == (uint32_t)proj->firing_ship_id) continue;
+                    float cos_r = cosf(fship->rotation);
+                    float sin_r = sinf(fship->rotation);
+                    for (int m = 0; m < fship->module_count; m++) {
+                        ShipModule* mod = &fship->modules[m];
+                        ModuleTypeId mt = mod->type_id;
+                        /* Only wooden modules: planks, decks, masts */
+                        if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK &&
+                            mt != MODULE_TYPE_MAST) continue;
+                        if (mod->health <= 0) continue;
+                        float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                        float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                        float wx = fship->x + (lx * cos_r - ly * sin_r);
+                        float wy = fship->y + (lx * sin_r + ly * cos_r);
+                        float ddx = wx - px, ddy = wy - py;
+                        if (ddx * ddx + ddy * ddy > mfr2) continue;
+                        /* Ignite this module */
+                        mod->fire_timer_ms = FIRE_DURATION_MS;
+                        /* Also mirror to global_sim */
+                        if (global_sim) {
+                            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                if ((uint32_t)global_sim->ships[si].id != fship->ship_id) continue;
+                                for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
+                                    if (global_sim->ships[si].modules[mi].id == mod->id) {
+                                        global_sim->ships[si].modules[mi].fire_timer_ms = FIRE_DURATION_MS;
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        char fmsg[256];
+                        BROADCAST_FIRE_EFFECT(fmsg,
+                            "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"module\","
+                            "\"shipId\":%u,\"moduleId\":%u,"
+                            "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                            fship->ship_id, mod->id, wx, wy, FIRE_DURATION_MS);
+                        proj_consumed = true;
+                        break; /* consume on first wooden module hit */
                     }
                 }
-
-                proj_consumed = true;
             }
 
             if (proj_consumed) {
@@ -8186,6 +8279,7 @@ void websocket_server_tick(float dt) {
                 pi++;
             }
         }
+        #undef BROADCAST_FIRE_EFFECT
     }
 
     // ===== TICK NPC AGENTS =====
@@ -8658,6 +8752,100 @@ void websocket_server_tick(float dt) {
         }
         
         last_cannon_update = current_time;
+
+        /* ===== FIRE DOT TICK (every 100ms) ===== */
+        /* NPCs on fire: 1 HP per tick (~10 HP/s, 100 HP total over 10 s) */
+        for (int ni = 0; ni < world_npc_count; ni++) {
+            WorldNpc* npc = &world_npcs[ni];
+            if (!npc->active || npc->fire_timer_ms == 0) continue;
+            if (npc->health > 1) npc->health -= 1; else npc->health = 0;
+            if (npc->fire_timer_ms > time_elapsed) {
+                npc->fire_timer_ms -= time_elapsed;
+            } else {
+                npc->fire_timer_ms = 0;
+                /* Broadcast FIRE_EXTINGUISHED for NPC */
+                char fx[192];
+                snprintf(fx, sizeof(fx),
+                    "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"npc\",\"id\":%u}",
+                    npc->id);
+                char fxf[256];
+                size_t fxfl = websocket_create_frame(WS_OPCODE_TEXT, fx, strlen(fx), fxf, sizeof(fxf));
+                if (fxfl > 0) {
+                    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                        struct WebSocketClient* wc = &ws_server.clients[ci];
+                        if (wc->connected && wc->handshake_complete) send(wc->fd, fxf, fxfl, 0);
+                    }
+                }
+            }
+        }
+
+        /* Players on fire: 1 HP per tick */
+        for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
+            WebSocketPlayer* wp = &players[wpi];
+            if (!wp->active || wp->fire_timer_ms == 0) continue;
+            if (wp->health > 1) wp->health -= 1; else wp->health = 0;
+            if (wp->fire_timer_ms > time_elapsed) {
+                wp->fire_timer_ms -= time_elapsed;
+            } else {
+                wp->fire_timer_ms = 0;
+                char fx[192];
+                snprintf(fx, sizeof(fx),
+                    "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"player\",\"id\":%u}",
+                    wp->player_id);
+                char fxf[256];
+                size_t fxfl = websocket_create_frame(WS_OPCODE_TEXT, fx, strlen(fx), fxf, sizeof(fxf));
+                if (fxfl > 0) {
+                    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                        struct WebSocketClient* wc = &ws_server.clients[ci];
+                        if (wc->connected && wc->handshake_complete) send(wc->fd, fxf, fxfl, 0);
+                    }
+                }
+            }
+        }
+
+        /* Wooden modules on fire: 50 HP per tick (~500 HP/s, 5000 HP over 10 s) */
+        for (int s = 0; s < ship_count; s++) {
+            if (!ships[s].active) continue;
+            SimpleShip* fship = &ships[s];
+            float cos_r = cosf(fship->rotation);
+            float sin_r = sinf(fship->rotation);
+            for (int m = 0; m < fship->module_count; m++) {
+                ShipModule* mod = &fship->modules[m];
+                if (mod->fire_timer_ms == 0) continue;
+                ModuleTypeId mt = mod->type_id;
+                if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK && mt != MODULE_TYPE_MAST) continue;
+                /* Apply 50 HP damage via module_apply_damage */
+                q16_t fire_dot = Q16_FROM_FLOAT(50.0f);
+                module_apply_damage(mod, fire_dot);
+                /* Tick module fire timer */
+                bool extinguished = false;
+                if (mod->fire_timer_ms > time_elapsed) {
+                    mod->fire_timer_ms -= time_elapsed;
+                } else {
+                    mod->fire_timer_ms = 0;
+                    extinguished = true;
+                }
+                if (extinguished) {
+                    float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                    float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                    float wx = fship->x + (lx * cos_r - ly * sin_r);
+                    float wy = fship->y + (lx * sin_r + ly * cos_r);
+                    char fx[256];
+                    snprintf(fx, sizeof(fx),
+                        "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"module\","
+                        "\"shipId\":%u,\"moduleId\":%u,\"x\":%.1f,\"y\":%.1f}",
+                        fship->ship_id, mod->id, wx, wy);
+                    char fxf[320];
+                    size_t fxfl = websocket_create_frame(WS_OPCODE_TEXT, fx, strlen(fx), fxf, sizeof(fxf));
+                    if (fxfl > 0) {
+                        for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                            struct WebSocketClient* wc = &ws_server.clients[ci];
+                            if (wc->connected && wc->handshake_complete) send(wc->fd, fxf, fxfl, 0);
+                        }
+                    }
+                }
+            }
+        }
     }
     
     // ===== APPLY WIND-BASED SHIP MOVEMENT =====

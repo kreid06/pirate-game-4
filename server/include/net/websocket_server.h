@@ -180,6 +180,9 @@ typedef struct WorldNpc {
     uint8_t       stat_damage;    // +10% damage per level
     uint8_t       stat_stamina;   // +10% reload/work speed per level
     uint8_t       stat_weight;    // +10% carry capacity per level
+
+    // ── Status effects ──────────────────────────────────────────────────────
+    uint32_t      fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
 } WorldNpc;
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -270,6 +273,9 @@ typedef struct WebSocketPlayer {
 
     // Inventory
     PlayerInventory inventory;
+
+    // Status effects
+    uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
 } WebSocketPlayer;
 
 struct WebSocketStats {

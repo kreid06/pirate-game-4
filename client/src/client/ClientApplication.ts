@@ -1009,6 +1009,16 @@ export class ClientApplication {
         this.renderSystem.notifyEntityDamaged(id, entityType === 'npc');
       };
 
+      // Handle FIRE_EFFECT: mark entity/module as burning
+      this.networkManager.onFireEffect = (entityType, id, x, y, durationMs, shipId, moduleId) => {
+        this.renderSystem.notifyFireEffect(entityType, id, durationMs, shipId, moduleId);
+      };
+
+      // Handle FIRE_EXTINGUISHED: clear burning state
+      this.networkManager.onFireExtinguished = (entityType, id, shipId, moduleId) => {
+        this.renderSystem.notifyFireExtinguished(entityType, id, shipId, moduleId);
+      };
+
       this.networkManager.onLadderState = (shipId, moduleId, retracted) => {
         const ws = this.authoritativeWorldState || this.predictedWorldState;
         if (!ws) return;

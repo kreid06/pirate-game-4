@@ -123,6 +123,8 @@ export class RenderSystem {
   private playerDamageFlash: Map<number, number> = new Map();
   /** npcId → timestamp of last damage hit, for red flash overlay. */
   private npcDamageFlash: Map<number, number> = new Map();
+  /** Key → fire expiry timestamp (ms). Key format: "npc:{id}" | "player:{id}" | "module:{shipId}:{moduleId}" */
+  private burningEntities: Map<string, number> = new Map();
   
   // Debug flags
   private showHoverBoundaries: boolean = false;
@@ -172,6 +174,63 @@ export class RenderSystem {
   notifyEntityDamaged(id: number, isNpc: boolean): void {
     if (isNpc) this.npcDamageFlash.set(id, performance.now());
     else        this.playerDamageFlash.set(id, performance.now());
+  }
+
+  /** Mark an entity or module as burning for `durationMs` milliseconds. */
+  notifyFireEffect(entityType: 'npc' | 'player' | 'module', id: number, durationMs: number,
+    shipId?: number, moduleId?: number): void {
+    const key = entityType === 'module'
+      ? `module:${shipId}:${moduleId}`
+      : `${entityType}:${id}`;
+    this.burningEntities.set(key, performance.now() + durationMs);
+  }
+
+  /** Clear the burning state for an entity or module. */
+  notifyFireExtinguished(entityType: 'npc' | 'player' | 'module', id: number,
+    shipId?: number, moduleId?: number): void {
+    const key = entityType === 'module'
+      ? `module:${shipId}:${moduleId}`
+      : `${entityType}:${id}`;
+    this.burningEntities.delete(key);
+  }
+
+  /** Returns true if an entity/module is currently marked as burning. */
+  private isBurning(entityType: 'npc' | 'player' | 'module', id: number,
+    shipId?: number, moduleId?: number): boolean {
+    const key = entityType === 'module'
+      ? `module:${shipId}:${moduleId}`
+      : `${entityType}:${id}`;
+    const expiry = this.burningEntities.get(key);
+    if (expiry === undefined) return false;
+    if (performance.now() > expiry) { this.burningEntities.delete(key); return false; }
+    return true;
+  }
+
+  /** Draw an animated fire overlay (flicker ring) centred at (cx, cy) in screen space. */
+  private drawFireOverlay(cx: number, cy: number, radius: number): void {
+    const ctx = this.ctx;
+    const t = performance.now() / 1000;
+    const numFlames = 6;
+    for (let i = 0; i < numFlames; i++) {
+      const angle = (i / numFlames) * Math.PI * 2 + t * 3.0;
+      const flicker = 0.85 + 0.15 * Math.sin(t * 8 + i * 1.3);
+      const fx = cx + Math.cos(angle) * radius * 0.55 * flicker;
+      const fy = cy + Math.sin(angle) * radius * 0.55 * flicker;
+      const fh = radius * 0.55 * flicker;
+      const grad = ctx.createRadialGradient(fx, fy - fh * 0.3, 0, fx, fy, fh);
+      grad.addColorStop(0,   'rgba(255,240,60,0.9)');
+      grad.addColorStop(0.4, 'rgba(255,100,0,0.7)');
+      grad.addColorStop(1,   'rgba(200,20,0,0.0)');
+      ctx.beginPath();
+      ctx.ellipse(fx, fy - fh * 0.25, fh * 0.35, fh * 0.55, 0, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+    }
+    // Smoke wisp
+    ctx.beginPath();
+    ctx.arc(cx, cy - radius * 1.1, radius * 0.25, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(80,80,80,0.25)';
+    ctx.fill();
   }
 
   /**
@@ -1262,6 +1321,11 @@ export class RenderSystem {
       this.queueRenderItem(3, 'plank-status', () => this.drawPlankStatusIcons(ship, camera), 2);
     }
 
+    // Burning module fire overlays — drawn above module graphics
+    for (const ship of worldState.ships) {
+      this.queueRenderItem(4, `fire-modules-${ship.id}`, () => this.drawBurningModules(ship, camera), 5);
+    }
+
     // Ghost placement plan markers — visible in build menu mode, B-key mode, or hotbar build mode
     if (this.ghostPlacements.length > 0 &&
         (this.buildMenuOpen || this.explicitBuildState !== null || this.cannonBuildMode || this.mastBuildMode || this.swivelBuildMode)) {
@@ -1680,6 +1744,31 @@ export class RenderSystem {
     }
 
     this.ctx.restore();
+  }
+
+  /**
+   * Draw animated fire overlays on burning wooden modules (plank, deck, mast).
+   */
+  private drawBurningModules(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+    const WOODEN_KINDS: ReadonlySet<string> = new Set(['plank', 'deck', 'mast']);
+    const cosR = Math.cos(ship.rotation);
+    const sinR = Math.sin(ship.rotation);
+    const zoom = camera.getState().zoom;
+    for (const mod of ship.modules) {
+      if (!WOODEN_KINDS.has(mod.kind)) continue;
+      if (!this.isBurning('module', mod.id, ship.id, mod.id)) continue;
+      // Compute local-to-world position
+      const lx = mod.localPos?.x ?? 0;
+      const ly = mod.localPos?.y ?? 0;
+      const wx = ship.position.x + lx * cosR - ly * sinR;
+      const wy = ship.position.y + lx * sinR + ly * cosR;
+      const screen = camera.worldToScreen(Vec2.from(wx, wy));
+      const baseRadius = Math.max(8, 12 * zoom);
+      this.ctx.save();
+      this.drawFireOverlay(screen.x, screen.y, baseRadius);
+      this.ctx.restore();
+    }
   }
 
   /**
@@ -3706,6 +3795,11 @@ export class RenderSystem {
         this.playerDamageFlash.delete(player.id);
       }
     }
+
+    // Fire overlay — animated flames when burning
+    if (this.isBurning('player', player.id)) {
+      this.drawFireOverlay(screenPos.x, screenPos.y, scaledRadius * 1.6);
+    }
     
     // If mounted, draw mount indicator
     if (player.isMounted) {
@@ -3954,6 +4048,11 @@ export class RenderSystem {
       } else {
         this.npcDamageFlash.delete(npc.id);
       }
+    }
+
+    // Fire overlay — animated flames when burning
+    if (this.isBurning('npc', npc.id)) {
+      this.drawFireOverlay(screenPos.x, screenPos.y, radius * 1.6);
     }
 
     // Facing direction indicator

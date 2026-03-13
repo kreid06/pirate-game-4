@@ -131,6 +131,9 @@ typedef struct {
         PlankModuleData plank;
         SwivelModuleData swivel;
     } data;
+
+    // Status effects (separate from type-specific data)
+    uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
 } ShipModule;
 
 /**

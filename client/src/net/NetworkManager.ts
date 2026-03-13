@@ -454,6 +454,12 @@ export class NetworkManager {
   /** Fired when a cannonball hits an NPC or player. */
   public onEntityHit: ((entityType: 'npc' | 'player', id: number, x: number, y: number,
     damage: number, health: number, maxHealth: number, killed: boolean) => void) | null = null;
+  /** Fired when liquid flame ignites an entity or wooden module. */
+  public onFireEffect: ((entityType: 'npc' | 'player' | 'module', id: number, x: number, y: number,
+    durationMs: number, shipId?: number, moduleId?: number) => void) | null = null;
+  /** Fired when a burning entity or module's fire timer expires. */
+  public onFireExtinguished: ((entityType: 'npc' | 'player' | 'module', id: number,
+    shipId?: number, moduleId?: number) => void) | null = null;
   /** Fired when a player performs a sword swing (for arc animation). */
   public onSwordSwing: ((playerId: number, x: number, y: number, angle: number, range: number) => void) | null = null;
   public onLadderState: ((shipId: number, moduleId: number, retracted: boolean) => void) | null = null;
@@ -1711,6 +1717,41 @@ export class NetworkManager {
           message.health   ?? 0,
           message.maxHealth ?? 100,
           message.killed   ?? false,
+        );
+        break;
+      }
+
+      case 'FIRE_EFFECT': {
+        const fireEntityType: 'npc' | 'player' | 'module' =
+          message.entityType === 'player' ? 'player' :
+          message.entityType === 'module' ? 'module' : 'npc';
+        const fireId = message.entityType === 'module'
+          ? (message.moduleId ?? 0)
+          : (message.id ?? 0);
+        this.onFireEffect?.(
+          fireEntityType,
+          fireId,
+          message.x        ?? 0,
+          message.y        ?? 0,
+          message.durationMs ?? 10000,
+          message.shipId   ?? undefined,
+          message.moduleId ?? undefined,
+        );
+        break;
+      }
+
+      case 'FIRE_EXTINGUISHED': {
+        const extEntityType: 'npc' | 'player' | 'module' =
+          message.entityType === 'player' ? 'player' :
+          message.entityType === 'module' ? 'module' : 'npc';
+        const extId = message.entityType === 'module'
+          ? (message.moduleId ?? 0)
+          : (message.id ?? 0);
+        this.onFireExtinguished?.(
+          extEntityType,
+          extId,
+          message.shipId   ?? undefined,
+          message.moduleId ?? undefined,
         );
         break;
       }
