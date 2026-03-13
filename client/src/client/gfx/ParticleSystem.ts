@@ -32,6 +32,7 @@ export enum ParticleEffectType {
   SAIL_FIBER = 'sail_fiber',
   SINK_SPLASH = 'sink_splash',
   FLAME_TRAIL = 'flame_trail',
+  FLAME_CONE_EMBERS = 'flame_cone_embers',
 }
 
 /**
@@ -295,6 +296,126 @@ export class ParticleSystem {
       type: ParticleEffectType.SAIL_FIBER,
       intensity,
       particles
+    });
+  }
+
+  /**
+   * Scatter embers + smoke through the entire live flame-cone volume.
+   * Called every frame from RenderSystem.drawFlameCones.
+   * @param origin     World-space swivel-gun muzzle position.
+   * @param angle      Centre-line angle of the cone (radians).
+   * @param halfCone   Half-angle of the cone (radians).
+   * @param innerDist  World-space inner radius (retreat edge).
+   * @param outerDist  World-space outer radius (wave-front edge).
+   */
+  createFlameConeParticles(
+    origin: Vec2,
+    angle: number,
+    halfCone: number,
+    innerDist: number,
+    outerDist: number,
+  ): void {
+    if (Math.random() > 0.75) return; // ~75% spawn chance keeps it light
+
+    const span = outerDist - innerDist;
+    if (span <= 0) return;
+
+    const quality = this.qualityMultipliers[this.quality];
+    const emberCount  = Math.max(2, Math.floor(6  * quality));
+    const smokeCount  = Math.max(1, Math.floor(3  * quality));
+    const sparkCount  = Math.max(1, Math.floor(2  * quality));
+
+    const emberColors = ['#FFFF99', '#FFE066', '#FFC800', '#FF8C00', '#FF5500', '#FF3300'];
+    const smokeColors = ['rgba(60,20,0,0.55)', 'rgba(80,40,0,0.45)', 'rgba(40,40,40,0.35)'];
+
+    const particles: Particle[] = [];
+
+    // ── Embers scattered across the cone ──────────────────────────────────
+    for (let i = 0; i < emberCount; i++) {
+      const a = angle + (Math.random() * 2 - 1) * halfCone;
+      const r = innerDist + Math.random() * span;
+      const frac = (r - innerDist) / span; // 0 = near origin, 1 = leading edge
+
+      // Hotter (brighter yellows) near the tip, cooler (reds) near origin
+      const colorIdx = Math.floor((1 - frac) * (emberColors.length - 1));
+      const color = emberColors[Math.min(colorIdx, emberColors.length - 1)];
+
+      // Velocity: slightly forward in cone direction + upward drift + random spread
+      const forwardSpeed = 20 + frac * 60 + Math.random() * 30;
+      const spread = (Math.random() - 0.5) * halfCone * 0.8;
+      const velAngle = angle + spread;
+
+      particles.push({
+        position: origin.add(Vec2.from(
+          Math.cos(a) * r + (Math.random() - 0.5) * 4,
+          Math.sin(a) * r + (Math.random() - 0.5) * 4,
+        )),
+        velocity: Vec2.from(
+          Math.cos(velAngle) * forwardSpeed,
+          Math.sin(velAngle) * forwardSpeed - 15 - Math.random() * 20,
+        ),
+        life:    0,
+        maxLife: 0.18 + frac * 0.30 + Math.random() * 0.25,
+        size:    0.8 + frac * 1.6 + Math.random() * 1.4,
+        color,
+        alpha:   0.80 + Math.random() * 0.20,
+        gravity: -30 - Math.random() * 20, // embers rise
+      });
+    }
+
+    // ── Sparks — tiny bright white/yellow flecks that shoot outward ───────
+    for (let i = 0; i < sparkCount; i++) {
+      const a = angle + (Math.random() * 2 - 1) * halfCone * 0.9;
+      const r = innerDist + Math.random() * span;
+      const sparkSpeed = 60 + Math.random() * 90;
+      particles.push({
+        position: origin.add(Vec2.from(
+          Math.cos(a) * r,
+          Math.sin(a) * r,
+        )),
+        velocity: Vec2.from(
+          Math.cos(a) * sparkSpeed + (Math.random() - 0.5) * 20,
+          Math.sin(a) * sparkSpeed + (Math.random() - 0.5) * 20 - 25,
+        ),
+        life:    0,
+        maxLife: 0.10 + Math.random() * 0.18,
+        size:    0.5 + Math.random() * 1.0,
+        color:   Math.random() > 0.5 ? '#FFFFFF' : '#FFFACD',
+        alpha:   1.0,
+        gravity: -15,
+      });
+    }
+
+    // ── Smoke wisps — billow upward and backward, thicker mid-range ───────
+    for (let i = 0; i < smokeCount; i++) {
+      const a = angle + (Math.random() * 2 - 1) * halfCone * 0.85;
+      const r = innerDist + 0.25 * span + Math.random() * 0.65 * span;
+      const color = smokeColors[Math.floor(Math.random() * smokeColors.length)];
+      const rearAngle = angle + Math.PI + (Math.random() - 0.5) * halfCone;
+      const smokeSpeed = 18 + Math.random() * 28;
+      particles.push({
+        position: origin.add(Vec2.from(
+          Math.cos(a) * r + (Math.random() - 0.5) * 8,
+          Math.sin(a) * r + (Math.random() - 0.5) * 8,
+        )),
+        velocity: Vec2.from(
+          Math.cos(rearAngle) * smokeSpeed,
+          Math.sin(rearAngle) * smokeSpeed - 12 - Math.random() * 18,
+        ),
+        life:    0,
+        maxLife: 0.55 + Math.random() * 0.65,
+        size:    4 + Math.random() * 7,
+        color,
+        alpha:   0.35 + Math.random() * 0.25,
+        gravity: -18, // smoke drifts upward
+      });
+    }
+
+    this.effects.push({
+      position: origin.clone(),
+      type:     ParticleEffectType.FLAME_CONE_EMBERS,
+      intensity: 1.0,
+      particles,
     });
   }
 

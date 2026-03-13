@@ -276,14 +276,14 @@ export class RenderSystem {
 
       ctx.restore();
 
-      // ── Ember particles along the leading edge ──────────────────────────
-      if (!fw.retreating) {
-        this.particleSystem.createFlameTrail(
-          Vec2.from(fw.x + Math.cos(fw.angle) * waveDist,
-                    fw.y + Math.sin(fw.angle) * waveDist),
-          fw.angle,
-        );
-      }
+      // ── Particle effects — embers + sparks + smoke across the whole cone ─
+      this.particleSystem.createFlameConeParticles(
+        Vec2.from(fw.x, fw.y),
+        fw.angle,
+        fw.halfCone,
+        retreatDist,
+        waveDist,
+      );
     }
   }
 
