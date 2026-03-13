@@ -3940,26 +3940,57 @@ export class RenderSystem {
       this.ctx.lineWidth   = 1;
       this.ctx.stroke();
     } else if (cannonball.ammoType === 3) {
-      // ── Liquid Flame ───────────────────────────────────────────────────────
-      // Slow incendiary fireball — glowing orange/yellow sphere.
-      const r   = Math.max(3, 5 * zoom);
-      const t   = Date.now() / 200;
-      const pulse = 0.85 + 0.15 * Math.sin(t + cannonball.id * 0.7);
-      const grd = this.ctx.createRadialGradient(
-        screenPos.x, screenPos.y, 0,
-        screenPos.x, screenPos.y, r * 2.2 * pulse);
-      grd.addColorStop(0,   'rgba(255,255,150,0.95)');
-      grd.addColorStop(0.4, 'rgba(255,140,0,0.85)');
-      grd.addColorStop(1,   'rgba(200,50,0,0)');
-      this.ctx.fillStyle = grd;
-      this.ctx.beginPath();
-      this.ctx.arc(screenPos.x, screenPos.y, r * 2.2 * pulse, 0, Math.PI * 2);
-      this.ctx.fill();
-      // Bright core
-      this.ctx.fillStyle = '#FFFF99';
-      this.ctx.beginPath();
-      this.ctx.arc(screenPos.x, screenPos.y, r * 0.45, 0, Math.PI * 2);
-      this.ctx.fill();
+      // ── Liquid Flame (Flamethrower) ─────────────────────────────────────────
+      // Elongated flame jet oriented along the velocity vector.
+      const ctx     = this.ctx;
+      const t       = performance.now() / 1000;
+      const flicker = 0.88 + 0.12 * Math.sin(t * 14 + cannonball.id * 1.7);
+
+      // Travel angle — use velocity direction; fallback to 0 if stopped
+      const vx    = cannonball.velocity.x;
+      const vy    = cannonball.velocity.y;
+      const angle = (Math.abs(vx) + Math.abs(vy) > 0.01) ? Math.atan2(vy, vx) : 0;
+
+      // Jet dimensions scale with zoom and flicker
+      const jetLen = Math.max(8, 18 * zoom) * flicker;  // along travel axis
+      const jetW   = Math.max(3,  6 * zoom) * flicker;  // perpendicular width
+
+      ctx.save();
+      ctx.translate(screenPos.x, screenPos.y);
+      ctx.rotate(angle);
+      // In local space: +x = forward (travel direction), origin = projectile centre
+
+      // Outer atmospheric haze — wide, faint orange cloud
+      const hazeGrd = ctx.createRadialGradient(-jetLen * 0.1, 0, 0, -jetLen * 0.1, 0, jetLen * 1.5);
+      hazeGrd.addColorStop(0,   `rgba(255,160,30,${(0.30 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(0.5, `rgba(200,60,10,${(0.18 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(1,   'rgba(150,20,0,0)');
+      ctx.beginPath();
+      ctx.ellipse(0, 0, jetLen * 1.5, jetW * 1.7, 0, 0, Math.PI * 2);
+      ctx.fillStyle = hazeGrd;
+      ctx.fill();
+
+      // Main jet body — linear gradient from bright tip to transparent tail
+      const jetGrd = ctx.createLinearGradient(jetLen * 0.9, 0, -jetLen * 0.5, 0);
+      jetGrd.addColorStop(0,    `rgba(255,255,210,${(0.98 * flicker).toFixed(3)})`);
+      jetGrd.addColorStop(0.2,  `rgba(255,220,60,${(0.90 * flicker).toFixed(3)})`);
+      jetGrd.addColorStop(0.55, `rgba(255,100,0,${(0.70 * flicker).toFixed(3)})`);
+      jetGrd.addColorStop(1,    'rgba(180,30,0,0)');
+      ctx.beginPath();
+      ctx.ellipse(0, 0, jetLen, jetW, 0, 0, Math.PI * 2);
+      ctx.fillStyle = jetGrd;
+      ctx.fill();
+
+      // Inner hot core — small bright spot toward the leading tip
+      ctx.beginPath();
+      ctx.ellipse(jetLen * 0.3, 0, jetLen * 0.32, jetW * 0.38, 0, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,255,235,${(0.95 * flicker).toFixed(3)})`;
+      ctx.fill();
+
+      ctx.restore();
+
+      // Ember particle trail (world-space, behind the projectile)
+      this.particleSystem.createFlameTrail(cannonball.position, angle);
     } else if (cannonball.ammoType === 4) {
       // ── Canister Shot pellet ───────────────────────────────────────────────
       // Wider spread than grapeshot — slightly larger, darker iron pellet.

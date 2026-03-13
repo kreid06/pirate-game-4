@@ -1156,6 +1156,11 @@ void handle_projectile_collisions(struct Sim* sim) {
         struct Projectile* proj = &sim->projectiles[i];
         bool removed = false;
 
+        /* Liquid flame flies through hull/planks/modules — fire effects are applied
+         * in the websocket_server entity-scan loop each tick.  Skip all geometric
+         * collision for this projectile type and let it expire via lifetime. */
+        if (proj->type == PROJ_TYPE_LIQUID_FLAME) { i++; continue; }
+
         // ---- Broad-phase: iterate all ships (small count, skip spatial hash) ----
         for (uint16_t s = 0; s < sim->ship_count && !removed; s++) {
             struct Ship* ship = &sim->ships[s];

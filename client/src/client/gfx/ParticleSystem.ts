@@ -31,6 +31,7 @@ export enum ParticleEffectType {
   WATER_FOAM = 'water_foam',
   SAIL_FIBER = 'sail_fiber',
   SINK_SPLASH = 'sink_splash',
+  FLAME_TRAIL = 'flame_trail',
 }
 
 /**
@@ -294,6 +295,53 @@ export class ParticleSystem {
       type: ParticleEffectType.SAIL_FIBER,
       intensity,
       particles
+    });
+  }
+
+  /**
+   * Create a flame/ember trail behind a flamethrower projectile.
+   * @param position  World-space centre of the projectile.
+   * @param direction Travel angle in radians (Math.atan2 of velocity).
+   */
+  createFlameTrail(position: Vec2, direction: number): void {
+    if (Math.random() > 0.55) return; // ~45% spawn chance each frame keeps it light
+
+    const count = Math.max(1, Math.floor(3 * this.qualityMultipliers[this.quality]));
+    const particles: Particle[] = [];
+    const fireColors = ['#FFFF99', '#FFC800', '#FF8C00', '#FF4500', '#CC2200'];
+
+    // Spawn slightly behind the projectile (opposite direction)
+    const backX = -Math.cos(direction);
+    const backY = -Math.sin(direction);
+
+    for (let i = 0; i < count; i++) {
+      const spread     = (Math.random() - 0.5) * Math.PI * 0.45; // ±40° cone
+      const spawnAngle = direction + Math.PI + spread;            // backward + spread
+      const offsetDist = 2 + Math.random() * 7;
+
+      particles.push({
+        position: position.add(Vec2.from(
+          backX * offsetDist + (Math.random() - 0.5) * 5,
+          backY * offsetDist + (Math.random() - 0.5) * 5
+        )),
+        velocity: Vec2.from(
+          Math.cos(spawnAngle) * (15 + Math.random() * 35),
+          Math.sin(spawnAngle) * (15 + Math.random() * 35)
+        ),
+        life:    0,
+        maxLife: 0.25 + Math.random() * 0.45,
+        size:    1.2 + Math.random() * 2.8,
+        color:   fireColors[Math.floor(Math.random() * fireColors.length)],
+        alpha:   0.75 + Math.random() * 0.25,
+        gravity: -25, // embers drift slightly upward
+      });
+    }
+
+    this.effects.push({
+      position: position.clone(),
+      type:     ParticleEffectType.FLAME_TRAIL,
+      intensity: 1.0,
+      particles,
     });
   }
 

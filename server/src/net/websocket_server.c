@@ -3740,27 +3740,36 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
         }
         log_info("Swivel %u fired GRAPESHOT (3 pellets) on ship %u", sw->id, ship->ship_id);
     } else if (ammo_type == PROJ_TYPE_LIQUID_FLAME) {
-        /* Single incendiary fireball — ~125px range, fast stream, zero direct HP damage */
-        const float FLAME_SPEED = CLIENT_TO_SERVER(125.0f);
-        float sx = world_x + cosf(fire_angle) * BARREL_LEN;
-        float sy = world_y + sinf(fire_angle) * BARREL_LEN;
-        Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(sx)),
-                        Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy)) };
-        Vec2Q16 vel = { Q16_FROM_FLOAT(cosf(fire_angle) * FLAME_SPEED + ship_vx),
-                        Q16_FROM_FLOAT(sinf(fire_angle) * FLAME_SPEED + ship_vy) };
-        entity_id pid = sim_create_projectile(global_sim, pos, vel, owner_id, PROJ_TYPE_LIQUID_FLAME);
-        if (pid != INVALID_ENTITY_ID) {
-            struct Projectile* proj = sim_get_projectile(global_sim, pid);
-            if (proj) {
-                proj->damage         = Q16_FROM_FLOAT(0.0f); /* fire DoT handled separately */
-                proj->lifetime       = Q16_FROM_FLOAT(2.0f);
-                proj->firing_company = ship->company_id;
-                proj->firing_ship_id = (entity_id)ship->ship_id;
-                proj->type           = PROJ_TYPE_LIQUID_FLAME;
+        /* Flamethrower cone: 5 projectiles spread ±15° — pass-through, sets fire on everything hit.
+         * Each strand travels at 125px/s for 2s (~250px range) giving travel-time feel.
+         * Hull collision is bypassed in simulation.c; fire application happens in the
+         * entity-scan loop each server tick. */
+        const int   FLAME_NUM        = 5;
+        const float FLAME_SPEED      = CLIENT_TO_SERVER(125.0f);
+        const float FLAME_HALF_CONE  = 15.0f * (float)(M_PI / 180.0f); /* ±15° */
+        for (int fp = 0; fp < FLAME_NUM; fp++) {
+            float t     = (FLAME_NUM > 1) ? (float)fp / (float)(FLAME_NUM - 1) : 0.5f;
+            float angle = fire_angle + FLAME_HALF_CONE * (2.0f * t - 1.0f);
+            float sx = world_x + cosf(angle) * BARREL_LEN;
+            float sy = world_y + sinf(angle) * BARREL_LEN;
+            Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(sx)),
+                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy)) };
+            Vec2Q16 vel = { Q16_FROM_FLOAT(cosf(angle) * FLAME_SPEED + ship_vx),
+                            Q16_FROM_FLOAT(sinf(angle) * FLAME_SPEED + ship_vy) };
+            entity_id pid = sim_create_projectile(global_sim, pos, vel, owner_id, PROJ_TYPE_LIQUID_FLAME);
+            if (pid != INVALID_ENTITY_ID) {
+                struct Projectile* proj = sim_get_projectile(global_sim, pid);
+                if (proj) {
+                    proj->damage         = Q16_FROM_FLOAT(0.0f); /* fire DoT handled separately */
+                    proj->lifetime       = Q16_FROM_FLOAT(2.0f);
+                    proj->firing_company = ship->company_id;
+                    proj->firing_ship_id = (entity_id)ship->ship_id;
+                    proj->type           = PROJ_TYPE_LIQUID_FLAME;
+                }
+                broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, angle, pid, PROJ_TYPE_LIQUID_FLAME);
             }
-            broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, fire_angle, pid, PROJ_TYPE_LIQUID_FLAME);
         }
-        log_info("Swivel %u fired LIQUID FLAME on ship %u", sw->id, ship->ship_id);
+        log_info("Swivel %u fired LIQUID FLAME cone (5 strands, ±15°) on ship %u", sw->id, ship->ship_id);
     } else if (ammo_type == PROJ_TYPE_CANISTER_SHOT) {
         /* 5 pellets spread ±20° — wide anti-personnel sweep */
         const int   NUM_PELLETS = 5;
@@ -8296,7 +8305,9 @@ void websocket_server_tick(float dt) {
             bool proj_consumed = false;
 
             // ── Check NPCs ──────────────────────────────────────────────────
-            for (int ni = 0; ni < world_npc_count && !proj_consumed; ni++) {
+            // Flame iterates ALL NPCs (pass-through — never consumed).
+            // Other types stop at the first hit (proj_consumed).
+            for (int ni = 0; ni < world_npc_count && (is_flame || !proj_consumed); ni++) {
                 WorldNpc* npc = &world_npcs[ni];
                 if (!npc->active) continue;
                 // No friendly fire: skip NPCs on the firing ship
@@ -8308,25 +8319,26 @@ void websocket_server_tick(float dt) {
                 if (dx * dx + dy * dy > hit_r2) continue;
 
                 if (is_flame) {
-                    /* Liquid flame: ignite the NPC, no direct HP damage */
-                    npc->fire_timer_ms = FIRE_DURATION_MS;
-                    char hit_msg[256];
-                    BROADCAST_FIRE_EFFECT(hit_msg,
-                        "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"npc\",\"id\":%u,"
-                        "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
-                        npc->id, npc->x, npc->y, FIRE_DURATION_MS);
-                    proj_consumed = true;
+                    /* Pass-through: ignite NPC; broadcast only on first ignition */
+                    if (npc->fire_timer_ms == 0) {
+                        npc->fire_timer_ms = FIRE_DURATION_MS;
+                        char hit_msg[256];
+                        BROADCAST_FIRE_EFFECT(hit_msg,
+                            "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"npc\",\"id\":%u,"
+                            "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                            npc->id, npc->x, npc->y, FIRE_DURATION_MS);
+                    } else {
+                        npc->fire_timer_ms = FIRE_DURATION_MS; /* refresh silently */
+                    }
+                    /* proj_consumed stays false — flame keeps flying */
                 } else {
-                    // Apply damage
                     uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
                     if (npc->health <= dmg16) {
                         npc->health = 0;
-                        npc->active = false; // NPC killed
+                        npc->active = false;
                     } else {
                         npc->health -= dmg16;
                     }
-
-                    // Knockback via velocity — skip if stationed at a module
                     bool npc_at_station = (npc->state == WORLD_NPC_STATE_AT_GUN ||
                                            npc->state == WORLD_NPC_STATE_REPAIRING);
                     if (!npc_at_station) {
@@ -8336,8 +8348,6 @@ void websocket_server_tick(float dt) {
                         npc->velocity_x += kx * ENTITY_KNOCKBACK;
                         npc->velocity_y += ky * ENTITY_KNOCKBACK;
                     }
-
-                    // Broadcast ENTITY_HIT
                     char hit_msg[256];
                     snprintf(hit_msg, sizeof(hit_msg),
                         "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
@@ -8356,16 +8366,14 @@ void websocket_server_tick(float dt) {
                                 send(wc->fd, hit_frame, hfl, 0);
                         }
                     }
-
                     proj_consumed = true;
                 }
             }
 
             // ── Check Players ────────────────────────────────────────────────
-            for (int wpi = 0; wpi < WS_MAX_CLIENTS && !proj_consumed; wpi++) {
+            for (int wpi = 0; wpi < WS_MAX_CLIENTS && (is_flame || !proj_consumed); wpi++) {
                 WebSocketPlayer* wp = &players[wpi];
                 if (!wp->active) continue;
-                // No friendly fire: skip players on the firing ship
                 if (proj->firing_ship_id != INVALID_ENTITY_ID &&
                     wp->parent_ship_id == (uint32_t)proj->firing_ship_id) continue;
 
@@ -8374,30 +8382,24 @@ void websocket_server_tick(float dt) {
                 if (dx * dx + dy * dy > hit_r2) continue;
 
                 if (is_flame) {
-                    /* Liquid flame: ignite the player, no direct HP damage */
-                    wp->fire_timer_ms = FIRE_DURATION_MS;
-                    char hit_msg[256];
-                    BROADCAST_FIRE_EFFECT(hit_msg,
-                        "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"player\",\"id\":%u,"
-                        "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
-                        wp->player_id, wp->x, wp->y, FIRE_DURATION_MS);
-                    proj_consumed = true;
-                } else {
-                    // Apply damage
-                    uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
-                    if (wp->health <= dmg16) {
-                        wp->health = 0;
+                    if (wp->fire_timer_ms == 0) {
+                        wp->fire_timer_ms = FIRE_DURATION_MS;
+                        char hit_msg[256];
+                        BROADCAST_FIRE_EFFECT(hit_msg,
+                            "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"player\",\"id\":%u,"
+                            "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                            wp->player_id, wp->x, wp->y, FIRE_DURATION_MS);
                     } else {
-                        wp->health -= dmg16;
+                        wp->fire_timer_ms = FIRE_DURATION_MS;
                     }
-
-                    // Knockback — skip if mounted to a module
+                } else {
+                    uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
+                    if (wp->health <= dmg16) { wp->health = 0; } else { wp->health -= dmg16; }
                     if (!wp->is_mounted) {
                         float dist = sqrtf(dx * dx + dy * dy);
                         float kx   = (dist > 0.1f) ? (dx / dist) : 1.0f;
                         float ky   = (dist > 0.1f) ? (dy / dist) : 0.0f;
                         if (wp->parent_ship_id != 0) {
-                            // On a ship: push local position, then recalc world pos
                             wp->local_x += kx * ENTITY_KNOCKBACK;
                             wp->local_y += ky * ENTITY_KNOCKBACK;
                             SimpleShip* wp_ship = NULL;
@@ -8409,12 +8411,10 @@ void websocket_server_tick(float dt) {
                             if (wp_ship) ship_local_to_world(wp_ship, wp->local_x, wp->local_y,
                                                               &wp->x, &wp->y);
                         } else {
-                            // Swimming: instant position delta + velocity impulse
                             wp->x += kx * ENTITY_KNOCKBACK;
                             wp->y += ky * ENTITY_KNOCKBACK;
                             wp->velocity_x += kx * ENTITY_KNOCKBACK * 3.0f;
                             wp->velocity_y += ky * ENTITY_KNOCKBACK * 3.0f;
-                            // Sync to sim player
                             if (wp->sim_entity_id != 0) {
                                 for (uint16_t spi = 0; spi < global_sim->player_count; spi++) {
                                     if (global_sim->players[spi].id == wp->sim_entity_id) {
@@ -8432,8 +8432,6 @@ void websocket_server_tick(float dt) {
                             }
                         }
                     }
-
-                    // Broadcast ENTITY_HIT
                     char hit_msg[256];
                     snprintf(hit_msg, sizeof(hit_msg),
                         "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
@@ -8451,28 +8449,24 @@ void websocket_server_tick(float dt) {
                                 send(wc->fd, hit_frame, hfl, 0);
                         }
                     }
-
                     proj_consumed = true;
                 }
             }
 
-            // ── Liquid flame: ignite nearby wooden modules if not consumed yet
-            //    (or even if it was — fire spreads to whatever it touches)
-            if (is_flame && !proj_consumed) {
-                const float MOD_FIRE_RADIUS = 35.0f; /* client pixels */
+            // ── Module fire pass: flame hits ALL modules in range; others stop at first ──
+            {
+                const float MOD_FIRE_RADIUS = 35.0f;
                 const float mfr2 = MOD_FIRE_RADIUS * MOD_FIRE_RADIUS;
-                for (int s = 0; s < ship_count && !proj_consumed; s++) {
+                for (int s = 0; s < ship_count && (is_flame || !proj_consumed); s++) {
                     if (!ships[s].active) continue;
                     SimpleShip* fship = &ships[s];
-                    /* Skip own ship — no self-fire from liquid flame */
                     if (proj->firing_ship_id != INVALID_ENTITY_ID &&
                         fship->ship_id == (uint32_t)proj->firing_ship_id) continue;
                     float cos_r = cosf(fship->rotation);
                     float sin_r = sinf(fship->rotation);
-                    for (int m = 0; m < fship->module_count; m++) {
+                    for (int m = 0; m < fship->module_count && (is_flame || !proj_consumed); m++) {
                         ShipModule* mod = &fship->modules[m];
                         ModuleTypeId mt = mod->type_id;
-                        /* Only wooden modules: planks, decks, masts */
                         if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK &&
                             mt != MODULE_TYPE_MAST) continue;
                         if (mod->health <= 0) continue;
@@ -8482,40 +8476,61 @@ void websocket_server_tick(float dt) {
                         float wy = fship->y + (lx * sin_r + ly * cos_r);
                         float ddx = wx - px, ddy = wy - py;
                         if (ddx * ddx + ddy * ddy > mfr2) continue;
-                        /* Ignite this module */
-                        mod->fire_timer_ms = FIRE_DURATION_MS;
-                        /* Also mirror to global_sim */
-                        if (global_sim) {
-                            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                                if ((uint32_t)global_sim->ships[si].id != fship->ship_id) continue;
-                                for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                    if (global_sim->ships[si].modules[mi].id == mod->id) {
-                                        global_sim->ships[si].modules[mi].fire_timer_ms = FIRE_DURATION_MS;
-                                        break;
-                                    }
-                                }
-                                break;
+
+                        /* Mirror fire_timer to global_sim */
+                        #define SET_MODULE_FIRE(_fship, _mod) do { \
+                            (_mod)->fire_timer_ms = FIRE_DURATION_MS; \
+                            if (global_sim) { \
+                                for (uint32_t _si = 0; _si < global_sim->ship_count; _si++) { \
+                                    if ((uint32_t)global_sim->ships[_si].id != (_fship)->ship_id) continue; \
+                                    for (uint8_t _mi = 0; _mi < global_sim->ships[_si].module_count; _mi++) { \
+                                        if (global_sim->ships[_si].modules[_mi].id == (_mod)->id) { \
+                                            global_sim->ships[_si].modules[_mi].fire_timer_ms = FIRE_DURATION_MS; \
+                                            break; \
+                                        } \
+                                    } \
+                                    break; \
+                                } \
+                            } \
+                        } while (0)
+
+                        if (is_flame) {
+                            /* Pass-through: ignite all wooden modules in cone range.
+                             * Only broadcast FIRE_EFFECT on first ignition. */
+                            if (mod->fire_timer_ms == 0) {
+                                SET_MODULE_FIRE(fship, mod);
+                                char fmsg[256];
+                                BROADCAST_FIRE_EFFECT(fmsg,
+                                    "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"module\","
+                                    "\"shipId\":%u,\"moduleId\":%u,"
+                                    "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                                    fship->ship_id, mod->id, wx, wy, FIRE_DURATION_MS);
+                            } else {
+                                SET_MODULE_FIRE(fship, mod); /* refresh silently */
                             }
+                            /* no proj_consumed, no break — keep scanning */
+                        } else {
+                            SET_MODULE_FIRE(fship, mod);
+                            char fmsg[256];
+                            BROADCAST_FIRE_EFFECT(fmsg,
+                                "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"module\","
+                                "\"shipId\":%u,\"moduleId\":%u,"
+                                "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                                fship->ship_id, mod->id, wx, wy, FIRE_DURATION_MS);
+                            proj_consumed = true;
                         }
-                        char fmsg[256];
-                        BROADCAST_FIRE_EFFECT(fmsg,
-                            "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"module\","
-                            "\"shipId\":%u,\"moduleId\":%u,"
-                            "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
-                            fship->ship_id, mod->id, wx, wy, FIRE_DURATION_MS);
-                        proj_consumed = true;
-                        break; /* consume on first wooden module hit */
+                        #undef SET_MODULE_FIRE
                     }
                 }
             }
 
-            if (proj_consumed) {
-                // Remove the projectile from the simulation
+            /* Flame projectiles expire via lifetime — never removed on hit.
+             * Non-flame projectiles are removed when consumed by their first hit. */
+            if (!is_flame && proj_consumed) {
                 memmove(&global_sim->projectiles[pi],
                         &global_sim->projectiles[pi + 1],
                         (global_sim->projectile_count - pi - 1) * sizeof(struct Projectile));
                 global_sim->projectile_count--;
-                // Don't advance pi — re-check this slot
             } else {
                 pi++;
             }
@@ -8998,11 +9013,12 @@ void websocket_server_tick(float dt) {
         last_cannon_update = current_time;
 
         /* ===== FIRE DOT TICK (every 100ms) ===== */
-        /* NPCs on fire: 1 HP per tick (~10 HP/s, 100 HP total over 10 s) */
+        /* NPCs on fire: 5 base HP + 1% max_health per 100ms tick */
         for (int ni = 0; ni < world_npc_count; ni++) {
             WorldNpc* npc = &world_npcs[ni];
             if (!npc->active || npc->fire_timer_ms == 0) continue;
-            if (npc->health > 1) npc->health -= 1; else npc->health = 0;
+            uint16_t npc_fire_dmg = 5u + (uint16_t)(npc->max_health / 100u);
+            if (npc->health > npc_fire_dmg) npc->health -= npc_fire_dmg; else npc->health = 0;
             if (npc->fire_timer_ms > time_elapsed) {
                 npc->fire_timer_ms -= time_elapsed;
             } else {
@@ -9023,11 +9039,12 @@ void websocket_server_tick(float dt) {
             }
         }
 
-        /* Players on fire: 1 HP per tick */
+        /* Players on fire: 5 base HP + 1% max_health per 100ms tick */
         for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
             WebSocketPlayer* wp = &players[wpi];
             if (!wp->active || wp->fire_timer_ms == 0) continue;
-            if (wp->health > 1) wp->health -= 1; else wp->health = 0;
+            uint16_t pl_fire_dmg = 5u + (uint16_t)(wp->max_health / 100u);
+            if (wp->health > pl_fire_dmg) wp->health -= pl_fire_dmg; else wp->health = 0;
             if (wp->fire_timer_ms > time_elapsed) {
                 wp->fire_timer_ms -= time_elapsed;
             } else {
@@ -9058,8 +9075,9 @@ void websocket_server_tick(float dt) {
                 if (mod->fire_timer_ms == 0) continue;
                 ModuleTypeId mt = mod->type_id;
                 if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK && mt != MODULE_TYPE_MAST) continue;
-                /* Apply 50 HP damage via module_apply_damage */
-                q16_t fire_dot = Q16_FROM_FLOAT(50.0f);
+                /* Apply 30 base + 0.5% of max_health per 100ms tick */
+                float fire_dot_f = 30.0f + Q16_TO_FLOAT(mod->max_health) * 0.005f;
+                q16_t fire_dot = Q16_FROM_FLOAT(fire_dot_f);
                 module_apply_damage(mod, fire_dot);
                 /* Tick module fire timer */
                 bool extinguished = false;
