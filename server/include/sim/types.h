@@ -89,12 +89,16 @@ struct Player {
     uint8_t reserved[2];
 };
 
-/* Projectile ammo types */
+/* Projectile ammo types
+ * Cannon ammo: 0-9   — used when player fires from helm/cannon
+ * Swivel ammo: 10-19 — used when player/NPC fires from swivel
+ * IDs are intentionally non-overlapping so the server can distinguish
+ * weapon category from ammo_type alone without needing extra context. */
 #define PROJ_TYPE_CANNONBALL    0
 #define PROJ_TYPE_BAR_SHOT      1
-#define PROJ_TYPE_GRAPESHOT     2   // Swivel: spread pellets, anti-personnel
-#define PROJ_TYPE_LIQUID_FLAME  3   // Swivel: incendiary, area denial
-#define PROJ_TYPE_CANISTER_SHOT 4   // Swivel: wide spread canister pellets
+#define PROJ_TYPE_GRAPESHOT     10  // Swivel: spread pellets, anti-personnel
+#define PROJ_TYPE_LIQUID_FLAME  11  // Swivel: incendiary, area denial
+#define PROJ_TYPE_CANISTER_SHOT 12  // Swivel: wide spread canister pellets
 
 // Projectile state (cannonballs, etc)  
 struct Projectile {

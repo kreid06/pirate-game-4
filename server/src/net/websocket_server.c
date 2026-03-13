@@ -3704,8 +3704,9 @@ static void handle_cannon_force_reload(WebSocketPlayer* player) {
 /**
  * Fire the swivel gun a player is currently mounted to.
  *
- * ammo_type PROJ_TYPE_CANNONBALL → single swivel ball (2000 dmg, 4s lifetime)
- * ammo_type PROJ_TYPE_GRAPESHOT  → 3 pellets ±12° spread (450 dmg ea., 1.5s lifetime)
+ * ammo_type PROJ_TYPE_GRAPESHOT    (10) → hit-scan, ±18° cone, 60 dmg/target
+ * ammo_type PROJ_TYPE_LIQUID_FLAME (11) → flame wave projection
+ * ammo_type PROJ_TYPE_CANISTER_SHOT(12) → 3 spread projectiles
  */
 static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
                         WebSocketPlayer* player, uint8_t ammo_type) {
@@ -4080,13 +4081,17 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
             /* Find SimpleShip copy for timer check and fire_swivel() */
             ShipModule* sw = find_module_by_id(ship, module->id);
             if (!sw) continue;
-            /* Use the same effective-cooldown logic as handle_swivel_fire:
-             * liquid flame uses the fast stream interval, everything else the full reload. */
-            uint32_t eff_cd = (ammo_type == PROJ_TYPE_LIQUID_FLAME)
+            /* NPC swivels must always use swivel ammo (10-12).
+             * If the incoming ammo_type is a cannon ammo (0-1), fall back to the
+             * swivel's own loaded ammo; default to grapeshot if not yet set. */
+            uint8_t swivel_ammo = (ammo_type >= PROJ_TYPE_GRAPESHOT) ? ammo_type
+                                : (sw->data.swivel.loaded_ammo >= PROJ_TYPE_GRAPESHOT
+                                   ? sw->data.swivel.loaded_ammo : PROJ_TYPE_GRAPESHOT);
+            uint32_t eff_cd = (swivel_ammo == PROJ_TYPE_LIQUID_FLAME)
                               ? SWIVEL_FLAME_INTERVAL_MS
                               : sw->data.swivel.reload_time;
             if (sw->data.swivel.time_since_fire < eff_cd) continue;
-            fire_swivel(ship, sw, module, player, ammo_type);
+            fire_swivel(ship, sw, module, player, swivel_ammo);
             cannons_fired++;
             continue;
         }
@@ -6024,11 +6029,15 @@ int websocket_server_update(struct Sim* sim) {
                                     bool fire_all = strstr(payload, "\"fire_all\":true") != NULL;
                                     // freefire: skip aim-angle check (set by client for freefire/targetfire modes)
                                     bool freefire = strstr(payload, "\"freefire\":true") != NULL;
-                                    // Parse ammo_type (0=cannonball, 1=bar_shot, 2=grapeshot, 3=liquid_flame, 4=canister_shot)
+                                    // Parse ammo_type:
+                                    //   cannon ammo: 0=cannonball, 1=bar_shot
+                                    //   swivel ammo: 10=grapeshot, 11=liquid_flame, 12=canister_shot
                                     uint8_t ammo_type = PROJ_TYPE_CANNONBALL;
                                     char* at = strstr(payload, "\"ammo_type\":");
                                     if (at) ammo_type = (uint8_t)atoi(at + 12);
-                                    if (ammo_type > PROJ_TYPE_CANISTER_SHOT) ammo_type = PROJ_TYPE_CANNONBALL;
+                                    /* Reject unknown values — allow 0-1 (cannon) and 10-12 (swivel) */
+                                    if (ammo_type > 1 && (ammo_type < PROJ_TYPE_GRAPESHOT || ammo_type > PROJ_TYPE_CANISTER_SHOT))
+                                        ammo_type = PROJ_TYPE_CANNONBALL;
                                     // Parse optional weapon_ids array
                                     uint32_t explicit_ids[MAX_WEAPONS_PER_GROUP];
                                     int explicit_count = parse_json_uint32_array(

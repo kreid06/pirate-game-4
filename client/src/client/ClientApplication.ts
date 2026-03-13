@@ -1022,7 +1022,7 @@ export class ClientApplication {
       // Handle CANNON_FIRE_EVENT: render hit-scan tracers for grapeshot / canister
       this.networkManager.onCannonFireEvent = (_cannonId, _shipId, x, y, angle, projectileId, ammoType) => {
         // Only spawn tracers for hit-scan ammo types (no real projectile, id=0)
-        if (projectileId === 0 && (ammoType === 2 || ammoType === 4)) {
+        if (projectileId === 0 && (ammoType === 10 || ammoType === 12)) {
           this.renderSystem.spawnGrapeshotTracers(x, y, angle, ammoType);
         }
       };

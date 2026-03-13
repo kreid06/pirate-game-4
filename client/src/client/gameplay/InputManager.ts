@@ -188,7 +188,7 @@ export class InputManager {
   private xHoldTimer: ReturnType<typeof setTimeout> | null = null;  // setTimeout handle for 1s hold
   private xHoldFired: boolean = false;    // True if hold timer already fired this press
   private flameStreamTimer: ReturnType<typeof setInterval> | null = null; // Liquid flame continuous stream
-  /** Active ammo group while at helm: 'cannon' (IDs 0-1) or 'swivel' (IDs 2-4). Toggle with U key. */
+  /** Active ammo group while at helm: 'cannon' (IDs 0-1) or 'swivel' (IDs 10-12). Toggle with U key. */
   public activeAmmoGroup: 'cannon' | 'swivel' = 'cannon';
 
   /** Called when player holds X (1s) to force-reload with the pending ammo type. */
@@ -454,9 +454,9 @@ export class InputManager {
         this.activeAmmoGroup = 'cannon';
         console.log(`⛵ [INPUT] Seeded sail openness to ${seeded}% on mount`);
       } else if (this.mountKind === 'swivel') {
-        // Swivel uses its own ammo types (2=grapeshot, 3=liquid flame, 4=canister shot)
-        this.selectedAmmoType = 2;
-        this.loadedAmmoType   = 2;
+        // Swivel uses its own ammo types (10=grapeshot, 11=liquid flame, 12=canister shot)
+        this.selectedAmmoType = 10;
+        this.loadedAmmoType   = 10;
       }
     } else {
       console.log(`⚓ [INPUT] Player dismounted - player controls active`);
@@ -974,13 +974,13 @@ export class InputManager {
               this.xHoldFired = true;
               const useSwivelGroup = this.mountKind === 'helm' && this.activeAmmoGroup === 'swivel';
               if (useSwivelGroup) {
-                const swivelAmmos = [2, 3, 4];
+                const swivelAmmos = [10, 11, 12];
                 if (this.selectedAmmoType === this.loadedAmmoType) {
                   const idx = swivelAmmos.indexOf(this.selectedAmmoType);
                   this.selectedAmmoType = swivelAmmos[(idx < 0 ? 0 : (idx + 1)) % 3];
                 }
                 this.loadedAmmoType = this.selectedAmmoType;
-                const swivelNames = ['', '', 'GRAPESHOT', 'LIQUID FLAME', 'CANISTER SHOT'];
+                const swivelNames: Record<number, string> = { 10: 'GRAPESHOT', 11: 'LIQUID FLAME', 12: 'CANISTER SHOT' };
                 console.log(`⚡ Helm swivel ammo force-loaded → ${swivelNames[this.loadedAmmoType]}`);
               } else {
                 if (this.selectedAmmoType === this.loadedAmmoType) {
@@ -996,8 +996,8 @@ export class InputManager {
           event.preventDefault();
         } else if (this.mountKind === 'swivel') {
           if (!event.repeat) {
-            const swivelAmmos = [2, 3, 4]; // GRAPESHOT, LIQUID_FLAME, CANISTER_SHOT
-            const ammoNames = ['', '', 'GRAPESHOT', 'LIQUID FLAME', 'CANISTER SHOT'];
+            const swivelAmmos = [10, 11, 12]; // GRAPESHOT, LIQUID_FLAME, CANISTER_SHOT
+            const ammoNames: Record<number, string> = { 10: 'GRAPESHOT', 11: 'LIQUID FLAME', 12: 'CANISTER SHOT' };
             this.xHoldFired = false;
             this.xHoldTimer = setTimeout(() => {
               this.xHoldFired = true;
@@ -1020,9 +1020,9 @@ export class InputManager {
           this.activeAmmoGroup = this.activeAmmoGroup === 'cannon' ? 'swivel' : 'cannon';
           // Snap to a valid ammo for the newly active group
           if (this.activeAmmoGroup === 'swivel') {
-            if (![2, 3, 4].includes(this.selectedAmmoType)) {
-              this.selectedAmmoType = 2;
-              this.loadedAmmoType   = 2;
+            if (![10, 11, 12].includes(this.selectedAmmoType)) {
+              this.selectedAmmoType = 10;
+              this.loadedAmmoType   = 10;
             }
           } else {
             if (![0, 1].includes(this.selectedAmmoType)) {
@@ -1116,8 +1116,8 @@ export class InputManager {
       if (!this.xHoldFired) {
         // Released before 1s — queue the swap
         if (this.mountKind === 'swivel' || (this.mountKind === 'helm' && this.activeAmmoGroup === 'swivel')) {
-          const swivelAmmos = [2, 3, 4];
-          const ammoNames = ['', '', 'GRAPESHOT', 'LIQUID FLAME', 'CANISTER SHOT'];
+          const swivelAmmos = [10, 11, 12];
+          const ammoNames: Record<number, string> = { 10: 'GRAPESHOT', 11: 'LIQUID FLAME', 12: 'CANISTER SHOT' };
           const idx = swivelAmmos.indexOf(this.selectedAmmoType);
           this.selectedAmmoType = swivelAmmos[(idx < 0 ? 0 : (idx + 1)) % 3];
           console.log(`💣 Swivel ammo queued → ${ammoNames[this.selectedAmmoType]} (hold X 0.5s to load now)`);
@@ -1180,8 +1180,8 @@ export class InputManager {
         }
       } else {
         // Mounted to helm, cannon, or swivel: fire weapon(s)
-        // Flame mode: ammo_type 3 (liquid flame) always streams regardless of activeAmmoGroup toggle
-        const isFlameMode = this.loadedAmmoType === 3 &&
+        // Flame mode: ammo_type 11 (liquid flame) always streams regardless of activeAmmoGroup toggle
+        const isFlameMode = this.loadedAmmoType === 11 &&
           (this.mountKind === 'swivel' || this.mountKind === 'helm');
         if (isFlameMode) {
           // Liquid flame: fire immediately then stream while mouse is held

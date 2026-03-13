@@ -198,11 +198,11 @@ export class RenderSystem {
 
   /**
    * Spawn hit-scan tracer lines for a grapeshot or canister burst.
-   * @param ammoType 2 = grapeshot, 4 = canister
+   * @param ammoType 10 = grapeshot, 12 = canister
    */
   spawnGrapeshotTracers(x: number, y: number, angle: number, ammoType: number): void {
     // 3 tracers for grapeshot (±12°), 5 for canister (±20°)
-    const isCanister = ammoType === 4;
+    const isCanister = ammoType === 12;
     const count      = isCanister ? 5 : 3;
     const halfSpread = isCanister ? (20 * Math.PI / 180) : (12 * Math.PI / 180);
     const range      = isCanister ? 180 : 250;
@@ -330,7 +330,7 @@ export class RenderSystem {
 
       // Faded tracer line: bright white core → transparent tip
       const grad = ctx.createLinearGradient(origin.x, origin.y, tip.x, tip.y);
-      if (t.ammoType === 4) {
+      if (t.ammoType === 12) {
         // Canister: slightly wider, warm-white
         grad.addColorStop(0,   `rgba(255,230,180,${alpha.toFixed(3)})`);
         grad.addColorStop(0.5, `rgba(255,180,80,${(alpha * 0.6).toFixed(3)})`);
@@ -4067,7 +4067,7 @@ export class RenderSystem {
     const screenPos = camera.worldToScreen(cannonball.position);
     const zoom      = camera.getState().zoom;
 
-    if (cannonball.ammoType === 2) {
+    if (cannonball.ammoType === 10) {
       // ── Grapeshot pellet ───────────────────────────────────────────────────
       // Small round pellet — fast, close-range, anti-personnel.
       const r = Math.max(1.5, 2.5 * zoom);
@@ -4118,7 +4118,7 @@ export class RenderSystem {
       this.ctx.strokeStyle = '#ff8844';
       this.ctx.lineWidth   = 1;
       this.ctx.stroke();
-    } else if (cannonball.ammoType === 3) {
+    } else if (cannonball.ammoType === 11) {
       // ── Liquid Flame (Flamethrower) ─────────────────────────────────────────
       // Elongated flame jet oriented along the velocity vector.
       const ctx     = this.ctx;
@@ -4170,7 +4170,7 @@ export class RenderSystem {
 
       // Ember particle trail (world-space, behind the projectile)
       this.particleSystem.createFlameTrail(cannonball.position, angle);
-    } else if (cannonball.ammoType === 4) {
+    } else if (cannonball.ammoType === 12) {
       // ── Canister Shot pellet ───────────────────────────────────────────────
       // Wider spread than grapeshot — slightly larger, darker iron pellet.
       const r = Math.max(2, 3.5 * zoom);
