@@ -626,6 +626,9 @@ export class ClientApplication {
       this.inputManager.onCannonAim = (aimAngle, activeGroups) => {
         this.networkManager.sendCannonAim(aimAngle, activeGroups);
       };
+      this.inputManager.onSwivelAim = (aimAngle) => {
+        this.networkManager.sendSwivelAim(aimAngle);
+      };
       this.inputManager.onCannonFire = (cannonIds, fireAll, ammoType, weaponGroup, weaponGroups) => {
         // Multi-group fire: fire all cannons in every selected group
         const groups = weaponGroups && weaponGroups.size > 0 ? weaponGroups : (weaponGroup !== undefined && weaponGroup >= 0 ? new Set([weaponGroup]) : null);

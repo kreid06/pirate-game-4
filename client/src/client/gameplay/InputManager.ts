@@ -84,6 +84,7 @@ export class InputManager {
   
   // Cannon control callbacks
   public onCannonAim: ((aimAngle: number, activeGroups: number[]) => void) | null = null;
+  public onSwivelAim: ((aimAngle: number) => void) | null = null;
   public onCannonFire: ((cannonIds?: number[], fireAll?: boolean, ammoType?: number, weaponGroup?: number, weaponGroups?: Set<number>) => void) | null = null;
 
   // Inventory callbacks
@@ -588,7 +589,12 @@ export class InputManager {
     const angleDelta = Math.abs(aimAngleRelative - this.lastCannonAimAngle);
     
     if (angleDelta > ANGLE_THRESHOLD) {
-      if (this.onCannonAim) {
+      if (this.mountKind === 'swivel') {
+        // Swivel: use dedicated swivel_aim message (server applies ±45° limit)
+        if (this.onSwivelAim) {
+          this.onSwivelAim(aimAngleRelative);
+        }
+      } else if (this.onCannonAim) {
         this.onCannonAim(aimAngleRelative, [...this.activeWeaponGroups]);
       }
       this.lastCannonAimAngle = aimAngleRelative;

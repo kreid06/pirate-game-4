@@ -1159,6 +1159,42 @@ static void handle_swivel_interact(WebSocketPlayer* player, struct WebSocketClie
     broadcast_player_mounted(player, module, ship);
 }
 
+/**
+ * Handle a swivel_aim message from a mounted player.
+ * Converts the ship-relative aim angle into a barrel offset from the swivel's
+ * natural direction, then clamps to the lateral limit of ±45°.
+ */
+static void handle_swivel_aim(WebSocketPlayer* player, float aim_angle) {
+    if (!player->is_mounted || player->parent_ship_id == 0) return;
+
+    SimpleShip* ship = find_ship(player->parent_ship_id);
+    if (!ship) return;
+
+    ShipModule* module = find_module_by_id(ship, player->mounted_module_id);
+    if (!module || module->type_id != MODULE_TYPE_SWIVEL) return;
+
+    /* Natural barrel direction in ship space = local_rot - π/2.
+     * Mirrors the cannon convention: barrel is at -Y in local frame,
+     * so in ship frame it sits at (local_rot - π/2). */
+    float swivel_base  = Q16_TO_FLOAT(module->local_rot);
+    float desired_offset = aim_angle - swivel_base + (float)(M_PI / 2.0);
+
+    /* Normalise to -π … +π */
+    while (desired_offset >  (float)M_PI) desired_offset -= 2.0f * (float)M_PI;
+    while (desired_offset < -(float)M_PI) desired_offset += 2.0f * (float)M_PI;
+
+    /* Clamp to ±45° lateral limit */
+    const float SWIVEL_AIM_LIMIT = 45.0f * ((float)M_PI / 180.0f);
+    if (desired_offset >  SWIVEL_AIM_LIMIT) desired_offset =  SWIVEL_AIM_LIMIT;
+    if (desired_offset < -SWIVEL_AIM_LIMIT) desired_offset = -SWIVEL_AIM_LIMIT;
+
+    module->data.swivel.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
+
+    log_info("🔫 swivel_aim: player %u swivel %u → %.1f°",
+             player->player_id, module->id,
+             desired_offset * 180.0f / (float)M_PI);
+}
+
 static void handle_seat_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
     // Check if seat is occupied
     if (module->data.seat.occupied_by != 0 && module->data.seat.occupied_by != player->player_id) {
@@ -4686,6 +4722,14 @@ int websocket_server_update(struct Sim* sim) {
                                                         m > 0 ? "," : "", module->id, module->type_id,
                                                         module_x, module_y, module_rot, aim_direction,
                                                         (unsigned)module->state_bits);
+                                                } else if (module->type_id == MODULE_TYPE_SWIVEL) {
+                                                    // Swivel: include current aim direction and state
+                                                    float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
+                                                    ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
+                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
+                                                        m > 0 ? "," : "", module->id, module->type_id,
+                                                        module_x, module_y, module_rot, aim_dir,
+                                                        (unsigned)module->state_bits);
                                                 } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                                                     // Helm: include wheel rotation, occupied status, state
                                                     float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
@@ -5381,7 +5425,26 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 handled = true;
                             }
-                            
+
+                        } else if (strstr(payload, "\"type\":\"swivel_aim\"")) {
+                            // SWIVEL AIM — update the aim direction of the player's mounted swivel
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player && player->parent_ship_id != 0) {
+                                    float aim_angle = 0.0f;
+                                    char* angle_start = strstr(payload, "\"aim_angle\":");
+                                    if (angle_start) sscanf(angle_start + 12, "%f", &aim_angle);
+                                    handle_swivel_aim(player, aim_angle);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"swivel_aim_updated\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                }
+                                handled = true;
+                            }
+
                         } else if (strstr(payload, "\"type\":\"cannon_fire\"")) {
                             // CANNON FIRE message
                             log_info("💥 Processing CANNON_FIRE message");
@@ -7945,6 +8008,30 @@ void websocket_server_tick(float dt) {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // ===== ADVANCE SWIVEL AIM TOWARD DESIRED (180°/s — faster than cannon) =====
+    {
+        const float SWIVEL_TURN_SPEED = 180.0f * (float)(M_PI / 180.0f); // rad/s
+        const float max_step = SWIVEL_TURN_SPEED * dt;
+        const float SWIVEL_AIM_LIMIT = 45.0f * ((float)M_PI / 180.0f);
+        for (int s = 0; s < ship_count; s++) {
+            if (!ships[s].active) continue;
+            for (int m = 0; m < ships[s].module_count; m++) {
+                ShipModule* mod = &ships[s].modules[m];
+                if (mod->type_id != MODULE_TYPE_SWIVEL) continue;
+                float cur  = Q16_TO_FLOAT(mod->data.swivel.aim_direction);
+                float tgt  = Q16_TO_FLOAT(mod->data.swivel.desired_aim_direction);
+                /* Re-clamp target in case it drifted somehow */
+                if (tgt >  SWIVEL_AIM_LIMIT) tgt =  SWIVEL_AIM_LIMIT;
+                if (tgt < -SWIVEL_AIM_LIMIT) tgt = -SWIVEL_AIM_LIMIT;
+                float diff = tgt - cur;
+                while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+                while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+                cur = (fabsf(diff) <= max_step) ? tgt : cur + (diff > 0.0f ? max_step : -max_step);
+                mod->data.swivel.aim_direction = Q16_FROM_FLOAT(cur);
             }
         }
     }

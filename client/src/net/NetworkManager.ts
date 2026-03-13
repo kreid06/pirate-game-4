@@ -60,6 +60,8 @@ export enum MessageType {
   CANNON_FIRE = 'cannon_fire',
   CANNON_GROUP_CONFIG = 'cannon_group_config',
   CANNON_GROUP_STATE = 'cannon_group_state',
+  // Swivel control messages
+  SWIVEL_AIM = 'swivel_aim',
 
   SLOT_SELECT = 'slot_select',
   UNEQUIP = 'unequip',
@@ -231,6 +233,15 @@ interface CannonAimMessage extends NetworkMessage {
 }
 
 /**
+ * Swivel aim message — ship-relative barrel heading sent by a mounted player.
+ */
+interface SwivelAimMessage extends NetworkMessage {
+  type: MessageType.SWIVEL_AIM;
+  timestamp: number;
+  aim_angle: number; // Radians, relative to ship rotation
+}
+
+/**
  * Cannon fire message
  */
 interface CannonFireMessage extends NetworkMessage {
@@ -387,7 +398,7 @@ interface CrewAssignMessage extends NetworkMessage {
   task: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage;
 
 /**
  * Main network manager class
@@ -874,6 +885,30 @@ export class NetworkManager {
       timestamp: now,
       aim_angle: aimAngle,
       active_groups: activeGroups
+    };
+
+    this.sendMessage(message);
+  }
+
+  /**
+   * Send swivel gun aim direction.
+   * @param aimAngle - Ship-relative aim angle in radians
+   */
+  sendSwivelAim(aimAngle: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - this.lastAimSentTime < this.AIM_SEND_INTERVAL_MS) {
+      return; // throttle to 20 Hz
+    }
+    this.lastAimSentTime = now;
+
+    const message: SwivelAimMessage = {
+      type: MessageType.SWIVEL_AIM,
+      timestamp: now,
+      aim_angle: aimAngle,
     };
 
     this.sendMessage(message);

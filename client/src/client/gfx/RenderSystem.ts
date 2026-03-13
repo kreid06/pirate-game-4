@@ -1306,6 +1306,7 @@ export class RenderSystem {
       this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
       this.queueRenderItem(4, 'swivel-guns', () => this.drawShipSwivelGuns(ship, camera));
       this.queueRenderItem(4, 'cannon-aim-guides', () => this.drawCannonAimGuides(ship, worldState, camera), 1);
+      this.queueRenderItem(4, 'swivel-aim-guides', () => this.drawSwivelAimGuide(ship, worldState, camera), 1);
       this.queueRenderItem(4, 'rudder', () => this.drawShipRudder(ship, camera));
       if ((this.showGroupOverlay || this.activeWeaponGroups.size > 0) && this.controlGroups) {
         this.queueRenderItem(5, `cannon-groups-${ship.id}`, () => this.drawCannonGroupOverlay(ship, camera));
@@ -2543,6 +2544,72 @@ export class RenderSystem {
 
       this.ctx.restore();
     }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw aim guide for a swivel gun the local player is currently mounted to.
+   * Shows: a short dashed trajectory line, and a ±45° arc indicating the rotation limits.
+   */
+  private drawSwivelAimGuide(ship: Ship, worldState: WorldState, camera: Camera): void {
+    if (!this.playerIsAiming) return;
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const localPlayer = this.localPlayerId != null
+      ? worldState.players.find(p => p.id === this.localPlayerId)
+      : null;
+    if (!localPlayer || !localPlayer.isMounted || localPlayer.carrierId !== ship.id) return;
+    if (localPlayer.mountedModuleId == null) return;
+
+    const mountedMod = ship.modules.find(m => m.id === localPlayer.mountedModuleId);
+    if (!mountedMod || mountedMod.kind !== 'swivel') return;
+
+    const swivelData = (mountedMod.moduleData?.kind === 'swivel') ? mountedMod.moduleData : null;
+    const aimDir = swivelData?.aimDirection ?? 0;  // barrel offset from localRot, radians
+    const localRot = mountedMod.localRot || 0;
+
+    this.ctx.save();
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    // Move to swivel position and apply its base rotation
+    this.ctx.translate(mountedMod.localPos.x, mountedMod.localPos.y);
+    this.ctx.rotate(localRot);
+
+    const BARREL_TIP = 22;    // px from pivot to barrel tip
+    const RANGE      = 200;   // swivel effective range in client units
+    const LIMIT_RAD  = 45 * Math.PI / 180;
+
+    // ── ±45° arc (limit indicators) ──────────────────────────────────────
+    // The barrel's natural direction in local swivel frame = -π/2 (straight up before rotation)
+    // arc centred on natural barrel direction = angle 0 in the post-localRot frame
+    const arcCentreAngle = -Math.PI / 2; // straight "out" in swivel local space
+    this.ctx.beginPath();
+    this.ctx.arc(0, 0, BARREL_TIP + 6, arcCentreAngle - LIMIT_RAD, arcCentreAngle + LIMIT_RAD);
+    this.ctx.strokeStyle = 'rgba(255,120,40,0.35)';
+    this.ctx.lineWidth = 1 / cameraState.zoom;
+    this.ctx.stroke();
+
+    // ── Barrel trajectory line (dashed) ──────────────────────────────────
+    // Barrel direction in swivel local space = aimDir applied to -Y
+    const barrelAngle = arcCentreAngle + aimDir;
+    const cosB = Math.cos(barrelAngle);
+    const sinB = Math.sin(barrelAngle);
+
+    this.ctx.save();
+    this.ctx.setLineDash([5 / cameraState.zoom, 4 / cameraState.zoom]);
+    this.ctx.strokeStyle = 'rgba(255,200,80,0.85)';
+    this.ctx.lineWidth = 1.5 / cameraState.zoom;
+    this.ctx.beginPath();
+    this.ctx.moveTo(cosB * BARREL_TIP, sinB * BARREL_TIP);
+    this.ctx.lineTo(cosB * (BARREL_TIP + RANGE), sinB * (BARREL_TIP + RANGE));
+    this.ctx.stroke();
+    this.ctx.setLineDash([]);
+    this.ctx.restore();
 
     this.ctx.restore();
   }
