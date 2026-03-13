@@ -187,6 +187,7 @@ export class InputManager {
   public loadedAmmoType: number = 0;      // What's physically in the barrel right now
   private xHoldTimer: ReturnType<typeof setTimeout> | null = null;  // setTimeout handle for 1s hold
   private xHoldFired: boolean = false;    // True if hold timer already fired this press
+  private flameStreamTimer: ReturnType<typeof setInterval> | null = null; // Liquid flame continuous stream
 
   /** Called when player holds X (1s) to force-reload with the pending ammo type. */
   public onForceReload: (() => void) | null = null;
@@ -458,6 +459,11 @@ export class InputManager {
       console.log(`⚓ [INPUT] Player dismounted - player controls active`);
       this.activeWeaponGroup = -1;
       this.activeWeaponGroups.clear();
+      // Stop any active flame stream on dismount
+      if (this.flameStreamTimer !== null) {
+        clearInterval(this.flameStreamTimer);
+        this.flameStreamTimer = null;
+      }
     }
   }
 
@@ -1139,8 +1145,16 @@ export class InputManager {
           this.onActionEvent('attack', this.inputState.mouseWorldPosition);
         }
       } else {
-        // Mounted to helm or cannon: fire cannon(s)
-        if (isDoubleClick) {
+        // Mounted to helm, cannon, or swivel: fire weapon(s)
+        if (this.mountKind === 'swivel' && this.loadedAmmoType === 3) {
+          // Liquid flame: fire immediately then stream while mouse is held
+          if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType);
+          if (this.flameStreamTimer === null) {
+            this.flameStreamTimer = setInterval(() => {
+              if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType);
+            }, 150);
+          }
+        } else if (isDoubleClick) {
           console.log('💥💥 Double-click: Fire ALL cannons!');
           if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
           // Cannon will reload into the pending ammo type
@@ -1185,6 +1199,11 @@ export class InputManager {
     if (event.button === 0) { // Left mouse button
       this.inputState.leftMouseDown = false;
       this.inputState.leftMouseReleased = true;
+      // Stop liquid flame stream if running
+      if (this.flameStreamTimer !== null) {
+        clearInterval(this.flameStreamTimer);
+        this.flameStreamTimer = null;
+      }
     } else if (event.button === 2) { // Right mouse button
       if (this.inputState.rightMouseDown) {
         this.inputState.rightMouseDown = false;

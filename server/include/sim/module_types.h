@@ -9,7 +9,8 @@
 #define CANNON_RELOAD_TIME_MS 3000
 
 /** Swivel gun reload time: faster than cannon, anti-personnel weapon. */
-#define SWIVEL_RELOAD_TIME_MS 1200
+#define SWIVEL_RELOAD_TIME_MS   1200
+#define SWIVEL_FLAME_INTERVAL_MS  150  /* Liquid flame stream: ms between shots */
 
 /**
  * Module Type IDs - matches client ModuleTypeId enum

@@ -3630,10 +3630,12 @@ static void handle_swivel_fire(WebSocketPlayer* player, uint8_t ammo_type) {
         }
     }
 
-    if (sw->data.swivel.time_since_fire < sw->data.swivel.reload_time) {
-        log_info("🔫 Swivel %u still reloading (%u/%u ms)",
-                 sw->id, sw->data.swivel.time_since_fire, sw->data.swivel.reload_time);
-        return;
+    /* Liquid flame uses a short per-shot interval; other ammo needs a full reload */
+    uint32_t effective_cooldown = (ammo_type == PROJ_TYPE_LIQUID_FLAME)
+                                  ? SWIVEL_FLAME_INTERVAL_MS
+                                  : sw->data.swivel.reload_time;
+    if (sw->data.swivel.time_since_fire < effective_cooldown) {
+        return; /* still cooling down */
     }
 
     fire_swivel(ship, sw, gsw, player, ammo_type);
