@@ -452,6 +452,10 @@ export class NetworkManager {
     statHealth: number, statDamage: number, statStamina: number, statWeight: number,
     statPoints: number) => void) | null = null;
   /** Fired when a cannonball hits an NPC or player. */
+  /** Fired when any weapon fires — used to render hit-scan tracers (grapeshot, canister). */
+  public onCannonFireEvent: ((cannonId: number, shipId: number, x: number, y: number,
+    angle: number, projectileId: number, ammoType: number) => void) | null = null;
+
   public onEntityHit: ((entityType: 'npc' | 'player', id: number, x: number, y: number,
     damage: number, health: number, maxHealth: number, killed: boolean) => void) | null = null;
   /** Fired when liquid flame ignites an entity or wooden module. */
@@ -1764,6 +1768,19 @@ export class NetworkManager {
 
       case 'FLAME_CONE_FIRE': // legacy — ignore
         break;
+
+      case 'CANNON_FIRE_EVENT': {
+        this.onCannonFireEvent?.(
+          message.cannonId    ?? 0,
+          message.shipId      ?? 0,
+          message.x           ?? 0,
+          message.y           ?? 0,
+          message.angle       ?? 0,
+          message.projectileId ?? 0,
+          message.ammoType    ?? 0,
+        );
+        break;
+      }
 
       case 'FLAME_WAVE_UPDATE': {
         this.onFlameWaveUpdate?.(

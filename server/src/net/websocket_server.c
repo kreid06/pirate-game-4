@@ -3704,8 +3704,9 @@ static void handle_cannon_force_reload(WebSocketPlayer* player) {
 /**
  * Fire the swivel gun a player is currently mounted to.
  *
- * ammo_type PROJ_TYPE_CANNONBALL → single swivel ball (2000 dmg, 4s lifetime)
- * ammo_type PROJ_TYPE_GRAPESHOT  → 3 pellets ±12° spread (450 dmg ea., 1.5s lifetime)
+ * ammo_type PROJ_TYPE_GRAPESHOT    (10) → hit-scan, ±18° cone, 60 dmg/target
+ * ammo_type PROJ_TYPE_LIQUID_FLAME (11) → flame wave projection
+ * ammo_type PROJ_TYPE_CANISTER_SHOT(12) → 3 spread projectiles
  */
 static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
                         WebSocketPlayer* player, uint8_t ammo_type) {
@@ -3759,31 +3760,79 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
     uint32_t owner_id = (player != NULL) ? player->player_id : ship->ship_id;
 
     if (ammo_type == PROJ_TYPE_GRAPESHOT) {
-        /* 3 pellets spread at -12°, 0°, +12° — anti-personnel */
-        const int   NUM_PELLETS = 3;
-        const float SPREAD_STEP = 12.0f * (float)(M_PI / 180.0f);
+        /* Pure hit-scan anti-personnel burst — 3 rays at -12°, 0°, +12°.
+         * No projectiles are spawned; modules are intentionally immune.
+         * Range: 250 px, damage: 60 HP per pellet hit. */
+        const float GRAPE_RANGE    = 250.0f;
+        const float GRAPE_DAMAGE   = 60.0f;
+        const float SPREAD_STEP    = 12.0f * (float)(M_PI / 180.0f);
+        const int   NUM_PELLETS    = 3;
+
+        /* Broadcast the visual shot event (reuses CANNON_FIRE format) so clients
+         * show the muzzle flash / tracer for each ray. Use id=0 for projectile
+         * since there is no real projectile entity. */
         for (int p = 0; p < NUM_PELLETS; p++) {
             float angle = fire_angle + SPREAD_STEP * (float)(p - 1);
-            float sx = world_x + cosf(angle) * BARREL_LEN;
-            float sy = world_y + sinf(angle) * BARREL_LEN;
-            Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(sx)),
-                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy)) };
-            Vec2Q16 vel = { Q16_FROM_FLOAT(cosf(angle) * SWIVEL_SPEED + ship_vx),
-                            Q16_FROM_FLOAT(sinf(angle) * SWIVEL_SPEED + ship_vy) };
-            entity_id pid = sim_create_projectile(global_sim, pos, vel, owner_id, PROJ_TYPE_GRAPESHOT);
-            if (pid != INVALID_ENTITY_ID) {
-                struct Projectile* proj = sim_get_projectile(global_sim, pid);
-                if (proj) {
-                    proj->damage         = Q16_FROM_FLOAT(450.0f);
-                    proj->lifetime       = Q16_FROM_FLOAT(1.5f);
-                    proj->firing_company = ship->company_id;
-                    proj->firing_ship_id = (entity_id)ship->ship_id;
-                    proj->type           = PROJ_TYPE_GRAPESHOT;
-                }
-                broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, angle, pid, PROJ_TYPE_GRAPESHOT);
-            }
+            broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, angle, 0, PROJ_TYPE_GRAPESHOT);
         }
-        log_info("Swivel %u fired GRAPESHOT (3 pellets) on ship %u", sw->id, ship->ship_id);
+
+        /* Scan NPCs */
+        for (int ni = 0; ni < world_npc_count; ni++) {
+            WorldNpc* npc = &world_npcs[ni];
+            if (!npc->active) continue;
+            if (npc->ship_id == ship->ship_id) continue; /* friendly */
+            float dx = npc->x - world_x, dy = npc->y - world_y;
+            float dist = sqrtf(dx*dx + dy*dy);
+            if (dist > GRAPE_RANGE) continue;
+            if (dist < 0.01f) { dx = 1.0f; dy = 0.0f; dist = 1.0f; }
+            float nx = dx / dist, ny = dy / dist;
+            float fdir_x = cosf(fire_angle), fdir_y = sinf(fire_angle);
+            /* Check if NPC falls within any of the 3 pellet rays (cone ±18°) */
+            float half_cone = 18.0f * (float)(M_PI / 180.0f);
+            float dot = nx * fdir_x + ny * fdir_y;
+            if (dot < cosf(half_cone)) continue;
+            uint16_t dmg = (uint16_t)GRAPE_DAMAGE;
+            bool killed = false;
+            if (npc->health <= dmg) { npc->health = 0; npc->active = false; killed = true; }
+            else { npc->health -= dmg; }
+            char hit_msg[256];
+            snprintf(hit_msg, sizeof(hit_msg),
+                "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
+                "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                npc->id, npc->x, npc->y, GRAPE_DAMAGE,
+                (unsigned)npc->health, (unsigned)npc->max_health,
+                killed ? "true" : "false");
+            broadcast_json_all(hit_msg);
+        }
+
+        /* Scan players */
+        for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
+            WebSocketPlayer* wp = &players[wpi];
+            if (!wp->active || wp->parent_ship_id == ship->ship_id) continue;
+            float dx = wp->x - world_x, dy = wp->y - world_y;
+            float dist = sqrtf(dx*dx + dy*dy);
+            if (dist > GRAPE_RANGE) continue;
+            if (dist < 0.01f) { dx = 1.0f; dy = 0.0f; dist = 1.0f; }
+            float nx = dx / dist, ny = dy / dist;
+            float fdir_x = cosf(fire_angle), fdir_y = sinf(fire_angle);
+            float half_cone = 18.0f * (float)(M_PI / 180.0f);
+            float dot = nx * fdir_x + ny * fdir_y;
+            if (dot < cosf(half_cone)) continue;
+            uint16_t dmg = (uint16_t)GRAPE_DAMAGE;
+            if (wp->health <= dmg) wp->health = 0; else wp->health -= dmg;
+            char hit_msg[256];
+            snprintf(hit_msg, sizeof(hit_msg),
+                "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
+                "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                wp->player_id, wp->x, wp->y, GRAPE_DAMAGE,
+                (unsigned)wp->health, (unsigned)wp->max_health,
+                wp->health == 0 ? "true" : "false");
+            broadcast_json_all(hit_msg);
+        }
+
+        log_info("Swivel %u fired GRAPESHOT (hit-scan) on ship %u", sw->id, ship->ship_id);
     } else if (ammo_type == PROJ_TYPE_LIQUID_FLAME) {
         /* ── Flamethrower wave: register / refresh this swivel's wave entry ──────
          * Hit application happens in update_flame_waves() each server tick so
@@ -4032,16 +4081,17 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
             /* Find SimpleShip copy for timer check and fire_swivel() */
             ShipModule* sw = find_module_by_id(ship, module->id);
             if (!sw) continue;
-            /* Use the same effective-cooldown logic as handle_swivel_fire:
-             * liquid flame uses the fast stream interval, everything else the full reload. */
-            uint32_t eff_cd = (ammo_type == PROJ_TYPE_LIQUID_FLAME)
+            /* NPC swivels must always use swivel ammo (10-12).
+             * If the incoming ammo_type is a cannon ammo (0-1), fall back to the
+             * swivel's own loaded ammo; default to grapeshot if not yet set. */
+            uint8_t swivel_ammo = (ammo_type >= PROJ_TYPE_GRAPESHOT) ? ammo_type
+                                : (sw->data.swivel.loaded_ammo >= PROJ_TYPE_GRAPESHOT
+                                   ? sw->data.swivel.loaded_ammo : PROJ_TYPE_GRAPESHOT);
+            uint32_t eff_cd = (swivel_ammo == PROJ_TYPE_LIQUID_FLAME)
                               ? SWIVEL_FLAME_INTERVAL_MS
                               : sw->data.swivel.reload_time;
             if (sw->data.swivel.time_since_fire < eff_cd) continue;
-            /* NPC-manned swivels always fire grapeshot regardless of the
-             * player's selected ammo type — liquid flame / canister etc.
-             * are player-only swivel ammo types. */
-            fire_swivel(ship, sw, module, player, PROJ_TYPE_GRAPESHOT);
+            fire_swivel(ship, sw, module, player, swivel_ammo);
             cannons_fired++;
             continue;
         }
@@ -4125,7 +4175,11 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
         }
         
         if (should_fire) {
-            fire_cannon(ship, module, player, manually_fired, ammo_type);
+            /* Cannons only accept cannon-valid ammo types; swivel-only ammo
+             * (grapeshot=2, liquid_flame=3, canister=4) is silently clamped
+             * to cannonball so mixed weapon groups can't fire flame from cannons. */
+            uint8_t cannon_ammo = (ammo_type <= PROJ_TYPE_BAR_SHOT) ? ammo_type : PROJ_TYPE_CANNONBALL;
+            fire_cannon(ship, module, player, manually_fired, cannon_ammo);
             cannons_fired++;
             
             // Also update simple ship module for sync
@@ -5975,11 +6029,15 @@ int websocket_server_update(struct Sim* sim) {
                                     bool fire_all = strstr(payload, "\"fire_all\":true") != NULL;
                                     // freefire: skip aim-angle check (set by client for freefire/targetfire modes)
                                     bool freefire = strstr(payload, "\"freefire\":true") != NULL;
-                                    // Parse ammo_type (0=cannonball, 1=bar_shot, 2=grapeshot, 3=liquid_flame, 4=canister_shot)
+                                    // Parse ammo_type:
+                                    //   cannon ammo: 0=cannonball, 1=bar_shot
+                                    //   swivel ammo: 10=grapeshot, 11=liquid_flame, 12=canister_shot
                                     uint8_t ammo_type = PROJ_TYPE_CANNONBALL;
                                     char* at = strstr(payload, "\"ammo_type\":");
                                     if (at) ammo_type = (uint8_t)atoi(at + 12);
-                                    if (ammo_type > PROJ_TYPE_CANISTER_SHOT) ammo_type = PROJ_TYPE_CANNONBALL;
+                                    /* Reject unknown values — allow 0-1 (cannon) and 10-12 (swivel) */
+                                    if (ammo_type > 1 && (ammo_type < PROJ_TYPE_GRAPESHOT || ammo_type > PROJ_TYPE_CANISTER_SHOT))
+                                        ammo_type = PROJ_TYPE_CANNONBALL;
                                     // Parse optional weapon_ids array
                                     uint32_t explicit_ids[MAX_WEAPONS_PER_GROUP];
                                     int explicit_count = parse_json_uint32_array(
