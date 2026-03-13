@@ -4038,10 +4038,7 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
                               ? SWIVEL_FLAME_INTERVAL_MS
                               : sw->data.swivel.reload_time;
             if (sw->data.swivel.time_since_fire < eff_cd) continue;
-            /* NPC-manned swivels always fire grapeshot regardless of the
-             * player's selected ammo type — liquid flame / canister etc.
-             * are player-only swivel ammo types. */
-            fire_swivel(ship, sw, module, player, PROJ_TYPE_GRAPESHOT);
+            fire_swivel(ship, sw, module, player, ammo_type);
             cannons_fired++;
             continue;
         }
@@ -4125,7 +4122,11 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
         }
         
         if (should_fire) {
-            fire_cannon(ship, module, player, manually_fired, ammo_type);
+            /* Cannons only accept cannon-valid ammo types; swivel-only ammo
+             * (grapeshot=2, liquid_flame=3, canister=4) is silently clamped
+             * to cannonball so mixed weapon groups can't fire flame from cannons. */
+            uint8_t cannon_ammo = (ammo_type <= PROJ_TYPE_BAR_SHOT) ? ammo_type : PROJ_TYPE_CANNONBALL;
+            fire_cannon(ship, module, player, manually_fired, cannon_ammo);
             cannons_fired++;
             
             // Also update simple ship module for sync
