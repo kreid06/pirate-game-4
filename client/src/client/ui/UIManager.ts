@@ -121,10 +121,11 @@ export class UIManager {
   private static readonly BUILD_PANEL_ENTRIES: Array<{
     kind: GhostModuleKind; label: string; symbol: string; color: string; borderColor: string;
   }> = [
-    { kind: 'cannon', label: 'Cannon', symbol: '⚫', color: '#444',    borderColor: '#888'    },
-    { kind: 'mast',   label: 'Sail',   symbol: '⛵', color: '#1e8c6e', borderColor: '#0f5c48' },
-    { kind: 'helm',   label: 'Helm',   symbol: 'W',  color: '#6a3d8f', borderColor: '#3d2060' },
-    { kind: 'deck',   label: 'Deck',   symbol: '⊟', color: '#8b5e3c', borderColor: '#5c3a1c' },
+    { kind: 'cannon', label: 'Cannon',     symbol: '⚫', color: '#444',    borderColor: '#888'    },
+    { kind: 'swivel', label: 'Swivel Gun', symbol: '›', color: '#7a4a2a', borderColor: '#4a2810' },
+    { kind: 'mast',   label: 'Sail',       symbol: '⛵', color: '#1e8c6e', borderColor: '#0f5c48' },
+    { kind: 'helm',   label: 'Helm',       symbol: 'W',  color: '#6a3d8f', borderColor: '#3d2060' },
+    { kind: 'deck',   label: 'Deck',       symbol: '⊟', color: '#8b5e3c', borderColor: '#5c3a1c' },
   ];
 
   private static readonly BUILD_PANEL_W = 164;

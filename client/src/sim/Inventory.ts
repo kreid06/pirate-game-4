@@ -26,7 +26,8 @@ export type ItemKind =
   | 'iron_armor'
   | 'wooden_shield'
   | 'iron_shield'
-  | 'deck';
+  | 'deck'
+  | 'swivel';
 
 // ── Category groups ─────────────────────────────────────────────────────────
 export type ItemCategory = 'none' | 'building' | 'repair' | 'ammo' | 'weapon' | 'tool' | 'armor' | 'shield';
@@ -64,6 +65,7 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   iron_armor:    { kind: 'iron_armor',    name: 'Iron Armor',    category: 'armor',    maxStack: 1,  color: '#8a8a8c', borderColor: '#555558', symbol: 'A',  description: 'Heavy armor. Provides strong protection.' },
   wooden_shield: { kind: 'wooden_shield', name: 'Wooden Shield', category: 'shield',   maxStack: 1,  color: '#c8a46e', borderColor: '#8a6030', symbol: 'D',  description: 'A light wooden shield for blocking attacks.' },
   iron_shield:   { kind: 'iron_shield',   name: 'Iron Shield',   category: 'shield',   maxStack: 1,  color: '#aaaaac', borderColor: '#666668', symbol: 'D',  description: 'A sturdy iron shield for reliable defense.' },
+  swivel:        { kind: 'swivel',        name: 'Swivel Gun',    category: 'building', maxStack: 9,  color: '#7a4a2a', borderColor: '#4a2810', symbol: '\u2023', description: 'A fast anti-personnel swivel gun. Place anywhere on the ship rail.' },
 };
 
 /**
@@ -87,6 +89,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   20: 'wooden_shield',
   21: 'iron_shield',
   13: 'deck',
+  14: 'swivel',
 };
 
 /**
