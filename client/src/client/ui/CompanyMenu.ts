@@ -20,7 +20,7 @@ import {
   COMPANY_NAVY,
   NPC_STATE_IDLE,
   NPC_STATE_MOVING,
-  NPC_STATE_AT_CANNON,
+  NPC_STATE_AT_GUN,
   NPC_STATE_REPAIRING,
 } from '../../sim/Types.js';
 
@@ -49,7 +49,7 @@ const NPC_ROLE_NAMES: Record<number, string> = {
 const NPC_STATE_NAMES: Record<number, string> = {
   [NPC_STATE_IDLE]:      'Idle',
   [NPC_STATE_MOVING]:    'Moving',
-  [NPC_STATE_AT_CANNON]: 'At Cannon',
+  [NPC_STATE_AT_GUN]: 'At Gun',
   [NPC_STATE_REPAIRING]: 'Repairing',
 };
 
@@ -230,7 +230,7 @@ export class CompanyMenu {
       const stateName = NPC_STATE_NAMES[npc.state] ?? `State ${npc.state}`;
 
       const stateColor =
-        npc.state === NPC_STATE_AT_CANNON ? '#ff9944' :
+        npc.state === NPC_STATE_AT_GUN ? '#ff9944' :
         npc.state === NPC_STATE_REPAIRING ? '#66dd88' :
         npc.state === NPC_STATE_MOVING    ? '#88ccff' :
                                             TEXT_DIM;

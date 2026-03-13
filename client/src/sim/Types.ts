@@ -183,6 +183,8 @@ export const NPC_TYPE_SAILOR = 0;
 // NPC movement/AI state (mirrors server WorldNpcState enum)
 export const NPC_STATE_IDLE      = 0;
 export const NPC_STATE_MOVING    = 1;
+export const NPC_STATE_AT_GUN    = 2;
+/** @deprecated use NPC_STATE_AT_GUN */
 export const NPC_STATE_AT_CANNON = 2;
 export const NPC_STATE_REPAIRING = 3;
 
@@ -201,7 +203,7 @@ export interface Npc {
   state: number;          // NPC_STATE_* — used for movement animation
   role: number;           // NPC_ROLE_* — 1=gunner, 3=rigger
   companyId: number;      // COMPANY_* — faction this NPC belongs to
-  assignedCannonId: number; // Module ID of cannon/mast this NPC is stationed at (0 if none)
+  assignedWeaponId: number; // Module ID of cannon/swivel/mast this NPC is stationed at (0 if none)
 
   // Crew levelling
   npcLevel: number;       // 1–66 (1 base + 65 upgrades)

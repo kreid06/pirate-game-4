@@ -44,7 +44,7 @@ typedef enum {
     MODULE_STATE_REPAIRING = (1 << 8),   // Repair has been initiated (enables passive regen)
     /** Cannon needs a gunner: player is aiming at it but no crew is stationed.
      *  Set by handle_cannon_aim() on the SimpleShip module; cleared when an NPC
-     *  arrives at AT_CANNON.  NPCs treat NEEDED cannons as their top-priority
+     *  arrives at AT_GUN.  NPCs treat NEEDED cannons as their top-priority
      *  destination regardless of weapon-group membership. */
     MODULE_STATE_NEEDED = (1 << 9),
     /** Set by toggle_ladder: ladder is pulled up and cannot be climbed. */

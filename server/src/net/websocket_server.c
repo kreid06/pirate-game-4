@@ -944,8 +944,8 @@ static void handle_helm_interact(WebSocketPlayer* player, struct WebSocketClient
     for (int _ni = 0; _ni < world_npc_count; _ni++) {
         WorldNpc* _npc = &world_npcs[_ni];
         if (!_npc->active) continue;
-        if (_npc->assigned_cannon_id != module->id) continue;
-        if (_npc->state != WORLD_NPC_STATE_AT_CANNON && _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
+        if (_npc->assigned_weapon_id != module->id) continue;
+        if (_npc->state != WORLD_NPC_STATE_AT_GUN && _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
         if (_npc->company_id == 0) continue;  // neutral never blocks
         if (player->company_id != 0 && _npc->company_id == player->company_id) continue;  // friendly OK
         send_interaction_failure(client, "npc_occupied");
@@ -1298,15 +1298,15 @@ static void handle_module_unmount(WebSocketPlayer* player, struct WebSocketClien
 
 /**
  * Returns true if a WorldNpc rigger is stationed at this specific mast module
- * (assigned_cannon_id == mast_id AND state == AT_CANNON).
+ * (assigned_weapon_id == mast_id AND state == AT_GUN).
  */
 static bool is_mast_manned(uint32_t ship_id, uint32_t mast_id) {
     for (int i = 0; i < world_npc_count; i++) {
         WorldNpc* w = &world_npcs[i];
         if (!w->active || w->ship_id != ship_id) continue;
         if (w->role == NPC_ROLE_RIGGER &&
-            w->assigned_cannon_id == mast_id &&
-            w->state == WORLD_NPC_STATE_AT_CANNON)
+            w->assigned_weapon_id == mast_id &&
+            w->state == WORLD_NPC_STATE_AT_GUN)
             return true;
     }
     return false;
@@ -1320,8 +1320,8 @@ static bool is_mast_manned_by_friendly(uint32_t ship_id, uint32_t mast_id, uint8
         WorldNpc* w = &world_npcs[i];
         if (!w->active || w->ship_id != ship_id) continue;
         if (w->role != NPC_ROLE_RIGGER) continue;
-        if (w->assigned_cannon_id != mast_id) continue;
-        if (w->state != WORLD_NPC_STATE_AT_CANNON) continue;
+        if (w->assigned_weapon_id != mast_id) continue;
+        if (w->state != WORLD_NPC_STATE_AT_GUN) continue;
         // A rigger is here — is it friendly?
         if (w->company_id == 0) return true;            // neutral obeys anyone
         if (player_company_id != 0 &&
@@ -1498,11 +1498,12 @@ static void handle_cannon_force_reload(WebSocketPlayer* player);
 static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_type,
                                uint32_t* explicit_ids, int explicit_count, bool skip_aim_check);
 static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
-                                       WeaponGroupMode mode, uint32_t* cannon_ids,
-                                       int cannon_count, uint32_t target_ship_id);
-static WeaponGroup* find_cannon_weapon_group(uint32_t ship_id, uint32_t cannon_id);
+                                       WeaponGroupMode mode, uint32_t* weapon_ids,
+                                       int weapon_count, uint32_t target_ship_id);
+static WeaponGroup* find_weapon_group(uint32_t ship_id, uint32_t cannon_id);
 static void assign_weapon_group_crew(SimpleShip* ship);
 static void tick_cannon_needed_expiry(void);
+static void tick_swivel_crew_demand(SimpleShip* ship);
 static void tick_ship_weapon_groups(void);
 static void tick_sinking_ships(void);
 static void ship_init_default_weapon_groups(SimpleShip* ship);
@@ -1584,13 +1585,13 @@ static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float 
 static void dismount_npc(WorldNpc* npc, SimpleShip* ship) {
     if (npc->role == NPC_ROLE_GUNNER) {
         npc->wants_cannon       = false;
-        npc->assigned_cannon_id = 0;
+        npc->assigned_weapon_id = 0;
         /* Re-run sector so remaining gunners can claim the vacated cannon */
         if (ship) update_npc_cannon_sector(ship, ship->active_aim_angle);
 
     } else if (npc->role == NPC_ROLE_RIGGER) {
         /* Free the mast — clear id so is_mast_manned() returns false immediately */
-        npc->assigned_cannon_id = 0;
+        npc->assigned_weapon_id = 0;
         npc->port_cannon_id     = 0;
         npc->starboard_cannon_id= 0;
     }
@@ -1632,7 +1633,7 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
                 WorldNpc* other = &world_npcs[j];
                 if (!other->active || other->id == npc->id) continue;
                 if (other->ship_id != ship_id) continue;
-                if (other->role == NPC_ROLE_RIGGER && other->assigned_cannon_id == mid) {
+                if (other->role == NPC_ROLE_RIGGER && other->assigned_weapon_id == mid) {
                     occupied = true;
                     break;
                 }
@@ -1647,7 +1648,7 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
                 float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(mast->local_pos.y));
                 npc->target_local_x     = mx;
                 npc->target_local_y     = my + 20.0f;
-                npc->assigned_cannon_id = free_mast;
+                npc->assigned_weapon_id = free_mast;
             }
             // log_info("⛵ NPC %u (%s) → RIGGER, walking to mast %u", npc->id, npc->name, free_mast);
         } else {
@@ -1668,7 +1669,7 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
     } else if (want_repairs) {
         /* Become a repairer — walk to idle position, tick_world_npcs will dispatch to a module */
         npc->role           = NPC_ROLE_REPAIRER;
-        npc->assigned_cannon_id = 0;
+        npc->assigned_weapon_id = 0;
         npc->target_local_x = npc->idle_local_x;
         npc->target_local_y = npc->idle_local_y;
         npc->state          = WORLD_NPC_STATE_MOVING;
@@ -1712,20 +1713,77 @@ static void tick_npc_agents(float dt) {
                 // Don't fire on allied ships
                 if (is_allied(ship->company_id, target->company_id)) break;
 
-                // Only aim/fire while the WorldNpc gunner is stationary at this cannon.
+                // Only aim/fire while the WorldNpc gunner is stationary at this weapon.
                 // Find the corresponding WorldNpc for this module and check its state.
-                bool npc_at_cannon = false;
+                bool npc_at_gun = false;
                 for (int wn = 0; wn < world_npc_count; wn++) {
                     WorldNpc* wnpc = &world_npcs[wn];
                     if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
                         wnpc->ship_id == ship->ship_id &&
-                        wnpc->assigned_cannon_id == module->id &&
-                        wnpc->state == WORLD_NPC_STATE_AT_CANNON) {
-                        npc_at_cannon = true;
+                        wnpc->assigned_weapon_id == module->id &&
+                        wnpc->state == WORLD_NPC_STATE_AT_GUN) {
+                        npc_at_gun = true;
                         break;
                     }
                 }
-                if (!npc_at_cannon) break;
+                if (!npc_at_gun) break;
+
+                /* ── Swivel path ──────────────────────────────────────────── */
+                if (module->type_id == MODULE_TYPE_SWIVEL) {
+                    WeaponGroup* grp = find_weapon_group(ship->ship_id, module->id);
+                    if (grp && grp->mode == WEAPON_GROUP_MODE_HALTFIRE) break; /* suppressed */
+
+                    /* Aim swivel toward target ship centre */
+                    float cos_r  = cosf(ship->rotation);
+                    float sin_r  = sinf(ship->rotation);
+                    float local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+                    float local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+                    float world_x = ship->x + (local_x * cos_r - local_y * sin_r);
+                    float world_y = ship->y + (local_x * sin_r + local_y * cos_r);
+                    float dx = target->x - world_x;
+                    float dy = target->y - world_y;
+                    float world_angle = atan2f(dy, dx);
+                    float sw_base = Q16_TO_FLOAT(module->local_rot) - (float)(M_PI / 2.0f);
+                    float desired_off = world_angle - ship->rotation - sw_base;
+                    while (desired_off >  (float)M_PI) desired_off -= 2.0f * (float)M_PI;
+                    while (desired_off < -(float)M_PI) desired_off += 2.0f * (float)M_PI;
+                    const float SWIVEL_AIM_RANGE = 90.0f * ((float)M_PI / 180.0f);
+                    if (desired_off >  SWIVEL_AIM_RANGE) desired_off =  SWIVEL_AIM_RANGE;
+                    if (desired_off < -SWIVEL_AIM_RANGE) desired_off = -SWIVEL_AIM_RANGE;
+                    module->data.swivel.aim_direction = Q16_FROM_FLOAT(desired_off);
+                    /* Mirror to global_sim */
+                    if (global_sim) {
+                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                            if (global_sim->ships[si].id != ship->ship_id) continue;
+                            for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
+                                if (global_sim->ships[si].modules[mi].id == module->id) {
+                                    global_sim->ships[si].modules[mi].data.swivel.aim_direction
+                                        = Q16_FROM_FLOAT(desired_off);
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    /* Fire when reload is complete */
+                    if (module->data.swivel.time_since_fire >= module->data.swivel.reload_time) {
+                        ShipModule* gsw = NULL;
+                        if (global_sim) {
+                            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                if (global_sim->ships[si].id != ship->ship_id) continue;
+                                for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
+                                    if (global_sim->ships[si].modules[mi].id == module->id) {
+                                        gsw = &global_sim->ships[si].modules[mi];
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        fire_swivel(ship, module, gsw, NULL, PROJ_TYPE_GRAPESHOT);
+                    }
+                    break;
+                }
 
                 /* ── Weapon-group override ──────────────────────────────────
                  * If this cannon belongs to a player's weapon control group,
@@ -1737,7 +1795,7 @@ static void tick_npc_agents(float dt) {
                  *   AIMING / FREEFIRE → NPC aims normally (follows ship aim angle).
                  * ─────────────────────────────────────────────────────────── */
                 {
-                    WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, module->id);
+                    WeaponGroup* grp = find_weapon_group(ship->ship_id, module->id);
                     if (grp) {
                         if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   break; /* suppressed */
                         if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE)  break; /* aim owned by tick_player_weapon_groups */
@@ -1887,7 +1945,7 @@ static uint32_t spawn_ship_crew(uint32_t ship_id, const char* name) {
     npc->move_speed     = 80.0f;
     npc->interact_radius= 40.0f;
     npc->state          = WORLD_NPC_STATE_IDLE;
-    npc->assigned_cannon_id = 0;
+    npc->assigned_weapon_id = 0;
     strncpy(npc->name,     name,              sizeof(npc->name)     - 1);
     strncpy(npc->dialogue, "Aye aye, Captain!", sizeof(npc->dialogue) - 1);
 
@@ -1928,16 +1986,17 @@ static uint32_t spawn_ship_crew(uint32_t ship_id, const char* name) {
  * ============================================================================*/
 #define SWAP_HYSTERESIS (10.0f * ((float)M_PI / 180.0f))  /* 10° dead-band */
 
-/* Walk a gunner to the given cannon module. */
-static void dispatch_gunner_to_cannon(WorldNpc* npc, SimpleShip* ship,
+/* Walk a gunner to the given cannon or swivel module. */
+static void dispatch_gunner_to_weapon(WorldNpc* npc, SimpleShip* ship,
                                       uint32_t cannon_id, float abs_diff_deg) {
     ShipModule* cannon = find_module_by_id(ship, cannon_id);
     if (!cannon) return;
     float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
     float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
     float barrel_angle = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
-    const float CANNON_MOUNT_DIST = 25.0f;
-    npc->assigned_cannon_id = cannon_id;
+    /* Swivels are smaller — NPC stands slightly closer to the pivot */
+    const float CANNON_MOUNT_DIST = (cannon->type_id == MODULE_TYPE_SWIVEL) ? 18.0f : 25.0f;
+    npc->assigned_weapon_id = cannon_id;
     npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->state              = WORLD_NPC_STATE_MOVING;
@@ -1983,7 +2042,7 @@ static void tick_cannon_needed_expiry(void) {
         if (!ship->active) continue;
         for (int m = 0; m < ship->module_count; m++) {
             ShipModule* mod = &ship->modules[m];
-            if (mod->type_id != MODULE_TYPE_CANNON) continue;
+            if (mod->type_id != MODULE_TYPE_CANNON && mod->type_id != MODULE_TYPE_SWIVEL) continue;
             if (!(mod->state_bits & MODULE_STATE_NEEDED)) continue;
 
             uint32_t last_aim = ship->cannon_last_needed_ms[m];
@@ -2012,6 +2071,33 @@ static void tick_cannon_needed_expiry(void) {
 }
 
 /**
+ * Mark swivel guns as NEEDED when this ship's NPC agents have an active enemy target.
+ * This drives the crew dispatch system to send gunner NPCs to unmanned swivels.
+ * Called once per tick before assign_weapon_group_crew().
+ */
+static void tick_swivel_crew_demand(SimpleShip* ship) {
+    if (!ship) return;
+    /* Check if any NpcAgent for this ship has a live target */
+    bool has_target = false;
+    for (int ai = 0; ai < npc_count; ai++) {
+        if (npc_agents[ai].active && npc_agents[ai].ship_id == ship->ship_id &&
+            npc_agents[ai].role == NPC_ROLE_GUNNER && npc_agents[ai].target_ship_id != 0) {
+            has_target = true;
+            break;
+        }
+    }
+    if (!has_target) return;
+    uint32_t now = get_time_ms();
+    for (int m = 0; m < ship->module_count; m++) {
+        ShipModule* mod = &ship->modules[m];
+        if (mod->type_id != MODULE_TYPE_SWIVEL) continue;
+        /* Set NEEDED and refresh timestamp so tick_cannon_needed_expiry keeps it alive */
+        mod->state_bits         |= MODULE_STATE_NEEDED;
+        ship->cannon_last_needed_ms[m] = now;
+    }
+}
+
+/**
  * Assign free on-duty gunner NPCs to any weapon-group cannon that is currently
  * unmanned and has MODULE_STATE_NEEDED set.
  *
@@ -2027,9 +2113,9 @@ static void assign_weapon_group_crew(SimpleShip* ship) {
 
     for (int m = 0; m < ship->module_count; m++) {
         ShipModule* mod = &ship->modules[m];
-        if (mod->type_id != MODULE_TYPE_CANNON) continue;
+        if (mod->type_id != MODULE_TYPE_CANNON && mod->type_id != MODULE_TYPE_SWIVEL) continue;
 
-        /* Only dispatch to cannons that are actively NEEDED. */
+        /* Only dispatch to weapons that are actively NEEDED. */
         if (!(mod->state_bits & MODULE_STATE_NEEDED)) continue;
 
         /* Check occupancy: player seated here? */
@@ -2047,8 +2133,8 @@ static void assign_weapon_group_crew(SimpleShip* ship) {
                 WorldNpc* npc = &world_npcs[ni];
                 if (npc->active && npc->role == NPC_ROLE_GUNNER &&
                     npc->ship_id == ship->ship_id &&
-                    npc->assigned_cannon_id == mod->id) {
-                    if (npc->state == WORLD_NPC_STATE_AT_CANNON) occupied  = true;
+                    npc->assigned_weapon_id == mod->id) {
+                    if (npc->state == WORLD_NPC_STATE_AT_GUN) occupied  = true;
                     else                                          en_route  = true;
                     break;
                 }
@@ -2068,9 +2154,9 @@ static void assign_weapon_group_crew(SimpleShip* ship) {
             WorldNpc* npc = &world_npcs[ni];
             if (!npc->active || npc->ship_id != ship->ship_id) continue;
             if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
-            if (npc->assigned_cannon_id != 0) {
+            if (npc->assigned_weapon_id != 0) {
                 /* Only pull from a cannon whose NEEDED has expired */
-                ShipModule* cur = find_module_on_ship(ship, npc->assigned_cannon_id);
+                ShipModule* cur = find_module_on_ship(ship, npc->assigned_weapon_id);
                 if (cur && (cur->state_bits & MODULE_STATE_NEEDED)) continue;
             }
             float dx = npc->local_x - cx;
@@ -2082,7 +2168,7 @@ static void assign_weapon_group_crew(SimpleShip* ship) {
         if (best) {
             // log_info("🎯 Cannon %u NEEDED+unmanned — dispatching NPC %u (%s)",
             //          mod->id, best->id, best->name);
-            dispatch_gunner_to_cannon(best, ship, mod->id, 0.0f);
+            dispatch_gunner_to_weapon(best, ship, mod->id, 0.0f);
         }
     }
 
@@ -2100,11 +2186,11 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
      * are never completely invisible to the sector system.                     */
     uint32_t sorted_ids [MAX_MODULES_PER_SHIP];
     float    sorted_diff[MAX_MODULES_PER_SHIP];
-    int      cannon_count = 0;
+    int      weapon_count = 0;
 
     for (int m = 0; m < ship->module_count; m++) {
         ShipModule* mod = &ship->modules[m];
-        if (mod->type_id != MODULE_TYPE_CANNON) continue;
+        if (mod->type_id != MODULE_TYPE_CANNON && mod->type_id != MODULE_TYPE_SWIVEL) continue;
 
         float fire_dir = Q16_TO_FLOAT(mod->local_rot) - (float)(M_PI / 2.0f);
         float diff = aim_angle - fire_dir;
@@ -2118,13 +2204,13 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
         if (mod->state_bits & MODULE_STATE_NEEDED)
             abs_diff -= 2.0f * (float)M_PI;   /* guaranteed negative → sorts first */
         else {
-            WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, mod->id);
+            WeaponGroup* grp = find_weapon_group(ship->ship_id, mod->id);
             if (grp && grp->mode == WEAPON_GROUP_MODE_HALTFIRE)
                 abs_diff += 2.0f * (float)M_PI; /* sorts last */
         }
 
         /* Insertion sort: smallest diff first */
-        int pos = cannon_count;
+        int pos = weapon_count;
         while (pos > 0 && sorted_diff[pos - 1] > abs_diff) {
             sorted_ids [pos] = sorted_ids [pos - 1];
             sorted_diff[pos] = sorted_diff[pos - 1];
@@ -2132,9 +2218,9 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
         }
         sorted_ids [pos] = mod->id;
         sorted_diff[pos] = abs_diff;
-        cannon_count++;
+        weapon_count++;
     }
-    if (cannon_count == 0) return;
+    if (weapon_count == 0) return;
 
     /* ─ Step 2: dispatch unassigned or released gunners to NEEDED cannons only.
      *
@@ -2150,8 +2236,8 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
         /* NPC is already heading to or sitting at a cannon — keep them
          * unless their cannon's NEEDED has expired AND another cannon
          * has NEEDED and is uncovered. */
-        if (npc->assigned_cannon_id != 0) {
-            ShipModule* cur = find_module_on_ship(ship, npc->assigned_cannon_id);
+        if (npc->assigned_weapon_id != 0) {
+            ShipModule* cur = find_module_on_ship(ship, npc->assigned_weapon_id);
             bool cur_needed = cur && (cur->state_bits & MODULE_STATE_NEEDED);
             if (cur_needed) continue; /* their cannon is still active — stay */
 
@@ -2159,8 +2245,9 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
              * NEEDED cannon that is uncovered. */
             bool any_needed_elsewhere = false;
             for (int mn = 0; mn < ship->module_count; mn++) {
-                if (ship->modules[mn].id == npc->assigned_cannon_id) continue;
-                if (ship->modules[mn].type_id == MODULE_TYPE_CANNON &&
+                if (ship->modules[mn].id == npc->assigned_weapon_id) continue;
+                if ((ship->modules[mn].type_id == MODULE_TYPE_CANNON ||
+                     ship->modules[mn].type_id == MODULE_TYPE_SWIVEL) &&
                     (ship->modules[mn].state_bits & MODULE_STATE_NEEDED)) {
                     bool covered = false;
                     for (int j = 0; j < world_npc_count; j++) {
@@ -2168,7 +2255,7 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
                         WorldNpc* o = &world_npcs[j];
                         if (o->active && o->role == NPC_ROLE_GUNNER &&
                             o->ship_id == ship->ship_id &&
-                            o->assigned_cannon_id == ship->modules[mn].id) {
+                            o->assigned_weapon_id == ship->modules[mn].id) {
                             covered = true; break;
                         }
                     }
@@ -2181,12 +2268,12 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
         /* Find the highest-priority NEEDED cannon not already covered by another NPC */
         uint32_t best_id = 0;
         float    best_diff = (float)M_PI * 4.0f; /* sorted_diff can be negative for NEEDED */
-        for (int c = 0; c < cannon_count; c++) {
+        for (int c = 0; c < weapon_count; c++) {
             uint32_t cid = sorted_ids[c];
             ShipModule* cmod = find_module_on_ship(ship, cid);
             if (!cmod || !(cmod->state_bits & MODULE_STATE_NEEDED)) continue;
             /* Already assigned to this one? Stay */
-            if (cid == npc->assigned_cannon_id) { best_id = cid; best_diff = sorted_diff[c]; break; }
+            if (cid == npc->assigned_weapon_id) { best_id = cid; best_diff = sorted_diff[c]; break; }
             /* Check nobody else is already covering it */
             bool covered = false;
             for (int j = 0; j < world_npc_count; j++) {
@@ -2194,14 +2281,14 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
                 WorldNpc* o = &world_npcs[j];
                 if (o->active && o->role == NPC_ROLE_GUNNER &&
                     o->ship_id == ship->ship_id &&
-                    o->assigned_cannon_id == cid) { covered = true; break; }
+                    o->assigned_weapon_id == cid) { covered = true; break; }
             }
             if (!covered) { best_id = cid; best_diff = sorted_diff[c]; break; }
         }
 
-        if (best_id == 0 || best_id == npc->assigned_cannon_id) continue;
+        if (best_id == 0 || best_id == npc->assigned_weapon_id) continue;
 
-        dispatch_gunner_to_cannon(npc, ship, best_id,
+        dispatch_gunner_to_weapon(npc, ship, best_id,
                                   best_diff * 180.0f / (float)M_PI);
     }
 
@@ -2254,7 +2341,7 @@ static void tick_world_npcs(float dt) {
 
         if (npc->state == WORLD_NPC_STATE_MOVING) {
             // ── Repairer walking home: interrupt if new damage appears ──────────
-            if (npc->role == NPC_ROLE_REPAIRER && npc->assigned_cannon_id == 0 && global_sim) {
+            if (npc->role == NPC_ROLE_REPAIRER && npc->assigned_weapon_id == 0 && global_sim) {
                 struct Ship* intr_ship = NULL;
                 for (uint32_t s = 0; s < global_sim->ship_count; s++) {
                     if ((uint32_t)global_sim->ships[s].id == npc->ship_id) {
@@ -2273,13 +2360,13 @@ static void tick_world_npcs(float dt) {
                             WorldNpc* other = &world_npcs[j];
                             if (!other->active || other->id == npc->id) continue;
                             if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
-                                other->assigned_cannon_id == 200) { intr_deck_taken = true; break; }
+                                other->assigned_weapon_id == 200) { intr_deck_taken = true; break; }
                         }
                     }
                     if (!intr_deck_present && !intr_deck_taken) {
                         npc->target_local_x     = 0.0f;
                         npc->target_local_y     = 0.0f;
-                        npc->assigned_cannon_id = 200;
+                        npc->assigned_weapon_id = 200;
                         log_info("🔨 NPC %u (%s) interrupted — redirecting to replace missing deck",
                                  npc->id, npc->name);
                     } else {
@@ -2297,7 +2384,7 @@ static void tick_world_npcs(float dt) {
                             WorldNpc* other = &world_npcs[j];
                             if (!other->active || other->id == npc->id) continue;
                             if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
-                                other->assigned_cannon_id == (uint32_t)(100 + k)) { taken = true; break; }
+                                other->assigned_weapon_id == (uint32_t)(100 + k)) { taken = true; break; }
                         }
                         if (!taken) { intr_missing = k; break; }
                     }
@@ -2307,7 +2394,7 @@ static void tick_world_npcs(float dt) {
                         if (pmag > 0.0f) { pcx -= (pcx / pmag) * 28.0f; pcy -= (pcy / pmag) * 28.0f; }
                         npc->target_local_x     = pcx;
                         npc->target_local_y     = pcy;
-                        npc->assigned_cannon_id = (uint32_t)(100 + intr_missing);
+                        npc->assigned_weapon_id = (uint32_t)(100 + intr_missing);
                         log_info("🔨 NPC %u (%s) interrupted — redirecting to missing plank %u",
                                  npc->id, npc->name, 100 + intr_missing);
                     } else {
@@ -2326,7 +2413,7 @@ static void tick_world_npcs(float dt) {
                                 WorldNpc* other = &world_npcs[j];
                                 if (!other->active || other->id == npc->id) continue;
                                 if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
-                                    other->assigned_cannon_id == (uint32_t)mod->id) { taken = true; break; }
+                                    other->assigned_weapon_id == (uint32_t)mod->id) { taken = true; break; }
                             }
                             if (!taken && ratio < intr_worst)  { intr_mod   = mod; intr_worst  = ratio; }
                             if ( taken && ratio < intr_stack_r){ intr_stack = mod; intr_stack_r = ratio; }
@@ -2339,7 +2426,7 @@ static void tick_world_npcs(float dt) {
                             if (mmag > 0.0f) { mx -= (mx / mmag) * 28.0f; my -= (my / mmag) * 28.0f; }
                             npc->target_local_x     = mx;
                             npc->target_local_y     = my;
-                            npc->assigned_cannon_id = (uint32_t)intr_mod->id;
+                            npc->assigned_weapon_id = (uint32_t)intr_mod->id;
                             log_info("🔧 NPC %u (%s) interrupted — redirecting to damaged module %u (%.0f%% HP)",
                                      npc->id, npc->name, intr_mod->id, intr_worst * 100.0f);
                         }
@@ -2355,11 +2442,11 @@ static void tick_world_npcs(float dt) {
             if (dist <= step || dist < 0.5f) {
                 npc->local_x = npc->target_local_x;
                 npc->local_y = npc->target_local_y;
-                if (npc->assigned_cannon_id != 0) {
+                if (npc->assigned_weapon_id != 0) {
                     /* Repair crew arrives at a damaged module; gunners/riggers arrive at a post */
                     npc->state = (npc->role == NPC_ROLE_REPAIRER)
                                ? WORLD_NPC_STATE_REPAIRING
-                               : WORLD_NPC_STATE_AT_CANNON;
+                               : WORLD_NPC_STATE_AT_GUN;
 
                     /* Rigger just arrived at mast — immediately apply current sail angle/openness
                      * so the sail snaps to the correct position without waiting for the next
@@ -2367,7 +2454,7 @@ static void tick_world_npcs(float dt) {
                     if (npc->role == NPC_ROLE_RIGGER) {
                         SimpleShip* rship = find_ship(npc->ship_id);
                         if (rship) {
-                            ShipModule* mast = find_module_by_id(rship, npc->assigned_cannon_id);
+                            ShipModule* mast = find_module_by_id(rship, npc->assigned_weapon_id);
                             if (mast && mast->type_id == MODULE_TYPE_MAST) {
                                 uint8_t tgt_open = rship->desired_sail_openness;
                                 mast->data.mast.openness = tgt_open;
@@ -2435,7 +2522,7 @@ static void tick_world_npcs(float dt) {
             bool still_working = false;
 
             if (sim_ship) {
-                uint32_t target_id = npc->assigned_cannon_id;
+                uint32_t target_id = npc->assigned_weapon_id;
 
                 // If the deck is missing, place it first
                 if (target_id == 200) {
@@ -2522,10 +2609,10 @@ static void tick_world_npcs(float dt) {
 
             if (!still_working) {
                 log_info("✅ NPC %u (%s) finished with module %u",
-                         npc->id, npc->name, npc->assigned_cannon_id);
+                         npc->id, npc->name, npc->assigned_weapon_id);
                 /* Award XP for completing a repair */
                 npc_apply_xp(npc, 25);
-                npc->assigned_cannon_id = 0;
+                npc->assigned_weapon_id = 0;
                 // Fall through to the IDLE scan below so the NPC goes directly to
                 // the next damaged/missing module without returning home first.
                 npc->state = WORLD_NPC_STATE_IDLE;
@@ -2549,12 +2636,12 @@ static void tick_world_npcs(float dt) {
                     WorldNpc* other = &world_npcs[j];
                     if (!other->active || other->id == npc->id) continue;
                     if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
-                        other->assigned_cannon_id == 200) { deck_taken = true; break; }
+                        other->assigned_weapon_id == 200) { deck_taken = true; break; }
                 }
                 if (!deck_taken) {
                     npc->target_local_x     = 0.0f;
                     npc->target_local_y     = 0.0f;
-                    npc->assigned_cannon_id = 200;
+                    npc->assigned_weapon_id = 200;
                     npc->state              = WORLD_NPC_STATE_MOVING;
                     log_info("🔨 NPC %u (%s) → walking to replace missing deck", npc->id, npc->name);
                     continue;
@@ -2576,7 +2663,7 @@ static void tick_world_npcs(float dt) {
                     if (!other->active || other->id == npc->id) continue;
                     if (other->ship_id == npc->ship_id &&
                         other->role   == NPC_ROLE_REPAIRER &&
-                        other->assigned_cannon_id == (uint32_t)(100 + k)) {
+                        other->assigned_weapon_id == (uint32_t)(100 + k)) {
                         taken = true; break;
                     }
                 }
@@ -2590,7 +2677,7 @@ static void tick_world_npcs(float dt) {
                 if (pmag > 0.0f) { pcx -= (pcx / pmag) * 28.0f; pcy -= (pcy / pmag) * 28.0f; }
                 npc->target_local_x     = pcx;
                 npc->target_local_y     = pcy;
-                npc->assigned_cannon_id = (uint32_t)(100 + missing_idx);
+                npc->assigned_weapon_id = (uint32_t)(100 + missing_idx);
                 npc->state              = WORLD_NPC_STATE_MOVING;
                 log_info("🔨 NPC %u (%s) → walking to place missing plank %u",
                          npc->id, npc->name, 100 + missing_idx);
@@ -2625,7 +2712,7 @@ static void tick_world_npcs(float dt) {
                     if (!other->active || other->id == npc->id) continue;
                     if (other->ship_id == npc->ship_id &&
                         other->role   == NPC_ROLE_REPAIRER &&
-                        other->assigned_cannon_id == (uint32_t)mod->id) {
+                        other->assigned_weapon_id == (uint32_t)mod->id) {
                         taken = true; break;
                     }
                 }
@@ -2643,7 +2730,7 @@ static void tick_world_npcs(float dt) {
                 if (mmag > 0.0f) { mx -= (mx / mmag) * 28.0f; my -= (my / mmag) * 28.0f; }
                 npc->target_local_x     = mx;
                 npc->target_local_y     = my;
-                npc->assigned_cannon_id = (uint32_t)target_mod->id;
+                npc->assigned_weapon_id = (uint32_t)target_mod->id;
                 npc->state              = WORLD_NPC_STATE_MOVING;
                 log_info("🔧 NPC %u (%s) → walking to repair module %u (%.0f%% HP)",
                          npc->id, npc->name, target_mod->id, worst_ratio * 100.0f);
@@ -2664,7 +2751,7 @@ static void tick_world_npcs(float dt) {
 
 /**
  * Parse a JSON array of uint32_t values for a given key.
- * Supports keys like "cannon_ids":[101,103,105].
+ * Supports keys like "weapon_ids":[101,103,105].
  * Returns the number of values written into out[] (capped at max_out).
  */
 static int parse_json_uint32_array(const char* json, const char* key, uint32_t* out, int max_out) {
@@ -2700,22 +2787,22 @@ static int parse_json_uint32_array(const char* json, const char* key, uint32_t* 
  *    (cannon is removed from any other group before being added here)
  */
 static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
-                                       WeaponGroupMode mode, uint32_t* cannon_ids,
-                                       int cannon_count, uint32_t target_ship_id) {
+                                       WeaponGroupMode mode, uint32_t* weapon_ids,
+                                       int weapon_count, uint32_t target_ship_id) {
     if (group_index < 0 || group_index >= MAX_WEAPON_GROUPS) return;
     if (player->parent_ship_id == 0) return;
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship) return;
 
-    /* ── Validate: strip any cannon ID not belonging to a real cannon module on
-     *    this ship.  Prevents clients from referencing foreign-ship cannons. ── */
-    uint32_t valid_ids[MAX_CANNONS_PER_GROUP];
+    /* ── Validate: strip any ID not belonging to a cannon or swivel on
+     *    this ship.  Prevents clients from referencing foreign-ship weapons. ── */
+    uint32_t valid_ids[MAX_WEAPONS_PER_GROUP];
     int      valid_count = 0;
-    int      limit = (cannon_count > MAX_CANNONS_PER_GROUP) ? MAX_CANNONS_PER_GROUP : cannon_count;
+    int      limit = (weapon_count > MAX_WEAPONS_PER_GROUP) ? MAX_WEAPONS_PER_GROUP : weapon_count;
     for (int i = 0; i < limit; i++) {
-        ShipModule* mod = find_module_on_ship(ship, cannon_ids[i]);
-        if (mod && mod->type_id == MODULE_TYPE_CANNON) {
-            valid_ids[valid_count++] = cannon_ids[i];
+        ShipModule* mod = find_module_on_ship(ship, weapon_ids[i]);
+        if (mod && (mod->type_id == MODULE_TYPE_CANNON || mod->type_id == MODULE_TYPE_SWIVEL)) {
+            valid_ids[valid_count++] = weapon_ids[i];
         }
     }
 
@@ -2725,11 +2812,11 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
         for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
             if (g == group_index) continue;
             WeaponGroup* other = &ship->weapon_groups[g];
-            for (int c = 0; c < other->cannon_count; c++) {
-                if (other->cannon_ids[c] == valid_ids[i]) {
+            for (int c = 0; c < other->weapon_count; c++) {
+                if (other->weapon_ids[c] == valid_ids[i]) {
                     /* Compact: overwrite with last entry */
-                    other->cannon_ids[c] = other->cannon_ids[other->cannon_count - 1];
-                    other->cannon_count--;
+                    other->weapon_ids[c] = other->weapon_ids[other->weapon_count - 1];
+                    other->weapon_count--;
                     break;
                 }
             }
@@ -2738,9 +2825,9 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
 
     WeaponGroup* group = &ship->weapon_groups[group_index];
     group->mode         = mode;
-    group->cannon_count = (uint8_t)valid_count;
+    group->weapon_count = (uint8_t)valid_count;
     for (int i = 0; i < valid_count; i++) {
-        group->cannon_ids[i] = valid_ids[i];
+        group->weapon_ids[i] = valid_ids[i];
     }
     group->target_ship_id = (mode == WEAPON_GROUP_MODE_TARGETFIRE) ? target_ship_id : 0;
 
@@ -2757,8 +2844,8 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
      * Also covers multi-group onAimEnd: each group sends its own config
      * message, and all need their NEEDED bits cleaned up. */
     if (mode == WEAPON_GROUP_MODE_HALTFIRE || mode == WEAPON_GROUP_MODE_TARGETFIRE) {
-        for (int ci = 0; ci < group->cannon_count; ci++) {
-            ShipModule* mod = find_module_on_ship(ship, group->cannon_ids[ci]);
+        for (int ci = 0; ci < group->weapon_count; ci++) {
+            ShipModule* mod = find_module_on_ship(ship, group->weapon_ids[ci]);
             if (mod) mod->state_bits &= ~MODULE_STATE_NEEDED;
         }
     }
@@ -2781,7 +2868,7 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
     }
 
     log_info("🎯 Player %u group %d → mode=%d cannons=%d target=%u",
-             player->player_id, group_index, mode, group->cannon_count, group->target_ship_id);
+             player->player_id, group_index, mode, group->weapon_count, group->target_ship_id);
 
     /* Defer the broadcast: mark the sender's client slot as dirty so that all
      * group-config messages in one frame collapse into a single broadcast at
@@ -2807,13 +2894,13 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
  * Find the WeaponGroup that owns cannon_id on ship_id, from any active player.
  * Returns NULL if no weapon group claims this cannon.
  */
-static WeaponGroup* find_cannon_weapon_group(uint32_t ship_id, uint32_t cannon_id) {
+static WeaponGroup* find_weapon_group(uint32_t ship_id, uint32_t cannon_id) {
     SimpleShip* ship = find_ship(ship_id);
     if (!ship) return NULL;
     for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
         WeaponGroup* grp = &ship->weapon_groups[g];
-        for (int c = 0; c < grp->cannon_count; c++) {
-            if (grp->cannon_ids[c] == cannon_id) return grp;
+        for (int c = 0; c < grp->weapon_count; c++) {
+            if (grp->weapon_ids[c] == cannon_id) return grp;
         }
     }
     return NULL;
@@ -2828,13 +2915,13 @@ static void tick_ship_weapon_groups(void) {
         for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
             WeaponGroup* group = &ship->weapon_groups[g];
             if (group->mode != WEAPON_GROUP_MODE_TARGETFIRE) continue;
-            if (group->target_ship_id == 0 || group->cannon_count == 0) continue;
+            if (group->target_ship_id == 0 || group->weapon_count == 0) continue;
 
             SimpleShip* target = find_ship(group->target_ship_id);
             if (!target || !target->active) continue;
 
-            for (int c = 0; c < group->cannon_count; c++) {
-                ShipModule* cannon = find_module_on_ship(ship, group->cannon_ids[c]);
+            for (int c = 0; c < group->weapon_count; c++) {
+                ShipModule* cannon = find_module_on_ship(ship, group->weapon_ids[c]);
                 if (!cannon || cannon->type_id != MODULE_TYPE_CANNON) continue;
                 npc_aim_cannon_at_world(ship, cannon, target->x, target->y);
             }
@@ -2926,7 +3013,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
      * ────────────────────────────────────────────────────────────────────── */
     bool player_has_groups = false;
     for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-        if (ship->weapon_groups[g].cannon_count > 0) {
+        if (ship->weapon_groups[g].weapon_count > 0) {
             player_has_groups = true;
             break;
         }
@@ -2938,7 +3025,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
         ShipModule* cannon = &sim_ship->modules[m];
 
         /* Resolve weapon group membership once for this cannon */
-        WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, cannon->id);
+        WeaponGroup* grp = find_weapon_group(ship->ship_id, cannon->id);
 
         /* ── Pass 1: MODULE_STATE_NEEDED update (SET-ONLY / sticky) ───────────
          *
@@ -2965,8 +3052,8 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                     uint32_t tg = active_group_indices[ag];
                     if (tg >= MAX_WEAPON_GROUPS) continue;
                     WeaponGroup* chk = &ship->weapon_groups[tg];
-                    for (int ci = 0; ci < chk->cannon_count && !in_active; ci++) {
-                        if (chk->cannon_ids[ci] == cannon->id) in_active = true;
+                    for (int ci = 0; ci < chk->weapon_count && !in_active; ci++) {
+                        if (chk->weapon_ids[ci] == cannon->id) in_active = true;
                     }
                 }
                 if (active_group_count == 0) {
@@ -3040,8 +3127,8 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 uint32_t tg = active_group_indices[ag];
                 if (tg >= MAX_WEAPON_GROUPS) continue;
                 WeaponGroup* chk = &ship->weapon_groups[tg];
-                for (int ci = 0; ci < chk->cannon_count && !in_active_pass2; ci++) {
-                    if (chk->cannon_ids[ci] == cannon->id) in_active_pass2 = true;
+                for (int ci = 0; ci < chk->weapon_count && !in_active_pass2; ci++) {
+                    if (chk->weapon_ids[ci] == cannon->id) in_active_pass2 = true;
                 }
             }
             if (!in_active_pass2) {
@@ -3059,7 +3146,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             continue; /* ungrouped cannon in group mode — already handled in pass 1 */
         }
 
-        // Only move a cannon if it is occupied (player mounted or WorldNpc AT_CANNON).
+        // Only move a cannon if it is occupied (player mounted or WorldNpc AT_GUN).
         // Cannons cannot aim without crew present.
         bool cannon_has_occupant = (cannon->state_bits & MODULE_STATE_OCCUPIED) != 0;
         if (!cannon_has_occupant) {
@@ -3067,8 +3154,8 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 WorldNpc* wnpc = &world_npcs[ni];
                 if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
                     wnpc->ship_id == ship->ship_id &&
-                    wnpc->assigned_cannon_id == cannon->id &&
-                    wnpc->state == WORLD_NPC_STATE_AT_CANNON) {
+                    wnpc->assigned_weapon_id == cannon->id &&
+                    wnpc->state == WORLD_NPC_STATE_AT_GUN) {
                     cannon_has_occupant = true;
                     break;
                 }
@@ -3081,7 +3168,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 WorldNpc* wnpc = &world_npcs[ni];
                 if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
                     wnpc->ship_id == ship->ship_id &&
-                    wnpc->assigned_cannon_id == cannon->id) {
+                    wnpc->assigned_weapon_id == cannon->id) {
                     npc_state = wnpc->state;
                     npc_assigned = wnpc->id;
                     break;
@@ -3105,8 +3192,8 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             for (int g = 0; g < MAX_WEAPON_GROUPS && !in_haltfire; g++) {
                 WeaponGroup* wg = &ship->weapon_groups[g];
                 if (wg->mode != WEAPON_GROUP_MODE_HALTFIRE) continue;
-                for (int ci = 0; ci < wg->cannon_count; ci++) {
-                    if (wg->cannon_ids[ci] == cannon->id) { in_haltfire = true; break; }
+                for (int ci = 0; ci < wg->weapon_count; ci++) {
+                    if (wg->weapon_ids[ci] == cannon->id) { in_haltfire = true; break; }
                 }
             }
             if (in_haltfire) {
@@ -3168,7 +3255,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             ShipModule* dm_mod = &ship->modules[dm];
             if (dm_mod->type_id != MODULE_TYPE_CANNON) continue;
             int needed = (dm_mod->state_bits & MODULE_STATE_NEEDED) ? 1 : 0;
-            WeaponGroup* dg = find_cannon_weapon_group(ship->ship_id, dm_mod->id);
+            WeaponGroup* dg = find_weapon_group(ship->ship_id, dm_mod->id);
             int gi = -1;
             if (dg) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[gg] == dg) { gi = gg; break; } } }
             npos += snprintf(nbuf + npos, (size_t)(256 - npos), " c%u:g%d:%s",
@@ -3351,9 +3438,9 @@ static void broadcast_cannon_group_state(SimpleShip* ship) {
         pos += snprintf(message + pos, sizeof(message) - pos,
             "%s{\"index\":%d,\"mode\":\"%s\",\"cannonIds\":[",
             (g > 0 ? "," : ""), g, mode_str);
-        for (int c = 0; c < grp->cannon_count && pos < (int)sizeof(message) - 32; c++) {
+        for (int c = 0; c < grp->weapon_count && pos < (int)sizeof(message) - 32; c++) {
             pos += snprintf(message + pos, sizeof(message) - pos,
-                "%s%u", (c > 0 ? "," : ""), grp->cannon_ids[c]);
+                "%s%u", (c > 0 ? "," : ""), grp->weapon_ids[c]);
         }
         pos += snprintf(message + pos, sizeof(message) - pos,
             "],\"targetShipId\":%u}", grp->target_ship_id);
@@ -3391,9 +3478,9 @@ static void send_cannon_group_state_to_client(struct WebSocketClient* client, Si
         pos += snprintf(message + pos, sizeof(message) - pos,
             "%s{\"index\":%d,\"mode\":\"%s\",\"cannonIds\":[",
             (g > 0 ? "," : ""), g, mode_str);
-        for (int c = 0; c < grp->cannon_count && pos < (int)sizeof(message) - 32; c++) {
+        for (int c = 0; c < grp->weapon_count && pos < (int)sizeof(message) - 32; c++) {
             pos += snprintf(message + pos, sizeof(message) - pos,
-                "%s%u", (c > 0 ? "," : ""), grp->cannon_ids[c]);
+                "%s%u", (c > 0 ? "," : ""), grp->weapon_ids[c]);
         }
         pos += snprintf(message + pos, sizeof(message) - pos,
             "],\"targetShipId\":%u}", grp->target_ship_id);
@@ -3764,8 +3851,8 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
                     WorldNpc* wnpc = &world_npcs[wn];
                     if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
                         wnpc->ship_id == ship->ship_id &&
-                        wnpc->assigned_cannon_id == module->id &&
-                        wnpc->state == WORLD_NPC_STATE_AT_CANNON) {
+                        wnpc->assigned_weapon_id == module->id &&
+                        wnpc->state == WORLD_NPC_STATE_AT_GUN) {
                         cannon_occupied = true;
                         break;
                     }
@@ -3886,9 +3973,9 @@ static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClie
         for (int _ni = 0; _ni < world_npc_count; _ni++) {
             WorldNpc* _npc = &world_npcs[_ni];
             if (!_npc->active) continue;
-            if (_npc->assigned_cannon_id != module->id) continue;
+            if (_npc->assigned_weapon_id != module->id) continue;
             // Only block when the NPC is physically at the module, not just en route
-            if (_npc->state != WORLD_NPC_STATE_AT_CANNON &&
+            if (_npc->state != WORLD_NPC_STATE_AT_GUN &&
                 _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
             // Neutral NPCs (company 0) never block anyone
             if (_npc->company_id == 0) continue;
@@ -4406,7 +4493,7 @@ static void ship_init_default_weapon_groups(SimpleShip* ship) {
     /* Reset all groups to HALTFIRE with no cannons */
     for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
         ship->weapon_groups[g].mode         = WEAPON_GROUP_MODE_HALTFIRE;
-        ship->weapon_groups[g].cannon_count = 0;
+        ship->weapon_groups[g].weapon_count = 0;
         ship->weapon_groups[g].target_ship_id = 0;
     }
 
@@ -4418,15 +4505,15 @@ static void ship_init_default_weapon_groups(SimpleShip* ship) {
         float local_y = Q16_TO_FLOAT(mod->local_pos.y);
         int   target_group = (local_y > 0.0f) ? 1 : 2;
         WeaponGroup* grp = &ship->weapon_groups[target_group];
-        if (grp->cannon_count < MAX_CANNONS_PER_GROUP) {
-            grp->cannon_ids[grp->cannon_count++] = mod->id;
+        if (grp->weapon_count < MAX_WEAPONS_PER_GROUP) {
+            grp->weapon_ids[grp->weapon_count++] = mod->id;
         }
     }
 
     log_info("🔫 Ship %u: default groups — port=%d cannons (grp1), starboard=%d cannons (grp2)",
              ship->ship_id,
-             ship->weapon_groups[1].cannon_count,
-             ship->weapon_groups[2].cannon_count);
+             ship->weapon_groups[1].weapon_count,
+             ship->weapon_groups[2].weapon_count);
 }
 
 // Initialize a brigantine ship at the given slot index, world position (client pixels), module ID base, and company
@@ -5666,10 +5753,10 @@ int websocket_server_update(struct Sim* sim) {
                                     char* at = strstr(payload, "\"ammo_type\":");
                                     if (at) ammo_type = (uint8_t)atoi(at + 12);
                                     if (ammo_type > PROJ_TYPE_CANISTER_SHOT) ammo_type = PROJ_TYPE_CANNONBALL;
-                                    // Parse optional cannon_ids array
-                                    uint32_t explicit_ids[MAX_CANNONS_PER_GROUP];
+                                    // Parse optional weapon_ids array
+                                    uint32_t explicit_ids[MAX_WEAPONS_PER_GROUP];
                                     int explicit_count = parse_json_uint32_array(
-                                        payload, "cannon_ids", explicit_ids, MAX_CANNONS_PER_GROUP);
+                                        payload, "weapon_ids", explicit_ids, MAX_WEAPONS_PER_GROUP);
                                     
                                     handle_cannon_fire(player, fire_all, ammo_type,
                                                        explicit_count > 0 ? explicit_ids : NULL,
@@ -5716,10 +5803,10 @@ int websocket_server_update(struct Sim* sim) {
                                     else if (strstr(payload, "\"mode\":\"targetfire\"")) mode = WEAPON_GROUP_MODE_TARGETFIRE;
                                     else if (strstr(payload, "\"mode\":\"haltfire\""))   mode = WEAPON_GROUP_MODE_HALTFIRE;
 
-                                    // Parse cannon_ids array
-                                    uint32_t cannon_ids[MAX_CANNONS_PER_GROUP];
-                                    int cannon_count = parse_json_uint32_array(
-                                        payload, "cannon_ids", cannon_ids, MAX_CANNONS_PER_GROUP);
+                                    // Parse weapon_ids array
+                                    uint32_t weapon_ids[MAX_WEAPONS_PER_GROUP];
+                                    int weapon_count = parse_json_uint32_array(
+                                        payload, "weapon_ids", weapon_ids, MAX_WEAPONS_PER_GROUP);
 
                                     // Parse optional target_ship_id
                                     uint32_t target_ship_id = 0;
@@ -5728,7 +5815,7 @@ int websocket_server_update(struct Sim* sim) {
 
                                     if (group_index >= 0 && group_index < MAX_WEAPON_GROUPS) {
                                         handle_cannon_group_config(player, group_index, mode,
-                                                                   cannon_ids, cannon_count,
+                                                                   weapon_ids, weapon_count,
                                                                    target_ship_id);
                                         strcpy(response, "{\"type\":\"message_ack\",\"status\":\"group_configured\"}");
                                     } else {
@@ -7551,7 +7638,7 @@ int websocket_server_update(struct Sim* sim) {
                 "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                 "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
                 "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u,"
-                "\"assigned_cannon_id\":%u,"
+                "\"assigned_weapon_id\":%u,"
                 "\"npc_level\":%u,\"health\":%u,\"max_health\":%u,\"xp\":%u,"
                 "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
                 "\"stat_points\":%u}",
@@ -7559,7 +7646,7 @@ int websocket_server_update(struct Sim* sim) {
                 npc->x, npc->y, npc->rotation,
                 npc->ship_id, npc->local_x, npc->local_y,
                 npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id,
-                npc->assigned_cannon_id,
+                npc->assigned_weapon_id,
                 (unsigned)npc->npc_level, (unsigned)npc->health, (unsigned)npc->max_health, npc->xp,
                 (unsigned)npc->stat_health, (unsigned)npc->stat_damage, (unsigned)npc->stat_stamina, (unsigned)npc->stat_weight,
                 (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
@@ -8086,7 +8173,7 @@ void websocket_server_tick(float dt) {
                     }
 
                     // Knockback via velocity — skip if stationed at a module
-                    bool npc_at_station = (npc->state == WORLD_NPC_STATE_AT_CANNON ||
+                    bool npc_at_station = (npc->state == WORLD_NPC_STATE_AT_GUN ||
                                            npc->state == WORLD_NPC_STATE_REPAIRING);
                     if (!npc_at_station) {
                         float dist = sqrtf(dx * dx + dy * dy);
@@ -8286,11 +8373,14 @@ void websocket_server_tick(float dt) {
     tick_npc_agents(dt);
     tick_world_npcs(dt);
 
-    // ===== ASSIGN CREW TO WEAPON-GROUP CANNONS =====
-    // Expire stale NEEDED flags, then dispatch idle gunners to NEEDED cannons.
+    // ===== ASSIGN CREW TO WEAPON-GROUP CANNONS + SWIVELS =====
+    // Mark swivels needed, expire stale NEEDED flags, then dispatch idle gunners.
     tick_cannon_needed_expiry();
     for (int s = 0; s < ship_count; s++) {
-        if (ships[s].active) assign_weapon_group_crew(&ships[s]);
+        if (ships[s].active) {
+            tick_swivel_crew_demand(&ships[s]);
+            assign_weapon_group_crew(&ships[s]);
+        }
     }
 
     // ===== TICK SHIP WEAPON GROUPS (TARGETFIRE auto-aim) =====

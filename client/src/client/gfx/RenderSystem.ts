@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_CANNON, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
@@ -2987,7 +2987,7 @@ export class RenderSystem {
           while (offset < -Math.PI) offset += 2 * Math.PI;
           const absOffset = Math.abs(offset);
           if (absOffset > CANNON_LIMIT_RAD + FADE_RAD) continue; // beyond 45° — skip
-          const hasNpc    = shipNpcs.some(n => n.assignedCannonId === m.id && n.state === NPC_STATE_AT_CANNON);
+          const hasNpc    = shipNpcs.some(n => n.assignedWeaponId === m.id && n.state === NPC_STATE_AT_GUN);
           const hasPlayer = shipPlayers.some(p => p.mountedModuleId === m.id);
           if (!hasNpc && !hasPlayer) continue;
           // Don't show trajectory for a reloading cannon
@@ -4082,11 +4082,11 @@ export class RenderSystem {
       this.ctx.fillText(npc.name, screenPos.x, nameY);
 
       // Debug: show assigned cannon/module ID and state below name
-      if (npc.assignedCannonId || npc.state !== 0) {
+      if (npc.assignedWeaponId || npc.state !== 0) {
         const STATE_SHORT: Record<number, string> = { 0: 'IDL', 1: 'MOV', 2: 'MAN', 3: 'REP' };
         const ROLE_SHORT: Record<number, string> = { 0: '-', 1: 'G', 2: 'H', 3: 'R', 4: 'P' };
         const debugLabel = `${ROLE_SHORT[npc.role] ?? '?'}:${STATE_SHORT[npc.state] ?? '?'}`
-          + (npc.assignedCannonId ? ` c${npc.assignedCannonId}` : '');
+          + (npc.assignedWeaponId ? ` c${npc.assignedWeaponId}` : '');
         const debugFontSize = Math.max(8, Math.min(11, 10 * cameraState.zoom));
         this.ctx.font = `${debugFontSize}px monospace`;
         const dtw = this.ctx.measureText(debugLabel).width;

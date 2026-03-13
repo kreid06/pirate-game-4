@@ -1555,7 +1555,7 @@ export class NetworkManager {
             state: n.state ?? 0,
             role: n.role ?? 0,
             companyId: n.company ?? 0,
-            assignedCannonId: n.assigned_cannon_id ?? 0,
+            assignedWeaponId: n.assigned_weapon_id ?? 0,
             // Crew levelling
             npcLevel:   n.npc_level   ?? 1,
             health:     n.health      ?? 100,

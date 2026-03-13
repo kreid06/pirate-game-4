@@ -21,11 +21,11 @@ typedef enum {
 } WeaponGroupMode;
 
 #define MAX_WEAPON_GROUPS      10
-#define MAX_CANNONS_PER_GROUP  16
+#define MAX_WEAPONS_PER_GROUP  16
 
 typedef struct {
-    uint32_t        cannon_ids[MAX_CANNONS_PER_GROUP];
-    uint8_t         cannon_count;
+    uint32_t        weapon_ids[MAX_WEAPONS_PER_GROUP];
+    uint8_t         weapon_count;
     WeaponGroupMode mode;
     uint32_t        target_ship_id;
 } WeaponGroup;
@@ -128,7 +128,7 @@ typedef struct NpcAgent {
 typedef enum {
     WORLD_NPC_STATE_IDLE      = 0, // Resting at or near assigned cannon
     WORLD_NPC_STATE_MOVING    = 1, // Walking across deck to a new cannon after a side switch
-    WORLD_NPC_STATE_AT_CANNON = 2, // Arrived — ready to fire
+    WORLD_NPC_STATE_AT_GUN = 2, // Arrived — ready to fire
     WORLD_NPC_STATE_REPAIRING = 3, // Arrived at a damaged module and actively repairing it
 } WorldNpcState;
 
@@ -151,7 +151,7 @@ typedef struct WorldNpc {
     // Gunner: port_cannon_id = future locked-cannon preference (0 = any; player-set later).
     uint32_t      port_cannon_id;       // Rigger: mast ID.  Gunner: locked preference (0=free)
     uint32_t      starboard_cannon_id;  // Rigger: mast ID (mirrors port).  Gunner: unused (0)
-    uint32_t      assigned_cannon_id;   // Module the NPC is currently heading to / stationed at
+    uint32_t      assigned_weapon_id;   // Module the NPC is currently heading to / stationed at
     bool          wants_cannon;         // Gunner: true = on cannon duty via manning panel
 
     // Movement / state machine
