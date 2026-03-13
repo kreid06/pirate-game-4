@@ -135,7 +135,7 @@ export class InputManager {
   private readonly ROTATION_THRESHOLD = 0.0524; // 3 degrees in radians
   
   // Ship control state tracking
-  private mountKind: 'none' | 'helm' | 'cannon' | 'mast' = 'none';
+  private mountKind: 'none' | 'helm' | 'cannon' | 'mast' | 'swivel' = 'none';
   private get isMountedToHelm(): boolean { return this.mountKind === 'helm'; }
   /** Mode of the currently active (primary) weapon group — kept in sync by ClientApplication. */
   public activeGroupMode: string = 'haltfire';
@@ -176,7 +176,7 @@ export class InputManager {
   // Cannon aiming state
   /** True while the player is mounted to a cannon and holding right-mouse to aim. */
   public get isCannonAiming(): boolean {
-    return this.mountKind === 'cannon' && this.inputState.rightMouseDown;
+    return (this.mountKind === 'cannon' || this.mountKind === 'swivel') && this.inputState.rightMouseDown;
   }
   /** ID of the cannon module the player is currently mounted to, or null. */
   public mountedCannonModuleId: number | null = null;
@@ -275,8 +275,8 @@ export class InputManager {
       return; // Skip normal player input processing
     }
 
-    // If mounted to cannon/mast, handle interact-to-dismount only
-    if (this.mountKind === 'cannon' || this.mountKind === 'mast') {
+    // If mounted to cannon/mast/swivel, handle interact-to-dismount only
+    if (this.mountKind === 'cannon' || this.mountKind === 'mast' || this.mountKind === 'swivel') {
       if (this.isActionActive('interact') && this.canInteract()) {
         this.lastInteractionTime = Date.now();
         if (this.onActionEvent) this.onActionEvent('dismount');
@@ -431,9 +431,9 @@ export class InputManager {
    * Set mount state (called when player mounts/dismounts a module)
    */
   setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number): void {
-    this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast') : 'none';
+    this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast' | 'swivel') : 'none';
     this.currentShipId = shipId !== undefined ? shipId : null;
-    this.mountedCannonModuleId = (mounted && moduleKind.toLowerCase() === 'cannon' && moduleId != null) ? moduleId : null;
+    this.mountedCannonModuleId = (mounted && (moduleKind.toLowerCase() === 'cannon' || moduleKind.toLowerCase() === 'swivel') && moduleId != null) ? moduleId : null;
 
     if (mounted) {
       console.log(`⚓ [INPUT] Player mounted to ${moduleKind} on ship ${shipId}`);
@@ -551,8 +551,8 @@ export class InputManager {
       return;
     }
 
-    // Only aim when mounted to helm or cannon
-    if (this.mountKind !== 'helm' && this.mountKind !== 'cannon') {
+    // Only aim when mounted to helm, cannon, or swivel
+    if (this.mountKind !== 'helm' && this.mountKind !== 'cannon' && this.mountKind !== 'swivel') {
       return;
     }
 
@@ -1040,7 +1040,7 @@ export class InputManager {
     // X key ammo logic:
     //   hold 1s (timer fires while key is down) → force-load immediately
     //   release before 1s                       → queue the swap for after next fire
-    if (event.code === 'KeyX' && (this.mountKind === 'cannon' || this.mountKind === 'helm')) {
+    if (event.code === 'KeyX' && (this.mountKind === 'cannon' || this.mountKind === 'helm' || this.mountKind === 'swivel')) {
       if (this.xHoldTimer !== null) {
         clearTimeout(this.xHoldTimer);
         this.xHoldTimer = null;

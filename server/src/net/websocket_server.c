@@ -297,6 +297,7 @@ static float module_collision_radius(ModuleTypeId type) {
         case MODULE_TYPE_STEERING_WHEEL: return 18.0f;
         case MODULE_TYPE_MAST:           return 14.0f;
         case MODULE_TYPE_CANNON:         return 20.0f;
+        case MODULE_TYPE_SWIVEL:         return 10.0f;
         default:                         return 0.0f; // ladder/plank/deck/seat — passable
     }
 }
@@ -777,6 +778,7 @@ static const char* get_module_type_name(ModuleTypeId type_id) {
         case MODULE_TYPE_PLANK: return "PLANK";
         case MODULE_TYPE_DECK: return "DECK";
         case MODULE_TYPE_STEERING_WHEEL: return "STEERING_WHEEL";
+        case MODULE_TYPE_SWIVEL: return "SWIVEL";
         default: return "UNKNOWN";
     }
 }
@@ -833,6 +835,24 @@ static void send_mount_success(struct WebSocketClient* client, ShipModule* modul
              "{\"type\":\"module_interact_success\",\"module_id\":%u,\"module_kind\":\"%s\",\"mounted\":true}",
              module->id, get_module_type_name(module->type_id));
     
+    char frame[512];
+    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0) {
+        send(client->fd, frame, frame_len, 0);
+    }
+}
+
+/**
+ * Send mount success with a local-space mount offset so the client can
+ * instantly snap the player to the correct position (e.g. swivel guns).
+ */
+static void send_mount_success_with_offset(struct WebSocketClient* client, ShipModule* module, float offset_x, float offset_y) {
+    char response[320];
+    snprintf(response, sizeof(response),
+             "{\"type\":\"module_interact_success\",\"module_id\":%u,\"module_kind\":\"%s\",\"mounted\":true,"
+             "\"mount_offset\":{\"x\":%.2f,\"y\":%.2f}}",
+             module->id, get_module_type_name(module->type_id), offset_x, offset_y);
+
     char frame[512];
     size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
     if (frame_len > 0) {
@@ -1101,6 +1121,42 @@ static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClie
         /* Unicast group state after ship transfer too. */
         send_cannon_group_state_to_client(client, ship);
     }
+}
+
+static void handle_swivel_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
+    // Reject if already occupied by another player
+    if (module->state_bits & MODULE_STATE_OCCUPIED) {
+        send_interaction_failure(client, "module_occupied");
+        return;
+    }
+
+    module->state_bits |= MODULE_STATE_OCCUPIED;
+    player->is_mounted = true;
+    player->mounted_module_id = module->id;
+
+    // Snap player inward from the swivel toward the ship center.
+    // Mount offset = normalize(-swivel_pos) * SWIVEL_MOUNT_DIST (client pixels).
+    float swivel_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+    float swivel_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+    float vec_x = -swivel_local_x;
+    float vec_y = -swivel_local_y;
+    float mag = sqrtf(vec_x * vec_x + vec_y * vec_y);
+    const float SWIVEL_MOUNT_DIST = 18.0f; // client pixels inward from swivel pivot
+    float offset_x = 0.0f, offset_y = 0.0f;
+    if (mag > 1.0f) {
+        offset_x = (vec_x / mag) * SWIVEL_MOUNT_DIST;
+        offset_y = (vec_y / mag) * SWIVEL_MOUNT_DIST;
+    }
+
+    player->local_x = swivel_local_x + offset_x;
+    player->local_y = swivel_local_y + offset_y;
+    ship_local_to_world(ship, player->local_x, player->local_y, &player->x, &player->y);
+
+    log_info("🔫 Player %u mounted to swivel %u at local (%.1f, %.1f) (offset %.1f,%.1f)",
+             player->player_id, module->id, player->local_x, player->local_y, offset_x, offset_y);
+
+    send_mount_success_with_offset(client, module, offset_x, offset_y);
+    broadcast_player_mounted(player, module, ship);
 }
 
 static void handle_seat_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
@@ -3702,6 +3758,10 @@ static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClie
             
         case MODULE_TYPE_SEAT:
             handle_seat_interact(player, client, target_ship, module);
+            break;
+
+        case MODULE_TYPE_SWIVEL:
+            handle_swivel_interact(player, client, target_ship, module);
             break;
             
         case MODULE_TYPE_PLANK:

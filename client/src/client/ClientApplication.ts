@@ -2666,8 +2666,8 @@ export class ClientApplication {
     const playerId = this.networkManager.getAssignedPlayerId();
     if (playerId === null) return;
     
-    // Enable ship/cannon/mast controls
-    if (moduleKind.toUpperCase() === 'HELM' || moduleKind.toUpperCase() === 'CANNON' || moduleKind.toUpperCase() === 'MAST') {
+    // Enable ship/cannon/mast/swivel controls
+    if (moduleKind.toUpperCase() === 'HELM' || moduleKind.toUpperCase() === 'CANNON' || moduleKind.toUpperCase() === 'MAST' || moduleKind.toUpperCase() === 'SWIVEL') {
       let shipId: number | undefined;
       
       // Find the ship the player is on
