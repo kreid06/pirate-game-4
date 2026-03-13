@@ -1492,6 +1492,8 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
 static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float world_x, float world_y, 
                                   float angle, entity_id projectile_id, uint8_t ammo_type);
 static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired, uint8_t ammo_type);
+static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw, WebSocketPlayer* player, uint8_t ammo_type);
+static void handle_swivel_fire(WebSocketPlayer* player, uint8_t ammo_type);
 static void handle_cannon_force_reload(WebSocketPlayer* player);
 static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_type,
                                uint32_t* explicit_ids, int explicit_count, bool skip_aim_check);
@@ -3457,6 +3459,134 @@ static void handle_cannon_force_reload(WebSocketPlayer* player) {
 }
 
 /**
+ * Fire the swivel gun a player is currently mounted to.
+ *
+ * ammo_type PROJ_TYPE_CANNONBALL → single swivel ball (2000 dmg, 4s lifetime)
+ * ammo_type PROJ_TYPE_GRAPESHOT  → 3 pellets ±12° spread (450 dmg ea., 1.5s lifetime)
+ */
+static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
+                        WebSocketPlayer* player, uint8_t ammo_type) {
+    if (!global_sim) { log_error("Cannot fire swivel — global_sim is NULL"); return; }
+
+    /* Reset reload on SimpleShip copy */
+    sw->data.swivel.time_since_fire = 0;
+    sw->data.swivel.loaded_ammo     = ammo_type;
+    sw->state_bits |= MODULE_STATE_RELOADING;
+    sw->state_bits &= ~MODULE_STATE_FIRING;
+
+    /* Mirror state to global_sim copy */
+    if (gsw) {
+        gsw->data.swivel.time_since_fire = 0;
+        gsw->data.swivel.loaded_ammo     = ammo_type;
+        gsw->state_bits = sw->state_bits;
+    }
+
+    /* World position of the swivel pivot */
+    float cos_r   = cosf(ship->rotation);
+    float sin_r   = sinf(ship->rotation);
+    float local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sw->local_pos.x));
+    float local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sw->local_pos.y));
+    float world_x = ship->x + (local_x * cos_r - local_y * sin_r);
+    float world_y = ship->y + (local_x * sin_r + local_y * cos_r);
+
+    /* Fire angle: same barrel convention as cannons (local_rot - PI/2 + aim_offset) */
+    float sw_base    = Q16_TO_FLOAT(sw->local_rot);
+    float aim_off    = Q16_TO_FLOAT(sw->data.swivel.aim_direction);
+    float fire_angle = ship->rotation + (sw_base - (float)(M_PI / 2.0)) + aim_off;
+
+    const float SWIVEL_SPEED = CLIENT_TO_SERVER(350.0f); /* px/s — slower than cannon's 500 */
+    const float BARREL_LEN   = 20.0f;                    /* client pixels */
+    float ship_vx = CLIENT_TO_SERVER(ship->velocity_x);
+    float ship_vy = CLIENT_TO_SERVER(ship->velocity_y);
+    uint32_t owner_id = (player != NULL) ? player->player_id : ship->ship_id;
+
+    if (ammo_type == PROJ_TYPE_GRAPESHOT) {
+        /* 3 pellets spread at -12°, 0°, +12° */
+        const int   NUM_PELLETS = 3;
+        const float SPREAD_STEP = 12.0f * (float)(M_PI / 180.0f);
+        for (int p = 0; p < NUM_PELLETS; p++) {
+            float angle = fire_angle + SPREAD_STEP * (float)(p - 1);
+            float sx = world_x + cosf(angle) * BARREL_LEN;
+            float sy = world_y + sinf(angle) * BARREL_LEN;
+            Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(sx)),
+                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy)) };
+            Vec2Q16 vel = { Q16_FROM_FLOAT(cosf(angle) * SWIVEL_SPEED + ship_vx),
+                            Q16_FROM_FLOAT(sinf(angle) * SWIVEL_SPEED + ship_vy) };
+            entity_id pid = sim_create_projectile(global_sim, pos, vel, owner_id, PROJ_TYPE_GRAPESHOT);
+            if (pid != INVALID_ENTITY_ID) {
+                struct Projectile* proj = sim_get_projectile(global_sim, pid);
+                if (proj) {
+                    proj->damage         = Q16_FROM_FLOAT(450.0f);
+                    proj->lifetime       = Q16_FROM_FLOAT(1.5f);
+                    proj->firing_company = ship->company_id;
+                    proj->firing_ship_id = (entity_id)ship->ship_id;
+                    proj->type           = PROJ_TYPE_GRAPESHOT;
+                }
+                broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, angle, pid, PROJ_TYPE_GRAPESHOT);
+            }
+        }
+        log_info("🔫 Swivel %u fired GRAPESHOT (3 pellets) on ship %u", sw->id, ship->ship_id);
+    } else {
+        /* Single swivel ball */
+        float sx = world_x + cosf(fire_angle) * BARREL_LEN;
+        float sy = world_y + sinf(fire_angle) * BARREL_LEN;
+        Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(sx)),
+                        Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy)) };
+        Vec2Q16 vel = { Q16_FROM_FLOAT(cosf(fire_angle) * SWIVEL_SPEED + ship_vx),
+                        Q16_FROM_FLOAT(sinf(fire_angle) * SWIVEL_SPEED + ship_vy) };
+        entity_id pid = sim_create_projectile(global_sim, pos, vel, owner_id, PROJ_TYPE_CANNONBALL);
+        if (pid != INVALID_ENTITY_ID) {
+            struct Projectile* proj = sim_get_projectile(global_sim, pid);
+            if (proj) {
+                proj->damage         = Q16_FROM_FLOAT(2000.0f);
+                proj->lifetime       = Q16_FROM_FLOAT(4.0f);
+                proj->firing_company = ship->company_id;
+                proj->firing_ship_id = (entity_id)ship->ship_id;
+            }
+            broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, fire_angle, pid, PROJ_TYPE_CANNONBALL);
+        }
+        log_info("🔫 Swivel %u fired BALL on ship %u angle=%.1f°",
+                 sw->id, ship->ship_id, fire_angle * 180.0f / (float)M_PI);
+    }
+}
+
+/**
+ * Handle a fire_weapon request when the player is mounted to a swivel gun.
+ */
+static void handle_swivel_fire(WebSocketPlayer* player, uint8_t ammo_type) {
+    if (!player->is_mounted || player->parent_ship_id == 0) return;
+    SimpleShip* ship = find_ship(player->parent_ship_id);
+    if (!ship || ship->is_sinking) return;
+
+    /* SimpleShip module — reload timer ticks ships[] so check here */
+    ShipModule* sw = find_module_by_id(ship, player->mounted_module_id);
+    if (!sw || sw->type_id != MODULE_TYPE_SWIVEL) return;
+
+    /* Also locate global_sim copy so fire_swivel can reset it */
+    ShipModule* gsw = NULL;
+    if (global_sim) {
+        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+            if (global_sim->ships[si].id != ship->ship_id) continue;
+            for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
+                if (global_sim->ships[si].modules[mi].id == sw->id) {
+                    gsw = &global_sim->ships[si].modules[mi];
+                    break;
+                }
+            }
+            break;
+        }
+    }
+
+    if (sw->data.swivel.time_since_fire < sw->data.swivel.reload_time) {
+        log_info("🔫 Swivel %u still reloading (%u/%u ms)",
+                 sw->id, sw->data.swivel.time_since_fire, sw->data.swivel.reload_time);
+        return;
+    }
+
+    fire_swivel(ship, sw, gsw, player, ammo_type);
+}
+
+/**
  * Handle cannon fire from player.
  *
  * @param fire_all        True → broadside (fire every loaded cannon with crew).
@@ -3494,12 +3624,16 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
             } else if (mmod->type_id == MODULE_TYPE_CANNON) {
                 at_cannon = true;
                 mounted_cannon_id = mmod->id;
+            } else if (mmod->type_id == MODULE_TYPE_SWIVEL) {
+                /* Route to swivel-specific handler */
+                handle_swivel_fire(player, ammo_type);
+                return;
             }
         }
     }
 
     if (!at_helm && !at_cannon) {
-        log_warn("Player %u tried to fire cannons but is not at helm or cannon", player->player_id);
+        log_warn("Player %u tried to fire weapon but is not at helm, cannon, or swivel", player->player_id);
         return;
     }
 
@@ -5460,10 +5594,8 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
 
-                        } else if (strstr(payload, "\"type\":\"cannon_fire\"")) {
-                            // CANNON FIRE message
-                            log_info("💥 Processing CANNON_FIRE message");
-                            
+                        } else if (strstr(payload, "\"type\":\"cannon_fire\"") || strstr(payload, "\"type\":\"fire_weapon\"")) {
+                            // FIRE WEAPON message (cannon, swivel, future: ballista/catapult)
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                                 handled = true;
@@ -5474,11 +5606,11 @@ int websocket_server_update(struct Sim* sim) {
                                     bool fire_all = strstr(payload, "\"fire_all\":true") != NULL;
                                     // freefire: skip aim-angle check (set by client for freefire/targetfire modes)
                                     bool freefire = strstr(payload, "\"freefire\":true") != NULL;
-                                    // Parse ammo_type (0=cannonball, 1=bar_shot)
+                                    // Parse ammo_type (0=cannonball, 1=bar_shot, 2=grapeshot)
                                     uint8_t ammo_type = PROJ_TYPE_CANNONBALL;
                                     char* at = strstr(payload, "\"ammo_type\":");
                                     if (at) ammo_type = (uint8_t)atoi(at + 12);
-                                    if (ammo_type > PROJ_TYPE_BAR_SHOT) ammo_type = PROJ_TYPE_CANNONBALL;
+                                    if (ammo_type > PROJ_TYPE_GRAPESHOT) ammo_type = PROJ_TYPE_CANNONBALL;
                                     // Parse optional cannon_ids array
                                     uint32_t explicit_ids[MAX_CANNONS_PER_GROUP];
                                     int explicit_count = parse_json_uint32_array(
@@ -6257,6 +6389,8 @@ int websocket_server_update(struct Sim* sim) {
                                             ns.data.swivel.aim_direction         = Q16_FROM_FLOAT(0.0f);
                                             ns.data.swivel.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
                                             ns.data.swivel.reload_time           = SWIVEL_RELOAD_TIME_MS;
+                                            ns.data.swivel.time_since_fire       = SWIVEL_RELOAD_TIME_MS; /* start ready to fire */
+                                            ns.data.swivel.loaded_ammo           = 0; /* default: cannonball */
 
                                             sw_sim->modules[sw_sim->module_count++]       = ns;
                                             sw_simple->modules[sw_simple->module_count++] = ns;
@@ -7805,12 +7939,12 @@ void websocket_server_tick(float dt) {
         global_sim->hit_event_count = 0;
     }
 
-    // ===== CANNONBALL vs ENTITY HIT DETECTION =====
+    // ===== CANNONBALL / GRAPESHOT vs ENTITY HIT DETECTION =====
     // Cannonballs (PROJ_TYPE_CANNONBALL) deal base 75 HP damage to NPCs and
-    // players, scaled by the firing ship's damage level.  Unmounted entities
-    // are knocked back; mounted ones are not.  The projectile is consumed on hit.
+    // players.  Grapeshot (PROJ_TYPE_GRAPESHOT) uses a tighter hit radius (20 px)
+    // and lower damage (35 HP per pellet). Unmounted entities are knocked back.
     if (global_sim) {
-        const float ENTITY_HIT_RADIUS    = 40.0f;   // client pixels
+        const float ENTITY_HIT_RADIUS    = 40.0f;   // client pixels (cannonball)
         const float ENTITY_BASE_DAMAGE   = 75.0f;
         const float ENTITY_KNOCKBACK     = 40.0f;   // velocity impulse (client px/s)
 
@@ -7818,8 +7952,8 @@ void websocket_server_tick(float dt) {
         while (pi < global_sim->projectile_count) {
             struct Projectile* proj = &global_sim->projectiles[pi];
 
-            // Only cannonballs damage entities
-            if (proj->type != PROJ_TYPE_CANNONBALL) { pi++; continue; }
+            // Only cannonballs and grapeshot damage entities
+            if (proj->type != PROJ_TYPE_CANNONBALL && proj->type != PROJ_TYPE_GRAPESHOT) { pi++; continue; }
 
             float px = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
             float py = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
@@ -7830,8 +7964,11 @@ void websocket_server_tick(float dt) {
                 struct Ship* fship = sim_get_ship(global_sim, (entity_id)proj->firing_ship_id);
                 if (fship) dmg_mult = ship_level_damage_mult(&fship->level_stats);
             }
-            float damage = ENTITY_BASE_DAMAGE * dmg_mult;
-            float hit_r2  = ENTITY_HIT_RADIUS * ENTITY_HIT_RADIUS;
+            /* Grapeshot: smaller hit radius; lower per-pellet entity damage */
+            float ent_hit_radius = (proj->type == PROJ_TYPE_GRAPESHOT) ? 20.0f : ENTITY_HIT_RADIUS;
+            float damage         = (proj->type == PROJ_TYPE_GRAPESHOT) ? 35.0f * dmg_mult
+                                                                        : ENTITY_BASE_DAMAGE * dmg_mult;
+            float hit_r2  = ent_hit_radius * ent_hit_radius;
 
             bool proj_consumed = false;
 
@@ -8413,8 +8550,8 @@ void websocket_server_tick(float dt) {
         last_rudder_update = current_time;
     }
     
-    // ===== UPDATE CANNON RELOAD TIMERS =====
-    // Track time since last fire for each cannon
+    // ===== UPDATE CANNON AND SWIVEL RELOAD TIMERS =====
+    // Track time since last fire for each cannon/swivel
     static uint32_t last_cannon_update = 0;
     
     if (current_time - last_cannon_update >= 100) { // Update every 100ms
@@ -8438,6 +8575,20 @@ void websocket_server_tick(float dt) {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        /* Swivel reload — tick ships[] (SimpleShip); handle_swivel_fire checks this array */
+        for (int s = 0; s < ship_count; s++) {
+            if (!ships[s].active) continue;
+            for (int m = 0; m < ships[s].module_count; m++) {
+                if (ships[s].modules[m].type_id != MODULE_TYPE_SWIVEL) continue;
+                ShipModule* sw = &ships[s].modules[m];
+                if (sw->data.swivel.time_since_fire < sw->data.swivel.reload_time) {
+                    sw->data.swivel.time_since_fire += time_elapsed;
+                    if (sw->data.swivel.time_since_fire > sw->data.swivel.reload_time)
+                        sw->data.swivel.time_since_fire = sw->data.swivel.reload_time;
                 }
             }
         }

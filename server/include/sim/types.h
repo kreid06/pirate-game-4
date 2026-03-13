@@ -92,6 +92,7 @@ struct Player {
 /* Projectile ammo types */
 #define PROJ_TYPE_CANNONBALL  0
 #define PROJ_TYPE_BAR_SHOT    1
+#define PROJ_TYPE_GRAPESHOT   2   // Swivel gun grapeshot — spread pellets, anti-personnel
 
 // Projectile state (cannonballs, etc)  
 struct Projectile {

@@ -57,7 +57,7 @@ export enum MessageType {
   
   // Cannon control messages
   CANNON_AIM = 'cannon_aim',
-  CANNON_FIRE = 'cannon_fire',
+  CANNON_FIRE = 'fire_weapon',   // universal weapon fire (cannon, swivel, future: ballista)
   CANNON_GROUP_CONFIG = 'cannon_group_config',
   CANNON_GROUP_STATE = 'cannon_group_state',
   // Swivel control messages

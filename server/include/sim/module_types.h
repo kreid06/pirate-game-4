@@ -96,13 +96,14 @@ typedef struct {
 
 /**
  * Swivel gun — fast, low-damage, anti-personnel weapon mounted at ship edges.
- * Skeleton: mount/dismount wired; aiming and firing are future work.
  */
 typedef struct {
     q16_t aim_direction;         // Current aim direction (ship-relative, radians)
     q16_t desired_aim_direction; // Target aim direction
     uint32_t time_since_fire;    // Time since last fire (ms)
     uint32_t reload_time;        // Reload time (ms) — defaults to SWIVEL_RELOAD_TIME_MS
+    uint8_t  loaded_ammo;        // Currently loaded ammo type (0=cannonball, 1=grapeshot)
+    uint8_t  _pad[3];            // Alignment padding
 } SwivelModuleData;
 
 /**

@@ -3794,7 +3794,18 @@ export class RenderSystem {
     const screenPos = camera.worldToScreen(cannonball.position);
     const zoom      = camera.getState().zoom;
 
-    if (cannonball.ammoType === 1) {
+    if (cannonball.ammoType === 2) {
+      // ── Grapeshot pellet ───────────────────────────────────────────────────
+      // Small round pellet — fast, close-range, anti-personnel.
+      const r = Math.max(1.5, 2.5 * zoom);
+      this.ctx.fillStyle = '#8B4513';
+      this.ctx.beginPath();
+      this.ctx.arc(screenPos.x, screenPos.y, r, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.strokeStyle = '#CD853F';
+      this.ctx.lineWidth = 0.5;
+      this.ctx.stroke();
+    } else if (cannonball.ammoType === 1) {
       // ── Bar Shot ───────────────────────────────────────────────────────────
       // Two iron balls connected by a spinning bar.
       // Spin angle: use wall-clock time so it always animates regardless of timeAlive.
