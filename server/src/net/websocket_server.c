@@ -1733,20 +1733,37 @@ static void tick_npc_agents(float dt) {
                     WeaponGroup* grp = find_weapon_group(ship->ship_id, module->id);
                     if (grp && grp->mode == WEAPON_GROUP_MODE_HALTFIRE) break; /* suppressed */
 
-                    /* Aim swivel toward target ship centre */
-                    float cos_r  = cosf(ship->rotation);
-                    float sin_r  = sinf(ship->rotation);
-                    float local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
-                    float local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
-                    float world_x = ship->x + (local_x * cos_r - local_y * sin_r);
-                    float world_y = ship->y + (local_x * sin_r + local_y * cos_r);
-                    float dx = target->x - world_x;
-                    float dy = target->y - world_y;
-                    float world_angle = atan2f(dy, dx);
-                    float sw_base = Q16_TO_FLOAT(module->local_rot) - (float)(M_PI / 2.0f);
-                    float desired_off = world_angle - ship->rotation - sw_base;
-                    while (desired_off >  (float)M_PI) desired_off -= 2.0f * (float)M_PI;
-                    while (desired_off < -(float)M_PI) desired_off += 2.0f * (float)M_PI;
+                    /* AIMING / FREEFIRE group → NPC defers to player's helm aim angle
+                     * (same as cannon NPCs tracking ship->active_aim_angle).
+                     * TARGETFIRE / not in any group → NPC auto-aims at target ship. */
+                    bool player_controls_aim = grp &&
+                        (grp->mode == WEAPON_GROUP_MODE_AIMING ||
+                         grp->mode == WEAPON_GROUP_MODE_FREEFIRE);
+
+                    float desired_off;
+                    if (player_controls_aim) {
+                        /* Sync to ship->active_aim_angle — same convention as handle_swivel_aim */
+                        float sw_base = Q16_TO_FLOAT(module->local_rot);
+                        desired_off = ship->active_aim_angle - sw_base + (float)(M_PI / 2.0f);
+                        while (desired_off >  (float)M_PI) desired_off -= 2.0f * (float)M_PI;
+                        while (desired_off < -(float)M_PI) desired_off += 2.0f * (float)M_PI;
+                    } else {
+                        /* Auto-aim at target ship centre */
+                        float cos_r  = cosf(ship->rotation);
+                        float sin_r  = sinf(ship->rotation);
+                        float local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+                        float local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+                        float world_x = ship->x + (local_x * cos_r - local_y * sin_r);
+                        float world_y = ship->y + (local_x * sin_r + local_y * cos_r);
+                        float dx = target->x - world_x;
+                        float dy = target->y - world_y;
+                        float world_angle = atan2f(dy, dx);
+                        float sw_base = Q16_TO_FLOAT(module->local_rot) - (float)(M_PI / 2.0f);
+                        desired_off = world_angle - ship->rotation - sw_base;
+                        while (desired_off >  (float)M_PI) desired_off -= 2.0f * (float)M_PI;
+                        while (desired_off < -(float)M_PI) desired_off += 2.0f * (float)M_PI;
+                    }
+
                     const float SWIVEL_AIM_RANGE = 90.0f * ((float)M_PI / 180.0f);
                     if (desired_off >  SWIVEL_AIM_RANGE) desired_off =  SWIVEL_AIM_RANGE;
                     if (desired_off < -SWIVEL_AIM_RANGE) desired_off = -SWIVEL_AIM_RANGE;
@@ -1765,8 +1782,10 @@ static void tick_npc_agents(float dt) {
                             break;
                         }
                     }
-                    /* Fire when reload is complete */
-                    if (module->data.swivel.time_since_fire >= module->data.swivel.reload_time) {
+                    /* Auto-aiming NPCs fire when reload is complete.
+                     * Player-aim mode: swivel fires on the player's fire command. */
+                    if (!player_controls_aim &&
+                        module->data.swivel.time_since_fire >= module->data.swivel.reload_time) {
                         ShipModule* gsw = NULL;
                         if (global_sim) {
                             for (uint32_t si = 0; si < global_sim->ship_count; si++) {
@@ -2076,25 +2095,7 @@ static void tick_cannon_needed_expiry(void) {
  * Called once per tick before assign_weapon_group_crew().
  */
 static void tick_swivel_crew_demand(SimpleShip* ship) {
-    if (!ship) return;
-    /* Check if any NpcAgent for this ship has a live target */
-    bool has_target = false;
-    for (int ai = 0; ai < npc_count; ai++) {
-        if (npc_agents[ai].active && npc_agents[ai].ship_id == ship->ship_id &&
-            npc_agents[ai].role == NPC_ROLE_GUNNER && npc_agents[ai].target_ship_id != 0) {
-            has_target = true;
-            break;
-        }
-    }
-    if (!has_target) return;
-    uint32_t now = get_time_ms();
-    for (int m = 0; m < ship->module_count; m++) {
-        ShipModule* mod = &ship->modules[m];
-        if (mod->type_id != MODULE_TYPE_SWIVEL) continue;
-        /* Set NEEDED and refresh timestamp so tick_cannon_needed_expiry keeps it alive */
-        mod->state_bits         |= MODULE_STATE_NEEDED;
-        ship->cannon_last_needed_ms[m] = now;
-    }
+    (void)ship; /* NEEDED for swivels is now driven by handle_cannon_aim sector-check, same as cannons */
 }
 
 /**
@@ -3264,6 +3265,98 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
         log_info("📊 Ship %u NEEDED map:%s", ship->ship_id, nbuf);
     }
 
+    /* ── Swivel pass: NEEDED + aim-propagation (mirrors cannon logic above) ─────
+     * Pass 1 — set MODULE_STATE_NEEDED when the aim angle is within the swivel's
+     *          ±45° arc and the swivel is in an active AIMING group (or ungrouped
+     *          when player_has_groups is false).
+     * Pass 2 — propagate desired_aim_direction from the helm so NPC-manned swivels
+     *          track the player cursor.  Only applies when at_helm; swivel-mounted
+     *          players already receive direct aim updates via handle_swivel_aim. ── */
+    for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+        ShipModule* sw = &sim_ship->modules[m];
+        if (sw->type_id != MODULE_TYPE_SWIVEL) continue;
+
+        WeaponGroup* grp = find_weapon_group(ship->ship_id, sw->id);
+
+        /* ── Swivel Pass 1: NEEDED ─────────────────────────────────────────── */
+        {
+            bool do_needed_update;
+            if (!grp) {
+                do_needed_update = !player_has_groups;
+            } else {
+                bool in_active = false;
+                for (int ag = 0; ag < active_group_count && !in_active; ag++) {
+                    uint32_t tg = active_group_indices[ag];
+                    if (tg >= MAX_WEAPON_GROUPS) continue;
+                    WeaponGroup* chk = &ship->weapon_groups[tg];
+                    for (int ci = 0; ci < chk->weapon_count && !in_active; ci++) {
+                        if (chk->weapon_ids[ci] == sw->id) in_active = true;
+                    }
+                }
+                if (active_group_count == 0)
+                    in_active = (grp->mode == WEAPON_GROUP_MODE_AIMING);
+                do_needed_update = in_active;
+            }
+            if (do_needed_update) {
+                const float SWIVEL_NEEDED_RANGE = 45.0f * ((float)M_PI / 180.0f);
+                float fire_dir = Q16_TO_FLOAT(sw->local_rot) - (float)(M_PI / 2.0f);
+                float diff = aim_angle - fire_dir;
+                while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+                while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+                if (fabsf(diff) <= SWIVEL_NEEDED_RANGE) {
+                    ShipModule* ssw = find_module_on_ship(ship, sw->id);
+                    if (ssw) {
+                        ssw->state_bits |= MODULE_STATE_NEEDED;
+                        uint32_t now = get_time_ms();
+                        for (int mi = 0; mi < ship->module_count; mi++) {
+                            if (ship->modules[mi].id == sw->id) {
+                                ship->cannon_last_needed_ms[mi] = now;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /* ── Swivel Pass 2: aim propagation (helm only) ────────────────────── */
+        if (at_cannon) continue; /* player on specific cannon — skip swivels */
+
+        /* Group-mode filter */
+        if (grp) {
+            if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   continue; /* suppressed */
+            if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) continue; /* auto-aim owns it */
+            bool sw_in_active = false;
+            for (int ag = 0; ag < active_group_count && !sw_in_active; ag++) {
+                uint32_t tg = active_group_indices[ag];
+                if (tg >= MAX_WEAPON_GROUPS) continue;
+                WeaponGroup* chk = &ship->weapon_groups[tg];
+                for (int ci = 0; ci < chk->weapon_count && !sw_in_active; ci++) {
+                    if (chk->weapon_ids[ci] == sw->id) sw_in_active = true;
+                }
+            }
+            if (active_group_count == 0)
+                sw_in_active = (grp->mode == WEAPON_GROUP_MODE_AIMING ||
+                                grp->mode == WEAPON_GROUP_MODE_FREEFIRE);
+            if (!sw_in_active) continue;
+        } else if (player_has_groups) {
+            continue; /* ungrouped swivel in group mode */
+        }
+
+        /* Propagate helm aim angle onto swivel desired_aim_direction.
+         * Uses the same offset convention as handle_swivel_aim. */
+        float sw_base     = Q16_TO_FLOAT(sw->local_rot);
+        float desired_off = aim_angle - sw_base + (float)(M_PI / 2.0f);
+        while (desired_off >  (float)M_PI) desired_off -= 2.0f * (float)M_PI;
+        while (desired_off < -(float)M_PI) desired_off += 2.0f * (float)M_PI;
+        const float SWIVEL_AIM_LIMIT = 45.0f * ((float)M_PI / 180.0f);
+        if (desired_off >  SWIVEL_AIM_LIMIT) desired_off =  SWIVEL_AIM_LIMIT;
+        if (desired_off < -SWIVEL_AIM_LIMIT) desired_off = -SWIVEL_AIM_LIMIT;
+        sw->data.swivel.desired_aim_direction = Q16_FROM_FLOAT(desired_off);
+        ShipModule* ssw = find_module_on_ship(ship, sw->id);
+        if (ssw) ssw->data.swivel.desired_aim_direction = Q16_FROM_FLOAT(desired_off);
+    }
+
     if (do_sector_update) {
         update_npc_cannon_sector(ship, ship->active_aim_angle);
     }
@@ -3560,6 +3653,21 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
     sw->data.swivel.loaded_ammo     = ammo_type;
     sw->state_bits |= MODULE_STATE_RELOADING;
     sw->state_bits &= ~MODULE_STATE_FIRING;
+
+    /* Refresh crew-dispatch timestamps — same as fire_cannon() does for cannons.
+     * Marks the swivel NEEDED and resets both fire and needed timestamps so the
+     * NPC crew member stays at this swivel for the full reload + grace period. */
+    {
+        uint32_t now_sw = get_time_ms();
+        for (int _sfi = 0; _sfi < ship->module_count; _sfi++) {
+            if (ship->modules[_sfi].id == sw->id) {
+                ship->cannon_last_fire_ms[_sfi]   = now_sw;
+                ship->cannon_last_needed_ms[_sfi] = now_sw;
+                ship->modules[_sfi].state_bits   |= MODULE_STATE_NEEDED;
+                break;
+            }
+        }
+    }
 
     /* Mirror state to global_sim copy */
     if (gsw) {

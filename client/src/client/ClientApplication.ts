@@ -632,9 +632,9 @@ export class ClientApplication {
       this.inputManager.onCannonFire = (cannonIds, fireAll, ammoType, weaponGroup, weaponGroups) => {
         // Multi-group fire: fire all cannons in every selected group
         const groups = weaponGroups && weaponGroups.size > 0 ? weaponGroups : (weaponGroup !== undefined && weaponGroup >= 0 ? new Set([weaponGroup]) : null);
-        if (groups && !fireAll) {
+        if (groups) {
           const allIds: number[] = [];
-          let skipAimCheck = false;
+          let skipAimCheck = !!fireAll; // double-click always skips aim-angle check
           for (const g of groups) {
             const gs = this.controlGroups.get(g);
             if (!gs || gs.cannonIds.length === 0) continue;
