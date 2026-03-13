@@ -3511,6 +3511,51 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
 /**
  * Broadcast cannon fire event to all connected clients
  */
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Flamethrower wave state
+ *
+ * Instead of spawning projectiles, the flamethrower maintains a per-swivel
+ * advancing "wave front".  Each server tick the front moves outward at
+ * FLAME_WAVE_SPEED px/s and fire is applied to anything newly in range.
+ * When the player releases (no fire pulse for > FLAME_STALE_MS), a retreat
+ * front sweeps from barrel to tip at the same speed, driving the client
+ * visual.  Fire DoT timers run naturally after the wave passes.
+ * ══════════════════════════════════════════════════════════════════════════ */
+#define MAX_FLAME_WAVES   16
+#define FLAME_WAVE_SPEED  125.0f    /* px/s — matches old projectile speed   */
+#define FLAME_RANGE       125.0f    /* max reach, client px                  */
+#define FLAME_HALF_CONE   (15.0f * (float)(M_PI / 180.0f))  /* ±15°         */
+#define FLAME_STALE_MS    350u      /* ms without a pulse → start retreating  */
+#define FIRE_DURATION_MS  10000u    /* ms an entity burns after ignition      */
+
+typedef struct {
+    bool     active;
+    uint32_t swivel_id;
+    uint32_t ship_id;
+    float    origin_x, origin_y;
+    float    fire_angle;
+    float    wave_dist;      /* leading wave front (px):  0 → FLAME_RANGE */
+    bool     retreating;
+    float    retreat_dist;   /* trailing edge during retreat (px) */
+    uint32_t last_fire_ms;   /* wall-clock ms of last fire_swivel call */
+} FlameWave;
+
+static FlameWave  flame_waves[MAX_FLAME_WAVES];
+static bool       flame_waves_initialized = false;
+
+/** Broadcast a raw JSON string to every connected WebSocket client. */
+static void broadcast_json_all(const char* json) {
+    char frame[1024];
+    size_t flen = websocket_create_frame(WS_OPCODE_TEXT, json, strlen(json), frame, sizeof(frame));
+    if (flen == 0) return;
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        struct WebSocketClient* wc = &ws_server.clients[i];
+        if (wc->connected && wc->handshake_complete)
+            send(wc->fd, frame, flen, 0);
+    }
+}
+
 static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float world_x, float world_y, 
                                   float angle, entity_id projectile_id, uint8_t ammo_type) {
     char message[512];
@@ -3740,36 +3785,46 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
         }
         log_info("Swivel %u fired GRAPESHOT (3 pellets) on ship %u", sw->id, ship->ship_id);
     } else if (ammo_type == PROJ_TYPE_LIQUID_FLAME) {
-        /* Flamethrower cone: 5 projectiles spread ±15° — pass-through, sets fire on everything hit.
-         * Each strand travels at 125px/s for 2s (~250px range) giving travel-time feel.
-         * Hull collision is bypassed in simulation.c; fire application happens in the
-         * entity-scan loop each server tick. */
-        const int   FLAME_NUM        = 5;
-        const float FLAME_SPEED      = CLIENT_TO_SERVER(125.0f);
-        const float FLAME_HALF_CONE  = 15.0f * (float)(M_PI / 180.0f); /* ±15° */
-        for (int fp = 0; fp < FLAME_NUM; fp++) {
-            float t     = (FLAME_NUM > 1) ? (float)fp / (float)(FLAME_NUM - 1) : 0.5f;
-            float angle = fire_angle + FLAME_HALF_CONE * (2.0f * t - 1.0f);
-            float sx = world_x + cosf(angle) * BARREL_LEN;
-            float sy = world_y + sinf(angle) * BARREL_LEN;
-            Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(sx)),
-                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy)) };
-            Vec2Q16 vel = { Q16_FROM_FLOAT(cosf(angle) * FLAME_SPEED + ship_vx),
-                            Q16_FROM_FLOAT(sinf(angle) * FLAME_SPEED + ship_vy) };
-            entity_id pid = sim_create_projectile(global_sim, pos, vel, owner_id, PROJ_TYPE_LIQUID_FLAME);
-            if (pid != INVALID_ENTITY_ID) {
-                struct Projectile* proj = sim_get_projectile(global_sim, pid);
-                if (proj) {
-                    proj->damage         = Q16_FROM_FLOAT(0.0f); /* fire DoT handled separately */
-                    proj->lifetime       = Q16_FROM_FLOAT(2.0f);
-                    proj->firing_company = ship->company_id;
-                    proj->firing_ship_id = (entity_id)ship->ship_id;
-                    proj->type           = PROJ_TYPE_LIQUID_FLAME;
-                }
-                broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, angle, pid, PROJ_TYPE_LIQUID_FLAME);
+        /* ── Flamethrower wave: register / refresh this swivel's wave entry ──────
+         * Hit application happens in update_flame_waves() each server tick so
+         * that fire reaches distant targets progressively (travel-time feel). */
+        {
+        if (!flame_waves_initialized) {
+            memset(flame_waves, 0, sizeof(flame_waves));
+            flame_waves_initialized = true;
+        }
+        uint32_t now_fw = get_time_ms();
+        int fw_slot = -1;
+        /* Look for existing entry for this swivel */
+        for (int fi = 0; fi < MAX_FLAME_WAVES; fi++) {
+            if (flame_waves[fi].active && flame_waves[fi].swivel_id == sw->id) {
+                fw_slot = fi; break;
             }
         }
-        log_info("Swivel %u fired LIQUID FLAME cone (5 strands, ±15°) on ship %u", sw->id, ship->ship_id);
+        /* Allocate a new slot if needed */
+        if (fw_slot < 0) {
+            for (int fi = 0; fi < MAX_FLAME_WAVES; fi++) {
+                if (!flame_waves[fi].active) { fw_slot = fi; break; }
+            }
+        }
+        if (fw_slot >= 0) {
+            FlameWave* fw = &flame_waves[fw_slot];
+            if (!fw->active) {
+                /* Fresh wave — start from barrel */
+                memset(fw, 0, sizeof(*fw));
+                fw->active    = true;
+                fw->swivel_id = sw->id;
+                fw->ship_id   = ship->ship_id;
+                fw->wave_dist = 0.0f;
+            }
+            /* Refresh / update every pulse */
+            fw->retreating  = false;
+            fw->origin_x    = world_x;
+            fw->origin_y    = world_y;
+            fw->fire_angle  = fire_angle;
+            fw->last_fire_ms = now_fw;
+        }
+        } /* end LIQUID_FLAME wave registration */
     } else if (ammo_type == PROJ_TYPE_CANISTER_SHOT) {
         /* 5 pellets spread ±20° — wide anti-personnel sweep */
         const int   NUM_PELLETS = 5;
@@ -8255,7 +8310,7 @@ void websocket_server_tick(float dt) {
         const float ENTITY_HIT_RADIUS    = 40.0f;   // client pixels (cannonball)
         const float ENTITY_BASE_DAMAGE   = 75.0f;
         const float ENTITY_KNOCKBACK     = 40.0f;   // velocity impulse (client px/s)
-        const uint32_t FIRE_DURATION_MS  = 10000;   // 10 seconds
+        /* FIRE_DURATION_MS is a file-scope #define (10000 ms) */
 
         /* Helper: broadcast a FIRE_EFFECT event */
         #define BROADCAST_FIRE_EFFECT(msg_buf, ...) do { \
@@ -8275,8 +8330,9 @@ void websocket_server_tick(float dt) {
             struct Projectile* proj = &global_sim->projectiles[pi];
 
             // Only projectile types that harm entities directly
+            // (PROJ_TYPE_LIQUID_FLAME removed — flamethrower is now instant hit-scan, no projectiles)
             if (proj->type != PROJ_TYPE_CANNONBALL && proj->type != PROJ_TYPE_GRAPESHOT &&
-                proj->type != PROJ_TYPE_LIQUID_FLAME && proj->type != PROJ_TYPE_CANISTER_SHOT) { pi++; continue; }
+                proj->type != PROJ_TYPE_CANISTER_SHOT) { pi++; continue; }
 
             float px = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
             float py = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
@@ -9011,6 +9067,162 @@ void websocket_server_tick(float dt) {
         }
         
         last_cannon_update = current_time;
+
+        /* ===== FLAME WAVE UPDATE (every 100ms) ===== */
+        /* Advance each active flamethrower wave, apply fire to newly-reached
+         * targets, and broadcast the current wave state to clients for
+         * smooth client-side interpolation. */
+        if (flame_waves_initialized) {
+            const float cos_hc = cosf(FLAME_HALF_CONE);
+            const float dt_s   = (float)time_elapsed / 1000.0f;
+            for (int fi = 0; fi < MAX_FLAME_WAVES; fi++) {
+                FlameWave* fw = &flame_waves[fi];
+                if (!fw->active) continue;
+
+                /* Check staleness — start retreating if no pulse for > FLAME_STALE_MS */
+                uint32_t now_fw2 = get_time_ms();
+                if (!fw->retreating && (now_fw2 - fw->last_fire_ms) > FLAME_STALE_MS) {
+                    fw->retreating   = true;
+                    fw->retreat_dist = 0.0f;
+                }
+
+                /* Advance leading edge */
+                if (!fw->retreating) {
+                    fw->wave_dist += dt_s * FLAME_WAVE_SPEED;
+                    if (fw->wave_dist > FLAME_RANGE) fw->wave_dist = FLAME_RANGE;
+                }
+
+                /* Advance retreat front */
+                if (fw->retreating) {
+                    fw->retreat_dist += dt_s * FLAME_WAVE_SPEED;
+                    if (fw->retreat_dist >= FLAME_RANGE) {
+                        /* Fully retreated — deactivate */
+                        fw->active = false;
+                        char dead_msg[128];
+                        snprintf(dead_msg, sizeof(dead_msg),
+                            "{\"type\":\"FLAME_WAVE_UPDATE\",\"cannonId\":%u,\"dead\":true}",
+                            fw->swivel_id);
+                        broadcast_json_all(dead_msg);
+                        continue;
+                    }
+                }
+
+                /* ── Apply fire to targets within the leading wave front ── */
+                if (!fw->retreating) {
+                    float fdir_x = cosf(fw->fire_angle);
+                    float fdir_y = sinf(fw->fire_angle);
+
+                    /* NPCs */
+                    for (int ni = 0; ni < world_npc_count; ni++) {
+                        WorldNpc* npc = &world_npcs[ni];
+                        if (!npc->active) continue;
+                        if (npc->ship_id == fw->ship_id) continue;
+                        float dx = npc->x - fw->origin_x, dy = npc->y - fw->origin_y;
+                        float dist = sqrtf(dx*dx + dy*dy);
+                        if (dist > fw->wave_dist + 30.0f) continue;
+                        float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
+                        if (dot < cos_hc) continue;
+                        bool first = (npc->fire_timer_ms == 0);
+                        npc->fire_timer_ms = FIRE_DURATION_MS;
+                        if (first) {
+                            char fmsg[256];
+                            snprintf(fmsg, sizeof(fmsg),
+                                "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"npc\",\"id\":%u,"
+                                "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                                npc->id, npc->x, npc->y, FIRE_DURATION_MS);
+                            broadcast_json_all(fmsg);
+                        }
+                    }
+
+                    /* Players */
+                    for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
+                        WebSocketPlayer* wp = &players[wpi];
+                        if (!wp->active) continue;
+                        if (wp->parent_ship_id == fw->ship_id) continue;
+                        float dx = wp->x - fw->origin_x, dy = wp->y - fw->origin_y;
+                        float dist = sqrtf(dx*dx + dy*dy);
+                        if (dist > fw->wave_dist + 30.0f) continue;
+                        float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
+                        if (dot < cos_hc) continue;
+                        bool first = (wp->fire_timer_ms == 0);
+                        wp->fire_timer_ms = FIRE_DURATION_MS;
+                        if (first) {
+                            char fmsg[256];
+                            snprintf(fmsg, sizeof(fmsg),
+                                "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"player\",\"id\":%u,"
+                                "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                                wp->player_id, wp->x, wp->y, FIRE_DURATION_MS);
+                            broadcast_json_all(fmsg);
+                        }
+                    }
+
+                    /* Wooden modules on enemy ships */
+                    for (int s = 0; s < ship_count; s++) {
+                        if (!ships[s].active) continue;
+                        SimpleShip* fship = &ships[s];
+                        if (fship->ship_id == fw->ship_id) continue;
+                        float cos_r = cosf(fship->rotation);
+                        float sin_r = sinf(fship->rotation);
+                        for (int m = 0; m < fship->module_count; m++) {
+                            ShipModule* mod = &fship->modules[m];
+                            ModuleTypeId mt = mod->type_id;
+                            if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK &&
+                                mt != MODULE_TYPE_MAST) continue;
+                            if (mod->health <= 0) continue;
+                            float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                            float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                            float wx = fship->x + (lx * cos_r - ly * sin_r);
+                            float wy = fship->y + (lx * sin_r + ly * cos_r);
+                            float dx = wx - fw->origin_x, dy = wy - fw->origin_y;
+                            float dist = sqrtf(dx*dx + dy*dy);
+                            if (dist > fw->wave_dist + 35.0f) continue;
+                            float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
+                            if (dot < cos_hc) continue;
+                            bool first = (mod->fire_timer_ms == 0);
+                            mod->fire_timer_ms = FIRE_DURATION_MS;
+                            if (global_sim) {
+                                for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                    if ((uint32_t)global_sim->ships[si].id != fship->ship_id) continue;
+                                    for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
+                                        if (global_sim->ships[si].modules[mi].id == mod->id) {
+                                            global_sim->ships[si].modules[mi].fire_timer_ms = FIRE_DURATION_MS;
+                                            break;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                            if (first) {
+                                char fmsg[256];
+                                snprintf(fmsg, sizeof(fmsg),
+                                    "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"module\","
+                                    "\"shipId\":%u,\"moduleId\":%u,"
+                                    "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                                    fship->ship_id, mod->id, wx, wy, FIRE_DURATION_MS);
+                                broadcast_json_all(fmsg);
+                            }
+                        }
+                    }
+                } /* end !retreating fire application */
+
+                /* Broadcast current wave state — client interpolates between ticks */
+                {
+                    char state_msg[320];
+                    snprintf(state_msg, sizeof(state_msg),
+                        "{\"type\":\"FLAME_WAVE_UPDATE\","
+                        "\"cannonId\":%u,\"shipId\":%u,"
+                        "\"x\":%.1f,\"y\":%.1f,\"angle\":%.3f,"
+                        "\"halfCone\":%.4f,\"waveDist\":%.1f,"
+                        "\"retreating\":%s,\"retreatDist\":%.1f}",
+                        fw->swivel_id, fw->ship_id,
+                        fw->origin_x, fw->origin_y, fw->fire_angle,
+                        FLAME_HALF_CONE, fw->wave_dist,
+                        fw->retreating ? "true" : "false",
+                        fw->retreat_dist);
+                    broadcast_json_all(state_msg);
+                }
+            }
+        } /* end FLAME WAVE UPDATE */
 
         /* ===== FIRE DOT TICK (every 100ms) ===== */
         /* NPCs on fire: 5 base HP + 1% max_health per 100ms tick */

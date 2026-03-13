@@ -467,6 +467,13 @@ export class NetworkManager {
   public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
   /** Fired when the server confirms the player has boarded a ship (via ladder). */
   public onPlayerBoarded: ((shipId: number) => void) | null = null;
+  /** Fired each server tick with the current state of an active flamethrower wave. */
+  public onFlameWaveUpdate: ((
+    cannonId: number, shipId: number,
+    x: number, y: number, angle: number, halfCone: number,
+    waveDist: number, retreating: boolean, retreatDist: number,
+    dead: boolean
+  ) => void) | null = null;
   
   constructor(config: NetworkConfig) {
     this.config = config;
@@ -941,12 +948,11 @@ export class NetworkManager {
       ammo_type: ammoType
     };
 
-    console.log(`💥 Cannon fire: ${fireAll ? 'ALL' : cannonIds ? `IDs ${cannonIds.join(',')}` : 'aimed'} [${ammoType === 1 ? 'BAR SHOT' : 'CANNONBALL'}]${freefire ? ' FREEFIRE' : ''}`);
+    console.log(`💥 Cannon fire: ${fireAll ? 'ALL' : cannonIds ? `IDs ${cannonIds.join(',')}` : 'aimed'}${freefire ? ' FREEFIRE' : ''}`);
     this.sendMessage(message);
   }
 
   /**
-   * Send weapon control group configuration to the server.
    * Call this whenever a group's mode, cannon assignment, or target changes.
    *
    * @param groupIndex     0–9 group slot
@@ -1752,6 +1758,25 @@ export class NetworkManager {
           extId,
           message.shipId   ?? undefined,
           message.moduleId ?? undefined,
+        );
+        break;
+      }
+
+      case 'FLAME_CONE_FIRE': // legacy — ignore
+        break;
+
+      case 'FLAME_WAVE_UPDATE': {
+        this.onFlameWaveUpdate?.(
+          message.cannonId    ?? 0,
+          message.shipId      ?? 0,
+          message.x           ?? 0,
+          message.y           ?? 0,
+          message.angle       ?? 0,
+          message.halfCone    ?? 0.2618,
+          message.waveDist    ?? 0,
+          message.retreating  ?? false,
+          message.retreatDist ?? 0,
+          message.dead        ?? false,
         );
         break;
       }

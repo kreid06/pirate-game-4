@@ -125,6 +125,12 @@ export class RenderSystem {
   private npcDamageFlash: Map<number, number> = new Map();
   /** Key → fire expiry timestamp (ms). Key format: "npc:{id}" | "player:{id}" | "module:{shipId}:{moduleId}" */
   private burningEntities: Map<string, number> = new Map();
+  /** Active flamethrower wave states keyed by cannonId. Client interpolates between server ticks. */
+  private flameWaves: Map<number, {
+    x: number; y: number; angle: number; halfCone: number;
+    waveDist: number; retreating: boolean; retreatDist: number;
+    serverUpdateAt: number;
+  }> = new Map();
   
   // Debug flags
   private showHoverBoundaries: boolean = false;
@@ -174,6 +180,110 @@ export class RenderSystem {
   notifyEntityDamaged(id: number, isNpc: boolean): void {
     if (isNpc) this.npcDamageFlash.set(id, performance.now());
     else        this.playerDamageFlash.set(id, performance.now());
+  }
+
+  /** Spawn a hit-scan flamethrower cone flash effect at world position (x, y).
+   * @deprecated Use updateFlameWave() — kept for backward compat with any remaining call sites.
+   */
+  spawnFlameCone(_x: number, _y: number, _angle: number, _halfCone: number): void { /* no-op */ }
+
+  /**
+   * Called each time a FLAME_WAVE_UPDATE arrives from the server.
+   * The client stores the server-reported state and locally interpolates
+   * the wave front between ticks for smooth 60fps visuals.
+   */
+  updateFlameWave(
+    cannonId: number, _shipId: number,
+    x: number, y: number, angle: number, halfCone: number,
+    waveDist: number, retreating: boolean, retreatDist: number,
+    dead: boolean,
+  ): void {
+    if (dead) { this.flameWaves.delete(cannonId); return; }
+    const existing = this.flameWaves.get(cannonId);
+    this.flameWaves.set(cannonId, {
+      x, y, angle, halfCone,
+      // Snap to server value, but never smaller (avoids backward jump)
+      waveDist:    existing ? Math.max(existing.waveDist, waveDist)    : waveDist,
+      retreating,
+      retreatDist: existing ? Math.max(existing.retreatDist, retreatDist) : retreatDist,
+      serverUpdateAt: performance.now(),
+    });
+  }
+
+  private drawFlameCones(camera: Camera): void {
+    if (this.flameWaves.size === 0) return;
+
+    const WAVE_SPEED = 125; // px/s — must match FLAME_WAVE_SPEED on server
+    const ctx        = this.ctx;
+    const zoom       = camera.getState().zoom;
+    const now        = performance.now();
+
+    for (const [cannonId, fw] of this.flameWaves) {
+      // Auto-expire stale entries (server went silent for > 2s)
+      if (now - fw.serverUpdateAt > 2000) { this.flameWaves.delete(cannonId); continue; }
+
+      // Client-side interpolation: advance wave/retreat from last server report
+      const dt = (now - fw.serverUpdateAt) / 1000;
+      const waveDist    = fw.retreating ? fw.waveDist
+                                        : Math.min(fw.waveDist + dt * WAVE_SPEED, 125);
+      const retreatDist = fw.retreating ? Math.min(fw.retreatDist + dt * WAVE_SPEED, 125) : 0;
+
+      // Nothing to draw if retreat has consumed the whole cone
+      if (retreatDist >= waveDist) continue;
+
+      const sp          = camera.worldToScreen(Vec2.from(fw.x, fw.y));
+      const outerR      = waveDist    * zoom;
+      const innerR      = retreatDist * zoom;
+      const a0          = fw.angle - fw.halfCone;
+      const a1          = fw.angle + fw.halfCone;
+
+      // Flicker — even mid-wave
+      const t       = now / 1000;
+      const flicker = 0.90 + 0.10 * Math.sin(t * 18 + cannonId * 0.6);
+
+      ctx.save();
+
+      // ── Clip to the wedge shape (annular sector) ────────────────────────
+      ctx.beginPath();
+      if (innerR > 1) {
+        ctx.arc(sp.x, sp.y, innerR, a0, a1);          // inner arc (CW)
+        ctx.arc(sp.x, sp.y, outerR, a1, a0, true);    // outer arc (CCW)
+      } else {
+        ctx.moveTo(sp.x, sp.y);
+        ctx.arc(sp.x, sp.y, outerR, a0, a1);
+      }
+      ctx.closePath();
+      ctx.clip();
+
+      // ── Outer atmospheric haze ──────────────────────────────────────────
+      const hazeGrd = ctx.createRadialGradient(sp.x, sp.y, innerR, sp.x, sp.y, outerR);
+      hazeGrd.addColorStop(0,    `rgba(255,200,50,${(0.55 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(0.35, `rgba(255,110,15,${(0.50 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(0.75, `rgba(180,40,0,${(0.30 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(1,    'rgba(100,10,0,0)');
+      ctx.fillStyle = hazeGrd;
+      ctx.fillRect(sp.x - outerR, sp.y - outerR, outerR * 2, outerR * 2);
+
+      // ── Bright inner core (narrower band) ──────────────────────────────
+      const coreOuter = Math.min(outerR, innerR + (outerR - innerR) * 0.55);
+      const coreGrd   = ctx.createRadialGradient(sp.x, sp.y, innerR, sp.x, sp.y, coreOuter);
+      coreGrd.addColorStop(0,    `rgba(255,255,200,${(0.92 * flicker).toFixed(3)})`);
+      coreGrd.addColorStop(0.5,  `rgba(255,180,40,${(0.65 * flicker).toFixed(3)})`);
+      coreGrd.addColorStop(1,    'rgba(255,80,0,0)');
+      ctx.fillStyle = coreGrd;
+      ctx.fillRect(sp.x - outerR, sp.y - outerR, outerR * 2, outerR * 2);
+
+      ctx.restore();
+
+      // ── Ember particles along the leading edge ──────────────────────────
+      if (!fw.retreating) {
+        this.particleSystem.createFlameTrail(
+          Vec2.from(fw.x + Math.cos(fw.angle) * waveDist,
+                    fw.y + Math.sin(fw.angle) * waveDist),
+          fw.angle,
+        );
+      }
+    }
   }
 
   /** Mark an entity or module as burning for `durationMs` milliseconds. */
@@ -878,6 +988,8 @@ export class RenderSystem {
     // Draw effects and particles (always on top)
     this.particleSystem.render(camera);
     this.effectRenderer.render(camera);
+    // Flamethrower instant cone flashes (on top of particles)
+    this.drawFlameCones(camera);
     // Screen-space announcement banners (on top of everything)
     this.effectRenderer.renderAnnouncements(this.canvas);
 
