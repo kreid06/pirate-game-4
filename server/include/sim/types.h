@@ -90,9 +90,11 @@ struct Player {
 };
 
 /* Projectile ammo types */
-#define PROJ_TYPE_CANNONBALL  0
-#define PROJ_TYPE_BAR_SHOT    1
-#define PROJ_TYPE_GRAPESHOT   2   // Swivel gun grapeshot — spread pellets, anti-personnel
+#define PROJ_TYPE_CANNONBALL    0
+#define PROJ_TYPE_BAR_SHOT      1
+#define PROJ_TYPE_GRAPESHOT     2   // Swivel: spread pellets, anti-personnel
+#define PROJ_TYPE_LIQUID_FLAME  3   // Swivel: incendiary, area denial
+#define PROJ_TYPE_CANISTER_SHOT 4   // Swivel: wide spread canister pellets
 
 // Projectile state (cannonballs, etc)  
 struct Projectile {

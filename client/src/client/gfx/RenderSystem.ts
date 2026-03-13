@@ -3845,6 +3845,38 @@ export class RenderSystem {
       this.ctx.strokeStyle = '#ff8844';
       this.ctx.lineWidth   = 1;
       this.ctx.stroke();
+    } else if (cannonball.ammoType === 3) {
+      // ── Liquid Flame ───────────────────────────────────────────────────────
+      // Slow incendiary fireball — glowing orange/yellow sphere.
+      const r   = Math.max(3, 5 * zoom);
+      const t   = Date.now() / 200;
+      const pulse = 0.85 + 0.15 * Math.sin(t + cannonball.id * 0.7);
+      const grd = this.ctx.createRadialGradient(
+        screenPos.x, screenPos.y, 0,
+        screenPos.x, screenPos.y, r * 2.2 * pulse);
+      grd.addColorStop(0,   'rgba(255,255,150,0.95)');
+      grd.addColorStop(0.4, 'rgba(255,140,0,0.85)');
+      grd.addColorStop(1,   'rgba(200,50,0,0)');
+      this.ctx.fillStyle = grd;
+      this.ctx.beginPath();
+      this.ctx.arc(screenPos.x, screenPos.y, r * 2.2 * pulse, 0, Math.PI * 2);
+      this.ctx.fill();
+      // Bright core
+      this.ctx.fillStyle = '#FFFF99';
+      this.ctx.beginPath();
+      this.ctx.arc(screenPos.x, screenPos.y, r * 0.45, 0, Math.PI * 2);
+      this.ctx.fill();
+    } else if (cannonball.ammoType === 4) {
+      // ── Canister Shot pellet ───────────────────────────────────────────────
+      // Wider spread than grapeshot — slightly larger, darker iron pellet.
+      const r = Math.max(2, 3.5 * zoom);
+      this.ctx.fillStyle = '#4A3728';
+      this.ctx.beginPath();
+      this.ctx.arc(screenPos.x, screenPos.y, r, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.strokeStyle = '#7A5C47';
+      this.ctx.lineWidth = 0.6;
+      this.ctx.stroke();
     } else {
       // ── Cannonball (default) ───────────────────────────────────────────────
       const scaledRadius = cannonball.radius * zoom;

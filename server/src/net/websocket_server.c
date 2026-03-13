@@ -3501,7 +3501,7 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
     uint32_t owner_id = (player != NULL) ? player->player_id : ship->ship_id;
 
     if (ammo_type == PROJ_TYPE_GRAPESHOT) {
-        /* 3 pellets spread at -12°, 0°, +12° */
+        /* 3 pellets spread at -12°, 0°, +12° — anti-personnel */
         const int   NUM_PELLETS = 3;
         const float SPREAD_STEP = 12.0f * (float)(M_PI / 180.0f);
         for (int p = 0; p < NUM_PELLETS; p++) {
@@ -3525,28 +3525,81 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
                 broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, angle, pid, PROJ_TYPE_GRAPESHOT);
             }
         }
-        log_info("🔫 Swivel %u fired GRAPESHOT (3 pellets) on ship %u", sw->id, ship->ship_id);
-    } else {
-        /* Single swivel ball */
+        log_info("Swivel %u fired GRAPESHOT (3 pellets) on ship %u", sw->id, ship->ship_id);
+    } else if (ammo_type == PROJ_TYPE_LIQUID_FLAME) {
+        /* Single incendiary fireball — slower, area denial */
+        const float FLAME_SPEED = CLIENT_TO_SERVER(250.0f);
         float sx = world_x + cosf(fire_angle) * BARREL_LEN;
         float sy = world_y + sinf(fire_angle) * BARREL_LEN;
         Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(sx)),
                         Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy)) };
-        Vec2Q16 vel = { Q16_FROM_FLOAT(cosf(fire_angle) * SWIVEL_SPEED + ship_vx),
-                        Q16_FROM_FLOAT(sinf(fire_angle) * SWIVEL_SPEED + ship_vy) };
-        entity_id pid = sim_create_projectile(global_sim, pos, vel, owner_id, PROJ_TYPE_CANNONBALL);
+        Vec2Q16 vel = { Q16_FROM_FLOAT(cosf(fire_angle) * FLAME_SPEED + ship_vx),
+                        Q16_FROM_FLOAT(sinf(fire_angle) * FLAME_SPEED + ship_vy) };
+        entity_id pid = sim_create_projectile(global_sim, pos, vel, owner_id, PROJ_TYPE_LIQUID_FLAME);
         if (pid != INVALID_ENTITY_ID) {
             struct Projectile* proj = sim_get_projectile(global_sim, pid);
             if (proj) {
-                proj->damage         = Q16_FROM_FLOAT(2000.0f);
-                proj->lifetime       = Q16_FROM_FLOAT(4.0f);
+                proj->damage         = Q16_FROM_FLOAT(800.0f);
+                proj->lifetime       = Q16_FROM_FLOAT(3.0f);
                 proj->firing_company = ship->company_id;
                 proj->firing_ship_id = (entity_id)ship->ship_id;
+                proj->type           = PROJ_TYPE_LIQUID_FLAME;
             }
-            broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, fire_angle, pid, PROJ_TYPE_CANNONBALL);
+            broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, fire_angle, pid, PROJ_TYPE_LIQUID_FLAME);
         }
-        log_info("🔫 Swivel %u fired BALL on ship %u angle=%.1f°",
-                 sw->id, ship->ship_id, fire_angle * 180.0f / (float)M_PI);
+        log_info("Swivel %u fired LIQUID FLAME on ship %u", sw->id, ship->ship_id);
+    } else if (ammo_type == PROJ_TYPE_CANISTER_SHOT) {
+        /* 5 pellets spread ±20° — wide anti-personnel sweep */
+        const int   NUM_PELLETS = 5;
+        const float HALF_SPREAD = 20.0f * (float)(M_PI / 180.0f);
+        for (int p = 0; p < NUM_PELLETS; p++) {
+            float t     = (NUM_PELLETS > 1) ? (float)p / (float)(NUM_PELLETS - 1) : 0.5f;
+            float angle = fire_angle + HALF_SPREAD * (2.0f * t - 1.0f);
+            float sx = world_x + cosf(angle) * BARREL_LEN;
+            float sy = world_y + sinf(angle) * BARREL_LEN;
+            Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(sx)),
+                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy)) };
+            Vec2Q16 vel = { Q16_FROM_FLOAT(cosf(angle) * SWIVEL_SPEED + ship_vx),
+                            Q16_FROM_FLOAT(sinf(angle) * SWIVEL_SPEED + ship_vy) };
+            entity_id pid = sim_create_projectile(global_sim, pos, vel, owner_id, PROJ_TYPE_CANISTER_SHOT);
+            if (pid != INVALID_ENTITY_ID) {
+                struct Projectile* proj = sim_get_projectile(global_sim, pid);
+                if (proj) {
+                    proj->damage         = Q16_FROM_FLOAT(300.0f);
+                    proj->lifetime       = Q16_FROM_FLOAT(1.2f);
+                    proj->firing_company = ship->company_id;
+                    proj->firing_ship_id = (entity_id)ship->ship_id;
+                    proj->type           = PROJ_TYPE_CANISTER_SHOT;
+                }
+                broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, angle, pid, PROJ_TYPE_CANISTER_SHOT);
+            }
+        }
+        log_info("Swivel %u fired CANISTER SHOT (5 pellets) on ship %u", sw->id, ship->ship_id);
+    } else {
+        /* Unknown/invalid ammo type: default to grapeshot */
+        log_info("Swivel %u: unknown ammo_type %u, defaulting to grapeshot", sw->id, (unsigned)ammo_type);
+        const float SPREAD_STEP = 12.0f * (float)(M_PI / 180.0f);
+        for (int p = 0; p < 3; p++) {
+            float angle = fire_angle + SPREAD_STEP * (float)(p - 1);
+            float sx = world_x + cosf(angle) * BARREL_LEN;
+            float sy = world_y + sinf(angle) * BARREL_LEN;
+            Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(sx)),
+                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy)) };
+            Vec2Q16 vel = { Q16_FROM_FLOAT(cosf(angle) * SWIVEL_SPEED + ship_vx),
+                            Q16_FROM_FLOAT(sinf(angle) * SWIVEL_SPEED + ship_vy) };
+            entity_id pid = sim_create_projectile(global_sim, pos, vel, owner_id, PROJ_TYPE_GRAPESHOT);
+            if (pid != INVALID_ENTITY_ID) {
+                struct Projectile* proj = sim_get_projectile(global_sim, pid);
+                if (proj) {
+                    proj->damage         = Q16_FROM_FLOAT(450.0f);
+                    proj->lifetime       = Q16_FROM_FLOAT(1.5f);
+                    proj->firing_company = ship->company_id;
+                    proj->firing_ship_id = (entity_id)ship->ship_id;
+                    proj->type           = PROJ_TYPE_GRAPESHOT;
+                }
+                broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, angle, pid, PROJ_TYPE_GRAPESHOT);
+            }
+        }
     }
 }
 
@@ -5606,11 +5659,11 @@ int websocket_server_update(struct Sim* sim) {
                                     bool fire_all = strstr(payload, "\"fire_all\":true") != NULL;
                                     // freefire: skip aim-angle check (set by client for freefire/targetfire modes)
                                     bool freefire = strstr(payload, "\"freefire\":true") != NULL;
-                                    // Parse ammo_type (0=cannonball, 1=bar_shot, 2=grapeshot)
+                                    // Parse ammo_type (0=cannonball, 1=bar_shot, 2=grapeshot, 3=liquid_flame, 4=canister_shot)
                                     uint8_t ammo_type = PROJ_TYPE_CANNONBALL;
                                     char* at = strstr(payload, "\"ammo_type\":");
                                     if (at) ammo_type = (uint8_t)atoi(at + 12);
-                                    if (ammo_type > PROJ_TYPE_GRAPESHOT) ammo_type = PROJ_TYPE_CANNONBALL;
+                                    if (ammo_type > PROJ_TYPE_CANISTER_SHOT) ammo_type = PROJ_TYPE_CANNONBALL;
                                     // Parse optional cannon_ids array
                                     uint32_t explicit_ids[MAX_CANNONS_PER_GROUP];
                                     int explicit_count = parse_json_uint32_array(
@@ -7952,8 +8005,9 @@ void websocket_server_tick(float dt) {
         while (pi < global_sim->projectile_count) {
             struct Projectile* proj = &global_sim->projectiles[pi];
 
-            // Only cannonballs and grapeshot damage entities
-            if (proj->type != PROJ_TYPE_CANNONBALL && proj->type != PROJ_TYPE_GRAPESHOT) { pi++; continue; }
+            // Only projectile types that harm entities directly
+            if (proj->type != PROJ_TYPE_CANNONBALL && proj->type != PROJ_TYPE_GRAPESHOT &&
+                proj->type != PROJ_TYPE_LIQUID_FLAME && proj->type != PROJ_TYPE_CANISTER_SHOT) { pi++; continue; }
 
             float px = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
             float py = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
@@ -7964,10 +8018,18 @@ void websocket_server_tick(float dt) {
                 struct Ship* fship = sim_get_ship(global_sim, (entity_id)proj->firing_ship_id);
                 if (fship) dmg_mult = ship_level_damage_mult(&fship->level_stats);
             }
-            /* Grapeshot: smaller hit radius; lower per-pellet entity damage */
-            float ent_hit_radius = (proj->type == PROJ_TYPE_GRAPESHOT) ? 20.0f : ENTITY_HIT_RADIUS;
-            float damage         = (proj->type == PROJ_TYPE_GRAPESHOT) ? 35.0f * dmg_mult
-                                                                        : ENTITY_BASE_DAMAGE * dmg_mult;
+            /* Per-type hit radius and base entity damage */
+            float ent_hit_radius, damage;
+            if (proj->type == PROJ_TYPE_GRAPESHOT || proj->type == PROJ_TYPE_CANISTER_SHOT) {
+                ent_hit_radius = (proj->type == PROJ_TYPE_CANISTER_SHOT) ? 15.0f : 20.0f;
+                damage         = (proj->type == PROJ_TYPE_CANISTER_SHOT) ? 25.0f * dmg_mult : 35.0f * dmg_mult;
+            } else if (proj->type == PROJ_TYPE_LIQUID_FLAME) {
+                ent_hit_radius = 30.0f;
+                damage         = 50.0f * dmg_mult;
+            } else {
+                ent_hit_radius = ENTITY_HIT_RADIUS;
+                damage         = ENTITY_BASE_DAMAGE * dmg_mult;
+            }
             float hit_r2  = ent_hit_radius * ent_hit_radius;
 
             bool proj_consumed = false;

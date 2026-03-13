@@ -449,6 +449,10 @@ export class InputManager {
         this.lastSailOpennessChangeTime = 0;
         this.lastSailAngleChangeTime = 0;
         console.log(`⛵ [INPUT] Seeded sail openness to ${seeded}% on mount`);
+      } else if (this.mountKind === 'swivel') {
+        // Swivel uses its own ammo types (2=grapeshot, 3=liquid flame, 4=canister shot)
+        this.selectedAmmoType = 2;
+        this.loadedAmmoType   = 2;
       }
     } else {
       console.log(`⚓ [INPUT] Player dismounted - player controls active`);
@@ -970,6 +974,24 @@ export class InputManager {
             }, 500);
           }
           event.preventDefault();
+        } else if (this.mountKind === 'swivel') {
+          if (!event.repeat) {
+            const swivelAmmos = [2, 3, 4]; // GRAPESHOT, LIQUID_FLAME, CANISTER_SHOT
+            const ammoNames = ['', '', 'GRAPESHOT', 'LIQUID FLAME', 'CANISTER SHOT'];
+            this.xHoldFired = false;
+            this.xHoldTimer = setTimeout(() => {
+              this.xHoldFired = true;
+              // Cycle to next swivel ammo type and force-load immediately
+              if (this.selectedAmmoType === this.loadedAmmoType) {
+                const idx = swivelAmmos.indexOf(this.selectedAmmoType);
+                this.selectedAmmoType = swivelAmmos[(idx < 0 ? 0 : (idx + 1)) % 3];
+              }
+              this.loadedAmmoType = this.selectedAmmoType;
+              console.log(`⚡ Swivel ammo force-loaded → ${ammoNames[this.loadedAmmoType]}`);
+              if (this.onForceReload) this.onForceReload();
+            }, 500);
+          }
+          event.preventDefault();
         }
         break;      // Hotbar slots: Digit1-Digit9 → slots 0-8, Digit0 → slot 9
       case 'KeyQ':
@@ -1053,9 +1075,17 @@ export class InputManager {
       }
       if (!this.xHoldFired) {
         // Released before 1s — queue the swap
-        this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
-        const ammoNames = ['CANNONBALL', 'BAR SHOT'];
-        console.log(`💣 Ammo queued → ${ammoNames[this.selectedAmmoType]} (hold X 0.5s to load now)`);
+        if (this.mountKind === 'swivel') {
+          const swivelAmmos = [2, 3, 4];
+          const ammoNames = ['', '', 'GRAPESHOT', 'LIQUID FLAME', 'CANISTER SHOT'];
+          const idx = swivelAmmos.indexOf(this.selectedAmmoType);
+          this.selectedAmmoType = swivelAmmos[(idx < 0 ? 0 : (idx + 1)) % 3];
+          console.log(`💣 Swivel ammo queued → ${ammoNames[this.selectedAmmoType]} (hold X 0.5s to load now)`);
+        } else {
+          this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
+          const ammoNames = ['CANNONBALL', 'BAR SHOT'];
+          console.log(`💣 Ammo queued → ${ammoNames[this.selectedAmmoType]} (hold X 0.5s to load now)`);
+        }
       }
       // If xHoldFired is true the force-load already happened — nothing more to do
     }
