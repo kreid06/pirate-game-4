@@ -3794,32 +3794,41 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
             flame_waves_initialized = true;
         }
         uint32_t now_fw = get_time_ms();
-        int fw_slot = -1;
-        /* If an existing wave is active for this swivel, deactivate it so the
-           client lets it finish/retreat, then we open a clean new slot. */
+        /* Find existing slot for this swivel */
+        bool fw_handled = false;
         for (int fi = 0; fi < MAX_FLAME_WAVES; fi++) {
-            if (flame_waves[fi].active && flame_waves[fi].swivel_id == sw->id) {
+            if (!flame_waves[fi].active || flame_waves[fi].swivel_id != sw->id) continue;
+            if (!flame_waves[fi].retreating) {
+                /* Continuous hold — refresh heartbeat and aim; wave keeps advancing */
+                flame_waves[fi].origin_x     = world_x;
+                flame_waves[fi].origin_y     = world_y;
+                flame_waves[fi].fire_angle   = fire_angle;
+                flame_waves[fi].last_fire_ms = now_fw;
+                fw_handled = true;
+            } else {
+                /* Was retreating — kill it; fall through to spawn a fresh wave */
                 flame_waves[fi].active = false;
+            }
+            break;
+        }
+        if (!fw_handled) {
+            /* Allocate a fresh slot (new fire or re-fire after retreat) */
+            for (int fi = 0; fi < MAX_FLAME_WAVES; fi++) {
+                if (flame_waves[fi].active) continue;
+                FlameWave* fw = &flame_waves[fi];
+                memset(fw, 0, sizeof(*fw));
+                fw->active       = true;
+                fw->swivel_id    = sw->id;
+                fw->ship_id      = ship->ship_id;
+                fw->wave_dist    = 0.0f;
+                fw->retreat_dist = 0.0f;
+                fw->retreating   = false;
+                fw->origin_x     = world_x;
+                fw->origin_y     = world_y;
+                fw->fire_angle   = fire_angle;
+                fw->last_fire_ms = now_fw;
                 break;
             }
-        }
-        /* Always allocate a fresh slot for the new burst */
-        for (int fi = 0; fi < MAX_FLAME_WAVES; fi++) {
-            if (!flame_waves[fi].active) { fw_slot = fi; break; }
-        }
-        if (fw_slot >= 0) {
-            FlameWave* fw = &flame_waves[fw_slot];
-            memset(fw, 0, sizeof(*fw));
-            fw->active       = true;
-            fw->swivel_id    = sw->id;
-            fw->ship_id      = ship->ship_id;
-            fw->wave_dist    = 0.0f;
-            fw->retreat_dist = 0.0f;
-            fw->retreating   = false;
-            fw->origin_x     = world_x;
-            fw->origin_y     = world_y;
-            fw->fire_angle   = fire_angle;
-            fw->last_fire_ms = now_fw;
         }
         } /* end LIQUID_FLAME wave registration */
     } else if (ammo_type == PROJ_TYPE_CANISTER_SHOT) {
@@ -4029,7 +4038,10 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
                               ? SWIVEL_FLAME_INTERVAL_MS
                               : sw->data.swivel.reload_time;
             if (sw->data.swivel.time_since_fire < eff_cd) continue;
-            fire_swivel(ship, sw, module, player, ammo_type);
+            /* NPC-manned swivels always fire grapeshot regardless of the
+             * player's selected ammo type — liquid flame / canister etc.
+             * are player-only swivel ammo types. */
+            fire_swivel(ship, sw, module, player, PROJ_TYPE_GRAPESHOT);
             cannons_fired++;
             continue;
         }
