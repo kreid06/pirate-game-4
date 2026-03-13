@@ -270,9 +270,12 @@ void sim_update_projectiles(struct Sim* sim, q16_t dt) {
     for (uint16_t i = 0; i < sim->projectile_count; i++) {
         struct Projectile* proj = &sim->projectiles[i];
         
-        // Check lifetime (4 seconds for cannonballs)
+        // Check lifetime — use proj->lifetime if set, otherwise fall back to 4s default
         uint32_t lifetime_ms = sim->time_ms - proj->spawn_time;
-        if (lifetime_ms > 4000) {
+        uint32_t max_lifetime = (proj->lifetime > 0)
+            ? (uint32_t)(Q16_TO_FLOAT(proj->lifetime) * 1000.0f)
+            : 4000;
+        if (lifetime_ms > max_lifetime) {
             // Remove expired projectile
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                    (sim->projectile_count - i - 1) * sizeof(struct Projectile));

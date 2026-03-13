@@ -3527,8 +3527,8 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
         }
         log_info("Swivel %u fired GRAPESHOT (3 pellets) on ship %u", sw->id, ship->ship_id);
     } else if (ammo_type == PROJ_TYPE_LIQUID_FLAME) {
-        /* Single incendiary fireball — short range, fast stream, zero direct HP damage */
-        const float FLAME_SPEED = CLIENT_TO_SERVER(150.0f);
+        /* Single incendiary fireball — ~125px range, fast stream, zero direct HP damage */
+        const float FLAME_SPEED = CLIENT_TO_SERVER(125.0f);
         float sx = world_x + cosf(fire_angle) * BARREL_LEN;
         float sy = world_y + sinf(fire_angle) * BARREL_LEN;
         Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(sx)),
@@ -3540,7 +3540,7 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
             struct Projectile* proj = sim_get_projectile(global_sim, pid);
             if (proj) {
                 proj->damage         = Q16_FROM_FLOAT(0.0f); /* fire DoT handled separately */
-                proj->lifetime       = Q16_FROM_FLOAT(1.5f);
+                proj->lifetime       = Q16_FROM_FLOAT(2.0f);
                 proj->firing_company = ship->company_id;
                 proj->firing_ship_id = (entity_id)ship->ship_id;
                 proj->type           = PROJ_TYPE_LIQUID_FLAME;
