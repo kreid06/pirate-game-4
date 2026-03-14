@@ -2253,7 +2253,7 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
         if (mod->state_bits & MODULE_STATE_NEEDED)
             abs_diff -= 2.0f * (float)M_PI;   /* guaranteed negative → sorts first */
         else {
-            WeaponGroup* grp = find_weapon_group(ship->ship_id, mod->id);
+            WeaponGroup* grp = find_weapon_group(ship->ship_id, mod->id, ship->company_id);
             if (grp && grp->mode == WEAPON_GROUP_MODE_HALTFIRE)
                 abs_diff += 2.0f * (float)M_PI; /* sorts last */
         }
@@ -2969,7 +2969,7 @@ static void tick_ship_weapon_groups(void) {
         if (ship->is_sinking) continue; /* no auto-fire while sinking */
 
         for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-            WeaponGroup* group = &ship->weapon_groups[g];
+            WeaponGroup* group = &ship->weapon_groups[ship->company_id][g];
             if (group->mode != WEAPON_GROUP_MODE_TARGETFIRE) continue;
             if (group->target_ship_id == 0 || group->weapon_count == 0) continue;
 
@@ -3637,14 +3637,15 @@ static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float wo
  * Broadcast authoritative weapon group state for ship to ALL connected clients.
  * Clients on other ships will ignore this message by checking shipId.
  */
-static void broadcast_cannon_group_state(SimpleShip* ship) {
+static void broadcast_cannon_group_state(SimpleShip* ship, uint8_t company_id) {
     if (!ship) return;
+    uint8_t cid = (company_id < MAX_COMPANIES) ? company_id : 0;
     static const char* mode_names[] = { "aiming", "freefire", "haltfire", "targetfire" };
     char message[4096];
     int pos = snprintf(message, sizeof(message),
         "{\"type\":\"cannon_group_state\",\"shipId\":%u,\"groups\":[", ship->ship_id);
     for (int g = 0; g < MAX_WEAPON_GROUPS && pos < (int)sizeof(message) - 64; g++) {
-        WeaponGroup* grp = &ship->weapon_groups[g];
+        WeaponGroup* grp = &ship->weapon_groups[cid][g];
         const char* mode_str = (grp->mode < 4) ? mode_names[grp->mode] : "haltfire";
         pos += snprintf(message + pos, sizeof(message) - pos,
             "%s{\"index\":%d,\"mode\":\"%s\",\"cannonIds\":[",
@@ -3663,9 +3664,13 @@ static void broadcast_cannon_group_state(SimpleShip* ship) {
     size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, message, strlen(message), frame, sizeof(frame));
     if (frame_len > 0) {
         for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-            struct WebSocketClient* client = &ws_server.clients[i];
-            if (client->connected && client->handshake_complete)
-                send(client->fd, frame, frame_len, 0);
+            struct WebSocketClient* cl = &ws_server.clients[i];
+            if (!cl->connected || !cl->handshake_complete) continue;
+            /* Only send to players of the same company (or neutral) */
+            WebSocketPlayer* p = find_player(cl->player_id);
+            if (p && p->company_id != COMPANY_NEUTRAL && cid != COMPANY_NEUTRAL &&
+                p->company_id != cid) continue;
+            send(cl->fd, frame, frame_len, 0);
         }
     }
 }
@@ -3679,12 +3684,15 @@ static void broadcast_cannon_group_state(SimpleShip* ship) {
 static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship) {
     if (!client || !ship) return;
     if (!client->connected || !client->handshake_complete) return;
+    /* Determine which company slot to show: look up the client's player. */
+    WebSocketPlayer* pl = find_player(client->player_id);
+    uint8_t cid = (pl && pl->company_id < MAX_COMPANIES) ? pl->company_id : 0;
     static const char* mode_names[] = { "aiming", "freefire", "haltfire", "targetfire" };
     char message[4096];
     int pos = snprintf(message, sizeof(message),
         "{\"type\":\"cannon_group_state\",\"shipId\":%u,\"groups\":[", ship->ship_id);
     for (int g = 0; g < MAX_WEAPON_GROUPS && pos < (int)sizeof(message) - 64; g++) {
-        WeaponGroup* grp = &ship->weapon_groups[g];
+        WeaponGroup* grp = &ship->weapon_groups[cid][g];
         const char* mode_str = (grp->mode < 4) ? mode_names[grp->mode] : "haltfire";
         pos += snprintf(message + pos, sizeof(message) - pos,
             "%s{\"index\":%d,\"mode\":\"%s\",\"cannonIds\":[",
@@ -4840,29 +4848,37 @@ static void tick_sinking_ships(void) {
  */
 static void ship_init_default_weapon_groups(SimpleShip* ship) {
     /* Reset all groups to HALTFIRE with no cannons */
-    for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-        ship->weapon_groups[g].mode         = WEAPON_GROUP_MODE_HALTFIRE;
-        ship->weapon_groups[g].weapon_count = 0;
-        ship->weapon_groups[g].target_ship_id = 0;
-    }
-
-    /* Partition cannons: port (local_y > 0) → group 1, starboard → group 2 */
-    for (int m = 0; m < ship->module_count; m++) {
-        ShipModule* mod = &ship->modules[m];
-        if (mod->type_id != MODULE_TYPE_CANNON) continue;
-
-        float local_y = Q16_TO_FLOAT(mod->local_pos.y);
-        int   target_group = (local_y > 0.0f) ? 1 : 2;
-        WeaponGroup* grp = &ship->weapon_groups[target_group];
-        if (grp->weapon_count < MAX_WEAPONS_PER_GROUP) {
-            grp->weapon_ids[grp->weapon_count++] = mod->id;
+    /* Reset all company slots to HALTFIRE with no cannons */
+    for (int co = 0; co < MAX_COMPANIES; co++) {
+        for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
+            ship->weapon_groups[co][g].mode         = WEAPON_GROUP_MODE_HALTFIRE;
+            ship->weapon_groups[co][g].weapon_count = 0;
+            ship->weapon_groups[co][g].target_ship_id = 0;
         }
     }
 
-    log_info("🔫 Ship %u: default groups — port=%d cannons (grp1), starboard=%d cannons (grp2)",
+    /* Partition cannons: port (local_y > 0) → group 1, starboard → group 2.
+     * Apply to ALL company slots so that any company boarding the ship starts
+     * with a sensible default layout. */
+    for (int co = 0; co < MAX_COMPANIES; co++) {
+        for (int m = 0; m < ship->module_count; m++) {
+            ShipModule* mod = &ship->modules[m];
+            if (mod->type_id != MODULE_TYPE_CANNON) continue;
+
+            float local_y = Q16_TO_FLOAT(mod->local_pos.y);
+            int   target_group = (local_y > 0.0f) ? 1 : 2;
+            WeaponGroup* grp = &ship->weapon_groups[co][target_group];
+            if (grp->weapon_count < MAX_WEAPONS_PER_GROUP) {
+                grp->weapon_ids[grp->weapon_count++] = mod->id;
+            }
+        }
+    }
+
+    log_info("🔫 Ship %u: default groups — port=%d cannons (grp1), starboard=%d cannons (grp2) [all %d company slots]",
              ship->ship_id,
-             ship->weapon_groups[1].weapon_count,
-             ship->weapon_groups[2].weapon_count);
+             ship->weapon_groups[0][1].weapon_count,
+             ship->weapon_groups[0][2].weapon_count,
+             MAX_COMPANIES);
 }
 
 // Initialize a brigantine ship at the given slot index, world position (client pixels), module ID base, and company
@@ -7525,8 +7541,9 @@ int websocket_server_update(struct Sim* sim) {
                      * ──────────────────────────────────────────────────────────────────── */
                     if (client->pending_group_broadcast_ship_id != 0) {
                         SimpleShip* bship = find_ship(client->pending_group_broadcast_ship_id);
-                        if (bship) broadcast_cannon_group_state(bship);
-                        client->pending_group_broadcast_ship_id = 0;
+                        if (bship) broadcast_cannon_group_state(bship, client->pending_group_broadcast_company_id);
+                        client->pending_group_broadcast_ship_id    = 0;
+                        client->pending_group_broadcast_company_id = 0;
                     }
 
                     // Send response
