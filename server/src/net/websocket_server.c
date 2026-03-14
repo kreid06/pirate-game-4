@@ -56,8 +56,11 @@ struct WebSocketClient {
      * Broadcast is deferred until all messages from this client in the current
      * frame have been handled, so a burst of group-config messages (e.g. the
      * client switching two groups to AIMING simultaneously) produces exactly
-     * one broadcast rather than one per message. */
+     * one broadcast rather than one per message.
+     * company_id stores which company's groups changed so the broadcast is
+     * only sent to clients of the same company. */
     uint32_t pending_group_broadcast_ship_id;
+    uint8_t  pending_group_broadcast_company_id;
 };
 
 struct WebSocketServer {
@@ -901,7 +904,27 @@ static void handle_cannon_interact(WebSocketPlayer* player, struct WebSocketClie
             return;
         }
     }
-    
+
+    // NPC occupancy check: block mounting if an enemy NPC gunner is stationed here.
+    for (int _ni = 0; _ni < world_npc_count; _ni++) {
+        WorldNpc* _npc = &world_npcs[_ni];
+        if (!_npc->active) continue;
+        if (_npc->assigned_weapon_id != module->id) continue;
+        if (_npc->state != WORLD_NPC_STATE_AT_GUN && _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
+        if (_npc->company_id == 0) continue;           // neutral never blocks
+        if (player->company_id != 0 && _npc->company_id == player->company_id) continue; // friendly OK
+        send_interaction_failure(client, "npc_occupied");
+        return;
+    }
+
+    /* Company check: cannot mount a cannon on an enemy ship */
+    if (ship->company_id != COMPANY_NEUTRAL &&
+        player->company_id != COMPANY_NEUTRAL &&
+        player->company_id != ship->company_id) {
+        send_interaction_failure(client, "wrong_company");
+        return;
+    }
+
     // Mount player to cannon
     module->state_bits |= MODULE_STATE_OCCUPIED;
     player->is_mounted = true;
@@ -1130,6 +1153,26 @@ static void handle_swivel_interact(WebSocketPlayer* player, struct WebSocketClie
         return;
     }
 
+    // NPC occupancy check: block mounting if an enemy NPC gunner is stationed here.
+    for (int _ni = 0; _ni < world_npc_count; _ni++) {
+        WorldNpc* _npc = &world_npcs[_ni];
+        if (!_npc->active) continue;
+        if (_npc->assigned_weapon_id != module->id) continue;
+        if (_npc->state != WORLD_NPC_STATE_AT_GUN && _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
+        if (_npc->company_id == 0) continue;           // neutral never blocks
+        if (player->company_id != 0 && _npc->company_id == player->company_id) continue; // friendly OK
+        send_interaction_failure(client, "npc_occupied");
+        return;
+    }
+
+    /* Company check: cannot mount a swivel on an enemy ship */
+    if (ship->company_id != COMPANY_NEUTRAL &&
+        player->company_id != COMPANY_NEUTRAL &&
+        player->company_id != ship->company_id) {
+        send_interaction_failure(client, "wrong_company");
+        return;
+    }
+
     module->state_bits |= MODULE_STATE_OCCUPIED;
     player->is_mounted = true;
     player->mounted_module_id = module->id;
@@ -1169,6 +1212,11 @@ static void handle_swivel_aim(WebSocketPlayer* player, float aim_angle) {
 
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship) return;
+
+    /* Defense-in-depth: refuse aim if player company doesn't match ship company */
+    if (ship->company_id != COMPANY_NEUTRAL &&
+        player->company_id != COMPANY_NEUTRAL &&
+        player->company_id != ship->company_id) return;
 
     ShipModule* module = find_module_by_id(ship, player->mounted_module_id);
     if (!module || module->type_id != MODULE_TYPE_SWIVEL) return;
@@ -1500,14 +1548,14 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
 static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
                                        WeaponGroupMode mode, uint32_t* weapon_ids,
                                        int weapon_count, uint32_t target_ship_id);
-static WeaponGroup* find_weapon_group(uint32_t ship_id, uint32_t cannon_id);
+static WeaponGroup* find_weapon_group(uint32_t ship_id, uint32_t cannon_id, uint8_t company_id);
 static void assign_weapon_group_crew(SimpleShip* ship);
 static void tick_cannon_needed_expiry(void);
 static void tick_swivel_crew_demand(SimpleShip* ship);
 static void tick_ship_weapon_groups(void);
 static void tick_sinking_ships(void);
 static void ship_init_default_weapon_groups(SimpleShip* ship);
-static void broadcast_cannon_group_state(SimpleShip* ship);
+static void broadcast_cannon_group_state(SimpleShip* ship, uint8_t company_id);
 static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship);
 static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task);
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle);
@@ -1730,7 +1778,7 @@ static void tick_npc_agents(float dt) {
 
                 /* ── Swivel path ──────────────────────────────────────────── */
                 if (module->type_id == MODULE_TYPE_SWIVEL) {
-                    WeaponGroup* grp = find_weapon_group(ship->ship_id, module->id);
+                    WeaponGroup* grp = find_weapon_group(ship->ship_id, module->id, ship->company_id);
                     if (grp && grp->mode == WEAPON_GROUP_MODE_HALTFIRE) break; /* suppressed */
 
                     /* AIMING / FREEFIRE group → NPC defers to player's helm aim angle
@@ -1814,7 +1862,7 @@ static void tick_npc_agents(float dt) {
                  *   AIMING / FREEFIRE → NPC aims normally (follows ship aim angle).
                  * ─────────────────────────────────────────────────────────── */
                 {
-                    WeaponGroup* grp = find_weapon_group(ship->ship_id, module->id);
+                    WeaponGroup* grp = find_weapon_group(ship->ship_id, module->id, ship->company_id);
                     if (grp) {
                         if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   break; /* suppressed */
                         if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE)  break; /* aim owned by tick_player_weapon_groups */
@@ -2795,6 +2843,11 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship) return;
 
+    /* Which company slot does this player write to?  Players of each company
+     * maintain their own independent group config so enemy boarders cannot
+     * read or corrupt the original crew's setup. */
+    uint8_t cid = (player->company_id < MAX_COMPANIES) ? player->company_id : 0;
+
     /* ── Validate: strip any ID not belonging to a cannon or swivel on
      *    this ship.  Prevents clients from referencing foreign-ship weapons. ── */
     uint32_t valid_ids[MAX_WEAPONS_PER_GROUP];
@@ -2812,7 +2865,7 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
     for (int i = 0; i < valid_count; i++) {
         for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
             if (g == group_index) continue;
-            WeaponGroup* other = &ship->weapon_groups[g];
+            WeaponGroup* other = &ship->weapon_groups[cid][g];
             for (int c = 0; c < other->weapon_count; c++) {
                 if (other->weapon_ids[c] == valid_ids[i]) {
                     /* Compact: overwrite with last entry */
@@ -2824,7 +2877,7 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
         }
     }
 
-    WeaponGroup* group = &ship->weapon_groups[group_index];
+    WeaponGroup* group = &ship->weapon_groups[cid][group_index];
     group->mode         = mode;
     group->weapon_count = (uint8_t)valid_count;
     for (int i = 0; i < valid_count; i++) {
@@ -2880,7 +2933,8 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
     for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
         struct WebSocketClient* c = &ws_server.clients[ci];
         if (c->connected && c->player_id == player->player_id) {
-            c->pending_group_broadcast_ship_id = ship->ship_id;
+            c->pending_group_broadcast_ship_id    = ship->ship_id;
+            c->pending_group_broadcast_company_id = cid;
             break;
         }
     }
@@ -2895,11 +2949,12 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
  * Find the WeaponGroup that owns cannon_id on ship_id, from any active player.
  * Returns NULL if no weapon group claims this cannon.
  */
-static WeaponGroup* find_weapon_group(uint32_t ship_id, uint32_t cannon_id) {
+static WeaponGroup* find_weapon_group(uint32_t ship_id, uint32_t cannon_id, uint8_t company_id) {
     SimpleShip* ship = find_ship(ship_id);
     if (!ship) return NULL;
+    uint8_t cid = (company_id < MAX_COMPANIES) ? company_id : 0;
     for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-        WeaponGroup* grp = &ship->weapon_groups[g];
+        WeaponGroup* grp = &ship->weapon_groups[cid][g];
         for (int c = 0; c < grp->weapon_count; c++) {
             if (grp->weapon_ids[c] == cannon_id) return grp;
         }
@@ -3014,7 +3069,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
      * ────────────────────────────────────────────────────────────────────── */
     bool player_has_groups = false;
     for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-        if (ship->weapon_groups[g].weapon_count > 0) {
+        if (ship->weapon_groups[player->company_id][g].weapon_count > 0) {
             player_has_groups = true;
             break;
         }
@@ -3026,7 +3081,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
         ShipModule* cannon = &sim_ship->modules[m];
 
         /* Resolve weapon group membership once for this cannon */
-        WeaponGroup* grp = find_weapon_group(ship->ship_id, cannon->id);
+        WeaponGroup* grp = find_weapon_group(ship->ship_id, cannon->id, player->company_id);
 
         /* ── Pass 1: MODULE_STATE_NEEDED update (SET-ONLY / sticky) ───────────
          *
@@ -3052,7 +3107,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 for (int ag = 0; ag < active_group_count && !in_active; ag++) {
                     uint32_t tg = active_group_indices[ag];
                     if (tg >= MAX_WEAPON_GROUPS) continue;
-                    WeaponGroup* chk = &ship->weapon_groups[tg];
+                    WeaponGroup* chk = &ship->weapon_groups[player->company_id][tg];
                     for (int ci = 0; ci < chk->weapon_count && !in_active; ci++) {
                         if (chk->weapon_ids[ci] == cannon->id) in_active = true;
                     }
@@ -3127,7 +3182,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             for (int ag = 0; ag < active_group_count && !in_active_pass2; ag++) {
                 uint32_t tg = active_group_indices[ag];
                 if (tg >= MAX_WEAPON_GROUPS) continue;
-                WeaponGroup* chk = &ship->weapon_groups[tg];
+                WeaponGroup* chk = &ship->weapon_groups[player->company_id][tg];
                 for (int ci = 0; ci < chk->weapon_count && !in_active_pass2; ci++) {
                     if (chk->weapon_ids[ci] == cannon->id) in_active_pass2 = true;
                 }
@@ -3176,7 +3231,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 }
             }
             int grp_idx = -1;
-            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[gg] == grp) { grp_idx = gg; break; } } }
+            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[player->company_id][gg] == grp) { grp_idx = gg; break; } } }
             log_info("🔫 P2 c%u g%d: SKIP no_occupant (sim_occ=%d npc_id=%u npc_state=%d in_active=%d)",
                      cannon->id, grp_idx,
                      (cannon->state_bits & MODULE_STATE_OCCUPIED) ? 1 : 0,
@@ -3191,7 +3246,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
         if (!in_active_pass2) {
             bool in_haltfire = false;
             for (int g = 0; g < MAX_WEAPON_GROUPS && !in_haltfire; g++) {
-                WeaponGroup* wg = &ship->weapon_groups[g];
+                WeaponGroup* wg = &ship->weapon_groups[player->company_id][g];
                 if (wg->mode != WEAPON_GROUP_MODE_HALTFIRE) continue;
                 for (int ci = 0; ci < wg->weapon_count; ci++) {
                     if (wg->weapon_ids[ci] == cannon->id) { in_haltfire = true; break; }
@@ -3205,7 +3260,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
 
         {
             int grp_idx = -1;
-            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[gg] == grp) { grp_idx = gg; break; } } }
+            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[player->company_id][gg] == grp) { grp_idx = gg; break; } } }
             log_info("🔫 P2 c%u g%d: AIM PROPAGATED (in_active=%d mode=%d)",
                      cannon->id, grp_idx, in_active_pass2 ? 1 : 0, grp ? grp->mode : -1);
         }
@@ -3256,9 +3311,9 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             ShipModule* dm_mod = &ship->modules[dm];
             if (dm_mod->type_id != MODULE_TYPE_CANNON) continue;
             int needed = (dm_mod->state_bits & MODULE_STATE_NEEDED) ? 1 : 0;
-            WeaponGroup* dg = find_weapon_group(ship->ship_id, dm_mod->id);
+            WeaponGroup* dg = find_weapon_group(ship->ship_id, dm_mod->id, player->company_id);
             int gi = -1;
-            if (dg) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[gg] == dg) { gi = gg; break; } } }
+            if (dg) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[player->company_id][gg] == dg) { gi = gg; break; } } }
             npos += snprintf(nbuf + npos, (size_t)(256 - npos), " c%u:g%d:%s",
                              dm_mod->id, gi, needed ? "NEED" : "----");
         }
@@ -3276,7 +3331,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
         ShipModule* sw = &sim_ship->modules[m];
         if (sw->type_id != MODULE_TYPE_SWIVEL) continue;
 
-        WeaponGroup* grp = find_weapon_group(ship->ship_id, sw->id);
+        WeaponGroup* grp = find_weapon_group(ship->ship_id, sw->id, player->company_id);
 
         /* ── Swivel Pass 1: NEEDED ─────────────────────────────────────────── */
         {
@@ -3288,7 +3343,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 for (int ag = 0; ag < active_group_count && !in_active; ag++) {
                     uint32_t tg = active_group_indices[ag];
                     if (tg >= MAX_WEAPON_GROUPS) continue;
-                    WeaponGroup* chk = &ship->weapon_groups[tg];
+                    WeaponGroup* chk = &ship->weapon_groups[player->company_id][tg];
                     for (int ci = 0; ci < chk->weapon_count && !in_active; ci++) {
                         if (chk->weapon_ids[ci] == sw->id) in_active = true;
                     }
@@ -3330,7 +3385,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             for (int ag = 0; ag < active_group_count && !sw_in_active; ag++) {
                 uint32_t tg = active_group_indices[ag];
                 if (tg >= MAX_WEAPON_GROUPS) continue;
-                WeaponGroup* chk = &ship->weapon_groups[tg];
+                WeaponGroup* chk = &ship->weapon_groups[player->company_id][tg];
                 for (int ci = 0; ci < chk->weapon_count && !sw_in_active; ci++) {
                     if (chk->weapon_ids[ci] == sw->id) sw_in_active = true;
                 }
@@ -3950,6 +4005,11 @@ static void handle_swivel_fire(WebSocketPlayer* player, uint8_t ammo_type) {
     if (!player->is_mounted || player->parent_ship_id == 0) return;
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship || ship->is_sinking) return;
+
+    /* Defense-in-depth: refuse fire if player company doesn't match ship company */
+    if (ship->company_id != COMPANY_NEUTRAL &&
+        player->company_id != COMPANY_NEUTRAL &&
+        player->company_id != ship->company_id) return;
 
     /* SimpleShip module — reload timer ticks ships[] so check here */
     ShipModule* sw = find_module_by_id(ship, player->mounted_module_id);

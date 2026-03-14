@@ -2911,22 +2911,134 @@ export class RenderSystem {
     this.ctx.lineWidth = 1 / cameraState.zoom;
     this.ctx.stroke();
 
-    // ── Barrel trajectory line (dashed) ──────────────────────────────────
-    // Barrel direction in swivel local space = aimDir applied to -Y
+    // ── Barrel trajectory / area overlay (ammo-specific) ─────────────────
     const barrelAngle = arcCentreAngle + aimDir;
     const cosB = Math.cos(barrelAngle);
     const sinB = Math.sin(barrelAngle);
+    // Barrel tip in swivel-local space
+    const tipX = cosB * BARREL_TIP;
+    const tipY = sinB * BARREL_TIP;
 
-    this.ctx.save();
-    this.ctx.setLineDash([5 / cameraState.zoom, 4 / cameraState.zoom]);
-    this.ctx.strokeStyle = 'rgba(255,200,80,0.85)';
-    this.ctx.lineWidth = 1.5 / cameraState.zoom;
-    this.ctx.beginPath();
-    this.ctx.moveTo(cosB * BARREL_TIP, sinB * BARREL_TIP);
-    this.ctx.lineTo(cosB * (BARREL_TIP + RANGE), sinB * (BARREL_TIP + RANGE));
-    this.ctx.stroke();
-    this.ctx.setLineDash([]);
-    this.ctx.restore();
+    // Normalise ammo ID: 10/2=grapeshot, 11/3=flame, 12/4=canister
+    const ammo = this.selectedAmmoType;
+    const ammoNorm = ammo === 10 ? 10 : ammo === 2 ? 10
+                   : ammo === 11 ? 11 : ammo === 3 ? 11
+                   : ammo === 12 ? 12 : ammo === 4 ? 12
+                   : ammo; // pass-through for cannon types
+
+    if (ammoNorm === 10) {
+      // ── Grapeshot: ±12° hit cone centred on barrel tip, 250px range ─────
+      const GRAPE_RANGE = 250;
+      const SPREAD      = 12 * Math.PI / 180;
+      const leftA  = barrelAngle - SPREAD;
+      const rightA = barrelAngle + SPREAD;
+
+      this.ctx.save();
+      this.ctx.translate(tipX, tipY);
+
+      // Filled wedge
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(Math.cos(leftA) * GRAPE_RANGE, Math.sin(leftA) * GRAPE_RANGE);
+      this.ctx.arc(0, 0, GRAPE_RANGE, leftA, rightA);
+      this.ctx.closePath();
+      this.ctx.fillStyle = 'rgba(255,200,80,0.07)';
+      this.ctx.fill();
+
+      // Cone outline edges
+      this.ctx.strokeStyle = 'rgba(255,200,80,0.55)';
+      this.ctx.lineWidth = 1 / cameraState.zoom;
+      this.ctx.setLineDash([4 / cameraState.zoom, 3 / cameraState.zoom]);
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(Math.cos(leftA) * GRAPE_RANGE, Math.sin(leftA) * GRAPE_RANGE);
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(Math.cos(rightA) * GRAPE_RANGE, Math.sin(rightA) * GRAPE_RANGE);
+      this.ctx.stroke();
+
+      // Solid arc at max range
+      this.ctx.setLineDash([]);
+      this.ctx.globalAlpha = 0.30;
+      this.ctx.beginPath();
+      this.ctx.arc(0, 0, GRAPE_RANGE, leftA, rightA);
+      this.ctx.stroke();
+      this.ctx.globalAlpha = 1.0;
+
+      // Centre aim line (solid, bright)
+      this.ctx.strokeStyle = 'rgba(255,220,100,0.75)';
+      this.ctx.lineWidth = 1.5 / cameraState.zoom;
+      this.ctx.setLineDash([5 / cameraState.zoom, 4 / cameraState.zoom]);
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(cosB * GRAPE_RANGE, sinB * GRAPE_RANGE);
+      this.ctx.stroke();
+      this.ctx.setLineDash([]);
+
+      this.ctx.restore();
+
+    } else if (ammoNorm === 11) {
+      // ── Liquid Flame: ±15° cone centred on barrel tip, 200px range ──────
+      const FLAME_RANGE = 200;
+      const SPREAD      = 15 * Math.PI / 180;
+      const leftA  = barrelAngle - SPREAD;
+      const rightA = barrelAngle + SPREAD;
+
+      this.ctx.save();
+      this.ctx.translate(tipX, tipY);
+
+      // Filled wedge — orange/flame tint
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(Math.cos(leftA) * FLAME_RANGE, Math.sin(leftA) * FLAME_RANGE);
+      this.ctx.arc(0, 0, FLAME_RANGE, leftA, rightA);
+      this.ctx.closePath();
+      this.ctx.fillStyle = 'rgba(255,100,0,0.08)';
+      this.ctx.fill();
+
+      // Cone edges (dashed, flame orange)
+      this.ctx.strokeStyle = 'rgba(255,120,0,0.55)';
+      this.ctx.lineWidth = 1 / cameraState.zoom;
+      this.ctx.setLineDash([3 / cameraState.zoom, 3 / cameraState.zoom]);
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(Math.cos(leftA) * FLAME_RANGE, Math.sin(leftA) * FLAME_RANGE);
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(Math.cos(rightA) * FLAME_RANGE, Math.sin(rightA) * FLAME_RANGE);
+      this.ctx.stroke();
+
+      // Solid arc at max range
+      this.ctx.setLineDash([]);
+      this.ctx.globalAlpha = 0.28;
+      this.ctx.beginPath();
+      this.ctx.arc(0, 0, FLAME_RANGE, leftA, rightA);
+      this.ctx.stroke();
+      this.ctx.globalAlpha = 1.0;
+
+      // Centre aim line — thin solid, shorter than cannon lines
+      this.ctx.strokeStyle = 'rgba(255,160,0,0.80)';
+      this.ctx.lineWidth = 1 / cameraState.zoom;
+      this.ctx.setLineDash([4 / cameraState.zoom, 3 / cameraState.zoom]);
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(cosB * FLAME_RANGE, sinB * FLAME_RANGE);
+      this.ctx.stroke();
+      this.ctx.setLineDash([]);
+
+      this.ctx.restore();
+
+    } else {
+      // ── Default / canister: simple dashed trajectory line ────────────────
+      this.ctx.save();
+      this.ctx.setLineDash([5 / cameraState.zoom, 4 / cameraState.zoom]);
+      this.ctx.strokeStyle = 'rgba(255,200,80,0.85)';
+      this.ctx.lineWidth = 1.5 / cameraState.zoom;
+      this.ctx.beginPath();
+      this.ctx.moveTo(tipX, tipY);
+      this.ctx.lineTo(cosB * (BARREL_TIP + RANGE), sinB * (BARREL_TIP + RANGE));
+      this.ctx.stroke();
+      this.ctx.setLineDash([]);
+      this.ctx.restore();
+    }
 
     this.ctx.restore();
   }
@@ -3242,6 +3354,151 @@ export class RenderSystem {
     const sinR = Math.sin(ship.rotation);
 
     for (const { module: cannon, alpha: fadeAlpha } of cannonsToShow) {
+      // ── Swivel: draw ammo-appropriate aim cone / line from helm ──────────
+      if (cannon.kind === 'swivel') {
+        const SWIVEL_LIMIT = 45 * Math.PI / 180;
+        const localRot = cannon.localRot || 0;
+        let predictedAimDir = this.playerAimAngleRelative - localRot + Math.PI / 2;
+        while (predictedAimDir >  Math.PI) predictedAimDir -= 2 * Math.PI;
+        while (predictedAimDir < -Math.PI) predictedAimDir += 2 * Math.PI;
+        predictedAimDir = Math.max(-SWIVEL_LIMIT, Math.min(SWIVEL_LIMIT, predictedAimDir));
+
+        const BARREL_TIP = 22;
+        const sx = cannon.localPos.x;
+        const sy = cannon.localPos.y;
+        // Barrel direction in ship-local space: localRot sets the "natural out" axis at -π/2
+        const barrelAngle = localRot - Math.PI / 2 + predictedAimDir;
+        const cosB = Math.cos(barrelAngle);
+        const sinB = Math.sin(barrelAngle);
+        const tipX = sx + cosB * BARREL_TIP;
+        const tipY = sy + sinB * BARREL_TIP;
+
+        const ammo = this.selectedAmmoType;
+        const ammoNorm = (ammo === 10 || ammo === 2) ? 10
+                       : (ammo === 11 || ammo === 3) ? 11
+                       : 12; // canister / default
+
+        this.ctx.save();
+        this.ctx.globalAlpha = fadeAlpha;
+
+        // ±45° rotation-limit arc centred on the swivel pivot
+        this.ctx.save();
+        this.ctx.translate(sx, sy);
+        const arcCentre = localRot - Math.PI / 2;
+        const LIMIT_RAD = 45 * Math.PI / 180;
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, BARREL_TIP + 6, arcCentre - LIMIT_RAD, arcCentre + LIMIT_RAD);
+        this.ctx.strokeStyle = 'rgba(255,120,40,0.35)';
+        this.ctx.lineWidth = 1 / cameraState.zoom;
+        this.ctx.stroke();
+        this.ctx.restore();
+
+        if (ammoNorm === 10) {
+          // Grapeshot: ±12° cone, 250px range
+          const GRAPE_RANGE = 250;
+          const SPREAD = 12 * Math.PI / 180;
+          const leftA  = barrelAngle - SPREAD;
+          const rightA = barrelAngle + SPREAD;
+          this.ctx.save();
+          this.ctx.translate(tipX, tipY);
+          // Filled wedge
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(Math.cos(leftA) * GRAPE_RANGE, Math.sin(leftA) * GRAPE_RANGE);
+          this.ctx.arc(0, 0, GRAPE_RANGE, leftA, rightA);
+          this.ctx.closePath();
+          this.ctx.fillStyle = 'rgba(255,200,80,0.07)';
+          this.ctx.fill();
+          // Dashed edges
+          this.ctx.strokeStyle = 'rgba(255,200,80,0.55)';
+          this.ctx.lineWidth = 1 / cameraState.zoom;
+          this.ctx.setLineDash([4 / cameraState.zoom, 3 / cameraState.zoom]);
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(Math.cos(leftA) * GRAPE_RANGE, Math.sin(leftA) * GRAPE_RANGE);
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(Math.cos(rightA) * GRAPE_RANGE, Math.sin(rightA) * GRAPE_RANGE);
+          this.ctx.stroke();
+          // Faint arc at max range
+          this.ctx.setLineDash([]);
+          this.ctx.globalAlpha = 0.30 * fadeAlpha;
+          this.ctx.beginPath();
+          this.ctx.arc(0, 0, GRAPE_RANGE, leftA, rightA);
+          this.ctx.stroke();
+          this.ctx.globalAlpha = fadeAlpha;
+          // Centre aim line
+          this.ctx.strokeStyle = 'rgba(255,220,100,0.75)';
+          this.ctx.lineWidth = 1.5 / cameraState.zoom;
+          this.ctx.setLineDash([5 / cameraState.zoom, 4 / cameraState.zoom]);
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(cosB * GRAPE_RANGE, sinB * GRAPE_RANGE);
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          this.ctx.restore();
+
+        } else if (ammoNorm === 11) {
+          // Liquid flame: ±15° cone, 200px range
+          const FLAME_RANGE = 200;
+          const SPREAD = 15 * Math.PI / 180;
+          const leftA  = barrelAngle - SPREAD;
+          const rightA = barrelAngle + SPREAD;
+          this.ctx.save();
+          this.ctx.translate(tipX, tipY);
+          // Filled wedge
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(Math.cos(leftA) * FLAME_RANGE, Math.sin(leftA) * FLAME_RANGE);
+          this.ctx.arc(0, 0, FLAME_RANGE, leftA, rightA);
+          this.ctx.closePath();
+          this.ctx.fillStyle = 'rgba(255,100,0,0.08)';
+          this.ctx.fill();
+          // Dashed edges
+          this.ctx.strokeStyle = 'rgba(255,120,0,0.55)';
+          this.ctx.lineWidth = 1 / cameraState.zoom;
+          this.ctx.setLineDash([3 / cameraState.zoom, 3 / cameraState.zoom]);
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(Math.cos(leftA) * FLAME_RANGE, Math.sin(leftA) * FLAME_RANGE);
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(Math.cos(rightA) * FLAME_RANGE, Math.sin(rightA) * FLAME_RANGE);
+          this.ctx.stroke();
+          // Faint arc at max range
+          this.ctx.setLineDash([]);
+          this.ctx.globalAlpha = 0.28 * fadeAlpha;
+          this.ctx.beginPath();
+          this.ctx.arc(0, 0, FLAME_RANGE, leftA, rightA);
+          this.ctx.stroke();
+          this.ctx.globalAlpha = fadeAlpha;
+          // Centre aim line
+          this.ctx.strokeStyle = 'rgba(255,160,0,0.80)';
+          this.ctx.lineWidth = 1 / cameraState.zoom;
+          this.ctx.setLineDash([4 / cameraState.zoom, 3 / cameraState.zoom]);
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(cosB * FLAME_RANGE, sinB * FLAME_RANGE);
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          this.ctx.restore();
+
+        } else {
+          // Canister / default: simple dashed line
+          this.ctx.save();
+          this.ctx.strokeStyle = 'rgba(255,200,80,0.85)';
+          this.ctx.lineWidth = 1.5 / cameraState.zoom;
+          this.ctx.setLineDash([5 / cameraState.zoom, 4 / cameraState.zoom]);
+          this.ctx.beginPath();
+          this.ctx.moveTo(tipX, tipY);
+          this.ctx.lineTo(tipX + cosB * 200, tipY + sinB * 200);
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          this.ctx.restore();
+        }
+
+        this.ctx.restore();
+        continue;
+      }
+
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
       const cannonData = cannon.moduleData;
 

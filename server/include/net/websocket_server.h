@@ -11,6 +11,7 @@
 #define COMPANY_NEUTRAL  0   // Unclaimed/neutral — no friendly-fire protection
 #define COMPANY_PIRATES  1   // Player's company
 #define COMPANY_NAVY     2   // Enemy AI company
+#define MAX_COMPANIES    3   // Total number of distinct company slots (neutral + pirates + navy)
 
 // ── Weapon Control Groups ────────────────────────────────────────────────────
 typedef enum {
@@ -79,8 +80,12 @@ typedef struct SimpleShip {
      *  or fired).  NEEDED stays true until this timestamp + CANNON_NEEDED_TIMEOUT_MS
      *  expires.  Cleared by tick_cannon_needed_expiry(). */
     uint32_t cannon_last_needed_ms[MAX_MODULES_PER_SHIP];
-    /* Per-ship weapon control groups (shared by all players on this ship) */
-    WeaponGroup weapon_groups[MAX_WEAPON_GROUPS];
+    /* Per-ship weapon control groups — isolated per company so that enemy
+     * boarders cannot read or sabotage the original crew's group config.
+     * Index 0 = COMPANY_NEUTRAL, 1 = COMPANY_PIRATES, 2 = COMPANY_NAVY.
+     * NPC/tick code always accesses [ship->company_id]; player config
+     * writes to [player->company_id]. */
+    WeaponGroup weapon_groups[MAX_COMPANIES][MAX_WEAPON_GROUPS];
 
     /* Sinking state — entered when hull_health hits 0; ship stays alive for SHIP_SINK_DURATION_MS */
     bool     is_sinking;
