@@ -366,6 +366,11 @@ export class UIManager {
   ): void {
     ctx.save();
 
+    // Normalise client UI IDs (10/11/12) → internal swivel IDs (2/3/4)
+    const normSwivel = (id: number) => id === 10 ? 2 : id === 11 ? 3 : id === 12 ? 4 : id;
+    loadedAmmoType  = normSwivel(loadedAmmoType);
+    pendingAmmoType = normSwivel(pendingAmmoType);
+
     const slotW  = 68;
     const slotH  = 48;
     const margin = 3;
@@ -646,10 +651,11 @@ export class UIManager {
   private renderSwivelAmmoSelector(ctx: CanvasRenderingContext2D, loadedAmmoType: number, pendingAmmoType: number): void {
     ctx.save();
 
-    // Swivel ammos are IDs 2–4; normalise anything invalid to 2 (grapeshot)
+    // Normalise client UI IDs (10/11/12) → internal swivel IDs (2/3/4)
+    const normSwivel = (id: number) => id === 10 ? 2 : id === 11 ? 3 : id === 12 ? 4 : id;
     const validIds = [2, 3, 4];
-    const safeLoaded  = validIds.includes(loadedAmmoType)  ? loadedAmmoType  : 2;
-    const safePending = validIds.includes(pendingAmmoType) ? pendingAmmoType : safeLoaded;
+    const safeLoaded  = validIds.includes(normSwivel(loadedAmmoType))  ? normSwivel(loadedAmmoType)  : 2;
+    const safePending = validIds.includes(normSwivel(pendingAmmoType)) ? normSwivel(pendingAmmoType) : safeLoaded;
 
     const ammoTypes = [
       { id: 2, name: 'GRAPESHOT',  icon: '∷', color: '#c8c8b0', desc: 'crew damage'  },

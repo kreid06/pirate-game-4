@@ -188,6 +188,7 @@ export class InputManager {
   private xHoldTimer: ReturnType<typeof setTimeout> | null = null;  // setTimeout handle for 1s hold
   private xHoldFired: boolean = false;    // True if hold timer already fired this press
   private flameStreamTimer: ReturnType<typeof setInterval> | null = null; // Liquid flame continuous stream
+  private flameAmmoSwitchTimer: ReturnType<typeof setTimeout> | null = null; // Post-flame ammo reload delay
   /** Active ammo group while at helm: 'cannon' (IDs 0-1) or 'swivel' (IDs 10-12). Toggle with U key. */
   public activeAmmoGroup: 'cannon' | 'swivel' = 'cannon';
 
@@ -466,6 +467,10 @@ export class InputManager {
       if (this.flameStreamTimer !== null) {
         clearInterval(this.flameStreamTimer);
         this.flameStreamTimer = null;
+      }
+      if (this.flameAmmoSwitchTimer !== null) {
+        clearTimeout(this.flameAmmoSwitchTimer);
+        this.flameAmmoSwitchTimer = null;
       }
     }
   }
@@ -1242,6 +1247,14 @@ export class InputManager {
       if (this.flameStreamTimer !== null) {
         clearInterval(this.flameStreamTimer);
         this.flameStreamTimer = null;
+        // If a different ammo is queued, schedule reload after 1s (swivel re-chambers)
+        if (this.selectedAmmoType !== this.loadedAmmoType) {
+          if (this.flameAmmoSwitchTimer !== null) clearTimeout(this.flameAmmoSwitchTimer);
+          this.flameAmmoSwitchTimer = setTimeout(() => {
+            this.loadedAmmoType = this.selectedAmmoType;
+            this.flameAmmoSwitchTimer = null;
+          }, 1000);
+        }
       }
     } else if (event.button === 2) { // Right mouse button
       if (this.inputState.rightMouseDown) {

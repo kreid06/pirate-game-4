@@ -3754,7 +3754,7 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
     float fire_angle = ship->rotation + (sw_base - (float)(M_PI / 2.0)) + aim_off;
 
     const float SWIVEL_SPEED = CLIENT_TO_SERVER(350.0f); /* px/s — slower than cannon's 500 */
-    const float BARREL_LEN   = 20.0f;                    /* client pixels */
+    const float BARREL_LEN   = 22.0f;                    /* client pixels — matches visual barrel tip (fillRect 22px) */
     float ship_vx = CLIENT_TO_SERVER(ship->velocity_x);
     float ship_vy = CLIENT_TO_SERVER(ship->velocity_y);
     uint32_t owner_id = (player != NULL) ? player->player_id : ship->ship_id;
@@ -3848,14 +3848,17 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
             flame_waves_initialized = true;
         }
         uint32_t now_fw = get_time_ms();
+        /* Barrel-tip origin for the flame wave — matches visual and hit-scan */
+        float flame_ox = world_x + cosf(fire_angle) * BARREL_LEN;
+        float flame_oy = world_y + sinf(fire_angle) * BARREL_LEN;
         /* Find existing slot for this swivel */
         bool fw_handled = false;
         for (int fi = 0; fi < MAX_FLAME_WAVES; fi++) {
             if (!flame_waves[fi].active || flame_waves[fi].swivel_id != sw->id) continue;
             if (!flame_waves[fi].retreating) {
                 /* Continuous hold — refresh heartbeat and aim; wave keeps advancing */
-                flame_waves[fi].origin_x     = world_x;
-                flame_waves[fi].origin_y     = world_y;
+                flame_waves[fi].origin_x     = flame_ox;
+                flame_waves[fi].origin_y     = flame_oy;
                 flame_waves[fi].fire_angle   = fire_angle;
                 flame_waves[fi].last_fire_ms = now_fw;
                 fw_handled = true;
@@ -3877,8 +3880,8 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
                 fw->wave_dist    = 0.0f;
                 fw->retreat_dist = 0.0f;
                 fw->retreating   = false;
-                fw->origin_x     = world_x;
-                fw->origin_y     = world_y;
+                fw->origin_x     = flame_ox;
+                fw->origin_y     = flame_oy;
                 fw->fire_angle   = fire_angle;
                 fw->last_fire_ms = now_fw;
                 break;
