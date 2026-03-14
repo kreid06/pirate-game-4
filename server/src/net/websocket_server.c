@@ -3768,12 +3768,17 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
         const float SPREAD_STEP    = 12.0f * (float)(M_PI / 180.0f);
         const int   NUM_PELLETS    = 3;
 
+        /* Offset origin to barrel tip so tracers and hit-scan start from the muzzle */
+        const float BARREL_LEN = 20.0f;
+        float muzzle_x = world_x + cosf(fire_angle) * BARREL_LEN;
+        float muzzle_y = world_y + sinf(fire_angle) * BARREL_LEN;
+
         /* Broadcast the visual shot event (reuses CANNON_FIRE format) so clients
          * show the muzzle flash / tracer for each ray. Use id=0 for projectile
          * since there is no real projectile entity. */
         for (int p = 0; p < NUM_PELLETS; p++) {
             float angle = fire_angle + SPREAD_STEP * (float)(p - 1);
-            broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, angle, 0, PROJ_TYPE_GRAPESHOT);
+            broadcast_cannon_fire(sw->id, ship->ship_id, muzzle_x, muzzle_y, angle, 0, PROJ_TYPE_GRAPESHOT);
         }
 
         /* Scan NPCs */
@@ -3781,7 +3786,7 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
             WorldNpc* npc = &world_npcs[ni];
             if (!npc->active) continue;
             if (npc->ship_id == ship->ship_id) continue; /* friendly */
-            float dx = npc->x - world_x, dy = npc->y - world_y;
+            float dx = npc->x - muzzle_x, dy = npc->y - muzzle_y;
             float dist = sqrtf(dx*dx + dy*dy);
             if (dist > GRAPE_RANGE) continue;
             if (dist < 0.01f) { dx = 1.0f; dy = 0.0f; dist = 1.0f; }
@@ -3810,7 +3815,7 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
         for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
             WebSocketPlayer* wp = &players[wpi];
             if (!wp->active || wp->parent_ship_id == ship->ship_id) continue;
-            float dx = wp->x - world_x, dy = wp->y - world_y;
+            float dx = wp->x - muzzle_x, dy = wp->y - muzzle_y;
             float dist = sqrtf(dx*dx + dy*dy);
             if (dist > GRAPE_RANGE) continue;
             if (dist < 0.01f) { dx = 1.0f; dy = 0.0f; dist = 1.0f; }
@@ -3903,7 +3908,7 @@ static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
                     proj->firing_ship_id = (entity_id)ship->ship_id;
                     proj->type           = PROJ_TYPE_CANISTER_SHOT;
                 }
-                broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, angle, pid, PROJ_TYPE_CANISTER_SHOT);
+                broadcast_cannon_fire(sw->id, ship->ship_id, sx, sy, angle, pid, PROJ_TYPE_CANISTER_SHOT);
             }
         }
         log_info("Swivel %u fired CANISTER SHOT (5 pellets) on ship %u", sw->id, ship->ship_id);

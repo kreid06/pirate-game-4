@@ -215,10 +215,16 @@ export class RenderSystem {
     const halfSpread = isCanister ? (20 * Math.PI / 180) : (12 * Math.PI / 180);
     const range      = isCanister ? 180 : 250;
     const now        = performance.now();
+
+    // Server broadcasts pivot position; offset to barrel tip (matches server BARREL_LEN = 20px)
+    const BARREL_TIP = 20;
+    const bx = x + Math.cos(angle) * BARREL_TIP;
+    const by = y + Math.sin(angle) * BARREL_TIP;
+
     for (let p = 0; p < count; p++) {
       const t   = count > 1 ? p / (count - 1) : 0.5;
       const ray = angle + halfSpread * (2 * t - 1);
-      this.grapeshotTracers.push({ x, y, angle: ray, range, spawnAt: now, ttl: 180, ammoType });
+      this.grapeshotTracers.push({ x: bx, y: by, angle: ray, range, spawnAt: now, ttl: 180, ammoType });
     }
   }
 
