@@ -2598,12 +2598,14 @@ static void tick_world_npcs(float dt) {
         }
 
         /* Deck-bounds water check: if the NPC slid off the ship edges, mark in_water.
-         * Ship is ~480 wide x 120 tall client units; use generous margins. */
+         * Ship is ~480 wide x 120 tall client units; use generous margins.
+         * If ship_id == 0 (ship sank) the NPC is always in water. */
         {
             const float DECK_HALF_LEN = 260.0f;
             const float DECK_HALF_WID =  75.0f;
             bool was_water = npc->in_water;
-            npc->in_water = (fabsf(npc->local_x) > DECK_HALF_LEN ||
+            npc->in_water = (npc->ship_id == 0) ||
+                            (fabsf(npc->local_x) > DECK_HALF_LEN ||
                              fabsf(npc->local_y) > DECK_HALF_WID);
             if (!was_water && npc->in_water && npc->fire_timer_ms > 0) {
                 /* Fell into water while burning — extinguish immediately */
@@ -4892,6 +4894,14 @@ static void tick_sinking_ships(void) {
             players[pi].controlling_ship_id = 0;
             players[pi].x = SERVER_TO_CLIENT(CLIENT_TO_SERVER(wx));
             players[pi].y = SERVER_TO_CLIENT(CLIENT_TO_SERVER(wy));
+        }
+
+        /* Eject any remaining NPCs — clear ship_id so they are orphaned in the world */
+        for (int ni = 0; ni < world_npc_count; ni++) {
+            if (!world_npcs[ni].active || world_npcs[ni].ship_id != sunk_id) continue;
+            world_npcs[ni].ship_id  = 0;
+            world_npcs[ni].in_water = true;
+            world_npcs[ni].fire_timer_ms = 0;
         }
 
         /* Destroy in sim */
@@ -8387,10 +8397,13 @@ void websocket_server_tick(float dt) {
                         players[pi].movement_state      = PLAYER_STATE_WALKING;
                     }
 
-                    /* Dismount all NPCs from the sinking ship */
+                    /* Dismount all NPCs from the sinking ship and mark them as in water */
                     for (int ni = 0; ni < world_npc_count; ni++) {
                         if (!world_npcs[ni].active || world_npcs[ni].ship_id != sunk_id) continue;
                         dismount_npc(&world_npcs[ni], sinking_ship);
+                        world_npcs[ni].in_water = true;
+                        /* Extinguish any burning NPCs that hit the water */
+                        world_npcs[ni].fire_timer_ms = 0;
                     }
 
                     /* Broadcast SHIP_SINKING so clients start the animation immediately */
