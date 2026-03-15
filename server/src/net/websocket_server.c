@@ -9347,6 +9347,7 @@ void websocket_server_tick(float dt) {
                         WorldNpc* npc = &world_npcs[ni];
                         if (!npc->active) continue;
                         if (npc->ship_id == fw->ship_id) continue;
+                        if (npc->ship_id == 0) continue; /* NPC is overboard / swimming */
                         float dx = npc->x - fw->origin_x, dy = npc->y - fw->origin_y;
                         float dist = sqrtf(dx*dx + dy*dy);
                         if (dist > fw->wave_dist + 30.0f) continue;
@@ -9375,6 +9376,7 @@ void websocket_server_tick(float dt) {
                         WebSocketPlayer* wp = &players[wpi];
                         if (!wp->active) continue;
                         if (wp->parent_ship_id == fw->ship_id) continue;
+                        if (wp->movement_state == PLAYER_STATE_SWIMMING) continue; /* player is in water */
                         float dx = wp->x - fw->origin_x, dy = wp->y - fw->origin_y;
                         float dist = sqrtf(dx*dx + dy*dy);
                         if (dist > fw->wave_dist + 30.0f) continue;
@@ -9512,6 +9514,16 @@ void websocket_server_tick(float dt) {
         for (int ni = 0; ni < world_npc_count; ni++) {
             WorldNpc* npc = &world_npcs[ni];
             if (!npc->active || npc->fire_timer_ms == 0) continue;
+            /* Water extinguishes fire — NPC overboard */
+            if (npc->ship_id == 0) {
+                npc->fire_timer_ms = 0;
+                char fx[192];
+                snprintf(fx, sizeof(fx),
+                    "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"npc\",\"id\":%u}",
+                    npc->id);
+                broadcast_json_all(fx);
+                continue;
+            }
             uint16_t npc_fire_dmg = 5u + (uint16_t)(npc->max_health / 80u);
             if (npc->health > npc_fire_dmg) npc->health -= npc_fire_dmg; else npc->health = 0;
             if (npc->health == 0) {
@@ -9557,6 +9569,16 @@ void websocket_server_tick(float dt) {
         for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
             WebSocketPlayer* wp = &players[wpi];
             if (!wp->active || wp->fire_timer_ms == 0) continue;
+            /* Water extinguishes fire — player swimming */
+            if (wp->movement_state == PLAYER_STATE_SWIMMING) {
+                wp->fire_timer_ms = 0;
+                char fx[192];
+                snprintf(fx, sizeof(fx),
+                    "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"player\",\"id\":%u}",
+                    wp->player_id);
+                broadcast_json_all(fx);
+                continue;
+            }
             uint16_t pl_fire_dmg = 5u + (uint16_t)(wp->max_health / 80u);
             if (wp->health > pl_fire_dmg) wp->health -= pl_fire_dmg; else wp->health = 0;
             if (wp->fire_timer_ms > dot_elapsed) {
