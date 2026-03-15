@@ -3579,10 +3579,11 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
  * ══════════════════════════════════════════════════════════════════════════ */
 #define MAX_FLAME_WAVES   16
 #define FLAME_WAVE_SPEED  125.0f    /* px/s — matches old projectile speed   */
-#define FLAME_RANGE       200.0f    /* max reach, client px                  */
+#define FLAME_RANGE       280.0f    /* max reach, client px                  */
 #define FLAME_HALF_CONE   (15.0f * (float)(M_PI / 180.0f))  /* ±15°         */
 #define FLAME_STALE_MS    350u      /* ms without a pulse → start retreating  */
 #define FIRE_DURATION_MS  10000u    /* ms an entity burns after ignition      */
+#define FLAME_HALF_CONE_MODULE (25.0f * (float)(M_PI / 180.0f)) /* wider test vs ±15° entity cone */
 
 typedef struct {
     bool     active;
@@ -9312,11 +9313,11 @@ void websocket_server_tick(float dt) {
                         }
                     }
 
-                    /* Wooden modules on enemy ships */
+                    /* Wooden modules — any ship (including firing ship; fire doesn't pick sides) */
+                    const float cos_hc_mod = cosf(FLAME_HALF_CONE_MODULE);
                     for (int s = 0; s < ship_count; s++) {
                         if (!ships[s].active) continue;
                         SimpleShip* fship = &ships[s];
-                        if (fship->ship_id == fw->ship_id) continue;
                         float cos_r = cosf(fship->rotation);
                         float sin_r = sinf(fship->rotation);
                         for (int m = 0; m < fship->module_count; m++) {
@@ -9331,9 +9332,9 @@ void websocket_server_tick(float dt) {
                             float wy = fship->y + (lx * sin_r + ly * cos_r);
                             float dx = wx - fw->origin_x, dy = wy - fw->origin_y;
                             float dist = sqrtf(dx*dx + dy*dy);
-                            if (dist > fw->wave_dist + 35.0f) continue;
+                            if (dist > fw->wave_dist + 40.0f) continue;
                             float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
-                            if (dot < cos_hc) continue;
+                            if (dot < cos_hc_mod) continue;
                             bool first = (mod->fire_timer_ms == 0);
                             mod->fire_timer_ms = FIRE_DURATION_MS;
                             if (global_sim) {
@@ -9349,6 +9350,8 @@ void websocket_server_tick(float dt) {
                                 }
                             }
                             if (first) {
+                                log_info("🔥 Module %u (ship %u type %d) ignited by flame wave (dist=%.1f wave=%.1f)",
+                                         mod->id, fship->ship_id, (int)mt, dist, fw->wave_dist);
                                 char fmsg[256];
                                 snprintf(fmsg, sizeof(fmsg),
                                     "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"module\","

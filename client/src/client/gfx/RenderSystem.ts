@@ -125,6 +125,8 @@ export class RenderSystem {
   private npcDamageFlash: Map<number, number> = new Map();
   /** Key → fire expiry timestamp (ms). Key format: "npc:{id}" | "player:{id}" | "module:{shipId}:{moduleId}" */
   private burningEntities: Map<string, number> = new Map();
+  /** Cached fire-point positions in ship-local space per burning module. Generated once on first draw. */
+  private moduleFirePoints: Map<string, Array<{lx: number; ly: number; r: number}>> = new Map();
   /**
    * Short-lived hit-scan tracer lines for grapeshot / canister bursts.
    * Each entry: origin (world px), angle (rad), range (px), spawnAt (ms), ttl (ms).
@@ -263,7 +265,7 @@ export class RenderSystem {
 
       // Client-side interpolation: advance wave/retreat from last server report
       const dt = (now - fw.serverUpdateAt) / 1000;
-      const FLAME_RANGE  = 200;
+      const FLAME_RANGE  = 280;
       const waveDist    = fw.retreating ? fw.waveDist
                                         : Math.min(fw.waveDist + dt * WAVE_SPEED, FLAME_RANGE);
       const retreatDist = fw.retreating ? Math.min(fw.retreatDist + dt * WAVE_SPEED, FLAME_RANGE) : 0;
@@ -411,6 +413,7 @@ export class RenderSystem {
       ? `module:${shipId}:${moduleId}`
       : `${entityType}:${id}`;
     this.burningEntities.delete(key);
+    if (entityType === 'module') this.moduleFirePoints.delete(key);
   }
 
   /** Returns true if an entity/module is currently marked as burning. */
@@ -2036,6 +2039,8 @@ export class RenderSystem {
 
   /**
    * Draw animated fire overlays on burning wooden modules (plank, deck, mast).
+   * Each module has a set of stable fire-point positions in ship-local space
+   * (generated once on first draw, min-distance spaced so they do not clump).
    */
   private drawBurningModules(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 300)) return;
@@ -2043,20 +2048,117 @@ export class RenderSystem {
     const cosR = Math.cos(ship.rotation);
     const sinR = Math.sin(ship.rotation);
     const zoom = camera.getState().zoom;
+
     for (const mod of ship.modules) {
       if (!WOODEN_KINDS.has(mod.kind)) continue;
       if (!this.isBurning('module', mod.id, ship.id, mod.id)) continue;
-      // Compute local-to-world position
-      const lx = mod.localPos?.x ?? 0;
-      const ly = mod.localPos?.y ?? 0;
-      const wx = ship.position.x + lx * cosR - ly * sinR;
-      const wy = ship.position.y + lx * sinR + ly * cosR;
-      const screen = camera.worldToScreen(Vec2.from(wx, wy));
-      const baseRadius = Math.max(8, 12 * zoom);
-      this.ctx.save();
-      this.drawFireOverlay(screen.x, screen.y, baseRadius);
-      this.ctx.restore();
+
+      const key = `module:${ship.id}:${mod.id}`;
+      // Generate and cache stable local-space fire positions for this module
+      if (!this.moduleFirePoints.has(key)) {
+        this.moduleFirePoints.set(key, this.generateModuleFirePoints(mod));
+      }
+      const firePts = this.moduleFirePoints.get(key)!;
+
+      for (const pt of firePts) {
+        const wx = ship.position.x + pt.lx * cosR - pt.ly * sinR;
+        const wy = ship.position.y + pt.lx * sinR + pt.ly * cosR;
+        const screen = camera.worldToScreen(Vec2.from(wx, wy));
+        const screenR = Math.max(8, pt.r * zoom);
+        this.ctx.save();
+        this.drawFireOverlay(screen.x, screen.y, screenR);
+        this.ctx.restore();
+      }
     }
+  }
+
+  /**
+   * Generate a stable set of fire-point positions in ship-local space for a burning module.
+   * Points are spaced at least MIN_FIRE_DIST world-units apart.
+   *
+   * - deck  → grid of points across the deck polygon / default bounds
+   * - plank → 1–4 points along the plank span or curve
+   * - mast  → single point at localPos
+   */
+  private generateModuleFirePoints(mod: ShipModule): Array<{lx: number; ly: number; r: number}> {
+    const MIN_DIST = 30; // world-unit minimum spacing between fire points
+    const points: Array<{lx: number; ly: number; r: number}> = [];
+
+    // Deterministic per-module PRNG (LCG) — same layout every time for the same module
+    let seed = (mod.id * 2654435761) >>> 0;
+    const rand = (): number => {
+      seed = Math.imul(seed, 1664525) + 1013904223 >>> 0;
+      return seed / 0x100000000;
+    };
+
+    const tryAdd = (lx: number, ly: number, r: number): boolean => {
+      for (const p of points) {
+        const dx = p.lx - lx, dy = p.ly - ly;
+        if (dx * dx + dy * dy < MIN_DIST * MIN_DIST) return false;
+      }
+      points.push({ lx, ly, r });
+      return true;
+    };
+
+    if (mod.kind === 'deck') {
+      // Sample a grid across the deck polygon; fall back to the default hull footprint
+      const data = mod.moduleData as any;
+      const area: Vec2[] | undefined = data?.area;
+      let minX = -220, minY = -48, maxX = 220, maxY = 48;
+      if (area && area.length > 2) {
+        minX = Infinity; minY = Infinity; maxX = -Infinity; maxY = -Infinity;
+        for (const v of area) {
+          if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+          if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+        }
+      }
+      const spacing = MIN_DIST * 1.05;
+      for (let lx = minX + spacing * 0.55; lx < maxX; lx += spacing) {
+        for (let ly = minY + spacing * 0.55; ly < maxY; ly += spacing) {
+          // Jitter so the grid does not look artificial
+          const jx = lx + (rand() - 0.5) * spacing * 0.55;
+          const jy = ly + (rand() - 0.5) * spacing * 0.55;
+          const pt = Vec2.from(jx, jy);
+          if (area && area.length > 2 && !PolygonUtils.pointInPolygon(pt, area)) continue;
+          tryAdd(jx, jy, 15);
+        }
+      }
+      // Guarantee at least a few visible points
+      if (points.length < 3) {
+        tryAdd(0, 0, 15);
+        tryAdd(-55, 0, 15);
+        tryAdd(55, 0, 15);
+      }
+
+    } else if (mod.kind === 'plank') {
+      const pd = mod.moduleData as PlankModuleData;
+      const lx0 = mod.localPos?.x ?? 0;
+      const ly0 = mod.localPos?.y ?? 0;
+      if (pd?.isCurved && pd.curveData) {
+        // Sample along the bezier curve at t1, midpoint, and t2
+        const { start, control, end, t1, t2 } = pd.curveData;
+        const tSamples = [t1, (t1 + t2) / 2, t2];
+        for (const t of tSamples) {
+          const bx = (1-t)*(1-t)*start.x + 2*(1-t)*t*control.x + t*t*end.x;
+          const by = (1-t)*(1-t)*start.y + 2*(1-t)*t*control.y + t*t*end.y;
+          tryAdd(bx, by, 16);
+        }
+      } else {
+        const len = pd?.length ?? 40;
+        const cos = Math.cos(mod.localRot ?? 0);
+        const sin = Math.sin(mod.localRot ?? 0);
+        const nPts = Math.max(1, Math.min(4, Math.round(len / MIN_DIST)));
+        for (let i = 0; i < nPts; i++) {
+          const f = nPts === 1 ? 0 : i / (nPts - 1) - 0.5;
+          tryAdd(lx0 + cos * len * f, ly0 + sin * len * f, 16);
+        }
+      }
+
+    } else if (mod.kind === 'mast') {
+      tryAdd(mod.localPos?.x ?? 0, mod.localPos?.y ?? 0, 18);
+    }
+
+    return points;
   }
 
   /**
@@ -3046,8 +3148,8 @@ export class RenderSystem {
       this.ctx.restore();
 
     } else if (ammoNorm === 11) {
-      // ── Liquid Flame: ±15° cone centred on barrel tip, 200px range ──────
-      const FLAME_RANGE = 200;
+      // ── Liquid Flame: ±15° cone centred on barrel tip, 280px range ──────
+      const FLAME_RANGE = 280;
       const SPREAD      = 15 * Math.PI / 180;
       const leftA  = barrelAngle - SPREAD;
       const rightA = barrelAngle + SPREAD;
@@ -3508,7 +3610,7 @@ export class RenderSystem {
 
         } else if (ammoNorm === 11) {
           // Liquid flame: ±15° cone, 200px range
-          const FLAME_RANGE = 200;
+          const FLAME_RANGE = 280;
           const SPREAD = 15 * Math.PI / 180;
           const leftA  = barrelAngle - SPREAD;
           const rightA = barrelAngle + SPREAD;
