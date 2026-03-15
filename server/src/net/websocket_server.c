@@ -5127,7 +5127,7 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
 /* Ghost cannon arc — ±90 degrees (much wider than normal 30°) */
 #define GHOST_CANNON_ARC    (90.0f * (float)(M_PI / 180.0))
 /* Cannon sweep: side-to-side oscillation rate while chasing */
-#define GHOST_SWEEP_RATE    0.7f   /* rad/s — slow haunting sweep */
+#define GHOST_SWEEP_RATE    0.14f  /* rad/s — very slow haunting sweep (5× slower) */
 /* Sweep amplitude (radians). ~40° wide arc swing side-to-side */
 #define GHOST_SWING_AMP     0.70f
 /* How much the ship BODY sways left/right while chasing (radians) */
@@ -5385,9 +5385,17 @@ static void tick_ghost_ships(float dt) {
                 if (cannon->type_id != MODULE_TYPE_CANNON) continue;
                 /* Aim with 90° arc + oscillating sweep */
                 ghost_aim_cannon(ship, cannon, target->x, target->y, sweep_rad);
-                /* Fire when reloaded — ghost ships need no crew */
+                /* Fire when reloaded AND aimed within ±15° of the target */
                 if (cannon->data.cannon.time_since_fire >= cannon->data.cannon.reload_time) {
-                    fire_cannon(ship, cannon, NULL, false, PROJ_TYPE_CANNONBALL);
+                    float wfa = ship->rotation
+                        + Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0)
+                        + Q16_TO_FLOAT(cannon->data.cannon.aim_direction);
+                    float fire_diff = wfa - atan2f(dy, dx);
+                    while (fire_diff >  (float)M_PI) fire_diff -= 2.0f * (float)M_PI;
+                    while (fire_diff < -(float)M_PI) fire_diff += 2.0f * (float)M_PI;
+                    if (fabsf(fire_diff) < 0.262f) { /* ±15° */
+                        fire_cannon(ship, cannon, NULL, false, PROJ_TYPE_CANNONBALL);
+                    }
                 }
             }
         } else {
