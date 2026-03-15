@@ -9302,9 +9302,8 @@ void websocket_server_tick(float dt) {
                         if (dist > fw->wave_dist + 30.0f) continue;
                         float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
                         if (dot < cos_hc) continue;
-                        bool first = (npc->fire_timer_ms == 0);
                         npc->fire_timer_ms = FIRE_DURATION_MS;
-                        if (first) {
+                        {
                             char fmsg[256];
                             snprintf(fmsg, sizeof(fmsg),
                                 "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"npc\",\"id\":%u,"
@@ -9324,9 +9323,8 @@ void websocket_server_tick(float dt) {
                         if (dist > fw->wave_dist + 30.0f) continue;
                         float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
                         if (dot < cos_hc) continue;
-                        bool first = (wp->fire_timer_ms == 0);
                         wp->fire_timer_ms = FIRE_DURATION_MS;
-                        if (first) {
+                        {
                             char fmsg[256];
                             snprintf(fmsg, sizeof(fmsg),
                                 "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"player\",\"id\":%u,"
@@ -9372,9 +9370,13 @@ void websocket_server_tick(float dt) {
                                     break;
                                 }
                             }
-                            if (first) {
-                                log_info("🔥 Module %u (ship %u type %d) ignited by flame wave (dist=%.1f wave=%.1f)",
-                                         mod->id, fship->ship_id, (int)mt, dist, fw->wave_dist);
+                            /* Always broadcast FIRE_EFFECT — refreshes client timer on every
+                               flame contact, preventing client/server desync where client timer
+                               expires while server keeps module burning. */
+                            log_info("🔥 Module %u (ship %u type %d) %s by flame wave (dist=%.1f wave=%.1f)",
+                                     mod->id, fship->ship_id, (int)mt,
+                                     first ? "ignited" : "re-ignited", dist, fw->wave_dist);
+                            {
                                 char fmsg[256];
                                 snprintf(fmsg, sizeof(fmsg),
                                     "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"module\","
