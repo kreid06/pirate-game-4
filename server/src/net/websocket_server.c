@@ -5125,10 +5125,12 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
 }
 
 /* ============================================================================
- * GHOST SHIP SPAWN
- * Creates a SHIP_TYPE_GHOST brigantine at the given world position.  The ship
+ * PHANTOM BRIG SPAWN  (ship_type = SHIP_TYPE_GHOST = 99)
+ * Creates a "Phantom Brig" brigantine at the given world position.  The ship
  * belongs to COMPANY_NAVY and has its port/starboard cannon groups set to
  * TARGETFIRE from the start so tick_ghost_ships can auto-aim them.
+ * Phantom Brigs deal hull-only damage — interior module breaches are filtered
+ * out in the hit-event processing loop.
  * ========================================================================= */
 uint32_t websocket_server_create_ghost_ship(float x, float y) {
     uint32_t ship_id = websocket_server_create_ship(x, y, COMPANY_NAVY);
@@ -5165,7 +5167,7 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
         (void)npc_id;  /* we don't need to track it separately */
     }
 
-    log_info("👻 Ghost ship spawned (ID: %u) at (%.0f, %.0f)", ship_id, x, y);
+    log_info("👻 Phantom Brig spawned (ID: %u) at (%.0f, %.0f)", ship_id, x, y);
     return ship_id;
 }
 
@@ -8561,6 +8563,15 @@ void websocket_server_tick(float dt) {
         for (uint8_t e = 0; e < global_sim->hit_event_count; e++) {
             const struct HitEvent* ev = &global_sim->hit_events[e];
             char msg[256];
+
+            /* ── Phantom Brig hull-only damage rule ──
+             * SHIP_TYPE_GHOST cannonballs skip interior module breaches entirely;
+             * only plank hits and sink events pass through to clients.
+             * This prevents phantoms from stripping modules — they attack the hull. */
+            if (ev->is_breach && !ev->is_sink && ev->shooter_ship_id != 0) {
+                SimpleShip* shooter = find_ship(ev->shooter_ship_id);
+                if (shooter && shooter->ship_type == SHIP_TYPE_GHOST) continue;
+            }
 
             if (ev->is_sink) {
                 // Ship hull_health reached 0 — enter sinking state instead of immediate despawn.

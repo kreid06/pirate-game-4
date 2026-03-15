@@ -5580,7 +5580,9 @@ export class RenderSystem {
       [COMPANY_NAVY]:    'Navy',
     };
     const companyName = COMPANY_NAMES[ship.companyId] ?? `#${ship.companyId}`;
-    const shipTitle   = `${companyName} Brigantine`;
+    const shipTitle   = ship.shipType === SHIP_TYPE_GHOST
+      ? 'Phantom Brig'
+      : `${companyName} Brigantine`;
 
     // Sum plank/deck module health
     let totalPlankHp    = 0;

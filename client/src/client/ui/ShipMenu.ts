@@ -17,6 +17,7 @@ import {
   COMPANY_NEUTRAL,
   COMPANY_PIRATES,
   COMPANY_NAVY,
+  SHIP_TYPE_GHOST,
   ShipLevelStats,
   SHIP_ATTR_WEIGHT,
   SHIP_ATTR_RESISTANCE,
@@ -181,7 +182,7 @@ export class ShipMenu {
     cur = this._hullAmmo(ctx, px, cur, ship);
     cur = this._modulesSection(ctx, px, cur, ship.modules);
     cur = this._progressionSection(ctx, px, cur, ship.id, ship.levelStats);
-    this._crewSection(ctx, px, cur, worldState, ship.id);
+    this._crewSection(ctx, px, cur, worldState, ship.id, ship.shipType ?? 3);
 
     ctx.restore();
   }
@@ -420,6 +421,7 @@ export class ShipMenu {
     px:         number, py: number,
     worldState: WorldState,
     shipId:     number,
+    shipType:   number = 3,
   ): void {
     this._npcHitAreas = [];
     const aboard  = worldState.npcs.filter(n => n.shipId === shipId);
@@ -432,7 +434,12 @@ export class ShipMenu {
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      ctx.fillText('  Ghost ship — no crew aboard.', px + PAD, py + 4);
+      ctx.fillText(
+        shipType === SHIP_TYPE_GHOST
+          ? '  Phantom Brig — no crew aboard.'
+          : '  No crew aboard.',
+        px + PAD, py + 4,
+      );
       return;
     }
 

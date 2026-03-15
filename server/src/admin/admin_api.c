@@ -675,6 +675,32 @@ int admin_api_create_ship(struct HttpResponse* resp, float x, float y, uint8_t c
     return 0;
 }
 
+int admin_api_create_phantom_brig(struct HttpResponse* resp, float x, float y) {
+    if (!resp) return -1;
+
+    uint32_t new_id = websocket_server_create_ghost_ship(x, y);
+
+    int len;
+    if (new_id == 0) {
+        resp->status_code = 503;
+        resp->content_type = "application/json";
+        len = snprintf(json_buffer, sizeof(json_buffer),
+            "{\"success\":false,\"error\":\"Failed to spawn Phantom Brig (sim full or not linked)\"}");
+    } else {
+        resp->status_code = 200;
+        resp->content_type = "application/json";
+        len = snprintf(json_buffer, sizeof(json_buffer),
+            "{\"success\":true,\"shipId\":%u,\"x\":%.1f,\"y\":%.1f,\"name\":\"Phantom Brig\"}",
+            new_id, x, y);
+    }
+
+    if (len < 0 || len >= (int)sizeof(json_buffer)) return -1;
+    resp->body = json_buffer;
+    resp->body_length = (size_t)len;
+    resp->cache_control = false;
+    return 0;
+}
+
 int admin_api_set_player_company(struct HttpResponse* resp, uint32_t player_id, uint8_t company_id) {
     if (!resp) return -1;
 

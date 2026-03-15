@@ -80,7 +80,16 @@ static const char* dashboard_html =
 "</div>\n"
 "<div id=\"spawn-result\" class=\"spawn-result\"></div>\n"
 "</div>\n"
-"<div class=\"card\"><h3>👥 Players</h3><div id=\"player-list\">Loading...</div></div>\n"
+"<div class=\"card\"><h3>� Spawn Phantom Brig</h3>\n"
+"<p style=\"font-size:0.85rem;color:#555;margin-top:0\">Spawn an autonomous spectral enemy brigantine. Attacks nearby player ships on sight.</p>\n"
+"<div class=\"form-row\">\n"
+"  <div class=\"form-group\"><label>X (px)</label><input id=\"pbrig-x\" type=\"number\" value=\"400\"></div>\n"
+"  <div class=\"form-group\"><label>Y (px)</label><input id=\"pbrig-y\" type=\"number\" value=\"400\"></div>\n"
+"  <button class=\"spawn-btn\" style=\"background:#4a1a7a\" onclick=\"spawnPhantomBrig()\">👻 Spawn Phantom Brig</button>\n"
+"</div>\n"
+"<div id=\"pbrig-result\" class=\"spawn-result\"></div>\n"
+"</div>\n"
+"<div class=\"card\"><h3>�👥 Players</h3><div id=\"player-list\">Loading...</div></div>\n"
 "</div></div>\n"
 "<div id=\"map\" class=\"tab-pane\">\n"
 "<h2>🗺️ Live World Map</h2>\n"
@@ -449,6 +458,32 @@ static const char* dashboard_html =
 "btn.disabled = false;\n"
 "refreshAll();\n"
 "}\n"
+"async function spawnPhantomBrig() {\n"
+"const x = parseFloat(document.getElementById('pbrig-x').value) || 400;\n"
+"const y = parseFloat(document.getElementById('pbrig-y').value) || 400;\n"
+"const resultEl = document.getElementById('pbrig-result');\n"
+"resultEl.style.display = 'none';\n"
+"try {\n"
+"const r = await fetch('/api/admin/phantom-brig', {\n"
+"  method: 'POST',\n"
+"  headers: {'Content-Type': 'application/json'},\n"
+"  body: JSON.stringify({x, y})\n"
+"});\n"
+"const data = await r.json();\n"
+"if (data.success) {\n"
+"  resultEl.className = 'spawn-result ok';\n"
+"  resultEl.textContent = `✅ Phantom Brig #${data.shipId} spawned at (${x}, ${y})`;\n"
+"} else {\n"
+"  resultEl.className = 'spawn-result err';\n"
+"  resultEl.textContent = `❌ ${data.error || 'Unknown error'}`;\n"
+"}\n"
+"} catch(e) {\n"
+"resultEl.className = 'spawn-result err';\n"
+"resultEl.textContent = '❌ Request failed: ' + e.message;\n"
+"}\n"
+"resultEl.style.display = 'block';\n"
+"refreshAll();\n"
+"}\n"
 "refreshAll(); setInterval(refreshAll, 2000);\n"
 "</script>\n"
 "</body></html>";
@@ -600,6 +635,16 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                             if (p) { p = strchr(p, ':'); if (p) company = (uint8_t)atoi(p + 1); }
                         }
                         admin_api_create_ship(&resp, x, y, company);
+                    } else if (strcmp(post_start, "/api/admin/phantom-brig") == 0) {
+                        float x = 400.0f, y = 400.0f;
+                        if (body) {
+                            char *p;
+                            p = strstr(body, "\"x\"");
+                            if (p) { p = strchr(p, ':'); if (p) x = (float)atof(p + 1); }
+                            p = strstr(body, "\"y\"");
+                            if (p) { p = strchr(p, ':'); if (p) y = (float)atof(p + 1); }
+                        }
+                        admin_api_create_phantom_brig(&resp, x, y);
                     } else if (strcmp(post_start, "/api/admin/player/company") == 0) {
                         uint32_t player_id = 0;
                         uint8_t company = 0;
