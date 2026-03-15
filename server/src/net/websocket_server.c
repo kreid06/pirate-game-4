@@ -9206,6 +9206,7 @@ void websocket_server_tick(float dt) {
     // ===== UPDATE CANNON AND SWIVEL RELOAD TIMERS =====
     // Track time since last fire for each cannon/swivel
     static uint32_t last_cannon_update = 0;
+    static uint32_t last_dot_update = 0;
     
     if (current_time - last_cannon_update >= 100) { // Update every 100ms
         uint32_t time_elapsed = current_time - last_cannon_update;
@@ -9408,12 +9409,15 @@ void websocket_server_tick(float dt) {
             }
         } /* end FLAME WAVE UPDATE */
 
-        /* ===== FIRE DOT TICK (every 100ms) ===== */
-        /* NPCs on fire: 1 base HP + 0.25% max_health per 100ms tick */
+        /* ===== FIRE DOT TICK (every 500ms, 5x damage per tick = same DPS, fewer broadcasts) ===== */
+        if (current_time - last_dot_update >= 500) {
+        uint32_t dot_elapsed = current_time - last_dot_update;
+        last_dot_update = current_time;
+        /* NPCs on fire: 5 base HP + 1.25% max_health per 500ms tick */
         for (int ni = 0; ni < world_npc_count; ni++) {
             WorldNpc* npc = &world_npcs[ni];
             if (!npc->active || npc->fire_timer_ms == 0) continue;
-            uint16_t npc_fire_dmg = 1u + (uint16_t)(npc->max_health / 400u);
+            uint16_t npc_fire_dmg = 5u + (uint16_t)(npc->max_health / 80u);
             if (npc->health > npc_fire_dmg) npc->health -= npc_fire_dmg; else npc->health = 0;
             if (npc->health == 0) {
                 npc->active = false;
@@ -9434,8 +9438,8 @@ void websocket_server_tick(float dt) {
                 }
                 continue;
             }
-            if (npc->fire_timer_ms > time_elapsed) {
-                npc->fire_timer_ms -= time_elapsed;
+            if (npc->fire_timer_ms > dot_elapsed) {
+                npc->fire_timer_ms -= dot_elapsed;
             } else {
                 npc->fire_timer_ms = 0;
                 /* Broadcast FIRE_EXTINGUISHED for NPC */
@@ -9454,14 +9458,14 @@ void websocket_server_tick(float dt) {
             }
         }
 
-        /* Players on fire: 1 base HP + 0.25% max_health per 100ms tick */
+        /* Players on fire: 5 base HP + 1.25% max_health per 500ms tick */
         for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
             WebSocketPlayer* wp = &players[wpi];
             if (!wp->active || wp->fire_timer_ms == 0) continue;
-            uint16_t pl_fire_dmg = 1u + (uint16_t)(wp->max_health / 400u);
+            uint16_t pl_fire_dmg = 5u + (uint16_t)(wp->max_health / 80u);
             if (wp->health > pl_fire_dmg) wp->health -= pl_fire_dmg; else wp->health = 0;
-            if (wp->fire_timer_ms > time_elapsed) {
-                wp->fire_timer_ms -= time_elapsed;
+            if (wp->fire_timer_ms > dot_elapsed) {
+                wp->fire_timer_ms -= dot_elapsed;
             } else {
                 wp->fire_timer_ms = 0;
                 char fx[192];
@@ -9499,7 +9503,7 @@ void websocket_server_tick(float dt) {
                 /* Apply 7.5 base + 0.125% of max_health per 100ms tick.
                  * mod->health is a raw integer (not Q16-scaled), so compute
                  * DOT as a plain integer too — do NOT use Q16_FROM_FLOAT here. */
-                q16_t fire_dot = (q16_t)(7.5f + (float)mod->max_health * 0.00125f);
+                q16_t fire_dot = (q16_t)(37.5f + (float)mod->max_health * 0.00625f);
                 module_apply_damage(mod, fire_dot);
 
                 /* Broadcast damage tick so client sees health decreasing. */
@@ -9557,8 +9561,8 @@ void websocket_server_tick(float dt) {
 
                 /* Tick module fire timer */
                 bool extinguished = false;
-                if (mod->fire_timer_ms > time_elapsed) {
-                    mod->fire_timer_ms -= time_elapsed;
+                if (mod->fire_timer_ms > dot_elapsed) {
+                    mod->fire_timer_ms -= dot_elapsed;
                 } else {
                     mod->fire_timer_ms = 0;
                     extinguished = true;
@@ -9584,6 +9588,7 @@ void websocket_server_tick(float dt) {
                 }
             }
         }
+        } /* end FIRE DOT TICK 500ms */
     }
     
     // ===== APPLY WIND-BASED SHIP MOVEMENT =====
