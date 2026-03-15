@@ -9506,6 +9506,23 @@ void websocket_server_tick(float dt) {
                 q16_t fire_dot = (q16_t)(37.5f + (float)mod->max_health * 0.00625f);
                 module_apply_damage(mod, fire_dot);
 
+                /* Sync updated health/state back to global_sim Ship module so that
+                 * GAME_STATE (which reads from sim->ships[]) broadcasts the correct value.
+                 * SimpleShip and Ship are separate structs; fire DOT only writes to SimpleShip. */
+                if (global_sim) {
+                    for (uint32_t gs = 0; gs < global_sim->ship_count; gs++) {
+                        if (global_sim->ships[gs].id != fship->ship_id) continue;
+                        for (uint8_t gm = 0; gm < global_sim->ships[gs].module_count; gm++) {
+                            if (global_sim->ships[gs].modules[gm].id == mod->id) {
+                                global_sim->ships[gs].modules[gm].health     = mod->health;
+                                global_sim->ships[gs].modules[gm].state_bits = mod->state_bits;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+
                 /* Broadcast damage tick so client sees health decreasing. */
                 {
                     float lx2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
