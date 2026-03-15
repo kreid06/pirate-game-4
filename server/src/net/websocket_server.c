@@ -5419,11 +5419,37 @@ static void tick_ghost_ships(float dt) {
                 }
             }
 
+            /* Side-cannon broadside sweep: 5× the body-sway rate so the
+             * barrels visibly oscillate through the full ±90° arc.  Using
+             * sinf(phase * 5) is equivalent to accumulating phase at 5×
+             * GHOST_SWEEP_RATE (0.14 × 5 = 0.70 rad/s — the original rate). */
+            float side_sweep = sinf(ghost_aim_phase[s] * 5.0f) * GHOST_CANNON_ARC;
+
             for (int m = 0; m < ship->module_count; m++) {
                 ShipModule* cannon = &ship->modules[m];
                 if (cannon->type_id != MODULE_TYPE_CANNON) continue;
-                /* Aim with 90° arc + oscillating sweep */
-                ghost_aim_cannon(ship, cannon, target->x, target->y, sweep_rad);
+
+                if (cannon->id == 300 || cannon->id == 301) {
+                    /* BOW cannon: track target with slow body-rate sweep */
+                    ghost_aim_cannon(ship, cannon, target->x, target->y, sweep_rad);
+                } else {
+                    /* SIDE cannon: sweep broadside around natural direction
+                     * (aim_direction=0 = barrel perpendicular to hull). */
+                    cannon->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(side_sweep);
+                    if (global_sim) {
+                        for (uint32_t gsi = 0; gsi < global_sim->ship_count; gsi++) {
+                            if (global_sim->ships[gsi].id != ship->ship_id) continue;
+                            struct Ship* gs = &global_sim->ships[gsi];
+                            for (uint8_t mi = 0; mi < gs->module_count; mi++) {
+                                if (gs->modules[mi].id == cannon->id) {
+                                    gs->modules[mi].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(side_sweep);
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
 
                 /* Find matching sim module for authoritative reload state */
                 ShipModule* sim_cannon = NULL;
@@ -9307,12 +9333,16 @@ void websocket_server_tick(float dt) {
     tick_ghost_ships(dt);
 
     // ===== ADVANCE CANNON AIM TOWARD DESIRED (turn-speed limit) =====
-    // Cannons rotate at a maximum of 60 degrees per second.
+    // Normal cannons: 60 deg/s.  Ghost ship cannons: 180 deg/s so their swept
+    // barrels track the oscillation without visible lag.
     {
-        const float CANNON_TURN_SPEED = 60.0f * (float)(M_PI / 180.0f); // rad/s
-        const float max_step = CANNON_TURN_SPEED * dt;
+        const float CANNON_TURN_SPEED        = 60.0f  * (float)(M_PI / 180.0f); // rad/s
+        const float GHOST_CANNON_TURN_SPEED  = 180.0f * (float)(M_PI / 180.0f); // rad/s
         for (int s = 0; s < ship_count; s++) {
             if (!ships[s].active) continue;
+            const float max_step = (ships[s].ship_type == SHIP_TYPE_GHOST
+                                    ? GHOST_CANNON_TURN_SPEED
+                                    : CANNON_TURN_SPEED) * dt;
             for (int m = 0; m < ships[s].module_count; m++) {
                 ShipModule* mod = &ships[s].modules[m];
                 if (mod->type_id != MODULE_TYPE_CANNON) continue;
