@@ -9501,6 +9501,60 @@ void websocket_server_tick(float dt) {
                  * DOT as a plain integer too — do NOT use Q16_FROM_FLOAT here. */
                 q16_t fire_dot = (q16_t)(7.5f + (float)mod->max_health * 0.00125f);
                 module_apply_damage(mod, fire_dot);
+
+                /* Broadcast damage tick so client sees health decreasing. */
+                {
+                    float lx2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                    float ly2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                    float wx2 = fship->x + (lx2 * cos_r - ly2 * sin_r);
+                    float wy2 = fship->y + (lx2 * sin_r + ly2 * cos_r);
+                    char dmsg[256];
+                    bool destroyed_now = (mod->state_bits & MODULE_STATE_DESTROYED) != 0;
+                    uint32_t mod_id_saved = mod->id; /* save before potential memmove */
+                    if (destroyed_now) {
+                        /* Module burnt out — remove from ship and broadcast destruction */
+                        if (mt == MODULE_TYPE_PLANK || mt == MODULE_TYPE_DECK) {
+                            /* Remove plank/deck from SimpleShip (same as cannon projectile path) */
+                            for (int rm = 0; rm < fship->module_count; rm++) {
+                                if (fship->modules[rm].id == mod_id_saved) {
+                                    memmove(&fship->modules[rm], &fship->modules[rm + 1],
+                                            (fship->module_count - rm - 1) * sizeof(ShipModule));
+                                    fship->module_count--;
+                                    mod = NULL; /* pointer now stale */
+                                    break;
+                                }
+                            }
+                            snprintf(dmsg, sizeof(dmsg),
+                                "{\"type\":\"PLANK_HIT\",\"shipId\":%u,\"plankId\":%u,"
+                                "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                                fship->ship_id, mod_id_saved, (float)fire_dot, wx2, wy2);
+                        } else {
+                            snprintf(dmsg, sizeof(dmsg),
+                                "{\"type\":\"MODULE_HIT\",\"shipId\":%u,\"moduleId\":%u,"
+                                "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                                fship->ship_id, mod_id_saved, (float)fire_dot, wx2, wy2);
+                        }
+                    } else {
+                        if (mt == MODULE_TYPE_PLANK || mt == MODULE_TYPE_DECK) {
+                            snprintf(dmsg, sizeof(dmsg),
+                                "{\"type\":\"PLANK_DAMAGED\",\"shipId\":%u,\"plankId\":%u,"
+                                "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                                fship->ship_id, mod->id, (float)fire_dot, wx2, wy2);
+                        } else {
+                            snprintf(dmsg, sizeof(dmsg),
+                                "{\"type\":\"MODULE_DAMAGED\",\"shipId\":%u,\"moduleId\":%u,"
+                                "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                                fship->ship_id, mod->id, (float)fire_dot, wx2, wy2);
+                        }
+                    }
+                    broadcast_json_all(dmsg);
+                    /* Destroyed modules get their fire timer cleared and we skip to next */
+                    if (!mod || (mod->state_bits & MODULE_STATE_DESTROYED)) {
+                        if (mod) mod->fire_timer_ms = 0;
+                        continue;
+                    }
+                }
+
                 /* Tick module fire timer */
                 bool extinguished = false;
                 if (mod->fire_timer_ms > time_elapsed) {
