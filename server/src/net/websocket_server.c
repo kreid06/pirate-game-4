@@ -4968,6 +4968,29 @@ static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t
     s->modules[s->module_count].state_bits  = MODULE_STATE_ACTIVE;
     s->module_count++;
 
+    /* Brigantine hull: 10 planks (IDs 100-109) + centre deck (ID 200).
+     * Fixed IDs match the client layout in modules.ts / NetworkManager. */
+    {
+        static const float plank_cx[10] = {
+             246.25f,  246.25f,  115.0f,  -35.0f, -185.0f,
+            -281.25f, -281.25f, -185.0f,  -35.0f,  115.0f
+        };
+        static const float plank_cy[10] = {
+             45.0f, -45.0f, -90.0f, -90.0f, -90.0f,
+            -45.0f,  45.0f,  90.0f,  90.0f,  90.0f
+        };
+        for (int i = 0; i < 10 && s->module_count < MAX_MODULES_PER_SHIP; i++) {
+            Vec2Q16 pos = {
+                Q16_FROM_FLOAT(CLIENT_TO_SERVER(plank_cx[i])),
+                Q16_FROM_FLOAT(CLIENT_TO_SERVER(plank_cy[i]))
+            };
+            s->modules[s->module_count++] = module_create((uint16_t)(100 + i), MODULE_TYPE_PLANK, pos, 0);
+        }
+        if (s->module_count < MAX_MODULES_PER_SHIP) {
+            s->modules[s->module_count++] = module_create(200, MODULE_TYPE_DECK, (Vec2Q16){0, 0}, 0);
+        }
+    }
+
     /* Set up default weapon control groups now that all modules are registered */
     ship_init_default_weapon_groups(s);
 
@@ -8682,7 +8705,7 @@ void websocket_server_tick(float dt) {
                         ModuleTypeId mt = mod->type_id;
                         if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK &&
                             mt != MODULE_TYPE_MAST) continue;
-                        if (mod->health <= 0) continue;
+                        if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
                         float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
                         float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
                         float wx = fship->x + (lx * cos_r - ly * sin_r);
@@ -9325,7 +9348,7 @@ void websocket_server_tick(float dt) {
                             ModuleTypeId mt = mod->type_id;
                             if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK &&
                                 mt != MODULE_TYPE_MAST) continue;
-                            if (mod->health <= 0) continue;
+                            if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
                             float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
                             float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
                             float wx = fship->x + (lx * cos_r - ly * sin_r);

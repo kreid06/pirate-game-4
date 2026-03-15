@@ -1732,6 +1732,7 @@ export class NetworkManager {
       }
 
       case 'FIRE_EFFECT': {
+        console.log(`[NET] FIRE_EFFECT received: entityType=${message.entityType} shipId=${message.shipId} moduleId=${message.moduleId} id=${message.id}`);
         const fireEntityType: 'npc' | 'player' | 'module' =
           message.entityType === 'player' ? 'player' :
           message.entityType === 'module' ? 'module' : 'npc';

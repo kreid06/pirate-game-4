@@ -403,6 +403,7 @@ export class RenderSystem {
     const key = entityType === 'module'
       ? `module:${shipId}:${moduleId}`
       : `${entityType}:${id}`;
+    console.log(`[FIRE] notifyFireEffect type=${entityType} key=${key} dur=${durationMs}ms burningCount=${this.burningEntities.size + 1}`);
     this.burningEntities.set(key, performance.now() + durationMs);
   }
 
@@ -2042,12 +2043,22 @@ export class RenderSystem {
    * Each module has a set of stable fire-point positions in ship-local space
    * (generated once on first draw, min-distance spaced so they do not clump).
    */
+  private _fireDbgLastLog = 0;
   private drawBurningModules(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 300)) return;
     const WOODEN_KINDS: ReadonlySet<string> = new Set(['plank', 'deck', 'mast']);
     const cosR = Math.cos(ship.rotation);
     const sinR = Math.sin(ship.rotation);
     const zoom = camera.getState().zoom;
+
+    // Throttled diagnostic — logs once per 3s if any burning entities exist
+    const now = performance.now();
+    if (this.burningEntities.size > 0 && now - this._fireDbgLastLog > 3000) {
+      this._fireDbgLastLog = now;
+      const woodenMods = ship.modules.filter(m => WOODEN_KINDS.has(m.kind));
+      const burningKeys = [...this.burningEntities.keys()];
+      console.log(`[FIRE DBG] ship=${ship.id} burningEntities=${[...burningKeys]} woodenMods=${woodenMods.map(m => m.kind+':'+m.id)}`);
+    }
 
     for (const mod of ship.modules) {
       if (!WOODEN_KINDS.has(mod.kind)) continue;
