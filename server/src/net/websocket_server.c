@@ -9303,6 +9303,34 @@ void websocket_server_tick(float dt) {
                         if (dist > fw->wave_dist + 30.0f) continue;
                         float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
                         if (dot < cos_hc) continue;
+                        /* Plank-occlusion check: if an intact plank on the NPC's own ship lies
+                         * between the flame origin and the NPC (along the flame direction), the
+                         * plank shields the NPC and fire does not reach them. */
+                        {
+                            bool plank_blocked = false;
+                            SimpleShip* npc_ship = find_ship_by_id(npc->ship_id);
+                            if (npc_ship) {
+                                float dir_x = (dist > 0.01f) ? dx / dist : fdir_x;
+                                float dir_y = (dist > 0.01f) ? dy / dist : fdir_y;
+                                float cos_rs = cosf(npc_ship->rotation);
+                                float sin_rs = sinf(npc_ship->rotation);
+                                for (int pm = 0; pm < npc_ship->module_count && !plank_blocked; pm++) {
+                                    ShipModule* pl = &npc_ship->modules[pm];
+                                    if (pl->type_id != MODULE_TYPE_PLANK && pl->type_id != MODULE_TYPE_DECK) continue;
+                                    if (pl->state_bits & MODULE_STATE_DESTROYED) continue;
+                                    float plx = SERVER_TO_CLIENT(Q16_TO_FLOAT(pl->local_pos.x));
+                                    float ply = SERVER_TO_CLIENT(Q16_TO_FLOAT(pl->local_pos.y));
+                                    float pwx = npc_ship->x + (plx * cos_rs - ply * sin_rs);
+                                    float pwy = npc_ship->y + (plx * sin_rs + ply * cos_rs);
+                                    float pdx = pwx - fw->origin_x, pdy = pwy - fw->origin_y;
+                                    float t = pdx * dir_x + pdy * dir_y; /* scalar projection onto flame→NPC */
+                                    if (t < 5.0f || t > dist - 5.0f) continue; /* not between origin and NPC */
+                                    float perp_x = pdx - t * dir_x, perp_y = pdy - t * dir_y;
+                                    if (perp_x*perp_x + perp_y*perp_y < 24.0f*24.0f) plank_blocked = true;
+                                }
+                            }
+                            if (plank_blocked) continue;
+                        }
                         npc->fire_timer_ms = FIRE_DURATION_MS;
                         {
                             char fmsg[256];
@@ -9324,6 +9352,32 @@ void websocket_server_tick(float dt) {
                         if (dist > fw->wave_dist + 30.0f) continue;
                         float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
                         if (dot < cos_hc) continue;
+                        /* Same plank-occlusion check for players as for NPCs */
+                        {
+                            bool plank_blocked = false;
+                            SimpleShip* pl_ship = find_ship_by_id(wp->parent_ship_id);
+                            if (pl_ship) {
+                                float dir_x = (dist > 0.01f) ? dx / dist : fdir_x;
+                                float dir_y = (dist > 0.01f) ? dy / dist : fdir_y;
+                                float cos_rs = cosf(pl_ship->rotation);
+                                float sin_rs = sinf(pl_ship->rotation);
+                                for (int pm = 0; pm < pl_ship->module_count && !plank_blocked; pm++) {
+                                    ShipModule* pl = &pl_ship->modules[pm];
+                                    if (pl->type_id != MODULE_TYPE_PLANK && pl->type_id != MODULE_TYPE_DECK) continue;
+                                    if (pl->state_bits & MODULE_STATE_DESTROYED) continue;
+                                    float plx = SERVER_TO_CLIENT(Q16_TO_FLOAT(pl->local_pos.x));
+                                    float ply = SERVER_TO_CLIENT(Q16_TO_FLOAT(pl->local_pos.y));
+                                    float pwx = pl_ship->x + (plx * cos_rs - ply * sin_rs);
+                                    float pwy = pl_ship->y + (plx * sin_rs + ply * cos_rs);
+                                    float pdx = pwx - fw->origin_x, pdy = pwy - fw->origin_y;
+                                    float t = pdx * dir_x + pdy * dir_y;
+                                    if (t < 5.0f || t > dist - 5.0f) continue;
+                                    float perp_x = pdx - t * dir_x, perp_y = pdy - t * dir_y;
+                                    if (perp_x*perp_x + perp_y*perp_y < 24.0f*24.0f) plank_blocked = true;
+                                }
+                            }
+                            if (plank_blocked) continue;
+                        }
                         wp->fire_timer_ms = FIRE_DURATION_MS;
                         {
                             char fmsg[256];
