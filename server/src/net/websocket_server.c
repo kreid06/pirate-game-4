@@ -5130,6 +5130,8 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
 #define GHOST_SWEEP_RATE    0.7f   /* rad/s — slow haunting sweep */
 /* Sweep amplitude (radians). ~40° wide arc swing side-to-side */
 #define GHOST_SWING_AMP     0.70f
+/* How much the ship BODY sways left/right while chasing (radians) */
+#define GHOST_HEADING_SWING 0.35f  /* ±20° — visible sway while still pursuing */
 
 /**
  * Aim a ghost-ship cannon at a world target with a 90° arc and an optional
@@ -5237,6 +5239,49 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
         ship->module_count++;
     }
 
+    /* Mirror bow cannons (300, 301) into the sim ship so the game-state
+     * broadcast (which serialises ship->modules[] on the sim ship) sends them
+     * to the client.  Without this they would exist only in SimpleShip and
+     * never appear on screen. */
+    if (global_sim) {
+        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+            if (global_sim->ships[si].id != ship_id) continue;
+            struct Ship* sim_ship = &global_sim->ships[si];
+            if (sim_ship->module_count + 2 <= MAX_MODULES_PER_SHIP) {
+                /* Bow port cannon (ID 300) */
+                sim_ship->modules[sim_ship->module_count].id          = 300;
+                sim_ship->modules[sim_ship->module_count].type_id     = MODULE_TYPE_CANNON;
+                sim_ship->modules[sim_ship->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(210.0f));
+                sim_ship->modules[sim_ship->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(22.0f));
+                sim_ship->modules[sim_ship->module_count].local_rot   = Q16_FROM_FLOAT((float)M_PI / 2.0f);
+                sim_ship->modules[sim_ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
+                sim_ship->modules[sim_ship->module_count].health      = 100;
+                sim_ship->modules[sim_ship->module_count].max_health  = 100;
+                sim_ship->modules[sim_ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
+                sim_ship->modules[sim_ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+                sim_ship->modules[sim_ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
+                sim_ship->modules[sim_ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
+                sim_ship->module_count++;
+
+                /* Bow starboard cannon (ID 301) */
+                sim_ship->modules[sim_ship->module_count].id          = 301;
+                sim_ship->modules[sim_ship->module_count].type_id     = MODULE_TYPE_CANNON;
+                sim_ship->modules[sim_ship->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(210.0f));
+                sim_ship->modules[sim_ship->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-22.0f));
+                sim_ship->modules[sim_ship->module_count].local_rot   = Q16_FROM_FLOAT((float)M_PI / 2.0f);
+                sim_ship->modules[sim_ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
+                sim_ship->modules[sim_ship->module_count].health      = 100;
+                sim_ship->modules[sim_ship->module_count].max_health  = 100;
+                sim_ship->modules[sim_ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
+                sim_ship->modules[sim_ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+                sim_ship->modules[sim_ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
+                sim_ship->modules[sim_ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
+                sim_ship->module_count++;
+            }
+            break;
+        }
+    }
+
     /* Spawn a helmsman NPC agent so the ship steers itself.
      * The helmsman uses the MODULE_TYPE_HELM to turn. */
     ShipModule* helm = NULL;
@@ -5327,12 +5372,13 @@ static void tick_ghost_ships(float dt) {
             /* Attack mode — head toward the target ship */
             float dx      = target->x - ship->x;
             float dy      = target->y - ship->y;
-            desired_heading = atan2f(dy, dx);
-            move_speed      = GHOST_CHASE_SPEED;
-
             /* === GHOST CANNON AI: direct aim + fire, no weapon groups === */
             ghost_aim_phase[s] += GHOST_SWEEP_RATE * dt;
-            float sweep_rad = sinf(ghost_aim_phase[s]) * GHOST_SWING_AMP;
+            float phase_sin = sinf(ghost_aim_phase[s]);
+            float sweep_rad = phase_sin * GHOST_SWING_AMP;
+            /* Body sway: oscillate the ship heading so it weaves while chasing */
+            desired_heading = atan2f(dy, dx) + phase_sin * GHOST_HEADING_SWING;
+            move_speed      = GHOST_CHASE_SPEED;
 
             for (int m = 0; m < ship->module_count; m++) {
                 ShipModule* cannon = &ship->modules[m];
