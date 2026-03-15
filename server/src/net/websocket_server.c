@@ -5129,7 +5129,7 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
 /* Cannon sweep: side-to-side oscillation rate while chasing */
 #define GHOST_SWEEP_RATE    0.14f  /* rad/s — very slow haunting sweep (5× slower) */
 /* Sweep amplitude (radians). ~40° wide arc swing side-to-side */
-#define GHOST_SWING_AMP     0.70f
+#define GHOST_SWING_AMP     0.785f  /* ±45° sweep amplitude */
 /* How much the ship BODY sways left/right while chasing (radians) */
 #define GHOST_HEADING_SWING 0.785f /* ±45° — slow haunting weave while pursuing */
 
@@ -5440,11 +5440,18 @@ static void tick_ghost_ships(float dt) {
                 uint32_t trel = sim_cannon ? sim_cannon->data.cannon.reload_time
                                            : cannon->data.cannon.reload_time;
 
-                /* Fire when reloaded AND aimed within ±15° of the target */
+                /* Fire when reloaded AND aimed within ±15° of the target.
+                 * Use the SIM cannon's aim_direction — the SimpleShip copy is
+                 * reset to 0 by fire_cannon() and never re-incremented, so
+                 * side cannons (local_rot=0) would always read wfa = rotation-π/2
+                 * (pointing sideways) and never satisfy the ±15° gate. */
                 if (tsf >= trel) {
+                    float actual_aim = sim_cannon
+                        ? Q16_TO_FLOAT(sim_cannon->data.cannon.aim_direction)
+                        : Q16_TO_FLOAT(cannon->data.cannon.aim_direction);
                     float wfa = ship->rotation
                         + Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0)
-                        + Q16_TO_FLOAT(cannon->data.cannon.aim_direction);
+                        + actual_aim;
                     float fire_diff = wfa - atan2f(dy, dx);
                     while (fire_diff >  (float)M_PI) fire_diff -= 2.0f * (float)M_PI;
                     while (fire_diff < -(float)M_PI) fire_diff += 2.0f * (float)M_PI;
