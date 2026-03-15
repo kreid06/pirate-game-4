@@ -2597,6 +2597,32 @@ static void tick_world_npcs(float dt) {
             if (fabsf(npc->velocity_y) < 0.5f) npc->velocity_y = 0.0f;
         }
 
+        /* Deck-bounds water check: if the NPC slid off the ship edges, mark in_water.
+         * Ship is ~480 wide x 120 tall client units; use generous margins. */
+        {
+            const float DECK_HALF_LEN = 260.0f;
+            const float DECK_HALF_WID =  75.0f;
+            bool was_water = npc->in_water;
+            npc->in_water = (fabsf(npc->local_x) > DECK_HALF_LEN ||
+                             fabsf(npc->local_y) > DECK_HALF_WID);
+            if (!was_water && npc->in_water && npc->fire_timer_ms > 0) {
+                /* Fell into water while burning — extinguish immediately */
+                npc->fire_timer_ms = 0;
+                char fx[192];
+                char fxf[256];
+                snprintf(fx, sizeof(fx),
+                    "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"npc\",\"id\":%u}",
+                    npc->id);
+                size_t fxfl = websocket_create_frame(WS_OPCODE_TEXT, fx, strlen(fx), fxf, sizeof(fxf));
+                if (fxfl > 0) {
+                    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                        struct WebSocketClient* wc = &ws_server.clients[ci];
+                        if (wc->connected && wc->handshake_complete) send(wc->fd, fxf, fxfl, 0);
+                    }
+                }
+            }
+        }
+
         // Keep world position in sync with ship transform
         if (npc->ship_id != 0) {
             SimpleShip* ship = find_ship(npc->ship_id);
@@ -9348,7 +9374,7 @@ void websocket_server_tick(float dt) {
                         WorldNpc* npc = &world_npcs[ni];
                         if (!npc->active) continue;
                         if (npc->ship_id == fw->ship_id) continue;
-                        if (npc->ship_id == 0) continue; /* NPC is overboard / swimming */
+                        if (npc->in_water) continue; /* NPC is in water */
                         float dx = npc->x - fw->origin_x, dy = npc->y - fw->origin_y;
                         float dist = sqrtf(dx*dx + dy*dy);
                         if (dist > fw->wave_dist + 30.0f) continue;
@@ -9530,7 +9556,7 @@ void websocket_server_tick(float dt) {
             WorldNpc* npc = &world_npcs[ni];
             if (!npc->active || npc->fire_timer_ms == 0) continue;
             /* Water extinguishes fire — NPC overboard */
-            if (npc->ship_id == 0) {
+            if (npc->in_water) {
                 npc->fire_timer_ms = 0;
                 char fx[192];
                 snprintf(fx, sizeof(fx),

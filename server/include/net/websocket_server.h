@@ -188,6 +188,7 @@ typedef struct WorldNpc {
 
     // ── Status effects ──────────────────────────────────────────────────────
     uint32_t      fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
+    bool          in_water;       // true when NPC has been knocked off the ship deck
 } WorldNpc;
 // ────────────────────────────────────────────────────────────────────────────
 
