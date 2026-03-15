@@ -5197,7 +5197,9 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
 /* Idle drift speed (client-px / s) */
 #define GHOST_WANDER_SPEED      40.0f
 /* Turn rate (rad / s) — slightly sluggish on purpose */
-#define GHOST_TURN_RATE         0.35f
+#define GHOST_TURN_RATE         2.0f   /* rad/s — very agile, feels supernatural */
+/* Slow spin rate added every tick while wandering — makes the brig spiral/spiral */
+#define GHOST_SPIN_RATE         1.0f   /* rad/s — roughly 1 full rotation per 6 s */
 
 /* Per-ghost wander timer array indexed by ship slot.  Initialised to 0.
  * Value = seconds remaining until next heading change.  When it hits 0 we
@@ -5251,13 +5253,11 @@ static void tick_ghost_ships(float dt) {
                 }
             }
         } else {
-            /* Wander mode — decay timer and change heading when it expires */
-            ghost_wander_timer[s] -= dt;
-            if (ghost_wander_timer[s] <= 0.0f) {
-                /* Pick a new random heading (full 360°) */
-                ghost_desired_heading[s] = ((float)(rand() % 6284) / 1000.0f) - (float)M_PI;
-                ghost_wander_timer[s]    = GHOST_WANDER_INTERVAL_S;
-            }
+            /* Wander mode — continuously spin the desired heading so the
+             * Phantom Brig spirals and rotates eerily rather than just drifting */
+            ghost_desired_heading[s] += GHOST_SPIN_RATE * dt;
+            while (ghost_desired_heading[s] >  (float)M_PI) ghost_desired_heading[s] -= 2.0f * (float)M_PI;
+            while (ghost_desired_heading[s] < -(float)M_PI) ghost_desired_heading[s] += 2.0f * (float)M_PI;
             desired_heading = ghost_desired_heading[s];
             move_speed      = GHOST_WANDER_SPEED;
 

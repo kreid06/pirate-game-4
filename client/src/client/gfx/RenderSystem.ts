@@ -4550,6 +4550,13 @@ export class RenderSystem {
       const mastData = mast.moduleData;
       const x = mast.localPos.x;
       const y = mast.localPos.y;
+
+      // ── Phantom Brig: spectral shroud sails instead of normal cloth ──
+      if (ship.shipType === SHIP_TYPE_GHOST) {
+        this.drawPhantomSail(x, y, mastData.sailWidth, mastData.height, mast.id);
+        continue;
+      }
+
       const width = mastData.sailWidth;
       const height = mastData.height;
       const sailColor = mastData.sailColor;
@@ -4565,6 +4572,102 @@ export class RenderSystem {
     this.ctx.restore();
   }
   
+  /**
+   * Spectral shroud sails for the Phantom Brig.
+   * Called inside drawShipSailFibers, inheriting the ship-level canvas transform.
+   * Wind angle is ignored — sails billow from spectral energy alone.
+   */
+  private drawPhantomSail(x: number, y: number, width: number, height: number, mastId: number): void {
+    const now   = Date.now();
+    const t     = now * 0.001;
+    const phase = mastId * 2.17;
+
+    // Gentle supernatural billow — no wind angle, slight side-to-side sway
+    const billow = Math.sin(t * 0.85 + phase) * 10;
+
+    const sailTopY = -height * 1.4;
+    const sailBotY = -sailTopY;
+    const halfW    = width * 0.5;
+
+    // Build seeded-random torn bottom edge
+    let mseed = (mastId * 2654435761) >>> 0;
+    const mrand = () => { mseed = (mseed * 1664525 + 1013904223) >>> 0; return mseed / 0xFFFFFFFF; };
+    const tearCount = 9;
+    const tearX: number[] = [];
+    const tearY: number[] = [];
+    for (let i = 0; i <= tearCount; i++) {
+      tearX.push(-halfW + (i / tearCount) * width);
+      tearY.push(sailBotY - mrand() * 28 - 4);
+    }
+
+    this.ctx.save();
+    this.ctx.translate(x, y);
+
+    // Build clip path (outline of sail)
+    const buildPath = () => {
+      this.ctx.beginPath();
+      this.ctx.moveTo(-halfW, sailTopY);
+      this.ctx.lineTo(halfW, sailTopY);
+      this.ctx.quadraticCurveTo(halfW + billow * 0.7, 0, tearX[tearCount], tearY[tearCount]);
+      for (let i = tearCount - 1; i >= 0; i--) {
+        this.ctx.lineTo(tearX[i], tearY[i]);
+      }
+      this.ctx.quadraticCurveTo(-halfW + billow * 0.3, 0, -halfW, sailTopY);
+      this.ctx.closePath();
+    };
+
+    // ── Outer glow pass ──
+    this.ctx.shadowColor = '#00ddcc';
+    this.ctx.shadowBlur  = 16;
+    buildPath();
+    this.ctx.strokeStyle = `rgba(0,210,200,${0.45 + 0.15 * Math.sin(t * 1.6 + phase)})`;
+    this.ctx.lineWidth   = 1.5;
+    this.ctx.stroke();
+    this.ctx.shadowBlur = 0;
+
+    // ── Cloth fill — dark void-teal gradient ──
+    const pulse = 0.52 + 0.13 * Math.sin(t * 1.3 + phase);
+    const grad  = this.ctx.createLinearGradient(-halfW, sailTopY, halfW, sailBotY);
+    grad.addColorStop(0,   `rgba(0, 55, 45, ${pulse})`);
+    grad.addColorStop(0.45,`rgba(0, 32, 26, ${pulse * 0.85})`);
+    grad.addColorStop(1,   `rgba(0, 14, 11, ${pulse * 0.65})`);
+    buildPath();
+    this.ctx.fillStyle = grad;
+    this.ctx.fill();
+
+    // ── Spectral vein lines through the sail cloth ──
+    this.ctx.save();
+    buildPath();
+    this.ctx.clip();
+    const veinCount = 3;
+    for (let v = 0; v < veinCount; v++) {
+      const vx     = -halfW * 0.55 + v * (halfW * 0.55);
+      const vAlpha = 0.28 + 0.18 * Math.sin(t * 2.1 + v * 1.5 + phase);
+      this.ctx.shadowColor  = '#00ffee';
+      this.ctx.shadowBlur   = 5;
+      this.ctx.strokeStyle  = `rgba(0, 230, 215, ${vAlpha})`;
+      this.ctx.lineWidth    = 0.9;
+      this.ctx.beginPath();
+      this.ctx.moveTo(vx, sailTopY + 4);
+      this.ctx.quadraticCurveTo(vx + billow * 0.35, 0, vx + billow * 0.15, sailBotY - 18);
+      this.ctx.stroke();
+    }
+    this.ctx.restore();
+
+    // ── Yard (horizontal boom at top) ──
+    this.ctx.shadowColor = '#00ccbb';
+    this.ctx.shadowBlur  = 6;
+    this.ctx.strokeStyle = '#1a4a40';
+    this.ctx.lineWidth   = 2.5;
+    this.ctx.beginPath();
+    this.ctx.moveTo(-halfW - 6, sailTopY);
+    this.ctx.lineTo(halfW  + 6, sailTopY);
+    this.ctx.stroke();
+    this.ctx.shadowBlur = 0;
+
+    this.ctx.restore();
+  }
+
   private drawSailFiber(x: number, y: number, width: number, height: number, sailColor: string, openness: number, angle: number, healthRatio: number = 1, moduleId: number = 0, fireIntensity: number = 0): void {
     // Clamp health — NaN guard for missing fiberMaxHealth
     const clampedHealth = Math.max(0, Math.min(1, isNaN(healthRatio) ? 1 : healthRatio));
@@ -4806,6 +4909,21 @@ export class RenderSystem {
       const x = mast.localPos.x;
       const y = mast.localPos.y;
       const radius = mastData.radius;
+
+      if (ship.shipType === SHIP_TYPE_GHOST) {
+        // Dark phantom mast — ebony pole with cyan glow
+        this.ctx.shadowColor = '#00ccbb';
+        this.ctx.shadowBlur  = 8;
+        this.ctx.fillStyle   = '#0d1a18';
+        this.ctx.strokeStyle = `rgba(0,200,185,${0.55 + 0.2 * Math.sin(Date.now() * 0.002 + x)})`;
+        this.ctx.lineWidth   = 1.5 / cameraState.zoom;
+        this.ctx.beginPath();
+        this.ctx.arc(x, y, radius, 0, Math.PI * 2);
+        this.ctx.fill();
+        this.ctx.stroke();
+        this.ctx.shadowBlur = 0;
+        continue;
+      }
       
       // Draw mast as a circle
       this.ctx.fillStyle = '#8B4513'; // Brown color for wooden mast
