@@ -4345,14 +4345,15 @@ export class RenderSystem {
       
       // Use sail cloth HP (fiberHealth) for visual degradation, not mast pole HP
       const healthRatio = mastData.fiberMaxHealth > 0 ? mastData.fiberHealth / mastData.fiberMaxHealth : 1;
-      this.drawSailFiber(x, y, width, height, sailColor, mastData.openness / 100, angle, healthRatio, mast.id);
+      const fireIntensity = mastData.sailFireIntensity ?? 0;
+      this.drawSailFiber(x, y, width, height, sailColor, mastData.openness / 100, angle, healthRatio, mast.id, fireIntensity);
       
     }
     
     this.ctx.restore();
   }
   
-  private drawSailFiber(x: number, y: number, width: number, height: number, sailColor: string, openness: number, angle: number, healthRatio: number = 1, moduleId: number = 0): void {
+  private drawSailFiber(x: number, y: number, width: number, height: number, sailColor: string, openness: number, angle: number, healthRatio: number = 1, moduleId: number = 0, fireIntensity: number = 0): void {
     // Clamp health — NaN guard for missing fiberMaxHealth
     const clampedHealth = Math.max(0, Math.min(1, isNaN(healthRatio) ? 1 : healthRatio));
 
@@ -4376,9 +4377,20 @@ export class RenderSystem {
     // Damage factor: 0 = pristine, 1 = nearly destroyed
     const damage = 1 - clampedHealth;
     const grey: [number, number, number] = [110, 110, 110];
+    // Fire factor: 0 = not burning, 1 = fully engulfed
+    const fireFactor = Math.min(1, (fireIntensity ?? 0) / 100);
 
-    const centerColor = lerpColor(hexToRgb(sailColor), grey, damage);
-    const edgeColor   = lerpColor(hexToRgb('#E6E6E6'), grey, damage);
+    let centerRgb = lerpColor(hexToRgb(sailColor), grey, damage);
+    let edgeRgb   = lerpColor(hexToRgb('#E6E6E6'), grey, damage);
+    if (fireFactor > 0) {
+      // Shift sail cloth colour toward orange-red as intensity rises
+      const fireCore: [number, number, number] = [255, 60,  0];
+      const fireEdge: [number, number, number] = [255, 190, 20];
+      centerRgb = lerpColor(hexToRgb(centerRgb), fireCore, fireFactor * 0.55);
+      edgeRgb   = lerpColor(hexToRgb(edgeRgb),   fireEdge, fireFactor * 0.38);
+    }
+    const centerColor = centerRgb;
+    const edgeColor   = edgeRgb;
 
     // Set up rotated coordinate space (yard always rotates with sail angle)
     this.ctx.save();
@@ -4437,6 +4449,56 @@ export class RenderSystem {
       }
 
       this.ctx.restore(); // end sailAlpha save
+
+      // ── Pulsing fire overlay on the sail cloth ──
+      if (fireFactor > 0 && openness > 0) {
+        const now     = Date.now();
+        const flicker = 0.7 + 0.3 * (Math.sin(now * 0.009) * 0.5 + 0.5);
+        this.ctx.save();
+        this.ctx.globalAlpha = fireFactor * 0.30 * flicker * sailAlpha;
+        this.ctx.beginPath();
+        this.ctx.moveTo(0, sailTopY);
+        this.ctx.lineTo(0, -sailTopY);
+        this.ctx.quadraticCurveTo(sailPower + 25, 0, 0, sailTopY);
+        this.ctx.clip();
+        const fireGrad = this.ctx.createLinearGradient(0, sailTopY, 0, 0);
+        fireGrad.addColorStop(0,   `rgba(255,${Math.floor(60 * (1 - fireFactor * 0.8))},0,1)`);
+        fireGrad.addColorStop(0.5, 'rgba(255,120,0,0.7)');
+        fireGrad.addColorStop(1,   'rgba(255,200,0,0)');
+        this.ctx.fillStyle = fireGrad;
+        this.ctx.fillRect(-width, sailTopY, width * 2.5 + sailPower, -sailTopY * 2);
+        this.ctx.restore();
+      }
+    }
+
+    // ── Animated flame licks along the burning sail ──
+    if (fireFactor > 0 && openness > 0 && clampedHealth > 0.02) {
+      const now        = Date.now();
+      const flicker    = 0.7 + 0.3 * (Math.sin(now * 0.009) * 0.5 + 0.5);
+      const flameCount = Math.max(3, Math.round(fireFactor * 7));
+      let fseed = ((moduleId * 6364136) ^ 0xdeadbeef) >>> 0;
+      const flcg  = (): number => { fseed = (fseed * 6364136 + 1442695041) >>> 0; return fseed / 0xFFFFFFFF; };
+      this.ctx.save();
+      for (let i = 0; i < flameCount; i++) {
+        const phase   = flcg() * Math.PI * 2;
+        const baseT   = (i + 0.5) / flameCount;
+        const baseY   = sailTopY + baseT * (-sailTopY * 2.0);
+        const wobbleX = Math.sin(now * 0.008 + phase) * 9 * fireFactor;
+        const px      = sailPower * baseT * 0.55 + wobbleX;
+        const flameH  = (12 + flcg() * 22) * fireFactor;
+        const flameW  = (5  + flcg() * 10) * fireFactor;
+        const alpha   = (0.55 + 0.35 * flicker) * fireFactor * sailAlpha;
+        const innerG  = Math.floor(240 * (1 - fireFactor * 0.7));
+        const fGrad   = this.ctx.createRadialGradient(px, baseY - flameH * 0.35, 0, px, baseY, flameW * 1.5);
+        fGrad.addColorStop(0,   `rgba(255,${innerG},60,${alpha})`);
+        fGrad.addColorStop(0.5, `rgba(255,80,0,${(alpha * 0.65).toFixed(3)})`);
+        fGrad.addColorStop(1,   'rgba(180,20,0,0)');
+        this.ctx.beginPath();
+        this.ctx.ellipse(px, baseY - flameH * 0.5, flameW, flameH, 0, 0, Math.PI * 2);
+        this.ctx.fillStyle = fGrad;
+        this.ctx.fill();
+      }
+      this.ctx.restore();
     }
 
     // ── Horizontal yard (always visible — holds the sail even when cloth is shredded) ──
@@ -4445,9 +4507,33 @@ export class RenderSystem {
     this.ctx.fillRect(-width / 20, sailTopY, width / 10, -sailTopY * 2);
     this.ctx.strokeRect(-width / 20, sailTopY, width / 10, -sailTopY * 2);
 
+    // ── Rising smoke wisps at medium–high fire intensity ──
+    if (fireFactor > 0.3 && openness > 0) {
+      const now    = Date.now();
+      const wCount = Math.max(1, Math.floor(fireFactor * 4));
+      let wseed = ((moduleId * 22695477) ^ 0x6c62272e) >>> 0;
+      const wlcg = (): number => { wseed = (wseed * 22695477 + 1) >>> 0; return wseed / 0xFFFFFFFF; };
+      this.ctx.save();
+      for (let i = 0; i < wCount; i++) {
+        const phase   = wlcg() * Math.PI * 2;
+        const baseX   = (wlcg() - 0.5) * sailPower * 0.7;
+        const drift   = Math.sin(now * 0.004 + phase) * 10;
+        const tOff    = (now * 0.04 + i * 30) % 70;      // each wisp cycles 0→70
+        const wispY   = sailTopY - 8 - tOff;
+        const fadeT   = tOff / 70;
+        const wAlpha  = (1 - fadeT) * 0.18 * fireFactor;
+        const wRadius = 6 + i * 3 + fadeT * 8;
+        this.ctx.beginPath();
+        this.ctx.ellipse(baseX + drift, wispY, wRadius * 0.7, wRadius, Math.PI * 0.15, 0, Math.PI * 2);
+        this.ctx.fillStyle = `rgba(70,65,65,${wAlpha.toFixed(3)})`;
+        this.ctx.fill();
+      }
+      this.ctx.restore();
+    }
+
     this.ctx.restore();
   }
-  
+
   private drawShipAmmoLabel(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 

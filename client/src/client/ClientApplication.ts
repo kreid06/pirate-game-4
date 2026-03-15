@@ -1047,6 +1047,27 @@ export class ClientApplication {
       // Handle FIRE_EXTINGUISHED: clear burning state
       this.networkManager.onFireExtinguished = (entityType, id, shipId, moduleId) => {
         this.renderSystem.notifyFireExtinguished(entityType, id, shipId, moduleId);
+        // Clear sail fire intensity when a mast module is extinguished
+        if (entityType === 'module' && shipId !== undefined && moduleId !== undefined) {
+          const ws = this.authoritativeWorldState || this.predictedWorldState;
+          const ship = ws?.ships.find(s => s.id === shipId);
+          const mod = ship?.modules.find(m => m.id === moduleId && m.kind === 'mast');
+          if (mod?.moduleData?.kind === 'mast') {
+            mod.moduleData.sailFireIntensity = 0;
+          }
+        }
+      };
+
+      // Handle SAIL_FIBER_FIRE: update mast module fire intensity in real time
+      this.networkManager.onSailFiberFire = (shipId, moduleId, intensity, fiberHealth, windEff) => {
+        const ws = this.authoritativeWorldState || this.predictedWorldState;
+        const ship = ws?.ships.find(s => s.id === shipId);
+        const mod  = ship?.modules.find(m => m.id === moduleId && m.kind === 'mast');
+        if (mod?.moduleData?.kind === 'mast') {
+          mod.moduleData.sailFireIntensity = intensity;
+          mod.moduleData.fiberHealth       = fiberHealth;
+          mod.moduleData.windEfficiency    = windEff;
+        }
       };
 
       this.networkManager.onLadderState = (shipId, moduleId, retracted) => {

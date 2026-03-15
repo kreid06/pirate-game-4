@@ -160,6 +160,7 @@ export interface MastModuleData {
   fiberHealth: number;          // Sail cloth HP (base max: 15000, same as mast)
   fiberMaxHealth: number;       // Sail cloth max HP
   angle: number;               // Sail angle in radians (from server)
+  sailFireIntensity: number;   // 0-100: fiber fire intensity (0=not burning, 100=fully engulfed)
 }
 
 /**
@@ -351,6 +352,7 @@ export class ModuleUtils {
           maxHealth: 15000,
           fiberHealth: 15000,     // Sail cloth HP (same base as mast)
           fiberMaxHealth: 15000,
+          sailFireIntensity: 0,
         } as MastModuleData;
         break;
 

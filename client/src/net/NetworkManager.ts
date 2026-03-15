@@ -464,6 +464,9 @@ export class NetworkManager {
   /** Fired when a burning entity or module's fire timer expires. */
   public onFireExtinguished: ((entityType: 'npc' | 'player' | 'module', id: number,
     shipId?: number, moduleId?: number) => void) | null = null;
+  /** Fired each 500ms tick with updated sail fiber fire intensity. */
+  public onSailFiberFire: ((shipId: number, moduleId: number, intensity: number,
+    fiberHealth: number, windEfficiency: number) => void) | null = null;
   /** Fired when a player performs a sword swing (for arc animation). */
   public onSwordSwing: ((playerId: number, x: number, y: number, angle: number, range: number) => void) | null = null;
   public onLadderState: ((shipId: number, moduleId: number, retracted: boolean) => void) | null = null;
@@ -1388,6 +1391,7 @@ export class NetworkManager {
                       windEfficiency: mod.windEfficiency ?? 1.0,
                       fiberHealth: mod.fiberHealth ?? 15000,
                       fiberMaxHealth: mod.fiberMaxHealth ?? 15000,
+                      sailFireIntensity: mod.fiberFireIntensity ?? 0,
                       radius: 15,
                       height: 120,
                       sailWidth: 80,
@@ -1766,6 +1770,18 @@ export class NetworkManager {
           extId,
           message.shipId   ?? undefined,
           message.moduleId ?? undefined,
+        );
+        break;
+      }
+
+      case 'SAIL_FIBER_FIRE': {
+        // Real-time sail fiber fire intensity update
+        this.onSailFiberFire?.(
+          message.shipId    ?? 0,
+          message.moduleId  ?? 0,
+          message.intensity ?? 0,
+          message.fiberHealth ?? 0,
+          message.windEff   ?? 1.0,
         );
         break;
       }

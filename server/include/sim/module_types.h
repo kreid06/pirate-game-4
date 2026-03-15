@@ -77,6 +77,7 @@ typedef struct {
     q16_t wind_efficiency;      // Current wind capture efficiency (derived from fiber_health)
     q16_t fiber_health;         // Sail cloth HP — same base as mast pole (15000)
     q16_t fiber_max_health;     // Sail cloth max HP
+    uint8_t sail_fire_intensity; // 0-100: fiber fire intensity (0=not burning, 100=fully engulfed)
 } MastModuleData;
 
 /**

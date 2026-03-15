@@ -7798,10 +7798,11 @@ int websocket_server_update(struct Sim* sim) {
                             float fh         = Q16_TO_FLOAT(module->data.mast.fiber_health);
                             float fhmax      = Q16_TO_FLOAT(module->data.mast.fiber_max_health);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"health\":%d,\"maxHealth\":%d}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"fiberFireIntensity\":%u,\"health\":%d,\"maxHealth\":%d}",
                                 m > 0 ? "," : "", module->id, module->type_id, 
                                 module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff,
-                                fh, fhmax, (int)module->health, (int)module->max_health);
+                                fh, fhmax, (unsigned)module->data.mast.sail_fire_intensity,
+                                (int)module->health, (int)module->max_health);
                         } else if (module->type_id == MODULE_TYPE_CANNON) {
                             // Cannon: include aim direction, state, and health
                             float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
@@ -9452,6 +9453,17 @@ void websocket_server_tick(float dt) {
                                 if (dist > fw->wave_dist + 40.0f) continue;
                                 float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
                                 if (dot < cos_hc_mod) continue;
+                                /* Sail fiber plank occlusion: skip if an intact plank
+                                 * lies between the flame origin and the mast centre. */
+                                if (mt == MODULE_TYPE_MAST &&
+                                    plank_occludes_ray(fship, fw->origin_x, fw->origin_y, wx, wy))
+                                    continue;
+                            }
+                            /* Sail fiber ignition: boost intensity on each flame contact */
+                            if (mt == MODULE_TYPE_MAST) {
+                                int ni = (int)mod->data.mast.sail_fire_intensity + 25;
+                                if (ni > 100) ni = 100;
+                                mod->data.mast.sail_fire_intensity = (uint8_t)ni;
                             }
                             bool first = (mod->fire_timer_ms == 0);
                             mod->fire_timer_ms = FIRE_DURATION_MS;
@@ -9462,6 +9474,9 @@ void websocket_server_tick(float dt) {
                                         if (global_sim->ships[si].modules[mi].id == mod->id) {
                                             global_sim->ships[si].modules[mi].fire_timer_ms = FIRE_DURATION_MS;
                                             global_sim->ships[si].modules[mi].state_bits    = mod->state_bits;
+                                            if (mod->type_id == MODULE_TYPE_MAST)
+                                                global_sim->ships[si].modules[mi].data.mast.sail_fire_intensity =
+                                                    mod->data.mast.sail_fire_intensity;
                                             break;
                                         }
                                     }
@@ -9617,6 +9632,124 @@ void websocket_server_tick(float dt) {
                 }
                 ModuleTypeId mt = mod->type_id;
                 if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK && mt != MODULE_TYPE_MAST) continue;
+
+                /* ── Mast/sail fiber fire: intensity-based system ── */
+                if (mt == MODULE_TYPE_MAST) {
+                    uint8_t intensity = mod->data.mast.sail_fire_intensity;
+                    uint8_t openness  = mod->data.mast.openness;
+                    if (intensity == 0) {
+                        mod->fire_timer_ms = 0;
+                        continue;
+                    }
+                    if (openness == 0) {
+                        /* Furled sails douse the flames: -15 per 500ms tick (~3.3 s to fully extinguish) */
+                        int ni = (int)intensity - 15;
+                        if (ni <= 0) {
+                            mod->data.mast.sail_fire_intensity = 0;
+                            mod->fire_timer_ms = 0;
+                            /* Sync global_sim */
+                            if (global_sim) {
+                                for (uint32_t gs = 0; gs < global_sim->ship_count; gs++) {
+                                    if (global_sim->ships[gs].id != fship->ship_id) continue;
+                                    for (uint8_t gm = 0; gm < global_sim->ships[gs].module_count; gm++) {
+                                        if (global_sim->ships[gs].modules[gm].id == mod->id) {
+                                            global_sim->ships[gs].modules[gm].data.mast.sail_fire_intensity = 0;
+                                            global_sim->ships[gs].modules[gm].fire_timer_ms = 0;
+                                            break;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                            {
+                                float mx2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                                float my2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                                float mwx = fship->x + (mx2 * cos_r - my2 * sin_r);
+                                float mwy = fship->y + (mx2 * sin_r + my2 * cos_r);
+                                char fx[256];
+                                snprintf(fx, sizeof(fx),
+                                    "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"module\","
+                                    "\"shipId\":%u,\"moduleId\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                    fship->ship_id, mod->id, mwx, mwy);
+                                broadcast_json_all(fx);
+                            }
+                            continue;
+                        }
+                        mod->data.mast.sail_fire_intensity = (uint8_t)ni;
+                    } else {
+                        /* Open sails: intensity creeps up naturally while burning (+2 per 500ms) */
+                        int ni = (int)intensity + 2;
+                        if (ni > 100) ni = 100;
+                        mod->data.mast.sail_fire_intensity = (uint8_t)ni;
+                        mod->fire_timer_ms = FIRE_DURATION_MS; /* keep the flame alive */
+                    }
+                    /* Fiber damage: base DOT scaled by current intensity (0-100%) */
+                    float fh    = Q16_TO_FLOAT(mod->data.mast.fiber_health);
+                    float fhmax = Q16_TO_FLOAT(mod->data.mast.fiber_max_health);
+                    float fiber_dot = (37.5f + fhmax * 0.00625f)
+                                    * ((float)mod->data.mast.sail_fire_intensity / 100.0f);
+                    fh -= fiber_dot;
+                    if (fh < 0.0f) fh = 0.0f;
+                    mod->data.mast.fiber_health    = Q16_FROM_FLOAT(fh);
+                    mod->data.mast.wind_efficiency = (fhmax > 0.0f)
+                        ? Q16_FROM_FLOAT(fh / fhmax) : 0;
+                    /* Sync global_sim mast data */
+                    if (global_sim) {
+                        for (uint32_t gs = 0; gs < global_sim->ship_count; gs++) {
+                            if (global_sim->ships[gs].id != fship->ship_id) continue;
+                            for (uint8_t gm = 0; gm < global_sim->ships[gs].module_count; gm++) {
+                                if (global_sim->ships[gs].modules[gm].id == mod->id) {
+                                    global_sim->ships[gs].modules[gm].data.mast.fiber_health    = mod->data.mast.fiber_health;
+                                    global_sim->ships[gs].modules[gm].data.mast.wind_efficiency = mod->data.mast.wind_efficiency;
+                                    global_sim->ships[gs].modules[gm].data.mast.sail_fire_intensity = mod->data.mast.sail_fire_intensity;
+                                    global_sim->ships[gs].modules[gm].fire_timer_ms = mod->fire_timer_ms;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    /* Broadcast per-tick sail fiber fire update */
+                    {
+                        float mx2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                        float my2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                        float mwx = fship->x + (mx2 * cos_r - my2 * sin_r);
+                        float mwy = fship->y + (mx2 * sin_r + my2 * cos_r);
+                        char dmsg[256];
+                        snprintf(dmsg, sizeof(dmsg),
+                            "{\"type\":\"SAIL_FIBER_FIRE\",\"shipId\":%u,\"moduleId\":%u,"
+                            "\"intensity\":%u,\"fiberHealth\":%.0f,\"windEff\":%.3f,"
+                            "\"x\":%.1f,\"y\":%.1f}",
+                            fship->ship_id, mod->id,
+                            (unsigned)mod->data.mast.sail_fire_intensity,
+                            fh, Q16_TO_FLOAT(mod->data.mast.wind_efficiency),
+                            mwx, mwy);
+                        broadcast_json_all(dmsg);
+                    }
+                    /* Tick the fire timer normally */
+                    if (mod->fire_timer_ms > dot_elapsed) {
+                        mod->fire_timer_ms -= dot_elapsed;
+                    } else {
+                        /* Timer expired without fresh flame contact — extinguish */
+                        mod->fire_timer_ms = 0;
+                        mod->data.mast.sail_fire_intensity = 0;
+                        if (global_sim) {
+                            for (uint32_t gs = 0; gs < global_sim->ship_count; gs++) {
+                                if (global_sim->ships[gs].id != fship->ship_id) continue;
+                                for (uint8_t gm = 0; gm < global_sim->ships[gs].module_count; gm++) {
+                                    if (global_sim->ships[gs].modules[gm].id == mod->id) {
+                                        global_sim->ships[gs].modules[gm].data.mast.sail_fire_intensity = 0;
+                                        global_sim->ships[gs].modules[gm].fire_timer_ms = 0;
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    continue; /* skip generic plank/deck path below */
+                }
+
                 /* Apply 7.5 base + 0.125% of max_health per 100ms tick.
                  * mod->health is a raw integer (not Q16-scaled), so compute
                  * DOT as a plain integer too — do NOT use Q16_FROM_FLOAT here. */
