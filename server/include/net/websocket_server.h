@@ -13,6 +13,12 @@
 #define COMPANY_NAVY     2   // Enemy AI company
 #define MAX_COMPANIES    3   // Total number of distinct company slots (neutral + pirates + navy)
 
+// ── Ship type identifiers ─────────────────────────────────────────────────
+#define SHIP_TYPE_SLOOP      1   // Small, fast sloop
+#define SHIP_TYPE_CUTTER     2   // Light cutter
+#define SHIP_TYPE_BRIGANTINE 3   // Medium brigantine (default)
+#define SHIP_TYPE_GHOST      99  // Ghostship — autonomous enemy, spectral visual
+
 // ── Weapon Control Groups ────────────────────────────────────────────────────
 typedef enum {
     WEAPON_GROUP_MODE_AIMING     = 0,
@@ -317,6 +323,17 @@ void websocket_server_set_simulation(struct Sim* sim);
  * @return Entity ID of the new ship, or 0 on failure
  */
 uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id);
+
+/**
+ * Spawn a ghost ship at the given world position (client pixels).
+ * Ghost ships (SHIP_TYPE_GHOST) are autonomous enemy vessels with spectral
+ * visuals.  They use COMPANY_NAVY (hostile to pirates) and their cannons are
+ * configured for TARGETFIRE automatically.
+ * @param x  World X position in client pixels
+ * @param y  World Y position in client pixels
+ * @return Entity ID of the new ghost ship, or 0 on failure
+ */
+uint32_t websocket_server_create_ghost_ship(float x, float y);
 
 /**
  * Clean up WebSocket server and close all connections

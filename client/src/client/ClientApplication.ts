@@ -2636,6 +2636,7 @@ export class ClientApplication {
       infiniteAmmo: true,
       hullHealth: 100,
       companyId: 0,
+      shipType: 3,
       levelStats: {
         levels: [1, 8, 12, 3, 5], // demo: some points in resistance/damage
         xp: 350,

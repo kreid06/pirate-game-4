@@ -1603,6 +1603,7 @@ static void tick_cannon_needed_expiry(void);
 static void tick_swivel_crew_demand(SimpleShip* ship);
 static void tick_ship_weapon_groups(void);
 static void tick_sinking_ships(void);
+static void tick_ghost_ships(float dt);
 static void ship_init_default_weapon_groups(SimpleShip* ship);
 static void broadcast_cannon_group_state(SimpleShip* ship, uint8_t company_id);
 static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship);
@@ -5115,8 +5116,206 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
     ships[ship_count].ship_id = sim_id;
     ship_count++;
 
+    // Sync IDs so the update loop matches them
+    ships[ship_count].ship_id = sim_id;
+    ship_count++;
+
     log_info("🚢 Admin spawned ship (ID: %u) at (%.0f, %.0f) company=%u", sim_id, x, y, company_id);
     return sim_id;
+}
+
+/* ============================================================================
+ * GHOST SHIP SPAWN
+ * Creates a SHIP_TYPE_GHOST brigantine at the given world position.  The ship
+ * belongs to COMPANY_NAVY and has its port/starboard cannon groups set to
+ * TARGETFIRE from the start so tick_ghost_ships can auto-aim them.
+ * ========================================================================= */
+uint32_t websocket_server_create_ghost_ship(float x, float y) {
+    uint32_t ship_id = websocket_server_create_ship(x, y, COMPANY_NAVY);
+    if (ship_id == 0) return 0;
+
+    SimpleShip* ship = find_ship(ship_id);
+    if (!ship) return ship_id;
+
+    /* Tag as ghost */
+    ship->ship_type = SHIP_TYPE_GHOST;
+
+    /* Set all cannon groups to TARGETFIRE so the ghost ship will auto-aim.
+     * Groups 1 (port) and 2 (starboard) were populated by ship_init_default_weapon_groups.
+     * We iterate all company slots mirroring the init function. */
+    for (int co = 0; co < MAX_COMPANIES; co++) {
+        if (ship->weapon_groups[co][1].weapon_count > 0)
+            ship->weapon_groups[co][1].mode = WEAPON_GROUP_MODE_TARGETFIRE;
+        if (ship->weapon_groups[co][2].weapon_count > 0)
+            ship->weapon_groups[co][2].mode = WEAPON_GROUP_MODE_TARGETFIRE;
+    }
+
+    /* Spawn a helmsman NPC agent so the ship steers itself.
+     * The helmsman uses the MODULE_TYPE_HELM to turn. */
+    ShipModule* helm = NULL;
+    for (int m = 0; m < ship->module_count; m++) {
+        if (ship->modules[m].type_id == MODULE_TYPE_HELM ||
+            ship->modules[m].type_id == MODULE_TYPE_STEERING_WHEEL) {
+            helm = &ship->modules[m];
+            break;
+        }
+    }
+    if (helm) {
+        uint32_t npc_id = websocket_server_create_npc(ship_id, helm->id, NPC_ROLE_HELMSMAN);
+        (void)npc_id;  /* we don't need to track it separately */
+    }
+
+    log_info("👻 Ghost ship spawned (ID: %u) at (%.0f, %.0f)", ship_id, x, y);
+    return ship_id;
+}
+
+/* ============================================================================
+ * GHOST SHIP AI  —  tick_ghost_ships(dt)
+ *
+ *  Called every server tick (after tick_sinking_ships).
+ *  For each active SHIP_TYPE_GHOST ship:
+ *    1. Scan enemy ships within GHOST_ATTACK_RANGE client-px.
+ *    2. If target found: steer toward it + set all TARGETFIRE groups on it.
+ *    3. If no target: wander (change heading every GHOST_WANDER_INTERVAL_MS ms).
+ *    4. Apply thrust forward (ghost ships accelerate under their own spectral
+ *       power — we write directly to velocity like the helmsman AI does).
+ *
+ *  Per-ship wander timer is stored in `ship->active_aim_angle` re-purposed as
+ *  a float wander_timer (slightly hacky but avoids a struct change).  When in
+ *  attack mode we do NOT touch it, so on loss-of-target the wander resumes.
+ * ========================================================================= */
+
+/* Maximum distance (client pixels) to scan for an enemy.
+ * ~800 px ≈ 4-5 ship lengths — about half a screen width at normal zoom. */
+#define GHOST_ATTACK_RANGE      800.0f
+/* Wander: new random heading every N seconds */
+#define GHOST_WANDER_INTERVAL_S 5.0f
+/* Top speed (client-px / s) while chasing — a bit slower than a player ship */
+#define GHOST_CHASE_SPEED       90.0f
+/* Idle drift speed (client-px / s) */
+#define GHOST_WANDER_SPEED      40.0f
+/* Turn rate (rad / s) — slightly sluggish on purpose */
+#define GHOST_TURN_RATE         0.35f
+
+/* Per-ghost wander timer array indexed by ship slot.  Initialised to 0.
+ * Value = seconds remaining until next heading change.  When it hits 0 we
+ * pick a new heading and reset. */
+static float ghost_wander_timer[MAX_SIMPLE_SHIPS] = {0};
+static float ghost_desired_heading[MAX_SIMPLE_SHIPS] = {0};
+
+static void tick_ghost_ships(float dt) {
+    for (int s = 0; s < ship_count; s++) {
+        SimpleShip* ship = &ships[s];
+        if (!ship->active) continue;
+        if (ship->ship_type != SHIP_TYPE_GHOST) continue;
+        if (ship->is_sinking) continue;
+
+        /* ── 1. Find nearest enemy (COMPANY_PIRATES or any non-NAVY ship) ── */
+        SimpleShip* target = NULL;
+        float best_dist2   = GHOST_ATTACK_RANGE * GHOST_ATTACK_RANGE;
+
+        for (int t = 0; t < ship_count; t++) {
+            if (t == s) continue;
+            SimpleShip* cand = &ships[t];
+            if (!cand->active || cand->is_sinking) continue;
+            if (is_allied(ship->company_id, cand->company_id)) continue; /* skip friendly */
+
+            float dx = cand->x - ship->x;
+            float dy = cand->y - ship->y;
+            float d2 = dx * dx + dy * dy;
+            if (d2 < best_dist2) {
+                best_dist2 = d2;
+                target     = cand;
+            }
+        }
+
+        /* ── 2. Steer and configure weapons ─────────────────────────────── */
+        float desired_heading;
+        float move_speed;
+
+        if (target) {
+            /* Attack mode — head toward the target ship */
+            float dx      = target->x - ship->x;
+            float dy      = target->y - ship->y;
+            desired_heading = atan2f(dy, dx);
+            move_speed      = GHOST_CHASE_SPEED;
+
+            /* Set TARGETFIRE groups to lock onto this ship */
+            for (int co = 0; co < MAX_COMPANIES; co++) {
+                for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
+                    WeaponGroup* grp = &ship->weapon_groups[co][g];
+                    if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE && grp->weapon_count > 0)
+                        grp->target_ship_id = target->ship_id;
+                }
+            }
+        } else {
+            /* Wander mode — decay timer and change heading when it expires */
+            ghost_wander_timer[s] -= dt;
+            if (ghost_wander_timer[s] <= 0.0f) {
+                /* Pick a new random heading (full 360°) */
+                ghost_desired_heading[s] = ((float)(rand() % 6284) / 1000.0f) - (float)M_PI;
+                ghost_wander_timer[s]    = GHOST_WANDER_INTERVAL_S;
+            }
+            desired_heading = ghost_desired_heading[s];
+            move_speed      = GHOST_WANDER_SPEED;
+
+            /* Clear TARGETFIRE targets while wandering */
+            for (int co = 0; co < MAX_COMPANIES; co++) {
+                for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
+                    WeaponGroup* grp = &ship->weapon_groups[co][g];
+                    if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE)
+                        grp->target_ship_id = 0;
+                }
+            }
+        }
+
+        /* Store in ship slot for rendering-side debug convenience */
+        ghost_desired_heading[s] = desired_heading;
+
+        /* ── 3. Apply rotation (same pattern as NPC_ROLE_HELMSMAN) ────────── */
+        float diff = desired_heading - ship->rotation;
+        while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+        while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+
+        float turn = diff;
+        if (turn >  GHOST_TURN_RATE * dt) turn =  GHOST_TURN_RATE * dt;
+        if (turn < -GHOST_TURN_RATE * dt) turn = -GHOST_TURN_RATE * dt;
+        ship->rotation += turn;
+
+        /* Normalise rotation to -PI..PI */
+        while (ship->rotation >  (float)M_PI) ship->rotation -= 2.0f * (float)M_PI;
+        while (ship->rotation < -(float)M_PI) ship->rotation += 2.0f * (float)M_PI;
+
+        /* Mirror rotation into the physics simulation */
+        if (global_sim) {
+            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                if ((uint32_t)global_sim->ships[si].id == ship->ship_id) {
+                    global_sim->ships[si].rotation = Q16_FROM_FLOAT(ship->rotation);
+                    break;
+                }
+            }
+        }
+
+        /* ── 4. Apply forward thrust (ghost ships ignore normal sail physics) ── */
+        float thrust_x = cosf(ship->rotation) * move_speed;
+        float thrust_y = sinf(ship->rotation) * move_speed;
+
+        /* Smooth approach to desired velocity (soft cap) */
+        const float ACCEL_RATE = 0.08f; /* blend factor per tick */
+        ship->velocity_x += (thrust_x - ship->velocity_x) * ACCEL_RATE;
+        ship->velocity_y += (thrust_y - ship->velocity_y) * ACCEL_RATE;
+
+        /* Mirror velocity into sim */
+        if (global_sim) {
+            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                if ((uint32_t)global_sim->ships[si].id == ship->ship_id) {
+                    global_sim->ships[si].velocity.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ship->velocity_x));
+                    global_sim->ships[si].velocity.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ship->velocity_y));
+                    break;
+                }
+            }
+        }
+    }
 }
 
 int websocket_server_init(uint16_t port) {
@@ -7794,12 +7993,13 @@ int websocket_server_update(struct Sim* sim) {
                         "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                         "\"rudder_angle\":%.3f,"
-                        "\"hullHealth\":%.2f,\"company\":%u,"
+                        "\"hullHealth\":%.2f,\"company\":%u,\"shipType\":%u,"
                         "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                         ship->id, pos_x, pos_y, rotation, vel_x, vel_y, ang_vel,
                         rudder_radians,
                         hull_health_pct,
                         simple_ship ? simple_ship->company_id : COMPANY_NEUTRAL,
+                        simple_ship ? simple_ship->ship_type  : SHIP_TYPE_BRIGANTINE,
                         simple_ship ? simple_ship->cannon_ammo : 0,
                         (simple_ship && simple_ship->infinite_ammo) ? "true" : "false");
                 
@@ -8877,6 +9077,9 @@ void websocket_server_tick(float dt) {
 
     // ===== TICK SINKING SHIPS (velocity=0, despawn after 8s) =====
     tick_sinking_ships();
+
+    // ===== TICK GHOST SHIPS (wander + attack AI) =====
+    tick_ghost_ships(dt);
 
     // ===== ADVANCE CANNON AIM TOWARD DESIRED (turn-speed limit) =====
     // Cannons rotate at a maximum of 60 degrees per second.

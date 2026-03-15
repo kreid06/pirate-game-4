@@ -1479,6 +1479,7 @@ export class NetworkManager {
               infiniteAmmo: ship.infiniteAmmo ?? true,
               hullHealth: ship.hullHealth ?? 100,
               companyId: ship.company ?? 0,
+              shipType: ship.shipType ?? 3,
               levelStats: ship.levelStats ? {
                 levels: [
                   ship.levelStats.weight     ?? 1,

@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY, SHIP_TYPE_GHOST } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
@@ -1567,6 +1567,10 @@ export class RenderSystem {
     // Queue ship hulls (layer 1)
     for (const ship of worldState.ships) {
       this.queueRenderItem(1, 'ship-hull', () => this.drawShipHull(ship, camera));
+      // Ghost fog aura: drawn at layer 0.5 (below hull, like water surface wisps)
+      if (ship.shipType === SHIP_TYPE_GHOST) {
+        this.queueRenderItem(1, `ghost-fog-${ship.id}`, () => this.drawGhostFogAura(ship, camera), -1);
+      }
     }
     
     // Queue players (layer 2)
@@ -1577,6 +1581,10 @@ export class RenderSystem {
     // Queue ship planks (layer 3)
     for (const ship of worldState.ships) {
       this.queueRenderItem(3, 'ship-planks', () => this.drawShipPlanks(ship, camera));
+      // Ghost deck effects (runic circle + crew silhouettes) drawn above planks
+      if (ship.shipType === SHIP_TYPE_GHOST) {
+        this.queueRenderItem(3, `ghost-deck-${ship.id}`, () => this.drawGhostDeckEffects(ship, camera), 3);
+      }
     }
 
     // In build mode, overlay missing plank ghost shapes (layer 3, priority 1 = after real planks)
@@ -1690,7 +1698,7 @@ export class RenderSystem {
           if (start > 0) trail.splice(0, start);
         }
       }
-      this.queueRenderItem(8, 'cannonballs', () => this.drawCannonball(cannonball, camera));
+      this.queueRenderItem(8, 'cannonballs', () => this.drawCannonball(cannonball, camera, worldState));
     }
 
     // Track last attacker per ship: record when a cannonball is within 150 units of a ship
@@ -1782,10 +1790,19 @@ export class RenderSystem {
     this.ctx.strokeStyle = '#8B4513'; // Brown
     this.ctx.fillStyle = '#DEB887'; // BurlyWood
 
+    // Ghost ship: dark spectral hull with cyan edge glow
+    const isGhost = ship.shipType === SHIP_TYPE_GHOST;
+    if (isGhost) {
+      this.ctx.fillStyle   = '#0f0f1a';
+      this.ctx.strokeStyle = '#0a0a16';
+      this.ctx.shadowColor  = '#00eeff';
+      this.ctx.shadowBlur   = 12 / cameraState.zoom;
+    }
+
     // Enemy ship: dark blue hull
     const isEnemy = this._localCompanyId !== 0 && ship.companyId !== 0
       && ship.companyId !== this._localCompanyId;
-    if (isEnemy) {
+    if (!isGhost && isEnemy) {
       this.ctx.strokeStyle = '#1a1a4a';
       this.ctx.fillStyle = '#1e3a6e';
     }
@@ -1802,10 +1819,30 @@ export class RenderSystem {
     this.ctx.fill();
     this.ctx.stroke();
 
-    // Water flood tint: blue overlay that intensifies from 75% → 100% water
+    // Ghost ships: add a second thin cyan edge stroke for the spectral glow outline
+    if (isGhost) {
+      this.ctx.shadowBlur   = 0;
+      this.ctx.strokeStyle  = `rgba(0,230,255,${0.55 * (phase1Alpha < 1 ? phase1Alpha : 1)})`;
+      this.ctx.lineWidth    = 1.5 / cameraState.zoom;
+      this.ctx.beginPath();
+      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+      this.ctx.closePath();
+      this.ctx.stroke();
+    }
+
+    // Water flood tint: blue overlay (non-ghost), cyan mist dissolve (ghost)
     if (floodTint > 0) {
-      this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
-      this.ctx.fillStyle = '#1a6eb5';
+      if (isGhost) {
+        // Ghost dissolve: cyan/teal mist instead of blue flood
+        this.ctx.globalAlpha = floodTint * 0.65 * (phase1Alpha < 1 ? phase1Alpha : 1);
+        this.ctx.fillStyle = '#00eeff';
+        this.ctx.shadowColor = '#00eeff';
+        this.ctx.shadowBlur  = 16 / cameraState.zoom;
+      } else {
+        this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
+        this.ctx.fillStyle = '#1a6eb5';
+      }
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
       for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
@@ -1833,9 +1870,13 @@ export class RenderSystem {
 
     const { floodTint, phase1Alpha } = this.computeSinkState(ship);
     if (phase1Alpha <= 0) return;
+
+    const isGhostShip = ship.shipType === SHIP_TYPE_GHOST;
     
     this.ctx.save();
-    if (phase1Alpha < 1) this.ctx.globalAlpha = phase1Alpha;
+    // Ghost planks are inherently semi-transparent
+    const baseAlpha = isGhostShip ? Math.min(phase1Alpha, 0.45) : phase1Alpha;
+    if (baseAlpha < 1) this.ctx.globalAlpha = baseAlpha;
     
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
@@ -1863,9 +1904,18 @@ export class RenderSystem {
       // Smoothly darken toward black as health decreases
       const maxHealth = plankData.maxHealth || 10000;
       const healthRatio = Math.max(0, health / maxHealth);
-      const fillColor   = this.darkenByDamage('#8B7355', healthRatio);
-      const strokeColor = this.darkenByDamage('#4A3020', healthRatio);
-      
+      // Ghost planks: dark semi-transparent with cyan tinge; pulsed by health
+      const fillColor   = isGhostShip
+        ? this.darkenByDamage('#1a2a3a', healthRatio)
+        : this.darkenByDamage('#8B7355', healthRatio);
+      const strokeColor = isGhostShip
+        ? this.darkenByDamage('#003055', healthRatio)
+        : this.darkenByDamage('#4A3020', healthRatio);
+
+      if (isGhostShip) {
+        this.ctx.shadowColor = '#00eeff';
+        this.ctx.shadowBlur  = 3;
+      }
       this.ctx.fillStyle = fillColor;
       this.ctx.strokeStyle = strokeColor;
       this.ctx.lineWidth = 1;
@@ -4025,6 +4075,168 @@ export class RenderSystem {
     this.ctx.restore();
   }
   
+  // ─── Ghost Ship FX ────────────────────────────────────────────────────────
+
+  /**
+   * Draw ghostly runic circle on deck + 3 translucent crew silhouettes that
+   * fade in and out asynchronously.
+   */
+  private drawGhostDeckEffects(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+
+    const { phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
+
+    const ctx         = this.ctx;
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cs          = camera.getState();
+    const t           = performance.now() / 1000;
+
+    ctx.save();
+    ctx.globalAlpha = phase1Alpha;
+    ctx.translate(screenPos.x, screenPos.y);
+    ctx.scale(cs.zoom, cs.zoom);
+    ctx.rotate(ship.rotation - cs.rotation);
+
+    // ── Runic circle pulsing glow ─────────────────────────────────────────
+    const pulse  = 0.4 + 0.35 * Math.sin(t * 1.8);
+    const rotate = t * 0.22; // slow rotation
+    const circleR = 55;
+
+    // Outer haze
+    ctx.save();
+    ctx.rotate(rotate);
+    const hazeGrd = ctx.createRadialGradient(0, 0, circleR * 0.55, 0, 0, circleR * 1.4);
+    hazeGrd.addColorStop(0,   `rgba(0,230,255,${(pulse * 0.30).toFixed(3)})`);
+    hazeGrd.addColorStop(1,   'rgba(0,100,160,0)');
+    ctx.fillStyle = hazeGrd;
+    ctx.beginPath();
+    ctx.arc(0, 0, circleR * 1.4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Circle stroke
+    ctx.strokeStyle = `rgba(0,220,255,${(pulse * 0.80).toFixed(3)})`;
+    ctx.lineWidth   = 1.5;
+    ctx.shadowColor = '#00eeff';
+    ctx.shadowBlur  = 6;
+    ctx.beginPath();
+    ctx.arc(0, 0, circleR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 5 rune tick marks around the ring
+    for (let i = 0; i < 5; i++) {
+      const angle = (i / 5) * Math.PI * 2;
+      const ix    = Math.cos(angle) * circleR;
+      const iy    = Math.sin(angle) * circleR;
+      const ox    = Math.cos(angle) * (circleR - 12);
+      const oy    = Math.sin(angle) * (circleR - 12);
+      ctx.strokeStyle = `rgba(0,200,255,${(pulse * 0.70).toFixed(3)})`;
+      ctx.lineWidth   = 1.0;
+      ctx.beginPath();
+      ctx.moveTo(ix, iy);
+      ctx.lineTo(ox, oy);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // ── Ghost crew silhouettes ────────────────────────────────────────────
+    // 3 "figures" at staggered positions along the deck centreline.
+    // Each fades in/out with a different phase offset.
+    const crewPositions = [
+      { x: 60,  y: 0,  phase: 0.0 },
+      { x: -40, y: 20, phase: 1.8 },
+      { x: -40, y: -20, phase: 3.2 },
+    ];
+    for (const crew of crewPositions) {
+      const alpha = Math.max(0, 0.15 + 0.35 * Math.sin(t * 1.1 + crew.phase));
+
+      ctx.save();
+      ctx.translate(crew.x, crew.y);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle   = '#a0e8ff';
+      ctx.shadowColor = '#00eeff';
+      ctx.shadowBlur  = 8;
+
+      // Body (torso + head silhouette)
+      ctx.beginPath();
+      ctx.ellipse(0, -12, 5, 10, 0, 0, Math.PI * 2); // torso
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(0, -24, 5, 0, Math.PI * 2);              // head
+      ctx.fill();
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  /**
+   * Draw wispy fog/mist aura around the ghost ship hull edges + stern whisps.
+   */
+  private drawGhostFogAura(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+
+    const { phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
+
+    const ctx       = this.ctx;
+    const screenPos = camera.worldToScreen(ship.position);
+    const cs        = camera.getState();
+    const t         = performance.now() / 1000;
+
+    ctx.save();
+    ctx.globalAlpha = phase1Alpha;
+    ctx.translate(screenPos.x, screenPos.y);
+    ctx.scale(cs.zoom, cs.zoom);
+    ctx.rotate(ship.rotation - cs.rotation);
+
+    // 8 mist puffs at hull-edge positions: bow, stern, two amidships port/stbd
+    const mistPositions = [
+      { x:  280, y:   0, r: 45 },   // bow
+      { x: -330, y:   0, r: 40 },   // stern
+      { x:   80, y:  80, r: 35 },   // fore-port
+      { x:   80, y: -80, r: 35 },   // fore-stbd
+      { x:  -80, y:  80, r: 35 },   // aft-port
+      { x:  -80, y: -80, r: 35 },   // aft-stbd
+      { x: -170, y:  55, r: 30 },   // far-aft-port
+      { x: -170, y: -55, r: 30 },   // far-aft-stbd
+    ];
+
+    for (let i = 0; i < mistPositions.length; i++) {
+      const mp    = mistPositions[i];
+      const drift = Math.sin(t * 0.7 + i * 1.2) * 8; // gentle drift
+      const alpha = 0.08 + 0.08 * Math.sin(t * 0.9 + i * 0.8);
+
+      const grd = ctx.createRadialGradient(mp.x, mp.y + drift, 2, mp.x, mp.y + drift, mp.r);
+      grd.addColorStop(0,   `rgba(180,240,255,${alpha.toFixed(3)})`);
+      grd.addColorStop(0.4, `rgba(100,200,240,${(alpha * 0.55).toFixed(3)})`);
+      grd.addColorStop(1,   'rgba(0,150,200,0)');
+
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.ellipse(mp.x, mp.y + drift, mp.r, mp.r * 0.55, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Trailing mist wake — cyan wisps stretching behind the stern
+    for (let i = 0; i < 4; i++) {
+      const wx    = -350 - i * 60;
+      const wdrift = Math.sin(t * 0.6 + i * 2.0) * 12;
+      const alpha  = Math.max(0, 0.12 - i * 0.025) * (0.5 + 0.5 * Math.sin(t * 0.5 + i));
+
+      const wgrd = ctx.createRadialGradient(wx, wdrift, 0, wx, wdrift, 30 + i * 10);
+      wgrd.addColorStop(0,   `rgba(120,220,255,${alpha.toFixed(3)})`);
+      wgrd.addColorStop(1,   'rgba(0,120,180,0)');
+
+      ctx.fillStyle = wgrd;
+      ctx.beginPath();
+      ctx.ellipse(wx, wdrift, 30 + i * 10, 18, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
   private drawShipRudder(ship: Ship, camera: Camera): void {
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
@@ -4740,12 +4952,17 @@ export class RenderSystem {
     }
   }
   
-  private drawCannonball(cannonball: Cannonball, camera: Camera): void {
+  private drawCannonball(cannonball: Cannonball, camera: Camera, worldState?: WorldState): void {
     if (!camera.isWorldPositionVisible(cannonball.position, 20)) return;
 
     const screenPos = camera.worldToScreen(cannonball.position);
     const zoom      = camera.getState().zoom;
     const now       = performance.now();
+
+    // Determine if this projectile was fired from a ghost ship
+    const firedFromGhost = worldState
+      ? (worldState.ships.find(s => s.id === cannonball.firedFrom)?.shipType === SHIP_TYPE_GHOST)
+      : false;
 
     // ── Smoke trail (cannonball & bar shot only) ───────────────────────────
     if (cannonball.ammoType === 0 || cannonball.ammoType === 1) {
@@ -4762,18 +4979,18 @@ export class RenderSystem {
           const alpha  = ease * (isBarShot ? 0.32 : 0.72);
           const radius = Math.max(1, ease * (isBarShot ? 4.5 : 9) * zoom);
           const sp     = camera.worldToScreen(Vec2.from(crumb.x, crumb.y));
-          // Outer puff — light grey
+          // Ghost: spectral green-cyan trail; normal: light grey smoke
           this.ctx.globalAlpha = alpha;
-          this.ctx.fillStyle   = '#c8c8c8';
+          this.ctx.fillStyle   = firedFromGhost ? '#00ff88' : '#c8c8c8';
           this.ctx.beginPath();
           this.ctx.arc(sp.x, sp.y, radius, 0, Math.PI * 2);
           this.ctx.fill();
-          // Inner dark core (cannonball only, fresh crumbs) for blackpowder depth
+          // Ghost: glowing core; normal: black powder dark core (cannonball only, fresh crumbs)
           if (!isBarShot && age < 0.35) {
             const coreAlpha  = (0.35 - age) / 0.35 * 0.55;
             const coreRadius = radius * 0.45;
             this.ctx.globalAlpha = coreAlpha;
-            this.ctx.fillStyle   = '#3a3a3a';
+            this.ctx.fillStyle   = firedFromGhost ? '#00ddaa' : '#3a3a3a';
             this.ctx.beginPath();
             this.ctx.arc(sp.x, sp.y, coreRadius, 0, Math.PI * 2);
             this.ctx.fill();
@@ -4979,10 +5196,31 @@ export class RenderSystem {
     } else {
       // ── Cannonball (default) ───────────────────────────────────────────────
       const scaledRadius = cannonball.radius * zoom;
-      this.ctx.fillStyle = '#000000';
-      this.ctx.beginPath();
-      this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, 0, Math.PI * 2);
-      this.ctx.fill();
+      if (firedFromGhost) {
+        // Ghost projectile: glowing green-cyan ball
+        const t = performance.now() / 1000;
+        const flicker = 0.85 + 0.15 * Math.sin(t * 12 + cannonball.id * 2.3);
+        const r = Math.max(3, scaledRadius * 1.4);
+        // Outer glow
+        const grd = this.ctx.createRadialGradient(screenPos.x, screenPos.y, 0, screenPos.x, screenPos.y, r * 2.5);
+        grd.addColorStop(0,   `rgba(0,255,160,${(0.65 * flicker).toFixed(3)})`);
+        grd.addColorStop(0.4, `rgba(0,200,120,${(0.35 * flicker).toFixed(3)})`);
+        grd.addColorStop(1,   'rgba(0,100,80,0)');
+        this.ctx.fillStyle = grd;
+        this.ctx.beginPath();
+        this.ctx.arc(screenPos.x, screenPos.y, r * 2.5, 0, Math.PI * 2);
+        this.ctx.fill();
+        // Ball core
+        this.ctx.fillStyle = `rgba(0,255,180,${flicker.toFixed(3)})`;
+        this.ctx.beginPath();
+        this.ctx.arc(screenPos.x, screenPos.y, r, 0, Math.PI * 2);
+        this.ctx.fill();
+      } else {
+        this.ctx.fillStyle = '#000000';
+        this.ctx.beginPath();
+        this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, 0, Math.PI * 2);
+        this.ctx.fill();
+      }
     }
   }
   

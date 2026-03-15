@@ -44,6 +44,9 @@ export interface Ship {
   // Company/faction (COMPANY_* constants)
   companyId: number;
 
+  // Ship type (SHIP_TYPE_* constants); used for spectral/ghost rendering
+  shipType: number;
+
   // Ship progression (from server levelStats; optional until server sends it)
   levelStats?: ShipLevelStats;
 }
@@ -111,6 +114,10 @@ export interface Cannonball {
 export const COMPANY_NEUTRAL = 0;
 export const COMPANY_PIRATES = 1;
 export const COMPANY_NAVY    = 2;
+
+// Ship type identifiers (mirror server SHIP_TYPE_* constants)
+export const SHIP_TYPE_BRIGANTINE = 3;
+export const SHIP_TYPE_GHOST      = 99; // Ghostship — autonomous enemy, spectral visual
 
 // ─── Ship levelling ───────────────────────────────────────────────────────────
 

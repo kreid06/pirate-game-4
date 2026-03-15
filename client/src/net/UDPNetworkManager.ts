@@ -651,7 +651,8 @@ export class UDPNetworkManager {
           cannonAmmo: 0,
           infiniteAmmo: true,
           hullHealth: 100,
-          companyId: 0
+          companyId: 0,
+          shipType: 3
         });
       } else {
         // Projectile entities  
