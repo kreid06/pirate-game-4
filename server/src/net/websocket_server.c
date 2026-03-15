@@ -5131,7 +5131,7 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
 /* Sweep amplitude (radians). ~40° wide arc swing side-to-side */
 #define GHOST_SWING_AMP     0.70f
 /* How much the ship BODY sways left/right while chasing (radians) */
-#define GHOST_HEADING_SWING 0.35f  /* ±20° — visible sway while still pursuing */
+#define GHOST_HEADING_SWING 0.785f /* ±45° — slow haunting weave while pursuing */
 
 /**
  * Aim a ghost-ship cannon at a world target with a 90° arc and an optional
