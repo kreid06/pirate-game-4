@@ -54,6 +54,8 @@ export class RenderSystem {
   private mouseWorldPos: Vec2 | null = null;
   private hoveredModule: { ship: Ship; module: any } | null = null;
   private hoveredNpc: Npc | null = null;
+  /** Ship (other than the player's own) whose hull the cursor is over. */
+  private hoveredShip: Ship | null = null;
 
   /** Timestamp (ms) of the last sword swing, used to draw a cooldown ring. */
   private lastSwordSwingAt: number = 0;
@@ -1078,6 +1080,7 @@ export class RenderSystem {
     // Detect hovered module
     this.detectHoveredModule(worldState);
     this.detectHoveredNpc(worldState);
+    this.detectHoveredShip(worldState);
 
     // In build mode, detect which missing plank slot is under the cursor
     if (this.buildMode) {
@@ -1162,6 +1165,7 @@ export class RenderSystem {
     // Draw hover tooltip (screen space, on top of everything)
     this.drawHoverTooltip(camera);
     this.drawNpcTooltip(camera);
+    this.drawShipHullTooltip(camera);
   }
   
   /**
@@ -2071,7 +2075,28 @@ export class RenderSystem {
       }
       const firePts = this.moduleFirePoints.get(key)!;
 
+      // Deck: extract active zone bits (bits 11-13) and draw zone overlays
+      const isDeck = mod.kind === 'deck';
+      const zoneBits = isDeck ? (mod.stateBits ?? 0) : 0;
+      const zone0 = isDeck && (zoneBits & (1 << 11)) !== 0; // bow  (+80 to +240)
+      const zone1 = isDeck && (zoneBits & (1 << 12)) !== 0; // mid  (-80 to +80)
+      const zone2 = isDeck && (zoneBits & (1 << 13)) !== 0; // stern(-240 to -80)
+
+      if (isDeck && (zone0 || zone1 || zone2)) {
+        this.drawDeckZoneOverlays(ship, cosR, sinR, zone0, zone1, zone2, zoom, camera);
+      }
+
       for (const pt of firePts) {
+        // Zone filtering for deck: only render fire in active zones
+        if (isDeck) {
+          const inZ0 = pt.lx > 80;
+          const inZ1 = pt.lx >= -80 && pt.lx <= 80;
+          const inZ2 = pt.lx < -80;
+          if (inZ0 && !zone0) continue;
+          if (inZ1 && !zone1) continue;
+          if (inZ2 && !zone2) continue;
+        }
+
         const wx = ship.position.x + pt.lx * cosR - pt.ly * sinR;
         const wy = ship.position.y + pt.lx * sinR + pt.ly * cosR;
         const screen = camera.worldToScreen(Vec2.from(wx, wy));
@@ -2080,6 +2105,77 @@ export class RenderSystem {
         this.drawFireOverlay(screen.x, screen.y, screenR);
         this.ctx.restore();
       }
+    }
+  }
+
+  /** Draw per-zone heat overlays and divider lines for a burning deck. */
+  private drawDeckZoneOverlays(
+    ship: Ship, cosR: number, sinR: number,
+    zone0: boolean, zone1: boolean, zone2: boolean,
+    zoom: number, camera: Camera
+  ): void {
+    // Each zone: 160 units wide, deck ~110 units tall (ly ±55)
+    // Zone 0 = bow  lx [80, 240], Zone 1 = mid lx [-80, 80], Zone 2 = stern lx [-240, -80]
+    const zoneDefs: Array<{ lxMin: number; lxMax: number; active: boolean }> = [
+      { lxMin:  80, lxMax:  240, active: zone0 },
+      { lxMin: -80, lxMax:   80, active: zone1 },
+      { lxMin: -240, lxMax: -80, active: zone2 },
+    ];
+
+    const HALF_H = 55; // half-height of deck in local units
+
+    for (const zone of zoneDefs) {
+      if (!zone.active) continue;
+      // Draw a semi-transparent heat tint over the zone (4 corners → polygon)
+      // Corners in ship-local space
+      const corners: Array<[number, number]> = [
+        [zone.lxMin, -HALF_H],
+        [zone.lxMax, -HALF_H],
+        [zone.lxMax,  HALF_H],
+        [zone.lxMin,  HALF_H],
+      ];
+      const screenCorners = corners.map(([lx, ly]) => {
+        const wx = ship.position.x + lx * cosR - ly * sinR;
+        const wy = ship.position.y + lx * sinR + ly * cosR;
+        return camera.worldToScreen(Vec2.from(wx, wy));
+      });
+
+      this.ctx.save();
+      this.ctx.beginPath();
+      this.ctx.moveTo(screenCorners[0].x, screenCorners[0].y);
+      for (let i = 1; i < screenCorners.length; i++) {
+        this.ctx.lineTo(screenCorners[i].x, screenCorners[i].y);
+      }
+      this.ctx.closePath();
+      this.ctx.fillStyle = 'rgba(255, 80, 0, 0.12)';
+      this.ctx.fill();
+      this.ctx.restore();
+    }
+
+    // Zone divider lines at lx = +80 and lx = -80
+    const dividers: Array<{ lx: number; show: boolean }> = [
+      { lx:  80, show: zone0 || zone1 },
+      { lx: -80, show: zone1 || zone2 },
+    ];
+    for (const div of dividers) {
+      if (!div.show) continue;
+      const top = camera.worldToScreen(Vec2.from(
+        ship.position.x + div.lx * cosR - (-HALF_H) * sinR,
+        ship.position.y + div.lx * sinR + (-HALF_H) * cosR,
+      ));
+      const bot = camera.worldToScreen(Vec2.from(
+        ship.position.x + div.lx * cosR - HALF_H * sinR,
+        ship.position.y + div.lx * sinR + HALF_H * cosR,
+      ));
+      this.ctx.save();
+      this.ctx.beginPath();
+      this.ctx.moveTo(top.x, top.y);
+      this.ctx.lineTo(bot.x, bot.y);
+      this.ctx.strokeStyle = 'rgba(255, 120, 0, 0.65)';
+      this.ctx.lineWidth = Math.max(1, 1.5 * zoom);
+      this.ctx.setLineDash([4 * zoom, 3 * zoom]);
+      this.ctx.stroke();
+      this.ctx.restore();
     }
   }
 
@@ -5098,6 +5194,161 @@ export class RenderSystem {
 
   /** Returns the NPC currently under the cursor (null if none). */
   getHoveredNpc(): Npc | null { return this.hoveredNpc; }
+
+  /**
+   * Detect whether the cursor is over a foreign ship's hull (polygon hit test).
+   * Sets hoveredShip; cleared when over own ship or no ship.
+   */
+  private detectHoveredShip(worldState: WorldState): void {
+    this.hoveredShip = null;
+    if (!this.mouseWorldPos) return;
+    // Don't show hull tooltip when a module or NPC is already hovered
+    if (this.hoveredModule || this.hoveredNpc) return;
+
+    // Determine the local player's current ship
+    const localPlayer = this.localPlayerId != null
+      ? worldState.players.find(p => p.id === this.localPlayerId)
+      : null;
+    const ownShipId = localPlayer?.carrierId ?? -1;
+
+    // Ray-cast point-in-polygon helper (ship-local space)
+    const pointInPolygon = (px: number, py: number, poly: Vec2[]): boolean => {
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i].x, yi = poly[i].y;
+        const xj = poly[j].x, yj = poly[j].y;
+        if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+          inside = !inside;
+        }
+      }
+      return inside;
+    };
+
+    for (const ship of worldState.ships) {
+      if (ship.id === ownShipId) continue;
+      if (!ship.hull || ship.hull.length < 3) continue;
+      // Transform mouse to ship-local coordinates
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const lx = dx * cos - dy * sin;
+      const ly = dx * sin + dy * cos;
+      if (pointInPolygon(lx, ly, ship.hull)) {
+        this.hoveredShip = ship;
+        break;
+      }
+    }
+  }
+
+  /**
+   * Draw a tooltip for a hovered foreign ship showing name, company, and hull/deck HP.
+   */
+  private drawShipHullTooltip(camera: Camera): void {
+    if (!this.hoveredShip || !this.mouseWorldPos) return;
+    // Don't overlap module or NPC tooltips
+    if (this.hoveredModule || this.hoveredNpc) return;
+
+    const ship = this.hoveredShip;
+    const COMPANY_NAMES: Record<number, string> = {
+      [COMPANY_NEUTRAL]: 'Neutral',
+      [COMPANY_PIRATES]: 'Pirates',
+      [COMPANY_NAVY]:    'Navy',
+    };
+    const companyName = COMPANY_NAMES[ship.companyId] ?? `#${ship.companyId}`;
+    const shipTitle   = `${companyName} Brigantine`;
+
+    // Sum plank/deck module health
+    let totalPlankHp    = 0;
+    let totalPlankMaxHp = 0;
+    for (const mod of ship.modules) {
+      const md = mod.moduleData as any;
+      if (!md) continue;
+      if (md.kind === 'plank' || md.kind === 'deck') {
+        totalPlankHp    += md.health    ?? md.maxHealth ?? 10000;
+        totalPlankMaxHp += md.maxHealth ?? 10000;
+      }
+    }
+
+    const hullPct  = Math.max(0, Math.min(1, ship.hullHealth / 100));
+    const hullText = `Hull: ${ship.hullHealth.toFixed(0)}%`;
+    const deckText = totalPlankMaxHp > 0
+      ? `Deck HP: ${Math.round(totalPlankHp)} / ${Math.round(totalPlankMaxHp)}`
+      : 'Deck HP: —';
+    const deckPct  = totalPlankMaxHp > 0 ? totalPlankHp / totalPlankMaxHp : 1;
+
+    const screenPos = camera.worldToScreen(this.mouseWorldPos);
+    const padding   = 10;
+    const barH      = 8;
+    const barW      = 180;
+    const lineH     = 18;
+
+    this.ctx.font = '14px monospace';
+    this.ctx.textAlign    = 'left';
+    this.ctx.textBaseline = 'top';
+
+    const lines    = [shipTitle, `Company: ${companyName}`, hullText, deckText];
+    const barRowH  = barH + 6;
+    let boxW = Math.max(barW + padding * 2, ...lines.map(l => this.ctx.measureText(l).width + padding * 2));
+    let boxH = lines.length * lineH + barRowH * 2 + padding * 2; // hull bar + deck bar
+
+    let tx = screenPos.x + 15;
+    let ty = screenPos.y + 15;
+    if (tx + boxW > this.canvas.width)  tx = screenPos.x - boxW - 15;
+    if (ty + boxH > this.canvas.height) ty = screenPos.y - boxH - 15;
+
+    // Background
+    this.ctx.fillStyle   = 'rgba(12,16,28,0.95)';
+    this.ctx.strokeStyle = '#cc6633';
+    this.ctx.lineWidth   = 1.5;
+    this.ctx.beginPath();
+    (this.ctx as any).roundRect(tx, ty, boxW, boxH, 4);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    let cy = ty + padding;
+
+    // Ship title (gold)
+    this.ctx.fillStyle = '#ffe066';
+    this.ctx.font = '14px monospace';
+    this.ctx.fillText(shipTitle, tx + padding, cy);  cy += lineH;
+
+    // Company
+    this.ctx.fillStyle = '#9ab';
+    this.ctx.font = '12px monospace';
+    this.ctx.fillText(`Company: ${companyName}`, tx + padding, cy);  cy += lineH;
+
+    const bx = tx + padding;
+    const bw = boxW - padding * 2;
+
+    // Hull integrity label
+    this.ctx.fillStyle = '#ccc';
+    this.ctx.fillText(hullText, bx, cy);  cy += lineH;
+    // Hull bar
+    this.ctx.fillStyle = '#333';
+    this.ctx.fillRect(bx, cy, bw, barH);
+    const hullColor = hullPct > 0.6 ? '#44cc66' : hullPct > 0.3 ? '#ffaa44' : '#ff5544';
+    this.ctx.fillStyle = hullColor;
+    this.ctx.fillRect(bx, cy, Math.round(bw * hullPct), barH);
+    this.ctx.strokeStyle = '#556';
+    this.ctx.lineWidth = 0.8;
+    this.ctx.strokeRect(bx, cy, bw, barH);
+    cy += barH + 6;
+
+    // Deck HP label
+    this.ctx.fillStyle = '#ccc';
+    this.ctx.font = '12px monospace';
+    this.ctx.fillText(deckText, bx, cy);  cy += lineH;
+    // Deck bar
+    this.ctx.fillStyle = '#333';
+    this.ctx.fillRect(bx, cy, bw, barH);
+    const deckColor = deckPct > 0.6 ? '#44cc66' : deckPct > 0.3 ? '#ffaa44' : '#ff5544';
+    this.ctx.fillStyle = deckColor;
+    this.ctx.fillRect(bx, cy, Math.round(bw * deckPct), barH);
+    this.ctx.strokeStyle = '#556';
+    this.ctx.lineWidth = 0.8;
+    this.ctx.strokeRect(bx, cy, bw, barH);
+  }
 
   /**
    * Draw hover tooltip for a hovered NPC.

@@ -1345,8 +1345,11 @@ export class NetworkManager {
                     maxHealth: mod.maxHealth ?? 10000,
                   });
                 } else if (kind === 'deck') {
-                  // Deck: Client generates from hull, server sends ID only
-                  // Skip - client already has deck module
+                  // Deck: client generates polygon from hull; update fire-zone state bits from server
+                  if (mod.stateBits !== undefined) {
+                    const existingDeck = properShip.modules.find(m => m.id === mod.id && m.kind === 'deck');
+                    if (existingDeck) existingDeck.stateBits = mod.stateBits ?? 0;
+                  }
                 } else {
                   // Gameplay modules: Full transform data from server
                   let moduleData: any = undefined;

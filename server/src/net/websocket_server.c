@@ -7731,10 +7731,10 @@ int websocket_server_update(struct Sim* sim) {
                             m > 0 ? "," : "", module->id, module->type_id,
                             (int)module->health, (int)module->max_health);
                     } else if (module->type_id == MODULE_TYPE_DECK) {
-                        // Deck: only ID/type (client generates polygon from hull)
+                        // Deck: ID, type, and fire zone state bits (client generates polygon from hull)
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u}",
-                            m > 0 ? "," : "", module->id, module->type_id);
+                            "%s{\"id\":%u,\"typeId\":%u,\"stateBits\":%u}",
+                            m > 0 ? "," : "", module->id, module->type_id, (unsigned)module->state_bits);
                     } else {
                         // Gameplay modules: full transform data
                         float module_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
@@ -9402,15 +9402,42 @@ void websocket_server_tick(float dt) {
                             if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK &&
                                 mt != MODULE_TYPE_MAST) continue;
                             if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
-                            float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
-                            float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
-                            float wx = fship->x + (lx * cos_r - ly * sin_r);
-                            float wy = fship->y + (lx * sin_r + ly * cos_r);
-                            float dx = wx - fw->origin_x, dy = wy - fw->origin_y;
-                            float dist = sqrtf(dx*dx + dy*dy);
-                            if (dist > fw->wave_dist + 40.0f) continue;
-                            float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
-                            if (dot < cos_hc_mod) continue;
+                            /* Compute world-space module position for the flame check.
+                             * Deck modules use per-zone ignition; other modules use their centre. */
+                            float lx, ly, wx, wy, dist = 0.0f;
+                            if (mt == MODULE_TYPE_DECK) {
+                                /* Test each of the 3 deck zone centres independently.
+                                 * Zone 0 = bow (+160 client), 1 = mid, 2 = stern (-160 client).
+                                 * Bits 11-13 are set for each zone that the flame reaches. */
+                                const float zone_lx3[3] = { 160.0f, 0.0f, -160.0f };
+                                bool any_zone = false;
+                                for (int z = 0; z < 3; z++) {
+                                    float z_wx = fship->x + zone_lx3[z] * cos_r;
+                                    float z_wy = fship->y + zone_lx3[z] * sin_r;
+                                    float zdx = z_wx - fw->origin_x, zdy = z_wy - fw->origin_y;
+                                    float zdist = sqrtf(zdx*zdx + zdy*zdy);
+                                    if (zdist > fw->wave_dist + 40.0f) continue;
+                                    float zdot = (zdist > 0.01f)
+                                        ? (zdx/zdist*fdir_x + zdy/zdist*fdir_y) : 1.0f;
+                                    if (zdot < cos_hc_mod) continue;
+                                    mod->state_bits |= (uint16_t)(1u << (11 + z));
+                                    any_zone = true;
+                                }
+                                if (!any_zone) continue;
+                                /* Use ship centre for FIRE_EFFECT position broadcast */
+                                lx = 0.0f; ly = 0.0f;
+                                wx = fship->x; wy = fship->y;
+                            } else {
+                                lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                                ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                                wx = fship->x + (lx * cos_r - ly * sin_r);
+                                wy = fship->y + (lx * sin_r + ly * cos_r);
+                                float dx = wx - fw->origin_x, dy = wy - fw->origin_y;
+                                dist = sqrtf(dx*dx + dy*dy);
+                                if (dist > fw->wave_dist + 40.0f) continue;
+                                float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
+                                if (dot < cos_hc_mod) continue;
+                            }
                             bool first = (mod->fire_timer_ms == 0);
                             mod->fire_timer_ms = FIRE_DURATION_MS;
                             if (global_sim) {
@@ -9419,6 +9446,7 @@ void websocket_server_tick(float dt) {
                                     for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
                                         if (global_sim->ships[si].modules[mi].id == mod->id) {
                                             global_sim->ships[si].modules[mi].fire_timer_ms = FIRE_DURATION_MS;
+                                            global_sim->ships[si].modules[mi].state_bits    = mod->state_bits;
                                             break;
                                         }
                                     }
@@ -9558,6 +9586,13 @@ void websocket_server_tick(float dt) {
                  * mod->health is a raw integer (not Q16-scaled), so compute
                  * DOT as a plain integer too — do NOT use Q16_FROM_FLOAT here. */
                 q16_t fire_dot = (q16_t)(37.5f + (float)mod->max_health * 0.00625f);
+                /* Deck: scale damage by the number of burning zones (1 – 3×). */
+                if (mt == MODULE_TYPE_DECK) {
+                    uint8_t zones = (uint8_t)(((mod->state_bits >> 11) & 1u)
+                                           + ((mod->state_bits >> 12) & 1u)
+                                           + ((mod->state_bits >> 13) & 1u));
+                    if (zones > 1) fire_dot = (q16_t)(fire_dot * zones);
+                }
                 module_apply_damage(mod, fire_dot);
 
                 /* Sync updated health/state back to global_sim Ship module so that
@@ -9639,6 +9674,10 @@ void websocket_server_tick(float dt) {
                     extinguished = true;
                 }
                 if (extinguished) {
+                    /* Clear deck zone bits that accumulated during this burn */
+                    if (mt == MODULE_TYPE_DECK) {
+                        mod->state_bits &= (uint16_t)~((1u<<11)|(1u<<12)|(1u<<13));
+                    }
                     float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
                     float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
                     float wx = fship->x + (lx * cos_r - ly * sin_r);

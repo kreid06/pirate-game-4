@@ -48,7 +48,13 @@ typedef enum {
      *  destination regardless of weapon-group membership. */
     MODULE_STATE_NEEDED = (1 << 9),
     /** Set by toggle_ladder: ladder is pulled up and cannot be climbed. */
-    MODULE_STATE_RETRACTED = (1 << 10)
+    MODULE_STATE_RETRACTED = (1 << 10),
+    /** Deck fire zones (bits 11-13): each bit marks one third of the deck as burning.
+     *  Zone 0 = bow (+160 client), Zone 1 = mid (0), Zone 2 = stern (-160 client).
+     *  Set by the flame-wave loop; cleared when the deck fire extinguishes. */
+    MODULE_STATE_DECK_ZONE0 = (1 << 11),
+    MODULE_STATE_DECK_ZONE1 = (1 << 12),
+    MODULE_STATE_DECK_ZONE2 = (1 << 13)
 } ModuleStateBits;
 
 /**
