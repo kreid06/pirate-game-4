@@ -11,6 +11,7 @@
 #define COMPANY_NEUTRAL  0   // Unclaimed/neutral — no friendly-fire protection
 #define COMPANY_PIRATES  1   // Player's company
 #define COMPANY_NAVY     2   // Enemy AI company
+#define COMPANY_GHOST   99   // Phantom Brig faction — hostile to all
 #define MAX_COMPANIES    3   // Total number of distinct company slots (neutral + pirates + navy)
 
 // ── Ship type identifiers ─────────────────────────────────────────────────

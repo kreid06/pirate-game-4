@@ -214,6 +214,10 @@ export class ClientApplication {
           if (hitMod?.kind === 'mast') {
             this.renderSystem.spawnSailFiberEffect(Vec2.from(worldX, worldY), 2.0);
           }
+          // Hull/plank or cannon destruction: big explosion burst
+          if (hitMod?.kind === 'plank' || hitMod?.kind === 'cannon') {
+            this.renderSystem.spawnExplosion(Vec2.from(worldX, worldY), 1.2);
+          }
         }
 
         // Remove the destroyed module immediately from world state so it disappears
@@ -247,6 +251,12 @@ export class ClientApplication {
 
         if (worldX !== null && worldY !== null) {
           this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage, false);
+          // Impact explosion for hull/plank and cannon hits
+          const hitShipDmg = ws?.ships.find(s => s.id === shipId);
+          const hitModDmg  = hitShipDmg?.modules.find(m => m.id === moduleId);
+          if (hitModDmg?.kind === 'plank' || hitModDmg?.kind === 'cannon') {
+            this.renderSystem.spawnExplosion(Vec2.from(worldX, worldY), 0.5);
+          }
           // If the hit module is a mast, spawn sail fiber shred particles
           const ship = ws?.ships.find(s => s.id === shipId);
           const mod  = ship?.modules.find(m => m.id === moduleId);
@@ -273,7 +283,7 @@ export class ClientApplication {
         const myPlayer    = myPlayerId !== null ? ws?.players.find(p => p.id === myPlayerId) : null;
         const sinkingShip = ws?.ships.find(s => s.id === shipId);
         if (sinkingShip) {
-          const FACTION: Record<number, string> = { 0: 'Neutral', 1: 'Pirates', 2: 'Navy' };
+          const FACTION: Record<number, string> = { 0: 'Neutral', 1: 'Pirates', 2: 'Navy', 99: 'Phantom Brig' };
           const shipLabel = (s: Ship) => FACTION[s.companyId] ?? `Ship #${s.id}`;
           const sinkLabel  = shipLabel(sinkingShip);
           const isOwnShip  = myPlayer?.carrierId === shipId;

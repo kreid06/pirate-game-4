@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY, SHIP_TYPE_GHOST } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
@@ -190,6 +190,10 @@ export class RenderSystem {
   /**
    * Spawn a floating damage number at a world position
    */
+  spawnExplosion(worldPos: Vec2, intensity: number = 1.0): void {
+    this.particleSystem.createExplosion(worldPos, intensity);
+  }
+
   spawnDamageNumber(worldPos: Vec2, damage: number, isKill: boolean = false): void {
     this.effectRenderer.createDamageNumber(worldPos, damage, isKill);
   }
@@ -3061,6 +3065,8 @@ export class RenderSystem {
     // Find all cannon modules
     const cannons = ship.modules.filter(m => m.kind === 'cannon');
     
+    const isPhantomBrig = ship.shipType === SHIP_TYPE_GHOST;
+
     for (const cannon of cannons) {
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
       
@@ -3081,7 +3087,49 @@ export class RenderSystem {
       this.ctx.rotate(localRot);
       
       const lineWidth = 1 / cameraState.zoom;
-      
+
+      if (isPhantomBrig) {
+        // ── Phantom Brig spectral cannon ────────────────────────────────────
+        const t = performance.now() / 1000;
+        const pulse = 0.55 + 0.45 * Math.sin(t * 2.2 + x * 0.05 + y * 0.05);
+        const glowAlpha = 0.5 + 0.5 * pulse;
+
+        // Void-dark base with cyan glow
+        this.ctx.shadowColor = `rgba(0,220,190,${glowAlpha * 0.9})`;
+        this.ctx.shadowBlur = 10 / cameraState.zoom;
+        this.ctx.fillStyle = '#060f0d';
+        this.ctx.strokeStyle = `rgba(0,200,180,${glowAlpha})`;
+        this.ctx.lineWidth = lineWidth * 1.5;
+        this.ctx.fillRect(-15, -10, 30, 20);
+        this.ctx.strokeRect(-15, -10, 30, 20);
+
+        // Spectral barrel
+        this.ctx.save();
+        this.ctx.rotate(turretAngle);
+        this.ctx.shadowColor = `rgba(0,240,200,${glowAlpha})`;
+        this.ctx.shadowBlur = 8 / cameraState.zoom;
+        this.ctx.fillStyle = `rgba(0,30,25,${0.85 + 0.15 * pulse})`;
+        this.ctx.strokeStyle = `rgba(0,210,185,${glowAlpha})`;
+        this.ctx.lineWidth = lineWidth * 1.5;
+        this.ctx.beginPath();
+        this.ctx.moveTo(-6, 0);
+        this.ctx.lineTo(-6, -42);
+        this.ctx.lineTo(6, -42);
+        this.ctx.lineTo(6, 0);
+        this.ctx.closePath();
+        this.ctx.fill();
+        this.ctx.stroke();
+        // Muzzle glow ring
+        this.ctx.beginPath();
+        this.ctx.arc(0, -42, 5, 0, Math.PI * 2);
+        this.ctx.fillStyle = `rgba(0,220,190,${glowAlpha * 0.6})`;
+        this.ctx.shadowBlur = 12 / cameraState.zoom;
+        this.ctx.fill();
+        this.ctx.restore();
+
+        this.ctx.shadowColor = 'transparent';
+        this.ctx.shadowBlur = 0;
+      } else {
       // Draw cannon base (doesn't rotate with turret)
       this.ctx.fillStyle = this.darkenByDamage('#8B4513', cannonHealthRatio);
       this.ctx.strokeStyle = '#000000';
@@ -3089,7 +3137,6 @@ export class RenderSystem {
       this.ctx.fillRect(-15, -10, 30, 20);
       this.ctx.strokeRect(-15, -10, 30, 20);
 
-   
       // Save context to apply turret rotation
       this.ctx.save();
       
@@ -3114,7 +3161,8 @@ export class RenderSystem {
       
       // Restore turret rotation
       this.ctx.restore();
-      
+      } // end normal cannon
+
       // Restore cannon position
       this.ctx.restore();
     }
@@ -5696,6 +5744,7 @@ export class RenderSystem {
       [COMPANY_NEUTRAL]: 'Neutral',
       [COMPANY_PIRATES]: 'Pirates',
       [COMPANY_NAVY]:    'Navy',
+      [COMPANY_GHOST]:   'Ghost Ships',
     };
     const companyName = COMPANY_NAMES[ship.companyId] ?? `#${ship.companyId}`;
     const shipTitle   = ship.shipType === SHIP_TYPE_GHOST
@@ -5826,7 +5875,7 @@ export class RenderSystem {
     this.ctx.textAlign = 'left';
     this.ctx.textBaseline = 'top';
 
-    const COMPANY_NAMES: Record<number, string> = { [COMPANY_NEUTRAL]: 'Neutral', [COMPANY_PIRATES]: 'Pirates', [COMPANY_NAVY]: 'Navy' };
+    const COMPANY_NAMES: Record<number, string> = { [COMPANY_NEUTRAL]: 'Neutral', [COMPANY_PIRATES]: 'Pirates', [COMPANY_NAVY]: 'Navy', [COMPANY_GHOST]: 'Ghost Ships' };
     const titleText   = `${npc.name}  Lv.${npc.npcLevel}`;
     const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
     const companyText = `Company: ${COMPANY_NAMES[npc.companyId] ?? `#${npc.companyId}`}`;

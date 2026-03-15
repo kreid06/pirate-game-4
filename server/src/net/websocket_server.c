@@ -5127,13 +5127,13 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
 /* ============================================================================
  * PHANTOM BRIG SPAWN  (ship_type = SHIP_TYPE_GHOST = 99)
  * Creates a "Phantom Brig" brigantine at the given world position.  The ship
- * belongs to COMPANY_NAVY and has its port/starboard cannon groups set to
+ * belongs to COMPANY_GHOST (99) and has its port/starboard cannon groups set to
  * TARGETFIRE from the start so tick_ghost_ships can auto-aim them.
  * Phantom Brigs deal hull-only damage — interior module breaches are filtered
  * out in the hit-event processing loop.
  * ========================================================================= */
 uint32_t websocket_server_create_ghost_ship(float x, float y) {
-    uint32_t ship_id = websocket_server_create_ship(x, y, COMPANY_NAVY);
+    uint32_t ship_id = websocket_server_create_ship(x, y, COMPANY_GHOST);
     if (ship_id == 0) return 0;
 
     SimpleShip* ship = find_ship(ship_id);
@@ -5193,9 +5193,9 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
 /* Wander: new random heading every N seconds */
 #define GHOST_WANDER_INTERVAL_S 5.0f
 /* Top speed (client-px / s) while chasing — a bit slower than a player ship */
-#define GHOST_CHASE_SPEED       90.0f
+#define GHOST_CHASE_SPEED       20.0f  /* slow, eerie drifting pursuit */
 /* Idle drift speed (client-px / s) */
-#define GHOST_WANDER_SPEED      40.0f
+#define GHOST_WANDER_SPEED      10.0f  /* very slow spectral drift */
 /* Turn rate (rad / s) — slightly sluggish on purpose */
 #define GHOST_TURN_RATE         2.0f   /* rad/s — very agile, feels supernatural */
 /* Slow spin rate added every tick while wandering — makes the brig spiral/spiral */
