@@ -800,6 +800,55 @@ static SimpleShip* find_ship_by_id(uint32_t ship_id) {
 }
 
 /**
+ * Returns true if any intact plank on `ship` blocks the line segment from
+ * (ox,oy) to (tx,ty) in client-space units.
+ *
+ * Method: treat each plank as an infinite line defined by its centre + normal.
+ * If the origin and target lie on opposite sides of that line AND the crossing
+ * falls within the plank's estimated half-span, the plank occludes.
+ */
+static bool plank_occludes_ray(const SimpleShip* ship,
+                                float ox, float oy,   /* flame origin */
+                                float tx, float ty)   /* target position */
+{
+    const float PLANK_HALF_SPAN = 260.0f; /* generous half-length for brigantine planks */
+    float cos_rs = cosf(ship->rotation);
+    float sin_rs = sinf(ship->rotation);
+    for (int pm = 0; pm < ship->module_count; pm++) {
+        const ShipModule* pl = &ship->modules[pm];
+        if (pl->type_id != MODULE_TYPE_PLANK) continue;
+        if (pl->state_bits & MODULE_STATE_DESTROYED) continue;
+        /* Plank centre in world space (client units) */
+        float plx = SERVER_TO_CLIENT(Q16_TO_FLOAT(pl->local_pos.x));
+        float ply = SERVER_TO_CLIENT(Q16_TO_FLOAT(pl->local_pos.y));
+        float pwx = ship->x + (plx * cos_rs - ply * sin_rs);
+        float pwy = ship->y + (plx * sin_rs + ply * cos_rs);
+        /* Plank normal: perpendicular to the plank's lengthwise direction */
+        float plank_angle = ship->rotation + Q16_TO_FLOAT(pl->local_rot);
+        float nx = -sinf(plank_angle);
+        float ny =  cosf(plank_angle);
+        /* Signed distances of origin and target from plank's infinite line */
+        float d_o = (ox - pwx) * nx + (oy - pwy) * ny;
+        float d_t = (tx - pwx) * nx + (ty - pwy) * ny;
+        /* Same side → no crossing */
+        if (d_o * d_t >= 0.0f) continue;
+        /* Intersection parameter t along origin→target */
+        float denom = d_o - d_t;
+        if (fabsf(denom) < 1e-4f) continue;
+        float t = d_o / denom;
+        if (t <= 0.0f || t >= 1.0f) continue;
+        /* Intersection world point */
+        float ix = ox + t * (tx - ox);
+        float iy = oy + t * (ty - oy);
+        /* Check along-plank extent */
+        float cos_pa = cosf(plank_angle), sin_pa = sinf(plank_angle);
+        float along = (ix - pwx) * cos_pa + (iy - pwy) * sin_pa;
+        if (fabsf(along) <= PLANK_HALF_SPAN) return true;
+    }
+    return false;
+}
+
+/**
  * Find module by ID on a ship
  */
 static ShipModule* find_module_by_id(SimpleShip* ship, uint32_t module_id) {
@@ -9304,32 +9353,11 @@ void websocket_server_tick(float dt) {
                         float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
                         if (dot < cos_hc) continue;
                         /* Plank-occlusion check: if an intact plank on the NPC's own ship lies
-                         * between the flame origin and the NPC (along the flame direction), the
-                         * plank shields the NPC and fire does not reach them. */
+                         * between the flame origin and the NPC, the plank shields them. */
                         {
-                            bool plank_blocked = false;
                             SimpleShip* npc_ship = find_ship_by_id(npc->ship_id);
-                            if (npc_ship) {
-                                float dir_x = (dist > 0.01f) ? dx / dist : fdir_x;
-                                float dir_y = (dist > 0.01f) ? dy / dist : fdir_y;
-                                float cos_rs = cosf(npc_ship->rotation);
-                                float sin_rs = sinf(npc_ship->rotation);
-                                for (int pm = 0; pm < npc_ship->module_count && !plank_blocked; pm++) {
-                                    ShipModule* pl = &npc_ship->modules[pm];
-                                    if (pl->type_id != MODULE_TYPE_PLANK && pl->type_id != MODULE_TYPE_DECK) continue;
-                                    if (pl->state_bits & MODULE_STATE_DESTROYED) continue;
-                                    float plx = SERVER_TO_CLIENT(Q16_TO_FLOAT(pl->local_pos.x));
-                                    float ply = SERVER_TO_CLIENT(Q16_TO_FLOAT(pl->local_pos.y));
-                                    float pwx = npc_ship->x + (plx * cos_rs - ply * sin_rs);
-                                    float pwy = npc_ship->y + (plx * sin_rs + ply * cos_rs);
-                                    float pdx = pwx - fw->origin_x, pdy = pwy - fw->origin_y;
-                                    float t = pdx * dir_x + pdy * dir_y; /* scalar projection onto flame→NPC */
-                                    if (t < 5.0f || t > dist - 5.0f) continue; /* not between origin and NPC */
-                                    float perp_x = pdx - t * dir_x, perp_y = pdy - t * dir_y;
-                                    if (perp_x*perp_x + perp_y*perp_y < 24.0f*24.0f) plank_blocked = true;
-                                }
-                            }
-                            if (plank_blocked) continue;
+                            if (npc_ship && plank_occludes_ray(npc_ship, fw->origin_x, fw->origin_y,
+                                                               npc->x, npc->y)) continue;
                         }
                         npc->fire_timer_ms = FIRE_DURATION_MS;
                         {
@@ -9354,29 +9382,9 @@ void websocket_server_tick(float dt) {
                         if (dot < cos_hc) continue;
                         /* Same plank-occlusion check for players as for NPCs */
                         {
-                            bool plank_blocked = false;
                             SimpleShip* pl_ship = find_ship_by_id(wp->parent_ship_id);
-                            if (pl_ship) {
-                                float dir_x = (dist > 0.01f) ? dx / dist : fdir_x;
-                                float dir_y = (dist > 0.01f) ? dy / dist : fdir_y;
-                                float cos_rs = cosf(pl_ship->rotation);
-                                float sin_rs = sinf(pl_ship->rotation);
-                                for (int pm = 0; pm < pl_ship->module_count && !plank_blocked; pm++) {
-                                    ShipModule* pl = &pl_ship->modules[pm];
-                                    if (pl->type_id != MODULE_TYPE_PLANK && pl->type_id != MODULE_TYPE_DECK) continue;
-                                    if (pl->state_bits & MODULE_STATE_DESTROYED) continue;
-                                    float plx = SERVER_TO_CLIENT(Q16_TO_FLOAT(pl->local_pos.x));
-                                    float ply = SERVER_TO_CLIENT(Q16_TO_FLOAT(pl->local_pos.y));
-                                    float pwx = pl_ship->x + (plx * cos_rs - ply * sin_rs);
-                                    float pwy = pl_ship->y + (plx * sin_rs + ply * cos_rs);
-                                    float pdx = pwx - fw->origin_x, pdy = pwy - fw->origin_y;
-                                    float t = pdx * dir_x + pdy * dir_y;
-                                    if (t < 5.0f || t > dist - 5.0f) continue;
-                                    float perp_x = pdx - t * dir_x, perp_y = pdy - t * dir_y;
-                                    if (perp_x*perp_x + perp_y*perp_y < 24.0f*24.0f) plank_blocked = true;
-                                }
-                            }
-                            if (plank_blocked) continue;
+                            if (pl_ship && plank_occludes_ray(pl_ship, fw->origin_x, fw->origin_y,
+                                                              wp->x, wp->y)) continue;
                         }
                         wp->fire_timer_ms = FIRE_DURATION_MS;
                         {
@@ -9408,7 +9416,9 @@ void websocket_server_tick(float dt) {
                             if (mt == MODULE_TYPE_DECK) {
                                 /* Test each of the 3 deck zone centres independently.
                                  * Zone 0 = bow (+160 client), 1 = mid, 2 = stern (-160 client).
-                                 * Bits 11-13 are set for each zone that the flame reaches. */
+                                 * Bits 11-13 are set for each zone that the flame reaches.
+                                 * A zone is not ignited if an intact plank on fship lies between
+                                 * the flame origin and the zone centre (plank-occlusion rule). */
                                 const float zone_lx3[3] = { 160.0f, 0.0f, -160.0f };
                                 bool any_zone = false;
                                 for (int z = 0; z < 3; z++) {
@@ -9420,6 +9430,9 @@ void websocket_server_tick(float dt) {
                                     float zdot = (zdist > 0.01f)
                                         ? (zdx/zdist*fdir_x + zdy/zdist*fdir_y) : 1.0f;
                                     if (zdot < cos_hc_mod) continue;
+                                    /* Skip if an intact plank blocks flame→zone centre */
+                                    if (plank_occludes_ray(fship, fw->origin_x, fw->origin_y,
+                                                           z_wx, z_wy)) continue;
                                     mod->state_bits |= (uint16_t)(1u << (11 + z));
                                     any_zone = true;
                                 }
