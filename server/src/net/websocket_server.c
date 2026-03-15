@@ -8835,13 +8835,8 @@ void websocket_server_tick(float dt) {
                             }
                             /* no proj_consumed, no break — keep scanning */
                         } else {
-                            SET_MODULE_FIRE(fship, mod);
-                            char fmsg[256];
-                            BROADCAST_FIRE_EFFECT(fmsg,
-                                "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"module\","
-                                "\"shipId\":%u,\"moduleId\":%u,"
-                                "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
-                                fship->ship_id, mod->id, wx, wy, FIRE_DURATION_MS);
+                            /* Cannonball/grapeshot/canister: physical impact only — no ignition.
+                             * Module HP damage is handled by the sim layer collision. */
                             proj_consumed = true;
                         }
                         #undef SET_MODULE_FIRE
