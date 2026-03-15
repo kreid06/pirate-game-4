@@ -1811,6 +1811,12 @@ export class RenderSystem {
       this.ctx.fillStyle = '#1e3a6e';
     }
     this.ctx.lineWidth = 2 / cameraState.zoom;
+
+    // Ghost hull fades as it takes damage (health 100→0 maps opacity 1.0→0.2)
+    if (isGhost) {
+      const healthFade = Math.max(0.2, ship.hullHealth / 100);
+      this.ctx.globalAlpha = phase1Alpha * healthFade;
+    }
     
     this.ctx.beginPath();
     this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
@@ -1825,8 +1831,10 @@ export class RenderSystem {
 
     // Ghost ships: add a second thin cyan edge stroke for the spectral glow outline
     if (isGhost) {
+      const healthMult = Math.max(0.2, ship.hullHealth / 100);
+      const sinkMult   = phase1Alpha < 1 ? phase1Alpha : 1;
       this.ctx.shadowBlur   = 0;
-      this.ctx.strokeStyle  = `rgba(0,230,255,${0.55 * (phase1Alpha < 1 ? phase1Alpha : 1)})`;
+      this.ctx.strokeStyle  = `rgba(0,230,255,${0.55 * sinkMult * healthMult})`;
       this.ctx.lineWidth    = 1.5 / cameraState.zoom;
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
@@ -1836,10 +1844,13 @@ export class RenderSystem {
     }
 
     // Water flood tint: blue overlay (non-ghost), cyan mist dissolve (ghost)
-    if (floodTint > 0) {
+    // Ghost mist begins at 75% HP (25% damage) and reaches full intensity at 0 HP
+    const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / 100) - 0.25) / 0.75 : 0;
+    if (isGhost ? ghostMistAlpha > 0 : floodTint > 0) {
       if (isGhost) {
-        // Ghost dissolve: cyan/teal mist instead of blue flood
-        this.ctx.globalAlpha = floodTint * 0.65 * (phase1Alpha < 1 ? phase1Alpha : 1);
+        // Ghost dissolve: cyan/teal mist, starts from 75% HP
+        const sinkMult = phase1Alpha < 1 ? phase1Alpha : 1;
+        this.ctx.globalAlpha = ghostMistAlpha * 0.75 * sinkMult;
         this.ctx.fillStyle = '#00eeff';
         this.ctx.shadowColor = '#00eeff';
         this.ctx.shadowBlur  = 16 / cameraState.zoom;
@@ -1878,8 +1889,9 @@ export class RenderSystem {
     const isGhostShip = ship.shipType === SHIP_TYPE_GHOST;
     
     this.ctx.save();
-    // Ghost planks are inherently semi-transparent
-    const baseAlpha = isGhostShip ? Math.min(phase1Alpha, 0.45) : phase1Alpha;
+    // Ghost planks fade with hull damage (full opacity 0.45 at 100 HP → 0.05 at 0 HP)
+    const ghostHealthFade = isGhostShip ? Math.max(0.1, ship.hullHealth / 100) : 1;
+    const baseAlpha = isGhostShip ? Math.min(phase1Alpha, 0.45) * ghostHealthFade : phase1Alpha;
     if (baseAlpha < 1) this.ctx.globalAlpha = baseAlpha;
     
     const screenPos = camera.worldToScreen(ship.position);

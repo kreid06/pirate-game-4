@@ -5194,6 +5194,32 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
     /* Tag as ghost */
     ship->ship_type = SHIP_TYPE_GHOST;
 
+    /* Boost ghost ship plank health to 4× normal — planks remain in the
+     * simulation for hull-health tracking (enabling the hull-fade and
+     * mist-dissolve damage system) but require far more hits to fully
+     * destroy, so individual planks never visibly "pop" off in gameplay. */
+    {
+        for (int m = 0; m < ship->module_count; m++) {
+            if (ship->modules[m].type_id == MODULE_TYPE_PLANK) {
+                ship->modules[m].max_health *= 4;
+                ship->modules[m].health     = ship->modules[m].max_health;
+            }
+        }
+        if (global_sim) {
+            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                if (global_sim->ships[si].id != ship_id) continue;
+                struct Ship* sim_ship = &global_sim->ships[si];
+                for (uint8_t sm = 0; sm < sim_ship->module_count; sm++) {
+                    if (sim_ship->modules[sm].type_id == MODULE_TYPE_PLANK) {
+                        sim_ship->modules[sm].max_health *= 4;
+                        sim_ship->modules[sm].health     = sim_ship->modules[sm].max_health;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
     /* Ghost ships have infinite spectral ammo */
     ship->infinite_ammo = 1;
 
@@ -5380,13 +5406,42 @@ static void tick_ghost_ships(float dt) {
             desired_heading = atan2f(dy, dx) + phase_sin * GHOST_HEADING_SWING;
             move_speed      = GHOST_CHASE_SPEED;
 
+            /* Find the sim ship once — reload state lives in sim modules, not
+             * SimpleShip modules (SimpleShip copy is reset by fire_cannon but
+             * never re-incremented; only the sim reload loop increments it). */
+            struct Ship* ghost_sim = NULL;
+            if (global_sim) {
+                for (uint32_t gsi = 0; gsi < global_sim->ship_count; gsi++) {
+                    if (global_sim->ships[gsi].id == ship->ship_id) {
+                        ghost_sim = &global_sim->ships[gsi];
+                        break;
+                    }
+                }
+            }
+
             for (int m = 0; m < ship->module_count; m++) {
                 ShipModule* cannon = &ship->modules[m];
                 if (cannon->type_id != MODULE_TYPE_CANNON) continue;
                 /* Aim with 90° arc + oscillating sweep */
                 ghost_aim_cannon(ship, cannon, target->x, target->y, sweep_rad);
+
+                /* Find matching sim module for authoritative reload state */
+                ShipModule* sim_cannon = NULL;
+                if (ghost_sim) {
+                    for (uint8_t sm = 0; sm < ghost_sim->module_count; sm++) {
+                        if (ghost_sim->modules[sm].id == cannon->id) {
+                            sim_cannon = &ghost_sim->modules[sm];
+                            break;
+                        }
+                    }
+                }
+                uint32_t tsf  = sim_cannon ? sim_cannon->data.cannon.time_since_fire
+                                           : cannon->data.cannon.time_since_fire;
+                uint32_t trel = sim_cannon ? sim_cannon->data.cannon.reload_time
+                                           : cannon->data.cannon.reload_time;
+
                 /* Fire when reloaded AND aimed within ±15° of the target */
-                if (cannon->data.cannon.time_since_fire >= cannon->data.cannon.reload_time) {
+                if (tsf >= trel) {
                     float wfa = ship->rotation
                         + Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0)
                         + Q16_TO_FLOAT(cannon->data.cannon.aim_direction);
@@ -5395,6 +5450,8 @@ static void tick_ghost_ships(float dt) {
                     while (fire_diff < -(float)M_PI) fire_diff += 2.0f * (float)M_PI;
                     if (fabsf(fire_diff) < 0.262f) { /* ±15° */
                         fire_cannon(ship, cannon, NULL, false, PROJ_TYPE_CANNONBALL);
+                        /* Reset sim module so its reload counter restarts properly */
+                        if (sim_cannon) sim_cannon->data.cannon.time_since_fire = 0;
                     }
                 }
             }
@@ -8724,6 +8781,7 @@ void websocket_server_tick(float dt) {
                         break;
                     }
                 }
+                /* When hull_health hits 0 the ship enters its dissolve state. */
                 if (sinking_ship && !sinking_ship->is_sinking) {
                     sinking_ship->is_sinking    = true;
                     sinking_ship->sink_start_ms = get_time_ms();
@@ -8770,6 +8828,14 @@ void websocket_server_tick(float dt) {
                 /* Skip building the broadcast msg for this event — no module_id / damage info */
                 continue;
             } else if (ev->is_breach) {
+                /* Ghost ship planks participate in hull-health tracking for the
+                 * damage-fade / mist-dissolve system.  Only block cascade-
+                 * destruction of interior modules (deck ID 200, cannons >= 300). */
+                {
+                    SimpleShip* breach_victim = find_ship(ev->ship_id);
+                    if (breach_victim && breach_victim->ship_type == SHIP_TYPE_GHOST
+                        && ev->destroyed && ev->module_id >= 200) continue;
+                }
                 if (ev->destroyed) {
                     // Interior module destroyed through breach: remove from SimpleShip and broadcast MODULE_HIT
                     SimpleShip* simple = find_ship(ev->ship_id);
