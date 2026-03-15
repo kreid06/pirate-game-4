@@ -9488,6 +9488,12 @@ void websocket_server_tick(float dt) {
             for (int m = 0; m < fship->module_count; m++) {
                 ShipModule* mod = &fship->modules[m];
                 if (mod->fire_timer_ms == 0) continue;
+                /* Stop DOT ticking on already-destroyed modules and extinguish
+                   their fire — prevents repeated "destroyed" log spam. */
+                if (mod->state_bits & MODULE_STATE_DESTROYED) {
+                    mod->fire_timer_ms = 0;
+                    continue;
+                }
                 ModuleTypeId mt = mod->type_id;
                 if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK && mt != MODULE_TYPE_MAST) continue;
                 /* Apply 7.5 base + 0.125% of max_health per 100ms tick.
