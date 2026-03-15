@@ -5124,6 +5124,56 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
     return sim_id;
 }
 
+/* Ghost cannon arc — ±90 degrees (much wider than normal 30°) */
+#define GHOST_CANNON_ARC    (90.0f * (float)(M_PI / 180.0))
+/* Cannon sweep: side-to-side oscillation rate while chasing */
+#define GHOST_SWEEP_RATE    0.7f   /* rad/s — slow haunting sweep */
+/* Sweep amplitude (radians). ~40° wide arc swing side-to-side */
+#define GHOST_SWING_AMP     0.70f
+
+/**
+ * Aim a ghost-ship cannon at a world target with a 90° arc and an optional
+ * sinusoidal sweep offset (sweep_rad, in radians) that swings the aim
+ * perpendicular to the line-of-sight.  Works identically to
+ * npc_aim_cannon_at_world() but with GHOST_CANNON_ARC instead of 30°.
+ */
+static void ghost_aim_cannon(SimpleShip* ship, ShipModule* cannon,
+                             float target_x, float target_y, float sweep_rad) {
+    float dx = target_x - ship->x;
+    float dy = target_y - ship->y;
+    float world_angle = atan2f(dy, dx) + sweep_rad;
+
+    float relative_angle = world_angle - ship->rotation;
+    while (relative_angle >  (float)M_PI) relative_angle -= 2.0f * (float)M_PI;
+    while (relative_angle < -(float)M_PI) relative_angle += 2.0f * (float)M_PI;
+
+    float cannon_base_angle = Q16_TO_FLOAT(cannon->local_rot);
+    float desired_offset = relative_angle - cannon_base_angle + (float)(M_PI / 2.0);
+    while (desired_offset >  (float)M_PI) desired_offset -= 2.0f * (float)M_PI;
+    while (desired_offset < -(float)M_PI) desired_offset += 2.0f * (float)M_PI;
+
+    if (desired_offset >  GHOST_CANNON_ARC) desired_offset =  GHOST_CANNON_ARC;
+    if (desired_offset < -GHOST_CANNON_ARC) desired_offset = -GHOST_CANNON_ARC;
+
+    cannon->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
+
+    if (global_sim) {
+        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+            if (global_sim->ships[s].id == ship->ship_id) {
+                struct Ship* sim_ship = &global_sim->ships[s];
+                for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                    if (sim_ship->modules[m].id == cannon->id) {
+                        sim_ship->modules[m].data.cannon.desired_aim_direction =
+                            Q16_FROM_FLOAT(desired_offset);
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
 /* ============================================================================
  * PHANTOM BRIG SPAWN  (ship_type = SHIP_TYPE_GHOST = 99)
  * Creates a "Phantom Brig" brigantine at the given world position.  The ship
@@ -5142,14 +5192,49 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
     /* Tag as ghost */
     ship->ship_type = SHIP_TYPE_GHOST;
 
-    /* Set all cannon groups to TARGETFIRE so the ghost ship will auto-aim.
-     * Groups 1 (port) and 2 (starboard) were populated by ship_init_default_weapon_groups.
-     * We iterate all company slots mirroring the init function. */
+    /* Ghost ships have infinite spectral ammo */
+    ship->infinite_ammo = 1;
+
+    /* Ghost ships do NOT use weapon groups — tick_ghost_ships() fires cannons
+     * directly with a custom 90° arc + oscillating sweep AI.
+     * Disable all weapon groups so tick_ship_weapon_groups() ignores this ship. */
     for (int co = 0; co < MAX_COMPANIES; co++) {
-        if (ship->weapon_groups[co][1].weapon_count > 0)
-            ship->weapon_groups[co][1].mode = WEAPON_GROUP_MODE_TARGETFIRE;
-        if (ship->weapon_groups[co][2].weapon_count > 0)
-            ship->weapon_groups[co][2].mode = WEAPON_GROUP_MODE_TARGETFIRE;
+        for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
+            ship->weapon_groups[co][g].mode = WEAPON_GROUP_MODE_HALTFIRE;
+            ship->weapon_groups[co][g].target_ship_id = 0;
+        }
+    }
+
+    /* Add 2 bow-facing cannons at the front of the hull.
+     * local_rot = PI/2 → barrel_angle = local_rot - PI/2 = 0 (fires forward).
+     * IDs 300 and 301 are reserved for ghost bow cannons (won't conflict with
+     * sequential IDs 0–11 or hardcoded plank IDs 100–109 / deck ID 200). */
+    if (ship->module_count + 2 <= MAX_MODULES_PER_SHIP) {
+        /* Bow port cannon (ID 300) */
+        ship->modules[ship->module_count].id          = 300;
+        ship->modules[ship->module_count].type_id     = MODULE_TYPE_CANNON;
+        ship->modules[ship->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(210.0f));
+        ship->modules[ship->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(22.0f));
+        ship->modules[ship->module_count].local_rot   = Q16_FROM_FLOAT((float)M_PI / 2.0f);
+        ship->modules[ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
+        ship->modules[ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
+        ship->modules[ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+        ship->modules[ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
+        ship->modules[ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
+        ship->module_count++;
+
+        /* Bow starboard cannon (ID 301) */
+        ship->modules[ship->module_count].id          = 301;
+        ship->modules[ship->module_count].type_id     = MODULE_TYPE_CANNON;
+        ship->modules[ship->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(210.0f));
+        ship->modules[ship->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-22.0f));
+        ship->modules[ship->module_count].local_rot   = Q16_FROM_FLOAT((float)M_PI / 2.0f);
+        ship->modules[ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
+        ship->modules[ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
+        ship->modules[ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+        ship->modules[ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
+        ship->modules[ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
+        ship->module_count++;
     }
 
     /* Spawn a helmsman NPC agent so the ship steers itself.
@@ -5200,12 +5285,13 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
 #define GHOST_TURN_RATE         2.0f   /* rad/s — very agile, feels supernatural */
 /* Slow spin rate added every tick while wandering — makes the brig spiral/spiral */
 #define GHOST_SPIN_RATE         1.0f   /* rad/s — roughly 1 full rotation per 6 s */
-
 /* Per-ghost wander timer array indexed by ship slot.  Initialised to 0.
  * Value = seconds remaining until next heading change.  When it hits 0 we
  * pick a new heading and reset. */
 static float ghost_wander_timer[MAX_SIMPLE_SHIPS] = {0};
 static float ghost_desired_heading[MAX_SIMPLE_SHIPS] = {0};
+/* Oscillating sweeping aim phase (radians, accumulates over time) */
+static float ghost_aim_phase[MAX_SIMPLE_SHIPS] = {0};
 
 static void tick_ghost_ships(float dt) {
     for (int s = 0; s < ship_count; s++) {
@@ -5244,12 +5330,18 @@ static void tick_ghost_ships(float dt) {
             desired_heading = atan2f(dy, dx);
             move_speed      = GHOST_CHASE_SPEED;
 
-            /* Set TARGETFIRE groups to lock onto this ship */
-            for (int co = 0; co < MAX_COMPANIES; co++) {
-                for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-                    WeaponGroup* grp = &ship->weapon_groups[co][g];
-                    if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE && grp->weapon_count > 0)
-                        grp->target_ship_id = target->ship_id;
+            /* === GHOST CANNON AI: direct aim + fire, no weapon groups === */
+            ghost_aim_phase[s] += GHOST_SWEEP_RATE * dt;
+            float sweep_rad = sinf(ghost_aim_phase[s]) * GHOST_SWING_AMP;
+
+            for (int m = 0; m < ship->module_count; m++) {
+                ShipModule* cannon = &ship->modules[m];
+                if (cannon->type_id != MODULE_TYPE_CANNON) continue;
+                /* Aim with 90° arc + oscillating sweep */
+                ghost_aim_cannon(ship, cannon, target->x, target->y, sweep_rad);
+                /* Fire when reloaded — ghost ships need no crew */
+                if (cannon->data.cannon.time_since_fire >= cannon->data.cannon.reload_time) {
+                    fire_cannon(ship, cannon, NULL, false, PROJ_TYPE_CANNONBALL);
                 }
             }
         } else {
@@ -5261,14 +5353,9 @@ static void tick_ghost_ships(float dt) {
             desired_heading = ghost_desired_heading[s];
             move_speed      = GHOST_WANDER_SPEED;
 
-            /* Clear TARGETFIRE targets while wandering */
-            for (int co = 0; co < MAX_COMPANIES; co++) {
-                for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-                    WeaponGroup* grp = &ship->weapon_groups[co][g];
-                    if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE)
-                        grp->target_ship_id = 0;
-                }
-            }
+            /* Ghost ships use no weapon groups — nothing to clear while wandering.
+             * Cannons will resume aiming when a target is found again. */
+            (void)0; /* no-op placeholder */
         }
 
         /* Store in ship slot for rendering-side debug convenience */
