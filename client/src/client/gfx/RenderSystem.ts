@@ -281,6 +281,16 @@ export class RenderSystem {
       const t       = now / 1000;
       const flicker = 0.90 + 0.10 * Math.sin(t * 18 + cannonId * 0.6);
 
+      // ── Wide ambient heat bloom — drawn BEFORE clip so it bleeds outward ──
+      {
+        const bloomGrd = ctx.createRadialGradient(sp.x, sp.y, innerR * 0.5, sp.x, sp.y, outerR * 1.55);
+        bloomGrd.addColorStop(0,   `rgba(255,120,0,${(0.22 * flicker).toFixed(3)})`);
+        bloomGrd.addColorStop(0.5, `rgba(180,40,0,${(0.12 * flicker).toFixed(3)})`);
+        bloomGrd.addColorStop(1,   'rgba(80,0,0,0)');
+        ctx.fillStyle = bloomGrd;
+        ctx.fillRect(sp.x - outerR * 1.6, sp.y - outerR * 1.6, outerR * 3.2, outerR * 3.2);
+      }
+
       ctx.save();
 
       // ── Clip to the wedge shape (annular sector) ────────────────────────
@@ -297,20 +307,40 @@ export class RenderSystem {
 
       // ── Outer atmospheric haze ──────────────────────────────────────────
       const hazeGrd = ctx.createRadialGradient(sp.x, sp.y, innerR, sp.x, sp.y, outerR);
-      hazeGrd.addColorStop(0,    `rgba(255,200,50,${(0.55 * flicker).toFixed(3)})`);
-      hazeGrd.addColorStop(0.35, `rgba(255,110,15,${(0.50 * flicker).toFixed(3)})`);
-      hazeGrd.addColorStop(0.75, `rgba(180,40,0,${(0.30 * flicker).toFixed(3)})`);
-      hazeGrd.addColorStop(1,    'rgba(100,10,0,0)');
+      hazeGrd.addColorStop(0,    `rgba(255,200,50,${(0.72 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(0.30, `rgba(255,110,15,${(0.65 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(0.65, `rgba(200,50,0,${(0.45 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(0.88, `rgba(140,20,0,${(0.25 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(1,    'rgba(80,5,0,0)');
       ctx.fillStyle = hazeGrd;
       ctx.fillRect(sp.x - outerR, sp.y - outerR, outerR * 2, outerR * 2);
 
+      // ── Mid-band intense orange layer ───────────────────────────────────
+      const midOuter = Math.min(outerR, innerR + (outerR - innerR) * 0.78);
+      const midGrd   = ctx.createRadialGradient(sp.x, sp.y, innerR, sp.x, sp.y, midOuter);
+      midGrd.addColorStop(0,   `rgba(255,170,20,${(0.80 * flicker).toFixed(3)})`);
+      midGrd.addColorStop(0.45,`rgba(255,90,0,${(0.62 * flicker).toFixed(3)})`);
+      midGrd.addColorStop(1,   'rgba(200,30,0,0)');
+      ctx.fillStyle = midGrd;
+      ctx.fillRect(sp.x - outerR, sp.y - outerR, outerR * 2, outerR * 2);
+
       // ── Bright inner core (narrower band) ──────────────────────────────
-      const coreOuter = Math.min(outerR, innerR + (outerR - innerR) * 0.55);
+      const coreOuter = Math.min(outerR, innerR + (outerR - innerR) * 0.48);
       const coreGrd   = ctx.createRadialGradient(sp.x, sp.y, innerR, sp.x, sp.y, coreOuter);
-      coreGrd.addColorStop(0,    `rgba(255,255,200,${(0.92 * flicker).toFixed(3)})`);
-      coreGrd.addColorStop(0.5,  `rgba(255,180,40,${(0.65 * flicker).toFixed(3)})`);
-      coreGrd.addColorStop(1,    'rgba(255,80,0,0)');
+      coreGrd.addColorStop(0,    `rgba(255,255,230,${(1.0 * flicker).toFixed(3)})`);
+      coreGrd.addColorStop(0.3,  `rgba(255,230,80,${(0.90 * flicker).toFixed(3)})`);
+      coreGrd.addColorStop(0.7,  `rgba(255,120,0,${(0.70 * flicker).toFixed(3)})`);
+      coreGrd.addColorStop(1,    'rgba(220,40,0,0)');
       ctx.fillStyle = coreGrd;
+      ctx.fillRect(sp.x - outerR, sp.y - outerR, outerR * 2, outerR * 2);
+
+      // ── Scorching white-hot tip strip along the wave front ──────────────
+      const tipBand = outerR * 0.08;
+      const tipGrd  = ctx.createRadialGradient(sp.x, sp.y, outerR - tipBand * 2, sp.x, sp.y, outerR);
+      tipGrd.addColorStop(0,   'rgba(255,255,255,0)');
+      tipGrd.addColorStop(0.5, `rgba(255,255,240,${(0.60 * flicker).toFixed(3)})`);
+      tipGrd.addColorStop(1,   'rgba(255,200,100,0)');
+      ctx.fillStyle = tipGrd;
       ctx.fillRect(sp.x - outerR, sp.y - outerR, outerR * 2, outerR * 2);
 
       ctx.restore();
@@ -399,27 +429,66 @@ export class RenderSystem {
   private drawFireOverlay(cx: number, cy: number, radius: number): void {
     const ctx = this.ctx;
     const t = performance.now() / 1000;
-    const numFlames = 6;
-    for (let i = 0; i < numFlames; i++) {
-      const angle = (i / numFlames) * Math.PI * 2 + t * 3.0;
-      const flicker = 0.85 + 0.15 * Math.sin(t * 8 + i * 1.3);
-      const fx = cx + Math.cos(angle) * radius * 0.55 * flicker;
-      const fy = cy + Math.sin(angle) * radius * 0.55 * flicker;
-      const fh = radius * 0.55 * flicker;
-      const grad = ctx.createRadialGradient(fx, fy - fh * 0.3, 0, fx, fy, fh);
-      grad.addColorStop(0,   'rgba(255,240,60,0.9)');
-      grad.addColorStop(0.4, 'rgba(255,100,0,0.7)');
-      grad.addColorStop(1,   'rgba(200,20,0,0.0)');
+
+    // ── Seething heat haze — radial orange bloom beneath the flames ──────────
+    const hazeGrd = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 2.2);
+    hazeGrd.addColorStop(0,   'rgba(255,140,0,0.35)');
+    hazeGrd.addColorStop(0.5, 'rgba(200,40,0,0.18)');
+    hazeGrd.addColorStop(1,   'rgba(100,10,0,0)');
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * 2.2, 0, Math.PI * 2);
+    ctx.fillStyle = hazeGrd;
+    ctx.fill();
+
+    // ── Individual flame tongues — two rings for bushy layered fire ──────────
+    const numFlames = 9;
+    for (let layer = 0; layer < 2; layer++) {
+      const layerScale = layer === 0 ? 1.0 : 0.65;
+      const layerSpeed = layer === 0 ? 3.5 : 5.2;
+      const layerOffset = layer * (Math.PI / numFlames);
+      for (let i = 0; i < numFlames; i++) {
+        const angle     = (i / numFlames) * Math.PI * 2 + t * layerSpeed + layerOffset;
+        const flicker   = 0.78 + 0.22 * Math.sin(t * 11 + i * 1.7 + layer * 2.4);
+        const orbitR    = radius * 0.50 * layerScale * flicker;
+        const fx        = cx + Math.cos(angle) * orbitR;
+        const fy        = cy + Math.sin(angle) * orbitR;
+        const fh        = radius * 0.70 * layerScale * flicker;
+        const alpha0    = layer === 0 ? 1.0 : 0.75;
+        const grad = ctx.createRadialGradient(fx, fy - fh * 0.35, 0, fx, fy, fh);
+        grad.addColorStop(0,   `rgba(255,255,180,${(alpha0 * flicker).toFixed(3)})`);
+        grad.addColorStop(0.25,`rgba(255,200,40,${(0.90 * alpha0 * flicker).toFixed(3)})`);
+        grad.addColorStop(0.55,`rgba(255,80,0,${(0.70 * alpha0 * flicker).toFixed(3)})`);
+        grad.addColorStop(1,   'rgba(180,10,0,0)');
+        ctx.beginPath();
+        ctx.ellipse(fx, fy - fh * 0.28, fh * 0.34, fh * 0.62, 0, 0, Math.PI * 2);
+        ctx.fillStyle = grad;
+        ctx.fill();
+      }
+    }
+
+    // ── Central hotspot — white-yellow core for eye-catching intensity ───────
+    const coreGrd = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 0.6);
+    const cf = 0.80 + 0.20 * Math.sin(t * 19);
+    coreGrd.addColorStop(0,   `rgba(255,255,230,${(0.85 * cf).toFixed(3)})`);
+    coreGrd.addColorStop(0.5, `rgba(255,160,20,${(0.55 * cf).toFixed(3)})`);
+    coreGrd.addColorStop(1,   'rgba(255,60,0,0)');
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * 0.6, 0, Math.PI * 2);
+    ctx.fillStyle = coreGrd;
+    ctx.fill();
+
+    // ── Smoke column — multiple overlapping dark wisps drifting upward ───────
+    const numSmoke = 4;
+    for (let s = 0; s < numSmoke; s++) {
+      const sx     = cx + Math.sin(t * 1.8 + s * 1.2) * radius * 0.3;
+      const riseY  = ((t * 28 + s * 22) % (radius * 3)) - radius * 0.5;
+      const sAlpha = Math.max(0, 0.38 - riseY / (radius * 4));
+      const sr     = radius * (0.22 + s * 0.06 + riseY / (radius * 6));
       ctx.beginPath();
-      ctx.ellipse(fx, fy - fh * 0.25, fh * 0.35, fh * 0.55, 0, 0, Math.PI * 2);
-      ctx.fillStyle = grad;
+      ctx.arc(sx, cy - radius * 0.9 - riseY, Math.max(2, sr), 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(50,30,10,${sAlpha.toFixed(3)})`;
       ctx.fill();
     }
-    // Smoke wisp
-    ctx.beginPath();
-    ctx.arc(cx, cy - radius * 1.1, radius * 0.25, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(80,80,80,0.25)';
-    ctx.fill();
   }
 
   /**
@@ -4557,31 +4626,44 @@ export class RenderSystem {
       ctx.rotate(angle);
       // In local space: +x = forward (travel direction), origin = projectile centre
 
-      // Outer atmospheric haze — wide, faint orange cloud
-      const hazeGrd = ctx.createRadialGradient(-jetLen * 0.1, 0, 0, -jetLen * 0.1, 0, jetLen * 1.5);
-      hazeGrd.addColorStop(0,   `rgba(255,160,30,${(0.30 * flicker).toFixed(3)})`);
-      hazeGrd.addColorStop(0.5, `rgba(200,60,10,${(0.18 * flicker).toFixed(3)})`);
-      hazeGrd.addColorStop(1,   'rgba(150,20,0,0)');
+      // Outer atmospheric haze — wide, intense orange bloom
+      const hazeGrd = ctx.createRadialGradient(-jetLen * 0.1, 0, 0, -jetLen * 0.1, 0, jetLen * 2.2);
+      hazeGrd.addColorStop(0,   `rgba(255,180,30,${(0.55 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(0.35,`rgba(230,80,10,${(0.38 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(0.7, `rgba(160,20,0,${(0.20 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(1,   'rgba(80,0,0,0)');
       ctx.beginPath();
-      ctx.ellipse(0, 0, jetLen * 1.5, jetW * 1.7, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, 0, jetLen * 2.2, jetW * 2.6, 0, 0, Math.PI * 2);
       ctx.fillStyle = hazeGrd;
       ctx.fill();
 
-      // Main jet body — linear gradient from bright tip to transparent tail
-      const jetGrd = ctx.createLinearGradient(jetLen * 0.9, 0, -jetLen * 0.5, 0);
-      jetGrd.addColorStop(0,    `rgba(255,255,210,${(0.98 * flicker).toFixed(3)})`);
-      jetGrd.addColorStop(0.2,  `rgba(255,220,60,${(0.90 * flicker).toFixed(3)})`);
-      jetGrd.addColorStop(0.55, `rgba(255,100,0,${(0.70 * flicker).toFixed(3)})`);
-      jetGrd.addColorStop(1,    'rgba(180,30,0,0)');
+      // Main jet body — bold linear gradient from white-hot tip to deep red tail
+      const jetGrd = ctx.createLinearGradient(jetLen * 0.95, 0, -jetLen * 0.6, 0);
+      jetGrd.addColorStop(0,    `rgba(255,255,220,${(1.0  * flicker).toFixed(3)})`);
+      jetGrd.addColorStop(0.15, `rgba(255,230,60,${(0.95 * flicker).toFixed(3)})`);
+      jetGrd.addColorStop(0.45, `rgba(255,110,0,${(0.80 * flicker).toFixed(3)})`);
+      jetGrd.addColorStop(0.75, `rgba(200,30,0,${(0.55 * flicker).toFixed(3)})`);
+      jetGrd.addColorStop(1,    'rgba(120,0,0,0)');
       ctx.beginPath();
-      ctx.ellipse(0, 0, jetLen, jetW, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, 0, jetLen * 1.15, jetW * 1.1, 0, 0, Math.PI * 2);
       ctx.fillStyle = jetGrd;
       ctx.fill();
 
-      // Inner hot core — small bright spot toward the leading tip
+      // Secondary narrower core for depth
+      const coreGrd2 = ctx.createLinearGradient(jetLen * 0.9, 0, -jetLen * 0.2, 0);
+      coreGrd2.addColorStop(0,   `rgba(255,255,255,${(0.85 * flicker).toFixed(3)})`);
+      coreGrd2.addColorStop(0.3, `rgba(255,230,120,${(0.70 * flicker).toFixed(3)})`);
+      coreGrd2.addColorStop(1,   'rgba(255,80,0,0)');
       ctx.beginPath();
-      ctx.ellipse(jetLen * 0.3, 0, jetLen * 0.32, jetW * 0.38, 0, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(255,255,235,${(0.95 * flicker).toFixed(3)})`;
+      ctx.ellipse(jetLen * 0.15, 0, jetLen * 0.75, jetW * 0.50, 0, 0, Math.PI * 2);
+      ctx.fillStyle = coreGrd2;
+      ctx.fill();
+
+      // Inner blazing white-hot spot right at the muzzle tip
+      const wf = 0.92 + 0.08 * Math.sin(t * 26 + cannonball.id * 3.1);
+      ctx.beginPath();
+      ctx.ellipse(jetLen * 0.55, 0, jetLen * 0.28, jetW * 0.32, 0, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,255,255,${(wf).toFixed(3)})`;
       ctx.fill();
 
       ctx.restore();
