@@ -9488,9 +9488,10 @@ void websocket_server_tick(float dt) {
                 if (mod->fire_timer_ms == 0) continue;
                 ModuleTypeId mt = mod->type_id;
                 if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK && mt != MODULE_TYPE_MAST) continue;
-                /* Apply 7.5 base + 0.125% of max_health per 100ms tick */
-                float fire_dot_f = 7.5f + Q16_TO_FLOAT(mod->max_health) * 0.00125f;
-                q16_t fire_dot = Q16_FROM_FLOAT(fire_dot_f);
+                /* Apply 7.5 base + 0.125% of max_health per 100ms tick.
+                 * mod->health is a raw integer (not Q16-scaled), so compute
+                 * DOT as a plain integer too — do NOT use Q16_FROM_FLOAT here. */
+                q16_t fire_dot = (q16_t)(7.5f + (float)mod->max_health * 0.00125f);
                 module_apply_damage(mod, fire_dot);
                 /* Tick module fire timer */
                 bool extinguished = false;
