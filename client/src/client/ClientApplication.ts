@@ -227,7 +227,24 @@ export class ClientApplication {
         }
       };
       this.networkManager.onModuleDamaged = (shipId, moduleId, damage, hitX, hitY) => {
-        // Non-fatal hit — spawn damage number but keep the module alive
+        // Non-fatal hit — apply damage to module health immediately so client stays in sync
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const ship = ws.ships.find(s => s.id === shipId);
+          if (!ship) continue;
+          // Check both modules (masts, cannons) and plank list
+          const mod = ship.modules.find(m => m.id === moduleId);
+          if (mod && mod.moduleData) {
+            const md = mod.moduleData as any;
+            md.health = Math.max(0, (md.health ?? md.maxHealth ?? 10000) - damage);
+          }
+          // Also check planks stored separately on the ship
+          const plank = (ship as any).planks?.find((p: any) => p.id === moduleId);
+          if (plank && plank.moduleData) {
+            plank.moduleData.health = Math.max(0, (plank.moduleData.health ?? plank.moduleData.maxHealth ?? 10000) - damage);
+          }
+        }
+
         let worldX: number | null = (hitX !== undefined) ? hitX : null;
         let worldY: number | null = (hitY !== undefined) ? hitY : null;
 
