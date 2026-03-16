@@ -1582,9 +1582,11 @@ export class RenderSystem {
       this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
     }
     
-    // Queue ship planks (layer 3)
+    // Queue ship planks (layer 3 — ghost ships have no physical planks, purely hull-fade driven)
     for (const ship of worldState.ships) {
-      this.queueRenderItem(3, 'ship-planks', () => this.drawShipPlanks(ship, camera));
+      if (ship.shipType !== SHIP_TYPE_GHOST) {
+        this.queueRenderItem(3, 'ship-planks', () => this.drawShipPlanks(ship, camera));
+      }
       // Ghost deck effects (runic circle + crew silhouettes) drawn above planks
       if (ship.shipType === SHIP_TYPE_GHOST) {
         this.queueRenderItem(3, `ghost-deck-${ship.id}`, () => this.drawGhostDeckEffects(ship, camera), 3);

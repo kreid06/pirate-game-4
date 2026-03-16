@@ -1344,6 +1344,18 @@ void handle_projectile_collisions(struct Sim* sim) {
                     ShipModule* hit_mod = &ship->modules[hit_m];
                     uint16_t mod_id = hit_mod->id;
 
+                    /* Ghost ships (company_id 99 = COMPANY_GHOST): only hull planks
+                     * are destructible. Cannons, helms, masts, ladders are indestructible
+                     * spectral features. Absorb the projectile silently so it doesn't
+                     * loop through the ghost hull every tick, but apply zero damage. */
+                    if (ship->company_id == 99 && hit_mod->type_id != MODULE_TYPE_PLANK) {
+                        /* Absorb projectile with no damage — ghost interior is immune */
+                        memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                                (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                        sim->projectile_count--;
+                        removed = true;
+                    } else {
+
                     float dmg_before = (float)hit_mod->health;
                     q16_t effective_damage = Q16_FROM_FLOAT(
                         Q16_TO_FLOAT(proj->damage)
@@ -1412,6 +1424,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                             (sim->projectile_count - i - 1) * sizeof(struct Projectile));
                     sim->projectile_count--;
                     removed = true;
+                    } /* end else (non-ghost interior module) */
                 }
                 // No module hit yet — ball keeps traveling
                 continue;

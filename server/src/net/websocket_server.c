@@ -5116,9 +5116,36 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
     ships[ship_count].ship_id = sim_id;
     ship_count++;
 
-    // Sync IDs so the update loop matches them
-    ships[ship_count].ship_id = sim_id;
-    ship_count++;
+    /* Sync sim ship module IDs to match SimpleShip IDs so all ID-based mirror
+     * operations (aim_direction, desired_aim_direction) work correctly.
+     * SimpleShip uses sequential IDs from mid_base (3000+);
+     * sim_create_ship uses ship->id * 1000 + n — they never match by default.
+     * We match by (type_id + local_pos) which is identical in both. */
+    {
+        SimpleShip* ss = &ships[ship_count - 1];
+        if (global_sim) {
+            for (uint32_t si2 = 0; si2 < global_sim->ship_count; si2++) {
+                if (global_sim->ships[si2].id != sim_id) continue;
+                struct Ship* sim2 = &global_sim->ships[si2];
+                for (uint8_t sm2 = 0; sm2 < sim2->module_count; sm2++) {
+                    float sx = Q16_TO_FLOAT(sim2->modules[sm2].local_pos.x);
+                    float sy = Q16_TO_FLOAT(sim2->modules[sm2].local_pos.y);
+                    ModuleTypeId stype = sim2->modules[sm2].type_id;
+                    for (int pm = 0; pm < ss->module_count; pm++) {
+                        if (ss->modules[pm].type_id != stype) continue;
+                        float px = Q16_TO_FLOAT(ss->modules[pm].local_pos.x);
+                        float py = Q16_TO_FLOAT(ss->modules[pm].local_pos.y);
+                        float d2 = (px - sx) * (px - sx) + (py - sy) * (py - sy);
+                        if (d2 < 0.01f) {
+                            sim2->modules[sm2].id = ss->modules[pm].id;
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
 
     log_info("🚢 Admin spawned ship (ID: %u) at (%.0f, %.0f) company=%u", sim_id, x, y, company_id);
     return sim_id;
