@@ -107,6 +107,9 @@ export class InputManager {
   public onAimEnd: (() => void) | null = null;
   /** Called at the very start of any right-click (button 2 down). Return true to consume the event and skip all other right-click handling. */
   public onBeforeRightClick: (() => boolean) | null = null;
+  /** Called at the very start of any left-click (button 0 down, after UI/shift/ctrl checks).
+   *  Return true to consume the event — fires onActionEvent('attack') then skips all other handling. */
+  public onBeforeLeftClick: (() => boolean) | null = null;
 
   // UI click intercept — return true to consume the click before game logic runs
   public onUIClick: ((x: number, y: number) => boolean) | null = null;
@@ -1185,6 +1188,9 @@ export class InputManager {
         if (this.onActionEvent) {
           this.onActionEvent('attack', this.inputState.mouseWorldPosition);
         }
+      } else if (this.onBeforeLeftClick && this.onBeforeLeftClick()) {
+        // Intercept hook consumed the click (e.g. Move To mode) — emit attack and skip cannon fire
+        if (this.onActionEvent) this.onActionEvent('attack', this.inputState.mouseWorldPosition);
       } else {
         // Mounted to helm, cannon, or swivel: fire weapon(s)
         // Flame mode: ammo_type 11 (liquid flame) always streams regardless of activeAmmoGroup toggle

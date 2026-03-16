@@ -2601,6 +2601,34 @@ static void tick_world_npcs(float dt) {
             if (dist <= step || dist < 0.5f) {
                 npc->local_x = npc->target_local_x;
                 npc->local_y = npc->target_local_y;
+
+                /* ── Boarding arrival: NPC swam to the hull entry point ── */
+                if (npc->boarding_ship_id != 0 && npc->ship_id == 0) {
+                    SimpleShip* bship = find_ship(npc->boarding_ship_id);
+                    if (bship) {
+                        /* Convert the hull entry world pos → ship-local coords */
+                        float bcos = cosf(-bship->rotation);
+                        float bsin = sinf(-bship->rotation);
+                        float bdx  = npc->local_x - bship->x;  /* local_x == world_x when ship_id==0 */
+                        float bdy  = npc->local_y - bship->y;
+                        npc->local_x           = bdx * bcos - bdy * bsin;
+                        npc->local_y           = bdx * bsin + bdy * bcos;
+                        npc->ship_id           = npc->boarding_ship_id;
+                        npc->in_water          = false;
+                        npc->target_local_x    = npc->boarding_local_x;
+                        npc->target_local_y    = npc->boarding_local_y;
+                        npc->boarding_ship_id  = 0;
+                        npc->state             = WORLD_NPC_STATE_MOVING;
+                        log_info("\u2693 NPC %u (%s) boarded ship %u, walking to (%.0f, %.0f)",
+                                 npc->id, npc->name, npc->ship_id,
+                                 npc->target_local_x, npc->target_local_y);
+                    } else {
+                        /* Ship disappeared — cancel boarding */
+                        npc->boarding_ship_id = 0;
+                        npc->state = WORLD_NPC_STATE_IDLE;
+                    }
+                    continue; /* re-evaluate on next tick */
+                }
                 if (npc->assigned_weapon_id != 0) {
                     /* Repair crew arrives at a damaged module; gunners/riggers arrive at a post */
                     npc->state = (npc->role == NPC_ROLE_REPAIRER)
@@ -8080,7 +8108,7 @@ int websocket_server_update(struct Sim* sim) {
                                     if (tp_ship_id != 0) {
                                         /* Board or walk on a specific ship */
                                         SimpleShip* tp_ship = find_ship(tp_ship_id);
-                                        if (tp_ship) {
+                                    if (tp_ship) {
                                             /* Convert world click → ship-local coords */
                                             float cos_r = cosf(-tp_ship->rotation);
                                             float sin_r = sinf(-tp_ship->rotation);
@@ -8088,35 +8116,49 @@ int websocket_server_update(struct Sim* sim) {
                                             float ddy    = tp_wy - tp_ship->y;
                                             float lx     = ddx * cos_r - ddy * sin_r;
                                             float ly     = ddx * sin_r + ddy * cos_r;
-                                            /* If switching ships, snap spawn to centre of new ship */
-                                            if (tp_npc->ship_id != tp_ship_id) {
-                                                tp_npc->local_x = 0.0f;
-                                                tp_npc->local_y = 0.0f;
+
+                                            if (tp_npc->ship_id == tp_ship_id) {
+                                                /* Already on the target ship — just walk to the clicked position */
+                                                tp_npc->target_local_x = lx;
+                                                tp_npc->target_local_y = ly;
+                                                tp_npc->state          = WORLD_NPC_STATE_MOVING;
+                                                log_info("\u2693 NPC %u (%s) \u2192 on-deck (%.0f, %.0f)",
+                                                         tp_npc_id, tp_npc->name, lx, ly);
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_moving\"}");
+                                            } else {
+                                                /* Detach from old ship (if any) and swim to the hull */
+                                                float wx = tp_npc->x;  /* world pos before detach */
+                                                float wy = tp_npc->y;
+                                                tp_npc->ship_id          = 0;
+                                                tp_npc->in_water         = true;
+                                                tp_npc->local_x          = wx;
+                                                tp_npc->local_y          = wy;
+                                                /* The world-click pos is on the hull — swim straight there */
+                                                tp_npc->target_local_x   = tp_wx;
+                                                tp_npc->target_local_y   = tp_wy;
+                                                /* After boarding, walk to the on-deck destination */
+                                                tp_npc->boarding_ship_id = tp_ship_id;
+                                                tp_npc->boarding_local_x = lx;
+                                                tp_npc->boarding_local_y = ly;
+                                                tp_npc->state            = WORLD_NPC_STATE_MOVING;
+                                                log_info("\U0001f30a NPC %u (%s) swimming to ship %u @ world (%.0f,%.0f) then deck (%.0f,%.0f)",
+                                                         tp_npc_id, tp_npc->name, tp_ship_id, tp_wx, tp_wy, lx, ly);
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_moving\"}");
                                             }
-                                            tp_npc->ship_id        = tp_ship_id;
-                                            tp_npc->in_water       = false;
-                                            tp_npc->target_local_x = lx;
-                                            tp_npc->target_local_y = ly;
-                                            tp_npc->state          = WORLD_NPC_STATE_MOVING;
-                                            ship_local_to_world(tp_ship,
-                                                tp_npc->local_x, tp_npc->local_y,
-                                                &tp_npc->x, &tp_npc->y);
-                                            log_info("\u2693 NPC %u (%s) \u2192 ship %u local (%.0f, %.0f)",
-                                                     tp_npc_id, tp_npc->name, tp_ship_id, lx, ly);
-                                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_moving\"}");
                                         } else {
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
                                         }
                                     } else {
                                         /* World walk / disembark */
                                         /* Use current world pos as local origin for path continuity */
-                                        tp_npc->local_x        = tp_npc->x;
-                                        tp_npc->local_y        = tp_npc->y;
-                                        tp_npc->ship_id        = 0;
-                                        tp_npc->in_water       = true;
-                                        tp_npc->target_local_x = tp_wx;
-                                        tp_npc->target_local_y = tp_wy;
-                                        tp_npc->state          = WORLD_NPC_STATE_MOVING;
+                                        tp_npc->local_x          = tp_npc->x;
+                                        tp_npc->local_y          = tp_npc->y;
+                                        tp_npc->ship_id          = 0;
+                                        tp_npc->in_water         = true;
+                                        tp_npc->boarding_ship_id = 0;  /* cancel any pending boarding */
+                                        tp_npc->target_local_x   = tp_wx;
+                                        tp_npc->target_local_y   = tp_wy;
+                                        tp_npc->state            = WORLD_NPC_STATE_MOVING;
                                         log_info("\U0001f30a NPC %u (%s) \u2192 world (%.0f, %.0f)",
                                                  tp_npc_id, tp_npc->name, tp_wx, tp_wy);
                                         strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_moving\"}");

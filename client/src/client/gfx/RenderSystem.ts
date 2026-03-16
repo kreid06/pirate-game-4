@@ -759,6 +759,34 @@ export class RenderSystem {
       this.ctx.restore();
     }
 
+    // ── Arrow colour mode ─────────────────────────────────────────────────────
+    // yellow  = default (world / hull target)
+    // green   = hovered module that is free
+    // red     = hovered module that is already occupied by another NPC
+    const SINGLE_OCCUPANCY_KINDS = new Set(['cannon', 'swivel', 'mast', 'helm']);
+    let arrowMode: 'yellow' | 'green' | 'red' = 'yellow';
+    if (this.hoveredModule) {
+      const modKind = this.hoveredModule.module.kind as string;
+      if (SINGLE_OCCUPANCY_KINDS.has(modKind)) {
+        const modId = this.hoveredModule.module.id as number;
+        const occupied = worldState.npcs.some(
+          n => n.id !== this._moveToSourceNpcId && n.assignedWeaponId === modId,
+        );
+        arrowMode = occupied ? 'red' : 'green';
+      } else {
+        arrowMode = 'green'; // non-occupancy modules are always free
+      }
+    }
+
+    // Palette per mode  [base, dimBase(rgba), dot]
+    const ARROW_PALETTES = {
+      yellow: { base: '#ffe066', dim: 'rgba(255,220,60,0.45)',  dot: '#fff8a0' },
+      green:  { base: '#44ff88', dim: 'rgba(68,255,136,0.45)',  dot: '#a0ffe0' },
+      red:    { base: '#ff4455', dim: 'rgba(255,68,80,0.45)',   dot: '#ffb0b8' },
+    } as const;
+    const palette = ARROW_PALETTES[arrowMode];
+    // ─────────────────────────────────────────────────────────────────────────
+
     const src  = camera.worldToScreen(npcWorldPos);
     const dst  = camera.worldToScreen(this.mouseWorldPos);
     const dx   = dst.x - src.x;
@@ -781,7 +809,7 @@ export class RenderSystem {
     ctx.beginPath();
     ctx.moveTo(src.x, src.y);
     ctx.lineTo(dst.x, dst.y);
-    ctx.strokeStyle = 'rgba(255, 220, 60, 0.45)';
+    ctx.strokeStyle = palette.dim;
     ctx.lineWidth   = 2;
     ctx.stroke();
     ctx.setLineDash([]);
@@ -816,7 +844,7 @@ export class RenderSystem {
       const ty = src.y + UY * t;
 
       ctx.globalAlpha = edgeFade * pulse * 0.92;
-      ctx.strokeStyle = '#ffe066';
+      ctx.strokeStyle = palette.base;
       ctx.beginPath();
       // Left wing: from rear-left to tip
       ctx.moveTo(
@@ -837,7 +865,7 @@ export class RenderSystem {
     ctx.globalAlpha = 0.85 * ringPulse;
     ctx.beginPath();
     ctx.arc(dst.x, dst.y, 10 + (1 - ringPulse) * 4, 0, Math.PI * 2);
-    ctx.strokeStyle = '#ffe066';
+    ctx.strokeStyle = palette.base;
     ctx.lineWidth   = 2;
     ctx.stroke();
 
@@ -845,7 +873,7 @@ export class RenderSystem {
     ctx.globalAlpha = 0.95;
     ctx.beginPath();
     ctx.arc(dst.x, dst.y, 3, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff8a0';
+    ctx.fillStyle = palette.dot;
     ctx.fill();
 
     // ── Source NPC indicator dot ──────────────────────────
