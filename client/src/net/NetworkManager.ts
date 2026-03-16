@@ -82,6 +82,7 @@ export enum MessageType {
   NPC_MOVE_ABOARD = 'npc_move_aboard',
   NPC_LOCK = 'npc_lock',
   NPC_GOTO_MODULE = 'npc_goto_module',
+  NPC_MOVE_TO_POS = 'npc_move_to_pos',
 
   PING = 'ping',
   
@@ -1185,6 +1186,19 @@ export class NetworkManager {
   sendNpcGotoModule(npcId: number, moduleId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: MessageType.NPC_GOTO_MODULE, timestamp: Date.now(), npcId, moduleId }));
+  }
+
+  /**
+   * Walk an NPC to a world position or board/walk on a specific ship.
+   * shipId=0  → detach from current ship, walk to world coords.
+   * shipId>0  → attach to that ship and walk to the clicked on-deck position.
+   */
+  sendNpcMoveToPos(npcId: number, worldX: number, worldY: number, shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({
+      type: MessageType.NPC_MOVE_TO_POS, timestamp: Date.now(),
+      npcId, worldX, worldY, shipId,
+    }));
   }
 
   /**

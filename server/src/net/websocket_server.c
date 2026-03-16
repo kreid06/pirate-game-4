@@ -2690,6 +2690,10 @@ static void tick_world_npcs(float dt) {
         if (npc->ship_id != 0) {
             SimpleShip* ship = find_ship(npc->ship_id);
             if (ship) ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
+        } else {
+            /* Off-ship NPCs: local_x/y ARE the world coordinates — keep x/y in sync */
+            npc->x = npc->local_x;
+            npc->y = npc->local_y;
         }
 
         // ── Repair crew (NPC_ROLE_REPAIRER) ─────────────────────────────────────
@@ -8015,6 +8019,83 @@ int websocket_server_update(struct Sim* sim) {
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_moved_to_module\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_goto_module\"}");
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strstr(payload, "\"type\":\"npc_move_to_pos\"")) {
+                            // NPC MOVE TO POSITION: walk NPC to world coords or board/walk on a ship.
+                            // {"type":"npc_move_to_pos","npcId":N,"worldX":F,"worldY":F,"shipId":S}
+                            // shipId=0  -> detach from ship and walk to world position
+                            // shipId>0  -> attach to that ship and walk to the clicked local position
+                            uint32_t tp_npc_id = 0, tp_ship_id = 0;
+                            float tp_wx = 0.0f, tp_wy = 0.0f;
+                            { char* p = strstr(payload, "\"npcId\":");  if (p) sscanf(p +  8, "%u", &tp_npc_id); }
+                            { char* p = strstr(payload, "\"worldX\":"); if (p) sscanf(p +  9, "%f", &tp_wx); }
+                            { char* p = strstr(payload, "\"worldY\":"); if (p) sscanf(p +  9, "%f", &tp_wy); }
+                            { char* p = strstr(payload, "\"shipId\":"); if (p) sscanf(p +  9, "%u", &tp_ship_id); }
+                            WebSocketPlayer* tp_player = find_player(client->player_id);
+                            if (tp_player && tp_npc_id != 0) {
+                                WorldNpc* tp_npc = NULL;
+                                for (int _ni = 0; _ni < world_npc_count; _ni++) {
+                                    if (world_npcs[_ni].active && world_npcs[_ni].id == tp_npc_id) {
+                                        tp_npc = &world_npcs[_ni]; break;
+                                    }
+                                }
+                                if (tp_npc && tp_npc->company_id == tp_player->company_id) {
+                                    /* Dismount from current post first */
+                                    SimpleShip* tp_old_ship = find_ship(tp_npc->ship_id);
+                                    dismount_npc(tp_npc, tp_old_ship);
+                                    tp_npc->task_locked        = false;
+                                    tp_npc->assigned_weapon_id = 0;
+                                    tp_npc->role               = NPC_ROLE_NONE;
+
+                                    if (tp_ship_id != 0) {
+                                        /* Board or walk on a specific ship */
+                                        SimpleShip* tp_ship = find_ship(tp_ship_id);
+                                        if (tp_ship) {
+                                            /* Convert world click → ship-local coords */
+                                            float cos_r = cosf(-tp_ship->rotation);
+                                            float sin_r = sinf(-tp_ship->rotation);
+                                            float ddx    = tp_wx - tp_ship->x;
+                                            float ddy    = tp_wy - tp_ship->y;
+                                            float lx     = ddx * cos_r - ddy * sin_r;
+                                            float ly     = ddx * sin_r + ddy * cos_r;
+                                            /* If switching ships, snap spawn to centre of new ship */
+                                            if (tp_npc->ship_id != tp_ship_id) {
+                                                tp_npc->local_x = 0.0f;
+                                                tp_npc->local_y = 0.0f;
+                                            }
+                                            tp_npc->ship_id        = tp_ship_id;
+                                            tp_npc->in_water       = false;
+                                            tp_npc->target_local_x = lx;
+                                            tp_npc->target_local_y = ly;
+                                            tp_npc->state          = WORLD_NPC_STATE_MOVING;
+                                            ship_local_to_world(tp_ship,
+                                                tp_npc->local_x, tp_npc->local_y,
+                                                &tp_npc->x, &tp_npc->y);
+                                            log_info("\u2693 NPC %u (%s) \u2192 ship %u local (%.0f, %.0f)",
+                                                     tp_npc_id, tp_npc->name, tp_ship_id, lx, ly);
+                                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_moving\"}");
+                                        } else {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        }
+                                    } else {
+                                        /* World walk / disembark */
+                                        /* Use current world pos as local origin for path continuity */
+                                        tp_npc->local_x        = tp_npc->x;
+                                        tp_npc->local_y        = tp_npc->y;
+                                        tp_npc->ship_id        = 0;
+                                        tp_npc->in_water       = true;
+                                        tp_npc->target_local_x = tp_wx;
+                                        tp_npc->target_local_y = tp_wy;
+                                        tp_npc->state          = WORLD_NPC_STATE_MOVING;
+                                        log_info("\U0001f30a NPC %u (%s) \u2192 world (%.0f, %.0f)",
+                                                 tp_npc_id, tp_npc->name, tp_wx, tp_wy);
+                                        strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_moving\"}");
+                                    }
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_move_npc\"}");
                                 }
                             }
                             handled = true;

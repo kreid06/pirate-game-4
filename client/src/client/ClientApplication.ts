@@ -409,15 +409,40 @@ export class ClientApplication {
           const moveNpcId = this._moveToNpcId;
           this._moveToNpcId = null;
           this.renderSystem.clearMoveToHint();
-          const hov = this.renderSystem.getHoveredModule();
-          if (hov) {
-            this.networkManager.sendNpcGotoModule(moveNpcId, hov.module.id);
-            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
-            console.log(`📍 NPC ${moveNpcId} → module ${hov.module.id}`);
-          } else {
-            this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
-            console.log('📍 Move To cancelled: no module hovered');
+
+          const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+          const flashPos = this.inputManager.getMouseScreenPosition();
+
+          // Priority 1: specific module hovered — most precise command
+          const hovMod = this.renderSystem.getHoveredModule();
+          if (hovMod) {
+            this.networkManager.sendNpcGotoModule(moveNpcId, hovMod.module.id);
+            this.renderSystem.flashInteract(flashPos);
+            console.log(`📍 NPC ${moveNpcId} → module ${hovMod.module.id}`);
+            return;
           }
+
+          // Priority 2: click landed on a ship hull (board / walk to deck position)
+          if (target && ws) {
+            const targetShip = this.findShipAtWorldPos(target, ws);
+            if (targetShip) {
+              this.networkManager.sendNpcMoveToPos(moveNpcId, target.x, target.y, targetShip.id);
+              this.renderSystem.flashInteract(flashPos);
+              console.log(`📍 NPC ${moveNpcId} → ship ${targetShip.id} @ (${target.x.toFixed(0)}, ${target.y.toFixed(0)})`);
+              return;
+            }
+          }
+
+          // Priority 3: open-water / world position (also disembarks if NPC is on a ship)
+          if (target) {
+            this.networkManager.sendNpcMoveToPos(moveNpcId, target.x, target.y, 0);
+            this.renderSystem.flashInteract(flashPos);
+            console.log(`🌊 NPC ${moveNpcId} → world (${target.x.toFixed(0)}, ${target.y.toFixed(0)})`);
+            return;
+          }
+
+          // Fallback: no target position (shouldn’t happen but guard anyway)
+          this.renderSystem.flashCancel(flashPos);
           return;
         }
 
@@ -868,7 +893,7 @@ export class ClientApplication {
           if (cmdOpts.length === 1 && cmdOpts[0].id === 'move_to') {
             // Only one option — execute immediately
             this._moveToNpcId = hovNpcCtrl.id;
-            this.renderSystem.setMoveToHint(`Moving ${hovNpcCtrl.name} — click a module`);
+            this.renderSystem.setMoveToHint(`Moving ${hovNpcCtrl.name} — click a module, ship, or open water`);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             return;
           }
@@ -895,7 +920,7 @@ export class ClientApplication {
               console.log(`🔓 Unlocking NPC ${npc.id} (${npc.name})`);
             } else if (selected === 'move_to') {
               this._moveToNpcId = npc.id;
-              this.renderSystem.setMoveToHint(`Moving ${npc.name} — click a module`);
+              this.renderSystem.setMoveToHint(`Moving ${npc.name} — click a module, ship, or open water`);
               console.log(`📍 Move To mode for NPC ${npc.id} (${npc.name})`);
             }
           };
@@ -1718,6 +1743,24 @@ export class ClientApplication {
    * Use this whenever the player does something incompatible with build/plan mode
    * (interact, mount, dismount, etc.).
    */
+  /**
+   * Find the first ship whose hull polygon contains the given world position.
+   * Checks ALL ships (including the player’s own) so Move To can target any deck.
+   */
+  private findShipAtWorldPos(pos: Vec2, worldState: WorldState): Ship | null {
+    for (const ship of worldState.ships) {
+      if (!ship.hull || ship.hull.length < 3) continue;
+      const dx     = pos.x - ship.position.x;
+      const dy     = pos.y - ship.position.y;
+      const cosR   = Math.cos(-ship.rotation);
+      const sinR   = Math.sin(-ship.rotation);
+      const localX = dx * cosR - dy * sinR;
+      const localY = dx * sinR + dy * cosR;
+      if (PolygonUtils.pointInPolygon(Vec2.from(localX, localY), ship.hull)) return ship;
+    }
+    return null;
+  }
+
   private exitAllBuildModes(): void {
     if (!this.buildMenuOpen && !this.explicitBuildMode && this.pendingGhostKind === null) return;
     this.buildMenuOpen      = false;
