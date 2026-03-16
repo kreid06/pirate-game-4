@@ -5161,30 +5161,40 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
 #define GHOST_HEADING_SWING 0.785f /* ±45° — slow haunting weave while pursuing */
 
 /**
- * Aim a ghost-ship cannon at a world target with a 90° arc and an optional
- * sinusoidal sweep offset (sweep_rad, in radians) that swings the aim
- * perpendicular to the line-of-sight.  Works identically to
- * npc_aim_cannon_at_world() but with GHOST_CANNON_ARC instead of 30°.
+ * Aim a ghost-ship cannon at a world target.
+ *
+ * aim_direction is the OFFSET from the cannon's natural firing direction
+ * (defined by local_rot).  The turret can swing at most ±45° (GHOST_AIM_LIMIT)
+ * from that natural direction.  If the target falls outside that arc the turret
+ * parks at the limit and the fire gate (fire_diff check) prevents firing.
+ *
+ * Convention that matches the client renderer and fire-angle math:
+ *   natural world fire angle = ship->rotation + local_rot - π/2
+ *   actual world fire angle  = natural + aim_direction
  */
+#define GHOST_AIM_LIMIT  ((float)(M_PI / 4.0f))   /* ±45° turret travel */
 static void ghost_aim_cannon(SimpleShip* ship, ShipModule* cannon,
-                             float target_x, float target_y, float sweep_rad) {
+                             float target_x, float target_y) {
     float dx = target_x - ship->x;
     float dy = target_y - ship->y;
-    /* DEBUG: no sweep offset, no arc clamp — cannons hard-lock directly on target */
-    float world_angle = atan2f(dy, dx); /* sweep_rad intentionally omitted */
+    float world_angle = atan2f(dy, dx);
 
+    /* Angle to target relative to ship heading */
     float relative_angle = world_angle - ship->rotation;
     while (relative_angle >  (float)M_PI) relative_angle -= 2.0f * (float)M_PI;
     while (relative_angle < -(float)M_PI) relative_angle += 2.0f * (float)M_PI;
 
+    /* How far the turret must rotate from its rest position (local_rot - π/2)
+     * to point at the target.  desired_offset == 0 means cannon aims along
+     * its natural direction. */
     float cannon_base_angle = Q16_TO_FLOAT(cannon->local_rot);
-    float desired_offset = relative_angle - cannon_base_angle + (float)(M_PI / 2.0);
+    float desired_offset = relative_angle - cannon_base_angle + (float)(M_PI / 2.0f);
     while (desired_offset >  (float)M_PI) desired_offset -= 2.0f * (float)M_PI;
     while (desired_offset < -(float)M_PI) desired_offset += 2.0f * (float)M_PI;
 
-    /* Arc clamping disabled for troubleshooting — full 360° freedom */
-    /* if (desired_offset >  GHOST_CANNON_ARC) desired_offset =  GHOST_CANNON_ARC; */
-    /* if (desired_offset < -GHOST_CANNON_ARC) desired_offset = -GHOST_CANNON_ARC; */
+    /* Clamp to ±45° — the turret physically cannot rotate further */
+    if (desired_offset >  GHOST_AIM_LIMIT) desired_offset =  GHOST_AIM_LIMIT;
+    if (desired_offset < -GHOST_AIM_LIMIT) desired_offset = -GHOST_AIM_LIMIT;
 
     cannon->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
 
@@ -5437,11 +5447,9 @@ static void tick_ghost_ships(float dt) {
             /* Attack mode — head toward the target ship */
             float dx      = target->x - ship->x;
             float dy      = target->y - ship->y;
-            /* === GHOST CANNON AI: direct aim + fire, no weapon groups === */
+            /* Body sway: oscillate the ship heading so it weaves while chasing */
             ghost_aim_phase[s] += GHOST_SWEEP_RATE * dt;
             float phase_sin = sinf(ghost_aim_phase[s]);
-            float sweep_rad = phase_sin * GHOST_SWING_AMP;
-            /* Body sway: oscillate the ship heading so it weaves while chasing */
             desired_heading = atan2f(dy, dx) + phase_sin * GHOST_HEADING_SWING;
             move_speed      = GHOST_CHASE_SPEED;
 
@@ -5462,22 +5470,24 @@ static void tick_ghost_ships(float dt) {
                 ShipModule* cannon = &ship->modules[m];
                 if (cannon->type_id != MODULE_TYPE_CANNON) continue;
 
-                /* All cannons track the target within their own arc limits.
-                 * ghost_aim_cannon computes desired_offset relative to each
-                 * cannon's local_rot, so bow, port, and starboard cannons
-                 * each independently aim at the target and are clamped to
-                 * ±GHOST_CANNON_ARC around their natural fire direction.
-                 * The body-sway sweep_rad adds an eerie oscillation to all. */
-                ghost_aim_cannon(ship, cannon, target->x, target->y, sweep_rad);
+                /* Aim each cannon independently at the target.  desired_aim_direction
+                 * is the offset from the cannon's natural direction (local_rot - π/2).
+                 * The function clamps to ±45°; if the target is outside that arc the
+                 * turret parks at the limit and the fire gate below blocks firing. */
+                ghost_aim_cannon(ship, cannon, target->x, target->y);
 
-                /* Find matching sim module for authoritative reload state */
+                /* Find matching sim module by position (ID schemes differ between
+                 * SimpleShip and sim ship — position is always identical). */
                 ShipModule* sim_cannon = NULL;
                 if (ghost_sim) {
+                    float cx = Q16_TO_FLOAT(cannon->local_pos.x);
+                    float cy = Q16_TO_FLOAT(cannon->local_pos.y);
                     for (uint8_t sm = 0; sm < ghost_sim->module_count; sm++) {
-                        if (ghost_sim->modules[sm].id == cannon->id) {
-                            sim_cannon = &ghost_sim->modules[sm];
-                            break;
-                        }
+                        if (ghost_sim->modules[sm].type_id != MODULE_TYPE_CANNON) continue;
+                        float sx = Q16_TO_FLOAT(ghost_sim->modules[sm].local_pos.x);
+                        float sy = Q16_TO_FLOAT(ghost_sim->modules[sm].local_pos.y);
+                        float d2 = (sx - cx) * (sx - cx) + (sy - cy) * (sy - cy);
+                        if (d2 < 0.01f) { sim_cannon = &ghost_sim->modules[sm]; break; }
                     }
                 }
                 uint32_t tsf  = sim_cannon ? sim_cannon->data.cannon.time_since_fire
@@ -5485,24 +5495,22 @@ static void tick_ghost_ships(float dt) {
                 uint32_t trel = sim_cannon ? sim_cannon->data.cannon.reload_time
                                            : cannon->data.cannon.reload_time;
 
-                /* Fire when reloaded AND aimed within ±15° of the target.
-                 * Use the SIM cannon's aim_direction — the SimpleShip copy is
-                 * reset to 0 by fire_cannon() and never re-incremented, so
-                 * side cannons (local_rot=0) would always read wfa = rotation-π/2
-                 * (pointing sideways) and never satisfy the ±15° gate. */
+                /* Fire when reloaded AND the barrel is actually pointing within
+                 * ±30° of the target (gives the turret time to track without
+                 * bursting instantly; also naturally rejects out-of-arc targets
+                 * because the turret parks at ±45° and fire_diff stays large). */
                 if (tsf >= trel) {
                     float actual_aim = sim_cannon
                         ? Q16_TO_FLOAT(sim_cannon->data.cannon.aim_direction)
                         : Q16_TO_FLOAT(cannon->data.cannon.aim_direction);
                     float wfa = ship->rotation
-                        + Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0)
+                        + Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f)
                         + actual_aim;
                     float fire_diff = wfa - atan2f(dy, dx);
                     while (fire_diff >  (float)M_PI) fire_diff -= 2.0f * (float)M_PI;
                     while (fire_diff < -(float)M_PI) fire_diff += 2.0f * (float)M_PI;
-                    if (fabsf(fire_diff) < 0.262f) { /* ±15° */
+                    if (fabsf(fire_diff) < (float)(M_PI / 6.0f)) { /* ±30° fire gate */
                         fire_cannon(ship, cannon, NULL, false, PROJ_TYPE_CANNONBALL);
-                        /* Reset sim module so its reload counter restarts properly */
                         if (sim_cannon) sim_cannon->data.cannon.time_since_fire = 0;
                     }
                 }
