@@ -1904,17 +1904,15 @@ static void tick_npc_agents(float dt) {
                     if (desired_off < -SWIVEL_AIM_RANGE) desired_off = -SWIVEL_AIM_RANGE;
                     module->data.swivel.aim_direction = Q16_FROM_FLOAT(desired_off);
                     /* Mirror to global_sim */
-                    if (global_sim) {
-                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                            if (global_sim->ships[si].id != ship->ship_id) continue;
-                            for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                if (global_sim->ships[si].modules[mi].id == module->id) {
-                                    global_sim->ships[si].modules[mi].data.swivel.aim_direction
-                                        = Q16_FROM_FLOAT(desired_off);
+                    {
+                        struct Ship* _ss = find_sim_ship(ship->ship_id);
+                        if (_ss) {
+                            for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                                if (_ss->modules[mi].id == module->id) {
+                                    _ss->modules[mi].data.swivel.aim_direction = Q16_FROM_FLOAT(desired_off);
                                     break;
                                 }
                             }
-                            break;
                         }
                     }
                     /* Auto-aiming NPCs fire when reload is complete.
@@ -1922,16 +1920,12 @@ static void tick_npc_agents(float dt) {
                     if (!player_controls_aim &&
                         module->data.swivel.time_since_fire >= module->data.swivel.reload_time) {
                         ShipModule* gsw = NULL;
-                        if (global_sim) {
-                            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                                if (global_sim->ships[si].id != ship->ship_id) continue;
-                                for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                    if (global_sim->ships[si].modules[mi].id == module->id) {
-                                        gsw = &global_sim->ships[si].modules[mi];
-                                        break;
-                                    }
+                        {
+                            struct Ship* _ss2 = find_sim_ship(ship->ship_id);
+                            if (_ss2) {
+                                for (uint8_t mi = 0; mi < _ss2->module_count; mi++) {
+                                    if (_ss2->modules[mi].id == module->id) { gsw = &_ss2->modules[mi]; break; }
                                 }
-                                break;
                             }
                         }
                         fire_swivel(ship, module, gsw, NULL, PROJ_TYPE_GRAPESHOT);
@@ -1974,17 +1968,14 @@ static void tick_npc_agents(float dt) {
                         desired_offset = (desired_offset > 0.0f) ? CANNON_AIM_RANGE : -CANNON_AIM_RANGE;
                     module->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
                     // Mirror into sim-ship
-                    if (global_sim) {
-                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                            if (global_sim->ships[si].id == ship->ship_id) {
-                                for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                    if (global_sim->ships[si].modules[mi].id == module->id) {
-                                        global_sim->ships[si].modules[mi].data.cannon.desired_aim_direction
-                                            = Q16_FROM_FLOAT(desired_offset);
-                                        break;
-                                    }
+                    {
+                        struct Ship* _ss = find_sim_ship(ship->ship_id);
+                        if (_ss) {
+                            for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                                if (_ss->modules[mi].id == module->id) {
+                                    _ss->modules[mi].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
+                                    break;
                                 }
-                                break;
                             }
                         }
                     }
@@ -2006,16 +1997,14 @@ static void tick_npc_agents(float dt) {
                     // Apply desired sail angle
                     module->data.mast.angle = Q16_FROM_FLOAT(ship->desired_sail_angle);
                     // Mirror into sim-ship
-                    if (global_sim) {
-                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                            if (global_sim->ships[si].id == ship->ship_id) {
-                                for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                    if (global_sim->ships[si].modules[mi].id == module->id) {
-                                        global_sim->ships[si].modules[mi].data.mast.angle = module->data.mast.angle;
-                                        break;
-                                    }
+                    {
+                        struct Ship* _ss = find_sim_ship(ship->ship_id);
+                        if (_ss) {
+                            for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                                if (_ss->modules[mi].id == module->id) {
+                                    _ss->modules[mi].data.mast.angle = module->data.mast.angle;
+                                    break;
                                 }
-                                break;
                             }
                         }
                     }
@@ -2683,16 +2672,15 @@ static void tick_world_npcs(float dt) {
                                 if (tgt_open > 0) mast->state_bits |=  MODULE_STATE_DEPLOYED;
                                 else              mast->state_bits &= ~MODULE_STATE_DEPLOYED;
                                 mast->data.mast.angle = Q16_FROM_FLOAT(rship->desired_sail_angle);
-                                if (global_sim) {
-                                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                                        if (global_sim->ships[si].id != rship->ship_id) continue;
-                                        for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                            if (global_sim->ships[si].modules[mi].id == mast->id) {
-                                                global_sim->ships[si].modules[mi].data.mast.angle = mast->data.mast.angle;
+                                {
+                                    struct Ship* _ss = find_sim_ship(rship->ship_id);
+                                    if (_ss) {
+                                        for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                                            if (_ss->modules[mi].id == mast->id) {
+                                                _ss->modules[mi].data.mast.angle = mast->data.mast.angle;
                                                 break;
                                             }
                                         }
-                                        break;
                                     }
                                 }
                             }
@@ -4186,16 +4174,12 @@ static void handle_swivel_fire(WebSocketPlayer* player, uint8_t ammo_type) {
 
     /* Also locate global_sim copy so fire_swivel can reset it */
     ShipModule* gsw = NULL;
-    if (global_sim) {
-        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-            if (global_sim->ships[si].id != ship->ship_id) continue;
-            for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                if (global_sim->ships[si].modules[mi].id == sw->id) {
-                    gsw = &global_sim->ships[si].modules[mi];
-                    break;
-                }
+    {
+        struct Ship* _ss = find_sim_ship(ship->ship_id);
+        if (_ss) {
+            for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                if (_ss->modules[mi].id == sw->id) { gsw = &_ss->modules[mi]; break; }
             }
-            break;
         }
     }
 
@@ -4267,16 +4251,7 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
     bool manually_fired = at_cannon;
     
     // Get simulation ship for up-to-date cannon data
-    struct Ship* sim_ship = NULL;
-    if (global_sim && global_sim->ship_count > 0) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                sim_ship = &global_sim->ships[s];
-                break;
-            }
-        }
-    }
-    
+    struct Ship* sim_ship = find_sim_ship(ship->ship_id);
     if (!sim_ship) {
         log_warn("Simulation ship %u not found", ship->ship_id);
         return;
@@ -5647,13 +5622,9 @@ static void tick_ghost_ships(float dt) {
         while (ship->rotation < -(float)M_PI) ship->rotation += 2.0f * (float)M_PI;
 
         /* Mirror rotation into the physics simulation */
-        if (global_sim) {
-            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                if ((uint32_t)global_sim->ships[si].id == ship->ship_id) {
-                    global_sim->ships[si].rotation = Q16_FROM_FLOAT(ship->rotation);
-                    break;
-                }
-            }
+        {
+            struct Ship* _gs = find_sim_ship(ship->ship_id);
+            if (_gs) _gs->rotation = Q16_FROM_FLOAT(ship->rotation);
         }
 
         /* ── 4. Apply forward thrust (ghost ships ignore normal sail physics) ── */
@@ -5666,13 +5637,11 @@ static void tick_ghost_ships(float dt) {
         ship->velocity_y += (thrust_y - ship->velocity_y) * ACCEL_RATE;
 
         /* Mirror velocity into sim */
-        if (global_sim) {
-            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                if ((uint32_t)global_sim->ships[si].id == ship->ship_id) {
-                    global_sim->ships[si].velocity.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ship->velocity_x));
-                    global_sim->ships[si].velocity.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ship->velocity_y));
-                    break;
-                }
+        {
+            struct Ship* _gs = find_sim_ship(ship->ship_id);
+            if (_gs) {
+                _gs->velocity.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ship->velocity_x));
+                _gs->velocity.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ship->velocity_y));
             }
         }
     }
@@ -9810,36 +9779,33 @@ void websocket_server_tick(float dt) {
                     cur += (diff > 0.0f ? max_step : -max_step);
                 }
                 mod->data.cannon.aim_direction = Q16_FROM_FLOAT(cur);
-                // Mirror aim_direction into sim-ship.
+                // Mirror aim_direction into sim-ship — O(1) via cache.
                 // Try ID match first; fall back to position match (ghost ships
                 // use different ID schemes between SimpleShip and sim ship).
-                if (global_sim) {
-                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                        if (global_sim->ships[si].id == ships[s].ship_id) {
-                            bool mirrored = false;
-                            for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                if (global_sim->ships[si].modules[mi].id == mod->id) {
-                                    global_sim->ships[si].modules[mi].data.cannon.aim_direction = mod->data.cannon.aim_direction;
-                                    mirrored = true;
+                {
+                    struct Ship* _ss = find_sim_ship(ships[s].ship_id);
+                    if (_ss) {
+                        bool mirrored = false;
+                        for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                            if (_ss->modules[mi].id == mod->id) {
+                                _ss->modules[mi].data.cannon.aim_direction = mod->data.cannon.aim_direction;
+                                mirrored = true;
+                                break;
+                            }
+                        }
+                        if (!mirrored) {
+                            float mx = Q16_TO_FLOAT(mod->local_pos.x);
+                            float my = Q16_TO_FLOAT(mod->local_pos.y);
+                            for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                                if (_ss->modules[mi].type_id != MODULE_TYPE_CANNON) continue;
+                                float sx = Q16_TO_FLOAT(_ss->modules[mi].local_pos.x);
+                                float sy = Q16_TO_FLOAT(_ss->modules[mi].local_pos.y);
+                                float d2 = (sx - mx)*(sx - mx) + (sy - my)*(sy - my);
+                                if (d2 < 0.01f) {
+                                    _ss->modules[mi].data.cannon.aim_direction = mod->data.cannon.aim_direction;
                                     break;
                                 }
                             }
-                            if (!mirrored) {
-                                /* Position-based fallback (ghost ships and any mismatch) */
-                                float mx = Q16_TO_FLOAT(mod->local_pos.x);
-                                float my = Q16_TO_FLOAT(mod->local_pos.y);
-                                for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                    if (global_sim->ships[si].modules[mi].type_id != MODULE_TYPE_CANNON) continue;
-                                    float sx = Q16_TO_FLOAT(global_sim->ships[si].modules[mi].local_pos.x);
-                                    float sy = Q16_TO_FLOAT(global_sim->ships[si].modules[mi].local_pos.y);
-                                    float d2 = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
-                                    if (d2 < 0.01f) {
-                                        global_sim->ships[si].modules[mi].data.cannon.aim_direction = mod->data.cannon.aim_direction;
-                                        break;
-                                    }
-                                }
-                            }
-                            break;
                         }
                     }
                 }
@@ -9868,16 +9834,14 @@ void websocket_server_tick(float dt) {
                 cur = (fabsf(diff) <= max_step) ? tgt : cur + (diff > 0.0f ? max_step : -max_step);
                 mod->data.swivel.aim_direction = Q16_FROM_FLOAT(cur);
                 /* Mirror into global_sim so sim-path snapshots reflect the interpolated angle */
-                if (global_sim) {
-                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                        if (global_sim->ships[si].id == ships[s].ship_id) {
-                            for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                if (global_sim->ships[si].modules[mi].id == mod->id) {
-                                    global_sim->ships[si].modules[mi].data.swivel.aim_direction = mod->data.swivel.aim_direction;
-                                    break;
-                                }
+                {
+                    struct Ship* _ss = find_sim_ship(ships[s].ship_id);
+                    if (_ss) {
+                        for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                            if (_ss->modules[mi].id == mod->id) {
+                                _ss->modules[mi].data.swivel.aim_direction = mod->data.swivel.aim_direction;
+                                break;
                             }
-                            break;
                         }
                     }
                 }
