@@ -4922,15 +4922,9 @@ static void tick_sinking_ships(void) {
         if (!ship->active || !ship->is_sinking) continue;
 
         /* Keep the vessel stationary — zero velocity in the sim ship every tick */
-        if (global_sim) {
-            for (uint32_t ss = 0; ss < global_sim->ship_count; ss++) {
-                if ((uint32_t)global_sim->ships[ss].id == ship->ship_id) {
-                    global_sim->ships[ss].velocity.x = 0;
-                    global_sim->ships[ss].velocity.y = 0;
-                    global_sim->ships[ss].angular_velocity = 0;
-                    break;
-                }
-            }
+        {
+            struct Ship* _ss = find_sim_ship(ship->ship_id);
+            if (_ss) { _ss->velocity.x = 0; _ss->velocity.y = 0; _ss->angular_velocity = 0; }
         }
         ship->velocity_x = 0.0f;
         ship->velocity_y = 0.0f;
@@ -5520,15 +5514,7 @@ static void tick_ghost_ships(float dt) {
             /* Find the sim ship once — reload state lives in sim modules, not
              * SimpleShip modules (SimpleShip copy is reset by fire_cannon but
              * never re-incremented; only the sim reload loop increments it). */
-            struct Ship* ghost_sim = NULL;
-            if (global_sim) {
-                for (uint32_t gsi = 0; gsi < global_sim->ship_count; gsi++) {
-                    if (global_sim->ships[gsi].id == ship->ship_id) {
-                        ghost_sim = &global_sim->ships[gsi];
-                        break;
-                    }
-                }
-            }
+            struct Ship* ghost_sim = find_sim_ship(ship->ship_id);
 
             for (int m = 0; m < ship->module_count; m++) {
                 ShipModule* cannon = &ship->modules[m];
@@ -8586,11 +8572,8 @@ int websocket_server_update(struct Sim* sim) {
                 float ang_vel = Q16_TO_FLOAT(ship->angular_velocity);
                 float rudder_radians = ship->rudder_angle * (3.14159f / 180.0f); // Convert degrees to radians
 
-                // Look up matching SimpleShip for ammo data
-                const SimpleShip* simple_ship = NULL;
-                for (int ss = 0; ss < ship_count; ss++) {
-                    if (ships[ss].ship_id == ship->id) { simple_ship = &ships[ss]; break; }
-                }
+                // Look up matching SimpleShip for ammo data (O(1) via cache)
+                const SimpleShip* simple_ship = find_ship(ship->id);
 
                 char ship_entry[6144];
                 /* Ghost ships store hull_health as raw int32 (0–60000).
@@ -9233,15 +9216,9 @@ void websocket_server_tick(float dt) {
                     sinking_ship->sink_start_ms = get_time_ms();
 
                     /* Zero the sim-ship velocity so the ship stops dead */
-                    if (global_sim) {
-                        for (uint32_t ss = 0; ss < global_sim->ship_count; ss++) {
-                            if ((uint32_t)global_sim->ships[ss].id == sunk_id) {
-                                global_sim->ships[ss].velocity.x = 0;
-                                global_sim->ships[ss].velocity.y = 0;
-                                global_sim->ships[ss].angular_velocity = 0;
-                                break;
-                            }
-                        }
+                    {
+                        struct Ship* _ss = find_sim_ship((uint32_t)sunk_id);
+                        if (_ss) { _ss->velocity.x = 0; _ss->velocity.y = 0; _ss->angular_velocity = 0; }
                     }
 
                     /* Dismount all players from the sinking ship */
@@ -9309,14 +9286,7 @@ void websocket_server_tick(float dt) {
                         log_info("💥 Deck destroyed on ship %u — cascading destruction", ev->ship_id);
 
                         // Destroy on the sim ship
-                        struct Ship* sim_ship = NULL;
-                        if (global_sim) {
-                            for (uint32_t ss = 0; ss < global_sim->ship_count; ss++) {
-                                if ((uint32_t)global_sim->ships[ss].id == ev->ship_id) {
-                                    sim_ship = &global_sim->ships[ss]; break;
-                                }
-                            }
-                        }
+                        struct Ship* sim_ship = find_sim_ship((uint32_t)ev->ship_id);
                         if (sim_ship) {
                             uint8_t m = 0;
                             while (m < sim_ship->module_count) {
@@ -10395,19 +10365,18 @@ void websocket_server_tick(float dt) {
                             bool first = (mod->fire_timer_ms == 0);
                             mod->fire_timer_ms = FIRE_DURATION_MS;
                             if (global_sim) {
-                                for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                                    if ((uint32_t)global_sim->ships[si].id != fship->ship_id) continue;
-                                    for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                        if (global_sim->ships[si].modules[mi].id == mod->id) {
-                                            global_sim->ships[si].modules[mi].fire_timer_ms = FIRE_DURATION_MS;
-                                            global_sim->ships[si].modules[mi].state_bits    = mod->state_bits;
+                                struct Ship* _fss = find_sim_ship(fship->ship_id);
+                                if (_fss) {
+                                    for (uint8_t mi = 0; mi < _fss->module_count; mi++) {
+                                        if (_fss->modules[mi].id == mod->id) {
+                                            _fss->modules[mi].fire_timer_ms = FIRE_DURATION_MS;
+                                            _fss->modules[mi].state_bits    = mod->state_bits;
                                             if (mod->type_id == MODULE_TYPE_MAST)
-                                                global_sim->ships[si].modules[mi].data.mast.sail_fire_intensity =
+                                                _fss->modules[mi].data.mast.sail_fire_intensity =
                                                     mod->data.mast.sail_fire_intensity;
                                             break;
                                         }
                                     }
-                                    break;
                                 }
                             }
                             /* Always broadcast FIRE_EFFECT — refreshes client timer on every
@@ -10575,17 +10544,16 @@ void websocket_server_tick(float dt) {
                             mod->data.mast.sail_fire_intensity = 0;
                             mod->fire_timer_ms = 0;
                             /* Sync global_sim */
-                            if (global_sim) {
-                                for (uint32_t gs = 0; gs < global_sim->ship_count; gs++) {
-                                    if (global_sim->ships[gs].id != fship->ship_id) continue;
-                                    for (uint8_t gm = 0; gm < global_sim->ships[gs].module_count; gm++) {
-                                        if (global_sim->ships[gs].modules[gm].id == mod->id) {
-                                            global_sim->ships[gs].modules[gm].data.mast.sail_fire_intensity = 0;
-                                            global_sim->ships[gs].modules[gm].fire_timer_ms = 0;
+                            {
+                                struct Ship* _fss = find_sim_ship(fship->ship_id);
+                                if (_fss) {
+                                    for (uint8_t gm = 0; gm < _fss->module_count; gm++) {
+                                        if (_fss->modules[gm].id == mod->id) {
+                                            _fss->modules[gm].data.mast.sail_fire_intensity = 0;
+                                            _fss->modules[gm].fire_timer_ms = 0;
                                             break;
                                         }
                                     }
-                                    break;
                                 }
                             }
                             {
@@ -10621,19 +10589,18 @@ void websocket_server_tick(float dt) {
                     mod->data.mast.wind_efficiency = (fhmax > 0.0f)
                         ? Q16_FROM_FLOAT(fh / fhmax) : 0;
                     /* Sync global_sim mast data */
-                    if (global_sim) {
-                        for (uint32_t gs = 0; gs < global_sim->ship_count; gs++) {
-                            if (global_sim->ships[gs].id != fship->ship_id) continue;
-                            for (uint8_t gm = 0; gm < global_sim->ships[gs].module_count; gm++) {
-                                if (global_sim->ships[gs].modules[gm].id == mod->id) {
-                                    global_sim->ships[gs].modules[gm].data.mast.fiber_health    = mod->data.mast.fiber_health;
-                                    global_sim->ships[gs].modules[gm].data.mast.wind_efficiency = mod->data.mast.wind_efficiency;
-                                    global_sim->ships[gs].modules[gm].data.mast.sail_fire_intensity = mod->data.mast.sail_fire_intensity;
-                                    global_sim->ships[gs].modules[gm].fire_timer_ms = mod->fire_timer_ms;
+                    {
+                        struct Ship* _fss = find_sim_ship(fship->ship_id);
+                        if (_fss) {
+                            for (uint8_t gm = 0; gm < _fss->module_count; gm++) {
+                                if (_fss->modules[gm].id == mod->id) {
+                                    _fss->modules[gm].data.mast.fiber_health       = mod->data.mast.fiber_health;
+                                    _fss->modules[gm].data.mast.wind_efficiency    = mod->data.mast.wind_efficiency;
+                                    _fss->modules[gm].data.mast.sail_fire_intensity = mod->data.mast.sail_fire_intensity;
+                                    _fss->modules[gm].fire_timer_ms                = mod->fire_timer_ms;
                                     break;
                                 }
                             }
-                            break;
                         }
                     }
                     /* Broadcast per-tick sail fiber fire update */
@@ -10660,17 +10627,16 @@ void websocket_server_tick(float dt) {
                         /* Timer expired without fresh flame contact — extinguish */
                         mod->fire_timer_ms = 0;
                         mod->data.mast.sail_fire_intensity = 0;
-                        if (global_sim) {
-                            for (uint32_t gs = 0; gs < global_sim->ship_count; gs++) {
-                                if (global_sim->ships[gs].id != fship->ship_id) continue;
-                                for (uint8_t gm = 0; gm < global_sim->ships[gs].module_count; gm++) {
-                                    if (global_sim->ships[gs].modules[gm].id == mod->id) {
-                                        global_sim->ships[gs].modules[gm].data.mast.sail_fire_intensity = 0;
-                                        global_sim->ships[gs].modules[gm].fire_timer_ms = 0;
+                        {
+                            struct Ship* _fss = find_sim_ship(fship->ship_id);
+                            if (_fss) {
+                                for (uint8_t gm = 0; gm < _fss->module_count; gm++) {
+                                    if (_fss->modules[gm].id == mod->id) {
+                                        _fss->modules[gm].data.mast.sail_fire_intensity = 0;
+                                        _fss->modules[gm].fire_timer_ms = 0;
                                         break;
                                     }
                                 }
-                                break;
                             }
                         }
                     }
@@ -10693,17 +10659,16 @@ void websocket_server_tick(float dt) {
                 /* Sync updated health/state back to global_sim Ship module so that
                  * GAME_STATE (which reads from sim->ships[]) broadcasts the correct value.
                  * SimpleShip and Ship are separate structs; fire DOT only writes to SimpleShip. */
-                if (global_sim) {
-                    for (uint32_t gs = 0; gs < global_sim->ship_count; gs++) {
-                        if (global_sim->ships[gs].id != fship->ship_id) continue;
-                        for (uint8_t gm = 0; gm < global_sim->ships[gs].module_count; gm++) {
-                            if (global_sim->ships[gs].modules[gm].id == mod->id) {
-                                global_sim->ships[gs].modules[gm].health     = mod->health;
-                                global_sim->ships[gs].modules[gm].state_bits = mod->state_bits;
+                {
+                    struct Ship* _fss = find_sim_ship(fship->ship_id);
+                    if (_fss) {
+                        for (uint8_t gm = 0; gm < _fss->module_count; gm++) {
+                            if (_fss->modules[gm].id == mod->id) {
+                                _fss->modules[gm].health     = mod->health;
+                                _fss->modules[gm].state_bits = mod->state_bits;
                                 break;
                             }
                         }
-                        break;
                     }
                 }
 
