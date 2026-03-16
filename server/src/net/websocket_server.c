@@ -129,6 +129,7 @@ static uint32_t next_npc_id = 5000;
 static WorldNpc world_npcs[MAX_WORLD_NPCS] = {0};
 static int world_npc_count = 0;
 static uint32_t next_world_npc_id = 9000;
+static bool g_npcs_dirty = true; // set whenever NPC state changes; cleared after JSON rebuild
 
 // Global ship data (simple ships for testing)
 #define MAX_SIMPLE_SHIPS 50
@@ -1167,19 +1168,17 @@ static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClie
         else
             module->state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
         // Mirror state change into the simulation ship module array
-        if (global_sim) {
-            for (uint32_t _s = 0; _s < global_sim->ship_count; _s++) {
-                if (global_sim->ships[_s].id == ship->ship_id) {
-                    for (uint8_t _m = 0; _m < global_sim->ships[_s].module_count; _m++) {
-                        if (global_sim->ships[_s].modules[_m].id == module->id) {
-                            if (now_retracted)
-                                global_sim->ships[_s].modules[_m].state_bits |= MODULE_STATE_RETRACTED;
-                            else
-                                global_sim->ships[_s].modules[_m].state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
-                            break;
-                        }
+        {
+            struct Ship* _lss = find_sim_ship(ship->ship_id);
+            if (_lss) {
+                for (uint8_t _m = 0; _m < _lss->module_count; _m++) {
+                    if (_lss->modules[_m].id == module->id) {
+                        if (now_retracted)
+                            _lss->modules[_m].state_bits |= MODULE_STATE_RETRACTED;
+                        else
+                            _lss->modules[_m].state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
+                        break;
                     }
-                    break;
                 }
             }
         }
@@ -1338,17 +1337,15 @@ static void handle_swivel_aim(WebSocketPlayer* player, float aim_angle) {
     module->data.swivel.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
 
     /* Mirror into global_sim so sim-path snapshots see the updated target */
-    if (global_sim) {
-        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-            if (global_sim->ships[si].id != ship->ship_id) continue;
-            for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                if (global_sim->ships[si].modules[mi].id == module->id) {
-                    global_sim->ships[si].modules[mi].data.swivel.desired_aim_direction =
-                        Q16_FROM_FLOAT(desired_offset);
+    {
+        struct Ship* _ss = find_sim_ship(ship->ship_id);
+        if (_ss) {
+            for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                if (_ss->modules[mi].id == module->id) {
+                    _ss->modules[mi].data.swivel.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
                     break;
                 }
             }
-            break;
         }
     }
 
@@ -1505,13 +1502,9 @@ static void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketCl
     //          player->player_id, ship->ship_id, desired_openness);
 
     // Store desired openness — the tick will only apply it to individually manned masts
-    if (global_sim && global_sim->ship_count > 0) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                global_sim->ships[s].desired_sail_openness = (uint8_t)desired_openness;
-                break;
-            }
-        }
+    {
+        struct Ship* _ss = find_sim_ship(ship->ship_id);
+        if (_ss) _ss->desired_sail_openness = (uint8_t)desired_openness;
     }
 
     // Also store in simple ship for compatibility
@@ -1553,13 +1546,9 @@ static void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocket
     //          player->player_id, ship->ship_id, direction, target_angle);
     
     // Update simulation ship target rudder angle
-    if (global_sim && global_sim->ship_count > 0) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                global_sim->ships[s].target_rudder_angle = target_angle;
-                break;
-            }
-        }
+    {
+        struct Ship* _ss = find_sim_ship(ship->ship_id);
+        if (_ss) _ss->target_rudder_angle = target_angle;
     }
     
     // Send acknowledgment
@@ -1590,19 +1579,14 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
     q16_t angle_q16 = Q16_FROM_FLOAT(angle_radians);
 
     // Update simulation ship masts — only those with a rigger stationed at them
-    if (global_sim && global_sim->ship_count > 0) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                struct Ship* sim_ship = &global_sim->ships[s];
-                for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                    if (sim_ship->modules[m].type_id == MODULE_TYPE_MAST &&
-                        is_mast_manned_by_friendly(ship->ship_id, sim_ship->modules[m].id, player->company_id)) {
-                        sim_ship->modules[m].data.mast.angle = angle_q16;
-                        // log_info("  🌀 Mast %u angle set to %.1f° (%.3f rad)",
-                        //          sim_ship->modules[m].id, desired_angle, angle_radians);
-                    }
+    {
+        struct Ship* sim_ship = find_sim_ship(ship->ship_id);
+        if (sim_ship) {
+            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                if (sim_ship->modules[m].type_id == MODULE_TYPE_MAST &&
+                    is_mast_manned_by_friendly(ship->ship_id, sim_ship->modules[m].id, player->company_id)) {
+                    sim_ship->modules[m].data.mast.angle = angle_q16;
                 }
-                break;
             }
         }
     }
@@ -1703,17 +1687,14 @@ static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float 
     cannon->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
 
     // Mirror into sim-ship so fire_cannon reads the correct value
-    if (global_sim) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                struct Ship* sim_ship = &global_sim->ships[s];
-                for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                    if (sim_ship->modules[m].id == cannon->id) {
-                        sim_ship->modules[m].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
-                        break;
-                    }
+    {
+        struct Ship* sim_ship = find_sim_ship(ship->ship_id);
+        if (sim_ship) {
+            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                if (sim_ship->modules[m].id == cannon->id) {
+                    sim_ship->modules[m].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
+                    break;
                 }
-                break;
             }
         }
     }
@@ -2547,6 +2528,7 @@ static bool occ_taken_by_other(const NpcOccEntry* buf, int cnt,
  * Tick world NPCs: animate movement across deck, then update world positions.
  */
 static void tick_world_npcs(float dt) {
+    g_npcs_dirty = true; // NPCs ticked this frame — JSON must be rebuilt
     // Plank centre positions in client-space local coords (match HULL_POINTS in modules.ts)
     // Order: bow_port, bow_starboard, 3× starboard, stern_starboard, stern_port, 3× port
     static const float s_plank_cx[10] = {
@@ -3237,16 +3219,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
     const float CANNON_AIM_RANGE = 30.0f * (M_PI / 180.0f); // ±30 degrees
 
     // Get simulation ship to update cannon modules
-    struct Ship* sim_ship = NULL;
-    if (global_sim && global_sim->ship_count > 0) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                sim_ship = &global_sim->ships[s];
-                break;
-            }
-        }
-    }
-
+    struct Ship* sim_ship = find_sim_ship(ship->ship_id);
     if (!sim_ship) return;
 
     // Update cannon(s) depending on how the player is mounted:
@@ -3921,15 +3894,7 @@ static void handle_cannon_force_reload(WebSocketPlayer* player) {
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship) return;
 
-    struct Ship* sim_ship = NULL;
-    if (global_sim) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                sim_ship = &global_sim->ships[s];
-                break;
-            }
-        }
-    }
+    struct Ship* sim_ship = find_sim_ship(ship->ship_id);
     if (!sim_ship) return;
 
     ShipModule* mmod = find_module_by_id(ship, player->mounted_module_id);
@@ -8982,38 +8947,45 @@ int websocket_server_update(struct Sim* sim) {
         }
         projectiles_offset += snprintf(projectiles_json + projectiles_offset, sizeof(projectiles_json) - projectiles_offset, "]");
 
-        // Build world NPCs JSON array
-        char npcs_json[32768]; /* 64 NPCs × ~350 bytes/NPC — must be large enough */
-        int npcs_offset = 0;
-        npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "[");
-        bool first_npc = true;
-        for (int n = 0; n < world_npc_count; n++) {
-            const WorldNpc* npc = &world_npcs[n];
-            if (!npc->active) continue;
-            if (!first_npc)
-                npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, ",");
-            npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset,
-                "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
-                "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
-                "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
-                "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u,"
-                "\"assigned_weapon_id\":%u,"
-                "\"npc_level\":%u,\"health\":%u,\"max_health\":%u,\"xp\":%u,"
-                "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
-                "\"stat_points\":%u,\"locked\":%d}",
-                npc->id, npc->name,
-                npc->x, npc->y, npc->rotation,
-                npc->ship_id, npc->local_x, npc->local_y,
-                npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id,
-                npc->assigned_weapon_id,
-                (unsigned)npc->npc_level, (unsigned)npc->health, (unsigned)npc->max_health, npc->xp,
-                (unsigned)npc->stat_health, (unsigned)npc->stat_damage, (unsigned)npc->stat_stamina, (unsigned)npc->stat_weight,
-                (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
-                    (npc->stat_health + npc->stat_damage + npc->stat_stamina + npc->stat_weight)),
-                (int)npc->task_locked);
-            first_npc = false;
+        // Build world NPCs JSON array — only rebuilt when g_npcs_dirty is set.
+        // tick_world_npcs() marks it dirty every tick; on idle (no NPC tick) we reuse
+        // the previous buffer, saving ~32 KB of snprintf work per broadcast.
+        static char npcs_json[32768];
+        static int  npcs_offset = 2; // starts valid: "[]" written at init
+        if (npcs_offset < 2) { npcs_json[0] = '['; npcs_json[1] = ']'; npcs_json[2] = '\0'; }
+        if (g_npcs_dirty) {
+            npcs_offset = 0;
+            npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "[");
+            bool first_npc = true;
+            for (int n = 0; n < world_npc_count; n++) {
+                const WorldNpc* npc = &world_npcs[n];
+                if (!npc->active) continue;
+                if (!first_npc)
+                    npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, ",");
+                npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset,
+                    "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
+                    "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
+                    "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
+                    "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u,"
+                    "\"assigned_weapon_id\":%u,"
+                    "\"npc_level\":%u,\"health\":%u,\"max_health\":%u,\"xp\":%u,"
+                    "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
+                    "\"stat_points\":%u,\"locked\":%d}",
+                    npc->id, npc->name,
+                    npc->x, npc->y, npc->rotation,
+                    npc->ship_id, npc->local_x, npc->local_y,
+                    npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id,
+                    npc->assigned_weapon_id,
+                    (unsigned)npc->npc_level, (unsigned)npc->health, (unsigned)npc->max_health, npc->xp,
+                    (unsigned)npc->stat_health, (unsigned)npc->stat_damage, (unsigned)npc->stat_stamina, (unsigned)npc->stat_weight,
+                    (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
+                        (npc->stat_health + npc->stat_damage + npc->stat_stamina + npc->stat_weight)),
+                    (int)npc->task_locked);
+                first_npc = false;
+            }
+            npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "]");
+            g_npcs_dirty = false;
         }
-        npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "]");
         
         // Adaptive tick rate based on activity
         bool has_recent_movement = (current_time - g_last_movement_time) < 2000; // Movement in last 2 seconds
