@@ -5186,12 +5186,22 @@ static void ghost_aim_cannon(SimpleShip* ship, ShipModule* cannon,
 
     cannon->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
 
+    /* Mirror desired AND current aim_direction onto the sim cannon.
+     * Match by position rather than ID because SimpleShip uses mid_base+n IDs
+     * while sim_create_ship uses ship_id*1000+n — they never match by default.
+     * Position is identical in both (same CLIENT_TO_SERVER values). */
     if (global_sim) {
+        float cx = Q16_TO_FLOAT(cannon->local_pos.x);
+        float cy = Q16_TO_FLOAT(cannon->local_pos.y);
         for (uint32_t s = 0; s < global_sim->ship_count; s++) {
             if (global_sim->ships[s].id == ship->ship_id) {
                 struct Ship* sim_ship = &global_sim->ships[s];
                 for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                    if (sim_ship->modules[m].id == cannon->id) {
+                    if (sim_ship->modules[m].type_id != MODULE_TYPE_CANNON) continue;
+                    float sx = Q16_TO_FLOAT(sim_ship->modules[m].local_pos.x);
+                    float sy = Q16_TO_FLOAT(sim_ship->modules[m].local_pos.y);
+                    float d2 = (sx - cx) * (sx - cx) + (sy - cy) * (sy - cy);
+                    if (d2 < 0.01f) {
                         sim_ship->modules[m].data.cannon.desired_aim_direction =
                             Q16_FROM_FLOAT(desired_offset);
                         break;
@@ -9365,14 +9375,33 @@ void websocket_server_tick(float dt) {
                     cur += (diff > 0.0f ? max_step : -max_step);
                 }
                 mod->data.cannon.aim_direction = Q16_FROM_FLOAT(cur);
-                // Mirror into sim-ship
+                // Mirror aim_direction into sim-ship.
+                // Try ID match first; fall back to position match (ghost ships
+                // use different ID schemes between SimpleShip and sim ship).
                 if (global_sim) {
                     for (uint32_t si = 0; si < global_sim->ship_count; si++) {
                         if (global_sim->ships[si].id == ships[s].ship_id) {
+                            bool mirrored = false;
                             for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
                                 if (global_sim->ships[si].modules[mi].id == mod->id) {
                                     global_sim->ships[si].modules[mi].data.cannon.aim_direction = mod->data.cannon.aim_direction;
+                                    mirrored = true;
                                     break;
+                                }
+                            }
+                            if (!mirrored) {
+                                /* Position-based fallback (ghost ships and any mismatch) */
+                                float mx = Q16_TO_FLOAT(mod->local_pos.x);
+                                float my = Q16_TO_FLOAT(mod->local_pos.y);
+                                for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
+                                    if (global_sim->ships[si].modules[mi].type_id != MODULE_TYPE_CANNON) continue;
+                                    float sx = Q16_TO_FLOAT(global_sim->ships[si].modules[mi].local_pos.x);
+                                    float sy = Q16_TO_FLOAT(global_sim->ships[si].modules[mi].local_pos.y);
+                                    float d2 = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
+                                    if (d2 < 0.01f) {
+                                        global_sim->ships[si].modules[mi].data.cannon.aim_direction = mod->data.cannon.aim_direction;
+                                        break;
+                                    }
                                 }
                             }
                             break;
