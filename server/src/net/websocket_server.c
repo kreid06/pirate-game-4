@@ -5243,27 +5243,32 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
     /* Tag as ghost */
     ship->ship_type = SHIP_TYPE_GHOST;
 
-    /* Boost ghost ship plank health to 4× normal — planks remain in the
-     * simulation for hull-health tracking (enabling the hull-fade and
-     * mist-dissolve damage system) but require far more hits to fully
-     * destroy, so individual planks never visibly "pop" off in gameplay. */
+    /* Ghost ships have no physical planks — hull damage is tracked directly via
+     * hull_health in simulation.c (7 HP per cannonball hit, heals 1 HP/s).
+     * Strip all plank modules from both SimpleShip and sim ship so the plank
+     * drain logic never runs and the hit path goes through the ghost entry point. */
     {
+        /* Strip planks from SimpleShip */
+        int write = 0;
         for (int m = 0; m < ship->module_count; m++) {
-            if (ship->modules[m].type_id == MODULE_TYPE_PLANK) {
-                ship->modules[m].max_health *= 4;
-                ship->modules[m].health     = ship->modules[m].max_health;
-            }
+            if (ship->modules[m].type_id != MODULE_TYPE_PLANK)
+                ship->modules[write++] = ship->modules[m];
         }
+        ship->module_count = write;
+
+        /* Strip planks from sim ship */
         if (global_sim) {
             for (uint32_t si = 0; si < global_sim->ship_count; si++) {
                 if (global_sim->ships[si].id != ship_id) continue;
                 struct Ship* sim_ship = &global_sim->ships[si];
+                uint8_t sw = 0;
                 for (uint8_t sm = 0; sm < sim_ship->module_count; sm++) {
-                    if (sim_ship->modules[sm].type_id == MODULE_TYPE_PLANK) {
-                        sim_ship->modules[sm].max_health *= 4;
-                        sim_ship->modules[sm].health     = sim_ship->modules[sm].max_health;
-                    }
+                    if (sim_ship->modules[sm].type_id != MODULE_TYPE_PLANK)
+                        sim_ship->modules[sw++] = sim_ship->modules[sm];
                 }
+                sim_ship->module_count = sw;
+                /* initial_plank_count = 0 so the drain tick never fires */
+                sim_ship->initial_plank_count = 0;
                 break;
             }
         }
@@ -5394,7 +5399,7 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
 
 /* Maximum distance (client pixels) to scan for an enemy.
  * ~800 px ≈ 4-5 ship lengths — about half a screen width at normal zoom. */
-#define GHOST_ATTACK_RANGE      800.0f
+#define GHOST_ATTACK_RANGE      2400.0f
 /* Wander: new random heading every N seconds */
 #define GHOST_WANDER_INTERVAL_S 5.0f
 /* Top speed (client-px / s) while chasing — a bit slower than a player ship */
@@ -5516,17 +5521,28 @@ static void tick_ghost_ships(float dt) {
                 }
             }
         } else {
-            /* Wander mode — continuously spin the desired heading so the
-             * Phantom Brig spirals and rotates eerily rather than just drifting */
-            ghost_desired_heading[s] += GHOST_SPIN_RATE * dt;
-            while (ghost_desired_heading[s] >  (float)M_PI) ghost_desired_heading[s] -= 2.0f * (float)M_PI;
-            while (ghost_desired_heading[s] < -(float)M_PI) ghost_desired_heading[s] += 2.0f * (float)M_PI;
+            /* Wander mode — pick a new random heading every 5-8 s and drift
+             * slowly toward it.  Uses the wander timer + a stable per-ship seed
+             * so each ghost wanders independently without a shared rand() state. */
+            ghost_wander_timer[s] -= dt;
+            if (ghost_wander_timer[s] <= 0.0f) {
+                /* Cheap deterministic pseudo-random: mix ship index with a
+                 * counter scaled by current heading to get varied offsets. */
+                static uint32_t wander_seed = 0x9e3779b9u;
+                wander_seed ^= (uint32_t)(s * 2654435761u) ^ (uint32_t)(ghost_aim_phase[s] * 1000.0f);
+                wander_seed = wander_seed * 1664525u + 1013904223u; /* LCG */
+                /* Turn ±PI from current heading for an organic wandering arc */
+                float turn_offset = ((float)(wander_seed & 0xFFFFu) / 65535.0f) * 2.0f * (float)M_PI
+                                    - (float)M_PI;
+                ghost_desired_heading[s] = ghost_desired_heading[s] + turn_offset * 0.65f;
+                while (ghost_desired_heading[s] >  (float)M_PI) ghost_desired_heading[s] -= 2.0f * (float)M_PI;
+                while (ghost_desired_heading[s] < -(float)M_PI) ghost_desired_heading[s] += 2.0f * (float)M_PI;
+                /* Next heading change in 5–8 s */
+                wander_seed = wander_seed * 1664525u + 1013904223u;
+                ghost_wander_timer[s] = 5.0f + ((float)(wander_seed & 0xFFFFu) / 65535.0f) * 3.0f;
+            }
             desired_heading = ghost_desired_heading[s];
             move_speed      = GHOST_WANDER_SPEED;
-
-            /* Ghost ships use no weapon groups — nothing to clear while wandering.
-             * Cannons will resume aiming when a target is found again. */
-            (void)0; /* no-op placeholder */
         }
 
         /* Store in ship slot for rendering-side debug convenience */

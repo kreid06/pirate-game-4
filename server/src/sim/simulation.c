@@ -1339,22 +1339,19 @@ void handle_projectile_collisions(struct Sim* sim) {
                 }
 
                 // Ball already breached this hull — check for interior module hits at current position
+                /* Ghost ships have no planks; absorb any projectile that managed to get inside
+                 * (shouldn't happen after entry-point intercept, but belt-and-suspenders). */
+                if (ship->company_id == 99) {
+                    memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                            (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                    sim->projectile_count--;
+                    removed = true;
+                }
+
                 int hit_m = find_module_hit(ship, lx, ly);
-                if (hit_m >= 0) {
+                if (!removed && hit_m >= 0) {
                     ShipModule* hit_mod = &ship->modules[hit_m];
                     uint16_t mod_id = hit_mod->id;
-
-                    /* Ghost ships (company_id 99 = COMPANY_GHOST): only hull planks
-                     * are destructible. Cannons, helms, masts, ladders are indestructible
-                     * spectral features. Absorb the projectile silently so it doesn't
-                     * loop through the ghost hull every tick, but apply zero damage. */
-                    if (ship->company_id == 99 && hit_mod->type_id != MODULE_TYPE_PLANK) {
-                        /* Absorb projectile with no damage — ghost interior is immune */
-                        memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
-                                (sim->projectile_count - i - 1) * sizeof(struct Projectile));
-                        sim->projectile_count--;
-                        removed = true;
-                    } else {
 
                     float dmg_before = (float)hit_mod->health;
                     q16_t effective_damage = Q16_FROM_FLOAT(
@@ -1424,13 +1421,42 @@ void handle_projectile_collisions(struct Sim* sim) {
                             (sim->projectile_count - i - 1) * sizeof(struct Projectile));
                     sim->projectile_count--;
                     removed = true;
-                    } /* end else (non-ghost interior module) */
                 }
                 // No module hit yet — ball keeps traveling
                 continue;
             }
 
             // ---- Ball is entering the hull for the first time — check entry plank ----
+
+            /* ── Ghost ship: no planks — apply direct spectral hull damage ─────── */
+            if (ship->company_id == 99) {
+                const float GHOST_HIT_DAMAGE = 7.0f; /* ~14 hits to sink (heals 1 HP/s) */
+                float hp = Q16_TO_FLOAT(ship->hull_health) - GHOST_HIT_DAMAGE;
+                if (hp < 0.0f) hp = 0.0f;
+                if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                    struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                    ev->ship_id         = ship->id;
+                    ev->module_id       = 0;
+                    ev->is_breach       = false;
+                    ev->is_sink         = (ship->hull_health > 0 && hp <= 0.0f);
+                    ev->destroyed       = false;
+                    ev->damage_dealt    = GHOST_HIT_DAMAGE;
+                    ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                    ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                    ev->shooter_ship_id = proj->firing_ship_id;
+                }
+                ship->hull_health = Q16_FROM_FLOAT(hp);
+                if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                    struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                    if (attacker) attacker->level_stats.xp += 20u;
+                }
+                memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                        (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                sim->projectile_count--;
+                removed = true;
+            }
+
+            if (removed) break; /* skip normal plank lookup */
 
             // Find nearest hull vertex to determine which plank was hit
             int nearest_v = 0;
