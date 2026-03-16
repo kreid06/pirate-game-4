@@ -2274,12 +2274,24 @@ export class ClientApplication {
 
               const myCompanyE = meE.companyId ?? 0;
               const npcCompanyE = hovNpcE.companyId;
+
+              // Enemy-company NPC: no interaction
+              if (npcCompanyE !== 0 && npcCompanyE !== myCompanyE) {
+                console.log(`🚫 E: NPC ${hovNpcE.id} belongs to enemy company ${npcCompanyE}`);
+                this._interactKind = null;
+                this._suppressLadderInteract = false;
+                this._npcInteractId = null;
+                this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+                break;
+              }
+
               let npcOpts: { id: string; label: string }[];
               if (npcCompanyE === 0) {
                 npcOpts = [{ id: 'recruit', label: 'Recruit to Company' }];
               } else if (npcCompanyE === myCompanyE && hovNpcE.shipId !== meE.carrierId) {
                 npcOpts = [{ id: 'move_aboard', label: 'Move Aboard' }];
               } else {
+                // Same company, same ship
                 npcOpts = [{ id: 'crew_menu', label: 'Manage Crew' }];
               }
               const npcOptsSnap = npcOpts;
@@ -2507,9 +2519,14 @@ export class ClientApplication {
           const npc = npcId != null ? ws?.npcs.find(n => n.id === npcId) : null;
           if (!npc) return;
           const myCompany = me?.companyId ?? 0;
-          if (npc.companyId === 0)                                     { executeNpcAction('recruit'); }
-          else if (npc.companyId === myCompany && npc.shipId !== me?.carrierId) { executeNpcAction('move_aboard'); }
-          else                                                          { executeNpcAction('crew_menu'); }
+          if (npc.companyId === 0) {
+            executeNpcAction('recruit');
+          } else if (npc.companyId === myCompany && npc.shipId !== me?.carrierId) {
+            executeNpcAction('move_aboard');
+          } else if (npc.companyId === myCompany) {
+            executeNpcAction('crew_menu');
+          }
+          // else: enemy company — no action
         };
 
         if (this._ladderHoldTimer !== null) {
