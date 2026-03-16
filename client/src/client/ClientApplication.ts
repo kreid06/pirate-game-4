@@ -1001,6 +1001,9 @@ export class ClientApplication {
         this.networkManager.sendCannonGroupConfig(targetGroup, state.mode, state.cannonIds, state.targetId > 0 ? state.targetId : 0);
       };
 
+      // Left-click while mounted: Move To mode takes priority over cannon fire
+      this.inputManager.onBeforeLeftClick = () => this._moveToNpcId !== null;
+
       // Right-click: cancel Move To mode before any other right-click handling
       this.inputManager.onBeforeRightClick = () => {
         if (this._moveToNpcId !== null) {

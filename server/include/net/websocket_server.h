@@ -200,6 +200,13 @@ typedef struct WorldNpc {
     // ── Task lock ───────────────────────────────────────────────────────────
     bool          task_locked;    // When true: player has pinned this NPC to their current module;
                                   // rejected by handle_crew_assign & auto cannon-sector dispatch.
+
+    // ── Boarding approach ──────────────────────────────────────────────────
+    // When boarding_ship_id != 0 the NPC is swimming (ship_id == 0) toward a hull
+    // entry point.  On arrival it snaps aboard and walks to (boarding_local_x/y).
+    uint32_t      boarding_ship_id;  // target ship to board; 0 = not boarding
+    float         boarding_local_x;  // on-deck destination (ship-local) after boarding
+    float         boarding_local_y;
 } WorldNpc;
 // ────────────────────────────────────────────────────────────────────────────
 
