@@ -16,6 +16,9 @@ import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
 import { RadialMenu } from '../ui/RadialMenu.js';
 
+/** Max hull HP for ghost (Phantom Brig) ships — server uses raw HP scale, not 0-100. */
+const GHOST_MAX_HULL_HP = 60000;
+
 /** NPC fill colours keyed by assigned task name (matches ManningPriorityPanel task colours). */
 const NPC_TASK_COLORS: Record<string, string> = {
   Sails:   '#5aafff',
@@ -994,7 +997,8 @@ export class RenderSystem {
     phase2Alpha: number;
     phase3Alpha: number;
   } {
-    const waterFill = Math.max(0, Math.min(1, 1 - ship.hullHealth / 100));
+    const hullPct = ship.shipType === SHIP_TYPE_GHOST ? ship.hullHealth / GHOST_MAX_HULL_HP : ship.hullHealth / 100;
+    const waterFill = Math.max(0, Math.min(1, 1 - hullPct));
     const floodTint = waterFill >= 0.75 ? (waterFill - 0.75) / 0.25 : 0;
 
     // Start the clock for any live ship the moment hullHealth hits 0 (fallback if SHIP_SINKING arrives late)
@@ -1814,9 +1818,9 @@ export class RenderSystem {
     }
     this.ctx.lineWidth = 2 / cameraState.zoom;
 
-    // Ghost hull fades as it takes damage (health 100→0 maps opacity 1.0→0.2)
+    // Ghost hull fades as it takes damage (health 60000→0 maps opacity 1.0→0.2)
     if (isGhost) {
-      const healthFade = Math.max(0.2, ship.hullHealth / 100);
+      const healthFade = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
       this.ctx.globalAlpha = phase1Alpha * healthFade;
     }
     
@@ -1833,7 +1837,7 @@ export class RenderSystem {
 
     // Ghost ships: add a second thin cyan edge stroke for the spectral glow outline
     if (isGhost) {
-      const healthMult = Math.max(0.2, ship.hullHealth / 100);
+      const healthMult = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
       const sinkMult   = phase1Alpha < 1 ? phase1Alpha : 1;
       this.ctx.shadowBlur   = 0;
       this.ctx.strokeStyle  = `rgba(0,230,255,${0.55 * sinkMult * healthMult})`;
@@ -1847,7 +1851,7 @@ export class RenderSystem {
 
     // Water flood tint: blue overlay (non-ghost), cyan mist dissolve (ghost)
     // Ghost mist begins at 75% HP (25% damage) and reaches full intensity at 0 HP
-    const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / 100) - 0.25) / 0.75 : 0;
+    const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / GHOST_MAX_HULL_HP) - 0.25) / 0.75 : 0;
     if (isGhost ? ghostMistAlpha > 0 : floodTint > 0) {
       if (isGhost) {
         // Ghost dissolve: cyan/teal mist, starts from 75% HP
@@ -1891,8 +1895,8 @@ export class RenderSystem {
     const isGhostShip = ship.shipType === SHIP_TYPE_GHOST;
     
     this.ctx.save();
-    // Ghost planks fade with hull damage (full opacity 0.45 at 100 HP → 0.05 at 0 HP)
-    const ghostHealthFade = isGhostShip ? Math.max(0.1, ship.hullHealth / 100) : 1;
+    // Ghost planks fade with hull damage (full opacity 0.45 at 60000 HP → 0.05 at 0 HP)
+    const ghostHealthFade = isGhostShip ? Math.max(0.1, ship.hullHealth / GHOST_MAX_HULL_HP) : 1;
     const baseAlpha = isGhostShip ? Math.min(phase1Alpha, 0.45) * ghostHealthFade : phase1Alpha;
     if (baseAlpha < 1) this.ctx.globalAlpha = baseAlpha;
     

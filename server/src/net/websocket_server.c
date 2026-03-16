@@ -5269,6 +5269,8 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
                 sim_ship->module_count = sw;
                 /* initial_plank_count = 0 so the drain tick never fires */
                 sim_ship->initial_plank_count = 0;
+                /* Ghost ships use a 0–60000 HP scale instead of 0–100. */
+                sim_ship->hull_health = Q16_FROM_FLOAT(60000.0f);
                 break;
             }
         }

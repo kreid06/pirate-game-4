@@ -183,9 +183,12 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
         int missing = (int)ship->initial_plank_count - planks_remaining;
 
         if (missing == 0 && planks_leaking == 0) {
-            // Full integrity: crew bails water — hull_health rises at 1 HP/s (capped at 100)
-            float health = Q16_TO_FLOAT(ship->hull_health) + 1.0f * dt_secs;
-            if (health > 100.0f) health = 100.0f;
+            /* Ghost ships (no planks): regenerate at 100 HP/s, cap at 60000.
+             * Normal ships: bail water at 1 HP/s, cap at 100. */
+            float heal_rate = (ship->company_id == 99) ? 100.0f : 1.0f;
+            float heal_cap  = (ship->company_id == 99) ? 60000.0f : 100.0f;
+            float health = Q16_TO_FLOAT(ship->hull_health) + heal_rate * dt_secs;
+            if (health > heal_cap) health = heal_cap;
             ship->hull_health = Q16_FROM_FLOAT(health);
         } else {
             // Hull is compromised — compute drain rate
@@ -1430,8 +1433,10 @@ void handle_projectile_collisions(struct Sim* sim) {
 
             /* ── Ghost ship: no planks — apply direct spectral hull damage ─────── */
             if (ship->company_id == 99) {
-                const float GHOST_HIT_DAMAGE = 7.0f; /* ~14 hits to sink (heals 1 HP/s) */
-                float hp = Q16_TO_FLOAT(ship->hull_health) - GHOST_HIT_DAMAGE;
+                /* Use raw cannonball damage (proj->damage = 3000) against 60000 max HP.
+                 * ~20 shots to sink a full-health ghost.  proj->damage is stored as a
+                 * plain integer (not Q16-scaled), same as the mast fiber damage path. */
+                float hp = Q16_TO_FLOAT(ship->hull_health) - (float)proj->damage;
                 if (hp < 0.0f) hp = 0.0f;
                 if (sim->hit_event_count < MAX_HIT_EVENTS) {
                     struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
@@ -1440,7 +1445,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                     ev->is_breach       = false;
                     ev->is_sink         = (ship->hull_health > 0 && hp <= 0.0f);
                     ev->destroyed       = false;
-                    ev->damage_dealt    = GHOST_HIT_DAMAGE;
+                    ev->damage_dealt    = (float)proj->damage;
                     ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
                     ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
                     ev->shooter_ship_id = proj->firing_ship_id;
