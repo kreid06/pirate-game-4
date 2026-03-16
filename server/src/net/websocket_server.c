@@ -5170,7 +5170,8 @@ static void ghost_aim_cannon(SimpleShip* ship, ShipModule* cannon,
                              float target_x, float target_y, float sweep_rad) {
     float dx = target_x - ship->x;
     float dy = target_y - ship->y;
-    float world_angle = atan2f(dy, dx) + sweep_rad;
+    /* DEBUG: no sweep offset, no arc clamp — cannons hard-lock directly on target */
+    float world_angle = atan2f(dy, dx); /* sweep_rad intentionally omitted */
 
     float relative_angle = world_angle - ship->rotation;
     while (relative_angle >  (float)M_PI) relative_angle -= 2.0f * (float)M_PI;
@@ -5181,8 +5182,9 @@ static void ghost_aim_cannon(SimpleShip* ship, ShipModule* cannon,
     while (desired_offset >  (float)M_PI) desired_offset -= 2.0f * (float)M_PI;
     while (desired_offset < -(float)M_PI) desired_offset += 2.0f * (float)M_PI;
 
-    if (desired_offset >  GHOST_CANNON_ARC) desired_offset =  GHOST_CANNON_ARC;
-    if (desired_offset < -GHOST_CANNON_ARC) desired_offset = -GHOST_CANNON_ARC;
+    /* Arc clamping disabled for troubleshooting — full 360° freedom */
+    /* if (desired_offset >  GHOST_CANNON_ARC) desired_offset =  GHOST_CANNON_ARC; */
+    /* if (desired_offset < -GHOST_CANNON_ARC) desired_offset = -GHOST_CANNON_ARC; */
 
     cannon->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
 
