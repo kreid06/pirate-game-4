@@ -182,33 +182,42 @@ static void update_mounted_players_on_ship(uint32_t ship_id) {
     }
 }
 
+// ── O(1) simulation-ship lookup ─────────────────────────────────────────────
+// Declared early so sync_simple_ships_from_simulation can use it.
+// Full definition lives after find_ship_by_id (below).
+#define SIM_SHIP_ID_SIZE 512
+static struct Ship* g_sim_ship_by_id[SIM_SHIP_ID_SIZE]; // zero-init by C
+static struct Ship* find_sim_ship(uint32_t id);          // forward declaration
+
 // Sync SimpleShip state from simulation ships (position, rotation, velocity)
 static void sync_simple_ships_from_simulation(void) {
     if (!global_sim || global_sim->ship_count == 0) return;
-    
+
+    // Rebuild sim-ship cache once per tick so all subsequent callers get O(1) lookups.
+    memset(g_sim_ship_by_id, 0, sizeof(g_sim_ship_by_id));
+    for (uint32_t ci = 0; ci < global_sim->ship_count; ci++) {
+        uint32_t sid = (uint32_t)global_sim->ships[ci].id;
+        if (sid > 0 && sid < SIM_SHIP_ID_SIZE)
+            g_sim_ship_by_id[sid] = &global_sim->ships[ci];
+    }
+
     for (int s = 0; s < ship_count; s++) {
         if (!ships[s].active) continue;
-        
-        // Find matching simulation ship by ID
-        for (uint32_t sim_idx = 0; sim_idx < global_sim->ship_count; sim_idx++) {
-            if (global_sim->ships[sim_idx].id == ships[s].ship_id) {
-                struct Ship* sim_ship = &global_sim->ships[sim_idx];
-                
-                // Sync position, rotation, velocity from simulation to SimpleShip
-                ships[s].x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->position.x));
-                ships[s].y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->position.y));
-                ships[s].rotation = Q16_TO_FLOAT(sim_ship->rotation);
-                ships[s].velocity_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->velocity.x));
-                ships[s].velocity_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->velocity.y));
-                ships[s].angular_velocity = Q16_TO_FLOAT(sim_ship->angular_velocity);
-                // Propagate company to sim layer for projectile friendly-fire checks
-                sim_ship->company_id = ships[s].company_id;
-                
-                // Update mounted players' world positions with new ship transform
-                update_mounted_players_on_ship(ships[s].ship_id);
-                break;
-            }
-        }
+        struct Ship* sim_ship = find_sim_ship(ships[s].ship_id);
+        if (!sim_ship) continue;
+
+        // Sync position, rotation, velocity from simulation to SimpleShip
+        ships[s].x              = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->position.x));
+        ships[s].y              = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->position.y));
+        ships[s].rotation       = Q16_TO_FLOAT(sim_ship->rotation);
+        ships[s].velocity_x     = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->velocity.x));
+        ships[s].velocity_y     = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->velocity.y));
+        ships[s].angular_velocity = Q16_TO_FLOAT(sim_ship->angular_velocity);
+        // Propagate company to sim layer for projectile friendly-fire checks
+        sim_ship->company_id    = ships[s].company_id;
+
+        // Update mounted players' world positions with new ship transform
+        update_mounted_players_on_ship(ships[s].ship_id);
     }
 }
 
@@ -259,22 +268,25 @@ static float swivel_dist_to_hull_edge(float sx, float sy, const struct Ship* shi
 
 // Helper to check if player is outside hull polygon (using simulation ship hull)
 static bool is_outside_deck(uint32_t ship_id, float local_x, float local_y) {
-    if (!global_sim) {
-        return false; // No simulation, can't check
+    struct Ship* sim_ship = find_sim_ship(ship_id);
+    if (!sim_ship || sim_ship->hull_vertex_count < 3) return false;
+
+    // Fast AABB pre-check: hull fits within ±300 × ±100 server units for a brigantine.
+    // Convert client local coords to server units for the comparison.
+    float sx = CLIENT_TO_SERVER(local_x);
+    float sy = CLIENT_TO_SERVER(local_y);
+    // Compute hull AABB.
+    float hmin_x = Q16_TO_FLOAT(sim_ship->hull_vertices[0].x);
+    float hmax_x = hmin_x;
+    float hmin_y = Q16_TO_FLOAT(sim_ship->hull_vertices[0].y);
+    float hmax_y = hmin_y;
+    for (uint8_t _v = 1; _v < sim_ship->hull_vertex_count; _v++) {
+        float vx = Q16_TO_FLOAT(sim_ship->hull_vertices[_v].x);
+        float vy = Q16_TO_FLOAT(sim_ship->hull_vertices[_v].y);
+        if (vx < hmin_x) hmin_x = vx; if (vx > hmax_x) hmax_x = vx;
+        if (vy < hmin_y) hmin_y = vy; if (vy > hmax_y) hmax_y = vy;
     }
-    
-    // Find the ship in the simulation
-    struct Ship* sim_ship = NULL;
-    for (uint16_t i = 0; i < global_sim->ship_count; i++) {
-        if (global_sim->ships[i].id == ship_id) {
-            sim_ship = &global_sim->ships[i];
-            break;
-        }
-    }
-    
-    if (!sim_ship || sim_ship->hull_vertex_count < 3) {
-        return false; // No hull to check against
-    }
+    if (sx < hmin_x || sx > hmax_x || sy < hmin_y || sy > hmax_y) return true; // clearly outside
     
     // Convert client local coordinates to server coordinates for comparison
     Vec2Q16 point = {
@@ -816,6 +828,25 @@ __attribute__((unused))
 // Alias kept for call-sites that use the longer name; delegates to the O(1) path.
 static SimpleShip* find_ship_by_id(uint32_t ship_id) {
     return find_ship(ship_id);
+}
+
+// ── O(1) simulation-ship lookup (implementation) ────────────────────────────
+// Array g_sim_ship_by_id and SIM_SHIP_ID_SIZE defined earlier, before
+// sync_simple_ships_from_simulation().
+
+static struct Ship* find_sim_ship(uint32_t id) {
+    if (id > 0 && id < SIM_SHIP_ID_SIZE) {
+        struct Ship* cached = g_sim_ship_by_id[id];
+        if (cached && (uint32_t)cached->id == id) return cached;
+    }
+    if (!global_sim) return NULL;
+    for (uint32_t i = 0; i < global_sim->ship_count; i++) {
+        if ((uint32_t)global_sim->ships[i].id == id) {
+            if (id < SIM_SHIP_ID_SIZE) g_sim_ship_by_id[id] = &global_sim->ships[i];
+            return &global_sim->ships[i];
+        }
+    }
+    return NULL;
 }
 
 /**
@@ -2544,12 +2575,7 @@ static void tick_world_npcs(float dt) {
         if (npc->state == WORLD_NPC_STATE_MOVING) {
             // ── Repairer walking home: interrupt if new damage appears ──────────
             if (npc->role == NPC_ROLE_REPAIRER && npc->assigned_weapon_id == 0 && global_sim) {
-                struct Ship* intr_ship = NULL;
-                for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-                    if ((uint32_t)global_sim->ships[s].id == npc->ship_id) {
-                        intr_ship = &global_sim->ships[s]; break;
-                    }
-                }
+                struct Ship* intr_ship = find_sim_ship(npc->ship_id);
                 if (intr_ship) {
                     // Check for missing deck (highest priority)
                     bool intr_deck_present = false;
@@ -2751,17 +2777,11 @@ static void tick_world_npcs(float dt) {
             npc->y = npc->local_y;
         }
 
-        // ── Repair crew (NPC_ROLE_REPAIRER) ─────────────────────────────────────
+        // ── Repair crew (NPC_ROLE_REPAIRER) ───────────────────────────────────────────────
         if (npc->role != NPC_ROLE_REPAIRER) continue;
         if (!global_sim) continue;
 
-        struct Ship* sim_ship = NULL;
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if ((uint32_t)global_sim->ships[s].id == npc->ship_id) {
-                sim_ship = &global_sim->ships[s];
-                break;
-            }
-        }
+        struct Ship* sim_ship = find_sim_ship(npc->ship_id);
 
         // ── REPAIRING: actively fix the assigned module ──────────────────────────
         if (npc->state == WORLD_NPC_STATE_REPAIRING) {
@@ -5945,13 +5965,24 @@ int websocket_server_update(struct Sim* sim) {
                     
                     char response[1024];
                     bool handled = false;
-                    
+
                     // Check if message is JSON or text command
                     if (payload[0] == '{') {
-                        // JSON message - parse type
-                        // JSON message - parsing type
-                        
-                        if (strstr(payload, "\"type\":\"handshake\"")) {
+                        // JSON message — extract "type" value once so branch conditions
+                        // can use strcmp instead of strstr on the full payload.
+                        char msg_type[64] = "";
+                        {
+                            const char* _tp = strstr(payload, "\"type\":\"");
+                            if (_tp) {
+                                _tp += 8; // skip past "type":"
+                                int _ti = 0;
+                                while (_ti < 63 && _tp[_ti] && _tp[_ti] != '"')
+                                    { msg_type[_ti] = _tp[_ti]; _ti++; }
+                                msg_type[_ti] = '\0';
+                            }
+                        }
+
+                        if (strcmp(msg_type, "handshake") == 0) {
                             // Processing HANDSHAKE message
                             // Extract player name from handshake if provided
                             char player_name[32] = "Player";
@@ -6135,7 +6166,7 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"input_frame\"")) {
+                        } else if (strcmp(msg_type, "input_frame") == 0) {
                             // Input frame message - parse movement data
                             ws_server.input_messages_received++;
                             ws_server.last_input_time = get_time_ms();
@@ -6204,7 +6235,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"movement_state\"")) {
+                        } else if (strcmp(msg_type, "movement_state") == 0) {
                             // HYBRID: Movement state change message
                             ws_server.input_messages_received++;
                             ws_server.last_input_time = get_time_ms();
@@ -6256,7 +6287,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"rotation_update\"")) {
+                        } else if (strcmp(msg_type, "rotation_update") == 0) {
                             // HYBRID: Rotation update message
                             
                             if (client->player_id == 0) {
@@ -6294,7 +6325,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"module_interact\"")) {
+                        } else if (strcmp(msg_type, "module_interact") == 0) {
                             // MODULE_INTERACT message
                             log_info("🎮 Processing MODULE_INTERACT from player %u", client->player_id);
                             
@@ -6313,7 +6344,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"module_unmount\"")) {
+                        } else if (strcmp(msg_type, "module_unmount") == 0) {
                             // MODULE_UNMOUNT message
                             // log_info("🔓 Processing MODULE_UNMOUNT message");
                             
@@ -6332,7 +6363,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"action_event\"")) {
+                        } else if (strcmp(msg_type, "action_event") == 0) {
                             // HYBRID: Action event message
                             // log_info("⚡ Processing ACTION_EVENT message");
                             
@@ -6594,7 +6625,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"ship_sail_control\"")) {
+                        } else if (strcmp(msg_type, "ship_sail_control") == 0) {
                             // SHIP SAIL CONTROL message
                             // log_info("⛵ Processing SHIP_SAIL_CONTROL message");
                             
@@ -6634,7 +6665,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"ship_rudder_control\"")) {
+                        } else if (strcmp(msg_type, "ship_rudder_control") == 0) {
                             // SHIP RUDDER CONTROL message
                             // log_info("🚢 Processing SHIP_RUDDER_CONTROL message");
                             
@@ -6671,7 +6702,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"ship_sail_angle_control\"")) {
+                        } else if (strcmp(msg_type, "ship_sail_angle_control") == 0) {
                             // SHIP SAIL ANGLE CONTROL message
                             // log_info("🌀 Processing SHIP_SAIL_ANGLE_CONTROL message");
                             
@@ -6711,7 +6742,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"cannon_aim\"")) {
+                        } else if (strcmp(msg_type, "cannon_aim") == 0) {
                             // CANNON AIM message
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
@@ -6765,7 +6796,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
 
-                        } else if (strstr(payload, "\"type\":\"swivel_aim\"")) {
+                        } else if (strcmp(msg_type, "swivel_aim") == 0) {
                             // SWIVEL AIM — update the aim direction of the player's mounted swivel
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
@@ -6784,7 +6815,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
 
-                        } else if (strstr(payload, "\"type\":\"cannon_fire\"") || strstr(payload, "\"type\":\"fire_weapon\"")) {
+                        } else if (strcmp(msg_type, "cannon_fire") == 0 || strcmp(msg_type, "fire_weapon") == 0) {
                             // FIRE WEAPON message (cannon, swivel, future: ballista/catapult)
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
@@ -6825,7 +6856,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
 
-                        } else if (strstr(payload, "\"type\":\"cannon_force_reload\"")) {
+                        } else if (strcmp(msg_type, "cannon_force_reload") == 0) {
                             // CANNON FORCE RELOAD — discard current round, restart reload
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
@@ -6840,7 +6871,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"cannon_group_config\"")) {
+                        } else if (strcmp(msg_type, "cannon_group_config") == 0) {
                             // WEAPON GROUP CONFIG — set mode, cannon list, and optional target for a group
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
@@ -6883,14 +6914,14 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"ping\"")) {
+                        } else if (strcmp(msg_type, "ping") == 0) {
                             // JSON ping message
                             snprintf(response, sizeof(response),
                                     "{\"type\":\"pong\",\"timestamp\":%u,\"server_time\":%u}",
                                     get_time_ms(), get_time_ms());
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"slot_select\"")) {
+                        } else if (strcmp(msg_type, "slot_select") == 0) {
                             // INVENTORY: player changed active hotbar slot
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
@@ -6909,7 +6940,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"unequip\"")) {
+                        } else if (strcmp(msg_type, "unequip") == 0) {
                             // INVENTORY: player deselected active slot (Q key) — sentinel 255 = nothing equipped
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
@@ -6924,7 +6955,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"give_item\"")) {
+                        } else if (strcmp(msg_type, "give_item") == 0) {
                             // INVENTORY: server-side item grant (used by admin/tests)
                             // {"type":"give_item","slot":0,"item":1,"quantity":10}
                             if (client->player_id != 0) {
@@ -6950,7 +6981,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"place_deck\"")) {
+                        } else if (strcmp(msg_type, "place_deck") == 0) {
                             // PLACE DECK: re-insert a destroyed deck on the player's ship.
                             // Consumes 1 ITEM_DECK from inventory (infinite for NPCs).
                             if (client->player_id == 0) {
@@ -7010,7 +7041,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"place_plank\"")) {
+                        } else if (strcmp(msg_type, "place_plank") == 0) {
                             // PLACE PLANK: re-insert a destroyed hull plank on the player's ship.
                             // Consumes 1 ITEM_PLANK from the player's inventory.
                             if (client->player_id == 0) {
@@ -7093,7 +7124,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"repair_plank\"")) {
+                        } else if (strcmp(msg_type, "repair_plank") == 0) {
                             // REPAIR PLANK: restore 5000 HP to the most damaged plank on the ship.
                             // Consumes 1 ITEM_REPAIR_KIT from the player's inventory.
                             if (client->player_id == 0) {
@@ -7161,7 +7192,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"use_hammer\"")) {
+                        } else if (strcmp(msg_type, "use_hammer") == 0) {
                             // USE HAMMER: apply 20% of target module's max_health as instant repair.
                             // Targets the specific module ID sent by the client (must be on same ship).
                             // Hammer is a reusable tool; not consumed.
@@ -7230,7 +7261,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"repair_sail\"")) {
+                        } else if (strcmp(msg_type, "repair_sail") == 0) {
                             // REPAIR SAIL FIBERS: restore openness (+50, cap 100) and wind_efficiency
                             // (+0.5, cap 1.0) on a specific mast. Consumes 1 ITEM_REPAIR_KIT.
                             // Payload: {"type":"repair_sail","shipId":N,"mastIndex":N}  (0=bow,1=mid,2=stern)
@@ -7316,7 +7347,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"place_cannon_at\"")) {
+                        } else if (strcmp(msg_type, "place_cannon_at") == 0) {
                             // FREE-PLACE CANNON: place a cannon at an arbitrary ship-local position.
                             // Payload: {"type":"place_cannon_at","shipId":N,"localX":F,"localY":F,"rotation":F}
                             // Consumes 1 ITEM_CANNON from the placing player's inventory.
@@ -7417,7 +7448,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"place_mast_at\"")) {
+                        } else if (strcmp(msg_type, "place_mast_at") == 0) {
                             // FREE-PLACE MAST: place a mast at an arbitrary ship-local position.
                             // Payload: {"type":"place_mast_at","shipId":N,"localX":F,"localY":F}
                             // Consumes 1 ITEM_SAIL from the placing player's inventory.
@@ -7505,7 +7536,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"place_swivel_at\"")) {
+                        } else if (strcmp(msg_type, "place_swivel_at") == 0) {
                             // FREE-PLACE SWIVEL: place a swivel gun at an arbitrary ship-local position.
                             // Payload: {"type":"place_swivel_at","shipId":N,"localX":F,"localY":F,"rotation":F}
                             // Consumes 1 ITEM_SWIVEL from the placing player's inventory.
@@ -7610,7 +7641,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"place_cannon\"")) {
+                        } else if (strcmp(msg_type, "place_cannon") == 0) {
                             // PLACE CANNON: re-install a destroyed cannon on the player's ship.
                             // Consumes 1 ITEM_CANNON. Server finds the first missing cannon slot
                             // (IDs base+1..base+6) and recreates it at the correct position.
@@ -7696,7 +7727,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"place_mast\"")) {
+                        } else if (strcmp(msg_type, "place_mast") == 0) {
                             // PLACE MAST: re-install a destroyed mast on the player's ship.
                             // Consumes 1 ITEM_SAIL. First missing mast slot (IDs base+7..base+9).
                             // Layout: mast_xs[3]={165,-35,-235}, y=0, rot=0.
@@ -7796,7 +7827,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"replace_helm\"")) {
+                        } else if (strcmp(msg_type, "replace_helm") == 0) {
                             // REPLACE HELM: re-install the helm if destroyed.
                             // Consumes 1 ITEM_HELM. Helm ID = base+0, pos (-90, 0).
                             if (client->player_id == 0) {
@@ -7873,7 +7904,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"crew_assign\"")) {
+                        } else if (strcmp(msg_type, "crew_assign") == 0) {
                             // CREW ASSIGN: player sets a WorldNpc's manning task.
                             // {"type":"crew_assign","ship_id":N,"npc_id":N,"task":"Sails|Cannons|Repairs|Combat|Idle"}
                             uint32_t ca_ship = 0, ca_npc = 0;
@@ -7909,7 +7940,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"npc_recruit\"")) {
+                        } else if (strcmp(msg_type, "npc_recruit") == 0) {
                             // NPC RECRUIT: player claims a neutral (company 0) NPC into their company.
                             // {"type":"npc_recruit","npcId":N}
                             uint32_t rn_npc_id = 0;
@@ -7934,7 +7965,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"npc_move_aboard\"")) {
+                        } else if (strcmp(msg_type, "npc_move_aboard") == 0) {
                             // NPC MOVE ABOARD: move a recruited NPC to the player's current ship.
                             // {"type":"npc_move_aboard","npcId":N}
                             uint32_t ma_npc_id = 0;
@@ -7973,7 +8004,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"npc_lock\"")) {
+                        } else if (strcmp(msg_type, "npc_lock") == 0) {
                             // NPC LOCK: pin or unpin an NPC to their current module.
                             // {"type":"npc_lock","npcId":N,"locked":true/false}
                             uint32_t lk_npc_id = 0;
@@ -8002,7 +8033,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"npc_goto_module\"")) {
+                        } else if (strcmp(msg_type, "npc_goto_module") == 0) {
                             // NPC GOTO MODULE: direct an NPC to a specific module on their ship.
                             // {"type":"npc_goto_module","npcId":N,"moduleId":M}
                             // Clears task_locked so the NPC can be re-dispatched after arriving.
@@ -8083,7 +8114,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"npc_move_to_pos\"")) {
+                        } else if (strcmp(msg_type, "npc_move_to_pos") == 0) {
                             // NPC MOVE TO POSITION: walk NPC to world coords or board/walk on a ship.
                             // {"type":"npc_move_to_pos","npcId":N,"worldX":F,"worldY":F,"shipId":S}
                             // shipId=0  -> detach from ship and walk to world position
@@ -8174,7 +8205,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"upgrade_ship\"")) {
+                        } else if (strcmp(msg_type, "upgrade_ship") == 0) {
                             // UPGRADE SHIP: spend XP to advance one attribute on the player's ship.
                             // {"type":"upgrade_ship","shipId":N,"attribute":"resistance"}
                             WebSocketPlayer* player = find_player(client->player_id);
@@ -8255,7 +8286,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"upgrade_crew_stat\"")) {
+                        } else if (strcmp(msg_type, "upgrade_crew_stat") == 0) {
                             // UPGRADE CREW STAT: spend an earned stat point to level one stat.
                             // {"type":"upgrade_crew_stat","npcId":N,"stat":"health"}
                             // Stats: health | damage | stamina | weight
@@ -8345,7 +8376,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"toggle_ladder\"")) {
+                        } else if (strcmp(msg_type, "toggle_ladder") == 0) {
                             // TOGGLE LADDER: retract or extend a ladder on the player's current ship.
                             // {"type":"toggle_ladder","moduleId":N}
                             WebSocketPlayer* player = find_player(client->player_id);
@@ -9001,24 +9032,53 @@ int websocket_server_update(struct Sim* sim) {
         // Cap at maximum rate
         if (current_update_rate > 30) current_update_rate = 30;
         
-        // Broadcasting game state
-        
-        static char game_state[131072]; // 128 KB: ships(64K) + players + projectiles + npcs
-        snprintf(game_state, sizeof(game_state),
-                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":%s,\"projectiles\":%s,\"npcs\":%s}",
-                current_time / 33, current_time, ships_json, players_json, projectiles_json, npcs_json);
-        
-        // Broadcast to all connected clients
-        for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-            struct WebSocketClient* client = &ws_server.clients[i];
-            if (client->connected && client->handshake_complete) {
-                static char frame[131086]; // Must be >= game_state size + WebSocket header (14)
-                size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state, strlen(game_state), frame, sizeof(frame));
-                if (frame_len > 0) {
-                    ssize_t sent = send(client->fd, frame, frame_len, 0);
-                    if (sent > 0) {
-                        ws_server.packets_sent++;
-                    }
+        // ── Assemble GAME_STATE directly — no intermediate copy ────────────────────
+        // Builds the JSON by memcpy-ing the already-serialised sub-blobs directly
+        // into the output buffer.  Avoids a second full-size snprintf that would
+        // scan and copy up to 100 KB purely to concatenate strings.
+        static char game_state[131072];
+        int gs_off = 0;
+        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
+                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":",
+                current_time / 33, current_time);
+        if (gs_off + ships_offset < (int)sizeof(game_state) - 1) {
+            memcpy(game_state + gs_off, ships_json, (size_t)ships_offset);
+            gs_off += ships_offset;
+        }
+        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off, ",\"players\":");
+        if (gs_off + players_offset < (int)sizeof(game_state) - 1) {
+            memcpy(game_state + gs_off, players_json, (size_t)players_offset);
+            gs_off += players_offset;
+        }
+        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off, ",\"projectiles\":");
+        if (gs_off + projectiles_offset < (int)sizeof(game_state) - 1) {
+            memcpy(game_state + gs_off, projectiles_json, (size_t)projectiles_offset);
+            gs_off += projectiles_offset;
+        }
+        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off, ",\"npcs\":");
+        if (gs_off + npcs_offset < (int)sizeof(game_state) - 1) {
+            memcpy(game_state + gs_off, npcs_json, (size_t)npcs_offset);
+            gs_off += npcs_offset;
+        }
+        if (gs_off < (int)sizeof(game_state) - 1) {
+            game_state[gs_off++] = '}';
+            game_state[gs_off]   = '\0';
+        }
+
+        // ── Frame once, broadcast to every client ──────────────────────────────
+        // strlen + websocket_create_frame computed once outside the loop.
+        // All clients receive the identical pre-built frame buffer.
+        static char broadcast_frame[131086];
+        size_t gs_payload_len = (size_t)gs_off;
+        size_t broadcast_frame_len = websocket_create_frame(
+            WS_OPCODE_TEXT, game_state, gs_payload_len,
+            broadcast_frame, sizeof(broadcast_frame));
+        if (broadcast_frame_len > 0) {
+            for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+                struct WebSocketClient* client = &ws_server.clients[i];
+                if (client->connected && client->handshake_complete) {
+                    ssize_t sent = send(client->fd, broadcast_frame, broadcast_frame_len, 0);
+                    if (sent > 0) ws_server.packets_sent++;
                 }
             }
         }
