@@ -28,6 +28,12 @@ const NPC_TASK_COLORS: Record<string, string> = {
   Idle:    '#DAA520',
 };
 
+/** Wooden module kinds that can catch fire — constant, never changes. */
+const WOODEN_KINDS: ReadonlySet<string> = new Set(['plank', 'deck', 'mast']);
+
+/** Module kinds where only one occupant (player or NPC) is allowed at a time. */
+const SINGLE_OCCUPANCY_KINDS: ReadonlySet<string> = new Set(['cannon', 'swivel', 'mast', 'helm']);
+
 /**
  * Render queue item for layered rendering
  */
@@ -763,7 +769,6 @@ export class RenderSystem {
     // yellow  = default (world / hull target)
     // green   = hovered module that is free
     // red     = hovered module that is already occupied by another NPC
-    const SINGLE_OCCUPANCY_KINDS = new Set(['cannon', 'swivel', 'mast', 'helm']);
     let arrowMode: 'yellow' | 'green' | 'red' = 'yellow';
     if (this.hoveredModule) {
       const modKind = this.hoveredModule.module.kind as string;
@@ -2025,7 +2030,8 @@ export class RenderSystem {
     
     // Queue cannonballs (layer 8 - on top of everything)
     const now = performance.now();
-    const liveIds = new Set(worldState.cannonballs.map(cb => cb.id));
+    const liveIds = new Set<number>();
+    for (const cb of worldState.cannonballs) liveIds.add(cb.id);
     // Prune trails for cannonballs that no longer exist
     for (const id of this.cannonballTrails.keys()) {
       if (!liveIds.has(id)) {
@@ -2465,7 +2471,6 @@ export class RenderSystem {
   private _fireDbgLastLog = 0;
   private drawBurningModules(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 300)) return;
-    const WOODEN_KINDS: ReadonlySet<string> = new Set(['plank', 'deck', 'mast']);
     const cosR = Math.cos(ship.rotation);
     const sinR = Math.sin(ship.rotation);
     const zoom = camera.getState().zoom;
@@ -2998,7 +3003,8 @@ export class RenderSystem {
       if (!helm) continue;
       const base = helm.id;
 
-      const presentIds = new Set(ship.modules.map(m => m.id));
+      const presentIds = new Set<number>();
+      for (const m of ship.modules) presentIds.add(m.id);
 
       // Transform mouse to ship-local space
       const dx = this.mouseWorldPos.x - ship.position.x;
@@ -3033,7 +3039,8 @@ export class RenderSystem {
     if (!helm) return;
     const base = helm.id;
 
-    const presentIds = new Set(ship.modules.map(m => m.id));
+    const presentIds = new Set<number>();
+    for (const m of ship.modules) presentIds.add(m.id);
 
     this.ctx.save();
     const screenPos = camera.worldToScreen(ship.position);
@@ -3110,7 +3117,8 @@ export class RenderSystem {
       if (!helm) continue;
       const base = helm.id;
 
-      const presentIds = new Set(ship.modules.map(m => m.id));
+      const presentIds = new Set<number>();
+      for (const m of ship.modules) presentIds.add(m.id);
 
       const dx = this.mouseWorldPos.x - ship.position.x;
       const dy = this.mouseWorldPos.y - ship.position.y;
@@ -3213,7 +3221,8 @@ export class RenderSystem {
     if (!helm) return;
     const base = helm.id;
 
-    const presentIds = new Set(ship.modules.map(m => m.id));
+    const presentIds = new Set<number>();
+    for (const m of ship.modules) presentIds.add(m.id);
 
     this.ctx.save();
     const screenPos = camera.worldToScreen(ship.position);

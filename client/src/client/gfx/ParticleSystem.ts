@@ -87,9 +87,10 @@ export class ParticleSystem {
       const effect = this.effects[i];
       this.updateEffect(effect, dt);
       
-      // Remove effects with no particles
+      // Remove effects with no particles (swap-and-pop)
       if (effect.particles.length === 0) {
-        this.effects.splice(i, 1);
+        this.effects[i] = this.effects[this.effects.length - 1];
+        this.effects.pop();
       }
     }
   }
@@ -492,9 +493,10 @@ export class ParticleSystem {
       // Update particle life
       particle.life += deltaTime;
       
-      // Remove expired particles
+      // Remove expired particles (swap-and-pop to avoid O(N) array shift)
       if (particle.life >= particle.maxLife) {
-        effect.particles.splice(i, 1);
+        effect.particles[i] = effect.particles[effect.particles.length - 1];
+        effect.particles.pop();
         continue;
       }
       

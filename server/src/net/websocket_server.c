@@ -760,25 +760,26 @@ static void remove_player(uint32_t player_id) {
         if (players[i].active && players[i].player_id == player_id) {
             // If mounted, clear the module's occupied state so other players can use it.
             if (players[i].is_mounted && players[i].mounted_module_id != 0) {
-                for (int s = 0; s < ship_count; s++) {
-                    if (!ships[s].active) continue;
-                    ShipModule* mod = find_module_by_id(&ships[s], players[i].mounted_module_id);
-                    if (!mod) continue;
-                    switch (mod->type_id) {
-                        case MODULE_TYPE_HELM:
-                        case MODULE_TYPE_STEERING_WHEEL:
-                            mod->data.helm.occupied_by = 0;
-                            break;
-                        case MODULE_TYPE_SEAT:
-                            mod->data.seat.occupied_by = 0;
-                            break;
-                        default:
-                            break;
+                /* Use O(1) ship lookup; parent_ship_id is set when mounted */
+                SimpleShip* ms = find_ship(players[i].parent_ship_id);
+                if (ms) {
+                    ShipModule* mod = find_module_by_id(ms, players[i].mounted_module_id);
+                    if (mod) {
+                        switch (mod->type_id) {
+                            case MODULE_TYPE_HELM:
+                            case MODULE_TYPE_STEERING_WHEEL:
+                                mod->data.helm.occupied_by = 0;
+                                break;
+                            case MODULE_TYPE_SEAT:
+                                mod->data.seat.occupied_by = 0;
+                                break;
+                            default:
+                                break;
+                        }
+                        mod->state_bits &= ~MODULE_STATE_OCCUPIED;
+                        log_info("🔓 Cleared occupied state on module %u (player %u disconnected)",
+                                 mod->id, player_id);
                     }
-                    mod->state_bits &= ~MODULE_STATE_OCCUPIED;
-                    log_info("🔓 Cleared occupied state on module %u (player %u disconnected)",
-                             mod->id, player_id);
-                    break;
                 }
             }
             // Remove the physics/collision entity from the simulation first so
@@ -8331,19 +8332,17 @@ int websocket_server_update(struct Sim* sim) {
                                 else
                                     tl_module->state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
                                 // Mirror state change into the simulation ship module array
-                                if (global_sim) {
-                                    for (uint32_t _s = 0; _s < global_sim->ship_count; _s++) {
-                                        if (global_sim->ships[_s].id == tl_ship->ship_id) {
-                                            for (uint8_t _m = 0; _m < global_sim->ships[_s].module_count; _m++) {
-                                                if (global_sim->ships[_s].modules[_m].id == tl_module_id) {
-                                                    if (now_retracted)
-                                                        global_sim->ships[_s].modules[_m].state_bits |= MODULE_STATE_RETRACTED;
-                                                    else
-                                                        global_sim->ships[_s].modules[_m].state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
-                                                    break;
-                                                }
+                                {
+                                    struct Ship* _ts = find_sim_ship(tl_ship->ship_id);
+                                    if (_ts) {
+                                        for (uint8_t _m = 0; _m < _ts->module_count; _m++) {
+                                            if (_ts->modules[_m].id == tl_module_id) {
+                                                if (now_retracted)
+                                                    _ts->modules[_m].state_bits |= MODULE_STATE_RETRACTED;
+                                                else
+                                                    _ts->modules[_m].state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
+                                                break;
                                             }
-                                            break;
                                         }
                                     }
                                 }
@@ -9203,13 +9202,7 @@ void websocket_server_tick(float dt) {
             if (ev->is_sink) {
                 // Ship hull_health reached 0 — enter sinking state instead of immediate despawn.
                 entity_id sunk_id = ev->ship_id;
-                SimpleShip* sinking_ship = NULL;
-                for (int s = 0; s < ship_count; s++) {
-                    if (ships[s].active && ships[s].ship_id == sunk_id) {
-                        sinking_ship = &ships[s];
-                        break;
-                    }
-                }
+                SimpleShip* sinking_ship = find_ship(sunk_id);
                 /* When hull_health hits 0 the ship enters its dissolve state. */
                 if (sinking_ship && !sinking_ship->is_sinking) {
                     sinking_ship->is_sinking    = true;
@@ -9569,12 +9562,7 @@ void websocket_server_tick(float dt) {
                         if (wp->parent_ship_id != 0) {
                             wp->local_x += kx * ENTITY_KNOCKBACK;
                             wp->local_y += ky * ENTITY_KNOCKBACK;
-                            SimpleShip* wp_ship = NULL;
-                            for (int s = 0; s < ship_count; s++) {
-                                if (ships[s].active && ships[s].ship_id == wp->parent_ship_id) {
-                                    wp_ship = &ships[s]; break;
-                                }
-                            }
+                            SimpleShip* wp_ship = find_ship(wp->parent_ship_id);
                             if (wp_ship) ship_local_to_world(wp_ship, wp->local_x, wp->local_y,
                                                               &wp->x, &wp->y);
                         } else {
@@ -9644,19 +9632,18 @@ void websocket_server_tick(float dt) {
                         float ddx = wx - px, ddy = wy - py;
                         if (ddx * ddx + ddy * ddy > mfr2) continue;
 
-                        /* Mirror fire_timer to global_sim */
+                        /* Mirror fire_timer to global_sim (O(1) via find_sim_ship cache) */
                         #define SET_MODULE_FIRE(_fship, _mod) do { \
                             (_mod)->fire_timer_ms = FIRE_DURATION_MS; \
-                            if (global_sim) { \
-                                for (uint32_t _si = 0; _si < global_sim->ship_count; _si++) { \
-                                    if ((uint32_t)global_sim->ships[_si].id != (_fship)->ship_id) continue; \
-                                    for (uint8_t _mi = 0; _mi < global_sim->ships[_si].module_count; _mi++) { \
-                                        if (global_sim->ships[_si].modules[_mi].id == (_mod)->id) { \
-                                            global_sim->ships[_si].modules[_mi].fire_timer_ms = FIRE_DURATION_MS; \
+                            { \
+                                struct Ship* _smf = find_sim_ship((_fship)->ship_id); \
+                                if (_smf) { \
+                                    for (uint8_t _mi = 0; _mi < _smf->module_count; _mi++) { \
+                                        if (_smf->modules[_mi].id == (_mod)->id) { \
+                                            _smf->modules[_mi].fire_timer_ms = FIRE_DURATION_MS; \
                                             break; \
                                         } \
                                     } \
-                                    break; \
                                 } \
                             } \
                         } while (0)
