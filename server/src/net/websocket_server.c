@@ -5419,37 +5419,17 @@ static void tick_ghost_ships(float dt) {
                 }
             }
 
-            /* Side-cannon broadside sweep: 5× the body-sway rate so the
-             * barrels visibly oscillate through the full ±90° arc.  Using
-             * sinf(phase * 5) is equivalent to accumulating phase at 5×
-             * GHOST_SWEEP_RATE (0.14 × 5 = 0.70 rad/s — the original rate). */
-            float side_sweep = sinf(ghost_aim_phase[s] * 5.0f) * GHOST_CANNON_ARC;
-
             for (int m = 0; m < ship->module_count; m++) {
                 ShipModule* cannon = &ship->modules[m];
                 if (cannon->type_id != MODULE_TYPE_CANNON) continue;
 
-                if (cannon->id == 300 || cannon->id == 301) {
-                    /* BOW cannon: track target with slow body-rate sweep */
-                    ghost_aim_cannon(ship, cannon, target->x, target->y, sweep_rad);
-                } else {
-                    /* SIDE cannon: sweep broadside around natural direction
-                     * (aim_direction=0 = barrel perpendicular to hull). */
-                    cannon->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(side_sweep);
-                    if (global_sim) {
-                        for (uint32_t gsi = 0; gsi < global_sim->ship_count; gsi++) {
-                            if (global_sim->ships[gsi].id != ship->ship_id) continue;
-                            struct Ship* gs = &global_sim->ships[gsi];
-                            for (uint8_t mi = 0; mi < gs->module_count; mi++) {
-                                if (gs->modules[mi].id == cannon->id) {
-                                    gs->modules[mi].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(side_sweep);
-                                    break;
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
+                /* All cannons track the target within their own arc limits.
+                 * ghost_aim_cannon computes desired_offset relative to each
+                 * cannon's local_rot, so bow, port, and starboard cannons
+                 * each independently aim at the target and are clamped to
+                 * ±GHOST_CANNON_ARC around their natural fire direction.
+                 * The body-sway sweep_rad adds an eerie oscillation to all. */
+                ghost_aim_cannon(ship, cannon, target->x, target->y, sweep_rad);
 
                 /* Find matching sim module for authoritative reload state */
                 ShipModule* sim_cannon = NULL;
