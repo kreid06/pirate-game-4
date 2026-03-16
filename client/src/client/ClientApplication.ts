@@ -137,6 +137,8 @@ export class ClientApplication {
   private _npcInteractId: number | null = null;
   /** NPC id for the pending "Move To" targeting mode (ctrl+click → Move To → click module). */
   private _moveToNpcId: number | null = null;
+  /** Screen-space position to flash once the server confirms (or rejects) a goto-module command. */
+  private _pendingModuleFlashPos: Vec2 | null = null;
   /** Generic radial action menu instance (rendered by RenderSystem). */
   private _radialMenu = new RadialMenu();
   private accumulator = 0;
@@ -414,10 +416,11 @@ export class ClientApplication {
           const flashPos = this.inputManager.getMouseScreenPosition();
 
           // Priority 1: specific module hovered — most precise command
+          // Flash is deferred: server checks occupancy and responds with ok/reject.
           const hovMod = this.renderSystem.getHoveredModule();
           if (hovMod) {
+            this._pendingModuleFlashPos = flashPos;
             this.networkManager.sendNpcGotoModule(moveNpcId, hovMod.module.id);
-            this.renderSystem.flashInteract(flashPos);
             console.log(`📍 NPC ${moveNpcId} → module ${hovMod.module.id}`);
             return;
           }
@@ -1116,6 +1119,18 @@ export class ClientApplication {
           npc.statStamina = statStamina;
           npc.statWeight  = statWeight;
           npc.statPoints  = statPoints;
+        }
+      };
+
+      // Handle npc_goto_module server response — flash green on success, red if occupied/invalid
+      this.networkManager.onNpcMoveResult = (ok: boolean) => {
+        const pos = this._pendingModuleFlashPos;
+        this._pendingModuleFlashPos = null;
+        if (!pos) return;
+        if (ok) {
+          this.renderSystem.flashInteract(pos);
+        } else {
+          this.renderSystem.flashCancel(pos);
         }
       };
 

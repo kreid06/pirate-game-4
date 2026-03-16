@@ -451,6 +451,11 @@ export class NetworkManager {
   public onShipSinking: ((shipId: number) => void) | null = null;
   public onShipLevelUp: ((shipId: number, attribute: string, attrLevel: number, xp: number, shipLevel: number, totalCap: number, nextUpgradeCost: number) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
+  /**
+   * Fired when the server accepts or rejects a Move To module command.
+   * ok=true → module dispatched successfully; ok=false → module was occupied or invalid.
+   */
+  public onNpcMoveResult: ((ok: boolean, npcId: number) => void) | null = null;
   /** Fired when the server confirms an NPC stat upgrade. */
   public onNpcStatUp: ((npcId: number, stat: string, statLevel: number, xp: number,
     maxHealth: number, npcLevel: number,
@@ -1678,6 +1683,15 @@ export class NetworkManager {
         break;
         
       case MessageType.MESSAGE_ACK:
+        if (message.status === 'npc_moved_to_module') {
+          this.onNpcMoveResult?.(true, message.npcId ?? 0);
+        }
+        break;
+
+      case 'error':
+        if (message.message === 'module_occupied' || message.message === 'cannot_goto_module') {
+          this.onNpcMoveResult?.(false, message.npcId ?? 0);
+        }
         break;
         
       case MessageType.MODULE_INTERACT_SUCCESS:

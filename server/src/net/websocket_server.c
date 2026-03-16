@@ -7988,6 +7988,28 @@ int websocket_server_update(struct Sim* sim) {
                                 ShipModule*  gm_mod  = gm_ship ? find_module_by_id(gm_ship, gm_mod_id) : NULL;
                                 if (gm_npc && gm_ship && gm_mod &&
                                     gm_npc->company_id == gm_player->company_id) {
+                                    /* ── Occupancy check: single-occupancy modules only ──────────────────── */
+                                    /* Cannon, swivel, mast and helm each hold exactly one NPC.              */
+                                    /* If another NPC is already assigned there, reject the command.         */
+                                    bool gm_occupied = false;
+                                    if (gm_mod->type_id == MODULE_TYPE_CANNON ||
+                                        gm_mod->type_id == MODULE_TYPE_SWIVEL ||
+                                        gm_mod->type_id == MODULE_TYPE_MAST   ||
+                                        gm_mod->type_id == MODULE_TYPE_HELM) {
+                                        for (int _oi = 0; _oi < world_npc_count && !gm_occupied; _oi++) {
+                                            WorldNpc* other = &world_npcs[_oi];
+                                            if (!other->active)                      continue;
+                                            if (other->id == gm_npc_id)              continue; /* the NPC itself */
+                                            if (other->ship_id != gm_ship->ship_id)  continue;
+                                            if (other->assigned_weapon_id == gm_mod_id) gm_occupied = true;
+                                        }
+                                    }
+                                    if (gm_occupied) {
+                                        snprintf(response, MAX_MESSAGE_SIZE,
+                                                 "{\"type\":\"error\",\"message\":\"module_occupied\",\"npcId\":%u,\"moduleId\":%u}",
+                                                 gm_npc_id, gm_mod_id);
+                                        log_info("🚫 NPC %u cannot go to module %u — already occupied", gm_npc_id, gm_mod_id);
+                                    } else {
                                     float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(gm_mod->local_pos.x));
                                     float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(gm_mod->local_pos.y));
                                     // Dismount from current post before re-dispatching
@@ -8016,9 +8038,14 @@ int websocket_server_update(struct Sim* sim) {
                                     log_info("📍 NPC %u (%s) → module %u (type %u) on ship %u",
                                              gm_npc_id, gm_npc->name, gm_mod_id,
                                              gm_mod->type_id, gm_npc->ship_id);
-                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_moved_to_module\"}");
+                                    snprintf(response, MAX_MESSAGE_SIZE,
+                                             "{\"type\":\"message_ack\",\"status\":\"npc_moved_to_module\",\"npcId\":%u}",
+                                             gm_npc_id);
+                                    } /* end else (not occupied) */
                                 } else {
-                                    strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_goto_module\"}");
+                                    snprintf(response, MAX_MESSAGE_SIZE,
+                                             "{\"type\":\"error\",\"message\":\"cannot_goto_module\",\"npcId\":%u}",
+                                             gm_npc_id);
                                 }
                             }
                             handled = true;

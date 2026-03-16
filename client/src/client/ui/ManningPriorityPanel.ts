@@ -185,6 +185,48 @@ export class ManningPriorityPanel {
       }
     }
 
+    // ── Server-role reconciliation ──────────────────────────────────────────
+    // Sync taskNpcs with the broadcast npc.role so that npc_goto_module changes
+    // are reflected immediately without waiting for + / - button presses.
+    // Mapping: role 1 (GUNNER) → Gunners, role 3 (RIGGER) → Sails,
+    //          role 4 (REPAIRER) → Repairs, role 0/2 → Idle (no task pin).
+    const ROLE_TO_TASK: Record<number, ManningTask | null> = {
+      0: null,  // NONE    → Idle
+      1: 'Gunners',
+      2: null,  // HELMSMAN → not tracked in panel
+      3: 'Sails',
+      4: 'Repairs',
+    };
+    for (const npc of shipNpcs) {
+      const desiredTask = ROLE_TO_TASK[npc.role] ?? null;
+
+      // Determine which task (if any) the NPC is currently pinned to
+      let currentTask: ManningTask | null = null;
+      for (const [t, ids] of this.taskNpcs) {
+        if (ids.includes(npc.id)) { currentTask = t; break; }
+      }
+
+      if (desiredTask === null) {
+        // Role is NONE / HELMSMAN — ensure the NPC is not pinned to any task
+        if (currentTask !== null) {
+          const list = this.taskNpcs.get(currentTask)!;
+          list.splice(list.indexOf(npc.id), 1);
+          // Mark as Idle in sent-state so the panel won't re-send a crew_assign
+          this.lastSentAssignment.set(npc.id, 'Idle');
+        }
+      } else if (currentTask !== desiredTask) {
+        // Role changed to a different task — move the pin
+        if (currentTask !== null) {
+          const oldList = this.taskNpcs.get(currentTask)!;
+          oldList.splice(oldList.indexOf(npc.id), 1);
+        }
+        this.taskNpcs.get(desiredTask)!.push(npc.id);
+        // Silence the delta-send so we don't echo back what the server already did
+        this.lastSentAssignment.set(npc.id, desiredTask);
+      }
+    }
+    // ── end reconciliation ──────────────────────────────────────────────────
+
     const assignments = this.computeAssignments(shipNpcs);
 
     // Update lastTaskMap so RenderSystem can tint NPCs by assigned task
