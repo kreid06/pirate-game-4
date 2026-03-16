@@ -138,10 +138,22 @@ static int next_ship_id = 1;
 // Monotonically-increasing module ID base — never reused, avoids collisions on slot recycle
 static uint32_t next_mid_base = 3000u;
 
-// Helper function to find a ship by ID
+// ── O(1) ship lookup ────────────────────────────────────────────────────────
+// Ship IDs are small sequential integers starting at 1 (next_ship_id begins
+// at 1, MAX_SIMPLE_SHIPS=50, so IDs stay well below 512).  The array is
+// self-validating: every hit checks active+ship_id so stale entries from
+// a deactivated/recycled slot are transparently bypassed.
+#define SHIP_ID_LOOKUP_SIZE 512
+static SimpleShip* g_ship_by_id[SHIP_ID_LOOKUP_SIZE]; // zero-initialised by C
+
 static SimpleShip* find_ship(uint32_t ship_id) {
+    if (ship_id > 0 && ship_id < SHIP_ID_LOOKUP_SIZE) {
+        SimpleShip* cached = g_ship_by_id[ship_id];
+        if (cached && cached->active && cached->ship_id == ship_id) return cached;
+    }
     for (int i = 0; i < ship_count; i++) {
         if (ships[i].active && ships[i].ship_id == ship_id) {
+            if (ship_id < SHIP_ID_LOOKUP_SIZE) g_ship_by_id[ship_id] = &ships[i];
             return &ships[i];
         }
     }
@@ -572,10 +584,21 @@ static void remove_player(uint32_t player_id);
 static ShipModule* find_module_by_id(SimpleShip* ship, uint32_t module_id);
 static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship);
 
+// ── O(1) player lookup ──────────────────────────────────────────────────────
+// Player IDs are sequential starting at 1000.  Using (id & mask) as the slot
+// gives a direct collision-free index for the first 1048 sequential IDs.
+// Self-validating: every hit re-checks active+player_id.
+#define PLAYER_ID_MASK 2047u   // 2048 slots
+static WebSocketPlayer* g_player_by_id[PLAYER_ID_MASK + 1]; // zero-initialised by C
+
 // Player management functions
 static WebSocketPlayer* find_player(uint32_t player_id) {
+    uint32_t slot = player_id & PLAYER_ID_MASK;
+    WebSocketPlayer* cached = g_player_by_id[slot];
+    if (cached && cached->active && cached->player_id == player_id) return cached;
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (players[i].active && players[i].player_id == player_id) {
+            g_player_by_id[slot] = &players[i];
             return &players[i];
         }
     }
@@ -790,13 +813,9 @@ static const char* get_module_type_name(ModuleTypeId type_id) {
  * Find ship by ID
  */
 __attribute__((unused))
+// Alias kept for call-sites that use the longer name; delegates to the O(1) path.
 static SimpleShip* find_ship_by_id(uint32_t ship_id) {
-    for (int i = 0; i < ship_count; i++) {
-        if (ships[i].active && ships[i].ship_id == ship_id) {
-            return &ships[i];
-        }
-    }
-    return NULL;
+    return find_ship(ship_id);
 }
 
 /**
@@ -2479,6 +2498,20 @@ static void npc_apply_xp(WorldNpc* npc, uint32_t xp_gain) {
     }
 }
 
+// ── Repairer occupancy: small precomputed set rebuilt each tick ──────────────
+// All active repairers with a current assignment are snapshotted before the NPC
+// loop.  Entries are added inline whenever a new claim is made so that
+// subsequent NPCs in the same tick see it and don't double-claim the same slot.
+typedef struct { uint32_t npc_id; uint32_t ship_id; uint32_t mod_id; } NpcOccEntry;
+
+static bool occ_taken_by_other(const NpcOccEntry* buf, int cnt,
+                                uint32_t self_npc_id, uint32_t ship_id, uint32_t mod_id) {
+    for (int k = 0; k < cnt; k++)
+        if (buf[k].ship_id == ship_id && buf[k].mod_id == mod_id && buf[k].npc_id != self_npc_id)
+            return true;
+    return false;
+}
+
 /**
  * Tick world NPCs: animate movement across deck, then update world positions.
  */
@@ -2493,6 +2526,16 @@ static void tick_world_npcs(float dt) {
          45.0f, -45.0f, -90.0f, -90.0f, -90.0f,
         -45.0f,  45.0f,  90.0f,  90.0f,  90.0f
     };
+
+    // Snapshot current repairer assignments for O(1) occupancy checks.
+    // Updated inline when a new claim is made mid-tick.
+    NpcOccEntry occ_buf[MAX_WORLD_NPCS];
+    int occ_cnt = 0;
+    for (int _bi = 0; _bi < world_npc_count; _bi++) {
+        WorldNpc* _bn = &world_npcs[_bi];
+        if (_bn->active && _bn->role == NPC_ROLE_REPAIRER && _bn->assigned_weapon_id != 0)
+            occ_buf[occ_cnt++] = (NpcOccEntry){ _bn->id, _bn->ship_id, _bn->assigned_weapon_id };
+    }
 
     for (int i = 0; i < world_npc_count; i++) {
         WorldNpc* npc = &world_npcs[i];
@@ -2513,19 +2556,13 @@ static void tick_world_npcs(float dt) {
                     for (uint8_t m = 0; m < intr_ship->module_count; m++) {
                         if (intr_ship->modules[m].id == 200) { intr_deck_present = true; break; }
                     }
-                    bool intr_deck_taken = false;
-                    if (!intr_deck_present) {
-                        for (int j = 0; j < world_npc_count; j++) {
-                            WorldNpc* other = &world_npcs[j];
-                            if (!other->active || other->id == npc->id) continue;
-                            if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
-                                other->assigned_weapon_id == 200) { intr_deck_taken = true; break; }
-                        }
-                    }
+                    bool intr_deck_taken = !intr_deck_present &&
+                        occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, 200);
                     if (!intr_deck_present && !intr_deck_taken) {
                         npc->target_local_x     = 0.0f;
                         npc->target_local_y     = 0.0f;
                         npc->assigned_weapon_id = 200;
+                        occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, 200 };
                         log_info("🔨 NPC %u (%s) interrupted — redirecting to replace missing deck",
                                  npc->id, npc->name);
                     } else {
@@ -2538,14 +2575,8 @@ static void tick_world_npcs(float dt) {
                     int intr_missing = -1;
                     for (int k = 0; k < 10; k++) {
                         if (present[k]) continue;
-                        bool taken = false;
-                        for (int j = 0; j < world_npc_count; j++) {
-                            WorldNpc* other = &world_npcs[j];
-                            if (!other->active || other->id == npc->id) continue;
-                            if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
-                                other->assigned_weapon_id == (uint32_t)(100 + k)) { taken = true; break; }
-                        }
-                        if (!taken) { intr_missing = k; break; }
+                        if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, (uint32_t)(100 + k)))
+                            { intr_missing = k; break; }
                     }
                     if (intr_missing >= 0) {
                         float pcx = s_plank_cx[intr_missing], pcy = s_plank_cy[intr_missing];
@@ -2554,6 +2585,7 @@ static void tick_world_npcs(float dt) {
                         npc->target_local_x     = pcx;
                         npc->target_local_y     = pcy;
                         npc->assigned_weapon_id = (uint32_t)(100 + intr_missing);
+                        occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                         log_info("🔨 NPC %u (%s) interrupted — redirecting to missing plank %u",
                                  npc->id, npc->name, 100 + intr_missing);
                     } else {
@@ -2567,13 +2599,7 @@ static void tick_world_npcs(float dt) {
                             if (mod->max_health == 0) continue;
                             float ratio = (float)mod->health / (float)mod->max_health;
                             if (ratio >= 1.0f) continue;
-                            bool taken = false;
-                            for (int j = 0; j < world_npc_count; j++) {
-                                WorldNpc* other = &world_npcs[j];
-                                if (!other->active || other->id == npc->id) continue;
-                                if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
-                                    other->assigned_weapon_id == (uint32_t)mod->id) { taken = true; break; }
-                            }
+                            bool taken = occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, (uint32_t)mod->id);
                             if (!taken && ratio < intr_worst)  { intr_mod   = mod; intr_worst  = ratio; }
                             if ( taken && ratio < intr_stack_r){ intr_stack = mod; intr_stack_r = ratio; }
                         }
@@ -2586,6 +2612,7 @@ static void tick_world_npcs(float dt) {
                             npc->target_local_x     = mx;
                             npc->target_local_y     = my;
                             npc->assigned_weapon_id = (uint32_t)intr_mod->id;
+                            occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                             log_info("🔧 NPC %u (%s) interrupted — redirecting to damaged module %u (%.0f%% HP)",
                                      npc->id, npc->name, intr_mod->id, intr_worst * 100.0f);
                         }
@@ -2850,18 +2877,12 @@ static void tick_world_npcs(float dt) {
                 if (sim_ship->modules[m].id == 200) { deck_present = true; break; }
             }
             if (!deck_present) {
-                bool deck_taken = false;
-                for (int j = 0; j < world_npc_count; j++) {
-                    WorldNpc* other = &world_npcs[j];
-                    if (!other->active || other->id == npc->id) continue;
-                    if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
-                        other->assigned_weapon_id == 200) { deck_taken = true; break; }
-                }
-                if (!deck_taken) {
+                if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, 200)) {
                     npc->target_local_x     = 0.0f;
                     npc->target_local_y     = 0.0f;
                     npc->assigned_weapon_id = 200;
                     npc->state              = WORLD_NPC_STATE_MOVING;
+                    occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, 200 };
                     log_info("🔨 NPC %u (%s) → walking to replace missing deck", npc->id, npc->name);
                     continue;
                 }
@@ -2876,17 +2897,8 @@ static void tick_world_npcs(float dt) {
             int missing_idx = -1;
             for (int k = 0; k < 10; k++) {
                 if (present[k]) continue;
-                bool taken = false;
-                for (int j = 0; j < world_npc_count; j++) {
-                    WorldNpc* other = &world_npcs[j];
-                    if (!other->active || other->id == npc->id) continue;
-                    if (other->ship_id == npc->ship_id &&
-                        other->role   == NPC_ROLE_REPAIRER &&
-                        other->assigned_weapon_id == (uint32_t)(100 + k)) {
-                        taken = true; break;
-                    }
-                }
-                if (!taken) { missing_idx = k; break; }
+                if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, (uint32_t)(100 + k)))
+                    { missing_idx = k; break; }
             }
 
             if (missing_idx >= 0) {
@@ -2898,6 +2910,7 @@ static void tick_world_npcs(float dt) {
                 npc->target_local_y     = pcy;
                 npc->assigned_weapon_id = (uint32_t)(100 + missing_idx);
                 npc->state              = WORLD_NPC_STATE_MOVING;
+                occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                 log_info("🔨 NPC %u (%s) → walking to place missing plank %u",
                          npc->id, npc->name, 100 + missing_idx);
                 continue;
@@ -2925,16 +2938,7 @@ static void tick_world_npcs(float dt) {
                     }
                 }
                 if (ratio >= 1.0f) continue;
-                bool taken = false;
-                for (int j = 0; j < world_npc_count; j++) {
-                    WorldNpc* other = &world_npcs[j];
-                    if (!other->active || other->id == npc->id) continue;
-                    if (other->ship_id == npc->ship_id &&
-                        other->role   == NPC_ROLE_REPAIRER &&
-                        other->assigned_weapon_id == (uint32_t)mod->id) {
-                        taken = true; break;
-                    }
-                }
+                bool taken = occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, (uint32_t)mod->id);
                 if (!taken && ratio < worst_ratio) { target_mod = mod; worst_ratio = ratio; }
                 if ( taken && ratio < stack_ratio)  { stack_mod  = mod; stack_ratio = ratio; }
             }
@@ -2951,6 +2955,7 @@ static void tick_world_npcs(float dt) {
                 npc->target_local_y     = my;
                 npc->assigned_weapon_id = (uint32_t)target_mod->id;
                 npc->state              = WORLD_NPC_STATE_MOVING;
+                occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                 log_info("🔧 NPC %u (%s) → walking to repair module %u (%.0f%% HP)",
                          npc->id, npc->name, target_mod->id, worst_ratio * 100.0f);
                 continue;
