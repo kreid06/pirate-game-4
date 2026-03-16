@@ -2422,10 +2422,10 @@ export class ClientApplication {
             }
           }
 
-          // ── NPC Interact: hovered NPC takes priority over module interact ────
+          // ── NPC Interact: only when no module is hovered (module takes priority) ─
           {
             const hovNpcE = this.renderSystem.getHoveredNpc();
-            if (hovNpcE) {
+            if (hovNpcE && !this.renderSystem.getHoveredModule()) {
               const npcDist = meE.position.sub(hovNpcE.position).length();
               if (npcDist > hovNpcE.interactRadius + 80) {
                 console.warn(`🤝 E: NPC out of range (dist=${npcDist.toFixed(0)})`);
