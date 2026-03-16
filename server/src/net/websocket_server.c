@@ -5269,8 +5269,8 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
                 sim_ship->module_count = sw;
                 /* initial_plank_count = 0 so the drain tick never fires */
                 sim_ship->initial_plank_count = 0;
-                /* Ghost ships use a 0–60000 HP scale instead of 0–100. */
-                sim_ship->hull_health = Q16_FROM_FLOAT(60000.0f);
+                /* Ghost hull HP stored as raw int32, not Q16. */
+                sim_ship->hull_health = 60000;
                 break;
             }
         }
@@ -8266,7 +8266,11 @@ int websocket_server_update(struct Sim* sim) {
                 }
 
                 char ship_entry[6144];
-                float hull_health_pct = Q16_TO_FLOAT(ship->hull_health); // 0.0–100.0
+                /* Ghost ships store hull_health as raw int32 (0–60000).
+                 * Normal ships use Q16 encoding (0.0–100.0). */
+                float hull_health_pct = (ship->company_id == COMPANY_GHOST)
+                    ? (float)ship->hull_health
+                    : Q16_TO_FLOAT(ship->hull_health);
                 int offset = snprintf(ship_entry, sizeof(ship_entry),
                         "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"

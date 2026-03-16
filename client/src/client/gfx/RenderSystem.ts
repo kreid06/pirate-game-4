@@ -997,12 +997,17 @@ export class RenderSystem {
     phase2Alpha: number;
     phase3Alpha: number;
   } {
-    const hullPct = ship.shipType === SHIP_TYPE_GHOST ? ship.hullHealth / GHOST_MAX_HULL_HP : ship.hullHealth / 100;
+    const isGhostShipForHP = ship.shipType === SHIP_TYPE_GHOST;
+    const maxHullHP = isGhostShipForHP ? GHOST_MAX_HULL_HP : 100;
+    // Once the sink animation has started, lock hullPct at 0 so the fade can't reverse
+    const rawHullPct = Math.max(0, Math.min(1, ship.hullHealth / maxHullHP));
+    const hullPct = this.sinkTimestamps.has(ship.id) ? 0 : rawHullPct;
     const waterFill = Math.max(0, Math.min(1, 1 - hullPct));
     const floodTint = waterFill >= 0.75 ? (waterFill - 0.75) / 0.25 : 0;
 
     // Start the clock for any live ship the moment hullHealth hits 0 (fallback if SHIP_SINKING arrives late)
-    if (ship.hullHealth <= 0 && !this.sinkTimestamps.has(ship.id)) {
+    const zeroThreshold = ship.shipType === SHIP_TYPE_GHOST ? 1 : 0;
+    if (ship.hullHealth <= zeroThreshold && !this.sinkTimestamps.has(ship.id)) {
       this.sinkTimestamps.set(ship.id, performance.now());
     }
 
@@ -5781,8 +5786,12 @@ export class RenderSystem {
       }
     }
 
-    const hullPct  = Math.max(0, Math.min(1, ship.hullHealth / 100));
-    const hullText = `Hull: ${ship.hullHealth.toFixed(0)}%`;
+    const isGhost = ship.shipType === SHIP_TYPE_GHOST;
+    const maxHullHP = isGhost ? GHOST_MAX_HULL_HP : 100;
+    const hullPct  = Math.max(0, Math.min(1, ship.hullHealth / maxHullHP));
+    const hullText = isGhost
+      ? `Hull: ${ship.hullHealth.toFixed(0)} / ${GHOST_MAX_HULL_HP.toLocaleString()}`
+      : `Hull: ${ship.hullHealth.toFixed(0)}%`;
     const deckText = totalPlankMaxHp > 0
       ? `Deck HP: ${Math.round(totalPlankHp)} / ${Math.round(totalPlankMaxHp)}`
       : 'Deck HP: —';
