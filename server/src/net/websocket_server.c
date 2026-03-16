@@ -1713,6 +1713,12 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
         return;
     }
 
+    /* Locked NPCs cannot be reassigned via the crew panel or crew_assign messages */
+    if (npc->task_locked) {
+        log_info("🔒 crew_assign: NPC %u (%s) is task-locked — reassignment blocked", npc_id, npc->name);
+        return;
+    }
+
     /* Dismount from current module before applying new role */
     dismount_npc(npc, ship);
 
@@ -2383,6 +2389,8 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
         WorldNpc* npc = &world_npcs[i];
         if (!npc->active || npc->ship_id != ship->ship_id) continue;
         if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
+        /* Locked NPCs stay pinned to their current cannon regardless of sector changes */
+        if (npc->task_locked) continue;
 
         /* NPC is already heading to or sitting at a cannon — keep them
          * unless their cannon's NEEDED has expired AND another cannon
@@ -7928,6 +7936,89 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strstr(payload, "\"type\":\"npc_lock\"")) {
+                            // NPC LOCK: pin or unpin an NPC to their current module.
+                            // {"type":"npc_lock","npcId":N,"locked":true/false}
+                            uint32_t lk_npc_id = 0;
+                            int      lk_locked  = 0;
+                            { char* lp = strstr(payload, "\"npcId\":"); if (lp) sscanf(lp + 8, "%u", &lk_npc_id); }
+                            { char* lp = strstr(payload, "\"locked\":"); if (lp) { lk_locked = (strncmp(lp + 9, "true", 4) == 0) ? 1 : 0; } }
+                            WebSocketPlayer* lk_player = find_player(client->player_id);
+                            if (lk_player && lk_npc_id != 0) {
+                                WorldNpc* lk_npc = NULL;
+                                for (int _ni = 0; _ni < world_npc_count; _ni++) {
+                                    if (world_npcs[_ni].active && world_npcs[_ni].id == lk_npc_id) {
+                                        lk_npc = &world_npcs[_ni]; break;
+                                    }
+                                }
+                                if (lk_npc && lk_npc->company_id == lk_player->company_id) {
+                                    lk_npc->task_locked = (bool)lk_locked;
+                                    log_info("%s NPC %u (%s) by player %u",
+                                             lk_locked ? "🔒 Locked" : "🔓 Unlocked",
+                                             lk_npc_id, lk_npc->name, lk_player->player_id);
+                                    strcpy(response, lk_locked
+                                        ? "{\"type\":\"message_ack\",\"status\":\"npc_locked\"}"
+                                        : "{\"type\":\"message_ack\",\"status\":\"npc_unlocked\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_lock_npc\"}");
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strstr(payload, "\"type\":\"npc_goto_module\"")) {
+                            // NPC GOTO MODULE: direct an NPC to a specific module on their ship.
+                            // {"type":"npc_goto_module","npcId":N,"moduleId":M}
+                            // Clears task_locked so the NPC can be re-dispatched after arriving.
+                            uint32_t gm_npc_id = 0, gm_mod_id = 0;
+                            { char* gp = strstr(payload, "\"npcId\":"); if (gp) sscanf(gp + 8, "%u", &gm_npc_id); }
+                            { char* gp = strstr(payload, "\"moduleId\":"); if (gp) sscanf(gp + 11, "%u", &gm_mod_id); }
+                            WebSocketPlayer* gm_player = find_player(client->player_id);
+                            if (gm_player && gm_npc_id != 0 && gm_mod_id != 0) {
+                                WorldNpc* gm_npc = NULL;
+                                for (int _ni = 0; _ni < world_npc_count; _ni++) {
+                                    if (world_npcs[_ni].active && world_npcs[_ni].id == gm_npc_id) {
+                                        gm_npc = &world_npcs[_ni]; break;
+                                    }
+                                }
+                                SimpleShip* gm_ship = gm_npc ? find_ship(gm_npc->ship_id) : NULL;
+                                ShipModule*  gm_mod  = gm_ship ? find_module_by_id(gm_ship, gm_mod_id) : NULL;
+                                if (gm_npc && gm_ship && gm_mod &&
+                                    gm_npc->company_id == gm_player->company_id) {
+                                    float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(gm_mod->local_pos.x));
+                                    float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(gm_mod->local_pos.y));
+                                    // Dismount from current post before re-dispatching
+                                    dismount_npc(gm_npc, gm_ship);
+                                    // Clear lock — Move To always unfastens the pin
+                                    gm_npc->task_locked = false;
+                                    if (gm_mod->type_id == MODULE_TYPE_CANNON ||
+                                        gm_mod->type_id == MODULE_TYPE_SWIVEL) {
+                                        gm_npc->role        = NPC_ROLE_GUNNER;
+                                        gm_npc->wants_cannon = false; /* specific pin, not sector-driven */
+                                        dispatch_gunner_to_weapon(gm_npc, gm_ship, gm_mod_id, 0.0f);
+                                    } else if (gm_mod->type_id == MODULE_TYPE_MAST) {
+                                        gm_npc->role            = NPC_ROLE_RIGGER;
+                                        gm_npc->assigned_weapon_id = gm_mod_id;
+                                        gm_npc->target_local_x  = mx;
+                                        gm_npc->target_local_y  = my + 20.0f;
+                                        gm_npc->state           = WORLD_NPC_STATE_MOVING;
+                                    } else {
+                                        /* Generic walk-to (helm, deck position, etc.) */
+                                        gm_npc->role            = NPC_ROLE_NONE;
+                                        gm_npc->assigned_weapon_id = gm_mod_id;
+                                        gm_npc->target_local_x  = mx;
+                                        gm_npc->target_local_y  = my + 20.0f;
+                                        gm_npc->state           = WORLD_NPC_STATE_MOVING;
+                                    }
+                                    log_info("📍 NPC %u (%s) → module %u (type %u) on ship %u",
+                                             gm_npc_id, gm_npc->name, gm_mod_id,
+                                             gm_mod->type_id, gm_npc->ship_id);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_moved_to_module\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_goto_module\"}");
+                                }
+                            }
+                            handled = true;
+
                         } else if (strstr(payload, "\"type\":\"upgrade_ship\"")) {
                             // UPGRADE SHIP: spend XP to advance one attribute on the player's ship.
                             // {"type":"upgrade_ship","shipId":N,"attribute":"resistance"}
@@ -8723,7 +8814,7 @@ int websocket_server_update(struct Sim* sim) {
                 "\"assigned_weapon_id\":%u,"
                 "\"npc_level\":%u,\"health\":%u,\"max_health\":%u,\"xp\":%u,"
                 "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
-                "\"stat_points\":%u}",
+                "\"stat_points\":%u,\"locked\":%d}",
                 npc->id, npc->name,
                 npc->x, npc->y, npc->rotation,
                 npc->ship_id, npc->local_x, npc->local_y,
@@ -8732,7 +8823,8 @@ int websocket_server_update(struct Sim* sim) {
                 (unsigned)npc->npc_level, (unsigned)npc->health, (unsigned)npc->max_health, npc->xp,
                 (unsigned)npc->stat_health, (unsigned)npc->stat_damage, (unsigned)npc->stat_stamina, (unsigned)npc->stat_weight,
                 (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
-                    (npc->stat_health + npc->stat_damage + npc->stat_stamina + npc->stat_weight)));
+                    (npc->stat_health + npc->stat_damage + npc->stat_stamina + npc->stat_weight)),
+                (int)npc->task_locked);
             first_npc = false;
         }
         npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "]");

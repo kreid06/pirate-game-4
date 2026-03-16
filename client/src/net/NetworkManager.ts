@@ -80,6 +80,8 @@ export enum MessageType {
   CREW_ASSIGN = 'crew_assign',
   NPC_RECRUIT = 'npc_recruit',
   NPC_MOVE_ABOARD = 'npc_move_aboard',
+  NPC_LOCK = 'npc_lock',
+  NPC_GOTO_MODULE = 'npc_goto_module',
 
   PING = 'ping',
   
@@ -1168,6 +1170,24 @@ export class NetworkManager {
   }
 
   /**
+   * Lock or unlock an NPC to their current module.
+   * When locked the crew panel and auto cannon-sector dispatch cannot reassign them.
+   */
+  sendNpcLock(npcId: number, locked: boolean): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.NPC_LOCK, timestamp: Date.now(), npcId, locked }));
+  }
+
+  /**
+   * Direct an NPC to a specific module on their ship by module ID.
+   * Clears any existing task lock so the NPC walks to the commanded post.
+   */
+  sendNpcGotoModule(npcId: number, moduleId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.NPC_GOTO_MODULE, timestamp: Date.now(), npcId, moduleId }));
+  }
+
+  /**
    * Request the server to spend XP upgrading one attribute on the player's ship.
    * attribute must be one of: 'weight' | 'resistance' | 'damage' | 'crew' | 'sturdiness'
    */
@@ -1604,6 +1624,7 @@ export class NetworkManager {
             statStamina: n.stat_stamina ?? 0,
             statWeight:  n.stat_weight  ?? 0,
             statPoints:  n.stat_points  ?? 0,
+            locked:      !!(n.locked),
           })),
           carrierDetection: new Map() // Will be populated as needed
         };

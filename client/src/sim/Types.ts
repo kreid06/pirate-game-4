@@ -223,6 +223,7 @@ export interface Npc {
   statStamina: number;    // upgrade levels (+10% reload/work speed each)
   statWeight: number;     // upgrade levels (+10% carry capacity each)
   statPoints: number;     // unspent stat points = (npcLevel - 1) - total spent
+  locked: boolean;        // when true: pinned to current module; crew panel cannot reassign
 }
 
 /**

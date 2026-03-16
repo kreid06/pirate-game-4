@@ -558,6 +558,14 @@ export class RenderSystem {
   private _radialMenu: RadialMenu | null = null;
   setRadialMenu(menu: RadialMenu): void { this._radialMenu = menu; }
 
+  /** On-screen instruction shown while the player is in "Move To" NPC targeting mode. */
+  private _moveToHint: string | null = null;
+
+  /** Set the Move To hint text (shown centre-bottom of screen until cleared). */
+  setMoveToHint(text: string): void { this._moveToHint = text; }
+  /** Clear the Move To hint. */
+  clearMoveToHint(): void { this._moveToHint = null; }
+
   /** Begin drawing the ladder hold-progress ring at the given screen position. */
   startLadderHoldRing(mouseScreenPos: Vec2): void {
     this.ladderHoldMousePos = mouseScreenPos;
@@ -581,6 +589,34 @@ export class RenderSystem {
   flashCancel(pos: Vec2): void {
     this._quickFlashPos     = pos;
     this._quickFlashStartMs = -(performance.now()); // negative = red
+  }
+
+  /** Draw the "Move To" hint banner at the bottom-centre of the screen. */
+  private drawMoveToHint(): void {
+    if (!this._moveToHint) return;
+    const ctx  = this.ctx;
+    const cw   = this.canvas.width;
+    const ch   = this.canvas.height;
+    const text = this._moveToHint;
+    ctx.save();
+    ctx.font      = 'bold 16px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const tw  = ctx.measureText(text).width;
+    const bw  = tw + 32;
+    const bh  = 36;
+    const bx  = (cw - bw) / 2;
+    const by  = ch - 80;
+    ctx.fillStyle   = 'rgba(0,0,0,0.75)';
+    ctx.strokeStyle = '#ffdd00';
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#ffe066';
+    ctx.fillText(`📍 ${text}`, cw / 2, by + bh / 2);
+    ctx.restore();
   }
 
   /** Called each frame from ClientApplication to keep sword cursor ring in sync. */
@@ -1169,6 +1205,8 @@ export class RenderSystem {
     this.drawLadderHoldRing();
     // Radial action menu (topmost)
     this._radialMenu?.render(this.ctx);
+    // Move To targeting hint banner
+    this.drawMoveToHint();
     
     // Draw hover boundaries debug if enabled
     if (this.showHoverBoundaries) {
@@ -5513,6 +5551,20 @@ export class RenderSystem {
       this.ctx.fillStyle = '#ffe066';
       this.ctx.fillText(npc.name, screenPos.x, nameY);
 
+      // Lock badge — small padlock icon above the NPC when task_locked
+      if (npc.locked) {
+        const lockSize = Math.max(8, Math.min(12, 10 * cameraState.zoom));
+        const lx = screenPos.x + radius - 2;
+        const ly = screenPos.y - radius - lockSize;
+        this.ctx.fillStyle = '#ffdd00';
+        this.ctx.strokeStyle = '#222';
+        this.ctx.lineWidth = 1;
+        this.ctx.font = `bold ${lockSize + 2}px Arial`;
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'bottom';
+        this.ctx.fillText('🔒', lx, ly);
+      }
+
       // Debug: show assigned cannon/module ID and state below name
       if (npc.assignedWeaponId || npc.state !== 0) {
         const STATE_SHORT: Record<number, string> = { 0: 'IDL', 1: 'MOV', 2: 'MAN', 3: 'REP' };
@@ -5903,7 +5955,7 @@ export class RenderSystem {
     this.ctx.textBaseline = 'top';
 
     const COMPANY_NAMES: Record<number, string> = { [COMPANY_NEUTRAL]: 'Neutral', [COMPANY_PIRATES]: 'Pirates', [COMPANY_NAVY]: 'Navy', [COMPANY_GHOST]: 'Ghost Ships' };
-    const titleText   = `${npc.name}  Lv.${npc.npcLevel}`;
+    const titleText   = `${npc.name}  Lv.${npc.npcLevel}${npc.locked ? '  🔒' : ''}`;
     const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
     const companyText = `Company: ${COMPANY_NAMES[npc.companyId] ?? `#${npc.companyId}`}`;
     const hpText      = `HP ${npc.health}/${npc.maxHealth} (${Math.round(hpPct * 100)}%)`;

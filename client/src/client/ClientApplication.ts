@@ -135,6 +135,8 @@ export class ClientApplication {
   private _ladderHoldShipId: number | null = null;
   /** NPC id locked in at E-keydown for the NPC radial interact path. */
   private _npcInteractId: number | null = null;
+  /** NPC id for the pending "Move To" targeting mode (ctrl+click → Move To → click module). */
+  private _moveToNpcId: number | null = null;
   /** Generic radial action menu instance (rendered by RenderSystem). */
   private _radialMenu = new RadialMenu();
   private accumulator = 0;
@@ -402,6 +404,23 @@ export class ClientApplication {
         this.networkManager.sendRotationUpdate(rotation);
       };
       this.inputManager.onActionEvent = (action, target) => {
+        // ── Move To targeting mode — intercept the next left-click to dispatch an NPC ──
+        if (action === 'attack' && this._moveToNpcId !== null) {
+          const moveNpcId = this._moveToNpcId;
+          this._moveToNpcId = null;
+          this.renderSystem.clearMoveToHint();
+          const hov = this.renderSystem.getHoveredModule();
+          if (hov) {
+            this.networkManager.sendNpcGotoModule(moveNpcId, hov.module.id);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`📍 NPC ${moveNpcId} → module ${hov.module.id}`);
+          } else {
+            this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            console.log('📍 Move To cancelled: no module hovered');
+          }
+          return;
+        }
+
         // Hammer tool: left-click on hovered module while holding hammer → minigame
         if (action === 'attack') {
           const playerId = this.networkManager.getAssignedPlayerId();
@@ -824,7 +843,67 @@ export class ClientApplication {
       };
 
       // Ctrl+left-click: assign/remove cannon from the active weapon group
+      //   — but if an NPC is hovered, open an NPC command radial instead
       this.inputManager.onGroupAssign = () => {
+        // ── Ctrl+click on an NPC → command radial ───────────────────────────
+        const hovNpcCtrl = this.renderSystem.getHoveredNpc();
+        if (hovNpcCtrl) {
+          const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+          const myId = this.networkManager.getAssignedPlayerId();
+          const me = (myId !== null ? ws?.players.find(p => p.id === myId) : null) ?? ws?.players[0] ?? null;
+          const myCompany = me?.companyId ?? 0;
+          // Only command your own crew
+          if (hovNpcCtrl.companyId !== myCompany || myCompany === 0) return;
+
+          // Build radial options
+          const cmdOpts: Array<{ id: string; label: string }> = [];
+          if (hovNpcCtrl.assignedWeaponId !== 0) {
+            // At a module — show lock toggle
+            cmdOpts.push(hovNpcCtrl.locked
+              ? { id: 'unlock', label: '🔓 Unlock' }
+              : { id: 'lock',   label: '🔒 Lock at Post' });
+          }
+          cmdOpts.push({ id: 'move_to', label: '📍 Move To...' });
+
+          if (cmdOpts.length === 1 && cmdOpts[0].id === 'move_to') {
+            // Only one option — execute immediately
+            this._moveToNpcId = hovNpcCtrl.id;
+            this.renderSystem.setMoveToHint(`Moving ${hovNpcCtrl.name} — click a module`);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            return;
+          }
+
+          const mp = this.inputManager.getMouseScreenPosition();
+          this._radialMenu.open(mp.x, mp.y, cmdOpts);
+
+          // Wait for the next pointerup / mouseup to resolve the selection
+          const onUp = () => {
+            window.removeEventListener('pointerup', onUp);
+            const selected = this._radialMenu.getHoveredId();
+            this._radialMenu.close();
+            if (!selected) {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+              return;
+            }
+            const npc = ws?.npcs.find(n => n.id === hovNpcCtrl.id);
+            if (!npc) return;
+            if (selected === 'lock') {
+              this.networkManager.sendNpcLock(npc.id, true);
+              console.log(`🔒 Locking NPC ${npc.id} (${npc.name}) at post`);
+            } else if (selected === 'unlock') {
+              this.networkManager.sendNpcLock(npc.id, false);
+              console.log(`🔓 Unlocking NPC ${npc.id} (${npc.name})`);
+            } else if (selected === 'move_to') {
+              this._moveToNpcId = npc.id;
+              this.renderSystem.setMoveToHint(`Moving ${npc.name} — click a module`);
+              console.log(`📍 Move To mode for NPC ${npc.id} (${npc.name})`);
+            }
+          };
+          window.addEventListener('pointerup', onUp);
+          return;
+        }
+
+        // ── Default: cannon group assignment ────────────────────────────────
         const hovered = this.renderSystem.getHoveredModule();
         if (!hovered) {
           console.warn(`⚠️ GroupAssign: no module hovered`);
@@ -2218,6 +2297,17 @@ export class ClientApplication {
       }
 
       switch (e.key) {
+        case 'Escape': {
+          // Cancel "Move To" targeting mode if active
+          if (this._moveToNpcId !== null) {
+            this._moveToNpcId = null;
+            this.renderSystem.clearMoveToHint();
+            this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            e.preventDefault();
+          }
+          break;
+        }
+
         case 'e':
         case 'E': {
           if (e.repeat) break; // no auto-repeat for E-hold logic
