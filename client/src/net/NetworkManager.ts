@@ -78,6 +78,8 @@ export enum MessageType {
   PLACE_DECK = 'place_deck',
   PLACE_SWIVEL_AT = 'place_swivel_at',
   CREW_ASSIGN = 'crew_assign',
+  NPC_RECRUIT = 'npc_recruit',
+  NPC_MOVE_ABOARD = 'npc_move_aboard',
 
   PING = 'ping',
   
@@ -1146,7 +1148,25 @@ export class NetworkManager {
       });
     }
   }
-  
+
+  /**
+   * Recruit a neutral (company 0) NPC into the player's company.
+   * The NPC must be free-standing in the world (shipId 0, companyId 0).
+   */
+  sendNpcRecruit(npcId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.NPC_RECRUIT, timestamp: Date.now(), npcId }));
+  }
+
+  /**
+   * Move a recruited NPC aboard the player's current ship.
+   * The NPC must already belong to the player's company.
+   */
+  sendNpcMoveAboard(npcId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.NPC_MOVE_ABOARD, timestamp: Date.now(), npcId }));
+  }
+
   /**
    * Request the server to spend XP upgrading one attribute on the player's ship.
    * attribute must be one of: 'weight' | 'resistance' | 'damage' | 'crew' | 'sturdiness'

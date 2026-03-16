@@ -2090,6 +2090,58 @@ static uint32_t spawn_ship_crew(uint32_t ship_id, const char* name) {
 }
 
 /* ============================================================================
+ * UNCLAIMED NPC SPAWN
+ * Spawns a free-floating, neutral NPC in the water at world position (wx, wy).
+ * Called when a ghost ship is destroyed — 2-3 survivors wash up as recruitable.
+ * index 0-2 produces a scatter offset so they don't all stack.
+ * ========================================================================= */
+static uint32_t spawn_unclaimed_npc(float wx, float wy, int index) {
+    if (world_npc_count >= MAX_WORLD_NPCS) {
+        log_warn("spawn_unclaimed_npc: MAX_WORLD_NPCS reached");
+        return 0;
+    }
+    static const char* const SURVIVOR_NAMES[] = {
+        "Phantom Sailor", "Ghost Deckhand", "Spectre Mariner",
+        "Wraith Jackal",  "Haunt Gunner",  "Moor Spirit",
+    };
+    const int NAME_COUNT = (int)(sizeof(SURVIVOR_NAMES) / sizeof(SURVIVOR_NAMES[0]));
+    /* Scatter: each survivor drifts slightly away from the wreck */
+    static const float OFFSETS_X[3] = {  20.0f, -30.0f,  10.0f };
+    static const float OFFSETS_Y[3] = { -20.0f,  10.0f,  40.0f };
+    float ox = OFFSETS_X[index < 3 ? index : 0];
+    float oy = OFFSETS_Y[index < 3 ? index : 0];
+
+    WorldNpc* npc = &world_npcs[world_npc_count++];
+    memset(npc, 0, sizeof(WorldNpc));
+    npc->id              = next_world_npc_id++;
+    npc->active          = true;
+    npc->role            = NPC_ROLE_NONE;
+    npc->ship_id         = 0;         /* free-standing — not on any ship */
+    npc->company_id      = 0;         /* unclaimed: COMPANY_NEUTRAL */
+    npc->move_speed      = 60.0f;
+    npc->interact_radius = 60.0f;     /* larger — floating in the water */
+    npc->state           = WORLD_NPC_STATE_IDLE;
+    npc->in_water        = true;
+    npc->x               = wx + ox;
+    npc->y               = wy + oy;
+    npc->local_x         = 0.0f;
+    npc->local_y         = 0.0f;
+
+    const char* chosen = SURVIVOR_NAMES[(npc->id) % NAME_COUNT];
+    strncpy(npc->name,     chosen,       sizeof(npc->name)     - 1);
+    strncpy(npc->dialogue, "Help me...", sizeof(npc->dialogue) - 1);
+
+    npc->npc_level   = 1;
+    npc->max_health  = 100;
+    npc->health      = 100;
+    npc->xp          = 0;
+
+    log_info("👻 Unclaimed NPC '%s' (id %u) in water at (%.0f, %.0f)",
+             npc->name, npc->id, npc->x, npc->y);
+    return npc->id;
+}
+
+/* ============================================================================
  * NPC CANNON PRIORITY SYSTEM
  *
  * All cannons on the ship are ranked by angular distance from the player's
@@ -7812,6 +7864,70 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strstr(payload, "\"type\":\"npc_recruit\"")) {
+                            // NPC RECRUIT: player claims a neutral (company 0) NPC into their company.
+                            // {"type":"npc_recruit","npcId":N}
+                            uint32_t rn_npc_id = 0;
+                            { char* rp = strstr(payload, "\"npcId\":"); if (rp) sscanf(rp + 8, "%u", &rn_npc_id); }
+                            WebSocketPlayer* rn_player = find_player(client->player_id);
+                            if (rn_player && rn_npc_id != 0) {
+                                WorldNpc* rn_npc_ptr = NULL;
+                                for (int _ni = 0; _ni < world_npc_count; _ni++) {
+                                    if (world_npcs[_ni].active && world_npcs[_ni].id == rn_npc_id) {
+                                        rn_npc_ptr = &world_npcs[_ni]; break;
+                                    }
+                                }
+                                if (rn_npc_ptr && rn_npc_ptr->company_id == 0) {
+                                    rn_npc_ptr->company_id = rn_player->company_id;
+                                    log_info("🤝 Player %u recruited NPC %u '%s' (company %u)",
+                                             rn_player->player_id, rn_npc_id,
+                                             rn_npc_ptr->name, rn_player->company_id);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"recruited\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_recruit\"}");
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strstr(payload, "\"type\":\"npc_move_aboard\"")) {
+                            // NPC MOVE ABOARD: move a recruited NPC to the player's current ship.
+                            // {"type":"npc_move_aboard","npcId":N}
+                            uint32_t ma_npc_id = 0;
+                            { char* mp2 = strstr(payload, "\"npcId\":"); if (mp2) sscanf(mp2 + 8, "%u", &ma_npc_id); }
+                            WebSocketPlayer* ma_player = find_player(client->player_id);
+                            if (ma_player && ma_npc_id != 0 && ma_player->parent_ship_id != 0) {
+                                WorldNpc* ma_npc_ptr = NULL;
+                                for (int _ni = 0; _ni < world_npc_count; _ni++) {
+                                    if (world_npcs[_ni].active && world_npcs[_ni].id == ma_npc_id) {
+                                        ma_npc_ptr = &world_npcs[_ni]; break;
+                                    }
+                                }
+                                SimpleShip* ma_ship = find_ship(ma_player->parent_ship_id);
+                                if (ma_npc_ptr && ma_ship &&
+                                    ma_npc_ptr->company_id == ma_player->company_id) {
+                                    ma_npc_ptr->ship_id        = ma_player->parent_ship_id;
+                                    ma_npc_ptr->in_water       = false;
+                                    int slot_idx = (int)(ma_npc_ptr->id % 9);
+                                    ma_npc_ptr->local_x        = -200.0f + slot_idx * 50.0f;
+                                    ma_npc_ptr->local_y        = 0.0f;
+                                    ma_npc_ptr->idle_local_x   = ma_npc_ptr->local_x;
+                                    ma_npc_ptr->idle_local_y   = ma_npc_ptr->local_y;
+                                    ma_npc_ptr->target_local_x = ma_npc_ptr->local_x;
+                                    ma_npc_ptr->target_local_y = ma_npc_ptr->local_y;
+                                    ma_npc_ptr->state          = WORLD_NPC_STATE_IDLE;
+                                    ship_local_to_world(ma_ship,
+                                        ma_npc_ptr->local_x, ma_npc_ptr->local_y,
+                                        &ma_npc_ptr->x, &ma_npc_ptr->y);
+                                    log_info("⚓ NPC %u '%s' moved aboard ship %u for player %u",
+                                             ma_npc_id, ma_npc_ptr->name,
+                                             ma_player->parent_ship_id, ma_player->player_id);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"moved_aboard\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_move_aboard\"}");
+                                }
+                            }
+                            handled = true;
+
                         } else if (strstr(payload, "\"type\":\"upgrade_ship\"")) {
                             // UPGRADE SHIP: spend XP to advance one attribute on the player's ship.
                             // {"type":"upgrade_ship","shipId":N,"attribute":"resistance"}
@@ -8896,6 +9012,14 @@ void websocket_server_tick(float dt) {
                         world_npcs[ni].in_water = true;
                         /* Extinguish any burning NPCs that hit the water */
                         world_npcs[ni].fire_timer_ms = 0;
+                    }
+
+                    /* Ghost ship survivors: spawn 2-3 unclaimed recruitable sailors */
+                    if (sinking_ship->ship_type == SHIP_TYPE_GHOST) {
+                        int n_survivors = 2 + (int)(next_world_npc_id % 2); /* 2 or 3 */
+                        for (int sv = 0; sv < n_survivors; sv++) {
+                            spawn_unclaimed_npc(sinking_ship->x, sinking_ship->y, sv);
+                        }
                     }
 
                     /* Broadcast SHIP_SINKING so clients start the animation immediately */

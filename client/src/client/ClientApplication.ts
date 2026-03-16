@@ -127,12 +127,14 @@ export class ClientApplication {
   private _ladderHoldIsExtended = false;
   /** True if player was on the ladder's ship when E was pressed. */
   private _ladderHoldOnShip = false;
-  /** What kind of module the current E-hold targets: 'ladder' | 'mount' | null */
-  private _interactKind: 'ladder' | 'mount' | null = null;
+  /** What kind of module the current E-hold targets: 'ladder' | 'mount' | 'npc' | null */
+  private _interactKind: 'ladder' | 'mount' | 'npc' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
   private _ladderHoldShipId: number | null = null;
+  /** NPC id locked in at E-keydown for the NPC radial interact path. */
+  private _npcInteractId: number | null = null;
   /** Generic radial action menu instance (rendered by RenderSystem). */
   private _radialMenu = new RadialMenu();
   private accumulator = 0;
@@ -552,12 +554,10 @@ export class ClientApplication {
             }
           }
 
-          // E key: open crew level menu if hovering an NPC (fallback when no module interacted)
-          const hovNpc = this.renderSystem.getHoveredNpc();
-          if (hovNpc) {
-            this.uiManager?.openCrewMenuForNpc(hovNpc);
-            return;
-          }
+          // E key: NPC interactions are now fully handled by the E-hold radial
+          // system in setupDebugKeys (which sets _suppressLadderInteract=true before
+          // this game-loop path runs). Skip here to avoid double-firing.
+          if (this.renderSystem.getHoveredNpc()) return;
 
           if (!hoveredModule && !this._suppressLadderInteract) {
             // Proximity fallback: scan for nearest ladder WITHOUT requiring mouse hover.
@@ -2257,6 +2257,44 @@ export class ClientApplication {
             }
           }
 
+          // ── NPC Interact: hovered NPC takes priority over module interact ────
+          {
+            const hovNpcE = this.renderSystem.getHoveredNpc();
+            if (hovNpcE) {
+              const npcDist = meE.position.sub(hovNpcE.position).length();
+              if (npcDist > hovNpcE.interactRadius + 80) {
+                console.warn(`🤝 E: NPC out of range (dist=${npcDist.toFixed(0)})`);
+                this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+                break;
+              }
+
+              this._interactKind = 'npc';
+              this._suppressLadderInteract = true;
+              this._npcInteractId = hovNpcE.id;
+
+              const myCompanyE = meE.companyId ?? 0;
+              const npcCompanyE = hovNpcE.companyId;
+              let npcOpts: { id: string; label: string }[];
+              if (npcCompanyE === 0) {
+                npcOpts = [{ id: 'recruit', label: 'Recruit to Company' }];
+              } else if (npcCompanyE === myCompanyE && hovNpcE.shipId !== meE.carrierId) {
+                npcOpts = [{ id: 'move_aboard', label: 'Move Aboard' }];
+              } else {
+                npcOpts = [{ id: 'crew_menu', label: 'Manage Crew' }];
+              }
+              const npcOptsSnap = npcOpts;
+
+              this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
+              this._ladderHoldTimer = setTimeout(() => {
+                this._ladderHoldTimer = null;
+                this.renderSystem.stopLadderHoldRing();
+                const mp = this.inputManager.getMouseScreenPosition();
+                this._radialMenu.open(mp.x, mp.y, npcOptsSnap);
+              }, 300);
+              break;
+            }
+          }
+
           // ── Mount / ladder: target is locked in HERE at keydown from the
           // hovered module. Continued hover is NOT required — the module ID and
           // ship ID are cached and used for the entire hold/keyup sequence.
@@ -2437,6 +2475,58 @@ export class ClientApplication {
         if (worldDist > CONFIRM_RANGE_OFFSHIP) console.warn(`📏 range fail (world): dist=${worldDist.toFixed(1)} > ${CONFIRM_RANGE_OFFSHIP} | player=(${me.position.x.toFixed(1)},${me.position.y.toFixed(1)}) modWorld=(${mwx.toFixed(1)},${mwy.toFixed(1)}) carrierId=${me.carrierId} shipId=${shipId}`);
         return worldDist <= CONFIRM_RANGE_OFFSHIP;
       };
+
+      // ── NPC INTERACT ─────────────────────────────────────────────────────────
+      if (interactKind === 'npc') {
+        const npcId = this._npcInteractId;
+        this._npcInteractId = null;
+
+        const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+        const myId = this.networkManager.getAssignedPlayerId();
+        const me = (myId !== null ? ws?.players.find(p => p.id === myId) : null) ?? ws?.players[0] ?? null;
+
+        const executeNpcAction = (actionId: string) => {
+          const npc = npcId != null ? ws?.npcs.find(n => n.id === npcId) : null;
+          if (!npc) { console.warn(`🤝 NPC ${npcId} not found in world state`); return; }
+          const myCompany = me?.companyId ?? 0;
+          if (actionId === 'recruit' && npc.companyId === 0) {
+            this.networkManager.sendNpcRecruit(npc.id);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`🤝 Recruiting NPC ${npc.id} (${npc.name})`);
+          } else if (actionId === 'move_aboard' && npc.companyId === myCompany) {
+            this.networkManager.sendNpcMoveAboard(npc.id);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`⚓ Moving NPC ${npc.id} (${npc.name}) aboard`);
+          } else if (actionId === 'crew_menu' && npc.companyId === myCompany) {
+            this.uiManager?.openCrewMenuForNpc(npc);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          }
+        };
+
+        const defaultNpcAction = () => {
+          const npc = npcId != null ? ws?.npcs.find(n => n.id === npcId) : null;
+          if (!npc) return;
+          const myCompany = me?.companyId ?? 0;
+          if (npc.companyId === 0)                                     { executeNpcAction('recruit'); }
+          else if (npc.companyId === myCompany && npc.shipId !== me?.carrierId) { executeNpcAction('move_aboard'); }
+          else                                                          { executeNpcAction('crew_menu'); }
+        };
+
+        if (this._ladderHoldTimer !== null) {
+          // Tap (< 300 ms): execute default action without radial
+          clearTimeout(this._ladderHoldTimer);
+          this._ladderHoldTimer = null;
+          this.renderSystem.stopLadderHoldRing();
+          defaultNpcAction();
+        } else if (this._radialMenu.isOpen) {
+          // Hold released with radial open — execute selected option or cancel
+          const selected = this._radialMenu.getHoveredId();
+          this._radialMenu.close();
+          if (selected) { executeNpcAction(selected); }
+          else { this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition()); }
+        }
+        return;
+      }
 
       // ── MOUNTABLE MODULES (helm / cannon / mast) — mount or dismount ────────
       if (interactKind === 'mount') {
