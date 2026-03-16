@@ -560,11 +560,15 @@ export class RenderSystem {
 
   /** On-screen instruction shown while the player is in "Move To" NPC targeting mode. */
   private _moveToHint: string | null = null;
+  /** NPC id whose world position is the arrow-line origin while in Move To mode. */
+  private _moveToSourceNpcId: number | null = null;
 
   /** Set the Move To hint text (shown centre-bottom of screen until cleared). */
   setMoveToHint(text: string): void { this._moveToHint = text; }
-  /** Clear the Move To hint. */
-  clearMoveToHint(): void { this._moveToHint = null; }
+  /** Record which NPC is the source so the arrow line can originate from it. */
+  setMoveToSourceNpc(npcId: number | null): void { this._moveToSourceNpcId = npcId; }
+  /** Clear the Move To hint and arrow-line source together. */
+  clearMoveToHint(): void { this._moveToHint = null; this._moveToSourceNpcId = null; }
 
   /** Begin drawing the ladder hold-progress ring at the given screen position. */
   startLadderHoldRing(mouseScreenPos: Vec2): void {
@@ -589,6 +593,272 @@ export class RenderSystem {
   flashCancel(pos: Vec2): void {
     this._quickFlashPos     = pos;
     this._quickFlashStartMs = -(performance.now()); // negative = red
+  }
+
+  /**
+   * Draw an animated marching-arrow line from the commanded NPC to the mouse cursor.
+   * Shown whenever Move To targeting mode is active.
+   */
+  private drawMoveToArrowLine(worldState: WorldState, camera: Camera): void {
+    if (this._moveToSourceNpcId === null || !this.mouseWorldPos) return;
+
+    // Resolve the NPC's current world position (same logic as drawNpc)
+    const npc = worldState.npcs.find(n => n.id === this._moveToSourceNpcId);
+    if (!npc) return;
+
+    let npcWorldPos = npc.position;
+    if (npc.shipId) {
+      const ship = worldState.ships.find(s => s.id === npc.shipId);
+      if (ship && npc.localPosition) {
+        const cosR = Math.cos(ship.rotation);
+        const sinR = Math.sin(ship.rotation);
+        npcWorldPos = Vec2.from(
+          ship.position.x + npc.localPosition.x * cosR - npc.localPosition.y * sinR,
+          ship.position.y + npc.localPosition.x * sinR + npc.localPosition.y * cosR,
+        );
+      }
+    }
+
+    // ── Module highlight: amber glow when cursor hovers a module in Move To mode ──
+    const now = performance.now();
+    if (this.hoveredModule) {
+      const { ship: modShip, module: mod } = this.hoveredModule;
+      const screenPos   = camera.worldToScreen(modShip.position);
+      const cameraState = camera.getState();
+      const glowPulse   = 0.55 + 0.45 * Math.sin(now / 160);
+      const glowAlpha   = 0.6 + 0.4 * glowPulse;
+
+      // Build the module's local-space path for the given kind
+      const buildModulePath = (ctx: CanvasRenderingContext2D): void => {
+        ctx.beginPath();
+        if (mod.kind === 'mast') {
+          ctx.arc(0, 0, (mod as any).radius || 15, 0, Math.PI * 2);
+        } else if (mod.kind === 'helm' || mod.kind === 'steering-wheel') {
+          ctx.arc(0, 0, 8, 0, Math.PI * 2);
+        } else if (mod.kind === 'cannon') {
+          ctx.rect(-15, -10, 30, 20);
+        } else if (mod.kind === 'swivel') {
+          ctx.arc(0, 0, 10, 0, Math.PI * 2);
+        } else if (mod.kind === 'ladder') {
+          ctx.rect(-10, -20, 20, 40);
+        } else if (mod.kind === 'plank') {
+          const w = (mod as any).length || 20;
+          const h = (mod as any).width  || 10;
+          ctx.rect(-w / 2, -h / 2, w, h);
+        } else {
+          ctx.rect(-10, -10, 20, 20);
+        }
+      };
+
+      this.ctx.save();
+      this.ctx.translate(screenPos.x, screenPos.y);
+      this.ctx.rotate(modShip.rotation - cameraState.rotation);
+      this.ctx.scale(cameraState.zoom, cameraState.zoom);
+      this.ctx.translate(mod.localPos.x, mod.localPos.y);
+      this.ctx.rotate((mod as any).localRot ?? 0);
+
+      // Outer glow pass
+      this.ctx.shadowColor  = '#ffe066';
+      this.ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
+      this.ctx.strokeStyle  = `rgba(255, 220, 60, ${(glowAlpha * 0.55).toFixed(3)})`;
+      this.ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
+      this.ctx.globalAlpha  = 1;
+      buildModulePath(this.ctx);
+      this.ctx.stroke();
+
+      // Inner crisp stroke
+      this.ctx.shadowBlur   = 0;
+      this.ctx.strokeStyle  = `rgba(255, 240, 130, ${(glowAlpha * 0.9).toFixed(3)})`;
+      this.ctx.lineWidth    = 2.5 / cameraState.zoom;
+      this.ctx.globalAlpha  = glowAlpha;
+      buildModulePath(this.ctx);
+      this.ctx.stroke();
+
+      // Translucent amber fill overlay
+      this.ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
+      this.ctx.fillStyle    = '#ffe066';
+      buildModulePath(this.ctx);
+      this.ctx.fill();
+
+      this.ctx.restore();
+    }
+
+    // ── Ship hull highlight: pulse the hull outline when cursor is over a ship ──
+    // Only when: no module is hovered (module highlight takes priority), AND the
+    // NPC is not already on that ship (boarding is the action — not an intra-ship move).
+    const hullHitShip = (() => {
+      if (!this.mouseWorldPos || this.hoveredModule) return null;
+      const pointInPoly = (px: number, py: number, poly: Vec2[]): boolean => {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+          const xi = poly[i].x, yi = poly[i].y;
+          const xj = poly[j].x, yj = poly[j].y;
+          if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi))
+            inside = !inside;
+        }
+        return inside;
+      };
+      for (const s of worldState.ships) {
+        if (!s.hull || s.hull.length < 3) continue;
+        // Skip if the NPC is already on this ship — no boarding would occur
+        if (npc.shipId && npc.shipId === s.id) continue;
+        const dx  = this.mouseWorldPos!.x - s.position.x;
+        const dy  = this.mouseWorldPos!.y - s.position.y;
+        const cos = Math.cos(-s.rotation);
+        const sin = Math.sin(-s.rotation);
+        if (pointInPoly(dx * cos - dy * sin, dx * sin + dy * cos, s.hull)) return s;
+      }
+      return null;
+    })();
+
+    if (hullHitShip) {
+      const screenPos    = camera.worldToScreen(hullHitShip.position);
+      const cameraState  = camera.getState();
+      const hull         = hullHitShip.hull;
+      // Alternating gold/white glow pulse
+      const glowPulse    = 0.55 + 0.45 * Math.sin(now / 160);
+      const glowAlpha    = 0.6 + 0.4 * glowPulse;
+
+      this.ctx.save();
+      this.ctx.translate(screenPos.x, screenPos.y);
+      this.ctx.scale(cameraState.zoom, cameraState.zoom);
+      this.ctx.rotate(hullHitShip.rotation - cameraState.rotation);
+
+      // Outer glow pass  (wider, dimmer)
+      this.ctx.shadowColor  = '#ffe066';
+      this.ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
+      this.ctx.strokeStyle  = `rgba(255, 220, 60, ${(glowAlpha * 0.55).toFixed(3)})`;
+      this.ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
+      this.ctx.globalAlpha  = 1;
+      this.ctx.beginPath();
+      this.ctx.moveTo(hull[0].x, hull[0].y);
+      for (let i = 1; i < hull.length; i++) this.ctx.lineTo(hull[i].x, hull[i].y);
+      this.ctx.closePath();
+      this.ctx.stroke();
+
+      // Inner crisp stroke
+      this.ctx.shadowBlur   = 0;
+      this.ctx.strokeStyle  = `rgba(255, 240, 130, ${(glowAlpha * 0.9).toFixed(3)})`;
+      this.ctx.lineWidth    = (2.5) / cameraState.zoom;
+      this.ctx.globalAlpha  = glowAlpha;
+      this.ctx.beginPath();
+      this.ctx.moveTo(hull[0].x, hull[0].y);
+      for (let i = 1; i < hull.length; i++) this.ctx.lineTo(hull[i].x, hull[i].y);
+      this.ctx.closePath();
+      this.ctx.stroke();
+
+      // Translucent amber fill overlay
+      this.ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
+      this.ctx.fillStyle    = '#ffe066';
+      this.ctx.beginPath();
+      this.ctx.moveTo(hull[0].x, hull[0].y);
+      for (let i = 1; i < hull.length; i++) this.ctx.lineTo(hull[i].x, hull[i].y);
+      this.ctx.closePath();
+      this.ctx.fill();
+
+      this.ctx.restore();
+    }
+
+    const src  = camera.worldToScreen(npcWorldPos);
+    const dst  = camera.worldToScreen(this.mouseWorldPos);
+    const dx   = dst.x - src.x;
+    const dy   = dst.y - src.y;
+    const totalLen = Math.sqrt(dx * dx + dy * dy);
+    if (totalLen < 8) return;
+
+    const UX  = dx / totalLen;
+    const UY  = dy / totalLen;
+    // Perpendicular unit vector
+    const PX  = -UY;
+    const PY  =  UX;
+    const ctx = this.ctx;
+
+    ctx.save();
+
+    // ── Dashed base line (scrolling animation) ───────────────────
+    ctx.setLineDash([8, 6]);
+    ctx.lineDashOffset = -((now / 22) % 14);
+    ctx.beginPath();
+    ctx.moveTo(src.x, src.y);
+    ctx.lineTo(dst.x, dst.y);
+    ctx.strokeStyle = 'rgba(255, 220, 60, 0.45)';
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineDashOffset = 0;
+
+    // ── Marching chevron arrowheads ────────────────────────────
+    const SPACING   = 38;   // px between arrow tips
+    const HALF_W    = 7;    // half wingspan
+    const BACK_LEN  = 9;    // how far behind the tip the wings start
+    const MARCH_SPD = 0.055; // px per ms
+
+    const marchOffset = (now * MARCH_SPD) % SPACING;
+    const numArrows   = Math.ceil(totalLen / SPACING) + 1;
+
+    ctx.lineWidth   = 2.2;
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
+
+    for (let i = 0; i < numArrows; i++) {
+      // t = distance from src to the arrow tip
+      const t = marchOffset + i * SPACING;
+      if (t < 14 || t > totalLen - 10) continue; // keep clear of endpoints
+
+      // Fade in near src, fade out near dst
+      const edgeFade = Math.min(t / 28, 1) * Math.min((totalLen - 10 - t) / 28, 1);
+      if (edgeFade <= 0) continue;
+
+      // Subtle pulse so each arrow breathes slightly out of phase
+      const pulse = 0.72 + 0.28 * Math.sin(now / 180 + i * 1.1);
+
+      const tx = src.x + UX * t;
+      const ty = src.y + UY * t;
+
+      ctx.globalAlpha = edgeFade * pulse * 0.92;
+      ctx.strokeStyle = '#ffe066';
+      ctx.beginPath();
+      // Left wing: from rear-left to tip
+      ctx.moveTo(
+        tx - UX * BACK_LEN + PX * HALF_W,
+        ty - UY * BACK_LEN + PY * HALF_W,
+      );
+      ctx.lineTo(tx, ty);
+      // Right wing: tip back to rear-right
+      ctx.lineTo(
+        tx - UX * BACK_LEN - PX * HALF_W,
+        ty - UY * BACK_LEN - PY * HALF_W,
+      );
+      ctx.stroke();
+    }
+
+    // ── Pulsing target ring at the destination ─────────────────────
+    const ringPulse = 0.65 + 0.35 * Math.sin(now / 220);
+    ctx.globalAlpha = 0.85 * ringPulse;
+    ctx.beginPath();
+    ctx.arc(dst.x, dst.y, 10 + (1 - ringPulse) * 4, 0, Math.PI * 2);
+    ctx.strokeStyle = '#ffe066';
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+
+    // Inner dot at cursor
+    ctx.globalAlpha = 0.95;
+    ctx.beginPath();
+    ctx.arc(dst.x, dst.y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff8a0';
+    ctx.fill();
+
+    // ── Source NPC indicator dot ──────────────────────────
+    const srcPulse = 0.6 + 0.4 * Math.sin(now / 200 + Math.PI); // opposite phase to ring
+    ctx.globalAlpha = 0.8 * srcPulse;
+    ctx.beginPath();
+    ctx.arc(src.x, src.y, 12 + (1 - srcPulse) * 4, 0, Math.PI * 2);
+    ctx.strokeStyle = '#80e0ff';
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+
+    ctx.globalAlpha = 1.0;
+    ctx.restore();
   }
 
   /** Draw the "Move To" hint banner at the bottom-centre of the screen. */
@@ -1203,6 +1473,8 @@ export class RenderSystem {
     this.drawSwordCooldownCursor();
     // Ladder hold-progress ring
     this.drawLadderHoldRing();
+    // Move To directive arrow line (above world, below UI menus)
+    this.drawMoveToArrowLine(worldState, camera);
     // Radial action menu (topmost)
     this._radialMenu?.render(this.ctx);
     // Move To targeting hint banner

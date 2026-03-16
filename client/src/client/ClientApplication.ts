@@ -408,7 +408,7 @@ export class ClientApplication {
         if (action === 'attack' && this._moveToNpcId !== null) {
           const moveNpcId = this._moveToNpcId;
           this._moveToNpcId = null;
-          this.renderSystem.clearMoveToHint();
+          this.renderSystem.clearMoveToHint(); // also clears _moveToSourceNpcId
 
           const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
           const flashPos = this.inputManager.getMouseScreenPosition();
@@ -893,6 +893,7 @@ export class ClientApplication {
           if (cmdOpts.length === 1 && cmdOpts[0].id === 'move_to') {
             // Only one option — execute immediately
             this._moveToNpcId = hovNpcCtrl.id;
+            this.renderSystem.setMoveToSourceNpc(hovNpcCtrl.id);
             this.renderSystem.setMoveToHint(`Moving ${hovNpcCtrl.name} — click a module, ship, or open water`);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             return;
@@ -920,6 +921,7 @@ export class ClientApplication {
               console.log(`🔓 Unlocking NPC ${npc.id} (${npc.name})`);
             } else if (selected === 'move_to') {
               this._moveToNpcId = npc.id;
+              this.renderSystem.setMoveToSourceNpc(npc.id);
               this.renderSystem.setMoveToHint(`Moving ${npc.name} — click a module, ship, or open water`);
               console.log(`📍 Move To mode for NPC ${npc.id} (${npc.name})`);
             }
@@ -994,6 +996,16 @@ export class ClientApplication {
           console.log(`\ud83c\udfaf Cannon ${cannonId} \u2192 group G${targetGroup}`);
         }
         this.networkManager.sendCannonGroupConfig(targetGroup, state.mode, state.cannonIds, state.targetId > 0 ? state.targetId : 0);
+      };
+
+      // Right-click: cancel Move To mode before any other right-click handling
+      this.inputManager.onBeforeRightClick = () => {
+        if (this._moveToNpcId !== null) {
+          this._moveToNpcId = null;
+          this.renderSystem.clearMoveToHint();
+          return true; // consume — don't aim, retarget, etc.
+        }
+        return false;
       };
 
       // Right-click intercepted by UIManager (e.g. cycling weapon group mode on hotbar)
@@ -2340,7 +2352,9 @@ export class ClientApplication {
       }
 
       switch (e.key) {
-        case 'Escape': {
+        case 'Escape':
+        case 'q':
+        case 'Q': {
           // Cancel "Move To" targeting mode if active
           if (this._moveToNpcId !== null) {
             this._moveToNpcId = null;

@@ -105,6 +105,8 @@ export class InputManager {
   public onAimStart: (() => void) | null = null;
   /** Called when right-click aiming ends (right mouse released). */
   public onAimEnd: (() => void) | null = null;
+  /** Called at the very start of any right-click (button 2 down). Return true to consume the event and skip all other right-click handling. */
+  public onBeforeRightClick: (() => boolean) | null = null;
 
   // UI click intercept — return true to consume the click before game logic runs
   public onUIClick: ((x: number, y: number) => boolean) | null = null;
@@ -1214,6 +1216,8 @@ export class InputManager {
       this.lastLeftClickTime = now;
       
     } else if (event.button === 2) { // Right mouse button
+      // Early-out hook: allows callers to intercept all right-clicks (e.g. cancel Move To mode)
+      if (this.onBeforeRightClick && this.onBeforeRightClick()) return;
       // Ctrl+right-click: toggle cannon group membership (same as Ctrl+left-click)
       if (this.isCtrlHeld()) {
         if (this.onGroupAssign) this.onGroupAssign();
