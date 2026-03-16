@@ -8005,7 +8005,7 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                     }
                                     if (gm_occupied) {
-                                        snprintf(response, MAX_MESSAGE_SIZE,
+                                        snprintf(response, 1024,
                                                  "{\"type\":\"error\",\"message\":\"module_occupied\",\"npcId\":%u,\"moduleId\":%u}",
                                                  gm_npc_id, gm_mod_id);
                                         log_info("🚫 NPC %u cannot go to module %u — already occupied", gm_npc_id, gm_mod_id);
@@ -8038,12 +8038,12 @@ int websocket_server_update(struct Sim* sim) {
                                     log_info("📍 NPC %u (%s) → module %u (type %u) on ship %u",
                                              gm_npc_id, gm_npc->name, gm_mod_id,
                                              gm_mod->type_id, gm_npc->ship_id);
-                                    snprintf(response, MAX_MESSAGE_SIZE,
+                                    snprintf(response, 1024,
                                              "{\"type\":\"message_ack\",\"status\":\"npc_moved_to_module\",\"npcId\":%u}",
                                              gm_npc_id);
                                     } /* end else (not occupied) */
                                 } else {
-                                    snprintf(response, MAX_MESSAGE_SIZE,
+                                    snprintf(response, 1024,
                                              "{\"type\":\"error\",\"message\":\"cannot_goto_module\",\"npcId\":%u}",
                                              gm_npc_id);
                                 }
