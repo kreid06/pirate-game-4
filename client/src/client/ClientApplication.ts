@@ -1474,13 +1474,15 @@ export class ClientApplication {
         // Get current rotation from input manager
         const currentRotation = this.inputManager.getCurrentInputFrame().rotation;
         
-        // Clone interpolated state and replace our player with predicted version (including rotation)
-        worldToRender = {
-          ...interpolatedState,
-          players: interpolatedState.players.map(p => 
-            p.id === assignedPlayerId ? { ...predictedPlayer, rotation: currentRotation } : p
-          )
-        };
+        // Splice predicted player in — avoid allocating N player objects when only 1 changes.
+        const localIdx = interpolatedState.players.findIndex(p => p.id === assignedPlayerId);
+        if (localIdx >= 0) {
+          const newPlayers = interpolatedState.players.slice(); // 1 array alloc
+          newPlayers[localIdx] = { ...predictedPlayer, rotation: currentRotation }; // 1 player alloc
+          worldToRender = { ...interpolatedState, players: newPlayers };
+        } else {
+          worldToRender = interpolatedState;
+        }
       }
     }
     
@@ -1517,7 +1519,7 @@ export class ClientApplication {
     } else {
       // Pass aiming state so cannon aim guides only draw when actively aiming
       this.renderSystem.playerIsAiming = this.inputManager?.isRightMouseDown ?? false;
-      this.renderSystem.localPlayerId = this.networkManager.getAssignedPlayerId();
+      this.renderSystem.localPlayerId = assignedPlayerId;
       this.renderSystem.playerAimAngleRelative = this.inputManager?.cannonAimAngleRelative ?? 0;
       this.renderSystem.selectedAmmoType = this.inputManager?.getLoadedAmmoType() ?? 0;
       this.renderSystem.npcTaskMap = this.uiManager.getNpcTaskMap();
@@ -1525,12 +1527,16 @@ export class ClientApplication {
       this.renderSystem.showGroupOverlay = this.inputManager?.isCtrlHeld() ?? false;
       this.renderSystem.activeWeaponGroups = this.inputManager?.activeWeaponGroups ?? new Set();
 
+      // Resolve local player once — reused by sword equip check, cursor cooldown ring, and UI render.
+      const localPlayer = assignedPlayerId !== null
+        ? worldToRender.players.find(p => p.id === assignedPlayerId) ?? null
+        : null;
+
       // Sword cooldown ring: only visible when sword is the active item and player is unmounted
-      const _localPlayer = worldToRender.players.find(p => p.id === this.networkManager.getAssignedPlayerId());
-      const _activeSlot  = _localPlayer?.inventory?.activeSlot ?? 0;
+      const _activeSlot  = localPlayer?.inventory?.activeSlot ?? 0;
       this.renderSystem.swordEquipped =
-        (_localPlayer?.inventory?.slots[_activeSlot]?.item === 'sword') &&
-        !(_localPlayer?.isMounted ?? false);
+        (localPlayer?.inventory?.slots[_activeSlot]?.item === 'sword') &&
+        !(localPlayer?.isMounted ?? false);
       if (this.explicitBuildMode) this.syncBuildModeState();
 
       // Render game world with hybrid state
@@ -1542,10 +1548,8 @@ export class ClientApplication {
         this.uiManager.setMousePos(mp.x, mp.y);
 
         // Pass sword cooldown state so RenderSystem can draw the cursor ring
-        const assignedId = this.networkManager.getAssignedPlayerId();
-        const pl = assignedId !== null ? worldToRender.players.find(p => p.id === assignedId) : null;
-        const activeSlot2 = pl?.inventory?.activeSlot ?? 0;
-        const activeItem2 = pl?.inventory?.slots[activeSlot2]?.item ?? 'none';
+        const activeSlot2 = localPlayer?.inventory?.activeSlot ?? 0;
+        const activeItem2 = localPlayer?.inventory?.slots[activeSlot2]?.item ?? 'none';
         if (activeItem2 === 'sword') {
           this.renderSystem.updateSwordCooldownCursor(mp, this.swordLastAttackMs, this.SWORD_COOLDOWN_MS);
         } else {
@@ -1554,10 +1558,7 @@ export class ClientApplication {
       }
 
       // Render UI overlay
-      const assignedPlayerId = this.networkManager.getAssignedPlayerId();
-      const playerShipId = assignedPlayerId !== null
-        ? (worldToRender.players.find(p => p.id === assignedPlayerId)?.carrierId ?? 0)
-        : 0;
+      const playerShipId = localPlayer?.carrierId ?? 0;
       const playerShip = playerShipId
         ? (worldToRender.ships.find(s => s.id === playerShipId) ?? null)
         : null;

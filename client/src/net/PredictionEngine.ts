@@ -414,32 +414,33 @@ export class PredictionEngine {
    */
   private interpolateShips(fromShips: any[], toShips: any[], alpha: number): any[] {
     const result = [];
-    
-    // DEBUG: Log ship count mismatch
+
+    // Build O(1) lookup to avoid O(N²) .find() per ship
+    const fromById = new Map<number, any>();
+    for (const s of fromShips) fromById.set(s.id, s);
+
     if (fromShips.length !== toShips.length) {
       console.warn(`⚠️ Ship count mismatch! From: ${fromShips.length}, To: ${toShips.length}`);
     }
-    
+
     for (const toShip of toShips) {
-      const fromShip = fromShips.find(s => s.id === toShip.id);
-      
+      const fromShip = fromById.get(toShip.id);
+
       if (!fromShip) {
         console.warn(`⚠️ Ship ${toShip.id} missing in from state - can't interpolate, using toShip directly`);
         result.push(toShip);
         continue;
       }
-      
-      const interpolated = {
+
+      result.push({
         ...toShip,
         position: this.lerpVec2(fromShip.position, toShip.position, alpha),
         velocity: this.lerpVec2(fromShip.velocity, toShip.velocity, alpha),
         rotation: this.lerpAngle(fromShip.rotation, toShip.rotation, alpha),
         angularVelocity: fromShip.angularVelocity + (toShip.angularVelocity - fromShip.angularVelocity) * alpha
-      };
-      
-      result.push(interpolated);
+      });
     }
-    
+
     return result;
   }
   
@@ -448,22 +449,26 @@ export class PredictionEngine {
    */
   private interpolatePlayers(fromPlayers: any[], toPlayers: any[], alpha: number): any[] {
     const result = [];
-    
+
+    // Build O(1) lookup to avoid O(N²) .find() per player
+    const fromById = new Map<number, any>();
+    for (const p of fromPlayers) fromById.set(p.id, p);
+
     for (const toPlayer of toPlayers) {
-      const fromPlayer = fromPlayers.find(p => p.id === toPlayer.id);
-      
+      const fromPlayer = fromById.get(toPlayer.id);
+
       if (!fromPlayer) {
         result.push(toPlayer);
         continue;
       }
-      
+
       result.push({
         ...toPlayer,
         position: this.lerpVec2(fromPlayer.position, toPlayer.position, alpha),
         velocity: this.lerpVec2(fromPlayer.velocity, toPlayer.velocity, alpha)
       });
     }
-    
+
     return result;
   }
   
@@ -472,22 +477,26 @@ export class PredictionEngine {
    */
   private interpolateCannonballs(fromBalls: any[], toBalls: any[], alpha: number): any[] {
     const result = [];
-    
+
+    // Build O(1) lookup to avoid O(N²) .find() per cannonball
+    const fromById = new Map<number, any>();
+    for (const b of fromBalls) fromById.set(b.id, b);
+
     for (const toBall of toBalls) {
-      const fromBall = fromBalls.find(b => b.id === toBall.id);
-      
+      const fromBall = fromById.get(toBall.id);
+
       if (!fromBall) {
         result.push(toBall);
         continue;
       }
-      
+
       result.push({
         ...toBall,
         position: this.lerpVec2(fromBall.position, toBall.position, alpha),
         velocity: this.lerpVec2(fromBall.velocity, toBall.velocity, alpha)
       });
     }
-    
+
     return result;
   }
   

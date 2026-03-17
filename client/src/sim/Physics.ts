@@ -62,7 +62,7 @@ export function simulate(prevWorld: WorldState, inputFrame: InputFrame, dt: numb
   
   for (const player of newWorld.players) {
     const events = updatePlayerWithDetection(player, newWorld.ships, newWorld.carrierDetection, inputFrame, dt, newWorld.timestamp);
-    allEvents.push(...events);
+    for (const ev of events) allEvents.push(ev);
   }
 
   // Store events for potential camera system usage (could be used by GameEngine)
