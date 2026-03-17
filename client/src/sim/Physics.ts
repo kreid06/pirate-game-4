@@ -78,13 +78,27 @@ export function simulate(prevWorld: WorldState, inputFrame: InputFrame, dt: numb
  * Update ship physics (forces and velocities, but not position integration)
  */
 function updateShipPhysics(ship: Ship, dt: number): void {
-  // Find helm module to get steering input
-  const helmModule = ship.modules.find(m => m.kind === 'helm');
+  // Single pass over modules: collect helm steering input and mast sail power simultaneously.
+  // Avoids a second O(N) scan (previously a separate .find() for helm + a for-loop for masts).
   let steeringInput = 0;
-  
-  if (helmModule && helmModule.moduleData) {
-    const helmData = helmModule.moduleData as any;
-    steeringInput = helmData.currentInput?.x || 0;
+  let totalSailPower = 0;
+  let sailCount = 0;
+
+  for (const module of ship.modules) {
+    if (module.kind === 'helm' && module.moduleData) {
+      const helmData = module.moduleData as any;
+      steeringInput = helmData.currentInput?.x || 0;
+    } else if (module.kind === 'mast' && module.moduleData) {
+      const mastData = module.moduleData as any;
+      const openness = mastData.openness || 0; // 0-100 sail openness
+      const efficiency = mastData.windEfficiency || 0.8; // How well this mast works
+
+      // Convert openness (0-100) to power contribution with exponential scaling
+      const opennessFactor = openness / 100; // 0-1
+      const sailPower = Math.pow(opennessFactor, 0.7) * efficiency; // Exponential curve for more power
+      totalSailPower += sailPower;
+      sailCount++;
+    }
   }
 
   // Calculate current speed for turning effectiveness
@@ -116,25 +130,6 @@ function updateShipPhysics(ship: Ship, dt: number): void {
   
   // Update rotation
   ship.rotation = AngleUtils.wrap(ship.rotation + ship.angularVelocity * dt);
-
-  // Calculate forward thrust based on sail configuration
-  let totalSailPower = 0;
-  let sailCount = 0;
-  
-  // Check all mast modules for sail configuration
-  for (const module of ship.modules) {
-    if (module.kind === 'mast' && module.moduleData) {
-      const mastData = module.moduleData as any;
-      const openness = mastData.openness || 0; // 0-100 sail openness
-      const efficiency = mastData.windEfficiency || 0.8; // How well this mast works
-      
-      // Convert openness (0-100) to power contribution with exponential scaling
-      const opennessFactor = openness / 100; // 0-1
-      const sailPower = Math.pow(opennessFactor, 0.7) * efficiency; // Exponential curve for more power
-      totalSailPower += sailPower;
-      sailCount++;
-    }
-  }
   
   // Calculate thrust force based on sail power - Reduced wind power
   const maxThrust = 8000; // Reduced from 15000

@@ -56,8 +56,8 @@ export class RenderSystem {
   private particleSystem: ParticleSystem;
   private effectRenderer: EffectRenderer;
   
-  // Render queue for layered rendering
-  private renderQueue: RenderQueueItem[] = [];
+  // Render queue for layered rendering (10 pre-allocated buckets: index 0 = layer -1, index 1-9 = layers 1-9)
+  private readonly renderBuckets: RenderQueueItem[][] = Array.from({length: 10}, () => []);
   
   // Hover state
   private mouseWorldPos: Vec2 | null = null;
@@ -106,8 +106,10 @@ export class RenderSystem {
   public showGroupOverlay: boolean = false;
   /** Currently selected weapon group indices — cannons in these groups are always highlighted. */
   public activeWeaponGroups: Set<number> = new Set();
-  /** Cached local player company for the current frame — set at start of queueWorldObjects. */
+  /** Cached local player company for the current frame — set at start of renderWorld. */
   private _localCompanyId: number = 0;
+  /** Cached local player for the current frame — set once in renderWorld, shared by all draw methods. */
+  private _cachedLocalPlayer: Player | null = null;
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
   public playerAimAngleRelative: number = 0;
   /** Currently selected ammo type (0 = cannonball, 1 = bar shot), set each frame by ClientApplication. */
@@ -1428,7 +1430,13 @@ export class RenderSystem {
   renderWorld(worldState: WorldState, camera: Camera, interpolationAlpha: number): void {
     // Clear canvas
     this.clearCanvas();
-    
+
+    // Cache local player once for the entire frame — shared by all detect* and draw* methods.
+    this._cachedLocalPlayer = this.localPlayerId != null
+      ? worldState.players.find(p => p.id === this.localPlayerId) ?? null
+      : null;
+    this._localCompanyId = this._cachedLocalPlayer?.companyId ?? 0;
+
     // Detect hovered module
     this.detectHoveredModule(worldState);
     this.detectHoveredNpc(worldState);
@@ -1814,14 +1822,11 @@ export class RenderSystem {
   }
   
   private queueWorldObjects(worldState: WorldState, camera: Camera, alpha: number): void {
-    // Clear render queue
-    this.renderQueue = [];
+    // Clear render queue buckets
+    for (const b of this.renderBuckets) b.length = 0;
 
-    // Cache local player's company for enemy-coloring this frame
-    const localPlayer = this.localPlayerId != null
-      ? worldState.players.find(p => p.id === this.localPlayerId)
-      : null;
-    this._localCompanyId = localPlayer?.companyId ?? 0;
+    // Cache local player's company for enemy-coloring this frame (already set at renderWorld entry)
+    // this._localCompanyId is updated there; no second find() needed.
 
     // ── Sinking ghost management ────────────────────────────────────────────
     // Track every live ship so we can detect despawns frame-to-frame.
@@ -2100,27 +2105,22 @@ export class RenderSystem {
   }
   
   private queueRenderItem(layer: number, layerName: string, renderFn: () => void, priority: number = 0): void {
-    this.renderQueue.push({
-      layer,
-      layerName,
-      renderFn,
-      priority
-    });
+    const idx = layer < 0 ? 0 : layer;
+    this.renderBuckets[idx].push({ layer, layerName, renderFn, priority });
   }
   
   private executeRenderQueue(): void {
-    // Sort by layer, then by priority
-    this.renderQueue.sort((a, b) => {
-      if (a.layer !== b.layer) return a.layer - b.layer;
-      return (a.priority || 0) - (b.priority || 0);
-    });
-    
-    // Execute all render functions
-    for (const item of this.renderQueue) {
-      try {
-        item.renderFn();
-      } catch (error) {
-        console.error(`Error rendering ${item.layerName}:`, error);
+    // Iterate pre-allocated layer buckets in order (bucket 0 = layer -1, 1-9 = layers 1-9).
+    // Sort within each bucket by priority only — far fewer comparisons than a full-queue sort.
+    for (const bucket of this.renderBuckets) {
+      if (bucket.length === 0) continue;
+      if (bucket.length > 1) bucket.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
+      for (const item of bucket) {
+        try {
+          item.renderFn();
+        } catch (error) {
+          console.error(`Error rendering ${item.layerName}:`, error);
+        }
       }
     }
   }
@@ -3610,9 +3610,7 @@ export class RenderSystem {
     if (!this.playerIsAiming) return;
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
-    const localPlayer = this.localPlayerId != null
-      ? worldState.players.find(p => p.id === this.localPlayerId)
-      : null;
+    const localPlayer = this._cachedLocalPlayer;
     if (!localPlayer || !localPlayer.isMounted || localPlayer.carrierId !== ship.id) return;
     if (localPlayer.mountedModuleId == null) return;
 
@@ -4021,10 +4019,8 @@ export class RenderSystem {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
     if (!this.playerIsAiming) return;
 
-    // Determine which cannons to show guides for based on what the local player is mounted to.
-    const localPlayer = this.localPlayerId != null
-      ? worldState.players.find(p => p.id === this.localPlayerId)
-      : null;
+    // Use frame-cached local player (set once in renderWorld).
+    const localPlayer = this._cachedLocalPlayer;
 
     // Player must be mounted and on this ship
     if (!localPlayer || !localPlayer.isMounted || localPlayer.carrierId !== ship.id) return;
@@ -6079,10 +6075,8 @@ export class RenderSystem {
     // Don't show hull tooltip when a module or NPC is already hovered
     if (this.hoveredModule || this.hoveredNpc) return;
 
-    // Determine the local player's current ship
-    const localPlayer = this.localPlayerId != null
-      ? worldState.players.find(p => p.id === this.localPlayerId)
-      : null;
+    // Determine the local player's current ship (use frame cache set in renderWorld)
+    const localPlayer = this._cachedLocalPlayer;
     const ownShipId = localPlayer?.carrierId ?? -1;
 
     // Ray-cast point-in-polygon helper (ship-local space)

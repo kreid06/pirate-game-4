@@ -6,7 +6,7 @@
  */
 
 import { NetworkConfig } from '../client/ClientConfig.js';
-import { WorldState, InputFrame, Npc } from '../sim/Types.js';
+import { WorldState, InputFrame, Npc, Ship } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { createShipAtPosition } from '../sim/ShipUtils.js';
 import { ShipModule, ModuleKind, MODULE_TYPE_MAP } from '../sim/modules.js';
@@ -439,7 +439,13 @@ export class NetworkManager {
   };
   
   private latency = 0;
-  
+
+  // ── Per-tick allocation caches ────────────────────────────────────────────
+  /** Brigantine hull/module template — created once, reused on every GAME_STATE message. */
+  private _shipTemplate: { planks: ShipModule[]; deck: ShipModule[]; ship: Ship } | null = null;
+  /** Plank-health lookup buffer — cleared and refilled each tick instead of being re-allocated. */
+  private readonly _plankHealthBuf = new Map<number, { health: number; maxHealth: number }>();
+
   // Event callbacks
   public onWorldStateReceived: ((worldState: WorldState) => void) | null = null;
   public onConnectionStateChanged: ((state: ConnectionState) => void) | null = null;
@@ -1373,11 +1379,16 @@ export class NetworkManager {
           tick: message.tick || 0,
           timestamp: Date.now(),
           ships: (message.ships || []).map((ship: any) => {
-            // Create proper ship with brigantine design (hull, deck, planks, modules)
-            // This ensures all ships have the correct visual appearance and collision geometry
-            const position = Vec2.from(ship.x || 0, ship.y || 0);
-            const rotation = ship.rotation || 0;
-            const properShip = createShipAtPosition(position, rotation);
+            // Use cached brigantine template — avoids recreating hull curve geometry on every tick.
+            if (!this._shipTemplate) {
+              const s = createShipAtPosition(Vec2.from(0, 0), 0);
+              this._shipTemplate = {
+                planks: s.modules.filter(m => m.kind === 'plank'),
+                deck:   s.modules.filter(m => m.kind === 'deck'),
+                ship:   s,
+              };
+            }
+            const tmpl = this._shipTemplate;
             
             // Parse modules from server if available
             // Server sends: modules: [{id, typeId, x, y, rotation}, ...]
@@ -1395,22 +1406,23 @@ export class NetworkManager {
             if (ship.modules && Array.isArray(ship.modules)) {
               // Separate gameplay modules from structural modules
               const gameplayModules: ShipModule[] = [];
-              const plankHealthUpdates = new Map<number, { health: number; maxHealth: number }>();
+              const plankHealthBuf = this._plankHealthBuf;
+              plankHealthBuf.clear();
+              let deckStateBitsFromServer: number | undefined;
               
               for (const mod of ship.modules) {
                 const kind = MODULE_TYPE_MAP.toKind(mod.typeId);
                 
                 if (kind === 'plank') {
                   // Plank: Server only sends health, client generates positions
-                  plankHealthUpdates.set(mod.id, {
+                  plankHealthBuf.set(mod.id, {
                     health: mod.health ?? 10000,
                     maxHealth: mod.maxHealth ?? 10000,
                   });
                 } else if (kind === 'deck') {
-                  // Deck: client generates polygon from hull; update fire-zone state bits from server
+                  // Deck: client generates polygon from hull; track state bits to apply after
                   if (mod.stateBits !== undefined) {
-                    const existingDeck = properShip.modules.find(m => m.id === mod.id && m.kind === 'deck');
-                    if (existingDeck) existingDeck.stateBits = mod.stateBits ?? 0;
+                    deckStateBitsFromServer = mod.stateBits ?? 0;
                   }
                 } else {
                   // Gameplay modules: Full transform data from server
@@ -1494,45 +1506,52 @@ export class NetworkManager {
                 }
               }
               
-              // Merge: Keep client-generated planks/deck, add server gameplay modules
-              const clientPlanks = properShip.modules.filter(m => m.kind === 'plank');
-              const clientDeck = properShip.modules.filter(m => m.kind === 'deck');
+              // Merge: Keep client-generated planks/deck (shallow-cloned from template) + server gameplay modules.
+              // Plank objects are cloned so health can be updated per-tick without mutating the template.
+              const clientDeck = tmpl.deck.map(p => ({
+                ...p,
+                stateBits: deckStateBitsFromServer !== undefined ? deckStateBitsFromServer : p.stateBits,
+              }) as ShipModule);
 
-              // Only include planks the server still reports — absence means destroyed
-              const serverPlankIds = new Set(plankHealthUpdates.keys());
-              const activePlanks = clientPlanks.filter(p => serverPlankIds.has(p.id));
+              // Only include planks the server still reports — absence means destroyed.
+              // Build with updated health directly (avoids separate filter + mutation loop).
+              const activePlanks = tmpl.planks
+                .filter(p => plankHealthBuf.has(p.id))
+                .map(p => {
+                  const d = plankHealthBuf.get(p.id)!;
+                  const md = p.moduleData;
+                  return {
+                    ...p,
+                    moduleData: md?.kind === 'plank'
+                      ? { ...md, health: d.health, maxHealth: d.maxHealth }
+                      : md,
+                  } as ShipModule;
+                });
 
-              // Update health on surviving planks
-              for (const plank of activePlanks) {
-                const serverData = plankHealthUpdates.get(plank.id);
-                if (serverData !== undefined && plank.moduleData && plank.moduleData.kind === 'plank') {
-                  plank.moduleData.health = serverData.health;
-                  plank.moduleData.maxHealth = serverData.maxHealth;
-                }
-              }
-              
               // Combine: client planks/deck + server gameplay modules
               serverModules = [...clientDeck, ...activePlanks, ...gameplayModules];
             }
             
             // Override with server's authoritative state
             return {
-              ...properShip,
-              id: ship.id || properShip.id, // Use server-assigned ship ID
+              ...tmpl.ship,
+              id: ship.id || 0,
+              position: Vec2.from(ship.x || 0, ship.y || 0),
+              rotation: ship.rotation || 0,
               velocity: Vec2.from(ship.velocity_x || 0, ship.velocity_y || 0),
               angularVelocity: ship.angular_velocity || 0,
               
               // Use server modules if provided, otherwise keep client defaults
-              modules: serverModules || properShip.modules,
+              modules: serverModules || tmpl.ship.modules,
               
               // Parse physics properties from server (override defaults if provided)
               // Server sends: mass, moment_of_inertia, max_speed, turn_rate, water_drag, angular_drag
-              mass: ship.mass ?? properShip.mass,
-              momentOfInertia: ship.moment_of_inertia ?? properShip.momentOfInertia,
-              maxSpeed: ship.max_speed ?? properShip.maxSpeed,
-              turnRate: ship.turn_rate ?? properShip.turnRate,
-              waterDrag: ship.water_drag ?? properShip.waterDrag,
-              angularDrag: ship.angular_drag ?? properShip.angularDrag,
+              mass: ship.mass ?? tmpl.ship.mass,
+              momentOfInertia: ship.moment_of_inertia ?? tmpl.ship.momentOfInertia,
+              maxSpeed: ship.max_speed ?? tmpl.ship.maxSpeed,
+              turnRate: ship.turn_rate ?? tmpl.ship.turnRate,
+              waterDrag: ship.water_drag ?? tmpl.ship.waterDrag,
+              angularDrag: ship.angular_drag ?? tmpl.ship.angularDrag,
               rudderAngle: ship.rudder_angle ?? 0,
               cannonAmmo: ship.ammo ?? 0,
               infiniteAmmo: ship.infiniteAmmo ?? true,
@@ -1559,7 +1578,7 @@ export class NetworkManager {
                   ship.levelStats.attrCaps?.crew       ?? 50,
                   ship.levelStats.attrCaps?.sturdiness ?? 25,
                 ],
-              } : properShip.levelStats,
+              } : tmpl.ship.levelStats,
             };
           }),
           players: (message.players || []).map((player: any) => ({
@@ -1647,24 +1666,6 @@ export class NetworkManager {
           })),
           carrierDetection: new Map() // Will be populated as needed
         };
-        
-        // Debug: Log cannonballs received
-        if (worldState.cannonballs.length > 0) {
-          console.log(`💥 Received ${worldState.cannonballs.length} cannonballs:`, worldState.cannonballs.map(cb => ({
-            id: cb.id,
-            pos: `(${cb.position.x.toFixed(1)}, ${cb.position.y.toFixed(1)})`,
-            vel: `(${cb.velocity.x.toFixed(1)}, ${cb.velocity.y.toFixed(1)})`
-          })));
-        }
-        
-        
-        // Debug: Log ship and player data
-        if (worldState.ships.length > 0) {
-          const ship = worldState.ships[0];
-        }
-        if (worldState.players.length > 0) {
-          const player = worldState.players[0];
-        }
         
         this.onWorldStateReceived?.(worldState);
         break;
