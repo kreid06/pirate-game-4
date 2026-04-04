@@ -1081,7 +1081,7 @@ static int hull_vertex_to_plank_index(int v) {
 }
 
 // Find the simulation module index that a breaching cannonball hits.
-// Uses enlarged hit radius to catch fast-moving projectiles (500 px/s @ 30 Hz = ~17 px/tick).
+// Uses slightly enlarged hit radius to account for fast-moving projectiles at 30 Hz.
 // lx/ly are in ship-local server units.
 // Returns -1 if no module is close enough.
 static int find_module_hit(const struct Ship* ship, float lx, float ly) {
@@ -1092,19 +1092,19 @@ static int find_module_hit(const struct Ship* ship, float lx, float ly) {
             mod->type_id != MODULE_TYPE_HELM)   continue;
         if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
 
-        // Enlarged radius to account for fast projectiles (500 px/s @ 30 Hz)
-        // Base radius + projectile speed per tick
+        // Moderately enlarged radius to catch fast projectiles without false positives
+        // Cannonballs travel ~17 client px/tick at 30 Hz (500 px/s / 30)
         float radius;
         switch (mod->type_id) {
-            case MODULE_TYPE_CANNON: radius = CLIENT_TO_SERVER(40.0f); break; // Was 20, now 40
-            case MODULE_TYPE_MAST:   radius = CLIENT_TO_SERVER(45.0f); break; // Was 30, now 45
-            case MODULE_TYPE_HELM:   radius = CLIENT_TO_SERVER(40.0f); break; // Was 20, now 40
+            case MODULE_TYPE_CANNON: radius = CLIENT_TO_SERVER(28.0f); break; // Was 20, now 28 (40% larger)
+            case MODULE_TYPE_MAST:   radius = CLIENT_TO_SERVER(38.0f); break; // Was 30, now 38 (25% larger)
+            case MODULE_TYPE_HELM:   radius = CLIENT_TO_SERVER(28.0f); break; // Was 20, now 28 (40% larger)
             default:                 radius = 0.0f;                    break;
         }
         float mx = Q16_TO_FLOAT(mod->local_pos.x);
         float my = Q16_TO_FLOAT(mod->local_pos.y);
         
-        // Circle collision check with enlarged radius
+        // Circle collision check with moderately enlarged radius
         float dx = mx - lx, dy = my - ly;
         if (dx*dx + dy*dy < radius*radius)
             return m;
@@ -1308,6 +1308,11 @@ void handle_projectile_collisions(struct Sim* sim) {
             if (!inside_hull) continue;
 
             // ---- Ball is inside the hull polygon ----
+            
+            // Log whether this is a first-time entry or already inside
+            if (proj->inside_ship_id != ship->id) {
+                log_info("🎯 Projectile %u entering hull of ship %u for first time", proj->id, ship->id);
+            }
 
             if (proj->inside_ship_id == ship->id) {
                 // ---- Deck pass-through: damage deck once per hull entry (priority) ----
