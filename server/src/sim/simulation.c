@@ -1302,6 +1302,7 @@ void handle_projectile_collisions(struct Sim* sim) {
             if (proj->inside_ship_id == ship->id && !inside_hull) {
                 proj->inside_ship_id = 0;
                 if (proj->last_hit_module_id == 200) proj->last_hit_module_id = 0; // clear deck hit flag
+                log_info("🚪 Projectile %u exited hull of ship %u", proj->id, ship->id);
                 continue;
             }
 
@@ -1311,7 +1312,11 @@ void handle_projectile_collisions(struct Sim* sim) {
             
             // Log whether this is a first-time entry or already inside
             if (proj->inside_ship_id != ship->id) {
-                log_info("🎯 Projectile %u entering hull of ship %u for first time", proj->id, ship->id);
+                log_info("🎯 Projectile %u entering hull of ship %u for first time (lx=%.1f, ly=%.1f)", 
+                         proj->id, ship->id, lx, ly);
+            } else {
+                log_info("🔄 Projectile %u already inside ship %u hull (lx=%.1f, ly=%.1f)", 
+                         proj->id, ship->id, lx, ly);
             }
 
             if (proj->inside_ship_id == ship->id) {
@@ -1486,13 +1491,32 @@ void handle_projectile_collisions(struct Sim* sim) {
                 float d2 = vx*vx + vy*vy;
                 if (d2 < nearest_d2) { nearest_d2 = d2; nearest_v = v; }
             }
+            
+            float nearest_distance = sqrtf(nearest_d2);
+            
+            // Only check for plank hit if cannonball is NEAR the hull boundary
+            // At 30 Hz, cannonballs travel ~17 client px/tick (500 px/s / 30)
+            // Use 2x that as safety margin = 34 client pixels
+            const float MAX_PLANK_HIT_DISTANCE = CLIENT_TO_SERVER(34.0f);
+            
+            log_info("🎯 Projectile %u crossing hull of ship %u: nearest vertex=%d, distance=%.1f (max=%.1f)",
+                     proj->id, ship->id, nearest_v, nearest_distance, MAX_PLANK_HIT_DISTANCE);
+            
+            if (nearest_distance > MAX_PLANK_HIT_DISTANCE) {
+                // Cannonball is too far from hull edge - skipped past planks in one tick
+                // This happens with fast projectiles at 30 Hz tick rate
+                // Mark as inside and check for interior modules on next iteration
+                log_info("⚠️ Projectile %u too far from hull edge (%.1f > %.1f) - skipped planks, now inside",
+                         proj->id, nearest_distance, MAX_PLANK_HIT_DISTANCE);
+                proj->inside_ship_id = ship->id;
+                // Don't remove projectile - it will be checked for interior module hits
+                // on the next iteration of the ship loop (or next tick)
+                continue;
+            }
 
             // Map vertex → plank module
             int plank_idx = hull_vertex_to_plank_index(nearest_v);
             uint16_t plank_module_id = (uint16_t)(100 + plank_idx);
-            
-            log_info("🎯 Projectile %u crossing hull of ship %u: nearest vertex=%d, plank_id=%u, distance=%.1f",
-                     proj->id, ship->id, nearest_v, plank_module_id, sqrtf(nearest_d2));
 
             // Find and destroy the plank module
             int hit_plank_idx = -1;
