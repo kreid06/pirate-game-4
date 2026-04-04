@@ -1081,7 +1081,7 @@ static int hull_vertex_to_plank_index(int v) {
 }
 
 // Find the simulation module index that a breaching cannonball hits.
-// Uses slightly enlarged hit radius to account for fast-moving projectiles at 30 Hz.
+// Uses original hit radius - projectiles must actually be inside the hull to hit modules.
 // lx/ly are in ship-local server units.
 // Returns -1 if no module is close enough.
 static int find_module_hit(const struct Ship* ship, float lx, float ly) {
@@ -1092,19 +1092,18 @@ static int find_module_hit(const struct Ship* ship, float lx, float ly) {
             mod->type_id != MODULE_TYPE_HELM)   continue;
         if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
 
-        // Moderately enlarged radius to catch fast projectiles without false positives
-        // Cannonballs travel ~17 client px/tick at 30 Hz (500 px/s / 30)
+        // Use original tight hit radius - projectile must be truly inside
         float radius;
         switch (mod->type_id) {
-            case MODULE_TYPE_CANNON: radius = CLIENT_TO_SERVER(28.0f); break; // Was 20, now 28 (40% larger)
-            case MODULE_TYPE_MAST:   radius = CLIENT_TO_SERVER(38.0f); break; // Was 30, now 38 (25% larger)
-            case MODULE_TYPE_HELM:   radius = CLIENT_TO_SERVER(28.0f); break; // Was 20, now 28 (40% larger)
+            case MODULE_TYPE_CANNON: radius = CLIENT_TO_SERVER(15.0f); break; // Reduced from 28
+            case MODULE_TYPE_MAST:   radius = CLIENT_TO_SERVER(25.0f); break; // Reduced from 38
+            case MODULE_TYPE_HELM:   radius = CLIENT_TO_SERVER(15.0f); break; // Reduced from 28
             default:                 radius = 0.0f;                    break;
         }
         float mx = Q16_TO_FLOAT(mod->local_pos.x);
         float my = Q16_TO_FLOAT(mod->local_pos.y);
         
-        // Circle collision check with moderately enlarged radius
+        // Circle collision check with tight radius
         float dx = mx - lx, dy = my - ly;
         if (dx*dx + dy*dy < radius*radius)
             return m;
@@ -1376,6 +1375,9 @@ void handle_projectile_collisions(struct Sim* sim) {
                 if (!removed && hit_m >= 0) {
                     ShipModule* hit_mod = &ship->modules[hit_m];
                     uint16_t mod_id = hit_mod->id;
+                    
+                    log_info("🎯 Interior module check: projectile %u at (%.1f, %.1f) hit module %u (type %d)",
+                             proj->id, lx, ly, mod_id, hit_mod->type_id);
 
                     float dmg_before = (float)hit_mod->health;
                     q16_t effective_damage = Q16_FROM_FLOAT(
