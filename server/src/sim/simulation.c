@@ -1580,9 +1580,36 @@ void handle_projectile_collisions(struct Sim* sim) {
                 removed = true;
             } else {
                 // --- Plank already removed: ball passes through the breach ---
+                // Apply hull damage when entering through an existing breach
+                int32_t hull_dmg = (int32_t)(Q16_TO_FLOAT(proj->damage) * ship_level_resistance_mult(&ship->level_stats));
+                ship->hull_health -= hull_dmg;
+                if (ship->hull_health < 0) ship->hull_health = 0;
+                
+                bool hull_destroyed = (ship->hull_health == 0);
+                
+                log_info("🕳️  Projectile %u entered breach at plank %u on ship %u — %d hull HP remaining",
+                         proj->id, plank_module_id, ship->id, ship->hull_health);
+                
+                if (hull_destroyed && sim->hit_event_count < MAX_HIT_EVENTS) {
+                    struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                    ev->ship_id         = ship->id;
+                    ev->module_id       = 0;
+                    ev->is_breach       = false;
+                    ev->is_sink         = true;
+                    ev->destroyed       = false;
+                    ev->damage_dealt    = (float)hull_dmg;
+                    ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                    ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                    ev->shooter_ship_id = proj->firing_ship_id;
+                }
+                
                 proj->inside_ship_id = ship->id;
-                log_info("🕳️  Projectile %u entered breach at plank %u on ship %u — traveling inside",
-                         proj->id, plank_module_id, ship->id);
+                
+                // Remove projectile after passing through breach (absorbed by hull)
+                memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                        (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                sim->projectile_count--;
+                removed = true;
             }
         }
 
