@@ -1081,7 +1081,9 @@ static int hull_vertex_to_plank_index(int v) {
 }
 
 // Find the simulation module index that a breaching cannonball hits.
-// lx/ly are in ship-local server units.  Returns -1 if no module is close enough.
+// Uses enlarged hit radius to catch fast-moving projectiles (500 px/s @ 30 Hz = ~17 px/tick).
+// lx/ly are in ship-local server units.
+// Returns -1 if no module is close enough.
 static int find_module_hit(const struct Ship* ship, float lx, float ly) {
     for (int m = 0; m < ship->module_count; m++) {
         const ShipModule* mod = &ship->modules[m];
@@ -1090,15 +1092,19 @@ static int find_module_hit(const struct Ship* ship, float lx, float ly) {
             mod->type_id != MODULE_TYPE_HELM)   continue;
         if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
 
+        // Enlarged radius to account for fast projectiles (500 px/s @ 30 Hz)
+        // Base radius + projectile speed per tick
         float radius;
         switch (mod->type_id) {
-            case MODULE_TYPE_CANNON: radius = CLIENT_TO_SERVER(20.0f); break;
-            case MODULE_TYPE_MAST:   radius = CLIENT_TO_SERVER(30.0f); break;
-            case MODULE_TYPE_HELM:   radius = CLIENT_TO_SERVER(20.0f); break;
+            case MODULE_TYPE_CANNON: radius = CLIENT_TO_SERVER(40.0f); break; // Was 20, now 40
+            case MODULE_TYPE_MAST:   radius = CLIENT_TO_SERVER(45.0f); break; // Was 30, now 45
+            case MODULE_TYPE_HELM:   radius = CLIENT_TO_SERVER(40.0f); break; // Was 20, now 40
             default:                 radius = 0.0f;                    break;
         }
         float mx = Q16_TO_FLOAT(mod->local_pos.x);
         float my = Q16_TO_FLOAT(mod->local_pos.y);
+        
+        // Circle collision check with enlarged radius
         float dx = mx - lx, dy = my - ly;
         if (dx*dx + dy*dy < radius*radius)
             return m;
