@@ -238,6 +238,7 @@ export class ClientApplication {
       };
       this.networkManager.onModuleDamaged = (shipId, moduleId, damage, hitX, hitY) => {
         // Visual effects only — health is authoritative from server GAME_STATE updates
+        console.log(`🎨 onModuleDamaged callback: ship ${shipId} module ${moduleId} damage ${damage} at (${hitX}, ${hitY})`);
         let worldX: number | null = (hitX !== undefined) ? hitX : null;
         let worldY: number | null = (hitY !== undefined) ? hitY : null;
 

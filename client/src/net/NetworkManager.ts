@@ -1754,6 +1754,7 @@ export class NetworkManager {
         const damage: number = message.damage || 0;
         const hitX: number | undefined = message.x;
         const hitY: number | undefined = message.y;
+        console.log(`💥 MODULE_DAMAGED: ship ${shipId} module ${moduleId} took ${damage} damage at (${hitX}, ${hitY})`);
         this.onModuleDamaged?.(shipId, moduleId, damage, hitX, hitY);
         break;
       }
