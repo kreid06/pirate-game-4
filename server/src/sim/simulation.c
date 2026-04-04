@@ -1490,6 +1490,9 @@ void handle_projectile_collisions(struct Sim* sim) {
             // Map vertex → plank module
             int plank_idx = hull_vertex_to_plank_index(nearest_v);
             uint16_t plank_module_id = (uint16_t)(100 + plank_idx);
+            
+            log_info("🎯 Projectile %u crossing hull of ship %u: nearest vertex=%d, plank_id=%u, distance=%.1f",
+                     proj->id, ship->id, nearest_v, plank_module_id, sqrtf(nearest_d2));
 
             // Find and destroy the plank module
             int hit_plank_idx = -1;
@@ -1498,6 +1501,11 @@ void handle_projectile_collisions(struct Sim* sim) {
                     hit_plank_idx = m;
                     break;
                 }
+            }
+            
+            if (hit_plank_idx < 0) {
+                log_info("⚠️ Plank %u not found in ship %u modules (may already be destroyed)", 
+                         plank_module_id, ship->id);
             }
 
             if (hit_plank_idx >= 0 && !(ship->modules[hit_plank_idx].state_bits & MODULE_STATE_DESTROYED)) {
