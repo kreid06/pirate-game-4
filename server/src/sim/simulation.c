@@ -1195,8 +1195,40 @@ void handle_projectile_collisions(struct Sim* sim) {
             float dist_sq = dx*dx + dy*dy;
             float brad = Q16_TO_FLOAT(ship->bounding_radius);
             if (dist_sq > brad * brad) {
-                // Ball is outside bounding circle - clear breach flag if it was set for this ship
-                if (proj->inside_ship_id == ship->id) proj->inside_ship_id = 0;
+                // Ball is outside bounding circle.
+                // If it was marked as inside this ship, it passed through without hitting a
+                // module (e.g. it skipped past every interior module).  Absorb it now and
+                // apply generic hull damage so the cannonball never disappears silently.
+                if (proj->inside_ship_id == ship->id) {
+                    log_info("⚠️  Projectile %u exited bounding circle of ship %u without hitting a module — applying hull damage",
+                             proj->id, ship->id);
+                    proj->inside_ship_id = 0;
+                    // Apply hull damage
+                    float raw_dmg = Q16_TO_FLOAT(proj->damage) * ship_level_resistance_mult(&ship->level_stats);
+                    int32_t hull_hp = ship->hull_health - (int32_t)raw_dmg;
+                    if (hull_hp < 0) hull_hp = 0;
+                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                        ev->ship_id         = ship->id;
+                        ev->module_id       = 0; // no module — hull direct
+                        ev->is_breach       = true;
+                        ev->is_sink         = (ship->hull_health > 0 && hull_hp == 0);
+                        ev->destroyed       = false;
+                        ev->damage_dealt    = (float)(ship->hull_health - hull_hp);
+                        ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                        ev->shooter_ship_id = proj->firing_ship_id;
+                    }
+                    ship->hull_health = hull_hp;
+                    if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                        if (attacker) attacker->level_stats.xp += 5u;
+                    }
+                    memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                            (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                    sim->projectile_count--;
+                    removed = true;
+                }
                 continue;
             }
 
@@ -1308,6 +1340,7 @@ void handle_projectile_collisions(struct Sim* sim) {
             // If ball was marked as breaching this ship but has now exited the hull, clear it
             if (proj->inside_ship_id == ship->id && !inside_hull) {
                 proj->inside_ship_id = 0;
+                proj->ticks_inside = 0;
                 if (proj->last_hit_module_id == 200) proj->last_hit_module_id = 0; // clear deck hit flag
                 log_info("🚪 Projectile %u exited hull of ship %u", proj->id, ship->id);
                 continue;
@@ -1321,6 +1354,7 @@ void handle_projectile_collisions(struct Sim* sim) {
             if (proj->inside_ship_id != ship->id) {
                 log_info("🎯 Projectile %u entering hull of ship %u for first time (lx=%.1f, ly=%.1f)", 
                          proj->id, ship->id, lx, ly);
+                proj->ticks_inside = 0; // reset counter on fresh entry
             } else {
                 log_info("🔄 Projectile %u already inside ship %u hull (lx=%.1f, ly=%.1f)", 
                          proj->id, ship->id, lx, ly);
@@ -1458,8 +1492,40 @@ void handle_projectile_collisions(struct Sim* sim) {
                     sim->projectile_count--;
                     removed = true;
                 }
-                // No module hit yet — ball keeps traveling
-                continue;
+                // No module hit this tick — ball keeps traveling inside the hull.
+                // Allow it to continue for up to 3 ticks (100ms) before forcing absorption.
+                // This gives the cannonball a chance to reach an interior module on the
+                // next tick without silently disappearing if it never hits one.
+                proj->ticks_inside++;
+                if (proj->ticks_inside >= 3) {
+                    log_info("⚠️  Projectile %u inside ship %u for %u ticks with no module hit — applying hull damage",
+                             proj->id, ship->id, proj->ticks_inside);
+                    float raw_dmg = Q16_TO_FLOAT(proj->damage) * ship_level_resistance_mult(&ship->level_stats);
+                    int32_t hull_hp = ship->hull_health - (int32_t)raw_dmg;
+                    if (hull_hp < 0) hull_hp = 0;
+                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                        ev->ship_id         = ship->id;
+                        ev->module_id       = 0;
+                        ev->is_breach       = true;
+                        ev->is_sink         = (ship->hull_health > 0 && hull_hp == 0);
+                        ev->destroyed       = false;
+                        ev->damage_dealt    = (float)(ship->hull_health - hull_hp);
+                        ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                        ev->shooter_ship_id = proj->firing_ship_id;
+                    }
+                    ship->hull_health = hull_hp;
+                    if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                        if (attacker) attacker->level_stats.xp += 5u;
+                    }
+                    memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                            (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                    sim->projectile_count--;
+                    removed = true;
+                }
+                if (!removed) continue;
             }
 
             // ---- Ball is entering the hull for the first time — check entry plank ----
@@ -1697,8 +1763,37 @@ void handle_projectile_collisions(struct Sim* sim) {
                     sim->projectile_count--;
                     removed = true;
                 } else {
-                    // No interior module hit - projectile continues through the ship
-                    // It will be checked again next tick or removed when it exits the hull
+                    // No interior module hit — cannonball passes through the open hull.
+                    // Absorb it here and apply direct hull damage so it never silently
+                    // disappears.  This covers:
+                    //   • a breach with no cannon/mast/helm in the path
+                    //   • a plank that was fully removed but no module was nearby
+                    log_info("⚠️  Projectile %u passed through breach on ship %u with no module hit — applying hull damage",
+                             proj->id, ship->id);
+                    float raw_dmg = Q16_TO_FLOAT(proj->damage) * ship_level_resistance_mult(&ship->level_stats);
+                    int32_t hull_hp = ship->hull_health - (int32_t)raw_dmg;
+                    if (hull_hp < 0) hull_hp = 0;
+                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                        ev->ship_id         = ship->id;
+                        ev->module_id       = 0;  // hull direct — no specific module
+                        ev->is_breach       = true;
+                        ev->is_sink         = (ship->hull_health > 0 && hull_hp == 0);
+                        ev->destroyed       = false;
+                        ev->damage_dealt    = (float)(ship->hull_health - hull_hp);
+                        ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                        ev->shooter_ship_id = proj->firing_ship_id;
+                    }
+                    ship->hull_health = hull_hp;
+                    if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                        if (attacker) attacker->level_stats.xp += 5u;
+                    }
+                    memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                            (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                    sim->projectile_count--;
+                    removed = true;
                 }
             }
         }
