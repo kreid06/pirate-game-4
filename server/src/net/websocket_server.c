@@ -9686,8 +9686,11 @@ void websocket_server_tick(float dt) {
                             /* no proj_consumed, no break — keep scanning */
                         } else {
                             /* Cannonball/grapeshot/canister: physical impact only — no ignition.
-                             * Module HP damage is handled by the sim layer collision. */
-                            proj_consumed = true;
+                             * Module HP damage and projectile removal are handled by the sim
+                             * layer collision (handle_projectile_collisions). Do NOT consume
+                             * the projectile here or the sim will never see it and despawn
+                             * logs/damage will silently be skipped. */
+                            (void)0;
                         }
                         #undef SET_MODULE_FIRE
                     }

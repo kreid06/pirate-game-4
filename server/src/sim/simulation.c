@@ -1605,8 +1605,8 @@ void handle_projectile_collisions(struct Sim* sim) {
                 // Allow it to continue for up to 3 ticks (100ms) before forcing absorption.
                 // This gives the cannonball a chance to reach an interior module on the
                 // next tick without silently disappearing if it never hits one.
-                proj->ticks_inside++;
-                if (proj->ticks_inside >= 3) {
+                if (!removed) proj->ticks_inside++;
+                if (!removed && proj->ticks_inside >= 3) {
                     log_info("⚠️  Projectile %u inside ship %u for %u ticks with no module hit — applying hull damage",
                              proj->id, ship->id, proj->ticks_inside);
                     float raw_dmg = Q16_TO_FLOAT(proj->damage) * ship_level_resistance_mult(&ship->level_stats);
@@ -1634,7 +1634,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                     sim->projectile_count--;
                     removed = true;
                 }
-                if (!removed) continue;
+                continue; // either consumed or still traveling inside — skip entry-plank code
             }
 
             // ---- Ball is entering the hull for the first time — check entry plank ----
@@ -1656,13 +1656,14 @@ void handle_projectile_collisions(struct Sim* sim) {
                     ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
                     ev->shooter_ship_id = proj->firing_ship_id;
                 }
+                int32_t old_hull_hp = ship->hull_health;
                 ship->hull_health = hp;
                 if (proj->firing_ship_id != INVALID_ENTITY_ID) {
                     struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
                     if (attacker) attacker->level_stats.xp += 20u;
                 }
                 log_info("💣 DESPAWN proj %u — ghost ship %u direct hull hit, HP %d->%d pos=(%.2f,%.2f)",
-                         proj->id, ship->id, ship->hull_health, hp,
+                         proj->id, ship->id, old_hull_hp, hp,
                          Q16_TO_FLOAT(proj->position.x), Q16_TO_FLOAT(proj->position.y));
                 memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                         (sim->projectile_count - i - 1) * sizeof(struct Projectile));
