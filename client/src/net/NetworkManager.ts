@@ -1781,6 +1781,19 @@ export class NetworkManager {
         break;
       }
 
+      case 'HULL_HIT': {
+        // Cannonball passed through the hull interior without hitting a specific module.
+        // Still show explosion + damage number at the hit position.
+        const hullShipId: number = message.shipId || 0;
+        const hullDmg: number = message.damage || 0;
+        const hullHitX: number | undefined = message.x;
+        const hullHitY: number | undefined = message.y;
+        console.log(`💥 HULL_HIT: ship ${hullShipId} took ${hullDmg} hull damage at (${hullHitX}, ${hullHitY})`);
+        // Re-use onModuleDamaged with moduleId=0 — ClientApplication handles id=0 gracefully
+        this.onModuleDamaged?.(hullShipId, 0, hullDmg, hullHitX, hullHitY);
+        break;
+      }
+
       case 'SHIP_SINK': {
         const sunkShipId: number = message.shipId || 0;
         console.log(`🌊 SHIP_SINK: ship ${sunkShipId} has sunk!`);

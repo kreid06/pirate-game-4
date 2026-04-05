@@ -9260,6 +9260,18 @@ void websocket_server_tick(float dt) {
                     if (breach_victim && breach_victim->ship_type == SHIP_TYPE_GHOST
                         && ev->destroyed && ev->module_id >= 200) continue;
                 }
+                // module_id == 0 means direct hull damage (no specific module was hit).
+                // Emit a HULL_HIT so the client can show an explosion at the position.
+                if (ev->module_id == 0) {
+                    snprintf(msg, sizeof(msg),
+                        "{\"type\":\"HULL_HIT\",\"shipId\":%u,"
+                        "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                        ev->ship_id, ev->damage_dealt,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                    log_info("📤 Broadcasting HULL_HIT: ship %u damage %.0f at (%.1f, %.1f)",
+                        ev->ship_id, ev->damage_dealt,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                } else
                 if (ev->destroyed) {
                     // Interior module destroyed through breach: remove from SimpleShip and broadcast MODULE_HIT
                     SimpleShip* simple = find_ship(ev->ship_id);

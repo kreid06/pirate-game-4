@@ -261,7 +261,8 @@ export class ClientApplication {
           // Impact explosion for hull/plank and cannon hits
           const hitShipDmg = ws?.ships.find(s => s.id === shipId);
           const hitModDmg  = hitShipDmg?.modules.find(m => m.id === moduleId);
-          if (hitModDmg?.kind === 'plank' || hitModDmg?.kind === 'cannon') {
+          // moduleId === 0 → direct hull hit (no specific module); always show explosion
+          if (moduleId === 0 || hitModDmg?.kind === 'plank' || hitModDmg?.kind === 'cannon') {
             this.renderSystem.spawnExplosion(Vec2.from(worldX, worldY), 0.5);
           }
           // If the hit module is a mast, spawn sail fiber shred particles
