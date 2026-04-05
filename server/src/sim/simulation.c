@@ -1423,6 +1423,9 @@ void handle_projectile_collisions(struct Sim* sim) {
 
                     if (center_hit) {
                         // Bar shot hit the mast pole directly — stop it here.
+                        log_info("💣 DESPAWN proj %u — bar shot hit mast pole (mod %u) on ship %u pos=(%.2f,%.2f)",
+                                 proj->id, mod_id, ship->id,
+                                 Q16_TO_FLOAT(proj->position.x), Q16_TO_FLOAT(proj->position.y));
                         memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                                 (sim->projectile_count - i - 1) * sizeof(struct Projectile));
                         sim->projectile_count--;
@@ -1590,6 +1593,9 @@ void handle_projectile_collisions(struct Sim* sim) {
                             if (attacker)
                                 attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
                         }
+                    } else {
+                        log_info("💣 DESPAWN proj %u — inside hull, hit module %u (type %d) on ship %u — %d HP remaining",
+                                 proj->id, mod_id, hit_mod->type_id, ship->id, (int)hit_mod->health);
                     }
 
                     // Projectile absorbed regardless of whether module was destroyed
@@ -1658,6 +1664,9 @@ void handle_projectile_collisions(struct Sim* sim) {
                     struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
                     if (attacker) attacker->level_stats.xp += 20u;
                 }
+                log_info("💣 DESPAWN proj %u — ghost ship %u direct hull hit, HP %d->%d pos=(%.2f,%.2f)",
+                         proj->id, ship->id, ship->hull_health, hp,
+                         Q16_TO_FLOAT(proj->position.x), Q16_TO_FLOAT(proj->position.y));
                 memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                         (sim->projectile_count - i - 1) * sizeof(struct Projectile));
                 sim->projectile_count--;
