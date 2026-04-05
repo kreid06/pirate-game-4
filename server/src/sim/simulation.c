@@ -1462,18 +1462,168 @@ void handle_projectile_collisions(struct Sim* sim) {
             if (!inside_hull) continue;
 
             // ---- Ball is inside the hull polygon ----
-            
-            // Log whether this is a first-time entry or already inside
+
+            // Log whether this is a first-time entry or already inside.
+            // NOTE: inside_ship_id is set HERE on first entry so the already-inside
+            // block runs immediately this tick.  Previously it was only set in the
+            // entry-plank else-branch, which meant the entry-plank code ran first
+            // and absorbed the ball before the interior-module check ever could.
             if (proj->inside_ship_id != ship->id) {
                 log_info("🎯 Projectile %u entering hull of ship %u for first time (lx=%.1f, ly=%.1f)", 
                          proj->id, ship->id, lx, ly);
-                proj->ticks_inside = 0; // reset counter on fresh entry
+                proj->inside_ship_id = ship->id; // mark as inside NOW
+                proj->ticks_inside = 0;
             } else {
                 log_info("🔄 Projectile %u already inside ship %u hull (lx=%.1f, ly=%.1f)", 
                          proj->id, ship->id, lx, ly);
             }
 
             if (proj->inside_ship_id == ship->id) {
+                // ── On the VERY FIRST TICK inside (ticks_inside==0 set during entry above),
+                // check the entry plank.  This replaces the old separate "entry plank" code path
+                // below the continue, which was unreachable after the inside_ship_id fix.
+                if (proj->ticks_inside == 0 && ship->company_id != 99) {
+                    // Determine the entry edge using the swept-segment approach, then map to a plank
+                    float prev_rel_x = Q16_TO_FLOAT(proj->prev_position.x) - Q16_TO_FLOAT(ship->position.x);
+                    float prev_rel_y = Q16_TO_FLOAT(proj->prev_position.y) - Q16_TO_FLOAT(ship->position.y);
+                    float prev_lx = prev_rel_x * cosf(-rot) - prev_rel_y * sinf(-rot);
+                    float prev_ly = prev_rel_x * sinf(-rot) + prev_rel_y * cosf(-rot);
+                    float vlx = Q16_TO_FLOAT(proj->velocity.x) * cosf(-rot)
+                              - Q16_TO_FLOAT(proj->velocity.y) * sinf(-rot);
+                    float vly = Q16_TO_FLOAT(proj->velocity.x) * sinf(-rot)
+                              + Q16_TO_FLOAT(proj->velocity.y) * cosf(-rot);
+
+                    int crossed_edge = swept_hull_edge_crossing(
+                        prev_lx, prev_ly, lx, ly,
+                        ship->hull_vertices, ship->hull_vertex_count);
+                    if (crossed_edge < 0) {
+                        crossed_edge = entry_edge_by_reverse_ray(
+                            lx, ly, vlx, vly,
+                            ship->hull_vertices, ship->hull_vertex_count);
+                        if (crossed_edge >= 0)
+                            log_info("🎯 Proj %u reverse-ray entry edge %d on ship %u",
+                                     proj->id, crossed_edge, ship->id);
+                    }
+                    int plank_idx;
+                    if (crossed_edge >= 0) {
+                        plank_idx = hull_vertex_to_plank_index(crossed_edge);
+                        log_info("🎯 Proj %u crossed hull edge %d → plank %d on ship %u",
+                                 proj->id, crossed_edge, plank_idx, ship->id);
+                    } else {
+                        int nearest_v = 0;
+                        float nearest_d2 = 1e30f;
+                        for (int v = 0; v < ship->hull_vertex_count; v++) {
+                            float vx2 = Q16_TO_FLOAT(ship->hull_vertices[v].x) - lx;
+                            float vy2 = Q16_TO_FLOAT(ship->hull_vertices[v].y) - ly;
+                            float d2 = vx2*vx2 + vy2*vy2;
+                            if (d2 < nearest_d2) { nearest_d2 = d2; nearest_v = v; }
+                        }
+                        plank_idx = hull_vertex_to_plank_index(nearest_v);
+                        log_info("🎯 Proj %u zero-vel fallback → plank %d on ship %u",
+                                 proj->id, plank_idx, ship->id);
+                    }
+
+                    uint16_t plank_module_id = (uint16_t)(100 + plank_idx);
+                    int hit_plank_idx = -1;
+                    for (uint8_t m = 0; m < ship->module_count; m++) {
+                        if (ship->modules[m].id == plank_module_id) { hit_plank_idx = m; break; }
+                    }
+
+                    if (hit_plank_idx >= 0 && !(ship->modules[hit_plank_idx].state_bits & MODULE_STATE_DESTROYED)) {
+                        ShipModule* hit_plank = &ship->modules[hit_plank_idx];
+                        float plank_hp_before = (float)hit_plank->health;
+                        q16_t effective_damage = Q16_FROM_FLOAT(
+                            Q16_TO_FLOAT(proj->damage)
+                            * ship_level_resistance_mult(&ship->level_stats));
+                        module_apply_damage(hit_plank, effective_damage);
+                        float plank_damage_dealt = plank_hp_before - (float)hit_plank->health;
+                        if (plank_damage_dealt < 0) plank_damage_dealt = 0;
+
+                        if (hit_plank->health <= 0) {
+                            log_info("🎯 Proj %u destroyed plank %u on ship %u",
+                                     proj->id, plank_module_id, ship->id);
+                            if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                                struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                                ev->ship_id = ship->id; ev->module_id = plank_module_id;
+                                ev->is_breach = false; ev->is_sink = false; ev->destroyed = true;
+                                ev->damage_dealt = plank_damage_dealt;
+                                ev->hit_x = Q16_TO_FLOAT(proj->position.x);
+                                ev->hit_y = Q16_TO_FLOAT(proj->position.y);
+                                ev->shooter_ship_id = proj->firing_ship_id;
+                            }
+                            if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                                struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                                if (attacker)
+                                    attacker->level_stats.xp += 10u + (uint32_t)(plank_damage_dealt / 100.0f);
+                            }
+                            memmove(&ship->modules[hit_plank_idx], &ship->modules[hit_plank_idx + 1],
+                                    (ship->module_count - hit_plank_idx - 1) * sizeof(ShipModule));
+                            ship->module_count--;
+                        } else {
+                            log_info("🎯 Proj %u hit plank %u on ship %u — %d HP remaining",
+                                     proj->id, plank_module_id, ship->id, (int)hit_plank->health);
+                            if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                                struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                                ev->ship_id = ship->id; ev->module_id = plank_module_id;
+                                ev->is_breach = false; ev->is_sink = false; ev->destroyed = false;
+                                ev->damage_dealt = plank_damage_dealt;
+                                ev->hit_x = Q16_TO_FLOAT(proj->position.x);
+                                ev->hit_y = Q16_TO_FLOAT(proj->position.y);
+                                ev->shooter_ship_id = proj->firing_ship_id;
+                            }
+                            if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                                struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                                if (attacker)
+                                    attacker->level_stats.xp += 10u + (uint32_t)(plank_damage_dealt / 100.0f);
+                            }
+                        }
+                        // Absorbed by plank regardless of HP
+                        log_info("💣 DESPAWN proj %u — absorbed by plank %u on ship %u",
+                                 proj->id, plank_module_id, ship->id);
+                        memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                                (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                        sim->projectile_count--;
+                        removed = true;
+                    } else {
+                        // Plank already gone — ball passes freely through the breach
+                        log_info("🕳️  Proj %u passed through breach at plank %u on ship %u — traveling inside",
+                                 proj->id, plank_module_id, ship->id);
+                        // inside_ship_id already set; ticks_inside stays 0; continue to interior checks below
+                    }
+                }
+
+                // Ghost ship with no planks: absorb on entry
+                if (!removed && ship->company_id == 99 && proj->ticks_inside == 0) {
+                    int32_t old_hull_hp = ship->hull_health;
+                    int32_t hp = ship->hull_health - (int32_t)proj->damage;
+                    if (hp < 0) hp = 0;
+                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                        ev->ship_id = ship->id; ev->module_id = 0;
+                        ev->is_breach = false;
+                        ev->is_sink = (ship->hull_health > 0 && hp == 0);
+                        ev->destroyed = false;
+                        ev->damage_dealt = (float)proj->damage;
+                        ev->hit_x = Q16_TO_FLOAT(proj->position.x);
+                        ev->hit_y = Q16_TO_FLOAT(proj->position.y);
+                        ev->shooter_ship_id = proj->firing_ship_id;
+                    }
+                    ship->hull_health = hp;
+                    if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                        if (attacker) attacker->level_stats.xp += 20u;
+                    }
+                    log_info("💣 DESPAWN proj %u — ghost ship %u direct hull hit, HP %d->%d pos=(%.2f,%.2f)",
+                             proj->id, ship->id, old_hull_hp, hp,
+                             Q16_TO_FLOAT(proj->position.x), Q16_TO_FLOAT(proj->position.y));
+                    memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                            (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                    sim->projectile_count--;
+                    removed = true;
+                }
+
+                if (removed) { continue; }
+
                 // ---- Deck pass-through: damage deck once per hull entry (priority) ----
                 // Deck ID is always 200; use last_hit_module_id==200 to fire only once per pass.
                 if (proj->last_hit_module_id != 200) {
@@ -1638,187 +1788,9 @@ void handle_projectile_collisions(struct Sim* sim) {
                     sim->projectile_count--;
                     removed = true;
                 }
-                continue; // either consumed or still traveling inside — skip entry-plank code
+                continue; // either consumed or still traveling inside — skip remaining ship code
             }
 
-            // ---- Ball is entering the hull for the first time — check entry plank ----
-
-            /* ── Ghost ship: no planks — apply direct spectral hull damage ─────── */
-            if (ship->company_id == 99) {
-                /* hull_health is a raw int32 (0–60000), proj->damage is also a plain int. */
-                int32_t hp = ship->hull_health - (int32_t)proj->damage;
-                if (hp < 0) hp = 0;
-                if (sim->hit_event_count < MAX_HIT_EVENTS) {
-                    struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
-                    ev->ship_id         = ship->id;
-                    ev->module_id       = 0;
-                    ev->is_breach       = false;
-                    ev->is_sink         = (ship->hull_health > 0 && hp == 0);
-                    ev->destroyed       = false;
-                    ev->damage_dealt    = (float)proj->damage;
-                    ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
-                    ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
-                    ev->shooter_ship_id = proj->firing_ship_id;
-                }
-                int32_t old_hull_hp = ship->hull_health;
-                ship->hull_health = hp;
-                if (proj->firing_ship_id != INVALID_ENTITY_ID) {
-                    struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
-                    if (attacker) attacker->level_stats.xp += 20u;
-                }
-                log_info("💣 DESPAWN proj %u — ghost ship %u direct hull hit, HP %d->%d pos=(%.2f,%.2f)",
-                         proj->id, ship->id, old_hull_hp, hp,
-                         Q16_TO_FLOAT(proj->position.x), Q16_TO_FLOAT(proj->position.y));
-                memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
-                        (sim->projectile_count - i - 1) * sizeof(struct Projectile));
-                sim->projectile_count--;
-                removed = true;
-            }
-
-            if (removed) break; /* skip normal plank lookup */
-
-            // ── Swept hull-edge crossing ─────────────────────────────────────────
-            // Transform previous position into ship-local coords as well
-            float prev_rel_x = Q16_TO_FLOAT(proj->prev_position.x) - Q16_TO_FLOAT(ship->position.x);
-            float prev_rel_y = Q16_TO_FLOAT(proj->prev_position.y) - Q16_TO_FLOAT(ship->position.y);
-            float prev_lx = prev_rel_x * cosf(-rot) - prev_rel_y * sinf(-rot);
-            float prev_ly = prev_rel_x * sinf(-rot) + prev_rel_y * cosf(-rot);
-
-            // Rotate the projectile velocity into ship-local space too
-            // (used by the reverse-ray fallback to determine approach direction)
-            float vlx = Q16_TO_FLOAT(proj->velocity.x) * cosf(-rot)
-                      - Q16_TO_FLOAT(proj->velocity.y) * sinf(-rot);
-            float vly = Q16_TO_FLOAT(proj->velocity.x) * sinf(-rot)
-                      + Q16_TO_FLOAT(proj->velocity.y) * cosf(-rot);
-
-            // Try swept segment first (outer→inner crossing)
-            int crossed_edge = swept_hull_edge_crossing(
-                prev_lx, prev_ly, lx, ly,
-                ship->hull_vertices, ship->hull_vertex_count);
-
-            // Fallback 1: reverse-ray from current position along approach direction.
-            // Fires when both prev and cur are inside (e.g. shallow angle, multi-tick
-            // gap, or fast ball that skipped the boundary check last tick).
-            if (crossed_edge < 0) {
-                crossed_edge = entry_edge_by_reverse_ray(
-                    lx, ly, vlx, vly,
-                    ship->hull_vertices, ship->hull_vertex_count);
-                if (crossed_edge >= 0)
-                    log_info("🎯 Projectile %u reverse-ray entry edge %d on ship %u",
-                             proj->id, crossed_edge, ship->id);
-            }
-
-            int plank_idx;
-            if (crossed_edge >= 0) {
-                plank_idx = hull_vertex_to_plank_index(crossed_edge);
-                log_info("🎯 Projectile %u crossed hull edge %d → plank %d on ship %u",
-                         proj->id, crossed_edge, plank_idx, ship->id);
-            } else {
-                // Fallback 2: velocity is zero or degenerate — use nearest hull vertex.
-                // This should only happen for stationary/spawned-inside projectiles.
-                int nearest_v = 0;
-                float nearest_d2 = 1e30f;
-                for (int v = 0; v < ship->hull_vertex_count; v++) {
-                    float vx = Q16_TO_FLOAT(ship->hull_vertices[v].x) - lx;
-                    float vy = Q16_TO_FLOAT(ship->hull_vertices[v].y) - ly;
-                    float d2 = vx*vx + vy*vy;
-                    if (d2 < nearest_d2) { nearest_d2 = d2; nearest_v = v; }
-                }
-                plank_idx = hull_vertex_to_plank_index(nearest_v);
-                log_info("🎯 Projectile %u zero-velocity fallback — nearest vertex %d → plank %d on ship %u",
-                         proj->id, nearest_v, plank_idx, ship->id);
-            }
-            uint16_t plank_module_id = (uint16_t)(100 + plank_idx);
-
-            // Look up the plank module
-            int hit_plank_idx = -1;
-            for (uint8_t m = 0; m < ship->module_count; m++) {
-                if (ship->modules[m].id == plank_module_id) {
-                    hit_plank_idx = m;
-                    break;
-                }
-            }
-
-            if (hit_plank_idx >= 0 && !(ship->modules[hit_plank_idx].state_bits & MODULE_STATE_DESTROYED)) {
-                ShipModule* hit_plank = &ship->modules[hit_plank_idx];
-
-                float plank_hp_before = (float)hit_plank->health;
-                q16_t effective_damage = Q16_FROM_FLOAT(
-                    Q16_TO_FLOAT(proj->damage)
-                    * ship_level_resistance_mult(&ship->level_stats)
-                );
-                module_apply_damage(hit_plank, effective_damage);
-                float plank_damage_dealt = plank_hp_before - (float)hit_plank->health;
-                if (plank_damage_dealt < 0) plank_damage_dealt = 0;
-
-                if (hit_plank->health <= 0) {
-                    // Plank destroyed — emit event and remove it
-                    log_info("🎯 Projectile %u destroyed plank %u on ship %u",
-                             proj->id, plank_module_id, ship->id);
-
-                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
-                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
-                        ev->ship_id         = ship->id;
-                        ev->module_id       = plank_module_id;
-                        ev->is_breach       = false;
-                        ev->is_sink         = false;
-                        ev->destroyed       = true;
-                        ev->damage_dealt    = plank_damage_dealt;
-                        ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
-                        ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
-                        ev->shooter_ship_id = proj->firing_ship_id;
-                    }
-
-                    /* Award XP to the attacker ship */
-                    if (proj->firing_ship_id != INVALID_ENTITY_ID) {
-                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
-                        if (attacker)
-                            attacker->level_stats.xp += 10u + (uint32_t)(plank_damage_dealt / 100.0f);
-                    }
-
-                    memmove(&ship->modules[hit_plank_idx], &ship->modules[hit_plank_idx + 1],
-                            (ship->module_count - hit_plank_idx - 1) * sizeof(ShipModule));
-                    ship->module_count--;
-                } else {
-                    log_info("🎯 Projectile %u hit plank %u on ship %u — %d HP remaining",
-                             proj->id, plank_module_id, ship->id, (int)hit_plank->health);
-
-                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
-                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
-                        ev->ship_id         = ship->id;
-                        ev->module_id       = plank_module_id;
-                        ev->is_breach       = false;
-                        ev->is_sink         = false;
-                        ev->destroyed       = false;
-                        ev->damage_dealt    = plank_damage_dealt;
-                        ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
-                        ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
-                        ev->shooter_ship_id = proj->firing_ship_id;
-                    }
-
-                    /* Award XP to the attacker ship */
-                    if (proj->firing_ship_id != INVALID_ENTITY_ID) {
-                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
-                        if (attacker)
-                            attacker->level_stats.xp += 10u + (uint32_t)(plank_damage_dealt / 100.0f);
-                    }
-                }
-
-                // Projectile absorbed by plank (intact or destroyed)
-                memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
-                        (sim->projectile_count - i - 1) * sizeof(struct Projectile));
-                sim->projectile_count--;
-                removed = true;
-            } else {
-                // --- Plank already removed: cannonball passes freely through the breach ---
-                // Don't absorb here — just mark as inside and let the per-tick
-                // already-inside path handle interior module checks over the next ticks.
-                proj->inside_ship_id = ship->id;
-                proj->ticks_inside   = 0;
-                log_info("🕳️  Projectile %u passed through breach at plank %u on ship %u — traveling inside",
-                         proj->id, plank_module_id, ship->id);
-                // removed stays false — ball keeps flying
-            }
         }
 
         // ---- Player collision (unchanged) ----
