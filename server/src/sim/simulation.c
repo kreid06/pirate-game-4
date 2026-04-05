@@ -1593,9 +1593,6 @@ void handle_projectile_collisions(struct Sim* sim) {
                             if (attacker)
                                 attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
                         }
-                    } else {
-                        log_info("💣 DESPAWN proj %u — inside hull, hit module %u (type %d) on ship %u — %d HP remaining",
-                                 proj->id, mod_id, hit_mod->type_id, ship->id, (int)hit_mod->health);
                     }
 
                     // Projectile absorbed regardless of whether module was destroyed
