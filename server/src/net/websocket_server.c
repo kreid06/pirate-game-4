@@ -9384,11 +9384,17 @@ void websocket_server_tick(float dt) {
                         "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                    log_info("📤 Broadcasting PLANK_HIT: ship %u plank %u destroyed, %.0f dmg at (%.1f, %.1f)",
+                        ev->ship_id, ev->module_id, ev->damage_dealt,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
                 } else {
                     // Non-fatal plank hit: just broadcast PLANK_DAMAGED for damage numbers
                     snprintf(msg, sizeof(msg),
                         "{\"type\":\"PLANK_DAMAGED\",\"shipId\":%u,\"plankId\":%u,"
                         "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                        ev->ship_id, ev->module_id, ev->damage_dealt,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                    log_info("📤 Broadcasting PLANK_DAMAGED: ship %u plank %u, %.0f dmg at (%.1f, %.1f)",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
                 }

@@ -1766,6 +1766,7 @@ export class NetworkManager {
         const plankDmg: number = message.damage || 0;
         const plankHitX: number | undefined = message.x;
         const plankHitY: number | undefined = message.y;
+        console.log(`💥 PLANK_HIT: ship ${plankShipId} plank ${plankId} destroyed — ${plankDmg} dmg at (${plankHitX}, ${plankHitY})`);
         this.onModuleDestroyed?.(plankShipId, plankId, plankDmg, plankHitX, plankHitY);
         break;
       }
@@ -1777,6 +1778,7 @@ export class NetworkManager {
         const plankDamage: number = message.damage || 0;
         const plankHitX: number | undefined = message.x;
         const plankHitY: number | undefined = message.y;
+        console.log(`💥 PLANK_DAMAGED: ship ${plankShipId} plank ${plankId} — ${plankDamage} dmg at (${plankHitX}, ${plankHitY})`);
         this.onModuleDamaged?.(plankShipId, plankId, plankDamage, plankHitX, plankHitY);
         break;
       }
