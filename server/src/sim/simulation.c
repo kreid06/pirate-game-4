@@ -1300,6 +1300,10 @@ void handle_projectile_collisions(struct Sim* sim) {
             float dy = Q16_TO_FLOAT(ship->position.y) - Q16_TO_FLOAT(proj->position.y);
             float dist_sq = dx*dx + dy*dy;
             float brad = Q16_TO_FLOAT(ship->bounding_radius);
+            if (dist_sq <= brad * brad) {
+                log_info("🔍 Proj %u within bounding radius of ship %u (dist=%.2f brad=%.2f)",
+                         proj->id, ship->id, sqrtf(dist_sq), brad);
+            }
             if (dist_sq > brad * brad) {
                 // Ball is outside bounding circle.
                 // If it was marked as inside this ship, it passed through without hitting a

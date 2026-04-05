@@ -9547,6 +9547,8 @@ void websocket_server_tick(float dt) {
                                 send(wc->fd, hit_frame, hfl, 0);
                         }
                     }
+                    log_info("💣 DESPAWN proj %u — NPC %u hit at (%.1f,%.1f) dmg=%.0f",
+                             proj->id, npc->id, npc->x, npc->y, damage);
                     proj_consumed = true;
                 }
             }
@@ -9625,6 +9627,8 @@ void websocket_server_tick(float dt) {
                                 send(wc->fd, hit_frame, hfl, 0);
                         }
                     }
+                    log_info("💣 DESPAWN proj %u — player %u hit at (%.1f,%.1f) dmg=%.0f",
+                             proj->id, wp->player_id, wp->x, wp->y, damage);
                     proj_consumed = true;
                 }
             }
