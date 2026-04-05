@@ -2,7 +2,9 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c99 -O2 -g
 INCLUDES = -Iinclude $(shell pkg-config --cflags openssl 2>/dev/null)
-LIBS = -lwebsockets -ljson-c -lm -lpthread $(shell pkg-config --libs openssl 2>/dev/null || echo "-lssl -lcrypto")
+WEBSOCKETS_LIBS = $(shell pkg-config --libs libwebsockets 2>/dev/null)
+JSONC_LIBS = $(shell pkg-config --libs json-c 2>/dev/null)
+LIBS = $(WEBSOCKETS_LIBS) $(JSONC_LIBS) -lm -lpthread $(shell pkg-config --libs openssl 2>/dev/null || echo "-lssl -lcrypto")
 
 # Directories
 SRCDIR = src
