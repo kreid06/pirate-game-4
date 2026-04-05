@@ -1215,6 +1215,59 @@ static int swept_hull_edge_crossing(
     return best_edge;
 }
 
+/*
+ * Backward ray from an inside point along the approach direction.
+ *
+ * Used when swept_hull_edge_crossing returns -1 (both prev and cur are
+ * inside the hull, e.g. shallow-angle approach where prev_position was
+ * already inside).  Fires a ray from (px, py) in the REVERSE of (rdx,rdy)
+ * and returns the first hull edge hit — which is the edge the ball entered
+ * through.  Returns -1 only if (rdx,rdy) is zero.
+ */
+static int entry_edge_by_reverse_ray(
+        float px, float py,     // current local position (inside hull)
+        float rdx, float rdy,   // approach direction (world-space velocity local-rotated)
+        const Vec2Q16* verts, int n)
+{
+    // Reverse the ray direction so it shoots back toward where the ball came from
+    float rx = -rdx;
+    float ry = -rdy;
+
+    float len = sqrtf(rx*rx + ry*ry);
+    if (len < 1e-9f) return -1;
+    // Normalise then scale to a length guaranteed to reach any hull edge
+    // (hull fits in ~200 server units, so 500 is more than enough)
+    rx = rx / len * 500.0f;
+    ry = ry / len * 500.0f;
+
+    int   best_edge = -1;
+    float best_t    = 1e30f;
+
+    for (int i = 0; i < n; i++) {
+        int j = (i + 1) % n;
+        float sx = Q16_TO_FLOAT(verts[j].x) - Q16_TO_FLOAT(verts[i].x);
+        float sy = Q16_TO_FLOAT(verts[j].y) - Q16_TO_FLOAT(verts[i].y);
+        float qx = Q16_TO_FLOAT(verts[i].x) - px;
+        float qy = Q16_TO_FLOAT(verts[i].y) - py;
+
+        float denom = rx * sy - ry * sx;
+        if (fabsf(denom) < 1e-9f) continue;
+
+        float t = (qx * sy - qy * sx) / denom;
+        float u = (qx * ry - qy * rx) / denom;
+
+        // t > 0 means forward along the reversed ray (i.e. behind ball's travel)
+        // u in [0,1] means intersection is on the hull edge
+        if (t > 0.0f && u >= 0.0f && u <= 1.0f) {
+            if (t < best_t) {
+                best_t    = t;
+                best_edge = i;
+            }
+        }
+    }
+    return best_edge;
+}
+
 void handle_projectile_collisions(struct Sim* sim) {
     // NOTE: hit_event_count is NOT reset here — sim_update_ships may have already
     // queued SHIP_SINK events this tick. The count is reset at the start of the
@@ -1620,20 +1673,38 @@ void handle_projectile_collisions(struct Sim* sim) {
             float prev_lx = prev_rel_x * cosf(-rot) - prev_rel_y * sinf(-rot);
             float prev_ly = prev_rel_x * sinf(-rot) + prev_rel_y * cosf(-rot);
 
-            // Find which hull edge the projectile's path crossed this tick
+            // Rotate the projectile velocity into ship-local space too
+            // (used by the reverse-ray fallback to determine approach direction)
+            float vlx = Q16_TO_FLOAT(proj->velocity.x) * cosf(-rot)
+                      - Q16_TO_FLOAT(proj->velocity.y) * sinf(-rot);
+            float vly = Q16_TO_FLOAT(proj->velocity.x) * sinf(-rot)
+                      + Q16_TO_FLOAT(proj->velocity.y) * cosf(-rot);
+
+            // Try swept segment first (outer→inner crossing)
             int crossed_edge = swept_hull_edge_crossing(
                 prev_lx, prev_ly, lx, ly,
                 ship->hull_vertices, ship->hull_vertex_count);
 
-            // Fallback: if no swept edge found (e.g. spawned inside, prev_pos same as cur_pos),
-            // fall back to the nearest-vertex approach so we always resolve a plank.
+            // Fallback 1: reverse-ray from current position along approach direction.
+            // Fires when both prev and cur are inside (e.g. shallow angle, multi-tick
+            // gap, or fast ball that skipped the boundary check last tick).
+            if (crossed_edge < 0) {
+                crossed_edge = entry_edge_by_reverse_ray(
+                    lx, ly, vlx, vly,
+                    ship->hull_vertices, ship->hull_vertex_count);
+                if (crossed_edge >= 0)
+                    log_info("🎯 Projectile %u reverse-ray entry edge %d on ship %u",
+                             proj->id, crossed_edge, ship->id);
+            }
+
             int plank_idx;
             if (crossed_edge >= 0) {
                 plank_idx = hull_vertex_to_plank_index(crossed_edge);
                 log_info("🎯 Projectile %u crossed hull edge %d → plank %d on ship %u",
                          proj->id, crossed_edge, plank_idx, ship->id);
             } else {
-                // Nearest-vertex fallback for projectiles that started inside
+                // Fallback 2: velocity is zero or degenerate — use nearest hull vertex.
+                // This should only happen for stationary/spawned-inside projectiles.
                 int nearest_v = 0;
                 float nearest_d2 = 1e30f;
                 for (int v = 0; v < ship->hull_vertex_count; v++) {
@@ -1643,7 +1714,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                     if (d2 < nearest_d2) { nearest_d2 = d2; nearest_v = v; }
                 }
                 plank_idx = hull_vertex_to_plank_index(nearest_v);
-                log_info("🎯 Projectile %u no swept edge — nearest vertex %d → plank %d on ship %u",
+                log_info("🎯 Projectile %u zero-velocity fallback — nearest vertex %d → plank %d on ship %u",
                          proj->id, nearest_v, plank_idx, ship->id);
             }
             uint16_t plank_module_id = (uint16_t)(100 + plank_idx);
