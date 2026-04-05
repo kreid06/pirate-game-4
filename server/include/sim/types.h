@@ -105,6 +105,7 @@ struct Projectile {
     entity_id id;
     entity_id owner_id;      // Who fired this
     Vec2Q16 position;
+    Vec2Q16 prev_position;   // Position last tick — used for swept hull-edge intersection
     Vec2Q16 velocity;
     q16_t damage;           // Damage amount
     q16_t lifetime;         // Remaining lifetime in seconds
