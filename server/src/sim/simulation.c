@@ -285,6 +285,9 @@ void sim_update_projectiles(struct Sim* sim, q16_t dt) {
             : 4000;
         if (lifetime_ms > max_lifetime) {
             // Remove expired projectile
+            log_info("⏱️  Projectile %u expired after %ums (max=%ums) at (%.1f, %.1f)",
+                     proj->id, lifetime_ms, max_lifetime,
+                     Q16_TO_FLOAT(proj->position.x), Q16_TO_FLOAT(proj->position.y));
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                    (sim->projectile_count - i - 1) * sizeof(struct Projectile));
             sim->projectile_count--;
@@ -1177,7 +1180,12 @@ void handle_projectile_collisions(struct Sim* sim) {
         // ---- Broad-phase: iterate all ships (small count, skip spatial hash) ----
         for (uint16_t s = 0; s < sim->ship_count && !removed; s++) {
             struct Ship* ship = &sim->ships[s];
-            if (ship->id == proj->owner_id) continue;
+            
+            // Skip own ship (check both owner_id and firing_ship_id)
+            if (ship->id == proj->owner_id || ship->id == proj->firing_ship_id) {
+                continue;
+            }
+            
             // Skip friendly-fire (same company, both non-neutral)
             if (proj->firing_company != 0 && proj->firing_company == ship->company_id) continue;
 
@@ -1365,6 +1373,8 @@ void handle_projectile_collisions(struct Sim* sim) {
                 /* Ghost ships have no planks; absorb any projectile that managed to get inside
                  * (shouldn't happen after entry-point intercept, but belt-and-suspenders). */
                 if (ship->company_id == 99) {
+                    log_info("👻 Projectile %u absorbed by ghost ship %u at (%.1f, %.1f)",
+                             proj->id, ship->id, lx, ly);
                     memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                             (sim->projectile_count - i - 1) * sizeof(struct Projectile));
                     sim->projectile_count--;
@@ -1706,8 +1716,9 @@ void handle_projectile_collisions(struct Sim* sim) {
             if (dist_sq < player_r * player_r) {
                 player->health = player->health > Q16_TO_INT(proj->damage) ?
                                  player->health - Q16_TO_INT(proj->damage) : 0;
-                log_info("💀 Projectile %u hit player %u for %d damage (health: %d)",
-                         proj->id, player->id, Q16_TO_INT(proj->damage), player->health);
+                log_info("💀 Projectile %u hit player %u for %d damage (health: %d) at (%.1f, %.1f)",
+                         proj->id, player->id, Q16_TO_INT(proj->damage), player->health,
+                         Q16_TO_FLOAT(proj->position.x), Q16_TO_FLOAT(proj->position.y));
 
                 memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                         (sim->projectile_count - i - 1) * sizeof(struct Projectile));
