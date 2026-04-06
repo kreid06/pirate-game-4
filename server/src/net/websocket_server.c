@@ -3739,11 +3739,12 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
  * visual.  Fire DoT timers run naturally after the wave passes.
  * ══════════════════════════════════════════════════════════════════════════ */
 #define MAX_FLAME_WAVES   16
-#define FLAME_WAVE_SPEED  125.0f    /* px/s — matches old projectile speed   */
+#define FLAME_WAVE_SPEED  350.0f    /* px/s — fast travel-time feel           */
 #define FLAME_RANGE       280.0f    /* max reach, client px                  */
 #define FLAME_HALF_CONE   (15.0f * (float)(M_PI / 180.0f))  /* ±15°         */
-#define FLAME_STALE_MS    350u      /* ms without a pulse → start retreating  */
-#define FIRE_DURATION_MS  10000u    /* ms an entity burns after ignition      */
+#define FLAME_STALE_MS    180u      /* ms without a pulse → start retreating  */
+#define FLAME_RETREAT_SPEED 700.0f  /* px/s — retreat 2× faster than advance */
+#define FIRE_DURATION_MS  4000u    /* ms an entity burns after ignition      */
 #define FLAME_HALF_CONE_MODULE (25.0f * (float)(M_PI / 180.0f)) /* wider test vs ±15° entity cone */
 
 typedef struct {
@@ -10239,9 +10240,9 @@ void websocket_server_tick(float dt) {
                     if (fw->wave_dist > FLAME_RANGE) fw->wave_dist = FLAME_RANGE;
                 }
 
-                /* Advance retreat front */
+                /* Advance retreat front — faster than advance so flame snaps off */
                 if (fw->retreating) {
-                    fw->retreat_dist += dt_s * FLAME_WAVE_SPEED;
+                    fw->retreat_dist += dt_s * FLAME_RETREAT_SPEED;
                     if (fw->retreat_dist >= FLAME_RANGE) {
                         /* Fully retreated — deactivate */
                         fw->active = false;

@@ -273,8 +273,9 @@ export class RenderSystem {
   private drawFlameCones(camera: Camera): void {
     if (this.flameWaves.size === 0) return;
 
-    const WAVE_SPEED = 125; // px/s — must match FLAME_WAVE_SPEED on server
-    const now        = performance.now();
+    const WAVE_SPEED    = 350; // px/s — must match FLAME_WAVE_SPEED on server
+    const RETREAT_SPEED = 700; // px/s — must match FLAME_RETREAT_SPEED on server
+    const now           = performance.now();
 
     for (const [cannonId, fw] of this.flameWaves) {
       // Auto-expire stale entries (server went silent for > 2s)
@@ -285,7 +286,7 @@ export class RenderSystem {
       const FLAME_RANGE  = 280;
       const waveDist    = fw.retreating ? fw.waveDist
                                         : Math.min(fw.waveDist + dt * WAVE_SPEED, FLAME_RANGE);
-      const retreatDist = fw.retreating ? Math.min(fw.retreatDist + dt * WAVE_SPEED, FLAME_RANGE) : 0;
+      const retreatDist = fw.retreating ? Math.min(fw.retreatDist + dt * RETREAT_SPEED, FLAME_RANGE) : 0;
 
       // Nothing to draw if retreat has consumed the whole cone
       if (retreatDist >= waveDist) continue;
