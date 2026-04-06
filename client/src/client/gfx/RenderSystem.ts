@@ -1565,6 +1565,7 @@ export class RenderSystem {
     this.drawWater(camera);
     this.drawGrid(camera);
     this.drawIsland(camera);
+    this.drawPlacedStructures(camera);
     this.drawIslandBuildGhost(camera);
     
     // Queue all game objects for layered rendering
@@ -1967,60 +1968,6 @@ export class RenderSystem {
 
       ctx.restore();
 
-      // ── Placed structures (floors + workbenches) ─────────────────────────
-      for (const s of this.placedStructures) {
-        if (s.islandId !== isl.id) continue;
-        const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
-        const sz  = Math.max(4, 50 * zoom);
-        if (s.type === 'wooden_floor') {
-          ctx.save();
-          ctx.fillStyle   = '#b8832b';
-          ctx.strokeStyle = '#7a5520';
-          ctx.lineWidth   = Math.max(1, 2 * zoom);
-          ctx.beginPath();
-          ctx.rect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
-          ctx.fill();
-          ctx.stroke();
-          // Plank lines
-          ctx.strokeStyle = 'rgba(90, 55, 15, 0.5)';
-          ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-          const third = sz / 3;
-          for (let li = 1; li < 3; li++) {
-            ctx.beginPath();
-            ctx.moveTo(ssp.x - sz / 2, ssp.y - sz / 2 + li * third);
-            ctx.lineTo(ssp.x + sz / 2, ssp.y - sz / 2 + li * third);
-            ctx.stroke();
-          }
-          ctx.restore();
-        } else if (s.type === 'workbench') {
-          // Tabletop
-          const tw = sz * 1.1;
-          const th = sz * 0.55;
-          ctx.save();
-          ctx.fillStyle   = '#7a4820';
-          ctx.strokeStyle = '#4a2810';
-          ctx.lineWidth   = Math.max(1, 2 * zoom);
-          ctx.beginPath();
-          ctx.rect(ssp.x - tw / 2, ssp.y - th * 0.7, tw, th);
-          ctx.fill();
-          ctx.stroke();
-          // Legs
-          const legW = Math.max(2, 5 * zoom);
-          const legH = Math.max(3, 12 * zoom);
-          ctx.fillStyle = '#5c3010';
-          for (const lx of [ssp.x - tw / 2 + legW, ssp.x + tw / 2 - legW * 2]) {
-            ctx.fillRect(lx, ssp.y - th * 0.7 + th - 1, legW, legH);
-          }
-          // Tool icon
-          ctx.font = `${Math.max(8, Math.round(13 * zoom))}px monospace`;
-          ctx.textAlign    = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillStyle    = '#f0c070';
-          ctx.fillText('\u2692', ssp.x, ssp.y - th * 0.2);
-          ctx.restore();
-        }
-      }
-
       // ── Resource nodes ───────────────────────────────────────────────────────
       const localPlayer = this._cachedLocalPlayer;
       const axeEquipped = (() => {
@@ -2177,6 +2124,60 @@ export class RenderSystem {
     ctx.restore();
   }
 
+  /** Draw all placed structures (floors + workbenches) using absolute world coords — no island id filtering. */
+  private drawPlacedStructures(camera: Camera): void {
+    const ctx  = this.ctx;
+    const zoom = camera.getState().zoom;
+    for (const s of this.placedStructures) {
+      const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
+      const sz  = Math.max(4, 50 * zoom);
+      if (s.type === 'wooden_floor') {
+        ctx.save();
+        ctx.fillStyle   = '#b8832b';
+        ctx.strokeStyle = '#7a5520';
+        ctx.lineWidth   = Math.max(1, 2 * zoom);
+        ctx.beginPath();
+        ctx.rect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+        ctx.fill();
+        ctx.stroke();
+        // Plank lines
+        ctx.strokeStyle = 'rgba(90, 55, 15, 0.5)';
+        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+        const third = sz / 3;
+        for (let li = 1; li < 3; li++) {
+          ctx.beginPath();
+          ctx.moveTo(ssp.x - sz / 2, ssp.y - sz / 2 + li * third);
+          ctx.lineTo(ssp.x + sz / 2, ssp.y - sz / 2 + li * third);
+          ctx.stroke();
+        }
+        ctx.restore();
+      } else if (s.type === 'workbench') {
+        const tw = sz * 1.1;
+        const th = sz * 0.55;
+        ctx.save();
+        ctx.fillStyle   = '#7a4820';
+        ctx.strokeStyle = '#4a2810';
+        ctx.lineWidth   = Math.max(1, 2 * zoom);
+        ctx.beginPath();
+        ctx.rect(ssp.x - tw / 2, ssp.y - th * 0.7, tw, th);
+        ctx.fill();
+        ctx.stroke();
+        const legW = Math.max(2, 5 * zoom);
+        const legH = Math.max(3, 12 * zoom);
+        ctx.fillStyle = '#5c3010';
+        for (const lx of [ssp.x - tw / 2 + legW, ssp.x + tw / 2 - legW * 2]) {
+          ctx.fillRect(lx, ssp.y - th * 0.7 + th - 1, legW, legH);
+        }
+        ctx.font = `${Math.max(8, Math.round(13 * zoom))}px monospace`;
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = '#f0c070';
+        ctx.fillText('\u2692', ssp.x, ssp.y - th * 0.2);
+        ctx.restore();
+      }
+    }
+  }
+
   /** Draw the island structure placement ghost at the cursor position (drawn once, after all islands). */
   private drawIslandBuildGhost(camera: Camera): void {
     this._islandGhostTooFar = false;
@@ -2221,6 +2222,18 @@ export class RenderSystem {
       const dy = my - player.position.y;
       tooFar = dx * dx + dy * dy > 200 * 200;
     }
+
+    // Overlap check: floor tiles must not be placed within 40 px of an existing floor
+    const OVERLAP_R = 40;
+    let overlaps = false;
+    if (this.islandBuildKind === 'wooden_floor') {
+      overlaps = this.placedStructures.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        const dx = s.x - mx; const dy = s.y - my;
+        return dx * dx + dy * dy < OVERLAP_R * OVERLAP_R;
+      });
+    }
+
     this._islandGhostTooFar = tooFar || inWater;
 
     // Workbench needs a floor tile within 55 px
@@ -2233,7 +2246,7 @@ export class RenderSystem {
       });
     }
 
-    const invalid = tooFar || inWater || noFloor;
+    const invalid = tooFar || inWater || noFloor || overlaps;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
@@ -2258,6 +2271,9 @@ export class RenderSystem {
     if (inWater) {
       ctx.fillStyle = '#4488ff';
       ctx.fillText('IN WATER', msp.x, labelY);
+    } else if (overlaps) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('OCCUPIED', msp.x, labelY);
     } else if (tooFar) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('TOO FAR', msp.x, labelY);

@@ -4520,6 +4520,21 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         }
     }
 
+    /* Wooden floor: must not overlap an existing floor within 40 px */
+    if (stype_enum == STRUCT_WOODEN_FLOOR) {
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
+            float dx = placed_structures[si].x - px;
+            float dy = placed_structures[si].y - py;
+            if (dx*dx + dy*dy < 40.0f * 40.0f) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
+                goto ps_send;
+            }
+        }
+    }
+
     /* Workbench: must have a wooden_floor tile within STRUCT_FLOOR_REQ_R of (px,py) */
     if (stype_enum == STRUCT_WORKBENCH) {
         bool has_floor = false;
