@@ -392,7 +392,7 @@ export class ParticleSystem {
         )),
         velocity: Vec2.from(velX, velY),
         life:    0,
-        maxLife: 0.5 + Math.random() * 0.9,
+        maxLife: 0.18 + Math.random() * 0.32,
         size:    30 + frac * 30 + Math.random() * 20,
         color:   `${r},${g},${b}`,
         alpha:   1.0,
@@ -431,7 +431,7 @@ export class ParticleSystem {
         position: Vec2.from(spawnX, spawnY),
         velocity: Vec2.from(velX, velY),
         life:    0,
-        maxLife: 0.25 + Math.random() * 0.50, // shorter — they escape the flame
+        maxLife: 0.10 + Math.random() * 0.20, // shorter — they escape the flame
         size:    12 + frac * 14 + Math.random() * 10,
         color:   `${r},${g},${b}`,
         alpha:   1.0,
@@ -476,7 +476,7 @@ export class ParticleSystem {
           Math.sin(spawnAngle) * (12 + Math.random() * 28) - 20,
         ),
         life:    0,
-        maxLife: 0.30 + Math.random() * 0.50,
+        maxLife: 0.15 + Math.random() * 0.25,
         size:    20 + Math.random() * 22,
         color:   `${r},${g},${b}`,
         alpha:   1.0,
@@ -611,7 +611,7 @@ export class ParticleSystem {
 
       // u_shape_offset analog: elongate along the particle's current travel direction.
       // More elongated when young (fast, directional), rounder as it slows and disperses.
-      const elongation = 1.4 + (1.0 - lifeRatio) * 0.5; // 1.4 → 1.9 when fresh
+      const elongation = 2.2 + (1.0 - lifeRatio) * 1.2; // 2.2 → 3.4 when fresh
 
       // Derive the angle from current velocity so the tongue tracks actual motion
       const velAngle = Math.atan2(p.velocity.y, p.velocity.x);
