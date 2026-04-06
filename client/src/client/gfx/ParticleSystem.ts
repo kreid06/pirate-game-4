@@ -18,7 +18,6 @@ interface Particle {
   size: number;
   color: string;
   alpha: number;
-  gravity: number;     // Gravity affect factor
 }
 
 /**
@@ -133,7 +132,6 @@ export class ParticleSystem {
         size: 4 + Math.random() * 7,
         color: waterColors[Math.floor(Math.random() * waterColors.length)],
         alpha: 0.85 + Math.random() * 0.15,
-        gravity: 320,
       });
     }
 
@@ -156,7 +154,6 @@ export class ParticleSystem {
         size: 3 + Math.random() * 6,
         color: waterColors[Math.floor(Math.random() * waterColors.length)],
         alpha: 0.7 + Math.random() * 0.25,
-        gravity: 280,
       });
     }
 
@@ -176,7 +173,6 @@ export class ParticleSystem {
         size: 6 + Math.random() * 10,
         color: foamColors[Math.floor(Math.random() * foamColors.length)],
         alpha: 0.35 + Math.random() * 0.3,
-        gravity: 60,
       });
     }
 
@@ -216,7 +212,6 @@ export class ParticleSystem {
         size: 3 + Math.random() * 4,
         color: '#555555', // Gray smoke
         alpha: 0.6,
-        gravity: -10 // Smoke rises
       });
     }
     
@@ -251,7 +246,6 @@ export class ParticleSystem {
         size: 3 + Math.random() * 5,
         color: Math.random() > 0.5 ? '#ff6600' : '#ffaa00', // Orange/yellow explosion
         alpha: 1.0,
-        gravity: 0 // Explosion particles don't fall initially
       });
     }
     
@@ -294,7 +288,6 @@ export class ParticleSystem {
         size: 2 + Math.random() * 4 * intensity,
         color: waterColors[Math.floor(Math.random() * waterColors.length)],
         alpha: 0.7 + Math.random() * 0.3,
-        gravity: 160, // droplets arc up then fall quickly
       });
     }
 
@@ -333,7 +326,6 @@ export class ParticleSystem {
         size: 2 + Math.random() * 5,
         color: clothColors[Math.floor(Math.random() * clothColors.length)],
         alpha: 0.9,
-        gravity: 120  // Cloth strips fall faster than smoke
       });
     }
 
@@ -359,8 +351,11 @@ export class ParticleSystem {
     halfCone: number,
     innerDist: number,
     outerDist: number,
+    rotationSpeed = 0,  // rad/s — widens cone when aim flicks fast
   ): void {
     if (Math.random() > 0.50) return; // 50% gate — pairs with outer pulse gate in RenderSystem
+    // Widen the spray when the player rotates fast; cap at 80° half-angle
+    const effectiveHalfCone = Math.min(halfCone * (1 + rotationSpeed * 0.4), Math.PI * 0.44);
     const span = outerDist - innerDist;
     if (span <= 0) return;
 
@@ -371,7 +366,7 @@ export class ParticleSystem {
 
     // ── Main forward embers ─────────────────────────────────────────────────
     for (let i = 0; i < count; i++) {
-      const a    = angle + (Math.random() * 2 - 1) * halfCone;
+      const a    = angle + (Math.random() * 2 - 1) * effectiveHalfCone;
       const dist = innerDist + Math.random() * span;
       const frac = dist / Math.max(1, outerDist);
 
@@ -399,7 +394,6 @@ export class ParticleSystem {
         size:    50 - frac * 20 + Math.random() * 15, // bigger/brighter near barrel
         color:   `${r},${g},${b}`,
         alpha:   brightness,
-        gravity: -25,
       });
     }
 
@@ -438,7 +432,6 @@ export class ParticleSystem {
         size:    12 + frac * 14 + Math.random() * 10,
         color:   `${r},${g},${b}`,
         alpha:   1.0,
-        gravity: -20,
       });
     }
 
@@ -483,7 +476,6 @@ export class ParticleSystem {
         size:    20 + Math.random() * 22,
         color:   `${r},${g},${b}`,
         alpha:   1.0,
-        gravity: -25,
       });
     }
 
@@ -528,13 +520,15 @@ export class ParticleSystem {
       }
 
       if (isFire) {
-        // Reference-style update: flicker + simple physics (no size/alpha override)
+        // Drag: heavier, realistic slowdown — frame-rate independent
+        const drag = Math.pow(0.97, deltaTime * 60);
+        particle.velocity = particle.velocity.mul(drag);
+        // Turbulence flicker
         particle.velocity = particle.velocity.add(Vec2.from(
           (Math.random() - 0.5) * 14,
           (Math.random() - 0.5) * 6,
         ));
         particle.position = particle.position.add(particle.velocity.mul(deltaTime));
-        particle.velocity = particle.velocity.add(Vec2.from(0, particle.gravity).mul(deltaTime));
       } else {
         this.updateParticle(particle, deltaTime);
       }
@@ -544,9 +538,6 @@ export class ParticleSystem {
   private updateParticle(particle: Particle, deltaTime: number): void {
     // Apply velocity
     particle.position = particle.position.add(particle.velocity.mul(deltaTime));
-    
-    // Apply gravity
-    particle.velocity = particle.velocity.add(Vec2.from(0, particle.gravity).mul(deltaTime));
     
     // Update alpha based on life (fade out over time)
     const lifeRatio = particle.life / particle.maxLife;
@@ -607,7 +598,7 @@ export class ParticleSystem {
       // u_power analog: power curve keeps the blob bright through most of its life
       // then drops off sharply. Cap at 0.72 so many overlapping blobs don't white-out.
       // p.alpha stores barrel brightness (1.0=barrel, 0.65=tip) — preserved through fire particle lifetime
-      const opacity = Math.min(0.62 * p.alpha, Math.pow(1.0 - lifeRatio, 0.7) * p.alpha);
+      const opacity = Math.min(0.38 * p.alpha, Math.pow(1.0 - lifeRatio, 0.7) * p.alpha);
       if (opacity <= 0.02) continue;
 
       const sp           = camera.worldToScreen(p.position);
@@ -623,9 +614,9 @@ export class ParticleSystem {
       // u_addition analog: multi-stop gradient gives each blob an internal hot core.
       // Stop layout:  hot yellow-orange core → birth colour body → dim translucent edge → transparent
       const col       = p.color; // "R,G,B" stored at spawn
-      const coreAlpha = (opacity * 1.00).toFixed(3);
-      const bodyAlpha = (opacity * 0.80).toFixed(3);
-      const edgeAlpha = (opacity * 0.25).toFixed(3);
+      const coreAlpha = (opacity * 0.95).toFixed(3);
+      const bodyAlpha = (opacity * 0.70).toFixed(3);
+      const edgeAlpha = (opacity * 0.20).toFixed(3);
 
       ctx.save();
       ctx.translate(sp.x, sp.y);

@@ -230,6 +230,7 @@ export class RenderSystem {
     x: number; y: number; angle: number; halfCone: number;
     waveDist: number; retreating: boolean; retreatDist: number;
     serverUpdateAt: number;
+    rotationSpeed: number; // rad/s — used to widen particle cone when aim flicks fast
   }> = new Map();
   /** Client-side smoke trail: cannonball id → ring of past positions with timestamps. */
   private cannonballTrails: Map<number, Array<{ x: number; y: number; t: number }>> = new Map();
@@ -337,12 +338,28 @@ export class RenderSystem {
     dead: boolean,
   ): void {
     if (dead) { this.flameWaves.delete(cannonId); return; }
+    const prev = this.flameWaves.get(cannonId);
+    // Compute shortest angular distance to derive rotation speed
+    let rotationSpeed = 0;
+    if (prev) {
+      const dt = (performance.now() - prev.serverUpdateAt) / 1000;
+      if (dt > 0.001) {
+        let diff = angle - prev.angle;
+        // Wrap to [-π, π]
+        while (diff >  Math.PI) diff -= 2 * Math.PI;
+        while (diff < -Math.PI) diff += 2 * Math.PI;
+        rotationSpeed = Math.abs(diff) / dt;
+      } else {
+        rotationSpeed = prev.rotationSpeed; // hold last value if update arrived too fast
+      }
+    }
     this.flameWaves.set(cannonId, {
       x, y, angle, halfCone,
       waveDist,
       retreating,
       retreatDist,
       serverUpdateAt: performance.now(),
+      rotationSpeed,
     });
   }
 
@@ -377,6 +394,7 @@ export class RenderSystem {
           fw.halfCone,
           retreatDist,
           waveDist,
+          fw.rotationSpeed,
         );
       }
     }

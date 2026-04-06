@@ -305,7 +305,8 @@ static void handle_island_collisions(struct Sim *sim) {
         const IslandDef *isl = &ISLAND_PRESETS[ii];
         float island_cx = CLIENT_TO_SERVER(isl->x);
         float island_cy = CLIENT_TO_SERVER(isl->y);
-        float island_r  = CLIENT_TO_SERVER(isl->beach_radius_px);
+        /* Broad-phase radius: base + max bump + ship bounding radius handled per-ship below */
+        float broad_r   = CLIENT_TO_SERVER(isl->beach_radius_px + isl->beach_max_bump);
         for (uint16_t si = 0; si < sim->ship_count; si++) {
             struct Ship *ship = &sim->ships[si];
             float sx = Q16_TO_FLOAT(ship->position.x);
@@ -314,25 +315,31 @@ static void handle_island_collisions(struct Sim *sim) {
             float dy = sy - island_cy;
             float dist_sq = dx * dx + dy * dy;
             float ship_r  = Q16_TO_FLOAT(ship->bounding_radius);
+            /* ── Broad phase ─────────────────────────────────────────────── */
+            float broad_min = broad_r + ship_r;
+            if (dist_sq >= broad_min * broad_min || dist_sq < 0.0001f) continue;
+            /* ── Narrow phase: sample bumpy boundary at the contact angle ── */
+            float dist     = sqrtf(dist_sq);
+            float angle    = atan2f(dy, dx);
+            float island_r = CLIENT_TO_SERVER(
+                island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle));
             float min_dist = island_r + ship_r;
-            if (dist_sq < min_dist * min_dist && dist_sq > 0.0001f) {
-                float dist = sqrtf(dist_sq);
-                float nx = dx / dist;
-                float ny = dy / dist;
-                float overlap = min_dist - dist;
-                /* Push ship completely outside the island */
-                ship->position.x += Q16_FROM_FLOAT(nx * overlap);
-                ship->position.y += Q16_FROM_FLOAT(ny * overlap);
-                /* Reflect velocity: low restitution (0.15) + friction (0.75) */
-                float vx = Q16_TO_FLOAT(ship->velocity.x);
-                float vy = Q16_TO_FLOAT(ship->velocity.y);
-                float vdotn = vx * nx + vy * ny;
-                if (vdotn < 0.0f) {
-                    const float restitution = 0.15f;
-                    const float friction    = 0.75f;
-                    ship->velocity.x = Q16_FROM_FLOAT((vx - (1.0f + restitution) * vdotn * nx) * friction);
-                    ship->velocity.y = Q16_FROM_FLOAT((vy - (1.0f + restitution) * vdotn * ny) * friction);
-                }
+            if (dist >= min_dist) continue;
+            float nx    = dx / dist;
+            float ny    = dy / dist;
+            float overlap = min_dist - dist;
+            /* Push ship outside the bumpy boundary */
+            ship->position.x += Q16_FROM_FLOAT(nx * overlap);
+            ship->position.y += Q16_FROM_FLOAT(ny * overlap);
+            /* Reflect velocity: low restitution (0.15) + friction (0.75) */
+            float vx    = Q16_TO_FLOAT(ship->velocity.x);
+            float vy    = Q16_TO_FLOAT(ship->velocity.y);
+            float vdotn = vx * nx + vy * ny;
+            if (vdotn < 0.0f) {
+                const float restitution = 0.15f;
+                const float friction    = 0.75f;
+                ship->velocity.x = Q16_FROM_FLOAT((vx - (1.0f + restitution) * vdotn * nx) * friction);
+                ship->velocity.y = Q16_FROM_FLOAT((vy - (1.0f + restitution) * vdotn * ny) * friction);
             }
         }
     }

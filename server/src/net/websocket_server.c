@@ -10135,22 +10135,28 @@ void websocket_server_tick(float dt) {
                     /* Island enter/leave detection (every tick, all non-ship players) */
                     float wx = ws_player->x, wy = ws_player->y;
                     if (ws_player->on_island_id == 0) {
-                        /* Entering: check if player crossed into any island's grass radius */
+                        /* Entering: broad phase → narrow angle-sampled grass boundary */
                         for (int ii = 0; ii < ISLAND_COUNT; ii++) {
                             const IslandDef *isl = &ISLAND_PRESETS[ii];
                             float dx = wx - isl->x, dy = wy - isl->y;
-                            if (dx*dx + dy*dy < isl->grass_radius_px * isl->grass_radius_px) {
+                            float dist_sq = dx*dx + dy*dy;
+                            float broad_r = isl->grass_radius_px + isl->grass_max_bump;
+                            if (dist_sq >= broad_r * broad_r) continue;
+                            /* Narrow phase */
+                            float angle   = atan2f(dy, dx);
+                            float narrow_r = island_boundary_r(isl->grass_radius_px, isl->grass_bumps, angle);
+                            if (dist_sq < narrow_r * narrow_r) {
                                 ws_player->on_island_id = (uint32_t)isl->id;
                                 ws_player->movement_state = PLAYER_STATE_WALKING;
                                 sim_player->velocity.x = 0;
                                 sim_player->velocity.y = 0;
-                                log_info("🏝️ Player %u stepped onto island %d",
+                                log_info("\U0001F3DD\uFE0F Player %u stepped onto island %d",
                                          ws_player->player_id, isl->id);
                                 break;
                             }
                         }
                     } else {
-                        /* Leaving: check if player has drifted outside grass radius + hysteresis */
+                        /* Leaving: player exits when outside bumpy boundary + 10px hysteresis */
                         const IslandDef *isl = NULL;
                         for (int ii = 0; ii < ISLAND_COUNT; ii++) {
                             if ((uint32_t)ISLAND_PRESETS[ii].id == ws_player->on_island_id) {
@@ -10158,12 +10164,19 @@ void websocket_server_tick(float dt) {
                             }
                         }
                         if (isl) {
-                            float leave_r = isl->grass_radius_px + 10.0f; /* 10px hysteresis */
                             float dx = wx - isl->x, dy = wy - isl->y;
-                            if (dx*dx + dy*dy > leave_r * leave_r) {
-                                ws_player->on_island_id = 0;
-                                ws_player->movement_state = PLAYER_STATE_SWIMMING;
-                                log_info("🌊 Player %u left island", ws_player->player_id);
+                            float dist_sq = dx*dx + dy*dy;
+                            /* Broad phase: still inside even worst-case bump → skip narrow test */
+                            float inner_r = isl->grass_radius_px - isl->grass_max_bump;
+                            if (dist_sq > inner_r * inner_r) {
+                                float angle    = atan2f(dy, dx);
+                                float narrow_r = island_boundary_r(isl->grass_radius_px, isl->grass_bumps, angle)
+                                                 + 10.0f; /* 10px hysteresis */
+                                if (dist_sq > narrow_r * narrow_r) {
+                                    ws_player->on_island_id = 0;
+                                    ws_player->movement_state = PLAYER_STATE_SWIMMING;
+                                    log_info("\U0001F30A Player %u left island", ws_player->player_id);
+                                }
                             }
                         }
                     }
