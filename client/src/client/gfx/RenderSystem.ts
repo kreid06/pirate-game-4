@@ -149,6 +149,82 @@ export class RenderSystem {
     spawnAt: number; ttl: number; ammoType: number;
   }> = [];
 
+  // ── Island data (server-driven via ISLANDS message; falls back to default) ──
+  /** Preset visual parameters keyed by preset name. */
+  private static readonly ISLAND_PRESETS: Record<string, {
+    beachRadius: number; grassRadius: number;
+    beachBumps: number[]; grassBumps: number[];
+    beachColors: [string, string, string];  // radial gradient 0/0.65/1.0
+    grassColors: [string, string, string];  // radial gradient 0/0.7/1.0
+    borderColor: string;
+  }> = {
+    tropical: {
+      beachRadius: 185, grassRadius: 148,
+      beachBumps:  [ 0, 14, -9, 20,  6, -13, 16,  3, -7, 18, -5, 10, 12, -11,  7, -9],
+      grassBumps:  [ 0,  9, -6, 13,  4,  -9, 10,  2, -4, 11, -3,  7,  8,  -7,  5, -6],
+      beachColors: ['#c8a96e', '#d4b97a', '#e8d4a0'],
+      grassColors: ['#47692a', '#598038', '#6b9444'],
+      borderColor: '#9a7840',
+    },
+    jungle: {
+      beachRadius: 200, grassRadius: 172,
+      beachBumps:  [-5, 18, -12, 22,  8, -16, 14,  5, -10, 20, -8, 13, 16, -14,  9, -11],
+      grassBumps:  [-3, 12,  -8, 15,  5, -11,  9,  3,  -6, 13, -5,  9, 11,  -9,  6,  -7],
+      beachColors: ['#b09058', '#c4a464', '#d8be80'],
+      grassColors: ['#2e4f1a', '#3c6522', '#4a7a2c'],
+      borderColor: '#7a6030',
+    },
+    desert: {
+      beachRadius: 165, grassRadius: 80,
+      beachBumps:  [ 2, 10, -6, 15,  4, -10, 12,  1, -5, 14, -3,  7,  9,  -8,  5, -6],
+      grassBumps:  [ 1,  6, -4,  9,  3,  -6,  7,  1, -3,  8, -2,  4,  5,  -5,  3, -4],
+      beachColors: ['#d4b870', '#e0c880', '#f0dca0'],
+      grassColors: ['#8f7a30', '#a08840', '#b09850'],
+      borderColor: '#a08040',
+    },
+    rocky: {
+      beachRadius: 170, grassRadius: 120,
+      beachBumps:  [-8, 20, -15, 25, 10, -18, 20,  6, -12, 22, -10, 15, 18, -16, 11, -14],
+      grassBumps:  [-5, 13, -10, 16,  6, -12, 13,  4,  -8, 14,  -6,  9, 11, -10,  7,  -9],
+      beachColors: ['#a09080', '#b4a490', '#ccc0b0'],
+      grassColors: ['#506040', '#607050', '#708060'],
+      borderColor: '#807060',
+    },
+    pine: {
+      beachRadius: 178, grassRadius: 145,
+      beachBumps:  [ 3, 12, -8, 18,  5, -12, 14,  2, -6, 16, -4,  9, 11, -10,  6, -8],
+      grassBumps:  [ 2,  8, -5, 12,  3,  -8,  9,  1, -4, 10, -3,  6,  7,  -6,  4, -5],
+      beachColors: ['#b8a478', '#ceb888', '#e2d0a8'],
+      grassColors: ['#284a1a', '#345e24', '#40722e'],
+      borderColor: '#887048',
+    },
+  };
+
+  /** Default fallback island — shown before the server sends ISLANDS. */
+  private static readonly DEFAULT_ISLAND = {
+    id: 0, x: 800, y: 600, preset: 'tropical' as const,
+    resources: [
+      { ox: -65, oy: -55, type: 'wood'  as const },
+      { ox:  85, oy: -25, type: 'wood'  as const },
+      { ox:  15, oy:  80, type: 'wood'  as const },
+      { ox: -90, oy:  38, type: 'wood'  as const },
+      { ox:  45, oy: -78, type: 'fiber' as const },
+      { ox: -28, oy:  32, type: 'fiber' as const },
+      { ox:  70, oy:  50, type: 'fiber' as const },
+    ],
+  };
+
+  /** Live island list — replaced by server ISLANDS message when received. */
+  private islands: Array<{
+    id: number; x: number; y: number; preset: string;
+    resources: Array<{ ox: number; oy: number; type: string }>;
+  }> = [RenderSystem.DEFAULT_ISLAND];
+
+  /** Called by ClientApplication when the server sends the ISLANDS message. */
+  setIslands(islands: Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string }> }>): void {
+    this.islands = islands;
+  }
+
   /** Active flamethrower wave states keyed by cannonId. Client interpolates between server ticks. */
   private flameWaves: Map<number, {
     x: number; y: number; angle: number; halfCone: number;
@@ -1412,6 +1488,7 @@ export class RenderSystem {
     // Draw background elements
     this.drawWater(camera);
     this.drawGrid(camera);
+    this.drawIsland(camera);
     
     // Queue all game objects for layered rendering
     this.queueWorldObjects(worldState, camera, interpolationAlpha);
@@ -1749,7 +1826,141 @@ export class RenderSystem {
       this.ctx.stroke();
     }
   }
-  
+
+  // ── Island rendering ─────────────────────────────────────────────────────────
+
+  /** Trace an irregular closed blob path using per-point radius bumps. */
+  private traceIslandBlob(
+    camera: Camera,
+    worldCx: number, worldCy: number,
+    radius: number, bumps: number[],
+  ): void {
+    const ctx = this.ctx;
+    const n   = bumps.length;
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const angle = (i / n) * Math.PI * 2 - Math.PI * 0.5;
+      const r     = radius + bumps[i % n];
+      const sp    = camera.worldToScreen(Vec2.from(
+        worldCx + Math.cos(angle) * r,
+        worldCy + Math.sin(angle) * r,
+      ));
+      if (i === 0) ctx.moveTo(sp.x, sp.y);
+      else         ctx.lineTo(sp.x, sp.y);
+    }
+    ctx.closePath();
+  }
+
+  private drawIsland(camera: Camera): void {
+    const zoom = camera.getState().zoom;
+    for (const isl of this.islands) {
+      if (!camera.isWorldPositionVisible(Vec2.from(isl.x, isl.y), 280)) continue;
+      const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+      const sc     = camera.worldToScreen(Vec2.from(isl.x, isl.y));
+      const ctx    = this.ctx;
+
+      ctx.save();
+
+      // ── Sandy beach ──────────────────────────────────────────────────────────
+      this.traceIslandBlob(camera, isl.x, isl.y, preset.beachRadius, preset.beachBumps);
+      const beachGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, preset.beachRadius * zoom * 1.1);
+      beachGrad.addColorStop(0.0,  preset.beachColors[0]);
+      beachGrad.addColorStop(0.65, preset.beachColors[1]);
+      beachGrad.addColorStop(1.0,  preset.beachColors[2]);
+      ctx.fillStyle = beachGrad;
+      ctx.fill();
+      ctx.strokeStyle = preset.borderColor;
+      ctx.lineWidth   = Math.max(1, 2 * zoom);
+      ctx.stroke();
+
+      // ── Grass interior ───────────────────────────────────────────────────────
+      this.traceIslandBlob(camera, isl.x, isl.y, preset.grassRadius, preset.grassBumps);
+      const grassGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, preset.grassRadius * zoom);
+      grassGrad.addColorStop(0.0, preset.grassColors[0]);
+      grassGrad.addColorStop(0.7, preset.grassColors[1]);
+      grassGrad.addColorStop(1.0, preset.grassColors[2]);
+      ctx.fillStyle = grassGrad;
+      ctx.fill();
+
+      ctx.restore();
+
+      // ── Resource nodes ───────────────────────────────────────────────────────
+      for (const res of isl.resources) {
+        const sp = camera.worldToScreen(Vec2.from(isl.x + res.ox, isl.y + res.oy));
+        if (res.type === 'wood') {
+          this.drawIslandTree(sp.x, sp.y, zoom);
+        } else if (res.type === 'fiber') {
+          this.drawIslandFiberPlant(sp.x, sp.y, zoom);
+        }
+        // 'food' nodes reserved for a future draw method
+      }
+    }
+  }
+
+  private drawIslandTree(sx: number, sy: number, zoom: number): void {
+    const ctx    = this.ctx;
+    const trunk  = Math.max(2, 4 * zoom);
+    const canopy = Math.max(4, 17 * zoom);
+
+    ctx.save();
+    // Trunk
+    ctx.fillStyle = '#5c3518';
+    ctx.beginPath();
+    ctx.ellipse(sx, sy + canopy * 0.45, trunk, trunk * 1.6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Dark shadow canopy
+    ctx.fillStyle = '#2a5214';
+    ctx.beginPath();
+    ctx.arc(sx + canopy * 0.1, sy + canopy * 0.08, canopy, 0, Math.PI * 2);
+    ctx.fill();
+    // Mid canopy
+    ctx.fillStyle = '#3e7a22';
+    ctx.beginPath();
+    ctx.arc(sx - canopy * 0.08, sy - canopy * 0.08, canopy * 0.84, 0, Math.PI * 2);
+    ctx.fill();
+    // Bright highlight
+    ctx.fillStyle = '#52a030';
+    ctx.beginPath();
+    ctx.arc(sx - canopy * 0.15, sy - canopy * 0.2, canopy * 0.52, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  private drawIslandFiberPlant(sx: number, sy: number, zoom: number): void {
+    const ctx        = this.ctx;
+    const h          = Math.max(5, 15 * zoom);
+    const bladeCount = 6;
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    // Dark base blades
+    ctx.strokeStyle = '#5a9030';
+    ctx.lineWidth   = Math.max(1, 2.2 * zoom);
+    for (let i = 0; i < bladeCount; i++) {
+      const angle  = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.95;
+      const bend   = Math.sin(i * 1.8) * 0.3;
+      const midX   = sx + Math.cos(angle + bend * 0.5) * h * 0.5;
+      const midY   = sy + Math.sin(angle + bend * 0.5) * h * 0.5;
+      const tipX   = sx + Math.cos(angle + bend) * h;
+      const tipY   = sy + Math.sin(angle + bend) * h;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(midX, midY, tipX, tipY);
+      ctx.stroke();
+    }
+    // Bright inner blades
+    ctx.strokeStyle = '#8acc48';
+    ctx.lineWidth   = Math.max(0.5, 1.2 * zoom);
+    for (let i = 1; i < bladeCount - 1; i++) {
+      const angle = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.6;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - h * 0.25);
+      ctx.lineTo(sx + Math.cos(angle) * h * 0.72, sy + Math.sin(angle) * h * 0.72);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   private queueWorldObjects(worldState: WorldState, camera: Camera, alpha: number): void {
     // Clear render queue buckets
     for (const b of this.renderBuckets) b.length = 0;

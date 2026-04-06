@@ -1160,6 +1160,11 @@ export class ClientApplication {
         this.renderSystem.notifyFireEffect(entityType, id, durationMs, shipId, moduleId);
       };
 
+      // Handle ISLANDS: server-defined island layout
+      this.networkManager.onIslands = (islands) => {
+        this.renderSystem.setIslands(islands);
+      };
+
       // Handle FLAME_CONE_FIRE / FLAME_WAVE_UPDATE: advancing/retreating cone visual
       this.networkManager.onFlameWaveUpdate = (cannonId, shipId, x, y, angle, halfCone, waveDist, retreating, retreatDist, dead) => {
         this.renderSystem.updateFlameWave(cannonId, shipId, x, y, angle, halfCone, waveDist, retreating, retreatDist, dead);

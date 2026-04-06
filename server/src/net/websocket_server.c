@@ -1,5 +1,6 @@
 #include "net/websocket_server.h"
 #include "sim/ship_level.h"
+#include "sim/island.h"
 #include "net/websocket_protocol.h"
 #include "net/network.h"
 #include "sim/simulation.h"
@@ -8417,7 +8418,37 @@ int websocket_server_update(struct Sim* sim) {
                                 snprintf(response, sizeof(response),
                                         "{\"type\":\"handshake_response\",\"player_id\":%u,\"player_name\":\"%s\",\"server_time\":%u,\"status\":\"connected\"}",
                                         player_id, player_name, get_time_ms());
-                                // Player joined
+                                // Player joined — immediately queue the ISLANDS message
+                                {
+                                    static char islands_buf[4096];
+                                    int pos = 0;
+                                    pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
+                                                    "{\"type\":\"ISLANDS\",\"islands\":[");
+                                    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+                                        const IslandDef *isl = &ISLAND_PRESETS[ii];
+                                        pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
+                                                        "%s{\"id\":%d,\"x\":%.1f,\"y\":%.1f,\"preset\":\"%s\",\"resources\":[",
+                                                        ii ? "," : "",
+                                                        isl->id, isl->x, isl->y, isl->preset);
+                                        for (int ri = 0; ri < isl->resource_count; ri++) {
+                                            const IslandResource *r = &isl->resources[ri];
+                                            pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
+                                                            "%s{\"ox\":%.1f,\"oy\":%.1f,\"type\":\"%s\"}",
+                                                            ri ? "," : "",
+                                                            r->ox, r->oy, r->type);
+                                        }
+                                        pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
+                                    }
+                                    pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
+                                    char isl_frame[4352];
+                                    size_t isl_frame_len = websocket_create_frame(
+                                        WS_OPCODE_TEXT, islands_buf, (size_t)pos,
+                                        isl_frame, sizeof(isl_frame));
+                                    if (isl_frame_len > 0 && isl_frame_len < sizeof(isl_frame)) {
+                                        send(client->fd, isl_frame, isl_frame_len, 0);
+                                        log_info("🏝️  Sent ISLANDS (%d islands) to player %u", ISLAND_COUNT, player_id);
+                                    }
+                                }
                             }
                             handled = true;
                             

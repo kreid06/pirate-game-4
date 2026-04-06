@@ -6,7 +6,7 @@
  */
 
 import { NetworkConfig } from '../client/ClientConfig.js';
-import { WorldState, InputFrame, Npc, Ship } from '../sim/Types.js';
+import { WorldState, InputFrame, Npc, Ship, IslandDef, IslandResource, IslandPreset } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { createShipAtPosition } from '../sim/ShipUtils.js';
 import { ShipModule, ModuleKind, MODULE_TYPE_MAP } from '../sim/modules.js';
@@ -490,6 +490,12 @@ export class NetworkManager {
   public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
   /** Fired when the server confirms the player has boarded a ship (via ladder). */
   public onPlayerBoarded: ((shipId: number) => void) | null = null;
+  /**
+   * Fired once on connect with the full list of server-defined islands.
+   * Falls back to client defaults if the server never sends this.
+   */
+  public onIslands: ((islands: IslandDef[]) => void) | null = null;
+
   /** Fired each server tick with the current state of an active flamethrower wave. */
   public onFlameWaveUpdate: ((
     cannonId: number, shipId: number,
@@ -1870,6 +1876,22 @@ export class NetworkManager {
           message.fiberHealth ?? 0,
           message.windEff   ?? 1.0,
         );
+        break;
+      }
+
+      case 'ISLANDS': {
+        const islands: IslandDef[] = (message.islands ?? []).map((isl: any) => ({
+          id:        isl.id       ?? 0,
+          x:         isl.x       ?? 0,
+          y:         isl.y       ?? 0,
+          preset:    (isl.preset ?? 'tropical') as IslandPreset,
+          resources: (isl.resources ?? []).map((r: any): IslandResource => ({
+            ox:   r.ox   ?? 0,
+            oy:   r.oy   ?? 0,
+            type: (r.type ?? 'wood') as IslandResource['type'],
+          })),
+        }));
+        this.onIslands?.(islands);
         break;
       }
 

@@ -227,6 +227,33 @@ export interface Npc {
 }
 
 /**
+/**
+ * Island preset names — must match server-side ISLAND_PRESET_* constants.
+ */
+export type IslandPreset = 'tropical' | 'jungle' | 'desert' | 'rocky' | 'pine';
+
+/**
+ * A single resource node on an island (offset from island centre in world px).
+ */
+export interface IslandResource {
+  ox: number;
+  oy: number;
+  type: 'wood' | 'fiber' | 'food';
+}
+
+/**
+ * Server-authoritative island definition.
+ * Sent once via the ISLANDS message on player connect.
+ */
+export interface IslandDef {
+  id: number;
+  x: number;
+  y: number;
+  preset: IslandPreset;
+  resources: IslandResource[];
+}
+
+/**
  * Complete world state for deterministic simulation
  */
 export interface WorldState {
