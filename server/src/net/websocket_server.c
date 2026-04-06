@@ -8892,6 +8892,39 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
                             
+                        } else if (strncmp(payload, "GET_STRUCTURES", 14) == 0) {
+                            /* Re-send the full placed-structures list to this client. */
+                            {
+                                static char gs_buf[8192];
+                                int gp = 0;
+                                gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
+                                               "{\"type\":\"STRUCTURES\",\"structures\":[");
+                                bool gfirst = true;
+                                for (uint32_t si = 0; si < placed_structure_count; si++) {
+                                    if (!placed_structures[si].active) continue;
+                                    const char* gs_type = placed_structures[si].type == STRUCT_WOODEN_FLOOR
+                                                          ? "wooden_floor" : "workbench";
+                                    gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
+                                                   "%s{\"id\":%u,\"structure_type\":\"%s\","
+                                                   "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                                   gfirst ? "" : ",",
+                                                   placed_structures[si].id, gs_type,
+                                                   placed_structures[si].island_id,
+                                                   placed_structures[si].x, placed_structures[si].y);
+                                    gfirst = false;
+                                }
+                                gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp, "]}");
+                                char gf[8448];
+                                size_t gflen = websocket_create_frame(
+                                    WS_OPCODE_TEXT, gs_buf, (size_t)gp, gf, sizeof(gf));
+                                if (gflen > 0 && gflen < sizeof(gf))
+                                    send(client->fd, gf, gflen, 0);
+                                log_info("📦 Sent STRUCTURES (%u) on GET_STRUCTURES to player %u",
+                                         placed_structure_count, player_id);
+                            }
+                            strcpy(response, "{\"type\":\"ack\"}");
+                            handled = true;
+
                         } else if (strncmp(payload, "STATE", 5) == 0) {
                             // Request game state
                             snprintf(response, sizeof(response),

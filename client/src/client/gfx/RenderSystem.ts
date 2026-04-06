@@ -2187,27 +2187,35 @@ export class RenderSystem {
         }
         ctx.restore();
       } else if (s.type === 'workbench') {
-        const tw = sz * 1.1;
-        const th = sz * 0.55;
+        // 1:2 rectangle — half the floor width, full floor height
+        const tw = sz * 0.5;  // 25 px at default zoom
+        const th = sz;        // 50 px at default zoom
         ctx.save();
         ctx.fillStyle   = '#7a4820';
         ctx.strokeStyle = '#4a2810';
         ctx.lineWidth   = Math.max(1, 2 * zoom);
+        // Table top (upper 40% of height)
+        const topH = th * 0.4;
         ctx.beginPath();
-        ctx.rect(ssp.x - tw / 2, ssp.y - th * 0.7, tw, th);
+        ctx.rect(ssp.x - tw / 2, ssp.y - th / 2, tw, topH);
         ctx.fill();
         ctx.stroke();
-        const legW = Math.max(2, 5 * zoom);
-        const legH = Math.max(3, 12 * zoom);
+        // Legs (lower 60% of height)
+        const legW = Math.max(2, 4 * zoom);
+        const legH = th * 0.6;
         ctx.fillStyle = '#5c3010';
-        for (const lx of [ssp.x - tw / 2 + legW, ssp.x + tw / 2 - legW * 2]) {
-          ctx.fillRect(lx, ssp.y - th * 0.7 + th - 1, legW, legH);
+        ctx.strokeStyle = '#3a1e08';
+        ctx.lineWidth = Math.max(0.5, 1 * zoom);
+        for (const lx of [ssp.x - tw / 2, ssp.x + tw / 2 - legW]) {
+          ctx.fillRect(lx, ssp.y - th / 2 + topH, legW, legH);
+          ctx.strokeRect(lx, ssp.y - th / 2 + topH, legW, legH);
         }
-        ctx.font = `${Math.max(8, Math.round(13 * zoom))}px monospace`;
+        // ⚒ icon centred on the table top
+        ctx.font = `${Math.max(7, Math.round(11 * zoom))}px monospace`;
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillStyle    = '#f0c070';
-        ctx.fillText('\u2692', ssp.x, ssp.y - th * 0.2);
+        ctx.fillText('\u2692', ssp.x, ssp.y - th / 2 + topH / 2);
         ctx.restore();
       }
     }

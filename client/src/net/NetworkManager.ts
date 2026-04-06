@@ -718,6 +718,7 @@ export class NetworkManager {
             this.socket!.onmessage = originalHandler;
             console.log('🤝 Handshake completed - Player ID received');
             this.requestGameState();
+            this.requestStructures();
             resolve();
           } else if (data.includes('message_ack') || data.includes('status') || data.startsWith('PONG')) {
             // Fallback acknowledgment
@@ -725,6 +726,7 @@ export class NetworkManager {
             this.socket!.onmessage = originalHandler;
             console.log('🤝 Handshake completed - Server acknowledged');
             this.requestGameState();
+            this.requestStructures();
             resolve();
           } else {
             // Non-handshake message arrived first (e.g. ISLANDS/STRUCTURES sent before
@@ -738,6 +740,7 @@ export class NetworkManager {
               try { originalHandler.call(this.socket!, event); } catch { /* ignore */ }
             }
             this.requestGameState();
+            this.requestStructures();
             resolve();
           }
         } catch (error) {
@@ -747,6 +750,7 @@ export class NetworkManager {
           this.socket!.onmessage = originalHandler;
           console.log('🤝 Handshake completed (server alive)');
           this.requestGameState();
+          this.requestStructures();
           resolve();
         }
       };
@@ -772,8 +776,18 @@ export class NetworkManager {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       this.socket.send('STATE');
       this.stats.messagesSent++;
-      this.stats.bytesSent += 5; // 'STATE'.length
+      this.stats.bytesSent += 5;
       console.log('📤 Requested game state from server');
+    }
+  }
+
+  /** Ask the server to re-send the full placed-structures list. */
+  requestStructures(): void {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send('GET_STRUCTURES');
+      this.stats.messagesSent++;
+      this.stats.bytesSent += 14;
+      console.log('📤 Requested structures list from server');
     }
   }
   
