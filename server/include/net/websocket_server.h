@@ -300,6 +300,9 @@ typedef struct WebSocketPlayer {
 
     // Status effects
     uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
+
+    /* Island walking — 0 = in water, >0 = on island with that id */
+    uint32_t on_island_id;
 } WebSocketPlayer;
 
 struct WebSocketStats {

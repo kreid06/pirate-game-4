@@ -10018,6 +10018,35 @@ void websocket_server_tick(float dt) {
                                 //          ws_player->local_x, ws_player->local_y,
                                 //          ws_player->x, ws_player->y);
                             }
+                        } else if (ws_player->on_island_id != 0) {
+                            // ===== ISLAND WALKING (WORLD COORDINATES) =====
+                            float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED);
+                            float new_x = ws_player->x + movement_x * walk_speed_client * dt;
+                            float new_y = ws_player->y + movement_y * walk_speed_client * dt;
+                            /* Clamp to inner edge of grass radius (5px margin) */
+                            const IslandDef *isl_mv = NULL;
+                            for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+                                if (ISLAND_PRESETS[ii].id == (int)ws_player->on_island_id) {
+                                    isl_mv = &ISLAND_PRESETS[ii]; break;
+                                }
+                            }
+                            if (isl_mv) {
+                                float dx = new_x - isl_mv->x;
+                                float dy = new_y - isl_mv->y;
+                                float dist_sq = dx * dx + dy * dy;
+                                float max_r = isl_mv->grass_radius_px - 5.0f;
+                                if (dist_sq > max_r * max_r && dist_sq > 0.001f) {
+                                    float dist = sqrtf(dist_sq);
+                                    new_x = isl_mv->x + (dx / dist) * max_r;
+                                    new_y = isl_mv->y + (dy / dist) * max_r;
+                                }
+                            }
+                            ws_player->x = new_x;
+                            ws_player->y = new_y;
+                            sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_x));
+                            sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_y));
+                            sim_player->velocity.x = 0;
+                            sim_player->velocity.y = 0;
                         } else {
                             // ===== SWIMMING MOVEMENT (WORLD COORDINATES) =====
                             // Apply acceleration in movement direction
@@ -10053,7 +10082,11 @@ void websocket_server_tick(float dt) {
                 } else {
                     // Player stopped moving - no deceleration needed for on-ship movement
                     // (player position is fixed relative to ship, ship velocity handles world movement)
-                    if (!on_ship) {
+                    if (!on_ship && ws_player->on_island_id != 0) {
+                        /* On island and stopped — zero velocity, no deceleration needed */
+                        sim_player->velocity.x = 0;
+                        sim_player->velocity.y = 0;
+                    } else if (!on_ship) {
                         // Only apply deceleration for swimming players
                         float current_vx = Q16_TO_FLOAT(sim_player->velocity.x);
                         float current_vy = Q16_TO_FLOAT(sim_player->velocity.y);
@@ -10099,6 +10132,41 @@ void websocket_server_tick(float dt) {
                     ws_player->y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->position.y));
                     ws_player->velocity_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->velocity.x));
                     ws_player->velocity_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->velocity.y));
+                    /* Island enter/leave detection (every tick, all non-ship players) */
+                    float wx = ws_player->x, wy = ws_player->y;
+                    if (ws_player->on_island_id == 0) {
+                        /* Entering: check if player crossed into any island's grass radius */
+                        for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+                            const IslandDef *isl = &ISLAND_PRESETS[ii];
+                            float dx = wx - isl->x, dy = wy - isl->y;
+                            if (dx*dx + dy*dy < isl->grass_radius_px * isl->grass_radius_px) {
+                                ws_player->on_island_id = (uint32_t)isl->id;
+                                ws_player->movement_state = PLAYER_STATE_WALKING;
+                                sim_player->velocity.x = 0;
+                                sim_player->velocity.y = 0;
+                                log_info("🏝️ Player %u stepped onto island %d",
+                                         ws_player->player_id, isl->id);
+                                break;
+                            }
+                        }
+                    } else {
+                        /* Leaving: check if player has drifted outside grass radius + hysteresis */
+                        const IslandDef *isl = NULL;
+                        for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+                            if ((uint32_t)ISLAND_PRESETS[ii].id == ws_player->on_island_id) {
+                                isl = &ISLAND_PRESETS[ii]; break;
+                            }
+                        }
+                        if (isl) {
+                            float leave_r = isl->grass_radius_px + 10.0f; /* 10px hysteresis */
+                            float dx = wx - isl->x, dy = wy - isl->y;
+                            if (dx*dx + dy*dy > leave_r * leave_r) {
+                                ws_player->on_island_id = 0;
+                                ws_player->movement_state = PLAYER_STATE_SWIMMING;
+                                log_info("🌊 Player %u left island", ws_player->player_id);
+                            }
+                        }
+                    }
                 } else {
                     // For on-ship players, recalculate world position from local coords
                     // (ship might have moved/rotated since last tick)
