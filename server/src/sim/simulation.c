@@ -20,6 +20,7 @@ static void update_projectile_physics(struct Projectile* projectile, q16_t dt);
 static void handle_ship_collisions(struct Sim* sim);
 static void handle_player_player_collisions(struct Sim* sim);
 static entity_id allocate_entity_id(struct Sim* sim);
+static Vec2Q16 transform_hull_vertex(Vec2Q16 local_vertex, Vec2Q16 position, q16_t rotation);
 
 /**
  * Allocate a new unique entity ID
