@@ -28,6 +28,7 @@
 #define ISLAND_RES_WOOD  "wood"
 #define ISLAND_RES_FIBER "fiber"
 #define ISLAND_RES_FOOD  "food"
+#define ISLAND_RES_ROCK  "rock"
 
 typedef struct {
     float ox, oy;       /* Offset from island centre (world px) */
@@ -82,7 +83,7 @@ static const IslandDef ISLAND_PRESETS[] = {
         .grass_bumps     = { 0,  9, -6, 13,  4,  -9, 10,  2, -4, 11, -3,  7,  8,  -7,  5, -6 },
         .grass_max_bump  = 13.0f,
         .preset          = "tropical",
-        .resource_count  = 7,
+        .resource_count  = 10,
         .resources = {
             { .ox = -65.0f, .oy = -55.0f, .type = ISLAND_RES_WOOD  },
             { .ox =  85.0f, .oy = -25.0f, .type = ISLAND_RES_WOOD  },
@@ -91,6 +92,9 @@ static const IslandDef ISLAND_PRESETS[] = {
             { .ox =  45.0f, .oy = -78.0f, .type = ISLAND_RES_FIBER },
             { .ox = -28.0f, .oy =  32.0f, .type = ISLAND_RES_FIBER },
             { .ox =  70.0f, .oy =  50.0f, .type = ISLAND_RES_FIBER },
+            { .ox =  -5.0f, .oy = -90.0f, .type = ISLAND_RES_ROCK  },
+            { .ox =  60.0f, .oy =  75.0f, .type = ISLAND_RES_ROCK  },
+            { .ox = -75.0f, .oy = -15.0f, .type = ISLAND_RES_ROCK  },
         },
     },
 };

@@ -237,6 +237,7 @@ typedef enum {
     ITEM_WOOD          = 22,
     ITEM_FIBER         = 23,
     ITEM_METAL         = 24,
+    ITEM_PICKAXE       = 25,
 } ItemKind;
 
 /* ── Island structures ────────────────────────────────────────────────────── */

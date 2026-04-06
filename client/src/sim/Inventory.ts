@@ -33,7 +33,8 @@ export type ItemKind =
   | 'workbench'
   | 'wood'
   | 'fiber'
-  | 'metal';
+  | 'metal'
+  | 'pickaxe';
 
 // ── Category groups ─────────────────────────────────────────────────────────
 export type ItemCategory = 'none' | 'building' | 'repair' | 'ammo' | 'weapon' | 'tool' | 'armor' | 'shield';
@@ -78,6 +79,7 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   wood:          { kind: 'wood',          name: 'Wood',          category: 'none',     maxStack: 99, color: '#8b5e2a', borderColor: '#5c3a10', symbol: 'W',  description: 'Raw wood harvested from island trees. Used for crafting.' },
   fiber:         { kind: 'fiber',         name: 'Fiber',         category: 'none',     maxStack: 99, color: '#c8a46e', borderColor: '#8a6030', symbol: 'Fi', description: 'Plant fiber from island vegetation. Used to craft sails.' },
   metal:         { kind: 'metal',         name: 'Metal',         category: 'none',     maxStack: 99, color: '#8a8a8c', borderColor: '#555558', symbol: 'Fe', description: 'Metal ingots. Used to craft weapons and cannons.' },
+  pickaxe:       { kind: 'pickaxe',       name: 'Pickaxe',       category: 'tool',     maxStack: 1,  color: '#7a7a7c', borderColor: '#555558', symbol: '\u26cf', description: 'Mine rock outcroppings on islands to gather metal.' },
 };
 
 /**
@@ -108,6 +110,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   22: 'wood',
   23: 'fiber',
   24: 'metal',
+  25: 'pickaxe',
 };
 
 /**

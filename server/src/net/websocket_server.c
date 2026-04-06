@@ -4827,6 +4827,160 @@ send_and_ret:;
 /**
  * Handle module interaction request from client
  */
+/* ── Fiber / rock harvest handlers ──────────────────────────────────────── */
+/* Forward declaration — defined in the Crafting helpers block below */
+static bool craft_grant(WebSocketPlayer* player, ItemKind item, int amount);
+
+/**
+ * Handle harvest_fiber: player presses E near a fiber plant.
+ * Grants 5 ITEM_FIBER if a fiber resource node is within HARVEST_RANGE.
+ */
+static void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* client) {
+    char response[256];
+
+    if (player->on_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_fiber_failure\",\"reason\":\"not_on_island\"}");
+        goto send_fiber_ret;
+    }
+
+    {
+        /* Find the island */
+        const IslandDef *isl = NULL;
+        for (int i = 0; i < ISLAND_COUNT; i++) {
+            if (ISLAND_PRESETS[i].id == (int)player->on_island_id) {
+                isl = &ISLAND_PRESETS[i];
+                break;
+            }
+        }
+        if (!isl) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_fiber_failure\",\"reason\":\"island_not_found\"}");
+            goto send_fiber_ret;
+        }
+
+        /* Find nearest fiber node within range */
+        float best_dist_sq = (float)(HARVEST_RANGE * HARVEST_RANGE);
+        bool  found = false;
+        for (int ri = 0; ri < isl->resource_count; ri++) {
+            if (strcmp(isl->resources[ri].type, ISLAND_RES_FIBER) != 0) continue;
+            float fx = isl->x + isl->resources[ri].ox;
+            float fy = isl->y + isl->resources[ri].oy;
+            float dx = player->x - fx;
+            float dy = player->y - fy;
+            float dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= best_dist_sq) {
+                best_dist_sq = dist_sq;
+                found = true;
+            }
+        }
+
+        if (!found) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_fiber_failure\",\"reason\":\"too_far\"}");
+            goto send_fiber_ret;
+        }
+
+        /* Grant 5 fiber */
+        if (!craft_grant(player, ITEM_FIBER, 5)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_fiber_failure\",\"reason\":\"inventory_full\"}");
+            goto send_fiber_ret;
+        }
+
+        log_info("🌿 Player %u gathered fiber → +5 fiber", player->player_id);
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_fiber_success\",\"fiber\":5}");
+    }
+
+send_fiber_ret:;
+    char frame[512];
+    size_t frame_len = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0 && frame_len < sizeof(frame))
+        send(client->fd, frame, frame_len, 0);
+}
+
+/**
+ * Handle harvest_rock: player presses E (with pickaxe) near a rock outcrop.
+ * Grants 3 ITEM_METAL if a rock resource node is within HARVEST_RANGE.
+ */
+static void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client) {
+    char response[256];
+
+    if (player->on_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_rock_failure\",\"reason\":\"not_on_island\"}");
+        goto send_rock_ret;
+    }
+
+    /* Check pickaxe equipped */
+    {
+        bool has_pickaxe = false;
+        int active = player->inventory.active_slot;
+        if (player->inventory.slots[active].item == ITEM_PICKAXE)
+            has_pickaxe = true;
+        if (!has_pickaxe) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_rock_failure\",\"reason\":\"need_pickaxe\"}");
+            goto send_rock_ret;
+        }
+    }
+
+    {
+        const IslandDef *isl = NULL;
+        for (int i = 0; i < ISLAND_COUNT; i++) {
+            if (ISLAND_PRESETS[i].id == (int)player->on_island_id) {
+                isl = &ISLAND_PRESETS[i];
+                break;
+            }
+        }
+        if (!isl) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_rock_failure\",\"reason\":\"island_not_found\"}");
+            goto send_rock_ret;
+        }
+
+        float best_dist_sq = (float)(HARVEST_RANGE * HARVEST_RANGE);
+        bool  found = false;
+        for (int ri = 0; ri < isl->resource_count; ri++) {
+            if (strcmp(isl->resources[ri].type, ISLAND_RES_ROCK) != 0) continue;
+            float rx = isl->x + isl->resources[ri].ox;
+            float ry = isl->y + isl->resources[ri].oy;
+            float dx = player->x - rx;
+            float dy = player->y - ry;
+            float dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= best_dist_sq) {
+                best_dist_sq = dist_sq;
+                found = true;
+            }
+        }
+
+        if (!found) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_rock_failure\",\"reason\":\"too_far\"}");
+            goto send_rock_ret;
+        }
+
+        if (!craft_grant(player, ITEM_METAL, 3)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_rock_failure\",\"reason\":\"inventory_full\"}");
+            goto send_rock_ret;
+        }
+
+        log_info("⛏ Player %u mined rock → +3 metal", player->player_id);
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_rock_success\",\"metal\":3}");
+    }
+
+send_rock_ret:;
+    char frame[512];
+    size_t frame_len = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0 && frame_len < sizeof(frame))
+        send(client->fd, frame, frame_len, 0);
+}
+
 /* ── Crafting helpers ──────────────────────────────────────────────────── */
 
 /** Count total quantity of an item across all inventory slots. */
@@ -6934,6 +7088,22 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 handled = true;
                             }
+
+                        } else if (strcmp(msg_type, "harvest_fiber") == 0) {
+                            // HARVEST FIBER: player presses E near a fiber plant
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_harvest_fiber(player, client);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "harvest_rock") == 0) {
+                            // HARVEST ROCK: player presses E with pickaxe near a rock
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_harvest_rock(player, client);
+                            }
+                            handled = true;
 
                         } else if (strcmp(msg_type, "place_structure") == 0) {
                             // ISLAND BUILDING: place a floor tile or workbench

@@ -76,6 +76,12 @@ export enum MessageType {
   HARVEST_RESOURCE = 'harvest_resource',
   HARVEST_SUCCESS  = 'harvest_success',
   HARVEST_FAILURE  = 'harvest_failure',
+  HARVEST_FIBER    = 'harvest_fiber',
+  HARVEST_FIBER_SUCCESS = 'harvest_fiber_success',
+  HARVEST_FIBER_FAILURE = 'harvest_fiber_failure',
+  HARVEST_ROCK     = 'harvest_rock',
+  HARVEST_ROCK_SUCCESS  = 'harvest_rock_success',
+  HARVEST_ROCK_FAILURE  = 'harvest_rock_failure',
   PLACE_STRUCTURE  = 'place_structure',
   STRUCTURE_INTERACT = 'structure_interact',
   PLACE_MAST_AT = 'place_mast_at',
@@ -521,6 +527,10 @@ export class NetworkManager {
   public onPlayerBoarded: ((shipId: number) => void) | null = null;
   /** Fired when the server responds to a harvest_resource request. */
   public onHarvestResult: ((success: boolean, wood: number, reason: string) => void) | null = null;
+  /** Fired when the server responds to a harvest_fiber request. */
+  public onFiberHarvestResult: ((success: boolean, fiber: number, reason: string) => void) | null = null;
+  /** Fired when the server responds to a harvest_rock request. */
+  public onRockHarvestResult: ((success: boolean, metal: number, reason: string) => void) | null = null;
   /**
    * Fired once on connect with the full list of server-defined islands.
    * Falls back to client defaults if the server never sends this.
@@ -1135,6 +1145,18 @@ export class NetworkManager {
   sendHarvestResource(): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.HARVEST_RESOURCE, timestamp: Date.now() });
+  }
+
+  /** Request server to harvest the nearest fiber plant on the current island. */
+  sendHarvestFiber(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'harvest_fiber', timestamp: Date.now() }));
+  }
+
+  /** Request server to mine the nearest rock outcrop on the current island. */
+  sendHarvestRock(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'harvest_rock', timestamp: Date.now() }));
   }
 
   /**
@@ -1823,6 +1845,22 @@ export class NetworkManager {
 
       case MessageType.HARVEST_FAILURE:
         this.onHarvestResult?.(false, 0, message.reason ?? 'unknown');
+        break;
+
+      case MessageType.HARVEST_FIBER_SUCCESS:
+        this.onFiberHarvestResult?.(true, message.fiber ?? 0, '');
+        break;
+
+      case MessageType.HARVEST_FIBER_FAILURE:
+        this.onFiberHarvestResult?.(false, 0, message.reason ?? 'unknown');
+        break;
+
+      case MessageType.HARVEST_ROCK_SUCCESS:
+        this.onRockHarvestResult?.(true, message.metal ?? 0, '');
+        break;
+
+      case MessageType.HARVEST_ROCK_FAILURE:
+        this.onRockHarvestResult?.(false, 0, message.reason ?? 'unknown');
         break;
 
       case 'npc_dialogue':

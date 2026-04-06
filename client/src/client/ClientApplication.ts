@@ -371,6 +371,33 @@ export class ClientApplication {
         }
       };
 
+      this.networkManager.onFiberHarvestResult = (success, fiber, reason) => {
+        if (success) {
+          this.renderSystem.showAnnouncement(`🌿 Gathered  +${fiber} fiber`, 'info', 2.5);
+        } else {
+          const msg: Record<string, string> = {
+            too_far:        'Move closer to a plant',
+            not_on_island:  'You must be on an island',
+            inventory_full: 'Inventory is full',
+          };
+          this.renderSystem.showAnnouncement(`🌿 ${msg[reason] ?? 'Cannot gather right now'}`, 'info', 2.0);
+        }
+      };
+
+      this.networkManager.onRockHarvestResult = (success, metal, reason) => {
+        if (success) {
+          this.renderSystem.showAnnouncement(`⛏ Mined  +${metal} metal`, 'info', 2.5);
+        } else {
+          const msg: Record<string, string> = {
+            need_pickaxe:   'Equip the pickaxe to mine rocks',
+            too_far:        'Move closer to a rock',
+            not_on_island:  'You must be on an island',
+            inventory_full: 'Inventory is full',
+          };
+          this.renderSystem.showAnnouncement(`⛏ ${msg[reason] ?? 'Cannot mine right now'}`, 'info', 2.0);
+        }
+      };
+
       // Authoritative per-ship weapon group state from server
       this.networkManager.onCannonGroupState = (shipId, groups) => {
         // Resolve the player's current ship from the world state.
@@ -599,16 +626,34 @@ export class ClientApplication {
             return;
           }
 
-          // Workbench interaction: player on island, workbench within range → open crafting
+          // Harvest fiber: hover a fiber plant → press E (no tool required)
+          if (player && player.carrierId === 0) {
+            const plant = this.renderSystem.getHoveredFiberPlant();
+            if (plant) {
+              this.networkManager.sendHarvestFiber();
+              return;
+            }
+          }
+
+          // Mine rock: pickaxe equipped + hovering rock → press E
+          if (activeItem === 'pickaxe' && player && player.carrierId === 0) {
+            const rock = this.renderSystem.getHoveredRock();
+            if (rock) {
+              this.networkManager.sendHarvestRock();
+              return;
+            }
+          }
+
+          // Workbench interaction: player on island, workbench under cursor and within range → open crafting
           if (player && player.carrierId === 0) {
             if (this.craftingMenu.visible) {
               this.craftingMenu.close();
               return;
             }
-            const bench = this.renderSystem.getHoveredWorkbench();
-            if (bench) {
-              console.log(`⚒ [INTERACT] Sending structure_interact for workbench ${bench.id}`);
-              this.networkManager.sendStructureInteract(bench.id);
+            const hovered = this.renderSystem.getHoveredStructure();
+            if (hovered?.type === 'workbench') {
+              console.log(`⚒ [INTERACT] Sending structure_interact for workbench ${hovered.id}`);
+              this.networkManager.sendStructureInteract(hovered.id);
               return;
             }
           }

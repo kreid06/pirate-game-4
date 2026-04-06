@@ -252,7 +252,7 @@ export type IslandPreset = 'tropical' | 'jungle' | 'desert' | 'rocky' | 'pine';
 export interface IslandResource {
   ox: number;
   oy: number;
-  type: 'wood' | 'fiber' | 'food';
+  type: 'wood' | 'fiber' | 'food' | 'rock';
 }
 
 /**

@@ -114,6 +114,10 @@ export class RenderSystem {
   private placedStructures: PlacedStructure[] = [];
   /** Structure currently under the cursor (within hover range of the local player). */
   private _hoveredStructure: PlacedStructure | null = null;
+  /** Fiber plant currently under cursor (world coords) — updated each frame in drawIsland. */
+  private _hoveredFiberPlant: { wx: number; wy: number } | null = null;
+  /** Rock node currently under cursor (world coords) — updated each frame in drawIsland. */
+  private _hoveredRock: { wx: number; wy: number } | null = null;
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
   private islandBuildKind: 'wooden_floor' | 'workbench' | null = null;
   /** True when the placement ghost is beyond the server's max placement range (200 px). */
@@ -1186,6 +1190,26 @@ export class RenderSystem {
     return dx * dx + dy * dy <= range * range ? this._hoveredStructure : null;
   }
 
+  /** Return hovered fiber plant world pos if player is in range and off-ship, else null. */
+  getHoveredFiberPlant(range: number = 110): { wx: number; wy: number } | null {
+    if (!this._hoveredFiberPlant) return null;
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return null;
+    const dx = this._hoveredFiberPlant.wx - player.position.x;
+    const dy = this._hoveredFiberPlant.wy - player.position.y;
+    return dx * dx + dy * dy <= range * range ? this._hoveredFiberPlant : null;
+  }
+
+  /** Return hovered rock world pos if player is in range and off-ship, else null. */
+  getHoveredRock(range: number = 110): { wx: number; wy: number } | null {
+    if (!this._hoveredRock) return null;
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return null;
+    const dx = this._hoveredRock.wx - player.position.x;
+    const dy = this._hoveredRock.wy - player.position.y;
+    return dx * dx + dy * dy <= range * range ? this._hoveredRock : null;
+  }
+
   /**
    * Whether cannon build mode is currently active
    */
@@ -1993,6 +2017,9 @@ export class RenderSystem {
 
   private drawIsland(camera: Camera): void {
     const zoom = camera.getState().zoom;
+    // Reset per-frame hovered resource nodes
+    this._hoveredFiberPlant = null;
+    this._hoveredRock       = null;
     for (const isl of this.islands) {
       if (!camera.isWorldPositionVisible(Vec2.from(isl.x, isl.y), 280)) continue;
       const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
@@ -2031,9 +2058,16 @@ export class RenderSystem {
         const slot = localPlayer.inventory?.activeSlot ?? 0;
         return localPlayer.inventory?.slots[slot]?.item === 'axe';
       })();
+      const pickaxeEquipped = (() => {
+        if (!localPlayer || localPlayer.carrierId !== 0) return false;
+        const slot = localPlayer.inventory?.activeSlot ?? 0;
+        return localPlayer.inventory?.slots[slot]?.item === 'pickaxe';
+      })();
       const HARVEST_RANGE_SQ = 110 * 110;
       // Mouse hover radius for trees: hit-test against the canopy circle (17px * zoom)
-      const TREE_HOVER_SQ = (Math.max(4, 17 * zoom)) * (Math.max(4, 17 * zoom));
+      const TREE_HOVER_SQ  = (Math.max(4, 17 * zoom)) * (Math.max(4, 17 * zoom));
+      const PLANT_HOVER_SQ = (Math.max(4, 14 * zoom)) * (Math.max(4, 14 * zoom));
+      const ROCK_HOVER_SQ  = (Math.max(4, 16 * zoom)) * (Math.max(4, 16 * zoom));
 
       for (const res of isl.resources) {
         const wx = isl.x + res.ox;
@@ -2058,11 +2092,48 @@ export class RenderSystem {
             this.drawHarvestPrompt(sp.x, sp.y, zoom, inRange);
           }
         } else if (res.type === 'fiber') {
-          this.drawIslandFiberPlant(sp.x, sp.y, zoom);
+          let isHovered = false;
+          if (this.mouseWorldPos) {
+            const msp = camera.worldToScreen(this.mouseWorldPos);
+            const hdx = msp.x - sp.x;
+            const hdy = msp.y - sp.y;
+            isHovered = (hdx * hdx + hdy * hdy) <= PLANT_HOVER_SQ;
+          }
+          const inRange = localPlayer && localPlayer.carrierId === 0
+            ? (() => { const dx = localPlayer.position.x - wx; const dy = localPlayer.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
+            : false;
+
+          if (isHovered) this._hoveredFiberPlant = { wx, wy };
+          this.drawIslandFiberPlant(sp.x, sp.y, zoom, isHovered);
+          if (isHovered) {
+            this.drawGatherPrompt(sp.x, sp.y, zoom, inRange, '[E] Gather Fiber');
+          }
+        } else if (res.type === 'rock') {
+          let isHovered = false;
+          if (this.mouseWorldPos) {
+            const msp = camera.worldToScreen(this.mouseWorldPos);
+            const hdx = msp.x - sp.x;
+            const hdy = msp.y - sp.y;
+            isHovered = (hdx * hdx + hdy * hdy) <= ROCK_HOVER_SQ;
+          }
+          const inRange = pickaxeEquipped && localPlayer
+            ? (() => { const dx = localPlayer.position.x - wx; const dy = localPlayer.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
+            : false;
+
+          if (isHovered) this._hoveredRock = { wx, wy };
+          this.drawIslandRock(sp.x, sp.y, zoom, isHovered);
+          if (isHovered && pickaxeEquipped) {
+            this.drawGatherPrompt(sp.x, sp.y, zoom, inRange, '[E] Mine Rock');
+          } else if (isHovered) {
+            this.drawGatherPrompt(sp.x, sp.y, zoom, false, '(need pickaxe)');
+          }
         }
         // 'food' nodes reserved for a future draw method
       }
     }
+
+    // Reset hovered nodes (re-set each frame in the loop above)
+    // Done: _hoveredFiberPlant and _hoveredRock are set to null at frame start below
   }
 
   /** Draw a floating "[E] Chop" or "Too far" prompt above a tree. */
@@ -2145,7 +2216,7 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandFiberPlant(sx: number, sy: number, zoom: number): void {
+  private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false): void {
     const ctx        = this.ctx;
     const h          = Math.max(5, 15 * zoom);
     const bladeCount = 6;
@@ -2153,7 +2224,7 @@ export class RenderSystem {
     ctx.save();
     ctx.lineCap = 'round';
     // Dark base blades
-    ctx.strokeStyle = '#5a9030';
+    ctx.strokeStyle = hovered ? '#7ac040' : '#5a9030';
     ctx.lineWidth   = Math.max(1, 2.2 * zoom);
     for (let i = 0; i < bladeCount; i++) {
       const angle  = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.95;
@@ -2168,7 +2239,7 @@ export class RenderSystem {
       ctx.stroke();
     }
     // Bright inner blades
-    ctx.strokeStyle = '#8acc48';
+    ctx.strokeStyle = hovered ? '#b0ff60' : '#8acc48';
     ctx.lineWidth   = Math.max(0.5, 1.2 * zoom);
     for (let i = 1; i < bladeCount - 1; i++) {
       const angle = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.6;
@@ -2180,7 +2251,64 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  /** Draw all placed structures (floors + workbenches) using absolute world coords — no island id filtering. */
+  private drawIslandRock(sx: number, sy: number, zoom: number, hovered = false): void {
+    const ctx = this.ctx;
+    const r   = Math.max(4, 12 * zoom);
+    ctx.save();
+    // Main rock body
+    ctx.beginPath();
+    ctx.ellipse(sx, sy + r * 0.15, r, r * 0.7, 0, 0, Math.PI * 2);
+    ctx.fillStyle   = hovered ? '#b0b0b4' : '#888890';
+    ctx.strokeStyle = hovered ? '#ffe090' : '#555560';
+    ctx.lineWidth   = Math.max(1, hovered ? 2.5 * zoom : 1.5 * zoom);
+    ctx.fill();
+    ctx.stroke();
+    // Highlight fleck
+    ctx.beginPath();
+    ctx.ellipse(sx - r * 0.25, sy - r * 0.15, r * 0.28, r * 0.18, -0.5, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.fill();
+    // Crack lines
+    ctx.strokeStyle = hovered ? '#888890' : '#666670';
+    ctx.lineWidth   = Math.max(0.5, zoom);
+    ctx.beginPath();
+    ctx.moveTo(sx - r * 0.1, sy - r * 0.2);
+    ctx.lineTo(sx + r * 0.25, sy + r * 0.3);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** Draw a floating "[E] action" or "Too far" prompt above a resource node. */
+  private drawGatherPrompt(sx: number, sy: number, zoom: number, inRange: boolean, actionLabel: string): void {
+    const ctx = this.ctx;
+    const offsetY  = Math.max(4, 16 * zoom);
+    const label     = inRange ? actionLabel : actionLabel.startsWith('(') ? actionLabel : 'Too far';
+    const borderCol = inRange ? '#a0ff60' : '#888888';
+    const textCol   = inRange ? '#c0ff80' : '#aaaaaa';
+    const fontSize  = Math.max(10, Math.round(12 * zoom));
+    ctx.save();
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'bottom';
+    const textW = ctx.measureText(label).width;
+    const padX = 5, padY = 3;
+    const bx = sx - textW / 2 - padX;
+    const by = sy - offsetY - fontSize - padY;
+    const bw = textW + padX * 2;
+    const bh = fontSize + padY * 2;
+    const pulse = inRange ? (0.75 + 0.25 * Math.sin(performance.now() / 350)) : 0.55;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle   = 'rgba(0,0,0,0.75)';
+    ctx.strokeStyle = borderCol;
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = textCol;
+    ctx.fillText(label, sx, sy - offsetY);
+    ctx.restore();
+  }
   private drawPlacedStructures(camera: Camera): void {
     const ctx  = this.ctx;
     const zoom = camera.getState().zoom;
@@ -2223,8 +2351,8 @@ export class RenderSystem {
       if (s.type === 'wooden_floor') {
         ctx.save();
         ctx.fillStyle   = isHovered ? '#d09a3a' : '#b8832b';
-        ctx.strokeStyle = isHovered ? '#ffe090' : '#7a5520';
-        ctx.lineWidth   = Math.max(1, isHovered ? 2.5 * zoom : 2 * zoom);
+        ctx.strokeStyle = '#7a5520';
+        ctx.lineWidth   = Math.max(1, 2 * zoom);
         ctx.beginPath();
         ctx.rect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
         ctx.fill();
@@ -2246,8 +2374,8 @@ export class RenderSystem {
         const th = sz * 0.5;  // 25 px at default zoom
         ctx.save();
         ctx.fillStyle   = isHovered ? '#8a5228' : '#7a4820';
-        ctx.strokeStyle = isHovered ? '#ffe090' : '#4a2810';
-        ctx.lineWidth   = Math.max(1, isHovered ? 2.5 * zoom : 2 * zoom);
+        ctx.strokeStyle = '#4a2810';
+        ctx.lineWidth   = Math.max(1, 2 * zoom);
         // Table top (upper 40% of height)
         const topH = th * 0.4;
         ctx.beginPath();
@@ -2272,49 +2400,55 @@ export class RenderSystem {
         ctx.fillText('\u2692', ssp.x, ssp.y - th / 2 + topH / 2);
         ctx.restore();
       }
+    }
 
-      // ── Hover tooltip ───────────────────────────────────────────────────────
-      if (isHovered) {
-        const structH = s.type === 'workbench' ? sz * 0.5 : sz;
-        const tipY = ssp.y - structH / 2 - 8;
+    // ── Second pass: hovered structure highlight border + tooltip (always on top) ──
+    if (this._hoveredStructure) {
+      const s   = this._hoveredStructure;
+      const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
+      const sz  = Math.max(4, 50 * zoom);
 
-        // Check if player is in interact range
-        const inRange = player && player.carrierId === 0 && (() => {
-          const dx = s.x - player.position.x;
-          const dy = s.y - player.position.y;
-          return dx * dx + dy * dy <= 110 * 110;
-        })();
-
-        const label = s.type === 'wooden_floor' ? 'Wooden Floor' : 'Workbench';
-
-        ctx.save();
-        ctx.textAlign    = 'center';
-        ctx.textBaseline = 'bottom';
-
-        // Name
-        ctx.font      = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
-        ctx.fillStyle = '#ffe8a0';
-        ctx.fillText(label, ssp.x, tipY);
-
-        const lineH = Math.max(12, 14 * zoom);
-        ctx.font = `${Math.max(9, Math.round(10 * zoom))}px Consolas, monospace`;
-        if (inRange) {
-          // Show interact hints
-          if (s.type === 'workbench') {
-            ctx.fillStyle = 'rgba(200, 255, 180, 0.95)';
-            ctx.fillText('Hold [E] to interact', ssp.x, tipY - lineH);
-          } else {
-            ctx.fillStyle = 'rgba(200, 255, 180, 0.95)';
-            ctx.fillText('Hold [E] to interact', ssp.x, tipY - lineH);
-          }
-        } else {
-          // Out of range — grey hint
-          ctx.fillStyle = 'rgba(180, 180, 160, 0.75)';
-          ctx.fillText('(walk closer)', ssp.x, tipY - lineH);
-        }
-
-        ctx.restore();
+      ctx.save();
+      ctx.strokeStyle = '#ffe090';
+      ctx.lineWidth   = Math.max(1, 3 * zoom);
+      if (s.type === 'wooden_floor') {
+        ctx.strokeRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+      } else if (s.type === 'workbench') {
+        const th  = sz * 0.5;
+        const topH = th * 0.4;
+        ctx.strokeRect(ssp.x - sz / 2, ssp.y - th / 2, sz, topH);
       }
+      ctx.restore();
+
+      // ── Tooltip ────────────────────────────────────────────────────────
+      const structH = s.type === 'workbench' ? sz * 0.5 : sz;
+      const tipY = ssp.y - structH / 2 - 8;
+
+      const inRange = player && player.carrierId === 0 && (() => {
+        const dx = s.x - player.position.x;
+        const dy = s.y - player.position.y;
+        return dx * dx + dy * dy <= 110 * 110;
+      })();
+
+      const label = s.type === 'wooden_floor' ? 'Wooden Floor' : 'Workbench';
+
+      ctx.save();
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.font      = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
+      ctx.fillStyle = '#ffe8a0';
+      ctx.fillText(label, ssp.x, tipY);
+
+      const lineH = Math.max(12, 14 * zoom);
+      ctx.font = `${Math.max(9, Math.round(10 * zoom))}px Consolas, monospace`;
+      if (inRange) {
+        ctx.fillStyle = 'rgba(200, 255, 180, 0.95)';
+        ctx.fillText('Hold [E] to interact', ssp.x, tipY - lineH);
+      } else {
+        ctx.fillStyle = 'rgba(180, 180, 160, 0.75)';
+        ctx.fillText('(walk closer)', ssp.x, tipY - lineH);
+      }
+      ctx.restore();
     }
   }
 
