@@ -104,6 +104,13 @@ export class UIManager {
     maxSails: number;
   } | null = null;
 
+  // Island structure build mode overlay state
+  private islandBuildState: {
+    kind: 'wooden_floor' | 'workbench';
+    tooFar: boolean;
+    enemyClose: boolean;
+  } | null = null;
+
   /** Called when the player clicks a build item button (cannon/sail/swivel). */
   public onBuildItemSelect: ((item: 'cannon' | 'sail' | 'swivel') => void) | null = null;
   /** Called when a weapon group has its mode cycled via right-click. */
@@ -301,6 +308,11 @@ export class UIManager {
     // Explicit build mode overlay (renders on top of everything, including menus)
     if (this.buildModeState?.active) {
       this.renderBuildModeOverlay(ctx, ctx.canvas);
+    }
+
+    // Island structure build mode overlay
+    if (this.islandBuildState) {
+      this.renderIslandBuildOverlay(ctx, ctx.canvas);
     }
 
     // Ghost build menu panel — left side of screen
@@ -836,6 +848,18 @@ export class UIManager {
   }
 
   /**
+   * Set island structure placement build mode state.
+   * Pass null to hide the overlay.
+   */
+  setIslandBuildState(state: {
+    kind: 'wooden_floor' | 'workbench';
+    tooFar: boolean;
+    enemyClose: boolean;
+  } | null): void {
+    this.islandBuildState = state;
+  }
+
+  /**
    * Update ghost build menu state (called by ClientApplication on each change).
    */
   setBuildMenuState(
@@ -1037,6 +1061,53 @@ export class UIManager {
     // 2) ROTATION DIAL — above the hotbar, centered
     // ================================================================
     this.renderRotationDial(ctx, canvas, rotationDeg);
+
+    ctx.restore();
+  }
+
+  /** Amber top banner shown when the player has a wooden_floor or workbench equipped. */
+  private renderIslandBuildOverlay(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    if (!this.islandBuildState) return;
+    const { kind, tooFar, enemyClose } = this.islandBuildState;
+
+    ctx.save();
+
+    const BANNER_H = 48;
+    const cw = canvas.width;
+
+    // Background — amber for normal, red-tint for warnings
+    const topColor    = (tooFar || enemyClose) ? '#a83000' : '#c87800';
+    const bottomColor = (tooFar || enemyClose) ? '#661800' : '#7a4800';
+    const bannerGrad = ctx.createLinearGradient(0, 0, 0, BANNER_H);
+    bannerGrad.addColorStop(0, topColor);
+    bannerGrad.addColorStop(1, bottomColor);
+    ctx.fillStyle = bannerGrad;
+    ctx.fillRect(0, 0, cw, BANNER_H);
+
+    // Bottom edge
+    ctx.strokeStyle = (tooFar || enemyClose) ? '#ff7744' : '#ffcc44';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, BANNER_H);
+    ctx.lineTo(cw, BANNER_H);
+    ctx.stroke();
+
+    // Item label
+    const itemLabel = kind === 'wooden_floor' ? '\u229f WOODEN FLOOR' : '\u2692 WORKBENCH';
+
+    // Status suffix
+    let status = '';
+    if (enemyClose) status = '  \u26a0\ufe0f ENEMY NEARBY — retreat to place';
+    else if (tooFar) status = '  \u26a0\ufe0f TOO FAR — move closer';
+
+    ctx.font = 'bold 20px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff8e0';
+    ctx.fillText(
+      `\u2301  BUILD MODE — ${itemLabel}  |  [Click] Place  |  [Esc / change slot] Cancel${status}`,
+      cw / 2, BANNER_H / 2
+    );
 
     ctx.restore();
   }

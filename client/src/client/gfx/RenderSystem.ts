@@ -114,6 +114,11 @@ export class RenderSystem {
   private placedStructures: PlacedStructure[] = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
   private islandBuildKind: 'wooden_floor' | 'workbench' | null = null;
+  /** True when the placement ghost is beyond the server's max placement range (200 px). */
+  private _islandGhostTooFar = false;
+
+  /** Returns whether the last-rendered island build ghost was out of placement range. */
+  getIslandBuildTooFar(): boolean { return this._islandGhostTooFar; }
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
   public playerAimAngleRelative: number = 0;
   /** Currently selected ammo type (0 = cannonball, 1 = bar shot), set each frame by ClientApplication. */
@@ -1560,6 +1565,7 @@ export class RenderSystem {
     this.drawWater(camera);
     this.drawGrid(camera);
     this.drawIsland(camera);
+    this.drawIslandBuildGhost(camera);
     
     // Queue all game objects for layered rendering
     this.queueWorldObjects(worldState, camera, interpolationAlpha);
@@ -2015,38 +2021,6 @@ export class RenderSystem {
         }
       }
 
-      // ── Island placement ghost ────────────────────────────────────────────
-      if (this.islandBuildKind && this.mouseWorldPos) {
-        // Only show ghost when player is on this island
-        const localPlayer = this._cachedLocalPlayer;
-        if (localPlayer && localPlayer.onIslandId === isl.id) {
-          const msp = camera.worldToScreen(this.mouseWorldPos);
-          const sz  = Math.max(4, 50 * zoom);
-          let ghostColor = 'rgba(100, 220, 100, 0.45)';
-          if (this.islandBuildKind === 'workbench') {
-            // Green only if a floor tile is within 55 px
-            const mx = this.mouseWorldPos.x;
-            const my = this.mouseWorldPos.y;
-            const hasFloor = this.placedStructures.some(s => {
-              if (s.type !== 'wooden_floor' || s.islandId !== isl.id) return false;
-              const dx = s.x - mx; const dy = s.y - my;
-              return dx * dx + dy * dy <= 55 * 55;
-            });
-            ghostColor = hasFloor ? 'rgba(100, 220, 100, 0.45)' : 'rgba(220, 80, 60, 0.45)';
-          }
-          ctx.save();
-          ctx.globalAlpha  = 0.7 + 0.15 * Math.sin(performance.now() / 300);
-          ctx.fillStyle    = ghostColor;
-          ctx.strokeStyle  = 'rgba(255, 255, 255, 0.5)';
-          ctx.lineWidth    = Math.max(1, 2 * zoom);
-          ctx.beginPath();
-          ctx.rect(msp.x - sz / 2, msp.y - sz / 2, sz, sz);
-          ctx.fill();
-          ctx.stroke();
-          ctx.restore();
-        }
-      }
-
       // ── Resource nodes ───────────────────────────────────────────────────────
       const localPlayer = this._cachedLocalPlayer;
       const axeEquipped = (() => {
@@ -2200,6 +2174,102 @@ export class RenderSystem {
       ctx.lineTo(sx + Math.cos(angle) * h * 0.72, sy + Math.sin(angle) * h * 0.72);
       ctx.stroke();
     }
+    ctx.restore();
+  }
+
+  /** Draw the island structure placement ghost at the cursor position (drawn once, after all islands). */
+  private drawIslandBuildGhost(camera: Camera): void {
+    this._islandGhostTooFar = false;
+    if (!this.islandBuildKind || !this.mouseWorldPos) return;
+    const zoom = camera.getState().zoom;
+    const msp  = camera.worldToScreen(this.mouseWorldPos);
+    const sz   = Math.max(4, 50 * zoom);
+    const ctx  = this.ctx;
+
+    // Helper: sample bumpy island boundary at an angle (mirrors server island_boundary_r)
+    const sampleBoundary = (baseR: number, bumps: number[], angle: number): number => {
+      const TWO_PI = Math.PI * 2;
+      const n = bumps.length;
+      let a = angle % TWO_PI;
+      if (a < 0) a += TWO_PI;
+      const t = (a / TWO_PI) * n;
+      const i0 = Math.floor(t) % n;
+      const i1 = (i0 + 1) % n;
+      return baseR + bumps[i0] + (t - Math.floor(t)) * (bumps[i1] - bumps[i0]);
+    };
+
+    // Water check: is cursor over any island's beach area?
+    const mx = this.mouseWorldPos.x;
+    const my = this.mouseWorldPos.y;
+    let inWater = true;
+    for (const isl of this.islands) {
+      const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+      const dx = mx - isl.x, dy = my - isl.y;
+      const distSq = dx * dx + dy * dy;
+      const broadR = preset.beachRadius + Math.max(...preset.beachBumps.map(Math.abs));
+      if (distSq >= broadR * broadR) continue;
+      const angle   = Math.atan2(dy, dx);
+      const narrowR = sampleBoundary(preset.beachRadius, preset.beachBumps, angle);
+      if (distSq < narrowR * narrowR) { inWater = false; break; }
+    }
+
+    // Distance check: player must be within 200 px (world space) of placement point
+    const player = this._cachedLocalPlayer;
+    let tooFar = false;
+    if (player) {
+      const dx = mx - player.position.x;
+      const dy = my - player.position.y;
+      tooFar = dx * dx + dy * dy > 200 * 200;
+    }
+    this._islandGhostTooFar = tooFar || inWater;
+
+    // Workbench needs a floor tile within 55 px
+    let noFloor = false;
+    if (this.islandBuildKind === 'workbench') {
+      noFloor = !this.placedStructures.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        const dx = s.x - mx; const dy = s.y - my;
+        return dx * dx + dy * dy <= 55 * 55;
+      });
+    }
+
+    const invalid = tooFar || inWater || noFloor;
+    const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
+    const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
+
+    ctx.save();
+    ctx.globalAlpha = 0.72 + 0.14 * Math.sin(performance.now() / 300);
+    ctx.fillStyle   = ghostColor;
+    ctx.strokeStyle = borderColor;
+    ctx.lineWidth   = Math.max(1, 2 * zoom);
+    ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+    ctx.beginPath();
+    ctx.rect(msp.x - sz / 2, msp.y - sz / 2, sz, sz);
+    ctx.fill();
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Label above the ghost
+    const labelY = msp.y - sz / 2 - 6;
+    ctx.globalAlpha = 1;
+    ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'bottom';
+    if (inWater) {
+      ctx.fillStyle = '#4488ff';
+      ctx.fillText('IN WATER', msp.x, labelY);
+    } else if (tooFar) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('TOO FAR', msp.x, labelY);
+    } else if (noFloor) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('NEEDS FLOOR', msp.x, labelY);
+    } else {
+      ctx.fillStyle = '#aaffaa';
+      const label = this.islandBuildKind === 'wooden_floor' ? 'Wooden Floor' : 'Workbench';
+      ctx.fillText(label, msp.x, labelY);
+    }
+
     ctx.restore();
   }
 

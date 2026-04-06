@@ -1627,6 +1627,19 @@ export class ClientApplication {
         }
       }
 
+      // Update island build mode overlay state
+      if (this.islandBuildMode) {
+        const activeSlotB = localPlayer?.inventory?.activeSlot ?? 0;
+        const islandBuildKind = (localPlayer?.inventory?.slots[activeSlotB]?.item ?? 'wooden_floor') as 'wooden_floor' | 'workbench';
+        this.uiManager.setIslandBuildState({
+          kind: islandBuildKind,
+          tooFar: this.renderSystem.getIslandBuildTooFar(),
+          enemyClose: false, // TODO: detect when enemies are nearby
+        });
+      } else {
+        this.uiManager.setIslandBuildState(null);
+      }
+
       // Render UI overlay
       const playerShipId = localPlayer?.carrierId ?? 0;
       const playerShip = playerShipId
@@ -1901,9 +1914,8 @@ export class ClientApplication {
     const inHelmBuildMode   = activeItem === 'helm_kit';
     const inDeckBuildMode   = activeItem === 'deck';
 
-    // Island placement build mode — wooden_floor or workbench while standing on an island
-    const onIsland = (player?.carrierId === 0) && ((player?.onIslandId ?? 0) !== 0);
-    const inIslandBuildMode = onIsland && (activeItem === 'wooden_floor' || activeItem === 'workbench');
+    // Island placement build mode — wooden_floor or workbench while not on a ship
+    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench');
     this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
     this.renderSystem.setIslandBuildItem(
       this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench') : null

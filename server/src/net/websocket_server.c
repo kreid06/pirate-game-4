@@ -4439,9 +4439,36 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
 static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
     char response[256];
 
-    if (player->on_island_id == 0) {
+    /* Parse placement position first (needed for island boundary check) */
+    float px = player->x, py = player->y;
+    {
+        char* pxs = strstr(payload, "\"x\":");
+        char* pys = strstr(payload, "\"y\":");
+        if (pxs) sscanf(pxs + 4, "%f", &px);
+        if (pys) sscanf(pys + 4, "%f", &py);
+    }
+
+    /* Placement point (px,py) must lie within a valid island beach boundary.
+       This replaces the old on_island_id check and also prevents water placement. */
+    uint32_t target_island_id = 0;
+    {
+        for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+            const IslandDef *isl = &ISLAND_PRESETS[ii];
+            float dx     = px - isl->x, dy = py - isl->y;
+            float dist_sq = dx*dx + dy*dy;
+            float broad_r = isl->beach_radius_px + isl->beach_max_bump;
+            if (dist_sq >= broad_r * broad_r) continue;
+            float angle    = atan2f(dy, dx);
+            float narrow_r = island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle);
+            if (dist_sq < narrow_r * narrow_r) {
+                target_island_id = (uint32_t)isl->id;
+                break;
+            }
+        }
+    }
+    if (target_island_id == 0) {
         snprintf(response, sizeof(response),
-                 "{\"type\":\"place_structure_fail\",\"reason\":\"not_on_island\"}");
+                 "{\"type\":\"place_structure_fail\",\"reason\":\"in_water\"}");
         goto ps_send;
     }
 
@@ -4479,13 +4506,6 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
             goto ps_send;
         }
     }
-
-    /* Parse x, y */
-    float px = player->x, py = player->y;
-    char* pxs = strstr(payload, "\"x\":");
-    char* pys = strstr(payload, "\"y\":");
-    if (pxs) sscanf(pxs + 4, "%f", &px);
-    if (pys) sscanf(pys + 4, "%f", &py);
 
     /* Player must be reasonably close to placement point */
     {
@@ -4536,20 +4556,20 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     placed_structures[placed_structure_count].active    = true;
     placed_structures[placed_structure_count].id        = new_id;
     placed_structures[placed_structure_count].type      = stype_enum;
-    placed_structures[placed_structure_count].island_id = player->on_island_id;
+    placed_structures[placed_structure_count].island_id = target_island_id;
     placed_structures[placed_structure_count].x         = px;
     placed_structures[placed_structure_count].y         = py;
     placed_structure_count++;
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
-             player->player_id, stype, new_id, px, py, player->on_island_id);
+             player->player_id, stype, new_id, px, py, target_island_id);
 
     /* Broadcast to all clients */
     char bcast[256];
     snprintf(bcast, sizeof(bcast),
              "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f}",
-             new_id, stype, player->on_island_id, px, py);
+             new_id, stype, target_island_id, px, py);
     websocket_server_broadcast(bcast);
     return; /* already sent via broadcast */
 
