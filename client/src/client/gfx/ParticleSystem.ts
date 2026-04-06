@@ -607,7 +607,7 @@ export class ParticleSystem {
       // u_power analog: power curve keeps the blob bright through most of its life
       // then drops off sharply. Cap at 0.72 so many overlapping blobs don't white-out.
       // p.alpha stores barrel brightness (1.0=barrel, 0.65=tip) — preserved through fire particle lifetime
-      const opacity = Math.min(0.38 * p.alpha, Math.pow(1.0 - lifeRatio, 0.7) * p.alpha);
+      const opacity = Math.min(0.62 * p.alpha, Math.pow(1.0 - lifeRatio, 0.7) * p.alpha);
       if (opacity <= 0.02) continue;
 
       const sp           = camera.worldToScreen(p.position);
@@ -623,9 +623,9 @@ export class ParticleSystem {
       // u_addition analog: multi-stop gradient gives each blob an internal hot core.
       // Stop layout:  hot yellow-orange core → birth colour body → dim translucent edge → transparent
       const col       = p.color; // "R,G,B" stored at spawn
-      const coreAlpha = (opacity * 0.95).toFixed(3);
-      const bodyAlpha = (opacity * 0.70).toFixed(3);
-      const edgeAlpha = (opacity * 0.20).toFixed(3);
+      const coreAlpha = (opacity * 1.00).toFixed(3);
+      const bodyAlpha = (opacity * 0.80).toFixed(3);
+      const edgeAlpha = (opacity * 0.25).toFixed(3);
 
       ctx.save();
       ctx.translate(sp.x, sp.y);
