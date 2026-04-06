@@ -4495,16 +4495,19 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         goto ps_send;
     }
 
-    /* Player must have the item in active slot */
-    {
-        uint8_t aslot = player->inventory.active_slot;
-        if (aslot >= INVENTORY_SLOTS ||
-            player->inventory.slots[aslot].item != required_item ||
-            player->inventory.slots[aslot].quantity == 0) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"place_structure_fail\",\"reason\":\"missing_item\"}");
-            goto ps_send;
+    /* Player must have the item somewhere in their inventory */
+    int found_slot = -1;
+    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+        if (player->inventory.slots[s].item == required_item &&
+            player->inventory.slots[s].quantity > 0) {
+            found_slot = s;
+            break;
         }
+    }
+    if (found_slot < 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"place_structure_fail\",\"reason\":\"missing_item\"}");
+        goto ps_send;
     }
 
     /* Player must be reasonably close to placement point */
@@ -4543,12 +4546,11 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         goto ps_send;
     }
 
-    /* Consume 1 item from active slot */
+    /* Consume 1 item from the found slot */
     {
-        uint8_t aslot = player->inventory.active_slot;
-        player->inventory.slots[aslot].quantity--;
-        if (player->inventory.slots[aslot].quantity == 0)
-            player->inventory.slots[aslot].item = ITEM_NONE;
+        player->inventory.slots[found_slot].quantity--;
+        if (player->inventory.slots[found_slot].quantity == 0)
+            player->inventory.slots[found_slot].item = ITEM_NONE;
     }
 
     /* Add structure */
