@@ -6,7 +6,7 @@
  */
 
 import { NetworkConfig } from '../client/ClientConfig.js';
-import { WorldState, InputFrame, Npc, Ship, IslandDef, IslandResource, IslandPreset } from '../sim/Types.js';
+import { WorldState, InputFrame, Npc, Ship, IslandDef, IslandResource, IslandPreset, PlacedStructure } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { createShipAtPosition } from '../sim/ShipUtils.js';
 import { ShipModule, ModuleKind, MODULE_TYPE_MAP } from '../sim/modules.js';
@@ -76,6 +76,8 @@ export enum MessageType {
   HARVEST_RESOURCE = 'harvest_resource',
   HARVEST_SUCCESS  = 'harvest_success',
   HARVEST_FAILURE  = 'harvest_failure',
+  PLACE_STRUCTURE  = 'place_structure',
+  STRUCTURE_INTERACT = 'structure_interact',
   PLACE_MAST_AT = 'place_mast_at',
   REPLACE_HELM = 'replace_helm',
   PLACE_DECK = 'place_deck',
@@ -100,6 +102,9 @@ export enum MessageType {
   
   // Server notifications
   PLAYER_BOARDED = 'player_boarded',
+  STRUCTURE_PLACED = 'structure_placed',
+  CRAFTING_OPEN  = 'crafting_open',
+  STRUCTURES_LIST = 'STRUCTURES',
 
   // Connection Management
   CONNECT = 'connect',
@@ -411,7 +416,21 @@ interface HarvestResourceMessage extends NetworkMessage {
   timestamp: number;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage;
+interface PlaceStructureMessage extends NetworkMessage {
+  type: MessageType.PLACE_STRUCTURE;
+  timestamp: number;
+  structure_type: string;
+  x: number;
+  y: number;
+}
+
+interface StructureInteractMessage extends NetworkMessage {
+  type: MessageType.STRUCTURE_INTERACT;
+  timestamp: number;
+  structure_id: number;
+}
+
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage;
 
 /**
  * Main network manager class
@@ -505,6 +524,13 @@ export class NetworkManager {
    * Falls back to client defaults if the server never sends this.
    */
   public onIslands: ((islands: IslandDef[]) => void) | null = null;
+
+  /** Fired when the server broadcasts a newly placed structure to all clients. */
+  public onStructurePlaced: ((s: PlacedStructure) => void) | null = null;
+  /** Fired when the server sends the full list of existing placed structures on join. */
+  public onStructuresList: ((structures: PlacedStructure[]) => void) | null = null;
+  /** Fired when the server confirms a workbench can be opened (E-key interact). */
+  public onCraftingOpen: ((structureId: number, structureType: string) => void) | null = null;
 
   /** Fired each server tick with the current state of an active flamethrower wave. */
   public onFlameWaveUpdate: ((
@@ -1086,6 +1112,24 @@ export class NetworkManager {
   }
 
   /**
+   * Ask the server to place a structure (wooden_floor or workbench) at world (x, y).
+   * The server validates that the player is on an island, has the item, and for
+   * workbench that a floor tile is close enough.
+   */
+  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench', x: number, y: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y });
+  }
+
+  /**
+   * Ask the server to interact with a placed structure (e.g. open a workbench).
+   */
+  sendStructureInteract(structureId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.STRUCTURE_INTERACT, timestamp: Date.now(), structure_id: structureId });
+  }
+
+  /**
    * Apply a hammer-boosted instant repair (10 000 HP) to the most damaged plank.
    * Called only after the player wins the client-side hammer minigame.
    */
@@ -1651,6 +1695,7 @@ export class NetworkManager {
             companyId: player.company ?? 0,
             health: player.health ?? 100,
             maxHealth: player.max_health ?? 100,
+            onIslandId: player.on_island ?? 0,
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,
@@ -1922,6 +1967,34 @@ export class NetworkManager {
         this.onIslands?.(islands);
         break;
       }
+
+      case 'STRUCTURES': {
+        const structs: PlacedStructure[] = (message.structures ?? []).map((s: any): PlacedStructure => ({
+          id:       s.id       ?? 0,
+          type:     s.structure_type === 'workbench' ? 'workbench' : 'wooden_floor',
+          islandId: s.island_id ?? 0,
+          x:        s.x ?? 0,
+          y:        s.y ?? 0,
+        }));
+        this.onStructuresList?.(structs);
+        break;
+      }
+
+      case 'structure_placed': {
+        const sp: PlacedStructure = {
+          id:       message.id       ?? 0,
+          type:     message.structure_type === 'workbench' ? 'workbench' : 'wooden_floor',
+          islandId: message.island_id ?? 0,
+          x:        message.x ?? 0,
+          y:        message.y ?? 0,
+        };
+        this.onStructurePlaced?.(sp);
+        break;
+      }
+
+      case 'crafting_open':
+        this.onCraftingOpen?.(message.structure_id ?? 0, message.structure_type ?? 'workbench');
+        break;
 
       case 'FLAME_CONE_FIRE': // legacy — ignore
         break;

@@ -86,6 +86,9 @@ export interface Player {
   // Health
   health: number;      // current HP
   maxHealth: number;   // max HP (default 100)
+
+  // Island presence (0 = not on island)
+  onIslandId: number;
 }
 
 /**
@@ -108,6 +111,17 @@ export interface Cannonball {
     age: number; // 0 to 1, where 1 is fully faded
     maxAge: number;
   }>;
+}
+
+/**
+ * A structure placed on an island by a player.
+ */
+export interface PlacedStructure {
+  id: number;
+  type: 'wooden_floor' | 'workbench';
+  islandId: number;
+  x: number;
+  y: number;
 }
 
 // Company identifiers (mirror server COMPANY_* constants)

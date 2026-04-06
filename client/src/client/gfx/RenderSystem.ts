@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
@@ -110,6 +110,10 @@ export class RenderSystem {
   private _localCompanyId: number = 0;
   /** Cached local player for the current frame — set once in renderWorld, shared by all draw methods. */
   private _cachedLocalPlayer: Player | null = null;
+  /** Placed island structures — updated via addPlacedStructure / setPlacedStructures. */
+  private placedStructures: PlacedStructure[] = [];
+  /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
+  private islandBuildKind: 'wooden_floor' | 'workbench' | null = null;
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
   public playerAimAngleRelative: number = 0;
   /** Currently selected ammo type (0 = cannonball, 1 = bar shot), set each frame by ClientApplication. */
@@ -1077,6 +1081,50 @@ export class RenderSystem {
     return this.hoveredDeckSlot;
   }
 
+  // ── Island structure management ────────────────────────────────────────────
+
+  /** Add (or update) a single placed structure received from the server. */
+  addPlacedStructure(s: PlacedStructure): void {
+    const idx = this.placedStructures.findIndex(p => p.id === s.id);
+    if (idx >= 0) this.placedStructures[idx] = s;
+    else this.placedStructures.push(s);
+  }
+
+  /** Replace the full placed-structure list (e.g. on join). */
+  setPlacedStructures(arr: PlacedStructure[]): void {
+    this.placedStructures = [...arr];
+  }
+
+  /** Activate island placement ghost for wooden_floor or workbench, or clear it. */
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | null): void {
+    this.islandBuildKind = kind;
+  }
+
+  /**
+   * Return the nearest workbench within `range` world-px of the local player,
+   * or null if none found. Used to decide whether E-key triggers interact.
+   */
+  getHoveredWorkbench(range: number = 110): PlacedStructure | null {
+    const player = this._cachedLocalPlayer;
+    if (!player) return null;
+    const px = player.position.x;
+    const py = player.position.y;
+    const rangeSq = range * range;
+    let best: PlacedStructure | null = null;
+    let bestDist = Infinity;
+    for (const s of this.placedStructures) {
+      if (s.type !== 'workbench') continue;
+      const dx = s.x - px;
+      const dy = s.y - py;
+      const dist = dx * dx + dy * dy;
+      if (dist <= rangeSq && dist < bestDist) {
+        bestDist = dist;
+        best = s;
+      }
+    }
+    return best;
+  }
+
   /**
    * Whether cannon build mode is currently active
    */
@@ -1912,6 +1960,92 @@ export class RenderSystem {
       ctx.fill();
 
       ctx.restore();
+
+      // ── Placed structures (floors + workbenches) ─────────────────────────
+      for (const s of this.placedStructures) {
+        if (s.islandId !== isl.id) continue;
+        const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
+        const sz  = Math.max(4, 50 * zoom);
+        if (s.type === 'wooden_floor') {
+          ctx.save();
+          ctx.fillStyle   = '#b8832b';
+          ctx.strokeStyle = '#7a5520';
+          ctx.lineWidth   = Math.max(1, 2 * zoom);
+          ctx.beginPath();
+          ctx.rect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+          ctx.fill();
+          ctx.stroke();
+          // Plank lines
+          ctx.strokeStyle = 'rgba(90, 55, 15, 0.5)';
+          ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+          const third = sz / 3;
+          for (let li = 1; li < 3; li++) {
+            ctx.beginPath();
+            ctx.moveTo(ssp.x - sz / 2, ssp.y - sz / 2 + li * third);
+            ctx.lineTo(ssp.x + sz / 2, ssp.y - sz / 2 + li * third);
+            ctx.stroke();
+          }
+          ctx.restore();
+        } else if (s.type === 'workbench') {
+          // Tabletop
+          const tw = sz * 1.1;
+          const th = sz * 0.55;
+          ctx.save();
+          ctx.fillStyle   = '#7a4820';
+          ctx.strokeStyle = '#4a2810';
+          ctx.lineWidth   = Math.max(1, 2 * zoom);
+          ctx.beginPath();
+          ctx.rect(ssp.x - tw / 2, ssp.y - th * 0.7, tw, th);
+          ctx.fill();
+          ctx.stroke();
+          // Legs
+          const legW = Math.max(2, 5 * zoom);
+          const legH = Math.max(3, 12 * zoom);
+          ctx.fillStyle = '#5c3010';
+          for (const lx of [ssp.x - tw / 2 + legW, ssp.x + tw / 2 - legW * 2]) {
+            ctx.fillRect(lx, ssp.y - th * 0.7 + th - 1, legW, legH);
+          }
+          // Tool icon
+          ctx.font = `${Math.max(8, Math.round(13 * zoom))}px monospace`;
+          ctx.textAlign    = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle    = '#f0c070';
+          ctx.fillText('\u2692', ssp.x, ssp.y - th * 0.2);
+          ctx.restore();
+        }
+      }
+
+      // ── Island placement ghost ────────────────────────────────────────────
+      if (this.islandBuildKind && this.mouseWorldPos) {
+        // Only show ghost when player is on this island
+        const localPlayer = this._cachedLocalPlayer;
+        if (localPlayer && localPlayer.onIslandId === isl.id) {
+          const msp = camera.worldToScreen(this.mouseWorldPos);
+          const sz  = Math.max(4, 50 * zoom);
+          let ghostColor = 'rgba(100, 220, 100, 0.45)';
+          if (this.islandBuildKind === 'workbench') {
+            // Green only if a floor tile is within 55 px
+            const mx = this.mouseWorldPos.x;
+            const my = this.mouseWorldPos.y;
+            const hasFloor = this.placedStructures.some(s => {
+              if (s.type !== 'wooden_floor' || s.islandId !== isl.id) return false;
+              const dx = s.x - mx; const dy = s.y - my;
+              return dx * dx + dy * dy <= 55 * 55;
+            });
+            ghostColor = hasFloor ? 'rgba(100, 220, 100, 0.45)' : 'rgba(220, 80, 60, 0.45)';
+          }
+          ctx.save();
+          ctx.globalAlpha  = 0.7 + 0.15 * Math.sin(performance.now() / 300);
+          ctx.fillStyle    = ghostColor;
+          ctx.strokeStyle  = 'rgba(255, 255, 255, 0.5)';
+          ctx.lineWidth    = Math.max(1, 2 * zoom);
+          ctx.beginPath();
+          ctx.rect(msp.x - sz / 2, msp.y - sz / 2, sz, sz);
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
 
       // ── Resource nodes ───────────────────────────────────────────────────────
       const localPlayer = this._cachedLocalPlayer;

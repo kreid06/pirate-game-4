@@ -120,6 +120,7 @@ export class GameEngine {
         companyId: 0,
         health: 100,
         maxHealth: 100,
+        onIslandId: 0,
         inventory: createEmptyInventory()
       }],
       cannonballs: [],

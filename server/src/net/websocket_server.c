@@ -140,6 +140,11 @@ static int next_ship_id = 1;
 // Monotonically-increasing module ID base — never reused, avoids collisions on slot recycle
 static uint32_t next_mid_base = 3000u;
 
+// ── Island placed structures ─────────────────────────────────────────────────
+static PlacedStructure placed_structures[MAX_PLACED_STRUCTURES];
+static uint32_t placed_structure_count = 0;
+static uint32_t next_structure_id = 1;
+
 // ── O(1) ship lookup ────────────────────────────────────────────────────────
 // Ship IDs are small sequential integers starting at 1 (next_ship_id begins
 // at 1, MAX_SIMPLE_SHIPS=50, so IDs stay well below 512).  The array is
@@ -719,7 +724,7 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].mounted_module_id = 0;
             players[i].controlling_ship_id = 0;
 
-            // Initialize inventory — 4 starter items: swivel, hammer, sword, axe
+            // Initialize inventory — 4 starter items: swivel, hammer, sword, axe + building items
             memset(&players[i].inventory, 0, sizeof(PlayerInventory));
             players[i].inventory.active_slot = 0;
             players[i].inventory.slots[0].item     = ITEM_SWIVEL;
@@ -730,7 +735,11 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].inventory.slots[2].quantity = 1;
             players[i].inventory.slots[3].item     = ITEM_AXE;
             players[i].inventory.slots[3].quantity = 1;
-            // slots 4-9 remain empty (zeroed by memset)
+            players[i].inventory.slots[4].item     = ITEM_WOODEN_FLOOR;
+            players[i].inventory.slots[4].quantity = 10;
+            players[i].inventory.slots[5].item     = ITEM_WORKBENCH;
+            players[i].inventory.slots[5].quantity = 2;
+            // slots 6-9 remain empty (zeroed by memset)
 
             return &players[i];
         }
@@ -4416,6 +4425,188 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
  * Grants 1–2 planks into the first available inventory slot.
  */
 #define HARVEST_RANGE 110.0f   /* world-px, generous for feel */
+
+/* ── Island structure placement ─────────────────────────────────────────────
+ * place_structure: payload = {"type":"place_structure","structure_type":"wooden_floor","x":123,"y":456}
+ * Validates: player on island, item in active slot, workbench needs floor under it.
+ * On success broadcasts structure_placed to all clients.
+ */
+#define STRUCT_FLOOR_RADIUS  30.0f  /* world-px half-extent of a floor tile (for overlap, not enforced hard) */
+#define STRUCT_PLACE_RANGE  200.0f  /* player must be within this range of placement point */
+#define STRUCT_FLOOR_REQ_R   55.0f  /* workbench centre must be within this of a floor tile */
+#define STRUCT_INTERACT_R   110.0f  /* E-key range to open workbench */
+
+static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[256];
+
+    if (player->on_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"place_structure_fail\",\"reason\":\"not_on_island\"}");
+        goto ps_send;
+    }
+
+    /* Parse structure_type */
+    char stype[32] = {0};
+    char* st = strstr(payload, "\"structure_type\":\"");
+    if (st) {
+        st += 18;
+        int ti = 0;
+        while (ti < 31 && *st && *st != '"') stype[ti++] = *st++;
+    }
+
+    PlacedStructureType stype_enum;
+    ItemKind required_item;
+    if (strcmp(stype, "wooden_floor") == 0) {
+        stype_enum    = STRUCT_WOODEN_FLOOR;
+        required_item = ITEM_WOODEN_FLOOR;
+    } else if (strcmp(stype, "workbench") == 0) {
+        stype_enum    = STRUCT_WORKBENCH;
+        required_item = ITEM_WORKBENCH;
+    } else {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"place_structure_fail\",\"reason\":\"unknown_type\"}");
+        goto ps_send;
+    }
+
+    /* Player must have the item in active slot */
+    {
+        uint8_t aslot = player->inventory.active_slot;
+        if (aslot >= INVENTORY_SLOTS ||
+            player->inventory.slots[aslot].item != required_item ||
+            player->inventory.slots[aslot].quantity == 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"missing_item\"}");
+            goto ps_send;
+        }
+    }
+
+    /* Parse x, y */
+    float px = player->x, py = player->y;
+    char* pxs = strstr(payload, "\"x\":");
+    char* pys = strstr(payload, "\"y\":");
+    if (pxs) sscanf(pxs + 4, "%f", &px);
+    if (pys) sscanf(pys + 4, "%f", &py);
+
+    /* Player must be reasonably close to placement point */
+    {
+        float dx = player->x - px, dy = player->y - py;
+        if (dx*dx + dy*dy > STRUCT_PLACE_RANGE * STRUCT_PLACE_RANGE) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"too_far\"}");
+            goto ps_send;
+        }
+    }
+
+    /* Workbench: must have a wooden_floor tile within STRUCT_FLOOR_REQ_R of (px,py) */
+    if (stype_enum == STRUCT_WORKBENCH) {
+        bool has_floor = false;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
+            float dx = placed_structures[si].x - px;
+            float dy = placed_structures[si].y - py;
+            if (dx*dx + dy*dy <= STRUCT_FLOOR_REQ_R * STRUCT_FLOOR_REQ_R) {
+                has_floor = true; break;
+            }
+        }
+        if (!has_floor) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor\"}");
+            goto ps_send;
+        }
+    }
+
+    /* Space for more structures? */
+    if (placed_structure_count >= MAX_PLACED_STRUCTURES) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"place_structure_fail\",\"reason\":\"world_full\"}");
+        goto ps_send;
+    }
+
+    /* Consume 1 item from active slot */
+    {
+        uint8_t aslot = player->inventory.active_slot;
+        player->inventory.slots[aslot].quantity--;
+        if (player->inventory.slots[aslot].quantity == 0)
+            player->inventory.slots[aslot].item = ITEM_NONE;
+    }
+
+    /* Add structure */
+    uint32_t new_id = next_structure_id++;
+    placed_structures[placed_structure_count].active    = true;
+    placed_structures[placed_structure_count].id        = new_id;
+    placed_structures[placed_structure_count].type      = stype_enum;
+    placed_structures[placed_structure_count].island_id = player->on_island_id;
+    placed_structures[placed_structure_count].x         = px;
+    placed_structures[placed_structure_count].y         = py;
+    placed_structure_count++;
+
+    log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
+             player->player_id, stype, new_id, px, py, player->on_island_id);
+
+    /* Broadcast to all clients */
+    char bcast[256];
+    snprintf(bcast, sizeof(bcast),
+             "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
+             "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+             new_id, stype, player->on_island_id, px, py);
+    websocket_server_broadcast(bcast);
+    return; /* already sent via broadcast */
+
+ps_send:;
+    char frame[512];
+    size_t flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (flen > 0 && flen < sizeof(frame)) send(client->fd, frame, flen, 0);
+}
+
+/*
+ * structure_interact: player presses E near a placed structure.
+ * Only workbenches currently do anything (open crafting UI).
+ */
+static void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[256];
+
+    if (player->on_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"structure_interact_fail\",\"reason\":\"not_on_island\"}");
+        goto si_send;
+    }
+
+    uint32_t sid = 0;
+    char* sp = strstr(payload, "\"structure_id\":");
+    if (sp) sscanf(sp + 15, "%u", &sid);
+
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        if (!placed_structures[i].active || placed_structures[i].id != sid) continue;
+        float dx = player->x - placed_structures[i].x;
+        float dy = player->y - placed_structures[i].y;
+        if (dx*dx + dy*dy > STRUCT_INTERACT_R * STRUCT_INTERACT_R) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"structure_interact_fail\",\"reason\":\"too_far\"}");
+            goto si_send;
+        }
+        if (placed_structures[i].type == STRUCT_WORKBENCH) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"crafting_open\",\"structure_id\":%u,\"structure_type\":\"workbench\"}",
+                     sid);
+            goto si_send;
+        }
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"structure_interact_fail\",\"reason\":\"not_interactive\"}");
+        goto si_send;
+    }
+
+    snprintf(response, sizeof(response),
+             "{\"type\":\"structure_interact_fail\",\"reason\":\"not_found\"}");
+
+si_send:;
+    char frame[512];
+    size_t flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (flen > 0 && flen < sizeof(frame)) send(client->fd, frame, flen, 0);
+}
+
 static void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* client) {
     char response[256];
 
@@ -6407,6 +6598,26 @@ int websocket_server_update(struct Sim* sim) {
                                     log_warn("harvest_resource for non-existent player %u", client->player_id);
                                     strcpy(response, "{\"type\":\"harvest_failure\",\"reason\":\"player_not_found\"}");
                                 }
+                                handled = true;
+                            }
+
+                        } else if (strcmp(msg_type, "place_structure") == 0) {
+                            // ISLAND BUILDING: place a floor tile or workbench
+                            if (client->player_id == 0) {
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_place_structure(player, client, payload);
+                                handled = true;
+                            }
+
+                        } else if (strcmp(msg_type, "structure_interact") == 0) {
+                            // ISLAND BUILDING: E-key on placed structure (open workbench)
+                            if (client->player_id == 0) {
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_structure_interact(player, client, payload);
                                 handled = true;
                             }
 
@@ -8569,6 +8780,35 @@ int websocket_server_update(struct Sim* sim) {
                                         log_info("🏝️  Sent ISLANDS (%d islands) to player %u", ISLAND_COUNT, player_id);
                                     }
                                 }
+                                /* Send current placed structures */
+                                {
+                                    static char structs_buf[8192];
+                                    int spos = 0;
+                                    spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
+                                                     "{\"type\":\"STRUCTURES\",\"structures\":[");
+                                    bool sfirst = true;
+                                    for (uint32_t si = 0; si < placed_structure_count; si++) {
+                                        if (!placed_structures[si].active) continue;
+                                        const char* stype_str = placed_structures[si].type == STRUCT_WOODEN_FLOOR
+                                                                 ? "wooden_floor" : "workbench";
+                                        spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
+                                                         "%s{\"id\":%u,\"structure_type\":\"%s\","
+                                                         "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                                         sfirst ? "" : ",",
+                                                         placed_structures[si].id,
+                                                         stype_str,
+                                                         placed_structures[si].island_id,
+                                                         placed_structures[si].x,
+                                                         placed_structures[si].y);
+                                        sfirst = false;
+                                    }
+                                    spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos, "]}");
+                                    char sf[8448];
+                                    size_t sflen = websocket_create_frame(
+                                        WS_OPCODE_TEXT, structs_buf, (size_t)spos, sf, sizeof(sf));
+                                    if (sflen > 0 && sflen < sizeof(sf))
+                                        send(client->fd, sf, sflen, 0);
+                                }
                             }
                             handled = true;
                             
@@ -8990,14 +9230,14 @@ int websocket_server_update(struct Sim* sim) {
                                     (int)players[p].inventory.shield,
                                     (int)players[p].inventory.active_slot);
 
-                char player_entry[640];
+                char player_entry[680];
                 snprintf(player_entry, sizeof(player_entry),
                         "{\"id\":%u,\"name\":\"Player_%u\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
                         "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
                         "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\","
                         "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
-                        "\"company\":%u,\"health\":%u,\"max_health\":%u%s}",
+                        "\"company\":%u,\"health\":%u,\"max_health\":%u,\"on_island\":%u%s}",
                         players[p].player_id, players[p].player_id,
                         players[p].x, players[p].y, players[p].rotation,
                         players[p].velocity_x, players[p].velocity_y,
@@ -9010,6 +9250,7 @@ int websocket_server_update(struct Sim* sim) {
                         players[p].controlling_ship_id,
                         players[p].company_id,
                         players[p].health, players[p].max_health,
+                        players[p].on_island_id,
                         inv_buf);
                 players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "%s", player_entry);
                 first_player = false;

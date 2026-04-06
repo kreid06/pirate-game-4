@@ -23,6 +23,7 @@ import { PhysicsConfig } from '../sim/Types.js';
 // UI System
 import { UIManager } from './ui/UIManager.js';
 import { RadialMenu } from './ui/RadialMenu.js';
+import { CraftingMenu } from './ui/CraftingMenu.js';
 
 // Audio System
 import { AudioManager } from './audio/AudioManager.js';
@@ -141,6 +142,10 @@ export class ClientApplication {
   private _pendingModuleFlashPos: Vec2 | null = null;
   /** Generic radial action menu instance (rendered by RenderSystem). */
   private _radialMenu = new RadialMenu();
+  /** Crafting panel opened when the player presses E near a workbench. */
+  private craftingMenu = new CraftingMenu();
+  /** True when the player's active slot is wooden_floor or workbench on an island. */
+  private islandBuildMode = false;
   private accumulator = 0;
   private readonly clientTickDuration: number; // milliseconds per client tick
   
@@ -590,6 +595,20 @@ export class ClientApplication {
             return;
           }
 
+          // Workbench interaction: player on island, workbench within range → open crafting
+          if (player && player.carrierId === 0) {
+            if (this.craftingMenu.visible) {
+              this.craftingMenu.close();
+              return;
+            }
+            const bench = this.renderSystem.getHoveredWorkbench();
+            if (bench) {
+              console.log(`⚒ [INTERACT] Sending structure_interact for workbench ${bench.id}`);
+              this.networkManager.sendStructureInteract(bench.id);
+              return;
+            }
+          }
+
           // Module interaction takes priority over NPC menu
           const hoveredModule = this.renderSystem.getHoveredModule();
 
@@ -782,6 +801,17 @@ export class ClientApplication {
 
       // Build placement: left-click in build mode → send place_plank / place_cannon / place_mast / replace_helm
       this.inputManager.onBuildPlace = (worldPos) => {
+        // Island structure placement (wooden floor or workbench)
+        if (this.islandBuildMode) {
+          const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+          const pid = this.networkManager.getAssignedPlayerId();
+          const p   = ws?.players.find(pl => pl.id === pid);
+          const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
+          if (kind === 'wooden_floor' || kind === 'workbench') {
+            this.networkManager.sendPlaceStructure(kind, worldPos.x, worldPos.y);
+          }
+          return;
+        }
         // Ghost menu pending placement takes highest priority
         if (this.buildMenuOpen && this.pendingGhostKind !== null) {
           this.handleGhostPlace(worldPos);
@@ -889,6 +919,7 @@ export class ClientApplication {
 
       // Let UI panels (e.g. manning priority panel) consume clicks before game logic
       this.inputManager.onUIClick = (x, y) => {
+        if (this.craftingMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
         if (this.uiManager?.handleClick(x, y)) return true;
         return false;
       };
@@ -1184,6 +1215,17 @@ export class ClientApplication {
       // Handle ISLANDS: server-defined island layout
       this.networkManager.onIslands = (islands) => {
         this.renderSystem.setIslands(islands);
+      };
+
+      // Handle placed structures
+      this.networkManager.onStructuresList = (structs) => {
+        this.renderSystem.setPlacedStructures(structs);
+      };
+      this.networkManager.onStructurePlaced = (s) => {
+        this.renderSystem.addPlacedStructure(s);
+      };
+      this.networkManager.onCraftingOpen = (structureId, _structureType) => {
+        this.craftingMenu.open(structureId);
       };
 
       // Handle FLAME_CONE_FIRE / FLAME_WAVE_UPDATE: advancing/retreating cone visual
@@ -1607,6 +1649,15 @@ export class ClientApplication {
         playerShip,
         controlGroups: this.controlGroups,
       });
+
+      // Crafting menu (rendered on top of all other UI)
+      if (this.craftingMenu.visible) {
+        this.craftingMenu.render(
+          this.renderSystem.getContext(),
+          this.canvas.width,
+          this.canvas.height,
+        );
+      }
     }
   }
   
@@ -1850,6 +1901,14 @@ export class ClientApplication {
     const inHelmBuildMode   = activeItem === 'helm_kit';
     const inDeckBuildMode   = activeItem === 'deck';
 
+    // Island placement build mode — wooden_floor or workbench while standing on an island
+    const onIsland = (player?.carrierId === 0) && ((player?.onIslandId ?? 0) !== 0);
+    const inIslandBuildMode = onIsland && (activeItem === 'wooden_floor' || activeItem === 'workbench');
+    this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
+    this.renderSystem.setIslandBuildItem(
+      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench') : null
+    );
+
     // Track whether the active item changed while in explicit build mode
     if (this.explicitBuildMode) {
       if (activeItem === 'cannon' || activeItem === 'sail' || activeItem === 'swivel') {
@@ -1883,7 +1942,7 @@ export class ClientApplication {
     this.renderSystem.setHelmBuildMode(!this.explicitBuildMode && inHelmBuildMode);
     this.renderSystem.setDeckBuildMode(!this.explicitBuildMode && inDeckBuildMode);
     this.inputManager.buildMode = this.explicitBuildMode || this.buildMenuOpen
-      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode;
+      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || this.islandBuildMode;
   }
 
   /**
@@ -3005,6 +3064,7 @@ export class ClientApplication {
           companyId: 0,
           health: 100,
           maxHealth: 100,
+          onIslandId: 0,
           inventory: createEmptyInventory()
         }
       ],

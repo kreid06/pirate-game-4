@@ -232,7 +232,25 @@ typedef enum {
     ITEM_DECK          = 13,
     ITEM_SWIVEL        = 14,
     ITEM_AXE           = 15,
+    ITEM_WOODEN_FLOOR  = 16,
+    ITEM_WORKBENCH     = 17,
 } ItemKind;
+
+/* ── Island structures ────────────────────────────────────────────────────── */
+typedef enum {
+    STRUCT_WOODEN_FLOOR = 0,
+    STRUCT_WORKBENCH    = 1,
+} PlacedStructureType;
+
+typedef struct {
+    bool     active;
+    uint32_t id;
+    PlacedStructureType type;
+    uint32_t island_id;
+    float    x, y;   /* world position */
+} PlacedStructure;
+
+#define MAX_PLACED_STRUCTURES 512
 
 typedef struct {
     ItemKind item;
