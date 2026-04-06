@@ -8920,7 +8920,7 @@ int websocket_server_update(struct Sim* sim) {
                                 if (gflen > 0 && gflen < sizeof(gf))
                                     send(client->fd, gf, gflen, 0);
                                 log_info("📦 Sent STRUCTURES (%u) on GET_STRUCTURES to player %u",
-                                         placed_structure_count, player_id);
+                                         placed_structure_count, client->player_id);
                             }
                             strcpy(response, "{\"type\":\"ack\"}");
                             handled = true;
