@@ -4670,6 +4670,51 @@ si_send:;
     if (flen > 0 && flen < sizeof(frame)) send(client->fd, frame, flen, 0);
 }
 
+/*
+ * demolish_structure: player holds E on a placed structure to remove it.
+ * Validates proximity, then removes from placed_structures[] and broadcasts.
+ */
+static void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[256];
+
+    uint32_t sid = 0;
+    const char* sp = strstr(payload, "\"structure_id\":");
+    if (sp) sscanf(sp + 15, "%u", &sid);
+
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        if (!placed_structures[i].active || placed_structures[i].id != sid) continue;
+        float dx = player->x - placed_structures[i].x;
+        float dy = player->y - placed_structures[i].y;
+        if (dx*dx + dy*dy > STRUCT_INTERACT_R * STRUCT_INTERACT_R) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"demolish_fail\",\"reason\":\"too_far\"}");
+            goto ds_send;
+        }
+        /* Mark inactive and compact the array */
+        placed_structures[i].active = false;
+        /* Shift subsequent entries down to keep the array dense */
+        for (uint32_t j = i; j + 1 < placed_structure_count; j++)
+            placed_structures[j] = placed_structures[j + 1];
+        placed_structure_count--;
+        log_info("🔨 Player %u demolished structure %u", player->player_id, sid);
+        /* Broadcast removal to all clients */
+        char bcast[128];
+        snprintf(bcast, sizeof(bcast),
+                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", sid);
+        websocket_server_broadcast(bcast);
+        return; /* already sent via broadcast */
+    }
+
+    snprintf(response, sizeof(response),
+             "{\"type\":\"demolish_fail\",\"reason\":\"not_found\"}");
+
+ds_send:;
+    char ds_frame[256];
+    size_t ds_flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), ds_frame, sizeof(ds_frame));
+    if (ds_flen > 0 && ds_flen < sizeof(ds_frame)) send(client->fd, ds_frame, ds_flen, 0);
+}
+
 static void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* client) {
     char response[256];
 
@@ -6745,6 +6790,14 @@ int websocket_server_update(struct Sim* sim) {
                                 if (player) handle_structure_interact(player, client, payload);
                                 handled = true;
                             }
+
+                        } else if (strcmp(msg_type, "demolish_structure") == 0) {
+                            // Hold E: demolish a placed structure
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_demolish_structure(player, client, payload);
+                            }
+                            handled = true;
 
                         } else if (strcmp(msg_type, "action_event") == 0) {
                             // HYBRID: Action event message

@@ -103,6 +103,8 @@ export enum MessageType {
   // Server notifications
   PLAYER_BOARDED = 'player_boarded',
   STRUCTURE_PLACED = 'structure_placed',
+  STRUCTURE_DEMOLISHED = 'structure_demolished',
+  DEMOLISH_STRUCTURE = 'demolish_structure',
   CRAFTING_OPEN  = 'crafting_open',
   STRUCTURES_LIST = 'STRUCTURES',
 
@@ -527,6 +529,8 @@ export class NetworkManager {
 
   /** Fired when the server broadcasts a newly placed structure to all clients. */
   public onStructurePlaced: ((s: PlacedStructure) => void) | null = null;
+  /** Fired when the server confirms a structure has been demolished. */
+  public onStructureDemolished: ((id: number) => void) | null = null;
   /** Fired when the server sends the full list of existing placed structures on join. */
   public onStructuresList: ((structures: PlacedStructure[]) => void) | null = null;
   /** Fired when the server confirms a workbench can be opened (E-key interact). */
@@ -1147,6 +1151,11 @@ export class NetworkManager {
   sendStructureInteract(structureId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.STRUCTURE_INTERACT, timestamp: Date.now(), structure_id: structureId });
+  }
+
+  sendDemolishStructure(structureId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'demolish_structure', timestamp: Date.now(), structure_id: structureId }));
   }
 
   /**
@@ -2011,6 +2020,10 @@ export class NetworkManager {
         this.onStructurePlaced?.(sp);
         break;
       }
+
+      case 'structure_demolished':
+        this.onStructureDemolished?.(message.structure_id ?? message.id ?? 0);
+        break;
 
       case 'crafting_open':
         this.onCraftingOpen?.(message.structure_id ?? 0, message.structure_type ?? 'workbench');

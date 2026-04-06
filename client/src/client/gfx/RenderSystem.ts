@@ -112,6 +112,8 @@ export class RenderSystem {
   private _cachedLocalPlayer: Player | null = null;
   /** Placed island structures — updated via addPlacedStructure / setPlacedStructures. */
   private placedStructures: PlacedStructure[] = [];
+  /** Structure currently under the cursor (within hover range of the local player). */
+  private _hoveredStructure: PlacedStructure | null = null;
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
   private islandBuildKind: 'wooden_floor' | 'workbench' | null = null;
   /** True when the placement ghost is beyond the server's max placement range (200 px). */
@@ -1104,6 +1106,11 @@ export class RenderSystem {
     this.placedStructures = [...arr];
   }
 
+  /** Remove a single structure by id (e.g. after server confirms demolish). */
+  removePlacedStructure(id: number): void {
+    this.placedStructures = this.placedStructures.filter(s => s.id !== id);
+  }
+
   /** Activate island placement ghost for wooden_floor or workbench, or clear it. */
   setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | null): void {
     this.islandBuildKind = kind;
@@ -1163,6 +1170,14 @@ export class RenderSystem {
       }
     }
     return best;
+  }
+
+  /**
+   * Return the nearest placed structure (any type) within `range` world-px of
+   * the local player, or null. Used by E-key interact logic.
+   */
+  getHoveredStructure(range: number = 110): PlacedStructure | null {
+    return this._hoveredStructure;
   }
 
   /**
@@ -2163,14 +2178,32 @@ export class RenderSystem {
   private drawPlacedStructures(camera: Camera): void {
     const ctx  = this.ctx;
     const zoom = camera.getState().zoom;
+
+    // ── Update hovered structure ──────────────────────────────────────────────
+    // Only detect hover when the player is off-ship (on an island).
+    const player = this._cachedLocalPlayer;
+    const HOVER_R = 80; // world px — proximity to count as hovered
+    this._hoveredStructure = null;
+    if (player && player.carrierId === 0) {
+      let bestDist = HOVER_R * HOVER_R;
+      for (const s of this.placedStructures) {
+        const dx = s.x - player.position.x;
+        const dy = s.y - player.position.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestDist) { bestDist = d2; this._hoveredStructure = s; }
+      }
+    }
+
     for (const s of this.placedStructures) {
       const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
       const sz  = Math.max(4, 50 * zoom);
+      const isHovered = this._hoveredStructure?.id === s.id;
+
       if (s.type === 'wooden_floor') {
         ctx.save();
-        ctx.fillStyle   = '#b8832b';
-        ctx.strokeStyle = '#7a5520';
-        ctx.lineWidth   = Math.max(1, 2 * zoom);
+        ctx.fillStyle   = isHovered ? '#d09a3a' : '#b8832b';
+        ctx.strokeStyle = isHovered ? '#ffe090' : '#7a5520';
+        ctx.lineWidth   = Math.max(1, isHovered ? 2.5 * zoom : 2 * zoom);
         ctx.beginPath();
         ctx.rect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
         ctx.fill();
@@ -2191,9 +2224,9 @@ export class RenderSystem {
         const tw = sz;        // 50 px at default zoom
         const th = sz * 0.5;  // 25 px at default zoom
         ctx.save();
-        ctx.fillStyle   = '#7a4820';
-        ctx.strokeStyle = '#4a2810';
-        ctx.lineWidth   = Math.max(1, 2 * zoom);
+        ctx.fillStyle   = isHovered ? '#8a5228' : '#7a4820';
+        ctx.strokeStyle = isHovered ? '#ffe090' : '#4a2810';
+        ctx.lineWidth   = Math.max(1, isHovered ? 2.5 * zoom : 2 * zoom);
         // Table top (upper 40% of height)
         const topH = th * 0.4;
         ctx.beginPath();
@@ -2203,7 +2236,7 @@ export class RenderSystem {
         // Legs (lower 60% of height)
         const legW = Math.max(2, 4 * zoom);
         const legH = th * 0.6;
-        ctx.fillStyle = '#5c3010';
+        ctx.fillStyle = isHovered ? '#6c3818' : '#5c3010';
         ctx.strokeStyle = '#3a1e08';
         ctx.lineWidth = Math.max(0.5, 1 * zoom);
         for (const lx of [ssp.x - tw / 2, ssp.x + tw / 2 - legW]) {
@@ -2216,6 +2249,32 @@ export class RenderSystem {
         ctx.textBaseline = 'middle';
         ctx.fillStyle    = '#f0c070';
         ctx.fillText('\u2692', ssp.x, ssp.y - th / 2 + topH / 2);
+        ctx.restore();
+      }
+
+      // ── Hover tooltip ───────────────────────────────────────────────────────
+      if (isHovered) {
+        const structH = s.type === 'workbench' ? sz * 0.5 : sz;
+        const tipY = ssp.y - structH / 2 - 8;
+
+        const label     = s.type === 'wooden_floor' ? 'Wooden Floor' : 'Workbench';
+        const hintLine1 = s.type === 'workbench'    ? '[E] Open Workbench' : '';
+        const hintLine2 = s.type === 'workbench'    ? 'Hold [E] Demolish'  : 'Hold [E] Demolish';
+
+        ctx.save();
+        ctx.font         = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'bottom';
+
+        // Name
+        ctx.fillStyle = '#ffe8a0';
+        ctx.fillText(label, ssp.x, tipY);
+
+        // Hint lines
+        ctx.font      = `${Math.max(9, Math.round(10 * zoom))}px Consolas, monospace`;
+        ctx.fillStyle = 'rgba(220, 220, 180, 0.9)';
+        if (hintLine1) ctx.fillText(hintLine1, ssp.x, tipY - Math.max(12, 14 * zoom));
+        ctx.fillText(hintLine2, ssp.x, tipY - (hintLine1 ? Math.max(24, 27 * zoom) : Math.max(12, 14 * zoom)));
         ctx.restore();
       }
     }

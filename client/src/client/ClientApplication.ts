@@ -128,8 +128,12 @@ export class ClientApplication {
   private _ladderHoldIsExtended = false;
   /** True if player was on the ladder's ship when E was pressed. */
   private _ladderHoldOnShip = false;
-  /** What kind of module the current E-hold targets: 'ladder' | 'mount' | 'npc' | null */
-  private _interactKind: 'ladder' | 'mount' | 'npc' | null = null;
+  /** What kind of module the current E-hold targets: 'ladder' | 'mount' | 'npc' | 'structure' | null */
+  private _interactKind: 'ladder' | 'mount' | 'npc' | 'structure' | null = null;
+  /** Placed-structure id locked in at E-keydown for the structure interact path. */
+  private _hoveredStructureId: number | null = null;
+  /** Type of the locked-in structure ('wooden_floor' | 'workbench'). */
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
@@ -1224,6 +1228,9 @@ export class ClientApplication {
       // Handle placed structures
       this.networkManager.onStructuresList = (structs) => {
         this.renderSystem.setPlacedStructures(structs);
+      };
+      this.networkManager.onStructureDemolished = (id) => {
+        this.renderSystem.removePlacedStructure(id);
       };
       this.networkManager.onStructurePlaced = (s) => {
         this.renderSystem.addPlacedStructure(s);
@@ -2576,6 +2583,42 @@ export class ClientApplication {
             }
           }
 
+          // ── Structure interact: floors and workbenches, only when off-ship ──
+          if (meE.carrierId === 0) {
+            const struct = this.renderSystem.getHoveredStructure();
+            if (struct) {
+              this._interactKind = 'structure';
+              this._hoveredStructureId = struct.id;
+              this._hoveredStructureType = struct.type;
+              this._suppressLadderInteract = true;
+              const mp = this.inputManager.getMouseScreenPosition();
+              this.renderSystem.startLadderHoldRing(mp);
+              if (struct.type === 'workbench') {
+                // Tap E = open workbench; hold E = radial with both options
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  this._radialMenu.open(mp2.x, mp2.y, [
+                    { id: 'use',      label: 'Open Workbench' },
+                    { id: 'demolish', label: 'Demolish' },
+                  ]);
+                }, 400);
+              } else {
+                // Floor: hold E = radial with only Demolish
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  this._radialMenu.open(mp2.x, mp2.y, [
+                    { id: 'demolish', label: 'Demolish Floor' },
+                  ]);
+                }, 600);
+              }
+              break;
+            }
+          }
+
           // ── Mount / ladder: target is locked in HERE at keydown from the
           // hovered module. Continued hover is NOT required — the module ID and
           // ship ID are cached and used for the entire hold/keyup sequence.
@@ -2756,6 +2799,46 @@ export class ClientApplication {
         if (worldDist > CONFIRM_RANGE_OFFSHIP) console.warn(`📏 range fail (world): dist=${worldDist.toFixed(1)} > ${CONFIRM_RANGE_OFFSHIP} | player=(${me.position.x.toFixed(1)},${me.position.y.toFixed(1)}) modWorld=(${mwx.toFixed(1)},${mwy.toFixed(1)}) carrierId=${me.carrierId} shipId=${shipId}`);
         return worldDist <= CONFIRM_RANGE_OFFSHIP;
       };
+
+      // ── STRUCTURE INTERACT (floor / workbench) ────────────────────────────
+      if (interactKind === 'structure') {
+        const structId   = this._hoveredStructureId;
+        const structType = this._hoveredStructureType;
+        this._hoveredStructureId   = null;
+        this._hoveredStructureType = null;
+
+        const doUse = () => {
+          if (structId === null) return;
+          this.networkManager.sendStructureInteract(structId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          console.log(`⚒ [STRUCTURE] Open workbench ${structId}`);
+        };
+        const doDemolish = () => {
+          if (structId === null) return;
+          this.networkManager.sendDemolishStructure(structId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          console.log(`🔨 [STRUCTURE] Demolish ${structType} ${structId}`);
+        };
+
+        if (this._ladderHoldTimer !== null) {
+          // Tap (released before radial opened)
+          clearTimeout(this._ladderHoldTimer);
+          this._ladderHoldTimer = null;
+          this.renderSystem.stopLadderHoldRing();
+          if (structType === 'workbench') {
+            // Tap E on workbench = primary action: open
+            doUse();
+          }
+          // Tap E on floor = nothing (user must hold to demolish)
+        } else if (this._radialMenu.isOpen) {
+          const selected = this._radialMenu.getHoveredId();
+          this._radialMenu.close();
+          if (selected === 'use')      doUse();
+          else if (selected === 'demolish') doDemolish();
+          else this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+        }
+        return;
+      }
 
       // ── NPC INTERACT ─────────────────────────────────────────────────────────
       if (interactKind === 'npc') {
