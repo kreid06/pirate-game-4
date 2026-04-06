@@ -719,31 +719,18 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].mounted_module_id = 0;
             players[i].controlling_ship_id = 0;
 
-            // Initialize inventory — give starter items for testing
-            // Slot 0 must NOT be a plank or the client enters build mode and
-            // left-click places planks instead of firing cannons.
+            // Initialize inventory — 4 starter items: swivel, hammer, sword, axe
             memset(&players[i].inventory, 0, sizeof(PlayerInventory));
             players[i].inventory.active_slot = 0;
-            players[i].inventory.slots[0].item     = ITEM_CANNON_BALL;
-            players[i].inventory.slots[0].quantity = 10;
-            players[i].inventory.slots[1].item     = ITEM_PLANK;
-            players[i].inventory.slots[1].quantity = 10;
-            players[i].inventory.slots[2].item     = ITEM_HAMMER;
+            players[i].inventory.slots[0].item     = ITEM_SWIVEL;
+            players[i].inventory.slots[0].quantity = 3;
+            players[i].inventory.slots[1].item     = ITEM_HAMMER;
+            players[i].inventory.slots[1].quantity = 1;
+            players[i].inventory.slots[2].item     = ITEM_SWORD;
             players[i].inventory.slots[2].quantity = 1;
-            players[i].inventory.slots[3].item     = ITEM_REPAIR_KIT;
-            players[i].inventory.slots[3].quantity = 3;
-            players[i].inventory.slots[4].item     = ITEM_CANNON;
-            players[i].inventory.slots[4].quantity = 3;
-            players[i].inventory.slots[5].item     = ITEM_SAIL;
-            players[i].inventory.slots[5].quantity = 3;
-            players[i].inventory.slots[6].item     = ITEM_HELM;
-            players[i].inventory.slots[6].quantity = 1;
-            players[i].inventory.slots[7].item     = ITEM_DECK;
-            players[i].inventory.slots[7].quantity = 3;
-            players[i].inventory.slots[8].item     = ITEM_SWORD;
-            players[i].inventory.slots[8].quantity = 1;
-            players[i].inventory.slots[9].item     = ITEM_SWIVEL;
-            players[i].inventory.slots[9].quantity = 3;
+            players[i].inventory.slots[3].item     = ITEM_AXE;
+            players[i].inventory.slots[3].quantity = 1;
+            // slots 4-9 remain empty (zeroed by memset)
 
             return &players[i];
         }
@@ -4423,6 +4410,122 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
 // ============================================================================
 
 /**
+ * Handle harvest_resource request from client.
+ * Requires: player is on an island, active slot holds ITEM_AXE,
+ * and a 'wood' resource node is within HARVEST_RANGE world-px.
+ * Grants 1–2 planks into the first available inventory slot.
+ */
+#define HARVEST_RANGE 110.0f   /* world-px, generous for feel */
+static void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* client) {
+    char response[256];
+
+    /* Must be standing on an island */
+    if (player->on_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_failure\",\"reason\":\"not_on_island\"}");
+        goto send_and_ret;
+    }
+
+    /* Active item must be the axe */
+    {
+        uint8_t slot = player->inventory.active_slot;
+        if (slot >= INVENTORY_SLOTS ||
+            player->inventory.slots[slot].item != ITEM_AXE ||
+            player->inventory.slots[slot].quantity == 0)
+        {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_failure\",\"reason\":\"need_axe\"}");
+            goto send_and_ret;
+        }
+    }
+
+    /* Find the island definition */
+    const IslandDef *isl = NULL;
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        if ((uint32_t)ISLAND_PRESETS[ii].id == player->on_island_id) {
+            isl = &ISLAND_PRESETS[ii];
+            break;
+        }
+    }
+    if (!isl) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_failure\",\"reason\":\"island_not_found\"}");
+        goto send_and_ret;
+    }
+
+    /* Find the nearest 'wood' resource node within range */
+    float best_dist_sq = HARVEST_RANGE * HARVEST_RANGE;
+    bool found = false;
+    for (int ri = 0; ri < isl->resource_count; ri++) {
+        if (strcmp(isl->resources[ri].type, ISLAND_RES_WOOD) != 0) continue;
+        float wx = isl->x + isl->resources[ri].ox;
+        float wy = isl->y + isl->resources[ri].oy;
+        float dx = player->x - wx;
+        float dy = player->y - wy;
+        float d2 = dx * dx + dy * dy;
+        if (d2 <= best_dist_sq) {
+            best_dist_sq = d2;
+            found = true;
+        }
+    }
+    if (!found) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_failure\",\"reason\":\"too_far\"}");
+        goto send_and_ret;
+    }
+
+    /* Grant 2 planks — find an existing plank stack or a free slot */
+    {
+        int grant_slot = -1;
+        /* Prefer an existing plank stack that isn't full */
+        for (int s = 0; s < INVENTORY_SLOTS; s++) {
+            if (player->inventory.slots[s].item == ITEM_PLANK &&
+                player->inventory.slots[s].quantity < 99) {
+                grant_slot = s;
+                break;
+            }
+        }
+        /* Fall back to first empty slot */
+        if (grant_slot < 0) {
+            for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                if (player->inventory.slots[s].item == ITEM_NONE ||
+                    player->inventory.slots[s].quantity == 0) {
+                    grant_slot = s;
+                    break;
+                }
+            }
+        }
+        if (grant_slot < 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_failure\",\"reason\":\"inventory_full\"}");
+            goto send_and_ret;
+        }
+
+        if (player->inventory.slots[grant_slot].item == ITEM_PLANK) {
+            int new_qty = (int)player->inventory.slots[grant_slot].quantity + 2;
+            if (new_qty > 99) new_qty = 99;
+            player->inventory.slots[grant_slot].quantity = (uint8_t)new_qty;
+        } else {
+            player->inventory.slots[grant_slot].item     = ITEM_PLANK;
+            player->inventory.slots[grant_slot].quantity = 2;
+        }
+
+        log_info("🪓 Player %u harvested wood → +2 planks (slot %d qty=%d)",
+                 player->player_id, grant_slot,
+                 (int)player->inventory.slots[grant_slot].quantity);
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_success\",\"planks\":2}");
+    }
+
+send_and_ret:;
+    char frame[512];
+    size_t frame_len = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0 && frame_len < sizeof(frame))
+        send(client->fd, frame, frame_len, 0);
+}
+
+/**
  * Handle module interaction request from client
  */
 static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
@@ -6290,6 +6393,23 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
+                        } else if (strcmp(msg_type, "harvest_resource") == 0) {
+                            // HARVEST RESOURCE: player presses E with axe near a tree
+                            if (client->player_id == 0) {
+                                log_warn("harvest_resource from client %s:%u with no player ID", client->ip_address, client->port);
+                                strcpy(response, "{\"type\":\"harvest_failure\",\"reason\":\"no_player\"}");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    handle_harvest_resource(player, client);
+                                } else {
+                                    log_warn("harvest_resource for non-existent player %u", client->player_id);
+                                    strcpy(response, "{\"type\":\"harvest_failure\",\"reason\":\"player_not_found\"}");
+                                }
+                                handled = true;
+                            }
+
                         } else if (strcmp(msg_type, "action_event") == 0) {
                             // HYBRID: Action event message
                             // log_info("⚡ Processing ACTION_EVENT message");

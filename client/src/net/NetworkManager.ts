@@ -73,6 +73,7 @@ export enum MessageType {
   PLACE_CANNON = 'place_cannon',
   PLACE_CANNON_AT = 'place_cannon_at',
   PLACE_MAST = 'place_mast',
+  HARVEST_RESOURCE = 'harvest_resource',
   PLACE_MAST_AT = 'place_mast_at',
   REPLACE_HELM = 'replace_helm',
   PLACE_DECK = 'place_deck',
@@ -403,7 +404,12 @@ interface CrewAssignMessage extends NetworkMessage {
   task: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage;
+interface HarvestResourceMessage extends NetworkMessage {
+  type: MessageType.HARVEST_RESOURCE;
+  timestamp: number;
+}
+
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage;
 
 /**
  * Main network manager class
@@ -1063,6 +1069,16 @@ export class NetworkManager {
   sendRepairPlank(shipId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.REPAIR_PLANK, timestamp: Date.now(), shipId });
+  }
+
+  /**
+   * Request server to harvest the nearest wood resource on the current island.
+   * Requires the axe to be in the active hotbar slot.
+   * Server grants planks and sends harvest_success / harvest_failure in response.
+   */
+  sendHarvestResource(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.HARVEST_RESOURCE, timestamp: Date.now() });
   }
 
   /**

@@ -231,6 +231,7 @@ typedef enum {
     ITEM_IRON_SHIELD   = 21,
     ITEM_DECK          = 13,
     ITEM_SWIVEL        = 14,
+    ITEM_AXE           = 15,
 } ItemKind;
 
 typedef struct {

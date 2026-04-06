@@ -569,6 +569,13 @@ export class ClientApplication {
             return;
           }
 
+          // Harvest mode: active slot = axe + not on a ship → chop nearest wood resource
+          if (activeItem === 'axe' && player && player.carrierId === 0) {
+            console.log(`🪓 [HARVEST] Sending harvest_resource`);
+            this.networkManager.sendHarvestResource();
+            return;
+          }
+
           // Module interaction takes priority over NPC menu
           const hoveredModule = this.renderSystem.getHoveredModule();
 
