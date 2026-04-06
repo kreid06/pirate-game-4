@@ -10050,7 +10050,8 @@ void websocket_server_tick(float dt) {
                                         CLIENT_TO_SERVER(movement_y * walk_speed_client));
                                 }
                             }
-                            /* Only set position if still on island */
+                            /* Apply position regardless — if walking off, land at the new spot so
+                               next tick the player is already outside and swim takes over */
                             if (ws_player->on_island_id != 0) {
                                 ws_player->x = new_x;
                                 ws_player->y = new_y;
@@ -10059,7 +10060,12 @@ void websocket_server_tick(float dt) {
                                 sim_player->velocity.x = 0;
                                 sim_player->velocity.y = 0;
                             } else {
-                                /* Already transitioned to swimming above — keep old position, let swim physics take over */
+                                /* Transitioned to swimming — write the new_x/new_y so the player
+                                   is placed at the water's edge, not stuck inside the beach */
+                                ws_player->x = new_x;
+                                ws_player->y = new_y;
+                                sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_x));
+                                sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_y));
                             }
                         } else {
                             // ===== SWIMMING MOVEMENT (WORLD COORDINATES) =====
