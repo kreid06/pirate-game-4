@@ -157,6 +157,8 @@ export class RenderSystem {
   }> = new Map();
   /** Client-side smoke trail: cannonball id → ring of past positions with timestamps. */
   private cannonballTrails: Map<number, Array<{ x: number; y: number; t: number }>> = new Map();
+  /** Last known world position of each live cannonball — used to spawn water splash on expiry. */
+  private cannonballLastPos: Map<number, { x: number; y: number; ammoType: number }> = new Map();
   /** Trail colour override per projectile — future customisation hook. */
   public trailColor: string = 'rgba(180,180,180,{a})';
   private readonly TRAIL_DURATION_MS = 680;  // how long each crumb lives
@@ -2037,14 +2039,30 @@ export class RenderSystem {
     const now = performance.now();
     const liveIds = new Set<number>();
     for (const cb of worldState.cannonballs) liveIds.add(cb.id);
-    // Prune trails for cannonballs that no longer exist
+    // Prune trails for cannonballs that no longer exist; spawn water splash for expired ones
     for (const id of this.cannonballTrails.keys()) {
       if (!liveIds.has(id)) {
         this.cannonballTrails.delete(id);
         this.trailLastEmit.delete(id);
       }
     }
+    for (const [id, last] of this.cannonballLastPos) {
+      if (!liveIds.has(id)) {
+        // Ball just disappeared — check if it's over open water (not inside any ship hull)
+        const overShip = worldState.ships.some(ship => {
+          const dx = last.x - ship.position.x;
+          const dy = last.y - ship.position.y;
+          return dx * dx + dy * dy < 220 * 220; // ~bounding radius in client px
+        });
+        if (!overShip && (last.ammoType === 0 || last.ammoType === 1)) {
+          this.particleSystem.createWaterSplash(Vec2.from(last.x, last.y), 1.2);
+        }
+        this.cannonballLastPos.delete(id);
+      }
+    }
     for (const cannonball of worldState.cannonballs) {
+      // Update last-known position for splash detection
+      this.cannonballLastPos.set(cannonball.id, { x: cannonball.position.x, y: cannonball.position.y, ammoType: cannonball.ammoType });
       // Leave smoke trails for cannonballs (0/1) and spark trails for grapeshot (10 or server type 2)
       if (cannonball.ammoType === 0 || cannonball.ammoType === 1 || cannonball.ammoType === 10 || cannonball.ammoType === 2) {
         const last = this.trailLastEmit.get(cannonball.id) ?? 0;

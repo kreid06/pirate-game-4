@@ -3687,6 +3687,10 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
                 proj->firing_company = ship->company_id;
                 proj->firing_ship_id = (entity_id)ship->ship_id;
                 proj->type = ammo_type;
+                // Cannonball and bar shot: 5-second lifetime (then water splash on client)
+                if (ammo_type == PROJ_TYPE_CANNONBALL || ammo_type == PROJ_TYPE_BAR_SHOT) {
+                    proj->lifetime = Q16_FROM_FLOAT(5.0f);
+                }
                 // Apply the firing ship's Damage level multiplier
                 struct Ship* sim_ship = sim_get_ship(global_sim, (entity_id)ship->ship_id);
                 if (sim_ship) {
