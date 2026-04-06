@@ -727,10 +727,16 @@ export class NetworkManager {
             this.requestGameState();
             resolve();
           } else {
-            // Any response means server is alive - accept it
+            // Non-handshake message arrived first (e.g. ISLANDS/STRUCTURES sent before
+            // handshake_response by an older server build). Restore the main handler and
+            // forward the current event through it so no data is lost.
             clearTimeout(timeout);
             this.socket!.onmessage = originalHandler;
-            console.log('🤝 Handshake completed (server responded)');
+            console.log('🤝 Handshake completed (server responded with non-handshake first)');
+            // Forward this event to the main handler so ISLANDS/STRUCTURES aren't dropped
+            if (originalHandler) {
+              try { originalHandler.call(this.socket!, event); } catch { /* ignore */ }
+            }
             this.requestGameState();
             resolve();
           }

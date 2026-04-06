@@ -8812,7 +8812,24 @@ int websocket_server_update(struct Sim* sim) {
                                 snprintf(response, sizeof(response),
                                         "{\"type\":\"handshake_response\",\"player_id\":%u,\"player_name\":\"%s\",\"server_time\":%u,\"status\":\"connected\"}",
                                         player_id, player_name, get_time_ms());
-                                // Player joined — immediately queue the ISLANDS message
+                                /* Send handshake_response FIRST so the client's temp handler
+                                   processes it (and sets assignedPlayerId) before ISLANDS and
+                                   STRUCTURES arrive — which must go through the main handler. */
+                                {
+                                    char hr_frame[512];
+                                    size_t hr_len = websocket_create_frame(
+                                        WS_OPCODE_TEXT, response, strlen(response),
+                                        hr_frame, sizeof(hr_frame));
+                                    if (hr_len > 0 && hr_len < sizeof(hr_frame)) {
+                                        send(client->fd, hr_frame, hr_len, 0);
+                                        log_info("🤝 Sent handshake_response to player %u", player_id);
+                                    }
+                                    /* Replace response with a no-op ack so the generic deferred
+                                       sender at the bottom of this block doesn't emit a duplicate
+                                       or malformed message. */
+                                    strcpy(response, "{\"type\":\"ack\"}");
+                                }
+                                // Send ISLANDS
                                 {
                                     static char islands_buf[4096];
                                     int pos = 0;
