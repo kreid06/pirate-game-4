@@ -348,6 +348,20 @@ export class ClientApplication {
         this.pendingGroupShipId = shipId;
       };
 
+      this.networkManager.onHarvestResult = (success, planks, reason) => {
+        if (success) {
+          this.renderSystem.showAnnouncement(`🪓 Harvested wood  +${planks} plank${planks !== 1 ? 's' : ''}`, 'info', 2.5);
+        } else {
+          const msg: Record<string, string> = {
+            need_axe:        'Equip the axe to chop trees',
+            too_far:         'Move closer to a tree',
+            not_on_island:   'You must be on an island',
+            inventory_full:  'Inventory is full',
+          };
+          this.renderSystem.showAnnouncement(`🪓 ${msg[reason] ?? 'Cannot harvest right now'}`, 'info', 2.0);
+        }
+      };
+
       // Authoritative per-ship weapon group state from server
       this.networkManager.onCannonGroupState = (shipId, groups) => {
         // Resolve the player's current ship from the world state.

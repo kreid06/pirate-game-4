@@ -225,6 +225,11 @@ export class RenderSystem {
     this.islands = islands;
   }
 
+  /** Returns the live island list (for proximity checks in ClientApplication). */
+  getIslands(): Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string }> }> {
+    return this.islands;
+  }
+
   /** Active flamethrower wave states keyed by cannonId. Client interpolates between server ticks. */
   private flameWaves: Map<number, {
     x: number; y: number; angle: number; halfCone: number;
@@ -1909,10 +1914,38 @@ export class RenderSystem {
       ctx.restore();
 
       // ── Resource nodes ───────────────────────────────────────────────────────
+      const localPlayer = this._cachedLocalPlayer;
+      const axeEquipped = (() => {
+        if (!localPlayer || localPlayer.carrierId !== 0) return false;
+        const slot = localPlayer.inventory?.activeSlot ?? 0;
+        return localPlayer.inventory?.slots[slot]?.item === 'axe';
+      })();
+      const HARVEST_RANGE_SQ = 110 * 110;
+      // Mouse hover radius for trees: hit-test against the canopy circle (17px * zoom)
+      const TREE_HOVER_SQ = (Math.max(4, 17 * zoom)) * (Math.max(4, 17 * zoom));
+
       for (const res of isl.resources) {
-        const sp = camera.worldToScreen(Vec2.from(isl.x + res.ox, isl.y + res.oy));
+        const wx = isl.x + res.ox;
+        const wy = isl.y + res.oy;
+        const sp = camera.worldToScreen(Vec2.from(wx, wy));
         if (res.type === 'wood') {
-          this.drawIslandTree(sp.x, sp.y, zoom);
+          // Hover detection (screen space)
+          let isHovered = false;
+          if (this.mouseWorldPos) {
+            const msp = camera.worldToScreen(this.mouseWorldPos);
+            const hdx = msp.x - sp.x;
+            const hdy = msp.y - sp.y;
+            isHovered = (hdx * hdx + hdy * hdy) <= TREE_HOVER_SQ;
+          }
+          // Player-proximity for harvest
+          const inRange = axeEquipped && localPlayer
+            ? (() => { const dx = localPlayer.position.x - wx; const dy = localPlayer.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
+            : false;
+
+          this.drawIslandTree(sp.x, sp.y, zoom, isHovered, inRange);
+          if (isHovered && axeEquipped) {
+            this.drawHarvestPrompt(sp.x, sp.y, zoom, inRange);
+          }
         } else if (res.type === 'fiber') {
           this.drawIslandFiberPlant(sp.x, sp.y, zoom);
         }
@@ -1921,12 +1954,55 @@ export class RenderSystem {
     }
   }
 
-  private drawIslandTree(sx: number, sy: number, zoom: number): void {
+  /** Draw a floating "[E] Chop" or "Too far" prompt above a tree. */
+  private drawHarvestPrompt(sx: number, sy: number, zoom: number, inRange: boolean): void {
+    const ctx = this.ctx;
+    const canopy    = Math.max(4, 17 * zoom);
+    const label     = inRange ? '[E] Chop' : 'Too far';
+    const borderCol = inRange ? '#f0c040' : '#888888';
+    const textCol   = inRange ? '#f0c040' : '#aaaaaa';
+    const fontSize  = Math.max(10, Math.round(13 * zoom));
+    ctx.save();
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'bottom';
+    const textW = ctx.measureText(label).width;
+    const padX  = 5;
+    const padY  = 3;
+    const bx    = sx - textW / 2 - padX;
+    const by    = sy - canopy * 1.65 - fontSize - padY;
+    const bw    = textW + padX * 2;
+    const bh    = fontSize + padY * 2;
+    // Pulsing alpha only when in range
+    const pulse = inRange ? (0.75 + 0.25 * Math.sin(performance.now() / 350)) : 0.55;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle   = 'rgba(0,0,0,0.75)';
+    ctx.strokeStyle = borderCol;
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = textCol;
+    ctx.fillText(label, sx, sy - canopy * 1.65);
+    ctx.restore();
+  }
+
+  private drawIslandTree(sx: number, sy: number, zoom: number, hovered = false, inRange = false): void {
     const ctx    = this.ctx;
     const trunk  = Math.max(2, 4 * zoom);
     const canopy = Math.max(4, 17 * zoom);
 
     ctx.save();
+    // Hover glow behind canopy
+    if (hovered) {
+      const glowColor = inRange ? 'rgba(255,230,80,0.22)' : 'rgba(180,180,180,0.15)';
+      const glowR     = inRange ? canopy * 1.25 : canopy * 1.15;
+      ctx.beginPath();
+      ctx.arc(sx, sy, glowR, 0, Math.PI * 2);
+      ctx.fillStyle = glowColor;
+      ctx.fill();
+    }
     // Trunk
     ctx.fillStyle = '#5c3518';
     ctx.beginPath();
@@ -1947,6 +2023,14 @@ export class RenderSystem {
     ctx.beginPath();
     ctx.arc(sx - canopy * 0.15, sy - canopy * 0.2, canopy * 0.52, 0, Math.PI * 2);
     ctx.fill();
+    // Hover outline ring
+    if (hovered) {
+      ctx.beginPath();
+      ctx.arc(sx, sy, canopy * 1.08, 0, Math.PI * 2);
+      ctx.strokeStyle = inRange ? '#f0c040' : '#888888';
+      ctx.lineWidth   = Math.max(1, 1.8 * zoom);
+      ctx.stroke();
+    }
     ctx.restore();
   }
 

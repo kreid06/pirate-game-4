@@ -74,6 +74,8 @@ export enum MessageType {
   PLACE_CANNON_AT = 'place_cannon_at',
   PLACE_MAST = 'place_mast',
   HARVEST_RESOURCE = 'harvest_resource',
+  HARVEST_SUCCESS  = 'harvest_success',
+  HARVEST_FAILURE  = 'harvest_failure',
   PLACE_MAST_AT = 'place_mast_at',
   REPLACE_HELM = 'replace_helm',
   PLACE_DECK = 'place_deck',
@@ -496,6 +498,8 @@ export class NetworkManager {
   public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
   /** Fired when the server confirms the player has boarded a ship (via ladder). */
   public onPlayerBoarded: ((shipId: number) => void) | null = null;
+  /** Fired when the server responds to a harvest_resource request. */
+  public onHarvestResult: ((success: boolean, planks: number, reason: string) => void) | null = null;
   /**
    * Fired once on connect with the full list of server-defined islands.
    * Falls back to client defaults if the server never sends this.
@@ -1730,6 +1734,14 @@ export class NetworkManager {
         this.onPlayerBoarded?.(boardedShipId);
         break;
       }
+
+      case MessageType.HARVEST_SUCCESS:
+        this.onHarvestResult?.(true, message.planks ?? 0, '');
+        break;
+
+      case MessageType.HARVEST_FAILURE:
+        this.onHarvestResult?.(false, 0, message.reason ?? 'unknown');
+        break;
 
       case 'npc_dialogue':
         console.log(`💬 [NPC] ${message.npc_name}: "${message.text}"`);
