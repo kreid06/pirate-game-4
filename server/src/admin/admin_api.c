@@ -1,5 +1,6 @@
 #include "admin/admin_server.h"
 #include "sim/types.h"
+#include "sim/island.h"
 #include "net/network.h"
 #include "net/websocket_server.h"
 #include "input_validation.h"
@@ -10,7 +11,7 @@
 #include <string.h>
 
 // Static buffer for JSON responses (to avoid dynamic allocation)
-static char json_buffer[4096];
+static char json_buffer[8192];
 
 int admin_api_status(struct HttpResponse* resp, const struct Sim* sim,
                     const struct NetworkManager* net_mgr) {
@@ -419,8 +420,36 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
     }
     
     offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
-        "  ]\n}\n");
-    
+        "  ],\n  \"islands\": [\n");
+
+    // Islands (static world data from ISLAND_PRESETS)
+    for (int ii = 0; ii < ISLAND_COUNT && offset < (int)sizeof(json_buffer) - 400; ii++) {
+        const IslandDef *isl = &ISLAND_PRESETS[ii];
+        if (ii > 0)
+            offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, ",\n");
+        offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+            "    {\"id\":%d,\"x\":%.2f,\"y\":%.2f"
+            ",\"beachRadius\":%.2f,\"grassRadius\":%.2f"
+            ",\"beachMaxBump\":%.2f,\"grassMaxBump\":%.2f"
+            ",\"beachBumps\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]"
+            ",\"grassBumps\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]}",
+            isl->id, isl->x, isl->y,
+            isl->beach_radius_px, isl->grass_radius_px,
+            isl->beach_max_bump, isl->grass_max_bump,
+            isl->beach_bumps[0],  isl->beach_bumps[1],  isl->beach_bumps[2],  isl->beach_bumps[3],
+            isl->beach_bumps[4],  isl->beach_bumps[5],  isl->beach_bumps[6],  isl->beach_bumps[7],
+            isl->beach_bumps[8],  isl->beach_bumps[9],  isl->beach_bumps[10], isl->beach_bumps[11],
+            isl->beach_bumps[12], isl->beach_bumps[13], isl->beach_bumps[14], isl->beach_bumps[15],
+            isl->grass_bumps[0],  isl->grass_bumps[1],  isl->grass_bumps[2],  isl->grass_bumps[3],
+            isl->grass_bumps[4],  isl->grass_bumps[5],  isl->grass_bumps[6],  isl->grass_bumps[7],
+            isl->grass_bumps[8],  isl->grass_bumps[9],  isl->grass_bumps[10], isl->grass_bumps[11],
+            isl->grass_bumps[12], isl->grass_bumps[13], isl->grass_bumps[14], isl->grass_bumps[15]
+        );
+    }
+
+    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+        "\n  ]\n}\n");
+
     resp->status_code = 200;
     resp->content_type = "application/json";
     resp->body = json_buffer;

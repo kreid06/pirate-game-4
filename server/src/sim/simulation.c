@@ -314,7 +314,7 @@ static void handle_island_collisions(struct Sim *sim) {
             float dx = sx - island_cx;
             float dy = sy - island_cy;
             float dist_sq = dx * dx + dy * dy;
-            float ship_r  = Q16_TO_FLOAT(ship->bounding_radius);
+            float ship_r  = Q16_TO_FLOAT(ship->bounding_radius); /* broad-phase only */
             /* ── Broad phase ─────────────────────────────────────────────── */
             float broad_min = broad_r + ship_r;
             if (dist_sq >= broad_min * broad_min || dist_sq < 0.0001f) continue;
@@ -323,7 +323,11 @@ static void handle_island_collisions(struct Sim *sim) {
             float angle    = atan2f(dy, dx);
             float island_r = CLIENT_TO_SERVER(
                 island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle));
-            float min_dist = island_r + ship_r;
+            /* Hull contact radius: ~half ship beam.  bounding_radius (435 px) is the
+               bow-to-stern bounding circle used only for ship-ship broad phase — it is
+               far too large for island contact detection. */
+            const float ship_hull_r = CLIENT_TO_SERVER(80.0f);
+            float min_dist = island_r + ship_hull_r;
             if (dist >= min_dist) continue;
             float nx    = dx / dist;
             float ny    = dy / dist;

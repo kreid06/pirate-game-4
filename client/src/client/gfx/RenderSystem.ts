@@ -6210,6 +6210,119 @@ export class RenderSystem {
         this.ctx.restore();
       }
     }
+
+    const ctx  = this.ctx;
+    const zoom = camera.getState().zoom;
+
+    // ── Ship bounding circles (broad-phase, server = 435px client radius) ───
+    const SHIP_BOUNDING_R = 435; // matches sim_create_brigantine bounding_radius
+    for (const ship of worldState.ships) {
+      const sc = camera.worldToScreen(ship.position);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(0,220,255,0.55)';
+      ctx.lineWidth   = 1.5;
+      ctx.setLineDash([8, 5]);
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, SHIP_BOUNDING_R * zoom, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(0,220,255,0.85)';
+      ctx.font = `${11}px monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(`ship#${ship.id} broad`, sc.x, sc.y - SHIP_BOUNDING_R * zoom - 4);
+      ctx.restore();
+    }
+
+    // ── Island physics bodies ────────────────────────────────────────────────
+    // Helper: sample the bumpy boundary at a given angle (mirrors island_boundary_r on server)
+    const sampleBoundary = (baseR: number, bumps: number[], angle: number): number => {
+      const TWO_PI = Math.PI * 2;
+      const n      = bumps.length;
+      let   a      = angle % TWO_PI;
+      if (a < 0) a += TWO_PI;
+      const t  = (a / TWO_PI) * n;
+      const i0 = Math.floor(t) % n;
+      const i1 = (i0 + 1) % n;
+      const f  = t - Math.floor(t);
+      return baseR + bumps[i0] + f * (bumps[i1] - bumps[i0]);
+    };
+
+    const drawBumpyPolygon = (cx: number, cy: number, baseR: number, bumps: number[], segments = 64) => {
+      ctx.beginPath();
+      for (let i = 0; i <= segments; i++) {
+        const angle = (i / segments) * Math.PI * 2;
+        const r     = sampleBoundary(baseR, bumps, angle);
+        const sx    = cx + Math.cos(angle) * r * zoom;
+        const sy    = cy + Math.sin(angle) * r * zoom;
+        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      }
+      ctx.closePath();
+    };
+
+    for (const isl of this.islands) {
+      const preset  = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+      const { beachRadius, grassRadius, beachBumps, grassBumps } = preset;
+      const beachMaxBump = Math.max(...beachBumps.map(Math.abs));
+      const grassMaxBump = Math.max(...grassBumps.map(Math.abs));
+      const sc = camera.worldToScreen(Vec2.from(isl.x, isl.y));
+
+      // Beach broad-phase circle (dashed yellow) — beachRadius + maxBump
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,220,0,0.45)';
+      ctx.lineWidth   = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, (beachRadius + beachMaxBump) * zoom, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      // Beach narrow-phase bumpy polygon (red-orange, solid) — ship collision boundary
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,80,0,0.85)';
+      ctx.lineWidth   = 2;
+      drawBumpyPolygon(sc.x, sc.y, beachRadius, beachBumps);
+      ctx.stroke();
+      ctx.restore();
+
+      // Grass narrow-phase bumpy polygon (green, solid) — player walk zone
+      ctx.save();
+      ctx.strokeStyle = 'rgba(80,220,80,0.85)';
+      ctx.lineWidth   = 2;
+      drawBumpyPolygon(sc.x, sc.y, grassRadius, grassBumps);
+      ctx.stroke();
+      ctx.restore();
+
+      // Grass broad-phase circle (dashed green) — grassRadius + maxBump
+      ctx.save();
+      ctx.strokeStyle = 'rgba(80,220,80,0.35)';
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, (grassRadius + grassMaxBump) * zoom, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      // Island centre cross + label
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.moveTo(sc.x - 8, sc.y); ctx.lineTo(sc.x + 8, sc.y);
+      ctx.moveTo(sc.x, sc.y - 8); ctx.lineTo(sc.x, sc.y + 8);
+      ctx.stroke();
+      ctx.fillStyle    = 'rgba(255,255,255,0.9)';
+      ctx.font         = '11px monospace';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(
+        `island#${isl.id} (${isl.preset}) beach:${beachRadius}+${beachMaxBump} grass:${grassRadius}+${grassMaxBump}`,
+        sc.x, sc.y - (beachRadius + beachMaxBump) * zoom - 4,
+      );
+      ctx.restore();
+    }
   }
   
   /**
