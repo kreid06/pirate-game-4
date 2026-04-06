@@ -116,9 +116,13 @@ export class RenderSystem {
   private islandBuildKind: 'wooden_floor' | 'workbench' | null = null;
   /** True when the placement ghost is beyond the server's max placement range (200 px). */
   private _islandGhostTooFar = false;
+  /** Last snapped placement position (may differ from raw cursor when snap-to-grid is active). */
+  private _snappedBuildPos: { x: number; y: number } | null = null;
 
   /** Returns whether the last-rendered island build ghost was out of placement range. */
   getIslandBuildTooFar(): boolean { return this._islandGhostTooFar; }
+  /** Returns the current snapped placement position (or null when no ghost is active). */
+  getSnappedBuildPos(): { x: number; y: number } | null { return this._snappedBuildPos; }
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
   public playerAimAngleRelative: number = 0;
   /** Currently selected ammo type (0 = cannonball, 1 = bar shot), set each frame by ClientApplication. */
@@ -2181,11 +2185,11 @@ export class RenderSystem {
   /** Draw the island structure placement ghost at the cursor position (drawn once, after all islands). */
   private drawIslandBuildGhost(camera: Camera): void {
     this._islandGhostTooFar = false;
+    this._snappedBuildPos   = null;
     if (!this.islandBuildKind || !this.mouseWorldPos) return;
     const zoom = camera.getState().zoom;
-    const msp  = camera.worldToScreen(this.mouseWorldPos);
-    const sz   = Math.max(4, 50 * zoom);
     const ctx  = this.ctx;
+    const TILE = 50; // world px — floor tile size
 
     // Helper: sample bumpy island boundary at an angle (mirrors server island_boundary_r)
     const sampleBoundary = (baseR: number, bumps: number[], angle: number): number => {
@@ -2199,9 +2203,39 @@ export class RenderSystem {
       return baseR + bumps[i0] + (t - Math.floor(t)) * (bumps[i1] - bumps[i0]);
     };
 
-    // Water check: is cursor over any island's beach area?
-    const mx = this.mouseWorldPos.x;
-    const my = this.mouseWorldPos.y;
+    // ── Snap to adjacent floor neighbour ────────────────────────────────────
+    // When cursor is within SNAP_R world px of any unoccupied cardinal neighbour
+    // slot of an existing floor, lock the ghost position there.
+    let mx = this.mouseWorldPos.x;
+    let my = this.mouseWorldPos.y;
+    if (this.islandBuildKind === 'wooden_floor' && this.placedStructures.length > 0) {
+      const SNAP_R  = TILE * 0.7; // 35 px — snap pull radius
+      let bestDist2 = SNAP_R * SNAP_R;
+      let bestX = mx, bestY = my;
+      const DIRS = [{ dx: TILE, dy: 0 }, { dx: -TILE, dy: 0 },
+                    { dx: 0, dy:  TILE }, { dx: 0, dy: -TILE }];
+      for (const s of this.placedStructures) {
+        if (s.type !== 'wooden_floor') continue;
+        for (const d of DIRS) {
+          const nx = s.x + d.dx, ny = s.y + d.dy;
+          // Skip neighbour slots already occupied by another floor
+          const occupied = this.placedStructures.some(
+            f => f.type === 'wooden_floor' && Math.abs(f.x - nx) < 1 && Math.abs(f.y - ny) < 1
+          );
+          if (occupied) continue;
+          const dist2 = (nx - mx) * (nx - mx) + (ny - my) * (ny - my);
+          if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; }
+        }
+      }
+      mx = bestX; my = bestY;
+    }
+    this._snappedBuildPos = { x: mx, y: my };
+
+    // Recalculate screen position after potential snap
+    const msp = camera.worldToScreen({ x: mx, y: my } as any);
+    const sz  = Math.max(4, TILE * zoom);
+
+    // Water check: is snapped pos over any island's beach area?
     let inWater = true;
     for (const isl of this.islands) {
       const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
@@ -2223,15 +2257,32 @@ export class RenderSystem {
       tooFar = dx * dx + dy * dy > 200 * 200;
     }
 
-    // Overlap check: floor tiles must not be placed within 40 px of an existing floor
-    const OVERLAP_R = 40;
+    // AABB overlap check: floor tile (50×50) must not overlap an existing floor tile
     let overlaps = false;
     if (this.islandBuildKind === 'wooden_floor') {
       overlaps = this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
-        const dx = s.x - mx; const dy = s.y - my;
-        return dx * dx + dy * dy < OVERLAP_R * OVERLAP_R;
+        return Math.abs(s.x - mx) < TILE && Math.abs(s.y - my) < TILE;
       });
+    }
+
+    // Tree obstacle: circle-AABB intersection — trees (wood resources) block floor placement
+    const TREE_R = 20; // world px — obstacle exclusion radius around tree trunk+canopy
+    let blockedByTree = false;
+    if (this.islandBuildKind === 'wooden_floor') {
+      const half = TILE / 2;
+      outer:
+      for (const isl of this.islands) {
+        for (const res of isl.resources) {
+          if (res.type !== 'wood') continue;
+          const tx = isl.x + res.ox, ty = isl.y + res.oy;
+          // Closest point on floor AABB to tree centre
+          const cx = Math.max(mx - half, Math.min(tx, mx + half));
+          const cy = Math.max(my - half, Math.min(ty, my + half));
+          const cdx = tx - cx, cdy = ty - cy;
+          if (cdx * cdx + cdy * cdy < TREE_R * TREE_R) { blockedByTree = true; break outer; }
+        }
+      }
     }
 
     this._islandGhostTooFar = tooFar || inWater;
@@ -2246,7 +2297,7 @@ export class RenderSystem {
       });
     }
 
-    const invalid = tooFar || inWater || noFloor || overlaps;
+    const invalid = tooFar || inWater || noFloor || overlaps || blockedByTree;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
@@ -2271,6 +2322,9 @@ export class RenderSystem {
     if (inWater) {
       ctx.fillStyle = '#4488ff';
       ctx.fillText('IN WATER', msp.x, labelY);
+    } else if (blockedByTree) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('BLOCKED', msp.x, labelY);
     } else if (overlaps) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('OCCUPIED', msp.x, labelY);

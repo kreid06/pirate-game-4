@@ -4520,18 +4520,44 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         }
     }
 
-    /* Wooden floor: must not overlap an existing floor within 40 px */
+    /* Wooden floor: AABB overlap check — tiles are 50×50 px, no two may share space */
     if (stype_enum == STRUCT_WOODEN_FLOOR) {
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             if (!placed_structures[si].active) continue;
             if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
-            float dx = placed_structures[si].x - px;
-            float dy = placed_structures[si].y - py;
-            if (dx*dx + dy*dy < 40.0f * 40.0f) {
+            float dx = fabsf(placed_structures[si].x - px);
+            float dy = fabsf(placed_structures[si].y - py);
+            if (dx < 50.0f && dy < 50.0f) {
                 snprintf(response, sizeof(response),
                          "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
                 goto ps_send;
             }
+        }
+    }
+
+    /* Wooden floor: must not intersect a tree (wood resource) on any island.
+       Obstacle radius TREE_R=20 px; test via circle-AABB closest-point. */
+    if (stype_enum == STRUCT_WOODEN_FLOOR) {
+        const float TREE_R  = 20.0f;
+        const float HALF    = 25.0f; /* half tile */
+        bool blocked = false;
+        for (int ii = 0; ii < ISLAND_COUNT && !blocked; ii++) {
+            const IslandDef *isl = &ISLAND_PRESETS[ii];
+            for (int ri = 0; ri < isl->resource_count && !blocked; ri++) {
+                if (strcmp(isl->resources[ri].type, ISLAND_RES_WOOD) != 0) continue;
+                float tx = isl->x + isl->resources[ri].ox;
+                float ty = isl->y + isl->resources[ri].oy;
+                /* Closest point on AABB [px-HALF, px+HALF] x [py-HALF, py+HALF] to tree */
+                float cx = tx < px - HALF ? px - HALF : (tx > px + HALF ? px + HALF : tx);
+                float cy = ty < py - HALF ? py - HALF : (ty > py + HALF ? py + HALF : ty);
+                float cdx = tx - cx, cdy = ty - cy;
+                if (cdx*cdx + cdy*cdy < TREE_R * TREE_R) blocked = true;
+            }
+        }
+        if (blocked) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"blocked_by_tree\"}");
+            goto ps_send;
         }
     }
 
