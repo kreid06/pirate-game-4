@@ -305,45 +305,74 @@ static void handle_island_collisions(struct Sim *sim) {
         const IslandDef *isl = &ISLAND_PRESETS[ii];
         float island_cx = CLIENT_TO_SERVER(isl->x);
         float island_cy = CLIENT_TO_SERVER(isl->y);
-        /* Broad-phase radius: base + max bump + ship bounding radius handled per-ship below */
-        float broad_r   = CLIENT_TO_SERVER(isl->beach_radius_px + isl->beach_max_bump);
+        /* Broad-phase radius: island beach + max bump, per-ship bounding radius added below */
+        float broad_r = CLIENT_TO_SERVER(isl->beach_radius_px + isl->beach_max_bump);
+
         for (uint16_t si = 0; si < sim->ship_count; si++) {
             struct Ship *ship = &sim->ships[si];
             float sx = Q16_TO_FLOAT(ship->position.x);
             float sy = Q16_TO_FLOAT(ship->position.y);
-            float dx = sx - island_cx;
-            float dy = sy - island_cy;
-            float dist_sq = dx * dx + dy * dy;
-            float ship_r  = Q16_TO_FLOAT(ship->bounding_radius); /* broad-phase only */
-            /* ── Broad phase ─────────────────────────────────────────────── */
+            float cdx = sx - island_cx;
+            float cdy = sy - island_cy;
+            float dist_sq = cdx * cdx + cdy * cdy;
+
+            /* ── Broad phase: same bounding_radius as ship-ship ─────────── */
+            float ship_r = Q16_TO_FLOAT(ship->bounding_radius);
             float broad_min = broad_r + ship_r;
             if (dist_sq >= broad_min * broad_min || dist_sq < 0.0001f) continue;
-            /* ── Narrow phase: sample bumpy boundary at the contact angle ── */
-            float dist     = sqrtf(dist_sq);
-            float angle    = atan2f(dy, dx);
-            float island_r = CLIENT_TO_SERVER(
-                island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle));
-            /* Hull contact radius: ~half ship beam.  bounding_radius (435 px) is the
-               bow-to-stern bounding circle used only for ship-ship broad phase — it is
-               far too large for island contact detection. */
-            const float ship_hull_r = CLIENT_TO_SERVER(80.0f);
-            float min_dist = island_r + ship_hull_r;
-            if (dist >= min_dist) continue;
-            float nx    = dx / dist;
-            float ny    = dy / dist;
-            float overlap = min_dist - dist;
-            /* Push ship outside the bumpy boundary */
-            ship->position.x += Q16_FROM_FLOAT(nx * overlap);
-            ship->position.y += Q16_FROM_FLOAT(ny * overlap);
-            /* Reflect velocity: low restitution (0.15) + friction (0.75) */
+
+            /* ── Narrow phase: test each hull vertex against the island ──── *
+             * Mirrors ship-ship: transform_hull_vertex() brings each vertex  *
+             * into world space using the ship's actual rotation, then we      *
+             * compare it against the bumpy island boundary at that angle.     */
+            float max_penetration = 0.0f;
+            float push_nx = 0.0f, push_ny = 0.0f;
+            bool  hit = false;
+
+            for (uint8_t vi = 0; vi < ship->hull_vertex_count; vi++) {
+                Vec2Q16 wv = transform_hull_vertex(ship->hull_vertices[vi],
+                                                   ship->position,
+                                                   ship->rotation);
+                float wx = Q16_TO_FLOAT(wv.x);
+                float wy = Q16_TO_FLOAT(wv.y);
+
+                float vdx = wx - island_cx;
+                float vdy = wy - island_cy;
+                float vdist = sqrtf(vdx * vdx + vdy * vdy);
+                if (vdist < 0.0001f) continue;
+
+                float angle    = atan2f(vdy, vdx);
+                float island_r = CLIENT_TO_SERVER(
+                    island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle));
+
+                /* positive penetration → vertex is inside the island */
+                float penetration = island_r - vdist;
+                if (penetration > 0.0f && penetration > max_penetration) {
+                    max_penetration = penetration;
+                    /* push direction: outward from island at this vertex */
+                    push_nx = vdx / vdist;
+                    push_ny = vdy / vdist;
+                    hit = true;
+                }
+            }
+
+            if (!hit) continue;
+
+            /* Push ship so the deepest vertex exits the island boundary */
+            ship->position.x += Q16_FROM_FLOAT(push_nx * max_penetration);
+            ship->position.y += Q16_FROM_FLOAT(push_ny * max_penetration);
+
+            /* Reflect velocity along push normal: low restitution + friction */
             float vx    = Q16_TO_FLOAT(ship->velocity.x);
             float vy    = Q16_TO_FLOAT(ship->velocity.y);
-            float vdotn = vx * nx + vy * ny;
+            float vdotn = vx * push_nx + vy * push_ny;
             if (vdotn < 0.0f) {
                 const float restitution = 0.15f;
                 const float friction    = 0.75f;
-                ship->velocity.x = Q16_FROM_FLOAT((vx - (1.0f + restitution) * vdotn * nx) * friction);
-                ship->velocity.y = Q16_FROM_FLOAT((vy - (1.0f + restitution) * vdotn * ny) * friction);
+                ship->velocity.x = Q16_FROM_FLOAT(
+                    (vx - (1.0f + restitution) * vdotn * push_nx) * friction);
+                ship->velocity.y = Q16_FROM_FLOAT(
+                    (vy - (1.0f + restitution) * vdotn * push_ny) * friction);
             }
         }
     }
