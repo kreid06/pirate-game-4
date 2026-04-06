@@ -357,9 +357,9 @@ export class ClientApplication {
         this.pendingGroupShipId = shipId;
       };
 
-      this.networkManager.onHarvestResult = (success, planks, reason) => {
+      this.networkManager.onHarvestResult = (success, wood, reason) => {
         if (success) {
-          this.renderSystem.showAnnouncement(`🪓 Harvested wood  +${planks} plank${planks !== 1 ? 's' : ''}`, 'info', 2.5);
+          this.renderSystem.showAnnouncement(`🪓 Harvested  +${wood} wood`, 'info', 2.5);
         } else {
           const msg: Record<string, string> = {
             need_axe:        'Equip the axe to chop trees',
@@ -1237,6 +1237,24 @@ export class ClientApplication {
       };
       this.networkManager.onCraftingOpen = (structureId, _structureType) => {
         this.craftingMenu.open(structureId);
+      };
+
+      this.craftingMenu.onCraft = (recipeId) => {
+        this.networkManager.sendCraftItem(recipeId);
+      };
+
+      this.networkManager.onCraftResult = (success, recipeId, reason) => {
+        if (success) {
+          this.renderSystem.showAnnouncement(`\u2692 Crafted ${recipeId.replace('craft_', '')}!`, 'info', 2.5);
+        } else {
+          const msg: Record<string, string> = {
+            missing_ingredients: 'Not enough materials',
+            inventory_full:      'Inventory is full',
+            not_at_workbench:    'Must be at a workbench',
+            unknown_recipe:      'Unknown recipe',
+          };
+          this.renderSystem.showAnnouncement(`\u2692 ${msg[reason ?? ''] ?? 'Cannot craft right now'}`, 'info', 2.0);
+        }
       };
 
       // Handle FLAME_CONE_FIRE / FLAME_WAVE_UPDATE: advancing/retreating cone visual

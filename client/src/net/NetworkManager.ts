@@ -520,7 +520,7 @@ export class NetworkManager {
   /** Fired when the server confirms the player has boarded a ship (via ladder). */
   public onPlayerBoarded: ((shipId: number) => void) | null = null;
   /** Fired when the server responds to a harvest_resource request. */
-  public onHarvestResult: ((success: boolean, planks: number, reason: string) => void) | null = null;
+  public onHarvestResult: ((success: boolean, wood: number, reason: string) => void) | null = null;
   /**
    * Fired once on connect with the full list of server-defined islands.
    * Falls back to client defaults if the server never sends this.
@@ -535,6 +535,8 @@ export class NetworkManager {
   public onStructuresList: ((structures: PlacedStructure[]) => void) | null = null;
   /** Fired when the server confirms a workbench can be opened (E-key interact). */
   public onCraftingOpen: ((structureId: number, structureType: string) => void) | null = null;
+  /** Fired when the server responds to a craft_item request. */
+  public onCraftResult: ((success: boolean, recipeId: string, reason?: string) => void) | null = null;
 
   /** Fired each server tick with the current state of an active flamethrower wave. */
   public onFlameWaveUpdate: ((
@@ -1156,6 +1158,12 @@ export class NetworkManager {
   sendDemolishStructure(structureId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: 'demolish_structure', timestamp: Date.now(), structure_id: structureId }));
+  }
+
+  /** Send a crafting request to the server for the given recipe ID. */
+  sendCraftItem(recipeId: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'craft_item', recipe_id: recipeId, timestamp: Date.now() }));
   }
 
   /**
@@ -1810,7 +1818,7 @@ export class NetworkManager {
       }
 
       case MessageType.HARVEST_SUCCESS:
-        this.onHarvestResult?.(true, message.planks ?? 0, '');
+        this.onHarvestResult?.(true, message.wood ?? message.planks ?? 0, '');
         break;
 
       case MessageType.HARVEST_FAILURE:
@@ -2023,6 +2031,14 @@ export class NetworkManager {
 
       case 'structure_demolished':
         this.onStructureDemolished?.(message.structure_id ?? message.id ?? 0);
+        break;
+
+      case 'craft_result':
+        this.onCraftResult?.(
+          message.success === true,
+          message.recipe_id ?? '',
+          message.reason,
+        );
         break;
 
       case 'crafting_open':
