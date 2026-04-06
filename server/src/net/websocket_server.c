@@ -10023,7 +10023,7 @@ void websocket_server_tick(float dt) {
                             float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED);
                             float new_x = ws_player->x + movement_x * walk_speed_client * dt;
                             float new_y = ws_player->y + movement_y * walk_speed_client * dt;
-                            /* Clamp to inner edge of grass radius (5px margin) */
+                            /* Walk freely on beach + grass. Step off the beach → swim. */
                             const IslandDef *isl_mv = NULL;
                             for (int ii = 0; ii < ISLAND_COUNT; ii++) {
                                 if (ISLAND_PRESETS[ii].id == (int)ws_player->on_island_id) {
@@ -10034,19 +10034,33 @@ void websocket_server_tick(float dt) {
                                 float dx = new_x - isl_mv->x;
                                 float dy = new_y - isl_mv->y;
                                 float dist_sq = dx * dx + dy * dy;
-                                float max_r = isl_mv->grass_radius_px - 5.0f;
-                                if (dist_sq > max_r * max_r && dist_sq > 0.001f) {
-                                    float dist = sqrtf(dist_sq);
-                                    new_x = isl_mv->x + (dx / dist) * max_r;
-                                    new_y = isl_mv->y + (dy / dist) * max_r;
+                                float angle   = atan2f(dy, dx);
+                                float beach_r = island_boundary_r(isl_mv->beach_radius_px,
+                                                                  isl_mv->beach_bumps, angle);
+                                if (dist_sq > beach_r * beach_r) {
+                                    /* Player walked off the island — transition to swimming */
+                                    ws_player->on_island_id = 0;
+                                    ws_player->movement_state = PLAYER_STATE_SWIMMING;
+                                    log_info("\U0001F30A Player %u walked off island",
+                                             ws_player->player_id);
+                                    /* Carry the walking velocity into swim so motion feels continuous */
+                                    sim_player->velocity.x = Q16_FROM_FLOAT(
+                                        CLIENT_TO_SERVER(movement_x * walk_speed_client));
+                                    sim_player->velocity.y = Q16_FROM_FLOAT(
+                                        CLIENT_TO_SERVER(movement_y * walk_speed_client));
                                 }
                             }
-                            ws_player->x = new_x;
-                            ws_player->y = new_y;
-                            sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_x));
-                            sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_y));
-                            sim_player->velocity.x = 0;
-                            sim_player->velocity.y = 0;
+                            /* Only set position if still on island */
+                            if (ws_player->on_island_id != 0) {
+                                ws_player->x = new_x;
+                                ws_player->y = new_y;
+                                sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_x));
+                                sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_y));
+                                sim_player->velocity.x = 0;
+                                sim_player->velocity.y = 0;
+                            } else {
+                                /* Already transitioned to swimming above — keep old position, let swim physics take over */
+                            }
                         } else {
                             // ===== SWIMMING MOVEMENT (WORLD COORDINATES) =====
                             // Apply acceleration in movement direction
@@ -10135,16 +10149,17 @@ void websocket_server_tick(float dt) {
                     /* Island enter/leave detection (every tick, all non-ship players) */
                     float wx = ws_player->x, wy = ws_player->y;
                     if (ws_player->on_island_id == 0) {
-                        /* Entering: broad phase → narrow angle-sampled grass boundary */
+                        /* Entering: broad phase → narrow angle-sampled BEACH boundary */
                         for (int ii = 0; ii < ISLAND_COUNT; ii++) {
                             const IslandDef *isl = &ISLAND_PRESETS[ii];
                             float dx = wx - isl->x, dy = wy - isl->y;
                             float dist_sq = dx*dx + dy*dy;
-                            float broad_r = isl->grass_radius_px + isl->grass_max_bump;
+                            float broad_r = isl->beach_radius_px + isl->beach_max_bump;
                             if (dist_sq >= broad_r * broad_r) continue;
-                            /* Narrow phase */
-                            float angle   = atan2f(dy, dx);
-                            float narrow_r = island_boundary_r(isl->grass_radius_px, isl->grass_bumps, angle);
+                            /* Narrow phase against beach boundary */
+                            float angle    = atan2f(dy, dx);
+                            float narrow_r = island_boundary_r(isl->beach_radius_px,
+                                                               isl->beach_bumps, angle);
                             if (dist_sq < narrow_r * narrow_r) {
                                 ws_player->on_island_id = (uint32_t)isl->id;
                                 ws_player->movement_state = PLAYER_STATE_WALKING;
@@ -10156,7 +10171,8 @@ void websocket_server_tick(float dt) {
                             }
                         }
                     } else {
-                        /* Leaving: player exits when outside bumpy boundary + 10px hysteresis */
+                        /* Leaving: fallback exit when outside BEACH boundary + 10px hysteresis.
+                           Primary exit is handled inline in the movement block above. */
                         const IslandDef *isl = NULL;
                         for (int ii = 0; ii < ISLAND_COUNT; ii++) {
                             if ((uint32_t)ISLAND_PRESETS[ii].id == ws_player->on_island_id) {
@@ -10166,11 +10182,12 @@ void websocket_server_tick(float dt) {
                         if (isl) {
                             float dx = wx - isl->x, dy = wy - isl->y;
                             float dist_sq = dx*dx + dy*dy;
-                            /* Broad phase: still inside even worst-case bump → skip narrow test */
-                            float inner_r = isl->grass_radius_px - isl->grass_max_bump;
+                            /* Broad phase: skip narrow test if clearly still inside */
+                            float inner_r = isl->beach_radius_px - isl->beach_max_bump;
                             if (dist_sq > inner_r * inner_r) {
                                 float angle    = atan2f(dy, dx);
-                                float narrow_r = island_boundary_r(isl->grass_radius_px, isl->grass_bumps, angle)
+                                float narrow_r = island_boundary_r(isl->beach_radius_px,
+                                                                   isl->beach_bumps, angle)
                                                  + 10.0f; /* 10px hysteresis */
                                 if (dist_sq > narrow_r * narrow_r) {
                                     ws_player->on_island_id = 0;
