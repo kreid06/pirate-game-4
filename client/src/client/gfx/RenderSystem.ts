@@ -1173,11 +1173,17 @@ export class RenderSystem {
   }
 
   /**
-   * Return the nearest placed structure (any type) within `range` world-px of
-   * the local player, or null. Used by E-key interact logic.
+   * Return the hovered structure if the player is also within `range` world-px
+   * of it (so E-key only fires when actually reachable). Returns null if no
+   * structure is moused-over or the player is too far / on a ship.
    */
   getHoveredStructure(range: number = 110): PlacedStructure | null {
-    return this._hoveredStructure;
+    if (!this._hoveredStructure) return null;
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return null;
+    const dx = this._hoveredStructure.x - player.position.x;
+    const dy = this._hoveredStructure.y - player.position.y;
+    return dx * dx + dy * dy <= range * range ? this._hoveredStructure : null;
   }
 
   /**
@@ -2180,18 +2186,33 @@ export class RenderSystem {
     const zoom = camera.getState().zoom;
 
     // ── Update hovered structure ──────────────────────────────────────────────
-    // Only detect hover when the player is off-ship (on an island).
+    // Highlight whichever structure the mouse cursor is over (AABB for floor,
+    // landscape rect for workbench).  Interaction hints additionally require
+    // the player to be off-ship and within range.
     const player = this._cachedLocalPlayer;
-    const HOVER_R = 80; // world px — proximity to count as hovered
+    const INTERACT_R = 110; // world px — must match getHoveredStructure range
     this._hoveredStructure = null;
-    if (player && player.carrierId === 0) {
-      let bestDist = HOVER_R * HOVER_R;
+    if (this.mouseWorldPos && !this.islandBuildKind) {
+      const mx = this.mouseWorldPos.x;
+      const my = this.mouseWorldPos.y;
+      const half = 25; // half of 50px tile
+      let floorHit: PlacedStructure | null = null;
       for (const s of this.placedStructures) {
-        const dx = s.x - player.position.x;
-        const dy = s.y - player.position.y;
-        const d2 = dx * dx + dy * dy;
-        if (d2 < bestDist) { bestDist = d2; this._hoveredStructure = s; }
+        const hw = half;
+        const hh = s.type === 'workbench' ? half * 0.5 : half;
+        if (Math.abs(mx - s.x) <= hw && Math.abs(my - s.y) <= hh) {
+          if (s.type === 'workbench') {
+            // Workbench always wins — stop searching
+            this._hoveredStructure = s;
+            floorHit = null;
+            break;
+          } else {
+            // Floor match — keep looking in case a workbench overlaps
+            floorHit = s;
+          }
+        }
       }
+      if (this._hoveredStructure === null) this._hoveredStructure = floorHit;
     }
 
     for (const s of this.placedStructures) {
@@ -2257,24 +2278,41 @@ export class RenderSystem {
         const structH = s.type === 'workbench' ? sz * 0.5 : sz;
         const tipY = ssp.y - structH / 2 - 8;
 
-        const label     = s.type === 'wooden_floor' ? 'Wooden Floor' : 'Workbench';
-        const hintLine1 = s.type === 'workbench'    ? '[E] Open Workbench' : '';
-        const hintLine2 = s.type === 'workbench'    ? 'Hold [E] Demolish'  : 'Hold [E] Demolish';
+        // Check if player is in interact range
+        const inRange = player && player.carrierId === 0 && (() => {
+          const dx = s.x - player.position.x;
+          const dy = s.y - player.position.y;
+          return dx * dx + dy * dy <= 110 * 110;
+        })();
+
+        const label = s.type === 'wooden_floor' ? 'Wooden Floor' : 'Workbench';
 
         ctx.save();
-        ctx.font         = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'bottom';
 
         // Name
+        ctx.font      = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
         ctx.fillStyle = '#ffe8a0';
         ctx.fillText(label, ssp.x, tipY);
 
-        // Hint lines
-        ctx.font      = `${Math.max(9, Math.round(10 * zoom))}px Consolas, monospace`;
-        ctx.fillStyle = 'rgba(220, 220, 180, 0.9)';
-        if (hintLine1) ctx.fillText(hintLine1, ssp.x, tipY - Math.max(12, 14 * zoom));
-        ctx.fillText(hintLine2, ssp.x, tipY - (hintLine1 ? Math.max(24, 27 * zoom) : Math.max(12, 14 * zoom)));
+        const lineH = Math.max(12, 14 * zoom);
+        ctx.font = `${Math.max(9, Math.round(10 * zoom))}px Consolas, monospace`;
+        if (inRange) {
+          // Show interact hints
+          if (s.type === 'workbench') {
+            ctx.fillStyle = 'rgba(200, 255, 180, 0.95)';
+            ctx.fillText('Hold [E] to interact', ssp.x, tipY - lineH);
+          } else {
+            ctx.fillStyle = 'rgba(200, 255, 180, 0.95)';
+            ctx.fillText('Hold [E] to interact', ssp.x, tipY - lineH);
+          }
+        } else {
+          // Out of range — grey hint
+          ctx.fillStyle = 'rgba(180, 180, 160, 0.75)';
+          ctx.fillText('(walk closer)', ssp.x, tipY - lineH);
+        }
+
         ctx.restore();
       }
     }
