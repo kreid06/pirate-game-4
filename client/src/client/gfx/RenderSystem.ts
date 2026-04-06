@@ -1852,13 +1852,19 @@ export class RenderSystem {
     camera: Camera,
     worldCx: number, worldCy: number,
     radius: number, bumps: number[],
+    segments = 64,
   ): void {
-    const ctx = this.ctx;
-    const n   = bumps.length;
+    const ctx  = this.ctx;
+    const n    = bumps.length;
+    const TWO_PI = Math.PI * 2;
     ctx.beginPath();
-    for (let i = 0; i <= n; i++) {
-      const angle = (i / n) * Math.PI * 2 - Math.PI * 0.5;
-      const r     = radius + bumps[i % n];
+    for (let i = 0; i <= segments; i++) {
+      const angle = (i / segments) * TWO_PI;   // 0→2π, matching server island_boundary_r
+      const t     = (angle / TWO_PI) * n;
+      const i0    = Math.floor(t) % n;
+      const i1    = (i0 + 1) % n;
+      const f     = t - Math.floor(t);
+      const r     = radius + bumps[i0] + f * (bumps[i1] - bumps[i0]);
       const sp    = camera.worldToScreen(Vec2.from(
         worldCx + Math.cos(angle) * r,
         worldCy + Math.sin(angle) * r,
