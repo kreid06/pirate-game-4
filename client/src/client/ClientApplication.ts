@@ -808,9 +808,10 @@ export class ClientApplication {
           const p   = ws?.players.find(pl => pl.id === pid);
           const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
           if (kind === 'wooden_floor' || kind === 'workbench') {
-            // Use the snapped position from the ghost; fall back to raw cursor
-            const snap = this.renderSystem.getSnappedBuildPos();
-            const pos  = snap ?? { x: worldPos.x, y: worldPos.y };
+            // Compute snap at click time (not from stale render state)
+            const pos = kind === 'wooden_floor'
+              ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
+              : { x: worldPos.x, y: worldPos.y };
             this.networkManager.sendPlaceStructure(kind, pos.x, pos.y);
           }
           return;

@@ -1110,6 +1110,37 @@ export class RenderSystem {
   }
 
   /**
+   * Compute the snapped world position for a wooden_floor placement at (wx, wy).
+   * If the point is within SNAP_R of an unoccupied cardinal neighbour slot of any
+   * existing floor, snaps to that slot. Otherwise returns the input unchanged.
+   * Called at click time so it is never stale.
+   */
+  computeSnappedPos(wx: number, wy: number): { x: number; y: number } {
+    const TILE   = 50;
+    const SNAP_R = TILE * 0.8; // 40 px — generous snap pull radius
+    if (this.islandBuildKind !== 'wooden_floor' || this.placedStructures.length === 0) {
+      return { x: wx, y: wy };
+    }
+    let bestDist2 = SNAP_R * SNAP_R;
+    let bestX = wx, bestY = wy;
+    const DIRS = [{ dx: TILE, dy: 0 }, { dx: -TILE, dy: 0 },
+                  { dx: 0, dy: TILE  }, { dx: 0, dy: -TILE  }];
+    for (const s of this.placedStructures) {
+      if (s.type !== 'wooden_floor') continue;
+      for (const d of DIRS) {
+        const nx = s.x + d.dx, ny = s.y + d.dy;
+        const alreadyOccupied = this.placedStructures.some(
+          f => f.type === 'wooden_floor' && Math.abs(f.x - nx) < 1 && Math.abs(f.y - ny) < 1
+        );
+        if (alreadyOccupied) continue;
+        const dist2 = (nx - wx) * (nx - wx) + (ny - wy) * (ny - wy);
+        if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; }
+      }
+    }
+    return { x: bestX, y: bestY };
+  }
+
+  /**
    * Return the nearest workbench within `range` world-px of the local player,
    * or null if none found. Used to decide whether E-key triggers interact.
    */
@@ -2209,7 +2240,7 @@ export class RenderSystem {
     let mx = this.mouseWorldPos.x;
     let my = this.mouseWorldPos.y;
     if (this.islandBuildKind === 'wooden_floor' && this.placedStructures.length > 0) {
-      const SNAP_R  = TILE * 0.7; // 35 px — snap pull radius
+      const SNAP_R  = TILE * 0.8; // 40 px — snap pull radius
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
       const DIRS = [{ dx: TILE, dy: 0 }, { dx: -TILE, dy: 0 },
@@ -2232,7 +2263,7 @@ export class RenderSystem {
     this._snappedBuildPos = { x: mx, y: my };
 
     // Recalculate screen position after potential snap
-    const msp = camera.worldToScreen({ x: mx, y: my } as any);
+    const msp = camera.worldToScreen(Vec2.from(mx, my));
     const sz  = Math.max(4, TILE * zoom);
 
     // Water check: is snapped pos over any island's beach area?
