@@ -2187,9 +2187,9 @@ export class RenderSystem {
         }
         ctx.restore();
       } else if (s.type === 'workbench') {
-        // 1:2 rectangle — half the floor width, full floor height
-        const tw = sz * 0.5;  // 25 px at default zoom
-        const th = sz;        // 50 px at default zoom
+        // 1:2 rectangle — full floor width, half floor height (landscape)
+        const tw = sz;        // 50 px at default zoom
+        const th = sz * 0.5;  // 25 px at default zoom
         ctx.save();
         ctx.fillStyle   = '#7a4820';
         ctx.strokeStyle = '#4a2810';
@@ -2346,14 +2346,15 @@ export class RenderSystem {
     ctx.strokeStyle = borderColor;
     ctx.lineWidth   = Math.max(1, 2 * zoom);
     ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+    const ghostH = this.islandBuildKind === 'workbench' ? sz * 0.5 : sz;
     ctx.beginPath();
-    ctx.rect(msp.x - sz / 2, msp.y - sz / 2, sz, sz);
+    ctx.rect(msp.x - sz / 2, msp.y - ghostH / 2, sz, ghostH);
     ctx.fill();
     ctx.stroke();
     ctx.setLineDash([]);
 
     // Label above the ghost
-    const labelY = msp.y - sz / 2 - 6;
+    const labelY = msp.y - ghostH / 2 - 6;
     ctx.globalAlpha = 1;
     ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
     ctx.textAlign    = 'center';

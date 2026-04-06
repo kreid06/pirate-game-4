@@ -6442,7 +6442,69 @@ int websocket_server_update(struct Sim* sim) {
                                         send(client->fd, game_state_frame, game_state_frame_len, 0);
                                         // Sent initial game state
                                     }
-                                    
+
+                                    // Send ISLANDS so client can render island geometry
+                                    {
+                                        static char hs_islands_buf[4096];
+                                        int hsi_pos = 0;
+                                        hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                            "{\"type\":\"ISLANDS\",\"islands\":[");
+                                        for (int hii = 0; hii < ISLAND_COUNT; hii++) {
+                                            const IslandDef *isl = &ISLAND_PRESETS[hii];
+                                            hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                                "%s{\"id\":%d,\"x\":%.1f,\"y\":%.1f,\"preset\":\"%s\",\"resources\":[",
+                                                                hii ? "," : "",
+                                                                isl->id, isl->x, isl->y, isl->preset);
+                                            for (int hri = 0; hri < isl->resource_count; hri++) {
+                                                const IslandResource *r = &isl->resources[hri];
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                                    "%s{\"ox\":%.1f,\"oy\":%.1f,\"type\":\"%s\"}",
+                                                                    hri ? "," : "",
+                                                                    r->ox, r->oy, r->type);
+                                            }
+                                            hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]}");
+                                        }
+                                        hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]}");
+                                        char hs_isl_frame[4352];
+                                        size_t hs_isl_len = websocket_create_frame(
+                                            WS_OPCODE_TEXT, hs_islands_buf, (size_t)hsi_pos,
+                                            hs_isl_frame, sizeof(hs_isl_frame));
+                                        if (hs_isl_len > 0 && hs_isl_len < sizeof(hs_isl_frame))
+                                            send(client->fd, hs_isl_frame, hs_isl_len, 0);
+                                        log_info("🏝️  Sent ISLANDS to JSON-handshake player %u", client->player_id);
+                                    }
+
+                                    // Send current placed structures
+                                    {
+                                        static char hs_structs_buf[8192];
+                                        int hs_sp = 0;
+                                        hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
+                                                          "{\"type\":\"STRUCTURES\",\"structures\":[");
+                                        bool hs_sfirst = true;
+                                        for (uint32_t si = 0; si < placed_structure_count; si++) {
+                                            if (!placed_structures[si].active) continue;
+                                            const char* hs_stype = placed_structures[si].type == STRUCT_WOODEN_FLOOR
+                                                                   ? "wooden_floor" : "workbench";
+                                            hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
+                                                              "%s{\"id\":%u,\"structure_type\":\"%s\","
+                                                              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                                              hs_sfirst ? "" : ",",
+                                                              placed_structures[si].id, hs_stype,
+                                                              placed_structures[si].island_id,
+                                                              placed_structures[si].x, placed_structures[si].y);
+                                            hs_sfirst = false;
+                                        }
+                                        hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp, "]}");
+                                        char hs_sf[8448];
+                                        size_t hs_sflen = websocket_create_frame(
+                                            WS_OPCODE_TEXT, hs_structs_buf, (size_t)hs_sp,
+                                            hs_sf, sizeof(hs_sf));
+                                        if (hs_sflen > 0 && hs_sflen < sizeof(hs_sf))
+                                            send(client->fd, hs_sf, hs_sflen, 0);
+                                        log_info("📦 Sent STRUCTURES (%u) to JSON-handshake player %u",
+                                                 placed_structure_count, client->player_id);
+                                    }
+
                                     // Skip normal response sending since we already sent
                                     ws_server.packets_sent += 2;
                                     ws_server.packets_received++;
