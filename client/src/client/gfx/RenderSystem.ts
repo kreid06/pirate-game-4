@@ -291,14 +291,18 @@ export class RenderSystem {
       // Nothing to draw if retreat has consumed the whole cone
       if (retreatDist >= waveDist) continue;
 
-      // ── Particle effects — embers + sparks + smoke across the whole cone ─
-      this.particleSystem.createFlameConeParticles(
-        Vec2.from(fw.x, fw.y),
-        fw.angle,
-        fw.halfCone,
-        retreatDist,
-        waveDist,
-      );
+      // ── Particle effects — pulsed wave emission: dense bursts every 110ms ─
+      // 60ms "on" window followed by 50ms gap creates visible waves of flame
+      const emitPhase = now % 110;
+      if (emitPhase <= 60) {
+        this.particleSystem.createFlameConeParticles(
+          Vec2.from(fw.x, fw.y),
+          fw.angle,
+          fw.halfCone,
+          retreatDist,
+          waveDist,
+        );
+      }
     }
   }
 

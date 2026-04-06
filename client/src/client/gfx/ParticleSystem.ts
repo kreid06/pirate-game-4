@@ -360,7 +360,7 @@ export class ParticleSystem {
     innerDist: number,
     outerDist: number,
   ): void {
-    if (Math.random() > 0.25) return; // spawn only ~25% of frames to prevent overdraw
+    if (Math.random() > 0.50) return; // 50% gate — pairs with outer pulse gate in RenderSystem
     const span = outerDist - innerDist;
     if (span <= 0) return;
 
@@ -376,7 +376,8 @@ export class ParticleSystem {
       const frac = dist / Math.max(1, outerDist);
 
       const r = Math.round(220 + Math.random() * 35); // 220–255
-      const g = Math.round(80  + Math.random() * 120); // 80–200 vivid orange-yellow
+      // Brighter/more-yellow near barrel (frac≈0), cooler orange toward tip (frac≈1)
+      const g = Math.min(255, Math.round((150 - frac * 90) + Math.random() * 50)); // 150–200 barrel → 60–110 tip
       const b = Math.round(0   + Math.random() * 15);  // 0–15
 
       const fwdSpeed   = 20 + frac * 45 + Math.random() * 25;
@@ -384,6 +385,8 @@ export class ParticleSystem {
       const riseSpeed  = 20 + Math.random() * 35;
       const velX = Math.cos(angle) * fwdSpeed + (-Math.sin(angle)) * crossSpeed;
       const velY = Math.sin(angle) * fwdSpeed + Math.cos(angle) * crossSpeed - riseSpeed;
+      // Barrel brightness stored in alpha (not overwritten for fire particles in updateEffect)
+      const brightness = 0.65 + (1.0 - frac) * 0.35; // 1.0 at barrel → 0.65 at tip
 
       particles.push({
         position: origin.add(Vec2.from(
@@ -393,9 +396,9 @@ export class ParticleSystem {
         velocity: Vec2.from(velX, velY),
         life:    0,
         maxLife: 0.18 + Math.random() * 0.32,
-        size:    30 + frac * 30 + Math.random() * 20,
+        size:    50 - frac * 20 + Math.random() * 15, // bigger/brighter near barrel
         color:   `${r},${g},${b}`,
-        alpha:   1.0,
+        alpha:   brightness,
         gravity: -25,
       });
     }
@@ -603,7 +606,8 @@ export class ParticleSystem {
 
       // u_power analog: power curve keeps the blob bright through most of its life
       // then drops off sharply. Cap at 0.72 so many overlapping blobs don't white-out.
-      const opacity = Math.min(0.38, Math.pow(1.0 - lifeRatio, 0.7));
+      // p.alpha stores barrel brightness (1.0=barrel, 0.65=tip) — preserved through fire particle lifetime
+      const opacity = Math.min(0.38 * p.alpha, Math.pow(1.0 - lifeRatio, 0.7) * p.alpha);
       if (opacity <= 0.02) continue;
 
       const sp           = camera.worldToScreen(p.position);

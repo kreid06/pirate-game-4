@@ -1204,7 +1204,7 @@ export class InputManager {
           if (this.flameStreamTimer === null) {
             this.flameStreamTimer = setInterval(() => {
               if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType, wg, wgs);
-            }, 150);
+            }, 100);
           }
         } else if (isDoubleClick) {
           console.log('💥💥 Double-click: Fire ALL cannons!');
