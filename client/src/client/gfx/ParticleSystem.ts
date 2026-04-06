@@ -64,7 +64,7 @@ export class ParticleSystem {
     medium: 1.0,
     high: 2.0
   };
-  
+
   constructor(ctx: CanvasRenderingContext2D) {
     this.ctx = ctx;
   }
@@ -109,37 +109,82 @@ export class ParticleSystem {
   }
   
   /**
-   * Create a water splash effect
+   * Create a dramatic water splash for cannonball impact / expiry over water.
+   * Three passes: central geyser column, radial base ring, foam mist.
    */
   createWaterSplash(position: Vec2, intensity: number = 1.0): void {
-    const particleCount = Math.floor(20 * intensity * this.qualityMultipliers[this.quality]);
+    const q = this.qualityMultipliers[this.quality];
     const particles: Particle[] = [];
-    
-    for (let i = 0; i < particleCount; i++) {
-      const angle = (i / particleCount) * Math.PI * 2;
-      const speed = 80 + Math.random() * 120;
-      const lifetime = 1.5 + Math.random() * 1.0;
-      
+
+    const waterColors  = ['#ffffff', '#daf0ff', '#a8d8f0', '#87ceeb', '#c8e8ff'];
+    const foamColors   = ['#ffffff', '#f0f8ff', '#e0f0ff'];
+
+    // ── Pass 1: Central geyser — tall upward column ──────────────────────────
+    const geyserCount = Math.floor(28 * intensity * q);
+    for (let i = 0; i < geyserCount; i++) {
+      const spread = (Math.random() - 0.5) * 0.45; // ±13° from straight up
+      const angle  = -Math.PI / 2 + spread;
+      const speed  = 220 + Math.random() * 280;     // fast enough to arc high
       particles.push({
-        position: position.clone(),
-        velocity: Vec2.from(
-          Math.cos(angle) * speed,
-          Math.sin(angle) * speed
-        ),
+        position: position.add(Vec2.from((Math.random() - 0.5) * 12, 0)),
+        velocity: Vec2.from(Math.cos(angle) * speed, Math.sin(angle) * speed),
         life: 0,
-        maxLife: lifetime,
-        size: 2 + Math.random() * 3,
-        color: '#87ceeb', // Sky blue for water
-        alpha: 0.8,
-        gravity: 50 // Water falls down
+        maxLife: 0.9 + Math.random() * 0.8,
+        size: 4 + Math.random() * 7,
+        color: waterColors[Math.floor(Math.random() * waterColors.length)],
+        alpha: 0.85 + Math.random() * 0.15,
+        gravity: 320,
       });
     }
-    
+
+    // ── Pass 2: Radial base ring — fans out to all sides ─────────────────────
+    const ringCount = Math.floor(36 * intensity * q);
+    for (let i = 0; i < ringCount; i++) {
+      const angle = (i / ringCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.3;
+      // Bias toward horizontal: [-60°, +60°] from the ring plane (y = 0)
+      const vertBias = (Math.random() - 0.5) * Math.PI * 0.4;
+      const finalAngle = angle + vertBias * 0.3;
+      const speed = 150 + Math.random() * 200;
+      particles.push({
+        position: position.add(Vec2.from(
+          (Math.random() - 0.5) * 20,
+          (Math.random() - 0.5) * 10,
+        )),
+        velocity: Vec2.from(Math.cos(finalAngle) * speed, Math.sin(finalAngle) * speed - 60),
+        life: 0,
+        maxLife: 0.7 + Math.random() * 0.7,
+        size: 3 + Math.random() * 6,
+        color: waterColors[Math.floor(Math.random() * waterColors.length)],
+        alpha: 0.7 + Math.random() * 0.25,
+        gravity: 280,
+      });
+    }
+
+    // ── Pass 3: Foam mist — small slow particles that linger ─────────────────
+    const mistCount = Math.floor(20 * intensity * q);
+    for (let i = 0; i < mistCount; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 40 + Math.random() * 90;
+      particles.push({
+        position: position.add(Vec2.from(
+          (Math.random() - 0.5) * 40,
+          (Math.random() - 0.5) * 20,
+        )),
+        velocity: Vec2.from(Math.cos(angle) * speed, Math.sin(angle) * speed - 30),
+        life: 0,
+        maxLife: 1.4 + Math.random() * 1.0,
+        size: 6 + Math.random() * 10,
+        color: foamColors[Math.floor(Math.random() * foamColors.length)],
+        alpha: 0.35 + Math.random() * 0.3,
+        gravity: 60,
+      });
+    }
+
     this.effects.push({
       position: position.clone(),
       type: ParticleEffectType.WATER_SPLASH,
       intensity,
-      particles
+      particles,
     });
   }
   
@@ -301,13 +346,12 @@ export class ParticleSystem {
   }
 
   /**
-   * Scatter embers + smoke through the entire live flame-cone volume.
+   * Scatter fire blobs through the live flame-cone volume.
    * Called every frame from RenderSystem.drawFlameCones.
-   * @param origin     World-space swivel-gun muzzle position.
-   * @param angle      Centre-line angle of the cone (radians).
-   * @param halfCone   Half-angle of the cone (radians).
-   * @param innerDist  World-space inner radius (retreat edge).
-   * @param outerDist  World-space outer radius (wave-front edge).
+   *
+   * Color is fixed at birth (reference style): r=255, g=100-190, b=10-30.
+   * Rendered as per-particle radial gradients with additive compositing.
+   * Velocity combines forward cone direction, cross-cone spread, and world-space upward rise.
    */
   createFlameConeParticles(
     origin: Vec2,
@@ -316,99 +360,82 @@ export class ParticleSystem {
     innerDist: number,
     outerDist: number,
   ): void {
-    if (Math.random() > 0.75) return; // ~75% spawn chance keeps it light
-
+    if (Math.random() > 0.25) return; // spawn only ~25% of frames to prevent overdraw
     const span = outerDist - innerDist;
     if (span <= 0) return;
 
-    const quality = this.qualityMultipliers[this.quality];
-    const emberCount  = Math.max(2, Math.floor(6  * quality));
-    const smokeCount  = Math.max(1, Math.floor(3  * quality));
-    const sparkCount  = Math.max(1, Math.floor(2  * quality));
-
-    const emberColors = ['#FFFF99', '#FFE066', '#FFC800', '#FF8C00', '#FF5500', '#FF3300'];
-    const smokeColors = ['rgba(60,20,0,0.55)', 'rgba(80,40,0,0.45)', 'rgba(40,40,40,0.35)'];
-
+    const quality   = this.qualityMultipliers[this.quality];
+    const count     = Math.max(1, Math.floor(3 * quality));  // reduced from 6
+    const sideCount = Math.max(1, Math.floor(1 * quality));  // reduced from 3
     const particles: Particle[] = [];
 
-    // ── Embers scattered across the cone ──────────────────────────────────
-    for (let i = 0; i < emberCount; i++) {
-      const a = angle + (Math.random() * 2 - 1) * halfCone;
-      const r = innerDist + Math.random() * span;
-      const frac = (r - innerDist) / span; // 0 = near origin, 1 = leading edge
+    // ── Main forward embers ─────────────────────────────────────────────────
+    for (let i = 0; i < count; i++) {
+      const a    = angle + (Math.random() * 2 - 1) * halfCone;
+      const dist = innerDist + Math.random() * span;
+      const frac = dist / Math.max(1, outerDist);
 
-      // Hotter (brighter yellows) near the tip, cooler (reds) near origin
-      const colorIdx = Math.floor((1 - frac) * (emberColors.length - 1));
-      const color = emberColors[Math.min(colorIdx, emberColors.length - 1)];
+      const r = Math.round(220 + Math.random() * 35); // 220–255
+      const g = Math.round(80  + Math.random() * 120); // 80–200 vivid orange-yellow
+      const b = Math.round(0   + Math.random() * 15);  // 0–15
 
-      // Velocity: slightly forward in cone direction + upward drift + random spread
-      const forwardSpeed = 20 + frac * 60 + Math.random() * 30;
-      const spread = (Math.random() - 0.5) * halfCone * 0.8;
-      const velAngle = angle + spread;
+      const fwdSpeed   = 20 + frac * 45 + Math.random() * 25;
+      const crossSpeed = (Math.random() - 0.5) * 30;
+      const riseSpeed  = 20 + Math.random() * 35;
+      const velX = Math.cos(angle) * fwdSpeed + (-Math.sin(angle)) * crossSpeed;
+      const velY = Math.sin(angle) * fwdSpeed + Math.cos(angle) * crossSpeed - riseSpeed;
 
       particles.push({
         position: origin.add(Vec2.from(
-          Math.cos(a) * r + (Math.random() - 0.5) * 4,
-          Math.sin(a) * r + (Math.random() - 0.5) * 4,
+          Math.cos(a) * dist + (Math.random() - 0.5) * 8,
+          Math.sin(a) * dist + (Math.random() - 0.5) * 8,
         )),
-        velocity: Vec2.from(
-          Math.cos(velAngle) * forwardSpeed,
-          Math.sin(velAngle) * forwardSpeed - 15 - Math.random() * 20,
-        ),
+        velocity: Vec2.from(velX, velY),
         life:    0,
-        maxLife: 0.18 + frac * 0.30 + Math.random() * 0.25,
-        size:    0.8 + frac * 1.6 + Math.random() * 1.4,
-        color,
-        alpha:   0.80 + Math.random() * 0.20,
-        gravity: -30 - Math.random() * 20, // embers rise
-      });
-    }
-
-    // ── Sparks — tiny bright white/yellow flecks that shoot outward ───────
-    for (let i = 0; i < sparkCount; i++) {
-      const a = angle + (Math.random() * 2 - 1) * halfCone * 0.9;
-      const r = innerDist + Math.random() * span;
-      const sparkSpeed = 60 + Math.random() * 90;
-      particles.push({
-        position: origin.add(Vec2.from(
-          Math.cos(a) * r,
-          Math.sin(a) * r,
-        )),
-        velocity: Vec2.from(
-          Math.cos(a) * sparkSpeed + (Math.random() - 0.5) * 20,
-          Math.sin(a) * sparkSpeed + (Math.random() - 0.5) * 20 - 25,
-        ),
-        life:    0,
-        maxLife: 0.10 + Math.random() * 0.18,
-        size:    0.5 + Math.random() * 1.0,
-        color:   Math.random() > 0.5 ? '#FFFFFF' : '#FFFACD',
+        maxLife: 0.5 + Math.random() * 0.9,
+        size:    30 + frac * 30 + Math.random() * 20,
+        color:   `${r},${g},${b}`,
         alpha:   1.0,
-        gravity: -15,
+        gravity: -25,
       });
     }
 
-    // ── Smoke wisps — billow upward and backward, thicker mid-range ───────
-    for (let i = 0; i < smokeCount; i++) {
-      const a = angle + (Math.random() * 2 - 1) * halfCone * 0.85;
-      const r = innerDist + 0.25 * span + Math.random() * 0.65 * span;
-      const color = smokeColors[Math.floor(Math.random() * smokeColors.length)];
-      const rearAngle = angle + Math.PI + (Math.random() - 0.5) * halfCone;
-      const smokeSpeed = 18 + Math.random() * 28;
+    // ── Side-scatter embers — spawn near the cone edges, fly sideways ───────
+    // perpX/perpY = unit vector perpendicular to the cone axis
+    const perpX = -Math.sin(angle);
+    const perpY =  Math.cos(angle);
+    for (let i = 0; i < sideCount; i++) {
+      // Place along the cone edge: pick a random depth then offset to one edge
+      const dist = innerDist + Math.random() * span;
+      const frac = dist / Math.max(1, outerDist);
+      const side = Math.random() < 0.5 ? -1 : 1; // left or right edge
+
+      // Spawn position: at the cone edge (halfCone) ± small jitter
+      const edgeAngle = angle + side * halfCone * (0.75 + Math.random() * 0.25);
+      const spawnX = origin.x + Math.cos(edgeAngle) * dist + (Math.random() - 0.5) * 6;
+      const spawnY = origin.y + Math.sin(edgeAngle) * dist + (Math.random() - 0.5) * 6;
+
+      // Velocity: mostly sideways away from the cone + slower forward bleed + upward
+      const lateralSpeed = 25 + Math.random() * 45;
+      const forwardBleed = 8  + Math.random() * 18;
+      const riseSpeed    = 15 + Math.random() * 30;
+      const velX = Math.cos(angle) * forwardBleed + perpX * side * lateralSpeed;
+      const velY = Math.sin(angle) * forwardBleed + perpY * side * lateralSpeed - riseSpeed;
+
+      // Cooler colors — side embers have had more time to cool
+      const r = Math.round(200 + Math.random() * 55); // 200–255
+      const g = Math.round(40  + Math.random() * 80);  // 40–120 warm orange
+      const b = 0;
+
       particles.push({
-        position: origin.add(Vec2.from(
-          Math.cos(a) * r + (Math.random() - 0.5) * 8,
-          Math.sin(a) * r + (Math.random() - 0.5) * 8,
-        )),
-        velocity: Vec2.from(
-          Math.cos(rearAngle) * smokeSpeed,
-          Math.sin(rearAngle) * smokeSpeed - 12 - Math.random() * 18,
-        ),
+        position: Vec2.from(spawnX, spawnY),
+        velocity: Vec2.from(velX, velY),
         life:    0,
-        maxLife: 0.55 + Math.random() * 0.65,
-        size:    4 + Math.random() * 7,
-        color,
-        alpha:   0.35 + Math.random() * 0.25,
-        gravity: -18, // smoke drifts upward
+        maxLife: 0.25 + Math.random() * 0.50, // shorter — they escape the flame
+        size:    12 + frac * 14 + Math.random() * 10,
+        color:   `${r},${g},${b}`,
+        alpha:   1.0,
+        gravity: -20,
       });
     }
 
@@ -421,41 +448,39 @@ export class ParticleSystem {
   }
 
   /**
-   * Create a flame/ember trail behind a flamethrower projectile.
-   * @param position  World-space centre of the projectile.
-   * @param direction Travel angle in radians (Math.atan2 of velocity).
+   * Create a flame trail behind a flamethrower projectile.
+   * Uses the same reference-style radial-gradient approach as the cone.
    */
   createFlameTrail(position: Vec2, direction: number): void {
-    if (Math.random() > 0.55) return; // ~45% spawn chance each frame keeps it light
+    if (Math.random() > 0.60) return;
 
     const count = Math.max(1, Math.floor(3 * this.qualityMultipliers[this.quality]));
     const particles: Particle[] = [];
-    const fireColors = ['#FFFF99', '#FFC800', '#FF8C00', '#FF4500', '#CC2200'];
-
-    // Spawn slightly behind the projectile (opposite direction)
     const backX = -Math.cos(direction);
     const backY = -Math.sin(direction);
 
     for (let i = 0; i < count; i++) {
-      const spread     = (Math.random() - 0.5) * Math.PI * 0.45; // ±40° cone
-      const spawnAngle = direction + Math.PI + spread;            // backward + spread
-      const offsetDist = 2 + Math.random() * 7;
-
+      const spread     = (Math.random() - 0.5) * Math.PI * 0.5;
+      const spawnAngle = direction + Math.PI + spread;
+      const offsetDist = 2 + Math.random() * 8;
+      const r = Math.round(220 + Math.random() * 35);
+      const g = Math.round(80  + Math.random() * 120);
+      const b = Math.round(0   + Math.random() * 15);
       particles.push({
         position: position.add(Vec2.from(
-          backX * offsetDist + (Math.random() - 0.5) * 5,
-          backY * offsetDist + (Math.random() - 0.5) * 5
+          backX * offsetDist + (Math.random() - 0.5) * 6,
+          backY * offsetDist + (Math.random() - 0.5) * 6,
         )),
         velocity: Vec2.from(
-          Math.cos(spawnAngle) * (15 + Math.random() * 35),
-          Math.sin(spawnAngle) * (15 + Math.random() * 35)
+          Math.cos(spawnAngle) * (12 + Math.random() * 28),
+          Math.sin(spawnAngle) * (12 + Math.random() * 28) - 20,
         ),
         life:    0,
-        maxLife: 0.25 + Math.random() * 0.45,
-        size:    1.2 + Math.random() * 2.8,
-        color:   fireColors[Math.floor(Math.random() * fireColors.length)],
-        alpha:   0.75 + Math.random() * 0.25,
-        gravity: -25, // embers drift slightly upward
+        maxLife: 0.30 + Math.random() * 0.50,
+        size:    20 + Math.random() * 22,
+        color:   `${r},${g},${b}`,
+        alpha:   1.0,
+        gravity: -25,
       });
     }
 
@@ -486,22 +511,30 @@ export class ParticleSystem {
   // Private methods
   
   private updateEffect(effect: ParticleEffect, deltaTime: number): void {
-    // Update all particles in the effect
+    const isFire = effect.type === ParticleEffectType.FLAME_CONE_EMBERS
+                || effect.type === ParticleEffectType.FLAME_TRAIL;
+
     for (let i = effect.particles.length - 1; i >= 0; i--) {
       const particle = effect.particles[i];
-      
-      // Update particle life
       particle.life += deltaTime;
-      
-      // Remove expired particles (swap-and-pop to avoid O(N) array shift)
+
       if (particle.life >= particle.maxLife) {
         effect.particles[i] = effect.particles[effect.particles.length - 1];
         effect.particles.pop();
         continue;
       }
-      
-      // Update particle physics
-      this.updateParticle(particle, deltaTime);
+
+      if (isFire) {
+        // Reference-style update: flicker + simple physics (no size/alpha override)
+        particle.velocity = particle.velocity.add(Vec2.from(
+          (Math.random() - 0.5) * 14,
+          (Math.random() - 0.5) * 6,
+        ));
+        particle.position = particle.position.add(particle.velocity.mul(deltaTime));
+        particle.velocity = particle.velocity.add(Vec2.from(0, particle.gravity).mul(deltaTime));
+      } else {
+        this.updateParticle(particle, deltaTime);
+      }
     }
   }
   
@@ -523,32 +556,92 @@ export class ParticleSystem {
   }
   
   private renderEffect(effect: ParticleEffect, camera: Camera): void {
+    if (effect.type === ParticleEffectType.FLAME_CONE_EMBERS
+     || effect.type === ParticleEffectType.FLAME_TRAIL) {
+      this.renderFireEffect(effect, camera);
+      return;
+    }
+
     for (const particle of effect.particles) {
-      // Skip particles that are too faded or too small
       if (particle.alpha <= 0.1 || particle.size <= 0.5) continue;
-      
-      // Check if particle is visible
       if (!camera.isWorldPositionVisible(particle.position, 50)) continue;
-      
-      // Convert to screen coordinates
-      const screenPos = camera.worldToScreen(particle.position);
-      const cameraState = camera.getState();
-      const scaledSize = particle.size * cameraState.zoom;
-      
-      // Skip particles that are too small to see
+      const screenPos  = camera.worldToScreen(particle.position);
+      const scaledSize = particle.size * camera.getState().zoom;
       if (scaledSize < 1) continue;
-      
-      // Set particle style
       this.ctx.globalAlpha = particle.alpha;
-      this.ctx.fillStyle = particle.color;
-      
-      // Draw particle
+      this.ctx.fillStyle   = particle.color;
       this.ctx.beginPath();
       this.ctx.arc(screenPos.x, screenPos.y, scaledSize, 0, Math.PI * 2);
       this.ctx.fill();
     }
-    
-    // Reset global alpha
     this.ctx.globalAlpha = 1.0;
+  }
+
+  /**
+   * Render fire particles (FLAME_CONE_EMBERS / FLAME_TRAIL).
+   *
+   * Canvas 2D translation of shader-based fire concepts:
+   *   u_power      → power-curve opacity: Math.pow(1-lifeRatio, 0.7) — bright longer, sharp tail
+   *   u_shape_offset → per-particle elongation along velocity direction (ctx.scale(elongation, 1))
+   *   u_addition   → multi-stop gradient: hot yellow-orange core → birth colour body → dim edge
+   *
+   * Each blob is drawn in its own transformed context so it stretches as a "tongue of flame"
+   * along whichever direction it is currently travelling.
+   */
+  private renderFireEffect(effect: ParticleEffect, camera: Camera): void {
+    const ctx  = this.ctx;
+    const zoom = camera.getState().zoom;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+
+    for (const p of effect.particles) {
+      if (p.life >= p.maxLife) continue;
+      if (!camera.isWorldPositionVisible(p.position, p.size * 2)) continue;
+
+      const lifeRatio = p.life / p.maxLife;
+
+      // u_power analog: power curve keeps the blob bright through most of its life
+      // then drops off sharply. Cap at 0.72 so many overlapping blobs don't white-out.
+      const opacity = Math.min(0.38, Math.pow(1.0 - lifeRatio, 0.7));
+      if (opacity <= 0.02) continue;
+
+      const sp           = camera.worldToScreen(p.position);
+      const screenRadius = Math.max(2, p.size * zoom * (1.0 - lifeRatio * 0.85));
+
+      // u_shape_offset analog: elongate along the particle's current travel direction.
+      // More elongated when young (fast, directional), rounder as it slows and disperses.
+      const elongation = 1.4 + (1.0 - lifeRatio) * 0.5; // 1.4 → 1.9 when fresh
+
+      // Derive the angle from current velocity so the tongue tracks actual motion
+      const velAngle = Math.atan2(p.velocity.y, p.velocity.x);
+
+      // u_addition analog: multi-stop gradient gives each blob an internal hot core.
+      // Stop layout:  hot yellow-orange core → birth colour body → dim translucent edge → transparent
+      const col       = p.color; // "R,G,B" stored at spawn
+      const coreAlpha = (opacity * 0.95).toFixed(3);
+      const bodyAlpha = (opacity * 0.70).toFixed(3);
+      const edgeAlpha = (opacity * 0.20).toFixed(3);
+
+      ctx.save();
+      ctx.translate(sp.x, sp.y);
+      ctx.rotate(velAngle);
+      ctx.scale(elongation, 1.0); // stretch along travel axis
+
+      // Gradient is defined in the scaled/rotated space — rings become ellipses on screen
+      const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, screenRadius);
+      grd.addColorStop(0.00, `rgba(255,220,80,${coreAlpha})`);  // hot yellow-white core
+      grd.addColorStop(0.15, `rgba(${col},${bodyAlpha})`);      // birth colour body
+      grd.addColorStop(0.25, `rgba(${col},${edgeAlpha})`);      // dim trailing edge
+      grd.addColorStop(1.00, `rgba(${col},0)`);                 // transparent boundary
+
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.arc(0, 0, screenRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore(); // ← restores per-particle transform; composite stays source-over
+    }
+
+    ctx.restore(); // ← restores composite operation
   }
 }
