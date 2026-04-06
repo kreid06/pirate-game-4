@@ -391,7 +391,7 @@ export class ParticleSystem {
         velocity: Vec2.from(velX, velY),
         life:    0,
         maxLife: 0.18 + Math.random() * 0.32,
-        size:    50 - frac * 20 + Math.random() * 15, // bigger/brighter near barrel
+        size:    18 - frac * 6 + Math.random() * 8,   // small at spawn — grows in render
         color:   `${r},${g},${b}`,
         alpha:   brightness,
       });
@@ -595,18 +595,19 @@ export class ParticleSystem {
 
       const lifeRatio = p.life / p.maxLife;
 
-      // u_power analog: power curve keeps the blob bright through most of its life
-      // then drops off sharply. Cap at 0.72 so many overlapping blobs don't white-out.
-      // p.alpha stores barrel brightness (1.0=barrel, 0.65=tip) — preserved through fire particle lifetime
-      const opacity = Math.min(0.38 * p.alpha, Math.pow(1.0 - lifeRatio, 0.7) * p.alpha);
+      // Solid when born, fade out toward death (exponent < 1 = slow fade start, sharp tail).
+      // p.alpha = barrel brightness (1.0 near nozzle → 0.65 at tip).
+      const power   = Math.pow(1.0 - lifeRatio, 0.40) * p.alpha;
+      const opacity = p.alpha >= 0.95 ? power : Math.min(0.55 * p.alpha, power);
       if (opacity <= 0.02) continue;
 
       const sp           = camera.worldToScreen(p.position);
-      const screenRadius = Math.max(2, p.size * zoom * (1.0 - lifeRatio * 0.85));
+      // Grow from 15 % at birth to 100 % at peak (lifeRatio ≈ 0.4), hold there.
+      const growScale    = Math.min(1.0, 0.15 + lifeRatio * 2.2);
+      const screenRadius = Math.max(2, p.size * zoom * growScale);
 
-      // u_shape_offset analog: elongate along the particle's current travel direction.
-      // More elongated when young (fast, directional), rounder as it slows and disperses.
-      const elongation = 2.2 + (1.0 - lifeRatio) * 1.2; // 2.2 → 3.4 when fresh
+      // Rounder when fresh (tight bud), more elongated as it disperses.
+      const elongation = 1.3 + lifeRatio * 1.6; // 1.3 at birth → 2.9 at death
 
       // Derive the angle from current velocity so the tongue tracks actual motion
       const velAngle = Math.atan2(p.velocity.y, p.velocity.x);
@@ -614,9 +615,11 @@ export class ParticleSystem {
       // u_addition analog: multi-stop gradient gives each blob an internal hot core.
       // Stop layout:  hot yellow-orange core → birth colour body → dim translucent edge → transparent
       const col       = p.color; // "R,G,B" stored at spawn
-      const coreAlpha = (opacity * 0.95).toFixed(3);
-      const bodyAlpha = (opacity * 0.70).toFixed(3);
-      const edgeAlpha = (opacity * 0.20).toFixed(3);
+      const coreAlpha = (opacity * 0.98).toFixed(3);
+      const bodyAlpha = (opacity * 0.80).toFixed(3);
+      const edgeAlpha = (opacity * 0.22).toFixed(3);
+      // Core stop expands as particle grows — wide solid blob when fresh, diffuse ring when old
+      const coreStop  = (0.30 - lifeRatio * 0.22).toFixed(3); // 0.30 → 0.08
 
       ctx.save();
       ctx.translate(sp.x, sp.y);
@@ -625,10 +628,11 @@ export class ParticleSystem {
 
       // Gradient is defined in the scaled/rotated space — rings become ellipses on screen
       const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, screenRadius);
-      grd.addColorStop(0.00, `rgba(255,220,80,${coreAlpha})`);  // hot yellow-white core
-      grd.addColorStop(0.15, `rgba(${col},${bodyAlpha})`);      // birth colour body
-      grd.addColorStop(0.25, `rgba(${col},${edgeAlpha})`);      // dim trailing edge
-      grd.addColorStop(1.00, `rgba(${col},0)`);                 // transparent boundary
+      grd.addColorStop(0.00,            `rgba(255,230,100,${coreAlpha})`); // hot yellow core
+      grd.addColorStop(+coreStop,       `rgba(${col},${coreAlpha})`);      // solid birth colour
+      grd.addColorStop(+coreStop + 0.15,`rgba(${col},${bodyAlpha})`);      // body
+      grd.addColorStop(+coreStop + 0.28,`rgba(${col},${edgeAlpha})`);      // trailing edge
+      grd.addColorStop(1.00,            `rgba(${col},0)`);                 // transparent boundary
 
       ctx.fillStyle = grd;
       ctx.beginPath();
