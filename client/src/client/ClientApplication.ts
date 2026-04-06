@@ -619,11 +619,14 @@ export class ClientApplication {
             return;
           }
 
-          // Harvest mode: active slot = axe + not on a ship → chop nearest wood resource
+          // Harvest mode: active slot = axe + not on a ship + hovering a tree → chop
           if (activeItem === 'axe' && player && player.carrierId === 0) {
-            console.log(`🪓 [HARVEST] Sending harvest_resource`);
-            this.networkManager.sendHarvestResource();
-            return;
+            const tree = this.renderSystem.getHoveredTree();
+            if (tree) {
+              console.log(`🪓 [HARVEST] Sending harvest_resource`);
+              this.networkManager.sendHarvestResource();
+              return;
+            }
           }
 
           // Harvest fiber: hover a fiber plant → press E (no tool required)

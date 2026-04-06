@@ -114,6 +114,8 @@ export class RenderSystem {
   private placedStructures: PlacedStructure[] = [];
   /** Structure currently under the cursor (within hover range of the local player). */
   private _hoveredStructure: PlacedStructure | null = null;
+  /** Tree node currently under cursor (world coords) — updated each frame in drawIsland. */
+  private _hoveredTree: { wx: number; wy: number } | null = null;
   /** Fiber plant currently under cursor (world coords) — updated each frame in drawIsland. */
   private _hoveredFiberPlant: { wx: number; wy: number } | null = null;
   /** Rock node currently under cursor (world coords) — updated each frame in drawIsland. */
@@ -1190,6 +1192,16 @@ export class RenderSystem {
     return dx * dx + dy * dy <= range * range ? this._hoveredStructure : null;
   }
 
+  /** Return hovered tree world pos if player is in range and off-ship, else null. */
+  getHoveredTree(range: number = 110): { wx: number; wy: number } | null {
+    if (!this._hoveredTree) return null;
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return null;
+    const dx = this._hoveredTree.wx - player.position.x;
+    const dy = this._hoveredTree.wy - player.position.y;
+    return dx * dx + dy * dy <= range * range ? this._hoveredTree : null;
+  }
+
   /** Return hovered fiber plant world pos if player is in range and off-ship, else null. */
   getHoveredFiberPlant(range: number = 110): { wx: number; wy: number } | null {
     if (!this._hoveredFiberPlant) return null;
@@ -2018,6 +2030,7 @@ export class RenderSystem {
   private drawIsland(camera: Camera): void {
     const zoom = camera.getState().zoom;
     // Reset per-frame hovered resource nodes
+    this._hoveredTree       = null;
     this._hoveredFiberPlant = null;
     this._hoveredRock       = null;
     for (const isl of this.islands) {
@@ -2087,6 +2100,7 @@ export class RenderSystem {
             ? (() => { const dx = localPlayer.position.x - wx; const dy = localPlayer.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
             : false;
 
+          if (isHovered) this._hoveredTree = { wx, wy };
           this.drawIslandTree(sp.x, sp.y, zoom, isHovered, inRange);
           if (isHovered && axeEquipped) {
             this.drawHarvestPrompt(sp.x, sp.y, zoom, inRange);
