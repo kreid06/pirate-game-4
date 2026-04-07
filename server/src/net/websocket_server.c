@@ -4606,6 +4606,7 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     placed_structures[placed_structure_count].company_id = (uint8_t)player->company_id;
     placed_structures[placed_structure_count].max_hp     = 100;
     placed_structures[placed_structure_count].hp         = 100;
+    placed_structures[placed_structure_count].placer_id  = player->player_id;
     placed_structure_count++;
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
@@ -10179,6 +10180,26 @@ int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id) 
         if (players[i].active && players[i].player_id == player_id) {
             players[i].company_id = company_id;
             log_info("🏴 Admin set player %u company → %u", player_id, company_id);
+
+            /* One-way structure promotion: if the new company is non-neutral,
+             * upgrade every neutral structure this player placed to that company.
+             * Structures already claimed by a non-neutral company are never changed. */
+            if (company_id != COMPANY_NEUTRAL) {
+                for (uint32_t si = 0; si < placed_structure_count; si++) {
+                    if (!placed_structures[si].active) continue;
+                    if (placed_structures[si].placer_id != player_id) continue;
+                    if (placed_structures[si].company_id != COMPANY_NEUTRAL) continue;
+                    placed_structures[si].company_id = company_id;
+                    char upd[128];
+                    snprintf(upd, sizeof(upd),
+                             "{\"type\":\"structure_company_updated\","
+                             "\"structure_id\":%u,\"company_id\":%u}",
+                             placed_structures[si].id, (unsigned)company_id);
+                    websocket_server_broadcast(upd);
+                    log_info("🏴 Structure %u promoted to company %u (player %u joined)",
+                             placed_structures[si].id, company_id, player_id);
+                }
+            }
             return 0;
         }
     }

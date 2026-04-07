@@ -1280,6 +1280,9 @@ export class ClientApplication {
       this.networkManager.onStructureDemolished = (id) => {
         this.renderSystem.removePlacedStructure(id);
       };
+      this.networkManager.onStructureCompanyUpdated = (id, companyId) => {
+        this.renderSystem.updateStructureCompany(id, companyId);
+      };
       this.networkManager.onStructurePlaced = (s) => {
         this.renderSystem.addPlacedStructure(s);
       };

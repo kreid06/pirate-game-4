@@ -1125,6 +1125,12 @@ export class RenderSystem {
     this.placedStructures = this.placedStructures.filter(s => s.id !== id);
   }
 
+  /** Update a structure's company ownership (one-way promotion from server). */
+  updateStructureCompany(id: number, companyId: number): void {
+    const s = this.placedStructures.find(p => p.id === id);
+    if (s) s.companyId = companyId;
+  }
+
   /** Activate island placement ghost for wooden_floor or workbench, or clear it. */
   setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | null): void {
     this.islandBuildKind = kind;

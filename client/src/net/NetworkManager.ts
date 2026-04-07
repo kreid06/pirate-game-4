@@ -541,6 +541,8 @@ export class NetworkManager {
   public onStructurePlaced: ((s: PlacedStructure) => void) | null = null;
   /** Fired when the server confirms a structure has been demolished. */
   public onStructureDemolished: ((id: number) => void) | null = null;
+  /** Fired when a structure's company ownership is promoted (one-way, neutral → non-neutral). */
+  public onStructureCompanyUpdated: ((id: number, companyId: number) => void) | null = null;
   /** Fired when the server sends the full list of existing placed structures on join. */
   public onStructuresList: ((structures: PlacedStructure[]) => void) | null = null;
   /** Fired when the server confirms a workbench can be opened (E-key interact). */
@@ -2075,6 +2077,10 @@ export class NetworkManager {
 
       case 'structure_demolished':
         this.onStructureDemolished?.(message.structure_id ?? message.id ?? 0);
+        break;
+
+      case 'structure_company_updated':
+        this.onStructureCompanyUpdated?.(message.structure_id ?? 0, message.company_id ?? 0);
         break;
 
       case 'craft_result':
