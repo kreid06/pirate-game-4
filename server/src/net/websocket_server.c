@@ -4690,8 +4690,10 @@ static void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketC
                      "{\"type\":\"demolish_fail\",\"reason\":\"too_far\"}");
             goto ds_send;
         }
-        /* Mark inactive and compact the array */
-        placed_structures[i].active = false;
+        /* Save position/type before compacting — needed for cascade below */
+        PlacedStructureType demolished_type = placed_structures[i].type;
+        float fx = placed_structures[i].x;
+        float fy = placed_structures[i].y;
         /* Shift subsequent entries down to keep the array dense */
         for (uint32_t j = i; j + 1 < placed_structure_count; j++)
             placed_structures[j] = placed_structures[j + 1];
@@ -4702,6 +4704,29 @@ static void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketC
         snprintf(bcast, sizeof(bcast),
                  "{\"type\":\"structure_demolished\",\"structure_id\":%u}", sid);
         websocket_server_broadcast(bcast);
+        /* Cascade: if a floor was demolished, remove any workbenches sitting on it */
+        if (demolished_type == STRUCT_WOODEN_FLOOR) {
+            uint32_t j = 0;
+            while (j < placed_structure_count) {
+                if (placed_structures[j].type == STRUCT_WORKBENCH) {
+                    float wdx = placed_structures[j].x - fx;
+                    float wdy = placed_structures[j].y - fy;
+                    if (wdx*wdx + wdy*wdy <= STRUCT_FLOOR_REQ_R * STRUCT_FLOOR_REQ_R) {
+                        uint32_t wid = placed_structures[j].id;
+                        for (uint32_t k = j; k + 1 < placed_structure_count; k++)
+                            placed_structures[k] = placed_structures[k + 1];
+                        placed_structure_count--;
+                        log_info("🔨 Cascade-demolished workbench %u (floor %u removed)", wid, sid);
+                        char wbcast[128];
+                        snprintf(wbcast, sizeof(wbcast),
+                                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", wid);
+                        websocket_server_broadcast(wbcast);
+                        continue; /* don't increment — array shifted left */
+                    }
+                }
+                j++;
+            }
+        }
         return; /* already sent via broadcast */
     }
 
