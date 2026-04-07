@@ -251,7 +251,10 @@ typedef struct {
     uint32_t id;
     PlacedStructureType type;
     uint32_t island_id;
-    float    x, y;   /* world position */
+    float    x, y;      /* world position */
+    uint8_t  company_id; /* COMPANY_* — faction that built this */
+    uint16_t hp;         /* current hit points */
+    uint16_t max_hp;     /* maximum hit points */
 } PlacedStructure;
 
 #define MAX_PLACED_STRUCTURES 512

@@ -171,6 +171,14 @@ export class RenderSystem {
   }> = [];
 
   // ── Island data (server-driven via ISLANDS message; falls back to default) ──
+
+  /** Returns a CSS color for a structure's owning company (0=neutral grey, 1=pirate orange, 2=navy blue). */
+  private static structureCompanyColor(companyId: number): string {
+    if (companyId === 1) return 'rgba(255, 100, 50, 0.85)';  // Pirates
+    if (companyId === 2) return 'rgba(50, 130, 255, 0.85)';  // Navy
+    return 'rgba(160, 160, 160, 0.60)';                       // Neutral
+  }
+
   /** Preset visual parameters keyed by preset name. */
   private static readonly ISLAND_PRESETS: Record<string, {
     beachRadius: number; grassRadius: number;
@@ -2340,8 +2348,8 @@ export class RenderSystem {
       const half = 25; // half of 50px tile
       let floorHit: PlacedStructure | null = null;
       for (const s of this.placedStructures) {
-        const hw = half;
-        const hh = s.type === 'workbench' ? half * 0.5 : half;
+        const hw = s.type === 'workbench' ? 25 * 0.88 : half;
+        const hh = s.type === 'workbench' ? 25 * 0.62 : half;
         if (Math.abs(mx - s.x) <= hw && Math.abs(my - s.y) <= hh) {
           if (s.type === 'workbench') {
             // Workbench always wins — stop searching
@@ -2357,7 +2365,12 @@ export class RenderSystem {
       if (this._hoveredStructure === null) this._hoveredStructure = floorHit;
     }
 
-    for (const s of this.placedStructures) {
+    // Floors first, then everything else, so floors are always below other structures
+    const sorted = [...this.placedStructures].sort((a, b) =>
+      (a.type === 'wooden_floor' ? 0 : 1) - (b.type === 'wooden_floor' ? 0 : 1)
+    );
+
+    for (const s of sorted) {
       const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
       const sz  = Math.max(4, 50 * zoom);
       const isHovered = this._hoveredStructure?.id === s.id;
@@ -2381,37 +2394,99 @@ export class RenderSystem {
           ctx.lineTo(ssp.x + sz / 2, ssp.y - sz / 2 + li * third);
           ctx.stroke();
         }
+        // Company ownership strip along the top edge
+        const floorCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        const stripH = Math.max(2, 3 * zoom);
+        ctx.fillStyle = floorCompanyColor;
+        ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, stripH);
+        // HP bar along the bottom edge
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const hpBarH = Math.max(2, 3 * zoom);
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(ssp.x - sz / 2, ssp.y + sz / 2 - hpBarH, sz, hpBarH);
+        ctx.fillStyle = hpFrac > 0.5 ? '#66dd44' : hpFrac > 0.25 ? '#ffaa22' : '#ee3322';
+        ctx.fillRect(ssp.x - sz / 2, ssp.y + sz / 2 - hpBarH, sz * hpFrac, hpBarH);
         ctx.restore();
       } else if (s.type === 'workbench') {
-        // 1:2 rectangle — full floor width, half floor height (landscape)
-        const tw = sz;        // 50 px at default zoom
-        const th = sz * 0.5;  // 25 px at default zoom
+        // Top-down view: wide rectangular bench filling most of the floor tile
+        const bw = sz * 0.88;   // bench width
+        const bh = sz * 0.62;   // bench depth
+        const bx = ssp.x - bw / 2;
+        const by = ssp.y - bh / 2;
         ctx.save();
-        ctx.fillStyle   = isHovered ? '#8a5228' : '#7a4820';
-        ctx.strokeStyle = '#4a2810';
-        ctx.lineWidth   = Math.max(1, 2 * zoom);
-        // Table top (upper 40% of height)
-        const topH = th * 0.4;
+
+        // Outer frame (structural legs / frame seen from above)
+        const frameColor  = isHovered ? '#5a3010' : '#4a2408';
+        ctx.fillStyle   = frameColor;
+        ctx.strokeStyle = '#2a1204';
+        ctx.lineWidth   = Math.max(1, 1.5 * zoom);
         ctx.beginPath();
-        ctx.rect(ssp.x - tw / 2, ssp.y - th / 2, tw, topH);
+        ctx.rect(bx, by, bw, bh);
         ctx.fill();
         ctx.stroke();
-        // Legs (lower 60% of height)
-        const legW = Math.max(2, 4 * zoom);
-        const legH = th * 0.6;
-        ctx.fillStyle = isHovered ? '#6c3818' : '#5c3010';
-        ctx.strokeStyle = '#3a1e08';
-        ctx.lineWidth = Math.max(0.5, 1 * zoom);
-        for (const lx of [ssp.x - tw / 2, ssp.x + tw / 2 - legW]) {
-          ctx.fillRect(lx, ssp.y - th / 2 + topH, legW, legH);
-          ctx.strokeRect(lx, ssp.y - th / 2 + topH, legW, legH);
+
+        // Inner work surface (inset by frame thickness)
+        const ft = Math.max(2, 4 * zoom); // frame thickness
+        const sx2 = bx + ft, sy2 = by + ft;
+        const sw  = bw - ft * 2, sh = bh - ft * 2;
+        ctx.fillStyle = isHovered ? '#c07838' : '#a86428';
+        ctx.beginPath();
+        ctx.rect(sx2, sy2, sw, sh);
+        ctx.fill();
+
+        // Plank grain lines along the length
+        ctx.strokeStyle = 'rgba(60, 30, 8, 0.35)';
+        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+        const grainCount = 3;
+        for (let gi = 1; gi < grainCount; gi++) {
+          const gy = sy2 + sh * (gi / grainCount);
+          ctx.beginPath();
+          ctx.moveTo(sx2, gy);
+          ctx.lineTo(sx2 + sw, gy);
+          ctx.stroke();
         }
-        // ⚒ icon centred on the table top
-        ctx.font = `${Math.max(7, Math.round(11 * zoom))}px monospace`;
+
+        // Vise block on the right side
+        const vw = Math.max(2, 5 * zoom);
+        const vh = Math.max(2, sh * 0.45);
+        const vx = sx2 + sw - vw;
+        const vy = sy2 + (sh - vh) / 2;
+        ctx.fillStyle   = isHovered ? '#888' : '#6a6a6a';
+        ctx.strokeStyle = '#3a3a3a';
+        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+        ctx.beginPath();
+        ctx.rect(vx, vy, vw, vh);
+        ctx.fill();
+        ctx.stroke();
+
+        // Corner leg indicators (small dark squares at each corner)
+        const legSz = Math.max(2, 3.5 * zoom);
+        ctx.fillStyle = '#2a1204';
+        for (const [lx, ly] of [[bx, by], [bx + bw - legSz, by],
+                                 [bx, by + bh - legSz], [bx + bw - legSz, by + bh - legSz]]) {
+          ctx.fillRect(lx, ly, legSz, legSz);
+        }
+
+        // ⚒ icon centred on the work surface
+        ctx.font         = `${Math.max(7, Math.round(10 * zoom))}px monospace`;
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillStyle    = '#f0c070';
-        ctx.fillText('\u2692', ssp.x, ssp.y - th / 2 + topH / 2);
+        ctx.fillStyle    = 'rgba(255, 210, 100, 0.9)';
+        ctx.fillText('\u2692', ssp.x - vw / 2, ssp.y);
+
+        // Company ownership strip along the top edge
+        const wbCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        const wbStripH = Math.max(2, 3 * zoom);
+        ctx.fillStyle = wbCompanyColor;
+        ctx.fillRect(bx, by, bw, wbStripH);
+        // HP bar along the bottom edge
+        const wbHpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const wbHpBarH = Math.max(2, 3 * zoom);
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(bx, by + bh - wbHpBarH, bw, wbHpBarH);
+        ctx.fillStyle = wbHpFrac > 0.5 ? '#66dd44' : wbHpFrac > 0.25 ? '#ffaa22' : '#ee3322';
+        ctx.fillRect(bx, by + bh - wbHpBarH, bw * wbHpFrac, wbHpBarH);
+
         ctx.restore();
       }
     }
@@ -2428,14 +2503,14 @@ export class RenderSystem {
       if (s.type === 'wooden_floor') {
         ctx.strokeRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
       } else if (s.type === 'workbench') {
-        const th  = sz * 0.5;
-        const topH = th * 0.4;
-        ctx.strokeRect(ssp.x - sz / 2, ssp.y - th / 2, sz, topH);
+        const bw = sz * 0.88;
+        const bh = sz * 0.62;
+        ctx.strokeRect(ssp.x - bw / 2, ssp.y - bh / 2, bw, bh);
       }
       ctx.restore();
 
       // ── Tooltip ────────────────────────────────────────────────────────
-      const structH = s.type === 'workbench' ? sz * 0.5 : sz;
+      const structH = s.type === 'workbench' ? sz * 0.62 : sz;
       const tipY = ssp.y - structH / 2 - 8;
 
       const inRange = player && player.carrierId === 0 && (() => {
@@ -2590,9 +2665,10 @@ export class RenderSystem {
     ctx.strokeStyle = borderColor;
     ctx.lineWidth   = Math.max(1, 2 * zoom);
     ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
-    const ghostH = this.islandBuildKind === 'workbench' ? sz * 0.5 : sz;
+    const ghostW = this.islandBuildKind === 'workbench' ? sz * 0.88 : sz;
+    const ghostH = this.islandBuildKind === 'workbench' ? sz * 0.62 : sz;
     ctx.beginPath();
-    ctx.rect(msp.x - sz / 2, msp.y - ghostH / 2, sz, ghostH);
+    ctx.rect(msp.x - ghostW / 2, msp.y - ghostH / 2, ghostW, ghostH);
     ctx.fill();
     ctx.stroke();
     ctx.setLineDash([]);

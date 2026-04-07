@@ -2045,11 +2045,14 @@ export class NetworkManager {
 
       case 'STRUCTURES': {
         const structs: PlacedStructure[] = (message.structures ?? []).map((s: any): PlacedStructure => ({
-          id:       s.id       ?? 0,
-          type:     s.structure_type === 'workbench' ? 'workbench' : 'wooden_floor',
-          islandId: s.island_id ?? 0,
-          x:        s.x ?? 0,
-          y:        s.y ?? 0,
+          id:        s.id       ?? 0,
+          type:      s.structure_type === 'workbench' ? 'workbench' : 'wooden_floor',
+          islandId:  s.island_id ?? 0,
+          x:         s.x ?? 0,
+          y:         s.y ?? 0,
+          companyId: s.company_id ?? 0,
+          hp:        s.hp     ?? 100,
+          maxHp:     s.max_hp ?? 100,
         }));
         this.onStructuresList?.(structs);
         break;
@@ -2057,11 +2060,14 @@ export class NetworkManager {
 
       case 'structure_placed': {
         const sp: PlacedStructure = {
-          id:       message.id       ?? 0,
-          type:     message.structure_type === 'workbench' ? 'workbench' : 'wooden_floor',
-          islandId: message.island_id ?? 0,
-          x:        message.x ?? 0,
-          y:        message.y ?? 0,
+          id:        message.id       ?? 0,
+          type:      message.structure_type === 'workbench' ? 'workbench' : 'wooden_floor',
+          islandId:  message.island_id ?? 0,
+          x:         message.x ?? 0,
+          y:         message.y ?? 0,
+          companyId: message.company_id ?? 0,
+          hp:        message.hp     ?? 100,
+          maxHp:     message.max_hp ?? 100,
         };
         this.onStructurePlaced?.(sp);
         break;

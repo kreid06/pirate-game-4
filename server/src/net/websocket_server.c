@@ -4597,12 +4597,15 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
 
     /* Add structure */
     uint32_t new_id = next_structure_id++;
-    placed_structures[placed_structure_count].active    = true;
-    placed_structures[placed_structure_count].id        = new_id;
-    placed_structures[placed_structure_count].type      = stype_enum;
-    placed_structures[placed_structure_count].island_id = target_island_id;
-    placed_structures[placed_structure_count].x         = px;
-    placed_structures[placed_structure_count].y         = py;
+    placed_structures[placed_structure_count].active     = true;
+    placed_structures[placed_structure_count].id         = new_id;
+    placed_structures[placed_structure_count].type       = stype_enum;
+    placed_structures[placed_structure_count].island_id  = target_island_id;
+    placed_structures[placed_structure_count].x          = px;
+    placed_structures[placed_structure_count].y          = py;
+    placed_structures[placed_structure_count].company_id = (uint8_t)player->company_id;
+    placed_structures[placed_structure_count].max_hp     = 100;
+    placed_structures[placed_structure_count].hp         = 100;
     placed_structure_count++;
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
@@ -4612,8 +4615,10 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     char bcast[256];
     snprintf(bcast, sizeof(bcast),
              "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
-             "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f}",
-             new_id, stype, target_island_id, px, py);
+             "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
+             "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u}",
+             new_id, stype, target_island_id, px, py,
+             (unsigned)player->company_id, 100u, 100u);
     websocket_server_broadcast(bcast);
     return; /* already sent via broadcast */
 
@@ -6876,11 +6881,15 @@ int websocket_server_update(struct Sim* sim) {
                                                                    ? "wooden_floor" : "workbench";
                                             hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
                                                               "%s{\"id\":%u,\"structure_type\":\"%s\","
-                                                              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                                              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                                                              "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u}",
                                                               hs_sfirst ? "" : ",",
                                                               placed_structures[si].id, hs_stype,
                                                               placed_structures[si].island_id,
-                                                              placed_structures[si].x, placed_structures[si].y);
+                                                              placed_structures[si].x, placed_structures[si].y,
+                                                              (unsigned)placed_structures[si].company_id,
+                                                              (unsigned)placed_structures[si].hp,
+                                                              (unsigned)placed_structures[si].max_hp);
                                             hs_sfirst = false;
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp, "]}");
@@ -9356,13 +9365,17 @@ int websocket_server_update(struct Sim* sim) {
                                                                  ? "wooden_floor" : "workbench";
                                         spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
-                                                         "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                                         "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                                                         "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u}",
                                                          sfirst ? "" : ",",
                                                          placed_structures[si].id,
                                                          stype_str,
                                                          placed_structures[si].island_id,
                                                          placed_structures[si].x,
-                                                         placed_structures[si].y);
+                                                         placed_structures[si].y,
+                                                         (unsigned)placed_structures[si].company_id,
+                                                         (unsigned)placed_structures[si].hp,
+                                                         (unsigned)placed_structures[si].max_hp);
                                         sfirst = false;
                                     }
                                     spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos, "]}");
@@ -9389,11 +9402,15 @@ int websocket_server_update(struct Sim* sim) {
                                                           ? "wooden_floor" : "workbench";
                                     gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
                                                    "%s{\"id\":%u,\"structure_type\":\"%s\","
-                                                   "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                                   "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                                                   "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u}",
                                                    gfirst ? "" : ",",
                                                    placed_structures[si].id, gs_type,
                                                    placed_structures[si].island_id,
-                                                   placed_structures[si].x, placed_structures[si].y);
+                                                   placed_structures[si].x, placed_structures[si].y,
+                                                   (unsigned)placed_structures[si].company_id,
+                                                   (unsigned)placed_structures[si].hp,
+                                                   (unsigned)placed_structures[si].max_hp);
                                     gfirst = false;
                                 }
                                 gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp, "]}");
