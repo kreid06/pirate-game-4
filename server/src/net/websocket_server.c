@@ -6542,9 +6542,108 @@ void websocket_server_cleanup(void) {
     log_info("✅ WebSocket server cleanup complete");
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * Cannonball vs. static-world collision: placed structures and island trees.
+ * Called once per tick before processing network I/O. Projectile positions
+ * are in Q16 server units (1/10 of client pixels); convert with SERVER_TO_CLIENT.
+ * Damage per cannonball hit on a structure: 25 HP (4 shots to destroy).
+ * Trees are indestructible — they simply stop the cannonball.
+ * ────────────────────────────────────────────────────────────────────────────*/
+#define PROJ_HIT_STRUCT_DAMAGE      25u     /* HP deducted per cannonball hit      */
+#define TREE_COLLISION_R_PX         22.0f   /* tree stop radius, client pixels     */
+#define STRUCT_FLOOR_HALF_EXT       25.0f   /* floor tile half-extent (50px tile)  */
+#define STRUCT_WB_HALF_W            22.0f   /* workbench half-width  (44px wide)   */
+#define STRUCT_WB_HALF_H            15.5f   /* workbench half-height (31px tall)   */
+#define STRUCT_WB_BROAD_R           26.5f   /* broad-phase radius (AABB diagonal)  */
+
+static void check_projectile_static_collisions(struct Sim* sim) {
+    if (!sim) return;
+    int i = 0;
+    while (i < (int)sim->projectile_count) {
+        struct Projectile* proj = &sim->projectiles[i];
+        /* Convert projectile world position from server units → client pixels */
+        float px = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
+        float py = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
+        bool removed = false;
+
+        /* ── Test vs. placed structures ──────────────────────────────────── */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active) continue;
+            float dx = px - s->x;
+            float dy = py - s->y;
+            bool hit;
+            if (s->type == STRUCT_WORKBENCH) {
+                /* Broad-phase radial cull, then narrow AABB (44×31px footprint) */
+                if (dx * dx + dy * dy > STRUCT_WB_BROAD_R * STRUCT_WB_BROAD_R) continue;
+                hit = (dx >= -STRUCT_WB_HALF_W && dx <= STRUCT_WB_HALF_W &&
+                       dy >= -STRUCT_WB_HALF_H && dy <= STRUCT_WB_HALF_H);
+            } else {
+                /* Wooden floor: AABB check (square 50×50 tile, ±25px) */
+                hit = (dx >= -STRUCT_FLOOR_HALF_EXT && dx <= STRUCT_FLOOR_HALF_EXT &&
+                       dy >= -STRUCT_FLOOR_HALF_EXT && dy <= STRUCT_FLOOR_HALF_EXT);
+            }
+            if (hit) {
+                /* Apply damage */
+                uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
+                s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
+
+                char msg[160];
+                if (s->hp == 0) {
+                    s->active = false;
+                    snprintf(msg, sizeof(msg),
+                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}",
+                             s->id);
+                } else {
+                    snprintf(msg, sizeof(msg),
+                             "{\"type\":\"structure_hp_changed\","
+                             "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u}",
+                             s->id, (unsigned)s->hp, (unsigned)s->max_hp);
+                }
+                websocket_server_broadcast(msg);
+
+                /* Splice projectile out of the array */
+                memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                        ((size_t)sim->projectile_count - (size_t)i - 1u)
+                        * sizeof(struct Projectile));
+                sim->projectile_count--;
+                removed = true;
+            }
+        }
+
+        /* ── Test vs. island trees ───────────────────────────────────────── */
+        if (!removed) {
+            for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {
+                const IslandDef* isl = &ISLAND_PRESETS[ii];
+                for (int ri = 0; ri < isl->resource_count && !removed; ri++) {
+                    const IslandResource* res = &isl->resources[ri];
+                    if (strcmp(res->type, ISLAND_RES_WOOD) != 0) continue;
+                    float tx = isl->x + res->ox;
+                    float ty = isl->y + res->oy;
+                    float dx = px - tx;
+                    float dy = py - ty;
+                    if (dx * dx + dy * dy <= TREE_COLLISION_R_PX * TREE_COLLISION_R_PX) {
+                        /* Trees are indestructible — just stop the cannonball */
+                        memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                                ((size_t)sim->projectile_count - (size_t)i - 1u)
+                                * sizeof(struct Projectile));
+                        sim->projectile_count--;
+                        removed = true;
+                    }
+                }
+            }
+        }
+
+        if (!removed) i++;
+    }
+}
+
 int websocket_server_update(struct Sim* sim) {
     if (!ws_server.running) return 0;
-    
+
+    /* Check cannonball hits against structures and trees from last sim tick */
+    check_projectile_static_collisions(sim);
+
     // Accept new connections
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);

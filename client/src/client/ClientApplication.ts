@@ -1283,6 +1283,9 @@ export class ClientApplication {
       this.networkManager.onStructureCompanyUpdated = (id, companyId) => {
         this.renderSystem.updateStructureCompany(id, companyId);
       };
+      this.networkManager.onStructureHpChanged = (id, hp, maxHp) => {
+        this.renderSystem.updateStructureHp(id, hp, maxHp);
+      };
       this.networkManager.onStructurePlaced = (s) => {
         this.renderSystem.addPlacedStructure(s);
       };

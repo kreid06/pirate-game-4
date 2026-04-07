@@ -1131,6 +1131,11 @@ export class RenderSystem {
     if (s) s.companyId = companyId;
   }
 
+  updateStructureHp(id: number, hp: number, maxHp: number): void {
+    const s = this.placedStructures.find(p => p.id === id);
+    if (s) { s.hp = hp; s.maxHp = maxHp; }
+  }
+
   /** Activate island placement ghost for wooden_floor or workbench, or clear it. */
   setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | null): void {
     this.islandBuildKind = kind;
