@@ -2123,6 +2123,8 @@ export class RenderSystem {
           this.drawIslandTree(sp.x, sp.y, zoom, isHovered, inRange);
           if (isHovered && axeEquipped) {
             this.drawHarvestPrompt(sp.x, sp.y, zoom, inRange);
+          } else if (isHovered) {
+            this.drawGatherPrompt(sp.x, sp.y, zoom, false, '(need axe)');
           }
         } else if (res.type === 'fiber') {
           let isHovered = false;
