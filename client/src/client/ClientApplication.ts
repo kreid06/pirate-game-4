@@ -2669,6 +2669,15 @@ export class ClientApplication {
           if (meE.carrierId === 0) {
             const struct = this.renderSystem.getHoveredStructure();
             if (struct) {
+              const myCompanyE = meE.companyId ?? 0;
+              const isOwnCompany = struct.companyId === myCompanyE;
+
+              // Can't interact at all with another company's floor (no use, no demolish)
+              if (!isOwnCompany && struct.type === 'wooden_floor') {
+                this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+                break;
+              }
+
               this._interactKind = 'structure';
               this._hoveredStructureId = struct.id;
               this._hoveredStructureType = struct.type;
@@ -2676,18 +2685,17 @@ export class ClientApplication {
               const mp = this.inputManager.getMouseScreenPosition();
               this.renderSystem.startLadderHoldRing(mp);
               if (struct.type === 'workbench') {
-                // Tap E = open workbench; hold E = radial with both options
+                // Tap E = open workbench; hold E = radial with options based on ownership
                 this._ladderHoldTimer = setTimeout(() => {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  this._radialMenu.open(mp2.x, mp2.y, [
-                    { id: 'use',      label: 'Open Workbench' },
-                    { id: 'demolish', label: 'Demolish' },
-                  ]);
+                  const opts: { id: string; label: string }[] = [{ id: 'use', label: 'Open Workbench' }];
+                  if (isOwnCompany) opts.push({ id: 'demolish', label: 'Demolish' });
+                  this._radialMenu.open(mp2.x, mp2.y, opts);
                 }, 400);
               } else {
-                // Floor: hold E = radial with only Demolish
+                // Floor: hold E = radial with only Demolish (only reachable if isOwnCompany)
                 this._ladderHoldTimer = setTimeout(() => {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();

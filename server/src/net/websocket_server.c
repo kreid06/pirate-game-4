@@ -4561,9 +4561,11 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         }
     }
 
-    /* Workbench: centre point must fall inside the AABB of a wooden_floor tile (50x50 px) */
+    /* Workbench: centre point must fall inside the AABB of a wooden_floor tile (50x50 px)
+       AND that floor tile must belong to the same company as the placing player. */
     if (stype_enum == STRUCT_WORKBENCH) {
-        bool has_floor = false;
+        bool has_floor     = false;
+        bool wrong_company = false;
         const float HALF_TILE = 25.0f;
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             if (!placed_structures[si].active) continue;
@@ -4571,12 +4573,17 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
             float dx = fabsf(placed_structures[si].x - px);
             float dy = fabsf(placed_structures[si].y - py);
             if (dx <= HALF_TILE && dy <= HALF_TILE) {
-                has_floor = true; break;
+                if (placed_structures[si].company_id != (uint8_t)player->company_id)
+                    wrong_company = true;
+                else
+                    has_floor = true;
+                break;
             }
         }
         if (!has_floor) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor\"}");
+            snprintf(response, sizeof(response), wrong_company
+                     ? "{\"type\":\"place_structure_fail\",\"reason\":\"wrong_company\"}"
+                     : "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor\"}");
             goto ps_send;
         }
     }
@@ -4699,6 +4706,12 @@ static void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketC
         if (dx*dx + dy*dy > STRUCT_INTERACT_R * STRUCT_INTERACT_R) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"demolish_fail\",\"reason\":\"too_far\"}");
+            goto ds_send;
+        }
+        /* Only the owner's company may demolish their own structures */
+        if (placed_structures[i].company_id != (uint8_t)player->company_id) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"demolish_fail\",\"reason\":\"wrong_company\"}");
             goto ds_send;
         }
         /* Save position/type before compacting — needed for cascade below */
