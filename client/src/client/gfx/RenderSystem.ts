@@ -2701,10 +2701,10 @@ export class RenderSystem {
       });
     }
 
-    // Enemy territory: any structure belonging to a different non-zero company within 500 world px
+    // Enemy territory: any structure not belonging to the current company within 500 world px
     const myCompany = (this._localCompanyId ?? 0) as number;
     const enemyTerritory = this.placedStructures.some(s =>
-      s.companyId !== 0 && s.companyId !== myCompany &&
+      s.companyId !== myCompany &&
       (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) < 500 * 500
     );
 

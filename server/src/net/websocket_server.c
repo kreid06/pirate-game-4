@@ -4525,7 +4525,6 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         bool enemy_block = false;
         for (uint32_t si = 0; si < placed_structure_count && !enemy_block; si++) {
             if (!placed_structures[si].active) continue;
-            if (placed_structures[si].company_id == 0) continue; /* neutral — skip */
             if (placed_structures[si].company_id == (uint8_t)player->company_id) continue; /* own */
             float dx = placed_structures[si].x - px;
             float dy = placed_structures[si].y - py;
