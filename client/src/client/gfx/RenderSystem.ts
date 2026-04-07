@@ -2981,21 +2981,28 @@ export class RenderSystem {
           return dx * dx + dy * dy < 500 * 500; // covers full brigantine hull (~435px radius) + margin
         });
 
-        // Check if it disappeared near a structure (AABB for floors, radial for workbenches)
+        // Check if it disappeared near a structure.
+        // Pass 1: workbenches (server checks these first — they sit on top of floors)
+        // Pass 2: floors (only if no workbench matched)
         // Guard: skip if last position is at origin (never properly updated)
         if (last.x === 0 && last.y === 0) {
           this.cannonballLastPos.delete(id);
           continue;
         }
 
-        const hitStructure = this.placedStructures.find(s => {
-          const dx = last.x - s.x;
-          const dy = last.y - s.y;
-          if (s.type === 'workbench') {
+        const hitStructure =
+          this.placedStructures.find(s => {
+            if (s.type !== 'workbench') return false;
+            const dx = last.x - s.x;
+            const dy = last.y - s.y;
             return dx * dx + dy * dy <= 26.5 * 26.5; // broad-phase radius (matches server)
-          }
-          return Math.abs(dx) <= 25 && Math.abs(dy) <= 25; // AABB ±25px
-        });
+          }) ||
+          this.placedStructures.find(s => {
+            if (s.type !== 'wooden_floor') return false;
+            const dx = last.x - s.x;
+            const dy = last.y - s.y;
+            return Math.abs(dx) <= 25 && Math.abs(dy) <= 25; // AABB ±25px
+          });
 
         // Check near an island tree
         const hitTree = !hitStructure && this.islands.some(isl =>
