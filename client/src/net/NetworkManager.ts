@@ -553,6 +553,8 @@ export class NetworkManager {
   public onCraftingOpen: ((structureId: number, structureType: string) => void) | null = null;
   /** Fired when the server responds to a craft_item request. */
   public onCraftResult: ((success: boolean, recipeId: string, reason?: string) => void) | null = null;
+  /** Fired when a door is toggled open or closed by any player. */
+  public onDoorToggled: ((id: number, open: boolean) => void) | null = null;
 
   /** Fired each server tick with the current state of an active flamethrower wave. */
   public onFlameWaveUpdate: ((
@@ -1170,7 +1172,7 @@ export class NetworkManager {
    * The server validates that the player is on an island, has the item, and for
    * workbench that a floor tile is close enough.
    */
-  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall', x: number, y: number): void {
+  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door', x: number, y: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y });
   }
@@ -2052,7 +2054,11 @@ export class NetworkManager {
       case 'STRUCTURES': {
         const structs: PlacedStructure[] = (message.structures ?? []).map((s: any): PlacedStructure => ({
           id:        s.id       ?? 0,
-          type:      s.structure_type === 'workbench' ? 'workbench' : 'wooden_floor',
+          type:      s.structure_type === 'workbench'  ? 'workbench'
+                   : s.structure_type === 'wall'       ? 'wall'
+                   : s.structure_type === 'door_frame' ? 'door_frame'
+                   : s.structure_type === 'door'       ? 'door'
+                   : 'wooden_floor',
           islandId:  s.island_id ?? 0,
           x:         s.x ?? 0,
           y:         s.y ?? 0,
@@ -2060,6 +2066,7 @@ export class NetworkManager {
           hp:        s.hp     ?? 100,
           maxHp:     s.max_hp ?? 100,
           placerName: s.placer_name ?? '',
+          doorOpen:  s.open ?? false,
         }));
         this.onStructuresList?.(structs);
         break;
@@ -2068,8 +2075,10 @@ export class NetworkManager {
       case 'structure_placed': {
         const sp: PlacedStructure = {
           id:        message.id       ?? 0,
-          type:      message.structure_type === 'workbench' ? 'workbench'
-                   : message.structure_type === 'wall'      ? 'wall'
+          type:      message.structure_type === 'workbench'  ? 'workbench'
+                   : message.structure_type === 'wall'       ? 'wall'
+                   : message.structure_type === 'door_frame' ? 'door_frame'
+                   : message.structure_type === 'door'       ? 'door'
                    : 'wooden_floor',
           islandId:  message.island_id ?? 0,
           x:         message.x ?? 0,
@@ -2078,10 +2087,15 @@ export class NetworkManager {
           hp:        message.hp     ?? 100,
           maxHp:     message.max_hp ?? 100,
           placerName: message.placer_name ?? '',
+          doorOpen:  message.open ?? false,
         };
         this.onStructurePlaced?.(sp);
         break;
       }
+
+      case 'door_toggled':
+        this.onDoorToggled?.(message.id ?? 0, message.open === true);
+        break;
 
       case 'structure_demolished':
         this.onStructureDemolished?.(

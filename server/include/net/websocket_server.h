@@ -235,6 +235,8 @@ typedef enum {
     ITEM_WOODEN_FLOOR  = 16,
     ITEM_WORKBENCH     = 17,
     ITEM_WALL          = 18,
+    ITEM_DOOR_FRAME    = 19,
+    ITEM_DOOR          = 20,
     ITEM_WOOD          = 22,
     ITEM_FIBER         = 23,
     ITEM_METAL         = 24,
@@ -246,6 +248,8 @@ typedef enum {
     STRUCT_WOODEN_FLOOR = 0,
     STRUCT_WORKBENCH    = 1,
     STRUCT_WALL         = 2,
+    STRUCT_DOOR_FRAME   = 3,  /* posts with open centre, always passable */
+    STRUCT_DOOR         = 4,  /* panel that snaps onto a door frame */
 } PlacedStructureType;
 
 typedef struct {
@@ -259,6 +263,7 @@ typedef struct {
     uint16_t max_hp;         /* maximum hit points */
     uint32_t placer_id;      /* player_id who built this — used for company promotion */
     char     placer_name[64]; /* display name of the player who built this */
+    bool     open;           /* doors only: true = open (passable) */
 } PlacedStructure;
 
 #define MAX_PLACED_STRUCTURES 512

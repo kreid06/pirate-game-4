@@ -103,6 +103,28 @@ const RECIPES: Recipe[] = [
       { label: 'Wood', count: 6 },
     ],
   },
+  {
+    id: 'craft_door_frame',
+    outputName: 'Door Frame',
+    outputCount: 1,
+    symbol: 'Fr',
+    color: '#7a4820',
+    borderColor: '#3e200c',
+    ingredients: [
+      { label: 'Wood', count: 4 },
+    ],
+  },
+  {
+    id: 'craft_door',
+    outputName: 'Door',
+    outputCount: 1,
+    symbol: '□',
+    color: '#7a4820',
+    borderColor: '#3e200c',
+    ingredients: [
+      { label: 'Wood', count: 4 },
+    ],
+  },
 ];
 
 // ── Layout ─────────────────────────────────────────────────────────────────

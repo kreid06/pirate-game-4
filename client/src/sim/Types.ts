@@ -118,7 +118,7 @@ export interface Cannonball {
  */
 export interface PlacedStructure {
   id: number;
-  type: 'wooden_floor' | 'workbench' | 'wall';
+  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door';
   islandId: number;
   x: number;
   y: number;
@@ -126,6 +126,7 @@ export interface PlacedStructure {
   hp: number;          // current hit points
   maxHp: number;       // maximum hit points
   placerName: string;  // display name of the player who built this
+  doorOpen?: boolean;  // doors only: true = open (passable)
 }
 
 // Company identifiers (mirror server COMPANY_* constants)

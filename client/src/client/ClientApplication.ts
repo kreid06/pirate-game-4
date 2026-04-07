@@ -132,8 +132,8 @@ export class ClientApplication {
   private _interactKind: 'ladder' | 'mount' | 'npc' | 'structure' | null = null;
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
-  /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall'). */
-  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | null = null;
+  /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
@@ -859,12 +859,14 @@ export class ClientApplication {
           const pid = this.networkManager.getAssignedPlayerId();
           const p   = ws?.players.find(pl => pl.id === pid);
           const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
-          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall') {
+          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door') {
             // Compute snap at click time (not from stale render state)
             const pos = kind === 'wooden_floor'
               ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
-              : kind === 'wall'
+              : (kind === 'wall' || kind === 'door_frame')
               ? this.renderSystem.computeSnappedWallPos(worldPos.x, worldPos.y)
+              : kind === 'door'
+              ? this.renderSystem.computeSnappedDoorPos(worldPos.x, worldPos.y)
               : { x: worldPos.x, y: worldPos.y };
             this.networkManager.sendPlaceStructure(kind, pos.x, pos.y);
           }
@@ -1300,6 +1302,9 @@ export class ClientApplication {
       };
       this.networkManager.onStructurePlaced = (s) => {
         this.renderSystem.addPlacedStructure(s);
+      };
+      this.networkManager.onDoorToggled = (id, open) => {
+        this.renderSystem.updateStructureDoorOpen(id, open);
       };
       this.networkManager.onCraftingOpen = (structureId, _structureType) => {
         this.craftingMenu.open(structureId);
@@ -2010,10 +2015,10 @@ export class ClientApplication {
     const inDeckBuildMode   = activeItem === 'deck';
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
-    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall');
+    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door');
     this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
     this.renderSystem.setIslandBuildItem(
-      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall') : null
+      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door') : null
     );
 
     // Track whether the active item changed while in explicit build mode
@@ -2706,6 +2711,28 @@ export class ClientApplication {
                     { id: 'demolish', label: 'Demolish Wall' },
                   ]);
                 }, 600);
+              } else if (struct.type === 'door_frame') {
+                // Door Frame: hold E = radial with Demolish (removing the frame also removes the panel)
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  this._radialMenu.open(mp2.x, mp2.y, [
+                    { id: 'demolish', label: 'Demolish Door Frame' },
+                  ]);
+                }, 600);
+              } else if (struct.type === 'door') {
+                // Door: tap E = toggle open/closed; hold E = radial with Demolish
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  const doorOpts: { id: string; label: string }[] = [
+                    { id: 'use', label: struct.doorOpen ? 'Close Door' : 'Open Door' },
+                  ];
+                  if (isOwnCompany) doorOpts.push({ id: 'demolish', label: 'Demolish' });
+                  this._radialMenu.open(mp2.x, mp2.y, doorOpts);
+                }, 400);
               } else {
                 // Floor: hold E = radial with only Demolish (only reachable if isOwnCompany)
                 this._ladderHoldTimer = setTimeout(() => {
@@ -2930,8 +2957,11 @@ export class ClientApplication {
           if (structType === 'workbench') {
             // Tap E on workbench = primary action: open
             doUse();
+          } else if (structType === 'door') {
+            // Tap E on door panel = toggle open/closed
+            doUse();
           }
-          // Tap E on floor = nothing (user must hold to demolish)
+          // Tap E on floor/wall/door_frame = nothing (user must hold to demolish)
         } else if (this._radialMenu.isOpen) {
           const selected = this._radialMenu.getHoveredId();
           this._radialMenu.close();

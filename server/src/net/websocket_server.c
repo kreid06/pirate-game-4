@@ -337,6 +337,25 @@ static float module_collision_radius(ModuleTypeId type) {
 }
 
 /**
+ * Determine if a placed wall/door is horizontal (N/S edge, runs along X axis)
+ * by scanning for a floor tile whose north or south edge midpoint matches (wx,wy).
+ * Returns false (vertical) if no horizontal floor edge is found.
+ */
+static bool wall_is_horizontal(float wx, float wy) {
+    const float TOL = 4.0f;
+    for (uint32_t fi = 0; fi < placed_structure_count; fi++) {
+        if (!placed_structures[fi].active) continue;
+        if (placed_structures[fi].type != STRUCT_WOODEN_FLOOR) continue;
+        float fx = placed_structures[fi].x;
+        float fy = placed_structures[fi].y;
+        if (fabsf(wx - fx) < TOL &&
+            (fabsf(wy - (fy - 25.0f)) < TOL || fabsf(wy - (fy + 25.0f)) < TOL))
+            return true;
+    }
+    return false; /* assume vertical */
+}
+
+/**
  * Resolve player-vs-module collisions in ship-local space.
  * Pushes (new_local_x, new_local_y) out of any module it overlaps.
  * Skips the module the player is currently mounted to.
@@ -4492,6 +4511,12 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     } else if (strcmp(stype, "wall") == 0) {
         stype_enum    = STRUCT_WALL;
         required_item = ITEM_WALL;
+    } else if (strcmp(stype, "door_frame") == 0) {
+        stype_enum    = STRUCT_DOOR_FRAME;
+        required_item = ITEM_DOOR_FRAME;
+    } else if (strcmp(stype, "door") == 0) {
+        stype_enum    = STRUCT_DOOR;
+        required_item = ITEM_DOOR;
     } else {
         snprintf(response, sizeof(response),
                  "{\"type\":\"place_structure_fail\",\"reason\":\"unknown_type\"}");
@@ -4608,18 +4633,20 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         }
     }
 
-    /* Wall: must snap to an edge midpoint of an existing same-company floor tile.
+    /* Wall / Door: must snap to an edge midpoint of an existing same-company floor tile.
        Edge midpoints are at (fx, fy±25) and (fx±25, fy) for floor at (fx, fy). */
-    if (stype_enum == STRUCT_WALL) {
+    if (stype_enum == STRUCT_WALL || stype_enum == STRUCT_DOOR_FRAME) {
         const float EDGE_TOL  = 3.0f;
         const float HALF_TILE = 25.0f;
         bool has_edge     = false;
         bool wrong_company = false;
         bool wall_occupied = false;
-        /* First: overlap check — no two walls at same position */
+        bool wall_horiz   = false;  /* set during edge validation */
+        /* First: overlap check — no two walls/doors at same position */
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             if (!placed_structures[si].active) continue;
-            if (placed_structures[si].type != STRUCT_WALL) continue;
+            if (placed_structures[si].type != STRUCT_WALL &&
+                placed_structures[si].type != STRUCT_DOOR_FRAME) continue;
             if (fabsf(placed_structures[si].x - px) < EDGE_TOL &&
                 fabsf(placed_structures[si].y - py) < EDGE_TOL) {
                 wall_occupied = true; break;
@@ -4630,7 +4657,7 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
                      "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
             goto ps_send;
         }
-        /* Validate floor-edge alignment */
+        /* Validate floor-edge alignment and determine orientation */
         for (uint32_t si = 0; si < placed_structure_count && !has_edge; si++) {
             if (!placed_structures[si].active) continue;
             if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
@@ -4643,14 +4670,83 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
             if (n_edge || s_edge || w_edge || e_edge) {
                 if (placed_structures[si].company_id != (uint8_t)player->company_id)
                     wrong_company = true;
-                else
-                    has_edge = true;
+                else {
+                    has_edge   = true;
+                    wall_horiz = (n_edge || s_edge); /* N/S edge → horizontal */
+                }
             }
         }
         if (!has_edge) {
             snprintf(response, sizeof(response), wrong_company
                      ? "{\"type\":\"place_structure_fail\",\"reason\":\"wrong_company\"}"
                      : "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor_edge\"}");
+            goto ps_send;
+        }
+        /* Check if any player is occupying the wall/door space */
+        {
+            const float PLAYER_R = 8.0f;
+            float hw = wall_horiz ? 25.0f : 5.0f;
+            float hh = wall_horiz ? 5.0f  : 25.0f;
+            bool player_in_way = false;
+            for (int pi2 = 0; pi2 < MAX_PLAYERS && !player_in_way; pi2++) {
+                if (!players[pi2].active) continue;
+                float cpx = players[pi2].x - px;
+                float cpy = players[pi2].y - py;
+                float clamp_cpx = cpx < -hw ? -hw : (cpx > hw ? hw : cpx);
+                float clamp_cpy = cpy < -hh ? -hh : (cpy > hh ? hh : cpy);
+                float dpx = cpx - clamp_cpx, dpy = cpy - clamp_cpy;
+                if (dpx*dpx + dpy*dpy < PLAYER_R * PLAYER_R) player_in_way = true;
+            }
+            if (player_in_way) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"blocked_by_player\"}");
+                goto ps_send;
+            }
+        }
+        /* Check if any non-floor structure (workbench/door) blocks this space */
+        {
+            float hw = wall_horiz ? 25.0f : 5.0f;
+            float hh = wall_horiz ? 5.0f  : 25.0f;
+            const float WB_R = 15.0f; /* conservative workbench interaction radius */
+            bool struct_in_way = false;
+            for (uint32_t si = 0; si < placed_structure_count && !struct_in_way; si++) {
+                if (!placed_structures[si].active) continue;
+                if (placed_structures[si].type == STRUCT_WOODEN_FLOOR) continue;
+                if (placed_structures[si].type == STRUCT_WALL) continue;
+                if (placed_structures[si].type == STRUCT_DOOR_FRAME) continue;
+                if (placed_structures[si].type == STRUCT_DOOR) continue;
+                float dpx = fabsf(placed_structures[si].x - px);
+                float dpy = fabsf(placed_structures[si].y - py);
+                if (dpx < hw + WB_R && dpy < hh + WB_R) struct_in_way = true;
+            }
+            if (struct_in_way) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
+                goto ps_send;
+            }
+        }
+    }
+
+    /* Door (panel): must snap onto an existing door_frame at the same position */
+    if (stype_enum == STRUCT_DOOR) {
+        const float POS_TOL = 3.0f;
+        bool has_frame  = false;
+        bool door_taken = false;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (fabsf(placed_structures[si].x - px) >= POS_TOL ||
+                fabsf(placed_structures[si].y - py) >= POS_TOL) continue;
+            if (placed_structures[si].type == STRUCT_DOOR_FRAME) has_frame  = true;
+            if (placed_structures[si].type == STRUCT_DOOR)       door_taken = true;
+        }
+        if (door_taken) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
+            goto ps_send;
+        }
+        if (!has_frame) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"needs_door_frame\"}");
             goto ps_send;
         }
     }
@@ -4685,6 +4781,7 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
             sizeof(placed_structures[placed_structure_count].placer_name) - 1);
     placed_structures[placed_structure_count].placer_name[
         sizeof(placed_structures[placed_structure_count].placer_name) - 1] = '\0';
+    placed_structures[placed_structure_count].open       = false;
     placed_structure_count++;
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
@@ -4692,12 +4789,14 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
 
     /* Broadcast to all clients */
     char bcast[384];
+    bool new_is_door = (stype_enum == STRUCT_DOOR);
     snprintf(bcast, sizeof(bcast),
              "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-             "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"}",
+             "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"%s}",
              new_id, stype, target_island_id, px, py,
-             (unsigned)player->company_id, 100u, 100u, player->name);
+             (unsigned)player->company_id, 100u, 100u, player->name,
+             new_is_door ? ",\"open\":false" : "");
     websocket_server_broadcast(bcast);
     return; /* already sent via broadcast */
 
@@ -4739,6 +4838,16 @@ static void handle_structure_interact(WebSocketPlayer* player, struct WebSocketC
                      "{\"type\":\"crafting_open\",\"structure_id\":%u,\"structure_type\":\"workbench\"}",
                      sid);
             goto si_send;
+        }
+        if (placed_structures[i].type == STRUCT_DOOR) {
+            /* Toggle door open/closed and broadcast to all clients */
+            placed_structures[i].open = !placed_structures[i].open;
+            char bcast[128];
+            snprintf(bcast, sizeof(bcast),
+                     "{\"type\":\"door_toggled\",\"id\":%u,\"open\":%s}",
+                     sid, placed_structures[i].open ? "true" : "false");
+            websocket_server_broadcast(bcast);
+            return; /* broadcast sent, no per-client response needed */
         }
         snprintf(response, sizeof(response),
                  "{\"type\":\"structure_interact_fail\",\"reason\":\"not_interactive\"}");
@@ -4815,7 +4924,9 @@ static void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketC
                         websocket_server_broadcast(wbcast);
                         continue; /* don't increment — array shifted left */
                     }
-                } else if (placed_structures[j].type == STRUCT_WALL) {
+                } else if (placed_structures[j].type == STRUCT_WALL ||
+                           placed_structures[j].type == STRUCT_DOOR_FRAME ||
+                           placed_structures[j].type == STRUCT_DOOR) {
                     /* Wall is at one of the 4 edge midpoints of the demolished floor? */
                     float wx = placed_structures[j].x;
                     float wy = placed_structures[j].y;
@@ -4848,6 +4959,24 @@ static void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketC
                     }
                 }
                 j++;
+            }
+        }
+        /* door_frame demolished: cascade any door panel sitting on it */
+        if (demolished_type == STRUCT_DOOR_FRAME) {
+            for (uint32_t j = 0; j < placed_structure_count; j++) {
+                if (placed_structures[j].type != STRUCT_DOOR) continue;
+                if (fabsf(placed_structures[j].x - fx) >= 3.0f ||
+                    fabsf(placed_structures[j].y - fy) >= 3.0f) continue;
+                uint32_t dpid = placed_structures[j].id;
+                for (uint32_t k = j; k + 1 < placed_structure_count; k++)
+                    placed_structures[k] = placed_structures[k + 1];
+                placed_structure_count--;
+                log_info("\U0001F528 Cascade-demolished door panel %u (frame removed)", dpid);
+                char dpcast[128];
+                snprintf(dpcast, sizeof(dpcast),
+                         "{\"type\":\"structure_demolished\",\"structure_id\":%u}", dpid);
+                websocket_server_broadcast(dpcast);
+                break;
             }
         }
         return; /* already sent via broadcast */
@@ -5222,6 +5351,8 @@ static void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* c
         { "craft_swivel", ITEM_SWIVEL, 1, { {ITEM_WOOD,  5}, {ITEM_METAL,  8} }, 2 },
         { "craft_sword",  ITEM_SWORD,  1, { {ITEM_WOOD,  2}, {ITEM_METAL,  5} }, 2 },
         { "craft_wall",   ITEM_WALL,   4, { {ITEM_WOOD,  6}, {0,0} }, 1 },
+        { "craft_door_frame", ITEM_DOOR_FRAME, 1, { {ITEM_WOOD, 4}, {0,0} }, 1 },
+        { "craft_door",       ITEM_DOOR,       1, { {ITEM_WOOD, 4}, {0,0} }, 1 },
     };
     const int num_recipes = (int)(sizeof(recipes) / sizeof(recipes[0]));
 
@@ -7234,20 +7365,26 @@ int websocket_server_update(struct Sim* sim) {
                                         bool hs_sfirst = true;
                                         for (uint32_t si = 0; si < placed_structure_count; si++) {
                                             if (!placed_structures[si].active) continue;
-                                            const char* hs_stype = placed_structures[si].type == STRUCT_WOODEN_FLOOR
-                                                                   ? "wooden_floor" : "workbench";
-                                            hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
-                                                              "%s{\"id\":%u,\"structure_type\":\"%s\","
-                                                              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                              "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"}",
-                                                              hs_sfirst ? "" : ",",
-                                                              placed_structures[si].id, hs_stype,
-                                                              placed_structures[si].island_id,
-                                                              placed_structures[si].x, placed_structures[si].y,
-                                                              (unsigned)placed_structures[si].company_id,
-                                                              (unsigned)placed_structures[si].hp,
-                                                              (unsigned)placed_structures[si].max_hp,
-                                                              placed_structures[si].placer_name);
+                                        const char* hs_stype =
+                                            placed_structures[si].type == STRUCT_WOODEN_FLOOR ? "wooden_floor" :
+                                            placed_structures[si].type == STRUCT_WORKBENCH    ? "workbench" :
+                                            placed_structures[si].type == STRUCT_WALL         ? "wall" :
+                                            placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
+                                            placed_structures[si].type == STRUCT_DOOR         ? "door" : "unknown";
+                                        bool hs_is_door = (placed_structures[si].type == STRUCT_DOOR);
+                                        hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
+                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
+                                                          "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"%s}",
+                                                          hs_sfirst ? "" : ",",
+                                                          placed_structures[si].id, hs_stype,
+                                                          placed_structures[si].island_id,
+                                                          placed_structures[si].x, placed_structures[si].y,
+                                                          (unsigned)placed_structures[si].company_id,
+                                                          (unsigned)placed_structures[si].hp,
+                                                          (unsigned)placed_structures[si].max_hp,
+                                                          placed_structures[si].placer_name,
+                                                          hs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "");
                                             hs_sfirst = false;
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp, "]}");
@@ -9719,12 +9856,17 @@ int websocket_server_update(struct Sim* sim) {
                                     bool sfirst = true;
                                     for (uint32_t si = 0; si < placed_structure_count; si++) {
                                         if (!placed_structures[si].active) continue;
-                                        const char* stype_str = placed_structures[si].type == STRUCT_WOODEN_FLOOR
-                                                                 ? "wooden_floor" : "workbench";
+                                        const char* stype_str =
+                                            placed_structures[si].type == STRUCT_WOODEN_FLOOR ? "wooden_floor" :
+                                            placed_structures[si].type == STRUCT_WORKBENCH    ? "workbench" :
+                                            placed_structures[si].type == STRUCT_WALL         ? "wall" :
+                                            placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
+                                            placed_structures[si].type == STRUCT_DOOR         ? "door" : "unknown";
+                                        bool is_door_s = (placed_structures[si].type == STRUCT_DOOR);
                                         spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                          "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                         "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"}",
+                                                         "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"%s}",
                                                          sfirst ? "" : ",",
                                                          placed_structures[si].id,
                                                          stype_str,
@@ -9734,7 +9876,8 @@ int websocket_server_update(struct Sim* sim) {
                                                          (unsigned)placed_structures[si].company_id,
                                                          (unsigned)placed_structures[si].hp,
                                                          (unsigned)placed_structures[si].max_hp,
-                                                         placed_structures[si].placer_name);
+                                                         placed_structures[si].placer_name,
+                                                         is_door_s ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "");
                                         sfirst = false;
                                     }
                                     spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos, "]}");
@@ -11407,6 +11550,34 @@ void websocket_server_tick(float dt) {
                             /* Apply position regardless — if walking off, land at the new spot so
                                next tick the player is already outside and swim takes over */
                             if (ws_player->on_island_id != 0) {
+                                /* Resolve collisions with walls and closed doors on this island */
+                                {
+                                    const float PLAYER_R = 8.0f;
+                                    for (uint32_t wi = 0; wi < placed_structure_count; wi++) {
+                                        PlacedStructure *ws = &placed_structures[wi];
+                                        if (!ws->active) continue;
+                                        if (ws->island_id != ws_player->on_island_id) continue;
+                                        bool is_wall = (ws->type == STRUCT_WALL);
+                                        bool is_door = (ws->type == STRUCT_DOOR && !ws->open);
+                                        if (!is_wall && !is_door) continue;
+                                        bool horiz = wall_is_horizontal(ws->x, ws->y);
+                                        float hw = horiz ? 25.0f : 5.0f;
+                                        float hh = horiz ? 5.0f  : 25.0f;
+                                        float cpx = new_x - ws->x;
+                                        float cpy = new_y - ws->y;
+                                        float clamp_x = cpx < -hw ? -hw : (cpx > hw ? hw : cpx);
+                                        float clamp_y = cpy < -hh ? -hh : (cpy > hh ? hh : cpy);
+                                        float dpx = cpx - clamp_x;
+                                        float dpy = cpy - clamp_y;
+                                        float dist_sq = dpx*dpx + dpy*dpy;
+                                        if (dist_sq < PLAYER_R * PLAYER_R && dist_sq > 0.0001f) {
+                                            float dist = sqrtf(dist_sq);
+                                            float pen  = PLAYER_R - dist;
+                                            new_x += (dpx / dist) * pen;
+                                            new_y += (dpy / dist) * pen;
+                                        }
+                                    }
+                                }
                                 ws_player->x = new_x;
                                 ws_player->y = new_y;
                                 sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_x));
