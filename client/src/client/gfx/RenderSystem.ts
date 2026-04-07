@@ -2701,7 +2701,22 @@ export class RenderSystem {
       });
     }
 
-    const invalid = tooFar || inWater || noFloor || overlaps || blockedByTree;
+    // Enemy territory: any structure belonging to a different non-zero company within 500 world px
+    const myCompany = (this._localCompanyId ?? 0) as number;
+    const enemyTerritory = this.placedStructures.some(s =>
+      s.companyId !== 0 && s.companyId !== myCompany &&
+      (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) < 500 * 500
+    );
+
+    // Workbench on enemy floor: a floor exists under cursor but belongs to a different company
+    const wrongCompany = this.islandBuildKind === 'workbench' && !noFloor &&
+      !this.placedStructures.some(s =>
+        s.type === 'wooden_floor' &&
+        Math.abs(s.x - mx) <= 25 && Math.abs(s.y - my) <= 25 &&
+        s.companyId === myCompany
+      );
+
+    const invalid = tooFar || inWater || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
@@ -2728,6 +2743,9 @@ export class RenderSystem {
     if (inWater) {
       ctx.fillStyle = '#4488ff';
       ctx.fillText('IN WATER', msp.x, labelY);
+    } else if (enemyTerritory) {
+      ctx.fillStyle = '#ff3333';
+      ctx.fillText('ENEMY TERRITORY', msp.x, labelY);
     } else if (blockedByTree) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('BLOCKED', msp.x, labelY);
@@ -2737,6 +2755,9 @@ export class RenderSystem {
     } else if (tooFar) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('TOO FAR', msp.x, labelY);
+    } else if (wrongCompany) {
+      ctx.fillStyle = '#ff3333';
+      ctx.fillText('ENEMY FLOOR', msp.x, labelY);
     } else if (noFloor) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('NEEDS FLOOR', msp.x, labelY);

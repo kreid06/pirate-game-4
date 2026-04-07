@@ -4520,6 +4520,24 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         }
     }
 
+    /* Cannot place within 500 px of an enemy-company structure */
+    {
+        bool enemy_block = false;
+        for (uint32_t si = 0; si < placed_structure_count && !enemy_block; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].company_id == 0) continue; /* neutral — skip */
+            if (placed_structures[si].company_id == (uint8_t)player->company_id) continue; /* own */
+            float dx = placed_structures[si].x - px;
+            float dy = placed_structures[si].y - py;
+            if (dx*dx + dy*dy < 500.0f * 500.0f) enemy_block = true;
+        }
+        if (enemy_block) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"enemy_territory\"}");
+            goto ps_send;
+        }
+    }
+
     /* Wooden floor: AABB overlap check — tiles are 50×50 px, no two may share space */
     if (stype_enum == STRUCT_WOODEN_FLOOR) {
         for (uint32_t si = 0; si < placed_structure_count; si++) {
