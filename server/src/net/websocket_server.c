@@ -5221,6 +5221,7 @@ static void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* c
         { "craft_cannon", ITEM_CANNON, 1, { {ITEM_WOOD,  8}, {ITEM_METAL, 20} }, 2 },
         { "craft_swivel", ITEM_SWIVEL, 1, { {ITEM_WOOD,  5}, {ITEM_METAL,  8} }, 2 },
         { "craft_sword",  ITEM_SWORD,  1, { {ITEM_WOOD,  2}, {ITEM_METAL,  5} }, 2 },
+        { "craft_wall",   ITEM_WALL,   4, { {ITEM_WOOD,  6}, {0,0} }, 1 },
     };
     const int num_recipes = (int)(sizeof(recipes) / sizeof(recipes[0]));
 
