@@ -1277,14 +1277,24 @@ export class ClientApplication {
       this.networkManager.onStructuresList = (structs) => {
         this.renderSystem.setPlacedStructures(structs);
       };
-      this.networkManager.onStructureDemolished = (id) => {
+      this.networkManager.onStructureDemolished = (id, x, y) => {
         this.renderSystem.removePlacedStructure(id);
+        if (x !== undefined && y !== undefined) {
+          // Cannonball kill — big explosion
+          this.renderSystem.spawnExplosion(Vec2.from(x, y), 1.2);
+          this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, true);
+        }
       };
       this.networkManager.onStructureCompanyUpdated = (id, companyId) => {
         this.renderSystem.updateStructureCompany(id, companyId);
       };
-      this.networkManager.onStructureHpChanged = (id, hp, maxHp) => {
+      this.networkManager.onStructureHpChanged = (id, hp, maxHp, x, y) => {
         this.renderSystem.updateStructureHp(id, hp, maxHp);
+        this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.6);
+        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, false);
+      };
+      this.networkManager.onTreeHit = (x, y) => {
+        this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.5);
       };
       this.networkManager.onStructurePlaced = (s) => {
         this.renderSystem.addPlacedStructure(s);

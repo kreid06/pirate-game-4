@@ -6601,17 +6601,19 @@ static void check_projectile_static_collisions(struct Sim* sim) {
                 uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
                 s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
 
-                char msg[160];
+                char msg[192];
                 if (s->hp == 0) {
                     s->active = false;
                     snprintf(msg, sizeof(msg),
-                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}",
-                             s->id);
+                             "{\"type\":\"structure_demolished\",\"structure_id\":%u"
+                             ",\"x\":%.1f,\"y\":%.1f}",
+                             s->id, s->x, s->y);
                 } else {
                     snprintf(msg, sizeof(msg),
                              "{\"type\":\"structure_hp_changed\","
-                             "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u}",
-                             s->id, (unsigned)s->hp, (unsigned)s->max_hp);
+                             "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
+                             ",\"x\":%.1f,\"y\":%.1f}",
+                             s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
                 }
                 websocket_server_broadcast(msg);
 
@@ -6636,7 +6638,12 @@ static void check_projectile_static_collisions(struct Sim* sim) {
                     float dx = px - tx;
                     float dy = py - ty;
                     if (dx * dx + dy * dy <= TREE_COLLISION_R_PX * TREE_COLLISION_R_PX) {
-                        /* Trees are indestructible — just stop the cannonball */
+                        /* Trees are indestructible — broadcast hit so client shows explosion */
+                        char tmsg[96];
+                        snprintf(tmsg, sizeof(tmsg),
+                                 "{\"type\":\"tree_cannonball_hit\",\"x\":%.1f,\"y\":%.1f}",
+                                 tx, ty);
+                        websocket_server_broadcast(tmsg);
                         memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                                 ((size_t)sim->projectile_count - (size_t)i - 1u)
                                 * sizeof(struct Projectile));

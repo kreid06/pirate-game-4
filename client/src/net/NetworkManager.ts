@@ -540,11 +540,13 @@ export class NetworkManager {
   /** Fired when the server broadcasts a newly placed structure to all clients. */
   public onStructurePlaced: ((s: PlacedStructure) => void) | null = null;
   /** Fired when the server confirms a structure has been demolished. */
-  public onStructureDemolished: ((id: number) => void) | null = null;
+  public onStructureDemolished: ((id: number, x?: number, y?: number) => void) | null = null;
   /** Fired when a structure's company ownership is promoted (one-way, neutral → non-neutral). */
   public onStructureCompanyUpdated: ((id: number, companyId: number) => void) | null = null;
-  /** Fired when a structure takes damage from a cannonball hit. */
-  public onStructureHpChanged: ((id: number, hp: number, maxHp: number) => void) | null = null;
+  /** Fired when a structure takes damage from a cannonball hit. Includes world position for FX. */
+  public onStructureHpChanged: ((id: number, hp: number, maxHp: number, x: number, y: number) => void) | null = null;
+  /** Fired when a cannonball hits a tree (trees are indestructible). */
+  public onTreeHit: ((x: number, y: number) => void) | null = null;
   /** Fired when the server sends the full list of existing placed structures on join. */
   public onStructuresList: ((structures: PlacedStructure[]) => void) | null = null;
   /** Fired when the server confirms a workbench can be opened (E-key interact). */
@@ -2080,7 +2082,11 @@ export class NetworkManager {
       }
 
       case 'structure_demolished':
-        this.onStructureDemolished?.(message.structure_id ?? message.id ?? 0);
+        this.onStructureDemolished?.(
+          message.structure_id ?? message.id ?? 0,
+          message.x,
+          message.y,
+        );
         break;
 
       case 'structure_company_updated':
@@ -2092,7 +2098,13 @@ export class NetworkManager {
           message.structure_id ?? 0,
           message.hp ?? 0,
           message.max_hp ?? 100,
+          message.x ?? 0,
+          message.y ?? 0,
         );
+        break;
+
+      case 'tree_cannonball_hit':
+        this.onTreeHit?.(message.x ?? 0, message.y ?? 0);
         break;
 
       case 'craft_result':
