@@ -2980,7 +2980,40 @@ export class RenderSystem {
           const dy = last.y - ship.position.y;
           return dx * dx + dy * dy < 500 * 500; // covers full brigantine hull (~435px radius) + margin
         });
-        if (!overShip && (last.ammoType === 0 || last.ammoType === 1)) {
+
+        // Check if it disappeared near a structure (AABB for floors, radial for workbenches)
+        // Guard: skip if last position is at origin (never properly updated)
+        if (last.x === 0 && last.y === 0) {
+          this.cannonballLastPos.delete(id);
+          continue;
+        }
+
+        const hitStructure = this.placedStructures.find(s => {
+          const dx = last.x - s.x;
+          const dy = last.y - s.y;
+          if (s.type === 'workbench') {
+            return dx * dx + dy * dy <= 26.5 * 26.5; // broad-phase radius (matches server)
+          }
+          return Math.abs(dx) <= 25 && Math.abs(dy) <= 25; // AABB ±25px
+        });
+
+        // Check near an island tree
+        const hitTree = !hitStructure && this.islands.some(isl =>
+          (isl.resources ?? []).some(r => {
+            if (r.type !== 'wood') return false;
+            const dx = last.x - (isl.x + r.ox);
+            const dy = last.y - (isl.y + r.oy);
+            return dx * dx + dy * dy <= 22 * 22;
+          })
+        );
+
+        if (hitStructure || hitTree) {
+          const intensity = hitStructure ? 0.6 : 0.5;
+          this.particleSystem.createExplosion(Vec2.from(last.x, last.y), intensity);
+          if (hitStructure) {
+            this.spawnDamageNumber(Vec2.from(last.x, last.y), 25, false);
+          }
+        } else if (!overShip && (last.ammoType === 0 || last.ammoType === 1)) {
           console.log(`💦 SPLASH: cannonball ${id} expired over water at (${last.x.toFixed(1)}, ${last.y.toFixed(1)})`);
           this.particleSystem.createWaterSplash(Vec2.from(last.x, last.y), 1.2);
         } else if (overShip) {

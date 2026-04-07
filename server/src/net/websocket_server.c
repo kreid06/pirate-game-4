@@ -6603,19 +6603,40 @@ static void check_projectile_static_collisions(struct Sim* sim) {
 
                 char msg[192];
                 if (s->hp == 0) {
+                    PlacedStructureType killed_type = s->type;
+                    float kx = s->x, ky = s->y;
                     s->active = false;
                     snprintf(msg, sizeof(msg),
                              "{\"type\":\"structure_demolished\",\"structure_id\":%u"
                              ",\"x\":%.1f,\"y\":%.1f}",
-                             s->id, s->x, s->y);
+                             s->id, kx, ky);
+                    websocket_server_broadcast(msg);
+
+                    /* Cascade: floor destroyed — demolish any workbench on top of it */
+                    if (killed_type == STRUCT_WOODEN_FLOOR) {
+                        for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
+                            PlacedStructure* wb = &placed_structures[ci];
+                            if (!wb->active) continue;
+                            if (wb->type != STRUCT_WORKBENCH) continue;
+                            if (fabsf(wb->x - kx) <= 25.0f && fabsf(wb->y - ky) <= 25.0f) {
+                                wb->active = false;
+                                char cwmsg[192];
+                                snprintf(cwmsg, sizeof(cwmsg),
+                                         "{\"type\":\"structure_demolished\","
+                                         "\"structure_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                         wb->id, wb->x, wb->y);
+                                websocket_server_broadcast(cwmsg);
+                            }
+                        }
+                    }
                 } else {
                     snprintf(msg, sizeof(msg),
                              "{\"type\":\"structure_hp_changed\","
                              "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
                              ",\"x\":%.1f,\"y\":%.1f}",
                              s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
+                    websocket_server_broadcast(msg);
                 }
-                websocket_server_broadcast(msg);
 
                 /* Splice projectile out of the array */
                 memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
