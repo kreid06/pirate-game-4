@@ -2571,13 +2571,12 @@ export class RenderSystem {
 
     this._islandGhostTooFar = tooFar || inWater;
 
-    // Workbench needs a floor tile within 55 px
+    // Workbench needs a floor tile whose AABB contains the cursor point
     let noFloor = false;
     if (this.islandBuildKind === 'workbench') {
       noFloor = !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
-        const dx = s.x - mx; const dy = s.y - my;
-        return dx * dx + dy * dy <= 55 * 55;
+        return Math.abs(s.x - mx) <= 25 && Math.abs(s.y - my) <= 25;
       });
     }
 

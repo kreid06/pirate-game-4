@@ -4561,15 +4561,16 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         }
     }
 
-    /* Workbench: must have a wooden_floor tile within STRUCT_FLOOR_REQ_R of (px,py) */
+    /* Workbench: centre point must fall inside the AABB of a wooden_floor tile (50x50 px) */
     if (stype_enum == STRUCT_WORKBENCH) {
         bool has_floor = false;
+        const float HALF_TILE = 25.0f;
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             if (!placed_structures[si].active) continue;
             if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
-            float dx = placed_structures[si].x - px;
-            float dy = placed_structures[si].y - py;
-            if (dx*dx + dy*dy <= STRUCT_FLOOR_REQ_R * STRUCT_FLOOR_REQ_R) {
+            float dx = fabsf(placed_structures[si].x - px);
+            float dy = fabsf(placed_structures[si].y - py);
+            if (dx <= HALF_TILE && dy <= HALF_TILE) {
                 has_floor = true; break;
             }
         }
@@ -4709,9 +4710,9 @@ static void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketC
             uint32_t j = 0;
             while (j < placed_structure_count) {
                 if (placed_structures[j].type == STRUCT_WORKBENCH) {
-                    float wdx = placed_structures[j].x - fx;
-                    float wdy = placed_structures[j].y - fy;
-                    if (wdx*wdx + wdy*wdy <= STRUCT_FLOOR_REQ_R * STRUCT_FLOOR_REQ_R) {
+                    float wdx = fabsf(placed_structures[j].x - fx);
+                    float wdy = fabsf(placed_structures[j].y - fy);
+                    if (wdx <= 25.0f && wdy <= 25.0f) {
                         uint32_t wid = placed_structures[j].id;
                         for (uint32_t k = j; k + 1 < placed_structure_count; k++)
                             placed_structures[k] = placed_structures[k + 1];
