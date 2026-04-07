@@ -4489,6 +4489,9 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     } else if (strcmp(stype, "workbench") == 0) {
         stype_enum    = STRUCT_WORKBENCH;
         required_item = ITEM_WORKBENCH;
+    } else if (strcmp(stype, "wall") == 0) {
+        stype_enum    = STRUCT_WALL;
+        required_item = ITEM_WALL;
     } else {
         snprintf(response, sizeof(response),
                  "{\"type\":\"place_structure_fail\",\"reason\":\"unknown_type\"}");
@@ -4601,6 +4604,53 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
             snprintf(response, sizeof(response), wrong_company
                      ? "{\"type\":\"place_structure_fail\",\"reason\":\"wrong_company\"}"
                      : "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor\"}");
+            goto ps_send;
+        }
+    }
+
+    /* Wall: must snap to an edge midpoint of an existing same-company floor tile.
+       Edge midpoints are at (fx, fy±25) and (fx±25, fy) for floor at (fx, fy). */
+    if (stype_enum == STRUCT_WALL) {
+        const float EDGE_TOL  = 3.0f;
+        const float HALF_TILE = 25.0f;
+        bool has_edge     = false;
+        bool wrong_company = false;
+        bool wall_occupied = false;
+        /* First: overlap check — no two walls at same position */
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_WALL) continue;
+            if (fabsf(placed_structures[si].x - px) < EDGE_TOL &&
+                fabsf(placed_structures[si].y - py) < EDGE_TOL) {
+                wall_occupied = true; break;
+            }
+        }
+        if (wall_occupied) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
+            goto ps_send;
+        }
+        /* Validate floor-edge alignment */
+        for (uint32_t si = 0; si < placed_structure_count && !has_edge; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
+            float fx = placed_structures[si].x;
+            float fy = placed_structures[si].y;
+            bool n_edge = fabsf(px - fx) < EDGE_TOL && fabsf(py - (fy - HALF_TILE)) < EDGE_TOL;
+            bool s_edge = fabsf(px - fx) < EDGE_TOL && fabsf(py - (fy + HALF_TILE)) < EDGE_TOL;
+            bool w_edge = fabsf(py - fy) < EDGE_TOL && fabsf(px - (fx - HALF_TILE)) < EDGE_TOL;
+            bool e_edge = fabsf(py - fy) < EDGE_TOL && fabsf(px - (fx + HALF_TILE)) < EDGE_TOL;
+            if (n_edge || s_edge || w_edge || e_edge) {
+                if (placed_structures[si].company_id != (uint8_t)player->company_id)
+                    wrong_company = true;
+                else
+                    has_edge = true;
+            }
+        }
+        if (!has_edge) {
+            snprintf(response, sizeof(response), wrong_company
+                     ? "{\"type\":\"place_structure_fail\",\"reason\":\"wrong_company\"}"
+                     : "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor_edge\"}");
             goto ps_send;
         }
     }
@@ -4745,7 +4795,8 @@ static void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketC
         snprintf(bcast, sizeof(bcast),
                  "{\"type\":\"structure_demolished\",\"structure_id\":%u}", sid);
         websocket_server_broadcast(bcast);
-        /* Cascade: if a floor was demolished, remove any workbenches sitting on it */
+        /* Cascade: if a floor was demolished, remove any workbenches sitting on it
+           and any walls at its edges that have no other supporting floor. */
         if (demolished_type == STRUCT_WOODEN_FLOOR) {
             uint32_t j = 0;
             while (j < placed_structure_count) {
@@ -4763,6 +4814,37 @@ static void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketC
                                  "{\"type\":\"structure_demolished\",\"structure_id\":%u}", wid);
                         websocket_server_broadcast(wbcast);
                         continue; /* don't increment — array shifted left */
+                    }
+                } else if (placed_structures[j].type == STRUCT_WALL) {
+                    /* Wall is at one of the 4 edge midpoints of the demolished floor? */
+                    float wx = placed_structures[j].x;
+                    float wy = placed_structures[j].y;
+                    bool at_edge =
+                        (fabsf(wx - fx) < 3.0f && fabsf(fabsf(wy - fy) - 25.0f) < 3.0f) ||
+                        (fabsf(wy - fy) < 3.0f && fabsf(fabsf(wx - fx) - 25.0f) < 3.0f);
+                    if (at_edge) {
+                        /* Check if another active floor still supports this wall edge */
+                        bool has_support = false;
+                        for (uint32_t fi = 0; fi < placed_structure_count && !has_support; fi++) {
+                            PlacedStructure* f = &placed_structures[fi];
+                            if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                            bool supports =
+                                (fabsf(wx - f->x) < 3.0f && fabsf(fabsf(wy - f->y) - 25.0f) < 3.0f) ||
+                                (fabsf(wy - f->y) < 3.0f && fabsf(fabsf(wx - f->x) - 25.0f) < 3.0f);
+                            if (supports) has_support = true;
+                        }
+                        if (!has_support) {
+                            uint32_t wid = placed_structures[j].id;
+                            for (uint32_t k = j; k + 1 < placed_structure_count; k++)
+                                placed_structures[k] = placed_structures[k + 1];
+                            placed_structure_count--;
+                            log_info("🔨 Cascade-demolished wall %u (floor %u removed)", wid, sid);
+                            char wcast[128];
+                            snprintf(wcast, sizeof(wcast),
+                                     "{\"type\":\"structure_demolished\",\"structure_id\":%u}", wid);
+                            websocket_server_broadcast(wcast);
+                            continue;
+                        }
                     }
                 }
                 j++;
@@ -6610,6 +6692,49 @@ static void check_projectile_static_collisions(struct Sim* sim) {
         if (!near_island) { i++; continue; }
 
         /* ── Test vs. placed structures ──────────────────────────────────── */
+        /* Pass 0: walls — thin hard barriers, hit before workbenches/floors. */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_WALL) continue;
+            /* Determine wall orientation by checking for a supporting floor */
+            bool is_horizontal = false;
+            for (uint32_t fi = 0; fi < placed_structure_count; fi++) {
+                PlacedStructure* f = &placed_structures[fi];
+                if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                if (fabsf(f->x - s->x) < 3.0f && fabsf(fabsf(f->y - s->y) - 25.0f) < 3.0f) {
+                    is_horizontal = true; break;
+                }
+            }
+            float half_w = is_horizontal ? 25.0f : 5.0f;
+            float half_h = is_horizontal ? 5.0f  : 25.0f;
+            float dx = px - s->x;
+            float dy = py - s->y;
+            if (!(dx >= -half_w && dx <= half_w && dy >= -half_h && dy <= half_h)) continue;
+            /* Hit wall */
+            uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
+            s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
+            char msg[192];
+            if (s->hp == 0) {
+                s->active = false;
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_demolished\",\"structure_id\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, s->x, s->y);
+            } else {
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_hp_changed\","
+                         "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
+            }
+            websocket_server_broadcast(msg);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+
         /* Pass 1: workbenches — checked first so they can be independently
          * hit and damaged even when a floor tile below overlaps the same area. */
         for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
@@ -6668,29 +6793,54 @@ static void check_projectile_static_collisions(struct Sim* sim) {
                          s->id, kx, ky);
                 websocket_server_broadcast(msg);
                 /* Cascade: floor destroyed — demolish workbenches that were resting
-                 * on this floor and have no other active floor still supporting them.
+                 * on this floor and have no other active floor still supporting them,
+                 * and demolish walls at its edges with no other supporting floor.
                  * (The killed floor is already inactive so the inner scan finds only
                  * surviving floors.) */
                 for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
                     PlacedStructure* wb = &placed_structures[ci];
-                    if (!wb->active || wb->type != STRUCT_WORKBENCH) continue;
-                    if (fabsf(wb->x - kx) > 25.0f || fabsf(wb->y - ky) > 25.0f) continue;
-                    /* Workbench was on this floor — check for another supporting floor */
-                    bool has_support = false;
-                    for (uint32_t fi = 0; fi < placed_structure_count && !has_support; fi++) {
-                        PlacedStructure* f = &placed_structures[fi];
-                        if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
-                        if (fabsf(wb->x - f->x) <= 25.0f && fabsf(wb->y - f->y) <= 25.0f)
-                            has_support = true;
-                    }
-                    if (!has_support) {
-                        wb->active = false;
-                        char cwmsg[192];
-                        snprintf(cwmsg, sizeof(cwmsg),
-                                 "{\"type\":\"structure_demolished\","
-                                 "\"structure_id\":%u,\"x\":%.1f,\"y\":%.1f}",
-                                 wb->id, wb->x, wb->y);
-                        websocket_server_broadcast(cwmsg);
+                    if (!wb->active) continue;
+                    if (wb->type == STRUCT_WORKBENCH) {
+                        if (fabsf(wb->x - kx) > 25.0f || fabsf(wb->y - ky) > 25.0f) continue;
+                        bool has_support = false;
+                        for (uint32_t fi = 0; fi < placed_structure_count && !has_support; fi++) {
+                            PlacedStructure* f = &placed_structures[fi];
+                            if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                            if (fabsf(wb->x - f->x) <= 25.0f && fabsf(wb->y - f->y) <= 25.0f)
+                                has_support = true;
+                        }
+                        if (!has_support) {
+                            wb->active = false;
+                            char cwmsg[192];
+                            snprintf(cwmsg, sizeof(cwmsg),
+                                     "{\"type\":\"structure_demolished\","
+                                     "\"structure_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                     wb->id, wb->x, wb->y);
+                            websocket_server_broadcast(cwmsg);
+                        }
+                    } else if (wb->type == STRUCT_WALL) {
+                        bool at_edge =
+                            (fabsf(wb->x - kx) < 3.0f && fabsf(fabsf(wb->y - ky) - 25.0f) < 3.0f) ||
+                            (fabsf(wb->y - ky) < 3.0f && fabsf(fabsf(wb->x - kx) - 25.0f) < 3.0f);
+                        if (!at_edge) continue;
+                        bool has_support = false;
+                        for (uint32_t fi = 0; fi < placed_structure_count && !has_support; fi++) {
+                            PlacedStructure* f = &placed_structures[fi];
+                            if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                            bool supports =
+                                (fabsf(wb->x - f->x) < 3.0f && fabsf(fabsf(wb->y - f->y) - 25.0f) < 3.0f) ||
+                                (fabsf(wb->y - f->y) < 3.0f && fabsf(fabsf(wb->x - f->x) - 25.0f) < 3.0f);
+                            if (supports) has_support = true;
+                        }
+                        if (!has_support) {
+                            wb->active = false;
+                            char cwmsg[192];
+                            snprintf(cwmsg, sizeof(cwmsg),
+                                     "{\"type\":\"structure_demolished\","
+                                     "\"structure_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                     wb->id, wb->x, wb->y);
+                            websocket_server_broadcast(cwmsg);
+                        }
                     }
                 }
             } else {

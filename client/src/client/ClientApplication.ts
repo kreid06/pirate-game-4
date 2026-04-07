@@ -132,8 +132,8 @@ export class ClientApplication {
   private _interactKind: 'ladder' | 'mount' | 'npc' | 'structure' | null = null;
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
-  /** Type of the locked-in structure ('wooden_floor' | 'workbench'). */
-  private _hoveredStructureType: 'wooden_floor' | 'workbench' | null = null;
+  /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall'). */
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
@@ -859,10 +859,12 @@ export class ClientApplication {
           const pid = this.networkManager.getAssignedPlayerId();
           const p   = ws?.players.find(pl => pl.id === pid);
           const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
-          if (kind === 'wooden_floor' || kind === 'workbench') {
+          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall') {
             // Compute snap at click time (not from stale render state)
             const pos = kind === 'wooden_floor'
               ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
+              : kind === 'wall'
+              ? this.renderSystem.computeSnappedWallPos(worldPos.x, worldPos.y)
               : { x: worldPos.x, y: worldPos.y };
             this.networkManager.sendPlaceStructure(kind, pos.x, pos.y);
           }
@@ -2007,11 +2009,11 @@ export class ClientApplication {
     const inHelmBuildMode   = activeItem === 'helm_kit';
     const inDeckBuildMode   = activeItem === 'deck';
 
-    // Island placement build mode — wooden_floor or workbench while not on a ship
-    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench');
+    // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
+    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall');
     this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
     this.renderSystem.setIslandBuildItem(
-      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench') : null
+      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall') : null
     );
 
     // Track whether the active item changed while in explicit build mode
@@ -2694,6 +2696,16 @@ export class ClientApplication {
                   if (isOwnCompany) opts.push({ id: 'demolish', label: 'Demolish' });
                   this._radialMenu.open(mp2.x, mp2.y, opts);
                 }, 400);
+              } else if (struct.type === 'wall') {
+                // Wall: hold E = radial with only Demolish
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  this._radialMenu.open(mp2.x, mp2.y, [
+                    { id: 'demolish', label: 'Demolish Wall' },
+                  ]);
+                }, 600);
               } else {
                 // Floor: hold E = radial with only Demolish (only reachable if isOwnCompany)
                 this._ladderHoldTimer = setTimeout(() => {

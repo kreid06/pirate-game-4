@@ -31,6 +31,7 @@ export type ItemKind =
   | 'axe'
   | 'wooden_floor'
   | 'workbench'
+  | 'wall'
   | 'wood'
   | 'fiber'
   | 'metal'
@@ -76,6 +77,7 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   axe:           { kind: 'axe',           name: 'Axe',           category: 'tool',     maxStack: 1,  color: '#8b5e2a', borderColor: '#5c3a10', symbol: '\uD83E\uDE93', description: 'Chop wood resources on islands. Equip and press E near a tree.' },
   wooden_floor:  { kind: 'wooden_floor',  name: 'Wooden Floor',  category: 'building', maxStack: 20, color: '#b8832b', borderColor: '#7a5520', symbol: '\u229f',      description: 'Place on island ground as a foundation for workbenches.' },
   workbench:     { kind: 'workbench',     name: 'Workbench',     category: 'building', maxStack: 5,  color: '#7a4820', borderColor: '#4a2810', symbol: '\u2692',      description: 'Crafting station. Place on a wooden floor and press E to open.' },
+  wall:          { kind: 'wall',          name: 'Wall',          category: 'building', maxStack: 20, color: '#5c3a1a', borderColor: '#2e1a08', symbol: '\u2503',      description: 'Place on a floor tile edge to build a wall segment.' },
   wood:          { kind: 'wood',          name: 'Wood',          category: 'none',     maxStack: 99, color: '#8b5e2a', borderColor: '#5c3a10', symbol: 'W',  description: 'Raw wood harvested from island trees. Used for crafting.' },
   fiber:         { kind: 'fiber',         name: 'Fiber',         category: 'none',     maxStack: 99, color: '#c8a46e', borderColor: '#8a6030', symbol: 'Fi', description: 'Plant fiber from island vegetation. Used to craft sails.' },
   metal:         { kind: 'metal',         name: 'Metal',         category: 'none',     maxStack: 99, color: '#8a8a8c', borderColor: '#555558', symbol: 'Fe', description: 'Metal ingots. Used to craft weapons and cannons.' },
@@ -107,6 +109,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   15: 'axe',
   16: 'wooden_floor',
   17: 'workbench',
+  18: 'wall',
   22: 'wood',
   23: 'fiber',
   24: 'metal',

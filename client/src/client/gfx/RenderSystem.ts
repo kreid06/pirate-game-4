@@ -121,7 +121,8 @@ export class RenderSystem {
   /** Rock node currently under cursor (world coords) — updated each frame in drawIsland. */
   private _hoveredRock: { wx: number; wy: number } | null = null;
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | null = null;
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | null = null;
+  private _wallGhostHorizontal: boolean = true; // true = runs along X axis (N/S edge)
   /** True when the placement ghost is beyond the server's max placement range (200 px). */
   private _islandGhostTooFar = false;
   /** Last snapped placement position (may differ from raw cursor when snap-to-grid is active). */
@@ -1137,7 +1138,7 @@ export class RenderSystem {
   }
 
   /** Activate island placement ghost for wooden_floor or workbench, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | null): void {
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | null): void {
     this.islandBuildKind = kind;
   }
 
@@ -1165,6 +1166,35 @@ export class RenderSystem {
           f => f.type === 'wooden_floor' && Math.abs(f.x - nx) < 1 && Math.abs(f.y - ny) < 1
         );
         if (alreadyOccupied) continue;
+        const dist2 = (nx - wx) * (nx - wx) + (ny - wy) * (ny - wy);
+        if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; }
+      }
+    }
+    return { x: bestX, y: bestY };
+  }
+
+  /**
+   * Compute the snapped world position for a wall placement at (wx, wy).
+   * Snaps to the nearest unoccupied edge midpoint of any floor tile.
+   */
+  computeSnappedWallPos(wx: number, wy: number): { x: number; y: number } {
+    const HALF = 25;
+    const SNAP_R = 30;
+    if (this.placedStructures.length === 0) return { x: wx, y: wy };
+    let bestDist2 = SNAP_R * SNAP_R;
+    let bestX = wx, bestY = wy;
+    const EDGES = [
+      { dx: 0, dy: -HALF }, { dx: 0, dy: HALF },
+      { dx: -HALF, dy: 0 }, { dx: HALF, dy: 0 },
+    ];
+    for (const s of this.placedStructures) {
+      if (s.type !== 'wooden_floor') continue;
+      for (const e of EDGES) {
+        const nx = s.x + e.dx, ny = s.y + e.dy;
+        const occ = this.placedStructures.some(
+          w => w.type === 'wall' && Math.abs(w.x - nx) < 2 && Math.abs(w.y - ny) < 2
+        );
+        if (occ) continue;
         const dist2 = (nx - wx) * (nx - wx) + (ny - wy) * (ny - wy);
         if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; }
       }
@@ -2361,6 +2391,18 @@ export class RenderSystem {
       const half = 25; // half of 50px tile
       let floorHit: PlacedStructure | null = null;
       for (const s of this.placedStructures) {
+        if (s.type === 'wall') {
+          // Walls have priority over floors but lower than workbenches
+          const isHoriz = this.placedStructures.some(f =>
+            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+          );
+          const hw = isHoriz ? 25 : 6;
+          const hh = isHoriz ? 6 : 25;
+          if (Math.abs(mx - s.x) <= hw && Math.abs(my - s.y) <= hh) {
+            floorHit = s; // walls treated like floors — workbench still wins
+          }
+          continue;
+        }
         const hw = s.type === 'workbench' ? 25 * 0.88 : half;
         const hh = s.type === 'workbench' ? 25 * 0.62 : half;
         if (Math.abs(mx - s.x) <= hw && Math.abs(my - s.y) <= hh) {
@@ -2378,10 +2420,12 @@ export class RenderSystem {
       if (this._hoveredStructure === null) this._hoveredStructure = floorHit;
     }
 
-    // Floors first, then everything else, so floors are always below other structures
-    const sorted = [...this.placedStructures].sort((a, b) =>
-      (a.type === 'wooden_floor' ? 0 : 1) - (b.type === 'wooden_floor' ? 0 : 1)
-    );
+    // Floors first, then walls, then workbenches
+    const sorted = [...this.placedStructures].sort((a, b) => {
+      const order = (t: PlacedStructure['type']) =>
+        t === 'wooden_floor' ? 0 : t === 'wall' ? 1 : 2;
+      return order(a.type) - order(b.type);
+    });
 
     for (const s of sorted) {
       const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
@@ -2503,6 +2547,51 @@ export class RenderSystem {
         }
 
         ctx.restore();
+      } else if (s.type === 'wall') {
+        // Determine orientation: if a floor shares X and is offset ±25 in Y → horizontal
+        const isHoriz = this.placedStructures.some(f =>
+          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        );
+        const THICK = 0.18; // ratio of tile (50px * 0.18 = 9px)
+        const ww = isHoriz ? sz : sz * THICK;
+        const wh = isHoriz ? sz * THICK : sz;
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const dmgDarken = (1 - hpFrac) * 0.5;
+
+        ctx.save();
+        ctx.fillStyle   = isHovered ? '#7a5030' : '#5c3a1a';
+        ctx.strokeStyle = '#2e1a08';
+        ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
+        ctx.beginPath();
+        ctx.rect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+        ctx.fill();
+        ctx.stroke();
+        // Plank grain lines along the length
+        ctx.strokeStyle = 'rgba(40, 20, 5, 0.4)';
+        ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
+        if (isHoriz) {
+          for (let li = 1; li < 3; li++) {
+            const gx = ssp.x - ww / 2 + ww * (li / 3);
+            ctx.beginPath(); ctx.moveTo(gx, ssp.y - wh / 2); ctx.lineTo(gx, ssp.y + wh / 2); ctx.stroke();
+          }
+        } else {
+          for (let li = 1; li < 3; li++) {
+            const gy = ssp.y - wh / 2 + wh * (li / 3);
+            ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2, gy); ctx.lineTo(ssp.x + ww / 2, gy); ctx.stroke();
+          }
+        }
+        // Company color strip
+        const wallCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        const stripSz = Math.max(1, 2 * zoom);
+        ctx.fillStyle = wallCompanyColor;
+        if (isHoriz) ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, stripSz);
+        else         ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, stripSz, wh);
+        // Damage darkening
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+        }
+        ctx.restore();
       }
     }
 
@@ -2521,16 +2610,40 @@ export class RenderSystem {
         const bw = sz * 0.88;
         const bh = sz * 0.62;
         ctx.strokeRect(ssp.x - bw / 2, ssp.y - bh / 2, bw, bh);
+      } else if (s.type === 'wall') {
+        const isHoriz = this.placedStructures.some(f =>
+          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        );
+        const THICK = 0.18;
+        const ww = isHoriz ? sz : sz * THICK;
+        const wh = isHoriz ? sz * THICK : sz;
+        ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
       }
       ctx.restore();
 
       // ── HP bar (hover only) ────────────────────────────────────────────
       {
+        const isHovWall = s.type === 'wall' && (() => {
+          const isHoriz = this.placedStructures.some(f =>
+            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+          );
+          return isHoriz ? sz * 0.18 : sz; // hh
+        })();
         const hpFrac  = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const barW    = s.type === 'workbench' ? sz * 0.88 : sz;
+        const barW    = s.type === 'workbench' ? sz * 0.88 : s.type === 'wall' ? (() => {
+          const isHoriz = this.placedStructures.some(f =>
+            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+          );
+          return isHoriz ? sz : sz * 0.18;
+        })() : sz;
         const barH    = Math.max(2, 3 * zoom);
         const barX    = ssp.x - barW / 2;
-        const structH = s.type === 'workbench' ? sz * 0.62 : sz;
+        const structH = s.type === 'workbench' ? sz * 0.62 : s.type === 'wall' ? (() => {
+          const isHoriz = this.placedStructures.some(f =>
+            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+          );
+          return isHoriz ? sz * 0.18 : sz;
+        })() : sz;
         const barY    = ssp.y + structH / 2 + Math.max(2, 2 * zoom);
         ctx.save();
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
@@ -2541,7 +2654,12 @@ export class RenderSystem {
       }
 
       // ── Tooltip ────────────────────────────────────────────────────────
-      const structH = s.type === 'workbench' ? sz * 0.62 : sz;
+      const structH = s.type === 'workbench' ? sz * 0.62 : s.type === 'wall' ? (() => {
+        const isHoriz = this.placedStructures.some(f =>
+          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        );
+        return isHoriz ? sz * 0.18 : sz;
+      })() : sz;
       const tipY = ssp.y - structH / 2 - 8;
 
       const inRange = player && player.carrierId === 0 && (() => {
@@ -2550,7 +2668,7 @@ export class RenderSystem {
         return dx * dx + dy * dy <= 110 * 110;
       })();
 
-      const label = s.type === 'wooden_floor' ? 'Wooden Floor' : 'Workbench';
+      const label = s.type === 'wooden_floor' ? 'Wooden Floor' : s.type === 'wall' ? 'Wall' : 'Workbench';
 
       // Determine ownership line text + color
       const COMPANY_NAMES: Record<number, string> = { 1: 'Pirates', 2: 'Navy', 99: 'Ghosts' };
@@ -2635,6 +2753,34 @@ export class RenderSystem {
         }
       }
       mx = bestX; my = bestY;
+    } else if (this.islandBuildKind === 'wall' && this.placedStructures.length > 0) {
+      // Snap to unoccupied edge midpoints of floor tiles
+      const HALF = TILE / 2; // 25 px
+      const SNAP_R = TILE * 0.6;
+      let bestDist2 = SNAP_R * SNAP_R;
+      let bestX = mx, bestY = my;
+      const EDGES = [
+        { dx: 0, dy: -HALF }, // N edge → horizontal
+        { dx: 0, dy:  HALF }, // S edge → horizontal
+        { dx: -HALF, dy: 0 }, // W edge → vertical
+        { dx:  HALF, dy: 0 }, // E edge → vertical
+      ];
+      for (const s of this.placedStructures) {
+        if (s.type !== 'wooden_floor') continue;
+        for (const e of EDGES) {
+          const nx = s.x + e.dx, ny = s.y + e.dy;
+          const occ = this.placedStructures.some(
+            w => w.type === 'wall' && Math.abs(w.x - nx) < 2 && Math.abs(w.y - ny) < 2
+          );
+          if (occ) continue;
+          const dist2 = (nx - mx) * (nx - mx) + (ny - my) * (ny - my);
+          if (dist2 < bestDist2) {
+            bestDist2 = dist2; bestX = nx; bestY = ny;
+            this._wallGhostHorizontal = (e.dy !== 0); // N/S edges → horizontal wall
+          }
+        }
+      }
+      mx = bestX; my = bestY;
     }
     this._snappedBuildPos = { x: mx, y: my };
 
@@ -2703,6 +2849,20 @@ export class RenderSystem {
       });
     }
 
+    // Wall needs to be at a floor tile edge midpoint
+    let noEdge = false;
+    let wallOccupied = false;
+    if (this.islandBuildKind === 'wall') {
+      wallOccupied = this.placedStructures.some(
+        w => w.type === 'wall' && Math.abs(w.x - mx) < 2 && Math.abs(w.y - my) < 2
+      );
+      noEdge = !this.placedStructures.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        return (Math.abs(mx - s.x) < 3 && Math.abs(Math.abs(my - s.y) - 25) < 3) ||
+               (Math.abs(my - s.y) < 3 && Math.abs(Math.abs(mx - s.x) - 25) < 3);
+      });
+    }
+
     // Enemy territory: any structure not belonging to the current company within 500 world px
     const myCompany = (this._localCompanyId ?? 0) as number;
     const enemyTerritory = this.placedStructures.some(s =>
@@ -2718,7 +2878,7 @@ export class RenderSystem {
         s.companyId === myCompany
       );
 
-    const invalid = tooFar || inWater || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany;
+    const invalid = tooFar || inWater || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
@@ -2728,8 +2888,13 @@ export class RenderSystem {
     ctx.strokeStyle = borderColor;
     ctx.lineWidth   = Math.max(1, 2 * zoom);
     ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
-    const ghostW = this.islandBuildKind === 'workbench' ? sz * 0.88 : sz;
-    const ghostH = this.islandBuildKind === 'workbench' ? sz * 0.62 : sz;
+    const WALL_THICK = 0.18;
+    const ghostW = this.islandBuildKind === 'workbench' ? sz * 0.88
+                 : this.islandBuildKind === 'wall' ? (this._wallGhostHorizontal ? sz : sz * WALL_THICK)
+                 : sz;
+    const ghostH = this.islandBuildKind === 'workbench' ? sz * 0.62
+                 : this.islandBuildKind === 'wall' ? (this._wallGhostHorizontal ? sz * WALL_THICK : sz)
+                 : sz;
     ctx.beginPath();
     ctx.rect(msp.x - ghostW / 2, msp.y - ghostH / 2, ghostW, ghostH);
     ctx.fill();
@@ -2747,11 +2912,11 @@ export class RenderSystem {
       ctx.fillText('IN WATER', msp.x, labelY);
     } else if (enemyTerritory) {
       ctx.fillStyle = '#ff3333';
-      ctx.fillText('ENEMY TERRITORY', msp.x, labelY);
+      ctx.fillText('ENEMY FLOOR', msp.x, labelY);
     } else if (blockedByTree) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('BLOCKED', msp.x, labelY);
-    } else if (overlaps) {
+    } else if (overlaps || wallOccupied) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('OCCUPIED', msp.x, labelY);
     } else if (tooFar) {
@@ -2763,9 +2928,14 @@ export class RenderSystem {
     } else if (noFloor) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('NEEDS FLOOR', msp.x, labelY);
+    } else if (noEdge) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('NEEDS FLOOR EDGE', msp.x, labelY);
     } else {
       ctx.fillStyle = '#aaffaa';
-      const label = this.islandBuildKind === 'wooden_floor' ? 'Wooden Floor' : 'Workbench';
+      const label = this.islandBuildKind === 'wooden_floor' ? 'Wooden Floor'
+                  : this.islandBuildKind === 'wall' ? 'Wall'
+                  : 'Workbench';
       ctx.fillText(label, msp.x, labelY);
     }
 

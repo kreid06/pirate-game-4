@@ -234,6 +234,7 @@ typedef enum {
     ITEM_AXE           = 15,
     ITEM_WOODEN_FLOOR  = 16,
     ITEM_WORKBENCH     = 17,
+    ITEM_WALL          = 18,
     ITEM_WOOD          = 22,
     ITEM_FIBER         = 23,
     ITEM_METAL         = 24,
@@ -244,6 +245,7 @@ typedef enum {
 typedef enum {
     STRUCT_WOODEN_FLOOR = 0,
     STRUCT_WORKBENCH    = 1,
+    STRUCT_WALL         = 2,
 } PlacedStructureType;
 
 typedef struct {

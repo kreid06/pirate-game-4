@@ -92,6 +92,17 @@ const RECIPES: Recipe[] = [
       { label: 'Metal', count: 5 },
     ],
   },
+  {
+    id: 'craft_wall',
+    outputName: 'Wall',
+    outputCount: 4,
+    symbol: '┃',
+    color: '#5c3a1a',
+    borderColor: '#2e1a08',
+    ingredients: [
+      { label: 'Wood', count: 6 },
+    ],
+  },
 ];
 
 // ── Layout ─────────────────────────────────────────────────────────────────

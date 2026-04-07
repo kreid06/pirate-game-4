@@ -118,7 +118,7 @@ export interface Cannonball {
  */
 export interface PlacedStructure {
   id: number;
-  type: 'wooden_floor' | 'workbench';
+  type: 'wooden_floor' | 'workbench' | 'wall';
   islandId: number;
   x: number;
   y: number;
