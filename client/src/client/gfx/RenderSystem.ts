@@ -2382,14 +2382,23 @@ export class RenderSystem {
       const isHovered = this._hoveredStructure?.id === s.id;
 
       if (s.type === 'wooden_floor') {
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        // Darken the fill as hp drops (up to 50% darker at 0 hp)
+        const dmgDarken = (1 - hpFrac) * 0.5;
+        const baseColor = isHovered ? '#d09a3a' : '#b8832b';
         ctx.save();
-        ctx.fillStyle   = isHovered ? '#d09a3a' : '#b8832b';
+        ctx.fillStyle   = baseColor;
         ctx.strokeStyle = '#7a5520';
         ctx.lineWidth   = Math.max(1, 2 * zoom);
         ctx.beginPath();
         ctx.rect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
         ctx.fill();
         ctx.stroke();
+        // Damage darkening overlay
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+        }
         // Plank lines
         ctx.strokeStyle = 'rgba(90, 55, 15, 0.5)';
         ctx.lineWidth   = Math.max(0.5, 1 * zoom);
@@ -2405,13 +2414,6 @@ export class RenderSystem {
         const stripH = Math.max(2, 3 * zoom);
         ctx.fillStyle = floorCompanyColor;
         ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, stripH);
-        // HP bar along the bottom edge
-        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const hpBarH = Math.max(2, 3 * zoom);
-        ctx.fillStyle = 'rgba(0,0,0,0.45)';
-        ctx.fillRect(ssp.x - sz / 2, ssp.y + sz / 2 - hpBarH, sz, hpBarH);
-        ctx.fillStyle = hpFrac > 0.5 ? '#66dd44' : hpFrac > 0.25 ? '#ffaa22' : '#ee3322';
-        ctx.fillRect(ssp.x - sz / 2, ssp.y + sz / 2 - hpBarH, sz * hpFrac, hpBarH);
         ctx.restore();
       } else if (s.type === 'workbench') {
         // Top-down view: wide rectangular bench filling most of the floor tile
@@ -2485,13 +2487,13 @@ export class RenderSystem {
         const wbStripH = Math.max(2, 3 * zoom);
         ctx.fillStyle = wbCompanyColor;
         ctx.fillRect(bx, by, bw, wbStripH);
-        // HP bar along the bottom edge
+        // Damage darkening overlay
         const wbHpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const wbHpBarH = Math.max(2, 3 * zoom);
-        ctx.fillStyle = 'rgba(0,0,0,0.45)';
-        ctx.fillRect(bx, by + bh - wbHpBarH, bw, wbHpBarH);
-        ctx.fillStyle = wbHpFrac > 0.5 ? '#66dd44' : wbHpFrac > 0.25 ? '#ffaa22' : '#ee3322';
-        ctx.fillRect(bx, by + bh - wbHpBarH, bw * wbHpFrac, wbHpBarH);
+        const wbDmgDarken = (1 - wbHpFrac) * 0.5;
+        if (wbDmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${wbDmgDarken.toFixed(2)})`;
+          ctx.fillRect(bx, by, bw, bh);
+        }
 
         ctx.restore();
       }
@@ -2515,6 +2517,22 @@ export class RenderSystem {
       }
       ctx.restore();
 
+      // ── HP bar (hover only) ────────────────────────────────────────────
+      {
+        const hpFrac  = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const barW    = s.type === 'workbench' ? sz * 0.88 : sz;
+        const barH    = Math.max(2, 3 * zoom);
+        const barX    = ssp.x - barW / 2;
+        const structH = s.type === 'workbench' ? sz * 0.62 : sz;
+        const barY    = ssp.y + structH / 2 + Math.max(2, 2 * zoom);
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(barX, barY, barW, barH);
+        ctx.fillStyle = hpFrac > 0.5 ? '#66dd44' : hpFrac > 0.25 ? '#ffaa22' : '#ee3322';
+        ctx.fillRect(barX, barY, barW * hpFrac, barH);
+        ctx.restore();
+      }
+
       // ── Tooltip ────────────────────────────────────────────────────────
       const structH = s.type === 'workbench' ? sz * 0.62 : sz;
       const tipY = ssp.y - structH / 2 - 8;
@@ -2527,6 +2545,17 @@ export class RenderSystem {
 
       const label = s.type === 'wooden_floor' ? 'Wooden Floor' : 'Workbench';
 
+      // Determine ownership line text + color
+      const COMPANY_NAMES: Record<number, string> = { 1: 'Pirates', 2: 'Navy', 99: 'Ghosts' };
+      let ownerText: string;
+      if (s.companyId !== 0 && COMPANY_NAMES[s.companyId]) {
+        ownerText = COMPANY_NAMES[s.companyId];
+      } else if (s.placerName) {
+        ownerText = `Player: ${s.placerName}`;
+      } else {
+        ownerText = 'Unclaimed';
+      }
+
       ctx.save();
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'bottom';
@@ -2536,12 +2565,18 @@ export class RenderSystem {
 
       const lineH = Math.max(12, 14 * zoom);
       ctx.font = `${Math.max(9, Math.round(10 * zoom))}px Consolas, monospace`;
+
+      // Owner line (colored by faction)
+      ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
+      ctx.fillText(ownerText, ssp.x, tipY - lineH);
+
+      // Interact hint (shifted up one more line)
       if (inRange) {
         ctx.fillStyle = 'rgba(200, 255, 180, 0.95)';
-        ctx.fillText('Hold [E] to interact', ssp.x, tipY - lineH);
+        ctx.fillText('Hold [E] to interact', ssp.x, tipY - lineH * 2);
       } else {
         ctx.fillStyle = 'rgba(180, 180, 160, 0.75)';
-        ctx.fillText('(walk closer)', ssp.x, tipY - lineH);
+        ctx.fillText('(walk closer)', ssp.x, tipY - lineH * 2);
       }
       ctx.restore();
     }

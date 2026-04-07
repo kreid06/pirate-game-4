@@ -4607,19 +4607,23 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     placed_structures[placed_structure_count].max_hp     = 100;
     placed_structures[placed_structure_count].hp         = 100;
     placed_structures[placed_structure_count].placer_id  = player->player_id;
+    strncpy(placed_structures[placed_structure_count].placer_name, player->name,
+            sizeof(placed_structures[placed_structure_count].placer_name) - 1);
+    placed_structures[placed_structure_count].placer_name[
+        sizeof(placed_structures[placed_structure_count].placer_name) - 1] = '\0';
     placed_structure_count++;
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
              player->player_id, stype, new_id, px, py, target_island_id);
 
     /* Broadcast to all clients */
-    char bcast[256];
+    char bcast[384];
     snprintf(bcast, sizeof(bcast),
              "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-             "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u}",
+             "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"}",
              new_id, stype, target_island_id, px, py,
-             (unsigned)player->company_id, 100u, 100u);
+             (unsigned)player->company_id, 100u, 100u, player->name);
     websocket_server_broadcast(bcast);
     return; /* already sent via broadcast */
 
@@ -6883,14 +6887,15 @@ int websocket_server_update(struct Sim* sim) {
                                             hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
                                                               "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                               "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                              "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u}",
+                                                              "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"}",
                                                               hs_sfirst ? "" : ",",
                                                               placed_structures[si].id, hs_stype,
                                                               placed_structures[si].island_id,
                                                               placed_structures[si].x, placed_structures[si].y,
                                                               (unsigned)placed_structures[si].company_id,
                                                               (unsigned)placed_structures[si].hp,
-                                                              (unsigned)placed_structures[si].max_hp);
+                                                              (unsigned)placed_structures[si].max_hp,
+                                                              placed_structures[si].placer_name);
                                             hs_sfirst = false;
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp, "]}");
@@ -9367,7 +9372,7 @@ int websocket_server_update(struct Sim* sim) {
                                         spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                          "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                         "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u}",
+                                                         "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"}",
                                                          sfirst ? "" : ",",
                                                          placed_structures[si].id,
                                                          stype_str,
@@ -9376,7 +9381,8 @@ int websocket_server_update(struct Sim* sim) {
                                                          placed_structures[si].y,
                                                          (unsigned)placed_structures[si].company_id,
                                                          (unsigned)placed_structures[si].hp,
-                                                         (unsigned)placed_structures[si].max_hp);
+                                                         (unsigned)placed_structures[si].max_hp,
+                                                         placed_structures[si].placer_name);
                                         sfirst = false;
                                     }
                                     spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos, "]}");
@@ -9404,14 +9410,15 @@ int websocket_server_update(struct Sim* sim) {
                                     gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
                                                    "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                    "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                   "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u}",
+                                                   "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"}",
                                                    gfirst ? "" : ",",
                                                    placed_structures[si].id, gs_type,
                                                    placed_structures[si].island_id,
                                                    placed_structures[si].x, placed_structures[si].y,
                                                    (unsigned)placed_structures[si].company_id,
                                                    (unsigned)placed_structures[si].hp,
-                                                   (unsigned)placed_structures[si].max_hp);
+                                                   (unsigned)placed_structures[si].max_hp,
+                                                   placed_structures[si].placer_name);
                                     gfirst = false;
                                 }
                                 gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp, "]}");

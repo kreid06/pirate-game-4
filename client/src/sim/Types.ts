@@ -122,9 +122,10 @@ export interface PlacedStructure {
   islandId: number;
   x: number;
   y: number;
-  companyId: number;  // COMPANY_* — faction that owns this structure (0 = neutral)
-  hp: number;         // current hit points
-  maxHp: number;      // maximum hit points
+  companyId: number;   // COMPANY_* — faction that owns this structure (0 = neutral)
+  hp: number;          // current hit points
+  maxHp: number;       // maximum hit points
+  placerName: string;  // display name of the player who built this
 }
 
 // Company identifiers (mirror server COMPANY_* constants)

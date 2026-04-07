@@ -2055,6 +2055,7 @@ export class NetworkManager {
           companyId: s.company_id ?? 0,
           hp:        s.hp     ?? 100,
           maxHp:     s.max_hp ?? 100,
+          placerName: s.placer_name ?? '',
         }));
         this.onStructuresList?.(structs);
         break;
@@ -2070,6 +2071,7 @@ export class NetworkManager {
           companyId: message.company_id ?? 0,
           hp:        message.hp     ?? 100,
           maxHp:     message.max_hp ?? 100,
+          placerName: message.placer_name ?? '',
         };
         this.onStructurePlaced?.(sp);
         break;
