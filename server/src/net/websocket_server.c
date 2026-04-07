@@ -6566,6 +6566,19 @@ static void check_projectile_static_collisions(struct Sim* sim) {
         float py = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
         bool removed = false;
 
+        /* ── Island broad-phase: skip projectiles that are out at sea ────── */
+        /* Only run structure/tree checks when the cannonball is within the
+         * outer boundary of at least one island (beach_radius + max_bump). */
+        bool near_island = false;
+        for (int ii = 0; ii < ISLAND_COUNT && !near_island; ii++) {
+            const IslandDef* isl = &ISLAND_PRESETS[ii];
+            float broad_r = isl->beach_radius_px + isl->beach_max_bump;
+            float idx = px - isl->x;
+            float idy = py - isl->y;
+            if (idx * idx + idy * idy <= broad_r * broad_r) near_island = true;
+        }
+        if (!near_island) { i++; continue; }
+
         /* ── Test vs. placed structures ──────────────────────────────────── */
         for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
             PlacedStructure* s = &placed_structures[si];
