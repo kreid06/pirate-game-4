@@ -4475,14 +4475,20 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
             const IslandDef *isl = &ISLAND_PRESETS[ii];
             float dx     = px - isl->x, dy = py - isl->y;
             float dist_sq = dx*dx + dy*dy;
-            float broad_r = isl->beach_radius_px + isl->beach_max_bump;
-            if (dist_sq >= broad_r * broad_r) continue;
-            float angle    = atan2f(dy, dx);
-            float narrow_r = island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle);
-            if (dist_sq < narrow_r * narrow_r) {
-                target_island_id = (uint32_t)isl->id;
-                break;
+            bool on_isl;
+            if (isl->vertex_count > 0) {
+                on_isl = (dist_sq < isl->poly_bound_r * isl->poly_bound_r)
+                      && island_poly_contains(isl, px, py);
+            } else {
+                float broad_r = isl->beach_radius_px + isl->beach_max_bump;
+                if (dist_sq >= broad_r * broad_r) { on_isl = false; }
+                else {
+                    float angle   = atan2f(dy, dx);
+                    float narrow_r = island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle);
+                    on_isl = (dist_sq < narrow_r * narrow_r);
+                }
             }
+            if (on_isl) { target_island_id = (uint32_t)isl->id; break; }
         }
     }
     if (target_island_id == 0) {
@@ -6816,7 +6822,8 @@ static void check_projectile_static_collisions(struct Sim* sim) {
         bool near_island = false;
         for (int ii = 0; ii < ISLAND_COUNT && !near_island; ii++) {
             const IslandDef* isl = &ISLAND_PRESETS[ii];
-            float broad_r = isl->beach_radius_px + isl->beach_max_bump;
+            float broad_r = (isl->vertex_count > 0) ? isl->poly_bound_r
+                                                       : (isl->beach_radius_px + isl->beach_max_bump);
             float idx = px - isl->x;
             float idy = py - isl->y;
             if (idx * idx + idy * idy <= broad_r * broad_r) near_island = true;
@@ -7327,16 +7334,27 @@ int websocket_server_update(struct Sim* sim) {
 
                                     // Send ISLANDS so client can render island geometry
                                     {
-                                        static char hs_islands_buf[4096];
+                                        static char hs_islands_buf[8192];
                                         int hsi_pos = 0;
                                         hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
                                                             "{\"type\":\"ISLANDS\",\"islands\":[");
                                         for (int hii = 0; hii < ISLAND_COUNT; hii++) {
                                             const IslandDef *isl = &ISLAND_PRESETS[hii];
                                             hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
-                                                                "%s{\"id\":%d,\"x\":%.1f,\"y\":%.1f,\"preset\":\"%s\",\"resources\":[",
+                                                                "%s{\"id\":%d,\"x\":%.1f,\"y\":%.1f,\"preset\":\"%s\"",
                                                                 hii ? "," : "",
                                                                 isl->id, isl->x, isl->y, isl->preset);
+                                            if (isl->vertex_count > 0) {
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"vertices\":[");
+                                                for (int vi = 0; vi < isl->vertex_count; vi++) {
+                                                    hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                                        "%s{\"x\":%.1f,\"y\":%.1f}",
+                                                                        vi ? "," : "",
+                                                                        isl->x + isl->vx[vi], isl->y + isl->vy[vi]);
+                                                }
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
+                                            }
+                                            hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"resources\":[");
                                             for (int hri = 0; hri < isl->resource_count; hri++) {
                                                 const IslandResource *r = &isl->resources[hri];
                                                 hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
@@ -7347,7 +7365,7 @@ int websocket_server_update(struct Sim* sim) {
                                             hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]}");
                                         }
                                         hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]}");
-                                        char hs_isl_frame[4352];
+                                        char hs_isl_frame[8704];
                                         size_t hs_isl_len = websocket_create_frame(
                                             WS_OPCODE_TEXT, hs_islands_buf, (size_t)hsi_pos,
                                             hs_isl_frame, sizeof(hs_isl_frame));
@@ -9818,16 +9836,27 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 // Send ISLANDS
                                 {
-                                    static char islands_buf[4096];
+                                    static char islands_buf[8192];
                                     int pos = 0;
                                     pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
                                                     "{\"type\":\"ISLANDS\",\"islands\":[");
                                     for (int ii = 0; ii < ISLAND_COUNT; ii++) {
                                         const IslandDef *isl = &ISLAND_PRESETS[ii];
                                         pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
-                                                        "%s{\"id\":%d,\"x\":%.1f,\"y\":%.1f,\"preset\":\"%s\",\"resources\":[",
+                                                        "%s{\"id\":%d,\"x\":%.1f,\"y\":%.1f,\"preset\":\"%s\"",
                                                         ii ? "," : "",
                                                         isl->id, isl->x, isl->y, isl->preset);
+                                        if (isl->vertex_count > 0) {
+                                            pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, ",\"vertices\":[");
+                                            for (int vi = 0; vi < isl->vertex_count; vi++) {
+                                                pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
+                                                                "%s{\"x\":%.1f,\"y\":%.1f}",
+                                                                vi ? "," : "",
+                                                                isl->x + isl->vx[vi], isl->y + isl->vy[vi]);
+                                            }
+                                            pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]");
+                                        }
+                                        pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, ",\"resources\":[");
                                         for (int ri = 0; ri < isl->resource_count; ri++) {
                                             const IslandResource *r = &isl->resources[ri];
                                             pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
@@ -9838,7 +9867,7 @@ int websocket_server_update(struct Sim* sim) {
                                         pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
                                     }
                                     pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
-                                    char isl_frame[4352];
+                                    char isl_frame[8704];
                                     size_t isl_frame_len = websocket_create_frame(
                                         WS_OPCODE_TEXT, islands_buf, (size_t)pos,
                                         isl_frame, sizeof(isl_frame));
@@ -11531,10 +11560,17 @@ void websocket_server_tick(float dt) {
                                 float dx = new_x - isl_mv->x;
                                 float dy = new_y - isl_mv->y;
                                 float dist_sq = dx * dx + dy * dy;
-                                float angle   = atan2f(dy, dx);
-                                float beach_r = island_boundary_r(isl_mv->beach_radius_px,
-                                                                  isl_mv->beach_bumps, angle);
-                                if (dist_sq > beach_r * beach_r) {
+                                bool still_inside;
+                                if (isl_mv->vertex_count > 0) {
+                                    still_inside = island_poly_contains(isl_mv, new_x, new_y);
+                                } else {
+                                    float angle   = atan2f(dy, dx);
+                                    float beach_r = island_boundary_r(isl_mv->beach_radius_px,
+                                                                      isl_mv->beach_bumps, angle);
+                                    still_inside = (dist_sq <= beach_r * beach_r);
+                                }
+                                (void)dist_sq;
+                                if (!still_inside) {
                                     /* Player walked off the island — transition to swimming */
                                     ws_player->on_island_id = 0;
                                     ws_player->movement_state = PLAYER_STATE_SWIMMING;
@@ -11680,18 +11716,26 @@ void websocket_server_tick(float dt) {
                     /* Island enter/leave detection (every tick, all non-ship players) */
                     float wx = ws_player->x, wy = ws_player->y;
                     if (ws_player->on_island_id == 0) {
-                        /* Entering: broad phase → narrow angle-sampled BEACH boundary */
+                        /* Entering: broad phase → narrow BEACH boundary (bump-circle or polygon) */
                         for (int ii = 0; ii < ISLAND_COUNT; ii++) {
                             const IslandDef *isl = &ISLAND_PRESETS[ii];
                             float dx = wx - isl->x, dy = wy - isl->y;
                             float dist_sq = dx*dx + dy*dy;
-                            float broad_r = isl->beach_radius_px + isl->beach_max_bump;
-                            if (dist_sq >= broad_r * broad_r) continue;
-                            /* Narrow phase against beach boundary */
-                            float angle    = atan2f(dy, dx);
-                            float narrow_r = island_boundary_r(isl->beach_radius_px,
-                                                               isl->beach_bumps, angle);
-                            if (dist_sq < narrow_r * narrow_r) {
+                            bool entering;
+                            if (isl->vertex_count > 0) {
+                                entering = (dist_sq < isl->poly_bound_r * isl->poly_bound_r)
+                                        && island_poly_contains(isl, wx, wy);
+                            } else {
+                                float broad_r = isl->beach_radius_px + isl->beach_max_bump;
+                                if (dist_sq >= broad_r * broad_r) { entering = false; }
+                                else {
+                                    float angle   = atan2f(dy, dx);
+                                    float narrow_r = island_boundary_r(isl->beach_radius_px,
+                                                                       isl->beach_bumps, angle);
+                                    entering = (dist_sq < narrow_r * narrow_r);
+                                }
+                            }
+                            if (entering) {
                                 ws_player->on_island_id = (uint32_t)isl->id;
                                 ws_player->movement_state = PLAYER_STATE_WALKING;
                                 sim_player->velocity.x = 0;
@@ -11714,17 +11758,25 @@ void websocket_server_tick(float dt) {
                             float dx = wx - isl->x, dy = wy - isl->y;
                             float dist_sq = dx*dx + dy*dy;
                             /* Broad phase: skip narrow test if clearly still inside */
-                            float inner_r = isl->beach_radius_px - isl->beach_max_bump;
-                            if (dist_sq > inner_r * inner_r) {
-                                float angle    = atan2f(dy, dx);
-                                float narrow_r = island_boundary_r(isl->beach_radius_px,
-                                                                   isl->beach_bumps, angle)
-                                                 + 10.0f; /* 10px hysteresis */
-                                if (dist_sq > narrow_r * narrow_r) {
+                            bool still_on;
+                            if (isl->vertex_count > 0) {
+                                still_on = island_poly_contains(isl, wx, wy);
+                            } else {
+                                still_on = true;
+                                float inner_r = isl->beach_radius_px - isl->beach_max_bump;
+                                if (dist_sq > inner_r * inner_r) {
+                                    float angle   = atan2f(dy, dx);
+                                    float narrow_r = island_boundary_r(isl->beach_radius_px,
+                                                                       isl->beach_bumps, angle)
+                                                     + 10.0f; /* 10px hysteresis */
+                                    still_on = (dist_sq <= narrow_r * narrow_r);
+                                }
+                            }
+                            if (!still_on) {
                                     ws_player->on_island_id = 0;
                                     ws_player->movement_state = PLAYER_STATE_SWIMMING;
                                     log_info("\U0001F30A Player %u left island", ws_player->player_id);
-                                }
+                            }
                             }
                         }
                     }

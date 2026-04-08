@@ -23,6 +23,7 @@
 #define ISLAND_MAX_RESOURCES 16
 #define ISLAND_MAX_COUNT     16
 #define ISLAND_BUMP_COUNT    16
+#define ISLAND_MAX_VERTS     64
 
 /* Resource types — must match client-side IslandResource['type'] literals */
 #define ISLAND_RES_WOOD  "wood"
@@ -47,6 +48,17 @@ typedef struct {
     const char    *preset;                         /* Visual preset name sent to clients */
     IslandResource resources[ISLAND_MAX_RESOURCES];
     int            resource_count;
+
+    /* ── Polygon island (vertex_count > 0 overrides bump-circle) ──────────
+     * Vertices are offsets from (x, y) in world pixels.  When vertex_count
+     * is nonzero the bump-circle fields (beach_radius_px etc.) are ignored
+     * for player-walk and structure-placement checks.
+     */
+    int   vertex_count;                 /* 0 = bump-circle mode */
+    float vx[ISLAND_MAX_VERTS];         /* vertex X offsets from centre (world px) */
+    float vy[ISLAND_MAX_VERTS];         /* vertex Y offsets from centre (world px) */
+    float poly_bound_r;                 /* broad-phase radius = max dist to vertex + margin */
+    float grass_poly_scale;             /* inner-grass polygon scale (e.g. 0.78) */
 } IslandDef;
 
 /**
@@ -65,6 +77,28 @@ static inline float island_boundary_r(
     int   i1 = (i0 + 1) % ISLAND_BUMP_COUNT;
     float f  = t - (int)t;
     return base_r + bumps[i0] + f * (bumps[i1] - bumps[i0]);
+}
+
+/**
+ * Ray-cast point-in-polygon test for polygon-mode islands.
+ * px, py are world-space coordinates (client pixels).
+ * Returns true if the point lies inside the beach polygon.
+ */
+static inline bool island_poly_contains(
+    const IslandDef *isl, float px, float py)
+{
+    int   n  = isl->vertex_count;
+    bool  inside = false;
+    float rx = px - isl->x;   /* relative to island centre */
+    float ry = py - isl->y;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+        float xi = isl->vx[i], yi = isl->vy[i];
+        float xj = isl->vx[j], yj = isl->vy[j];
+        if (((yi > ry) != (yj > ry)) &&
+            (rx < (xj - xi) * (ry - yi) / (yj - yi) + xi))
+            inside = !inside;
+    }
+    return inside;
 }
 
 /* ── World island list (server-authoritative) ───────────────────────────── */
@@ -95,6 +129,48 @@ static const IslandDef ISLAND_PRESETS[] = {
             { .ox =  -5.0f, .oy = -90.0f, .type = ISLAND_RES_ROCK  },
             { .ox =  60.0f, .oy =  75.0f, .type = ISLAND_RES_ROCK  },
             { .ox = -75.0f, .oy = -15.0f, .type = ISLAND_RES_ROCK  },
+        },
+    },
+    {
+        /* ── Giant C-shaped island — opens east, width ~1800px ────────────
+         * Polygon vertices are offsets from centre (3500, 2500).
+         * The bay opens to the east; approach from the east to sail in.
+         */
+        .id              = 2,
+        .x               = 3500.0f,
+        .y               = 2500.0f,
+        /* beach_radius_px / grass_radius_px unused — polygon mode */
+        .beach_radius_px = 0.0f,
+        .grass_radius_px = 0.0f,
+        .beach_bumps     = {0},
+        .grass_bumps     = {0},
+        .beach_max_bump  = 0.0f,
+        .grass_max_bump  = 0.0f,
+        .preset          = "continental",
+        /* 24-vertex coastline traced clockwise in screen coords */
+        .vertex_count    = 24,
+        .poly_bound_r    = 920.0f,
+        .grass_poly_scale = 0.78f,
+        .vx = {  650,  500,  200,    0, -300, -550, -700, -800,
+                -700, -550, -300,    0,  200,  500,  650,  500,
+                 350,  250,  200,  150,  200,  250,  350,  500 },
+        .vy = { -600, -700, -780, -800, -750, -550, -250,    0,
+                 250,  550,  750,  800,  780,  700,  600,  550,
+                 500,  350,  200,    0, -200, -350, -500, -550 },
+        .resource_count  = 12,
+        .resources = {
+            { .ox = -500.0f, .oy =    0.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -400.0f, .oy = -350.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -400.0f, .oy =  350.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -600.0f, .oy = -150.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -600.0f, .oy =  150.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -300.0f, .oy = -600.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -300.0f, .oy =  600.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -500.0f, .oy = -400.0f, .type = ISLAND_RES_FIBER },
+            { .ox = -500.0f, .oy =  400.0f, .type = ISLAND_RES_FIBER },
+            { .ox = -350.0f, .oy =    0.0f, .type = ISLAND_RES_FIBER },
+            { .ox = -650.0f, .oy =    0.0f, .type = ISLAND_RES_ROCK  },
+            { .ox = -550.0f, .oy = -500.0f, .type = ISLAND_RES_ROCK  },
         },
     },
 };

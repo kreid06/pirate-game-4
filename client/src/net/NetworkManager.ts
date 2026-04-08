@@ -2046,6 +2046,9 @@ export class NetworkManager {
             oy:   r.oy   ?? 0,
             type: (r.type ?? 'wood') as IslandResource['type'],
           })),
+          vertices: isl.vertices
+            ? (isl.vertices as any[]).map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 }))
+            : undefined,
         }));
         this.onIslands?.(islands);
         break;

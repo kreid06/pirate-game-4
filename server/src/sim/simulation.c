@@ -304,6 +304,11 @@ void sim_update_projectiles(struct Sim* sim, q16_t dt) {
 static void handle_island_collisions(struct Sim *sim) {
     for (int ii = 0; ii < ISLAND_COUNT; ii++) {
         const IslandDef *isl = &ISLAND_PRESETS[ii];
+        /* TODO: polygon-island ship collision not yet implemented.
+         * Polygon islands use point-in-polygon for player walking and
+         * structure placement; ship hull collision still needs a polygon
+         * push algorithm.  Skip until implemented. */
+        if (isl->vertex_count > 0) continue;
         float island_cx = CLIENT_TO_SERVER(isl->x);
         float island_cy = CLIENT_TO_SERVER(isl->y);
         /* Broad-phase radius: island beach + max bump, per-ship bounding radius added below */

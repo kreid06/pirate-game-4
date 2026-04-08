@@ -187,6 +187,7 @@ export class RenderSystem {
     beachColors: [string, string, string];  // radial gradient 0/0.65/1.0
     grassColors: [string, string, string];  // radial gradient 0/0.7/1.0
     borderColor: string;
+    grassPolyScale?: number;  // for polygon islands: inner-grass scale (e.g. 0.78)
   }> = {
     tropical: {
       beachRadius: 185, grassRadius: 148,
@@ -228,6 +229,16 @@ export class RenderSystem {
       grassColors: ['#284a1a', '#345e24', '#40722e'],
       borderColor: '#887048',
     },
+    continental: {
+      /* Polygon island — beachRadius/grassRadius/bumps unused for rendering.
+       * Colors and grassPolyScale are used instead.                           */
+      beachRadius: 0, grassRadius: 0,
+      beachBumps:  [], grassBumps:  [],
+      beachColors: ['#c0a870', '#cbb880', '#ddd0a8'],
+      grassColors: ['#3a5e22', '#4a7230', '#5a883e'],
+      borderColor: '#8a7040',
+      grassPolyScale: 0.78,
+    },
   };
 
   /** Default fallback island — shown before the server sends ISLANDS. */
@@ -248,15 +259,16 @@ export class RenderSystem {
   private islands: Array<{
     id: number; x: number; y: number; preset: string;
     resources: Array<{ ox: number; oy: number; type: string }>;
+    vertices?: { x: number; y: number }[];
   }> = [RenderSystem.DEFAULT_ISLAND];
 
   /** Called by ClientApplication when the server sends the ISLANDS message. */
-  setIslands(islands: Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string }> }>): void {
+  setIslands(islands: Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string }>; vertices?: { x: number; y: number }[] }>): void {
     this.islands = islands;
   }
 
   /** Returns the live island list (for proximity checks in ClientApplication). */
-  getIslands(): Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string }> }> {
+  getIslands(): Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string }>; vertices?: { x: number; y: number }[] }> {
     return this.islands;
   }
 
@@ -2100,6 +2112,21 @@ export class RenderSystem {
     ctx.closePath();
   }
 
+  /** Trace a closed polygon path in screen space from an array of world-space vertices. */
+  private traceIslandPolygon(
+    camera: Camera,
+    vertices: { x: number; y: number }[],
+  ): void {
+    const ctx = this.ctx;
+    ctx.beginPath();
+    for (let i = 0; i < vertices.length; i++) {
+      const sp = camera.worldToScreen(Vec2.from(vertices[i].x, vertices[i].y));
+      if (i === 0) ctx.moveTo(sp.x, sp.y);
+      else         ctx.lineTo(sp.x, sp.y);
+    }
+    ctx.closePath();
+  }
+
   private drawIsland(camera: Camera): void {
     const zoom = camera.getState().zoom;
     // Reset per-frame hovered resource nodes
@@ -2107,33 +2134,70 @@ export class RenderSystem {
     this._hoveredFiberPlant = null;
     this._hoveredRock       = null;
     for (const isl of this.islands) {
-      if (!camera.isWorldPositionVisible(Vec2.from(isl.x, isl.y), 280)) continue;
       const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
-      const sc     = camera.worldToScreen(Vec2.from(isl.x, isl.y));
-      const ctx    = this.ctx;
+      // Visibility check: adapt radius to polygon bound or bump-circle
+      const visR = isl.vertices
+        ? Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y))) + 50
+        : (preset.beachRadius + Math.max(0, ...preset.beachBumps.map(Math.abs)) + 20);
+      if (!camera.isWorldPositionVisible(Vec2.from(isl.x, isl.y), visR)) continue;
+      const sc  = camera.worldToScreen(Vec2.from(isl.x, isl.y));
+      const ctx = this.ctx;
 
       ctx.save();
 
-      // ── Sandy beach ──────────────────────────────────────────────────────────
-      this.traceIslandBlob(camera, isl.x, isl.y, preset.beachRadius, preset.beachBumps);
-      const beachGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, preset.beachRadius * zoom * 1.1);
-      beachGrad.addColorStop(0.0,  preset.beachColors[0]);
-      beachGrad.addColorStop(0.65, preset.beachColors[1]);
-      beachGrad.addColorStop(1.0,  preset.beachColors[2]);
-      ctx.fillStyle = beachGrad;
-      ctx.fill();
-      ctx.strokeStyle = preset.borderColor;
-      ctx.lineWidth   = Math.max(1, 2 * zoom);
-      ctx.stroke();
+      if (isl.vertices) {
+        // ── Polygon island ─────────────────────────────────────────────────────
+        const polyBoundR = Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
 
-      // ── Grass interior ───────────────────────────────────────────────────────
-      this.traceIslandBlob(camera, isl.x, isl.y, preset.grassRadius, preset.grassBumps);
-      const grassGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, preset.grassRadius * zoom);
-      grassGrad.addColorStop(0.0, preset.grassColors[0]);
-      grassGrad.addColorStop(0.7, preset.grassColors[1]);
-      grassGrad.addColorStop(1.0, preset.grassColors[2]);
-      ctx.fillStyle = grassGrad;
-      ctx.fill();
+        // Beach
+        this.traceIslandPolygon(camera, isl.vertices);
+        const beachGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, polyBoundR * zoom * 1.05);
+        beachGrad.addColorStop(0.0,  preset.beachColors[0]);
+        beachGrad.addColorStop(0.65, preset.beachColors[1]);
+        beachGrad.addColorStop(1.0,  preset.beachColors[2]);
+        ctx.fillStyle = beachGrad;
+        ctx.fill();
+        ctx.strokeStyle = preset.borderColor;
+        ctx.lineWidth   = Math.max(1, 2 * zoom);
+        ctx.stroke();
+
+        // Grass interior (polygon scaled toward island centre)
+        const gScale = preset.grassPolyScale ?? 0.78;
+        const grassVerts = isl.vertices.map(v => ({
+          x: isl.x + (v.x - isl.x) * gScale,
+          y: isl.y + (v.y - isl.y) * gScale,
+        }));
+        this.traceIslandPolygon(camera, grassVerts);
+        const grassBoundR = polyBoundR * gScale;
+        const grassGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, grassBoundR * zoom);
+        grassGrad.addColorStop(0.0, preset.grassColors[0]);
+        grassGrad.addColorStop(0.7, preset.grassColors[1]);
+        grassGrad.addColorStop(1.0, preset.grassColors[2]);
+        ctx.fillStyle = grassGrad;
+        ctx.fill();
+      } else {
+        // ── Bump-circle island ────────────────────────────────────────────────
+        // Sandy beach
+        this.traceIslandBlob(camera, isl.x, isl.y, preset.beachRadius, preset.beachBumps);
+        const beachGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, preset.beachRadius * zoom * 1.1);
+        beachGrad.addColorStop(0.0,  preset.beachColors[0]);
+        beachGrad.addColorStop(0.65, preset.beachColors[1]);
+        beachGrad.addColorStop(1.0,  preset.beachColors[2]);
+        ctx.fillStyle = beachGrad;
+        ctx.fill();
+        ctx.strokeStyle = preset.borderColor;
+        ctx.lineWidth   = Math.max(1, 2 * zoom);
+        ctx.stroke();
+
+        // Grass interior
+        this.traceIslandBlob(camera, isl.x, isl.y, preset.grassRadius, preset.grassBumps);
+        const grassGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, preset.grassRadius * zoom);
+        grassGrad.addColorStop(0.0, preset.grassColors[0]);
+        grassGrad.addColorStop(0.7, preset.grassColors[1]);
+        grassGrad.addColorStop(1.0, preset.grassColors[2]);
+        ctx.fillStyle = grassGrad;
+        ctx.fill();
+      }
 
       ctx.restore();
 
@@ -2971,14 +3035,29 @@ export class RenderSystem {
     // Water check: is snapped pos over any island's beach area?
     let inWater = true;
     for (const isl of this.islands) {
-      const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
-      const dx = mx - isl.x, dy = my - isl.y;
-      const distSq = dx * dx + dy * dy;
-      const broadR = preset.beachRadius + Math.max(...preset.beachBumps.map(Math.abs));
-      if (distSq >= broadR * broadR) continue;
-      const angle   = Math.atan2(dy, dx);
-      const narrowR = sampleBoundary(preset.beachRadius, preset.beachBumps, angle);
-      if (distSq < narrowR * narrowR) { inWater = false; break; }
+      if (isl.vertices) {
+        // Polygon island: ray-cast point-in-polygon
+        let inside = false;
+        const verts = isl.vertices;
+        const n = verts.length;
+        for (let i = 0, j = n - 1; i < n; j = i++) {
+          const xi = verts[i].x, yi = verts[i].y;
+          const xj = verts[j].x, yj = verts[j].y;
+          if ((yi > my) !== (yj > my) && mx < (xj - xi) * (my - yi) / (yj - yi) + xi)
+            inside = !inside;
+        }
+        if (inside) { inWater = false; break; }
+      } else {
+        // Bump-circle island
+        const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+        const dx = mx - isl.x, dy = my - isl.y;
+        const distSq = dx * dx + dy * dy;
+        const broadR = preset.beachRadius + Math.max(...preset.beachBumps.map(Math.abs));
+        if (distSq >= broadR * broadR) continue;
+        const angle   = Math.atan2(dy, dx);
+        const narrowR = sampleBoundary(preset.beachRadius, preset.beachBumps, angle);
+        if (distSq < narrowR * narrowR) { inWater = false; break; }
+      }
     }
 
     // Distance check: player must be within 200 px (world space) of placement point

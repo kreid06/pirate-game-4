@@ -249,7 +249,7 @@ export interface Npc {
 /**
  * Island preset names — must match server-side ISLAND_PRESET_* constants.
  */
-export type IslandPreset = 'tropical' | 'jungle' | 'desert' | 'rocky' | 'pine';
+export type IslandPreset = 'tropical' | 'jungle' | 'desert' | 'rocky' | 'pine' | 'continental';
 
 /**
  * A single resource node on an island (offset from island centre in world px).
@@ -270,6 +270,8 @@ export interface IslandDef {
   y: number;
   preset: IslandPreset;
   resources: IslandResource[];
+  /** Polygon coastline vertices in world-space (present for polygon-mode islands). */
+  vertices?: { x: number; y: number }[];
 }
 
 /**
