@@ -84,6 +84,7 @@ export class InputManager {
   
   // Cannon control callbacks
   public onCannonAim: ((aimAngle: number, activeGroups: number[]) => void) | null = null;
+  public onSwivelAim: ((aimAngle: number) => void) | null = null;
   public onCannonFire: ((cannonIds?: number[], fireAll?: boolean, ammoType?: number, weaponGroup?: number, weaponGroups?: Set<number>) => void) | null = null;
 
   // Inventory callbacks
@@ -104,6 +105,11 @@ export class InputManager {
   public onAimStart: (() => void) | null = null;
   /** Called when right-click aiming ends (right mouse released). */
   public onAimEnd: (() => void) | null = null;
+  /** Called at the very start of any right-click (button 2 down). Return true to consume the event and skip all other right-click handling. */
+  public onBeforeRightClick: (() => boolean) | null = null;
+  /** Called at the very start of any left-click (button 0 down, after UI/shift/ctrl checks).
+   *  Return true to consume the event — fires onActionEvent('attack') then skips all other handling. */
+  public onBeforeLeftClick: (() => boolean) | null = null;
 
   // UI click intercept — return true to consume the click before game logic runs
   public onUIClick: ((x: number, y: number) => boolean) | null = null;
@@ -115,6 +121,7 @@ export class InputManager {
   // Explicit build mode (toggled with B key — independent of hotbar items)
   public explicitBuildMode: boolean = false;
   public onBuildModeToggle: (() => void) | null = null;
+  public onToggleAllLadders: (() => void) | null = null;
   public onBuildRotate: ((deltaDeg: number) => void) | null = null;
   /** Called when R is pressed while hovering a damaged mast (not in explicit build mode). */
   public onRepairSail: (() => void) | null = null;
@@ -134,7 +141,7 @@ export class InputManager {
   private readonly ROTATION_THRESHOLD = 0.0524; // 3 degrees in radians
   
   // Ship control state tracking
-  private mountKind: 'none' | 'helm' | 'cannon' | 'mast' = 'none';
+  private mountKind: 'none' | 'helm' | 'cannon' | 'mast' | 'swivel' = 'none';
   private get isMountedToHelm(): boolean { return this.mountKind === 'helm'; }
   /** Mode of the currently active (primary) weapon group — kept in sync by ClientApplication. */
   public activeGroupMode: string = 'haltfire';
@@ -175,7 +182,7 @@ export class InputManager {
   // Cannon aiming state
   /** True while the player is mounted to a cannon and holding right-mouse to aim. */
   public get isCannonAiming(): boolean {
-    return this.mountKind === 'cannon' && this.inputState.rightMouseDown;
+    return (this.mountKind === 'cannon' || this.mountKind === 'swivel') && this.inputState.rightMouseDown;
   }
   /** ID of the cannon module the player is currently mounted to, or null. */
   public mountedCannonModuleId: number | null = null;
@@ -185,6 +192,10 @@ export class InputManager {
   public loadedAmmoType: number = 0;      // What's physically in the barrel right now
   private xHoldTimer: ReturnType<typeof setTimeout> | null = null;  // setTimeout handle for 1s hold
   private xHoldFired: boolean = false;    // True if hold timer already fired this press
+  private flameStreamTimer: ReturnType<typeof setInterval> | null = null; // Liquid flame continuous stream
+  private flameAmmoSwitchTimer: ReturnType<typeof setTimeout> | null = null; // Post-flame ammo reload delay
+  /** Active ammo group while at helm: 'cannon' (IDs 0-1) or 'swivel' (IDs 10-12). Toggle with U key. */
+  public activeAmmoGroup: 'cannon' | 'swivel' = 'cannon';
 
   /** Called when player holds X (1s) to force-reload with the pending ammo type. */
   public onForceReload: (() => void) | null = null;
@@ -274,8 +285,8 @@ export class InputManager {
       return; // Skip normal player input processing
     }
 
-    // If mounted to cannon/mast, handle interact-to-dismount only
-    if (this.mountKind === 'cannon' || this.mountKind === 'mast') {
+    // If mounted to cannon/mast/swivel, handle interact-to-dismount only
+    if (this.mountKind === 'cannon' || this.mountKind === 'mast' || this.mountKind === 'swivel') {
       if (this.isActionActive('interact') && this.canInteract()) {
         this.lastInteractionTime = Date.now();
         if (this.onActionEvent) this.onActionEvent('dismount');
@@ -330,11 +341,7 @@ export class InputManager {
       this.onInputFrame(this.currentInputFrame);
       this.lastInputFrame = { ...this.currentInputFrame };
       
-      if (this.hasActiveInput) {
-        console.log(`📤 Input changed - sending frame: Movement(${this.currentInputFrame.movement.x.toFixed(2)}, ${this.currentInputFrame.movement.y.toFixed(2)}), Actions: ${this.currentInputFrame.actions}`);
-      } else {
-        console.log(`💓 Heartbeat sent - keeping connection alive`);
-      }
+
     }
     
     // Walking right-click = block
@@ -434,9 +441,9 @@ export class InputManager {
    * Set mount state (called when player mounts/dismounts a module)
    */
   setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number): void {
-    this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast') : 'none';
+    this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast' | 'swivel') : 'none';
     this.currentShipId = shipId !== undefined ? shipId : null;
-    this.mountedCannonModuleId = (mounted && moduleKind.toLowerCase() === 'cannon' && moduleId != null) ? moduleId : null;
+    this.mountedCannonModuleId = (mounted && (moduleKind.toLowerCase() === 'cannon' || moduleKind.toLowerCase() === 'swivel') && moduleId != null) ? moduleId : null;
 
     if (mounted) {
       console.log(`⚓ [INPUT] Player mounted to ${moduleKind} on ship ${shipId}`);
@@ -450,12 +457,26 @@ export class InputManager {
         this.lastRudderState = { left: false, right: false };
         this.lastSailOpennessChangeTime = 0;
         this.lastSailAngleChangeTime = 0;
+        this.activeAmmoGroup = 'cannon';
         console.log(`⛵ [INPUT] Seeded sail openness to ${seeded}% on mount`);
+      } else if (this.mountKind === 'swivel') {
+        // Swivel uses its own ammo types (10=grapeshot, 11=liquid flame, 12=canister shot)
+        this.selectedAmmoType = 10;
+        this.loadedAmmoType   = 10;
       }
     } else {
       console.log(`⚓ [INPUT] Player dismounted - player controls active`);
       this.activeWeaponGroup = -1;
       this.activeWeaponGroups.clear();
+      // Stop any active flame stream on dismount
+      if (this.flameStreamTimer !== null) {
+        clearInterval(this.flameStreamTimer);
+        this.flameStreamTimer = null;
+      }
+      if (this.flameAmmoSwitchTimer !== null) {
+        clearTimeout(this.flameAmmoSwitchTimer);
+        this.flameAmmoSwitchTimer = null;
+      }
     }
   }
 
@@ -554,8 +575,8 @@ export class InputManager {
       return;
     }
 
-    // Only aim when mounted to helm or cannon
-    if (this.mountKind !== 'helm' && this.mountKind !== 'cannon') {
+    // Only aim when mounted to helm, cannon, or swivel
+    if (this.mountKind !== 'helm' && this.mountKind !== 'cannon' && this.mountKind !== 'swivel') {
       return;
     }
 
@@ -591,7 +612,12 @@ export class InputManager {
     const angleDelta = Math.abs(aimAngleRelative - this.lastCannonAimAngle);
     
     if (angleDelta > ANGLE_THRESHOLD) {
-      if (this.onCannonAim) {
+      if (this.mountKind === 'swivel') {
+        // Swivel: use dedicated swivel_aim message (server applies ±45° limit)
+        if (this.onSwivelAim) {
+          this.onSwivelAim(aimAngleRelative);
+        }
+      } else if (this.onCannonAim) {
         this.onCannonAim(aimAngleRelative, [...this.activeWeaponGroups]);
       }
       this.lastCannonAimAngle = aimAngleRelative;
@@ -917,7 +943,8 @@ export class InputManager {
     // Handle debug toggles immediately (not part of simulation input)
     switch (event.code) {
       case 'KeyL':
-        // Debug toggle handled by client application
+        if (this.onToggleAllLadders) this.onToggleAllLadders();
+        event.preventDefault();
         break;
       case 'KeyP':
         // Plank bounds toggle handled by client application
@@ -955,19 +982,68 @@ export class InputManager {
             this.xHoldFired = false;
             this.xHoldTimer = setTimeout(() => {
               this.xHoldFired = true;
-              const ammoNames = ['CANNONBALL', 'BAR SHOT'];
-              // Toggle if nothing is queued yet
+              const useSwivelGroup = this.mountKind === 'helm' && this.activeAmmoGroup === 'swivel';
+              if (useSwivelGroup) {
+                const swivelAmmos = [10, 11, 12];
+                if (this.selectedAmmoType === this.loadedAmmoType) {
+                  const idx = swivelAmmos.indexOf(this.selectedAmmoType);
+                  this.selectedAmmoType = swivelAmmos[(idx < 0 ? 0 : (idx + 1)) % 3];
+                }
+                this.loadedAmmoType = this.selectedAmmoType;
+                const swivelNames: Record<number, string> = { 10: 'GRAPESHOT', 11: 'LIQUID FLAME', 12: 'CANISTER SHOT' };
+                console.log(`⚡ Helm swivel ammo force-loaded → ${swivelNames[this.loadedAmmoType]}`);
+              } else {
+                if (this.selectedAmmoType === this.loadedAmmoType) {
+                  this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
+                }
+                this.loadedAmmoType = this.selectedAmmoType;
+                const ammoNames = ['CANNONBALL', 'BAR SHOT'];
+                console.log(`⚡ Ammo force-loaded → ${ammoNames[this.loadedAmmoType]}`);
+              }
+              if (this.onForceReload) this.onForceReload();
+            }, 500);
+          }
+          event.preventDefault();
+        } else if (this.mountKind === 'swivel') {
+          if (!event.repeat) {
+            const swivelAmmos = [10, 11, 12]; // GRAPESHOT, LIQUID_FLAME, CANISTER_SHOT
+            const ammoNames: Record<number, string> = { 10: 'GRAPESHOT', 11: 'LIQUID FLAME', 12: 'CANISTER SHOT' };
+            this.xHoldFired = false;
+            this.xHoldTimer = setTimeout(() => {
+              this.xHoldFired = true;
+              // Cycle to next swivel ammo type and force-load immediately
               if (this.selectedAmmoType === this.loadedAmmoType) {
-                this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
+                const idx = swivelAmmos.indexOf(this.selectedAmmoType);
+                this.selectedAmmoType = swivelAmmos[(idx < 0 ? 0 : (idx + 1)) % 3];
               }
               this.loadedAmmoType = this.selectedAmmoType;
-              console.log(`⚡ Ammo force-loaded → ${ammoNames[this.loadedAmmoType]}`);
+              console.log(`⚡ Swivel ammo force-loaded → ${ammoNames[this.loadedAmmoType]}`);
               if (this.onForceReload) this.onForceReload();
             }, 500);
           }
           event.preventDefault();
         }
         break;      // Hotbar slots: Digit1-Digit9 → slots 0-8, Digit0 → slot 9
+      case 'KeyU':
+        // Toggle active ammo group between cannon and swivel while at helm
+        if (this.mountKind === 'helm') {
+          this.activeAmmoGroup = this.activeAmmoGroup === 'cannon' ? 'swivel' : 'cannon';
+          // Snap to a valid ammo for the newly active group
+          if (this.activeAmmoGroup === 'swivel') {
+            if (![10, 11, 12].includes(this.selectedAmmoType)) {
+              this.selectedAmmoType = 10;
+              this.loadedAmmoType   = 10;
+            }
+          } else {
+            if (![0, 1].includes(this.selectedAmmoType)) {
+              this.selectedAmmoType = 0;
+              this.loadedAmmoType   = 0;
+            }
+          }
+          console.log(`🔄 Helm ammo group → ${this.activeAmmoGroup.toUpperCase()}`);
+          event.preventDefault();
+        }
+        break;
       case 'KeyQ':
         if (this.onUnequip) this.onUnequip();
         event.preventDefault();
@@ -1042,16 +1118,24 @@ export class InputManager {
     // X key ammo logic:
     //   hold 1s (timer fires while key is down) → force-load immediately
     //   release before 1s                       → queue the swap for after next fire
-    if (event.code === 'KeyX' && (this.mountKind === 'cannon' || this.mountKind === 'helm')) {
+    if (event.code === 'KeyX' && (this.mountKind === 'cannon' || this.mountKind === 'helm' || this.mountKind === 'swivel')) {
       if (this.xHoldTimer !== null) {
         clearTimeout(this.xHoldTimer);
         this.xHoldTimer = null;
       }
       if (!this.xHoldFired) {
         // Released before 1s — queue the swap
-        this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
-        const ammoNames = ['CANNONBALL', 'BAR SHOT'];
-        console.log(`💣 Ammo queued → ${ammoNames[this.selectedAmmoType]} (hold X 0.5s to load now)`);
+        if (this.mountKind === 'swivel' || (this.mountKind === 'helm' && this.activeAmmoGroup === 'swivel')) {
+          const swivelAmmos = [10, 11, 12];
+          const ammoNames: Record<number, string> = { 10: 'GRAPESHOT', 11: 'LIQUID FLAME', 12: 'CANISTER SHOT' };
+          const idx = swivelAmmos.indexOf(this.selectedAmmoType);
+          this.selectedAmmoType = swivelAmmos[(idx < 0 ? 0 : (idx + 1)) % 3];
+          console.log(`💣 Swivel ammo queued → ${ammoNames[this.selectedAmmoType]} (hold X 0.5s to load now)`);
+        } else {
+          this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
+          const ammoNames = ['CANNONBALL', 'BAR SHOT'];
+          console.log(`💣 Ammo queued → ${ammoNames[this.selectedAmmoType]} (hold X 0.5s to load now)`);
+        }
       }
       // If xHoldFired is true the force-load already happened — nothing more to do
     }
@@ -1104,9 +1188,25 @@ export class InputManager {
         if (this.onActionEvent) {
           this.onActionEvent('attack', this.inputState.mouseWorldPosition);
         }
+      } else if (this.onBeforeLeftClick && this.onBeforeLeftClick()) {
+        // Intercept hook consumed the click (e.g. Move To mode) — emit attack and skip cannon fire
+        if (this.onActionEvent) this.onActionEvent('attack', this.inputState.mouseWorldPosition);
       } else {
-        // Mounted to helm or cannon: fire cannon(s)
-        if (isDoubleClick) {
+        // Mounted to helm, cannon, or swivel: fire weapon(s)
+        // Flame mode: ammo_type 11 (liquid flame) always streams regardless of activeAmmoGroup toggle
+        const isFlameMode = this.loadedAmmoType === 11 &&
+          (this.mountKind === 'swivel' || this.mountKind === 'helm');
+        if (isFlameMode) {
+          // Liquid flame: fire immediately then stream while mouse is held
+          const wg  = this.mountKind === 'helm' ? this.activeWeaponGroup  : undefined;
+          const wgs = this.mountKind === 'helm' ? this.activeWeaponGroups : undefined;
+          if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType, wg, wgs);
+          if (this.flameStreamTimer === null) {
+            this.flameStreamTimer = setInterval(() => {
+              if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType, wg, wgs);
+            }, 100);
+          }
+        } else if (isDoubleClick) {
           console.log('💥💥 Double-click: Fire ALL cannons!');
           if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
           // Cannon will reload into the pending ammo type
@@ -1122,6 +1222,8 @@ export class InputManager {
       this.lastLeftClickTime = now;
       
     } else if (event.button === 2) { // Right mouse button
+      // Early-out hook: allows callers to intercept all right-clicks (e.g. cancel Move To mode)
+      if (this.onBeforeRightClick && this.onBeforeRightClick()) return;
       // Ctrl+right-click: toggle cannon group membership (same as Ctrl+left-click)
       if (this.isCtrlHeld()) {
         if (this.onGroupAssign) this.onGroupAssign();
@@ -1151,6 +1253,19 @@ export class InputManager {
     if (event.button === 0) { // Left mouse button
       this.inputState.leftMouseDown = false;
       this.inputState.leftMouseReleased = true;
+      // Stop liquid flame stream if running
+      if (this.flameStreamTimer !== null) {
+        clearInterval(this.flameStreamTimer);
+        this.flameStreamTimer = null;
+        // If a different ammo is queued, schedule reload after 1s (swivel re-chambers)
+        if (this.selectedAmmoType !== this.loadedAmmoType) {
+          if (this.flameAmmoSwitchTimer !== null) clearTimeout(this.flameAmmoSwitchTimer);
+          this.flameAmmoSwitchTimer = setTimeout(() => {
+            this.loadedAmmoType = this.selectedAmmoType;
+            this.flameAmmoSwitchTimer = null;
+          }, 1000);
+        }
+      }
     } else if (event.button === 2) { // Right mouse button
       if (this.inputState.rightMouseDown) {
         this.inputState.rightMouseDown = false;

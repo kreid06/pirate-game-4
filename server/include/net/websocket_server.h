@@ -11,6 +11,14 @@
 #define COMPANY_NEUTRAL  0   // Unclaimed/neutral — no friendly-fire protection
 #define COMPANY_PIRATES  1   // Player's company
 #define COMPANY_NAVY     2   // Enemy AI company
+#define COMPANY_GHOST   99   // Phantom Brig faction — hostile to all
+#define MAX_COMPANIES    3   // Total number of distinct company slots (neutral + pirates + navy)
+
+// ── Ship type identifiers ─────────────────────────────────────────────────
+#define SHIP_TYPE_SLOOP      1   // Small, fast sloop
+#define SHIP_TYPE_CUTTER     2   // Light cutter
+#define SHIP_TYPE_BRIGANTINE 3   // Medium brigantine (default)
+#define SHIP_TYPE_GHOST      99  // Ghostship — autonomous enemy, spectral visual
 
 // ── Weapon Control Groups ────────────────────────────────────────────────────
 typedef enum {
@@ -21,11 +29,11 @@ typedef enum {
 } WeaponGroupMode;
 
 #define MAX_WEAPON_GROUPS      10
-#define MAX_CANNONS_PER_GROUP  16
+#define MAX_WEAPONS_PER_GROUP  16
 
 typedef struct {
-    uint32_t        cannon_ids[MAX_CANNONS_PER_GROUP];
-    uint8_t         cannon_count;
+    uint32_t        weapon_ids[MAX_WEAPONS_PER_GROUP];
+    uint8_t         weapon_count;
     WeaponGroupMode mode;
     uint32_t        target_ship_id;
 } WeaponGroup;
@@ -79,8 +87,12 @@ typedef struct SimpleShip {
      *  or fired).  NEEDED stays true until this timestamp + CANNON_NEEDED_TIMEOUT_MS
      *  expires.  Cleared by tick_cannon_needed_expiry(). */
     uint32_t cannon_last_needed_ms[MAX_MODULES_PER_SHIP];
-    /* Per-ship weapon control groups (shared by all players on this ship) */
-    WeaponGroup weapon_groups[MAX_WEAPON_GROUPS];
+    /* Per-ship weapon control groups — isolated per company so that enemy
+     * boarders cannot read or sabotage the original crew's group config.
+     * Index 0 = COMPANY_NEUTRAL, 1 = COMPANY_PIRATES, 2 = COMPANY_NAVY.
+     * NPC/tick code always accesses [ship->company_id]; player config
+     * writes to [player->company_id]. */
+    WeaponGroup weapon_groups[MAX_COMPANIES][MAX_WEAPON_GROUPS];
 
     /* Sinking state — entered when hull_health hits 0; ship stays alive for SHIP_SINK_DURATION_MS */
     bool     is_sinking;
@@ -128,7 +140,7 @@ typedef struct NpcAgent {
 typedef enum {
     WORLD_NPC_STATE_IDLE      = 0, // Resting at or near assigned cannon
     WORLD_NPC_STATE_MOVING    = 1, // Walking across deck to a new cannon after a side switch
-    WORLD_NPC_STATE_AT_CANNON = 2, // Arrived — ready to fire
+    WORLD_NPC_STATE_AT_GUN = 2, // Arrived — ready to fire
     WORLD_NPC_STATE_REPAIRING = 3, // Arrived at a damaged module and actively repairing it
 } WorldNpcState;
 
@@ -151,7 +163,7 @@ typedef struct WorldNpc {
     // Gunner: port_cannon_id = future locked-cannon preference (0 = any; player-set later).
     uint32_t      port_cannon_id;       // Rigger: mast ID.  Gunner: locked preference (0=free)
     uint32_t      starboard_cannon_id;  // Rigger: mast ID (mirrors port).  Gunner: unused (0)
-    uint32_t      assigned_cannon_id;   // Module the NPC is currently heading to / stationed at
+    uint32_t      assigned_weapon_id;   // Module the NPC is currently heading to / stationed at
     bool          wants_cannon;         // Gunner: true = on cannon duty via manning panel
 
     // Movement / state machine
@@ -166,6 +178,35 @@ typedef struct WorldNpc {
     char          dialogue[64];
 
     uint8_t       company_id;     // Inherited from ship at spawn time (COMPANY_*)
+
+    // Knockback velocity (client units/s, decays each tick)
+    float         velocity_x, velocity_y;
+
+    // ── Crew levelling ───────────────────────────────────────────────────────
+    uint8_t       npc_level;      // 1–10
+    uint16_t      health;         // current HP
+    uint16_t      max_health;     // base 100 + stat_health * 20
+    uint32_t      xp;             // accumulated experience
+    // Stat upgrade levels (0 = unupgraded, max 5 each)
+    uint8_t       stat_health;    // +20 max HP per level
+    uint8_t       stat_damage;    // +10% damage per level
+    uint8_t       stat_stamina;   // +10% reload/work speed per level
+    uint8_t       stat_weight;    // +10% carry capacity per level
+
+    // ── Status effects ──────────────────────────────────────────────────────
+    uint32_t      fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
+    bool          in_water;       // true when NPC has been knocked off the ship deck
+
+    // ── Task lock ───────────────────────────────────────────────────────────
+    bool          task_locked;    // When true: player has pinned this NPC to their current module;
+                                  // rejected by handle_crew_assign & auto cannon-sector dispatch.
+
+    // ── Boarding approach ──────────────────────────────────────────────────
+    // When boarding_ship_id != 0 the NPC is swimming (ship_id == 0) toward a hull
+    // entry point.  On arrival it snaps aboard and walks to (boarding_local_x/y).
+    uint32_t      boarding_ship_id;  // target ship to board; 0 = not boarding
+    float         boarding_local_x;  // on-deck destination (ship-local) after boarding
+    float         boarding_local_y;
 } WorldNpc;
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -189,7 +230,43 @@ typedef enum {
     ITEM_WOODEN_SHIELD = 20,
     ITEM_IRON_SHIELD   = 21,
     ITEM_DECK          = 13,
+    ITEM_SWIVEL        = 14,
+    ITEM_AXE           = 15,
+    ITEM_WOODEN_FLOOR  = 16,
+    ITEM_WORKBENCH     = 17,
+    ITEM_WALL          = 18,
+    ITEM_DOOR_FRAME    = 19,
+    ITEM_DOOR          = 20,
+    ITEM_WOOD          = 22,
+    ITEM_FIBER         = 23,
+    ITEM_METAL         = 24,
+    ITEM_PICKAXE       = 25,
 } ItemKind;
+
+/* ── Island structures ────────────────────────────────────────────────────── */
+typedef enum {
+    STRUCT_WOODEN_FLOOR = 0,
+    STRUCT_WORKBENCH    = 1,
+    STRUCT_WALL         = 2,
+    STRUCT_DOOR_FRAME   = 3,  /* posts with open centre, always passable */
+    STRUCT_DOOR         = 4,  /* panel that snaps onto a door frame */
+} PlacedStructureType;
+
+typedef struct {
+    bool     active;
+    uint32_t id;
+    PlacedStructureType type;
+    uint32_t island_id;
+    float    x, y;           /* world position */
+    uint8_t  company_id;     /* COMPANY_* — faction that owns this structure */
+    uint16_t hp;             /* current hit points */
+    uint16_t max_hp;         /* maximum hit points */
+    uint32_t placer_id;      /* player_id who built this — used for company promotion */
+    char     placer_name[64]; /* display name of the player who built this */
+    bool     open;           /* doors only: true = open (passable) */
+} PlacedStructure;
+
+#define MAX_PLACED_STRUCTURES 512
 
 typedef struct {
     ItemKind item;
@@ -246,8 +323,21 @@ typedef struct WebSocketPlayer {
 
     uint8_t company_id;            // Inherited from the ship this player boards
 
+    // Health
+    uint16_t health;             // Current HP (0 = dead)
+    uint16_t max_health;         // Max HP (default 100)
+
+    // Melee combat
+    uint32_t sword_last_attack_ms; // Wall-clock ms of last sword swing (0 = never)
+
     // Inventory
     PlayerInventory inventory;
+
+    // Status effects
+    uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
+
+    /* Island walking — 0 = in water, >0 = on island with that id */
+    uint32_t on_island_id;
 } WebSocketPlayer;
 
 struct WebSocketStats {
@@ -283,6 +373,17 @@ void websocket_server_set_simulation(struct Sim* sim);
  * @return Entity ID of the new ship, or 0 on failure
  */
 uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id);
+
+/**
+ * Spawn a ghost ship at the given world position (client pixels).
+ * Ghost ships (SHIP_TYPE_GHOST) are autonomous enemy vessels with spectral
+ * visuals.  They use COMPANY_NAVY (hostile to pirates) and their cannons are
+ * configured for TARGETFIRE automatically.
+ * @param x  World X position in client pixels
+ * @param y  World Y position in client pixels
+ * @return Entity ID of the new ghost ship, or 0 on failure
+ */
+uint32_t websocket_server_create_ghost_ship(float x, float y);
 
 /**
  * Clean up WebSocket server and close all connections
@@ -352,3 +453,5 @@ void websocket_server_npc_set_target(uint32_t npc_id, uint32_t target_ship_id);
  * @return 0 on success, -1 on error
  */
 int websocket_server_get_players(WebSocketPlayer** out_players, int* out_count);
+/** Set the company of a connected player (admin use). Returns 0 on success, -1 if not found. */
+int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id);

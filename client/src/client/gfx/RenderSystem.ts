@@ -8,21 +8,31 @@
 import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
-import { EffectRenderer } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_CANNON, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY } from '../../sim/Types.js';
+import { EffectRenderer, AnnouncementKind } from './EffectRenderer.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
+import { RadialMenu } from '../ui/RadialMenu.js';
+
+/** Max hull HP for ghost (Phantom Brig) ships — server uses raw HP scale, not 0-100. */
+const GHOST_MAX_HULL_HP = 60000;
 
 /** NPC fill colours keyed by assigned task name (matches ManningPriorityPanel task colours). */
 const NPC_TASK_COLORS: Record<string, string> = {
   Sails:   '#5aafff',
   Cannons: '#ffaa44',
   Repairs: '#55dd66',
-  Combat:  '#ff5555',
+  Combat:  '#aa44ff',
   Idle:    '#DAA520',
 };
+
+/** Wooden module kinds that can catch fire — constant, never changes. */
+const WOODEN_KINDS: ReadonlySet<string> = new Set(['plank', 'deck', 'mast']);
+
+/** Module kinds where only one occupant (player or NPC) is allowed at a time. */
+const SINGLE_OCCUPANCY_KINDS: ReadonlySet<string> = new Set(['cannon', 'swivel', 'mast', 'helm']);
 
 /**
  * Render queue item for layered rendering
@@ -46,13 +56,21 @@ export class RenderSystem {
   private particleSystem: ParticleSystem;
   private effectRenderer: EffectRenderer;
   
-  // Render queue for layered rendering
-  private renderQueue: RenderQueueItem[] = [];
+  // Render queue for layered rendering (10 pre-allocated buckets: index 0 = layer -1, index 1-9 = layers 1-9)
+  private readonly renderBuckets: RenderQueueItem[][] = Array.from({length: 10}, () => []);
   
   // Hover state
   private mouseWorldPos: Vec2 | null = null;
   private hoveredModule: { ship: Ship; module: any } | null = null;
   private hoveredNpc: Npc | null = null;
+  /** Ship (other than the player's own) whose hull the cursor is over. */
+  private hoveredShip: Ship | null = null;
+
+  /** Timestamp (ms) of the last sword swing, used to draw a cooldown ring. */
+  private lastSwordSwingAt: number = 0;
+  private swordCooldownMs: number = 800;
+  /** Set to true each frame when the local player has the sword as their active item. */
+  public swordEquipped: boolean = false;
 
   // Build mode state
   private buildMode: boolean = false;
@@ -64,6 +82,8 @@ export class RenderSystem {
   private mastBuildMode: boolean = false;
   /** The mast slot (mastIndex+ship) currently under the cursor in mast build mode. */
   private hoveredMastSlot: { ship: Ship; mastIndex: number } | null = null;
+  /** Whether swivel gun placement build mode is active (swivel item held). */
+  private swivelBuildMode: boolean = false;
   /** An existing but fiber-damaged mast within sail radius of the cursor — for R-key repair. */
   private hoveredDamagedMast: { ship: Ship; mastIndex: number } | null = null;
   /** Whether helm replacement build mode is active (helm_kit item held). */
@@ -86,8 +106,32 @@ export class RenderSystem {
   public showGroupOverlay: boolean = false;
   /** Currently selected weapon group indices — cannons in these groups are always highlighted. */
   public activeWeaponGroups: Set<number> = new Set();
-  /** Cached local player company for the current frame — set at start of queueWorldObjects. */
+  /** Cached local player company for the current frame — set at start of renderWorld. */
   private _localCompanyId: number = 0;
+  /** Cached local player for the current frame — set once in renderWorld, shared by all draw methods. */
+  private _cachedLocalPlayer: Player | null = null;
+  /** Placed island structures — updated via addPlacedStructure / setPlacedStructures. */
+  private placedStructures: PlacedStructure[] = [];
+  /** Structure currently under the cursor (within hover range of the local player). */
+  private _hoveredStructure: PlacedStructure | null = null;
+  /** Tree node currently under cursor (world coords) — updated each frame in drawIsland. */
+  private _hoveredTree: { wx: number; wy: number } | null = null;
+  /** Fiber plant currently under cursor (world coords) — updated each frame in drawIsland. */
+  private _hoveredFiberPlant: { wx: number; wy: number } | null = null;
+  /** Rock node currently under cursor (world coords) — updated each frame in drawIsland. */
+  private _hoveredRock: { wx: number; wy: number } | null = null;
+  /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | null = null;
+  private _wallGhostHorizontal: boolean = true; // true = runs along X axis (N/S edge)
+  /** True when the placement ghost is beyond the server's max placement range (200 px). */
+  private _islandGhostTooFar = false;
+  /** Last snapped placement position (may differ from raw cursor when snap-to-grid is active). */
+  private _snappedBuildPos: { x: number; y: number } | null = null;
+
+  /** Returns whether the last-rendered island build ghost was out of placement range. */
+  getIslandBuildTooFar(): boolean { return this._islandGhostTooFar; }
+  /** Returns the current snapped placement position (or null when no ghost is active). */
+  getSnappedBuildPos(): { x: number; y: number } | null { return this._snappedBuildPos; }
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
   public playerAimAngleRelative: number = 0;
   /** Currently selected ammo type (0 = cannonball, 1 = bar shot), set each frame by ClientApplication. */
@@ -102,6 +146,149 @@ export class RenderSystem {
   private sinkingGhosts: Map<number, Ship> = new Map();
   /** Last known ship state per id — lets us snapshot a ship the moment it despawns. */
   private lastKnownShips: Map<number, Ship> = new Map();
+  /** Last known NPC set — used to detect NPC deaths for kill announcements. */
+  private lastKnownNpcIds: Set<number> = new Set();
+  /** NPC id → name cache for the kill announcement message. */
+  private _lastNpcNames: Map<number, string> = new Map();
+  /** Last ship to fire a cannonball near each ship — used for sink announcements. */
+  private lastAttackerOf: Map<number, number> = new Map();
+  /** Last splash emit time (ms) per sinking ship — throttles particle emission. */
+  private sinkSplashTimers: Map<number, number> = new Map();
+  /** playerId → timestamp of last damage hit, for red flash overlay. */
+  private playerDamageFlash: Map<number, number> = new Map();
+  /** npcId → timestamp of last damage hit, for red flash overlay. */
+  private npcDamageFlash: Map<number, number> = new Map();
+  /** Key → fire expiry timestamp (ms). Key format: "npc:{id}" | "player:{id}" | "module:{shipId}:{moduleId}" */
+  private burningEntities: Map<string, number> = new Map();
+  /** Cached fire-point positions in ship-local space per burning module. Generated once on first draw. */
+  private moduleFirePoints: Map<string, Array<{lx: number; ly: number; r: number}>> = new Map();
+  /**
+   * Short-lived hit-scan tracer lines for grapeshot / canister bursts.
+   * Each entry: origin (world px), angle (rad), range (px), spawnAt (ms), ttl (ms).
+   */
+  private grapeshotTracers: Array<{
+    x: number; y: number; angle: number; range: number;
+    spawnAt: number; ttl: number; ammoType: number;
+  }> = [];
+
+  // ── Island data (server-driven via ISLANDS message; falls back to default) ──
+
+  /** Returns a CSS color for a structure's owning company (0=neutral grey, 1=pirate orange, 2=navy blue). */
+  private static structureCompanyColor(companyId: number): string {
+    if (companyId === 1) return 'rgba(255, 100, 50, 0.85)';  // Pirates
+    if (companyId === 2) return 'rgba(50, 130, 255, 0.85)';  // Navy
+    return 'rgba(160, 160, 160, 0.60)';                       // Neutral
+  }
+
+  /** Preset visual parameters keyed by preset name. */
+  private static readonly ISLAND_PRESETS: Record<string, {
+    beachRadius: number; grassRadius: number;
+    beachBumps: number[]; grassBumps: number[];
+    beachColors: [string, string, string];  // radial gradient 0/0.65/1.0
+    grassColors: [string, string, string];  // radial gradient 0/0.7/1.0
+    borderColor: string;
+    grassPolyScale?: number;  // for polygon islands: inner-grass scale (e.g. 0.78)
+  }> = {
+    tropical: {
+      beachRadius: 185, grassRadius: 148,
+      beachBumps:  [ 0, 14, -9, 20,  6, -13, 16,  3, -7, 18, -5, 10, 12, -11,  7, -9],
+      grassBumps:  [ 0,  9, -6, 13,  4,  -9, 10,  2, -4, 11, -3,  7,  8,  -7,  5, -6],
+      beachColors: ['#c8a96e', '#d4b97a', '#e8d4a0'],
+      grassColors: ['#47692a', '#598038', '#6b9444'],
+      borderColor: '#9a7840',
+    },
+    jungle: {
+      beachRadius: 200, grassRadius: 172,
+      beachBumps:  [-5, 18, -12, 22,  8, -16, 14,  5, -10, 20, -8, 13, 16, -14,  9, -11],
+      grassBumps:  [-3, 12,  -8, 15,  5, -11,  9,  3,  -6, 13, -5,  9, 11,  -9,  6,  -7],
+      beachColors: ['#b09058', '#c4a464', '#d8be80'],
+      grassColors: ['#2e4f1a', '#3c6522', '#4a7a2c'],
+      borderColor: '#7a6030',
+    },
+    desert: {
+      beachRadius: 165, grassRadius: 80,
+      beachBumps:  [ 2, 10, -6, 15,  4, -10, 12,  1, -5, 14, -3,  7,  9,  -8,  5, -6],
+      grassBumps:  [ 1,  6, -4,  9,  3,  -6,  7,  1, -3,  8, -2,  4,  5,  -5,  3, -4],
+      beachColors: ['#d4b870', '#e0c880', '#f0dca0'],
+      grassColors: ['#8f7a30', '#a08840', '#b09850'],
+      borderColor: '#a08040',
+    },
+    rocky: {
+      beachRadius: 170, grassRadius: 120,
+      beachBumps:  [-8, 20, -15, 25, 10, -18, 20,  6, -12, 22, -10, 15, 18, -16, 11, -14],
+      grassBumps:  [-5, 13, -10, 16,  6, -12, 13,  4,  -8, 14,  -6,  9, 11, -10,  7,  -9],
+      beachColors: ['#a09080', '#b4a490', '#ccc0b0'],
+      grassColors: ['#506040', '#607050', '#708060'],
+      borderColor: '#807060',
+    },
+    pine: {
+      beachRadius: 178, grassRadius: 145,
+      beachBumps:  [ 3, 12, -8, 18,  5, -12, 14,  2, -6, 16, -4,  9, 11, -10,  6, -8],
+      grassBumps:  [ 2,  8, -5, 12,  3,  -8,  9,  1, -4, 10, -3,  6,  7,  -6,  4, -5],
+      beachColors: ['#b8a478', '#ceb888', '#e2d0a8'],
+      grassColors: ['#284a1a', '#345e24', '#40722e'],
+      borderColor: '#887048',
+    },
+    continental: {
+      /* Polygon island — beachRadius/grassRadius/bumps unused for rendering.
+       * Colors and grassPolyScale are used instead.                           */
+      beachRadius: 0, grassRadius: 0,
+      beachBumps:  [], grassBumps:  [],
+      beachColors: ['#c0a870', '#cbb880', '#ddd0a8'],
+      grassColors: ['#3a5e22', '#4a7230', '#5a883e'],
+      borderColor: '#8a7040',
+      grassPolyScale: 0.78,
+    },
+  };
+
+  /** Default fallback island — shown before the server sends ISLANDS. */
+  private static readonly DEFAULT_ISLAND = {
+    id: 0, x: 800, y: 600, preset: 'tropical' as const,
+    resources: [
+      { ox: -65, oy: -55, type: 'wood'  as const },
+      { ox:  85, oy: -25, type: 'wood'  as const },
+      { ox:  15, oy:  80, type: 'wood'  as const },
+      { ox: -90, oy:  38, type: 'wood'  as const },
+      { ox:  45, oy: -78, type: 'fiber' as const },
+      { ox: -28, oy:  32, type: 'fiber' as const },
+      { ox:  70, oy:  50, type: 'fiber' as const },
+    ],
+  };
+
+  /** Live island list — replaced by server ISLANDS message when received. */
+  private islands: Array<{
+    id: number; x: number; y: number; preset: string;
+    resources: Array<{ ox: number; oy: number; type: string }>;
+    vertices?: { x: number; y: number }[];
+  }> = [RenderSystem.DEFAULT_ISLAND];
+
+  /** Called by ClientApplication when the server sends the ISLANDS message. */
+  setIslands(islands: Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string }>; vertices?: { x: number; y: number }[] }>): void {
+    this.islands = islands;
+  }
+
+  /** Returns the live island list (for proximity checks in ClientApplication). */
+  getIslands(): Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string }>; vertices?: { x: number; y: number }[] }> {
+    return this.islands;
+  }
+
+  /** Active flamethrower wave states keyed by cannonId. Client interpolates between server ticks. */
+  private flameWaves: Map<number, {
+    x: number; y: number; angle: number; halfCone: number;
+    waveDist: number; retreating: boolean; retreatDist: number;
+    serverUpdateAt: number;
+    rotationSpeed: number; // rad/s — used to widen particle cone when aim flicks fast
+  }> = new Map();
+  /** Client-side smoke trail: cannonball id → ring of past positions with timestamps. */
+  private cannonballTrails: Map<number, Array<{ x: number; y: number; t: number }>> = new Map();
+  /** Last known world position of each live cannonball — used to spawn water splash on expiry. */
+  private cannonballLastPos: Map<number, { x: number; y: number; ammoType: number }> = new Map();
+  /** Trail colour override per projectile — future customisation hook. */
+  public trailColor: string = 'rgba(180,180,180,{a})';
+  private readonly TRAIL_DURATION_MS = 680;  // how long each crumb lives
+  private readonly TRAIL_SPACING_MS  = 10;   // min ms between crumbs
+  /** Timestamp of last crumb per ball — prevents over-sampling. */
+  private trailLastEmit: Map<number, number> = new Map();
   
   // Debug flags
   private showHoverBoundaries: boolean = false;
@@ -140,8 +327,268 @@ export class RenderSystem {
   /**
    * Spawn a floating damage number at a world position
    */
+  spawnExplosion(worldPos: Vec2, intensity: number = 1.0): void {
+    this.particleSystem.createExplosion(worldPos, intensity);
+  }
+
   spawnDamageNumber(worldPos: Vec2, damage: number, isKill: boolean = false): void {
     this.effectRenderer.createDamageNumber(worldPos, damage, isKill);
+  }
+
+  /**
+   * Record a damage hit on an entity so the next ~300 ms of frames
+   * render a red flash overlay on that entity's circle.
+   */
+  notifyEntityDamaged(id: number, isNpc: boolean): void {
+    if (isNpc) this.npcDamageFlash.set(id, performance.now());
+    else        this.playerDamageFlash.set(id, performance.now());
+  }
+
+  /** Spawn a hit-scan flamethrower cone flash effect at world position (x, y).
+   * @deprecated Use updateFlameWave() — kept for backward compat with any remaining call sites.
+   */
+  spawnFlameCone(_x: number, _y: number, _angle: number, _halfCone: number): void { /* no-op */ }
+
+  /**
+   * Spawn hit-scan tracer lines for a grapeshot or canister burst.
+   * @param ammoType 10 = grapeshot, 12 = canister
+   */
+  spawnGrapeshotTracers(x: number, y: number, angle: number, ammoType: number): void {
+    // 3 tracers for grapeshot (±12°), 5 for canister (±20°)
+    const isCanister = ammoType === 12;
+    const count      = isCanister ? 5 : 3;
+    const halfSpread = isCanister ? (20 * Math.PI / 180) : (12 * Math.PI / 180);
+    const range      = isCanister ? 180 : 250;
+    const now        = performance.now();
+
+    // Server broadcasts pivot position; offset to barrel tip (matches server BARREL_LEN = 20px)
+    const BARREL_TIP = 20;
+    const bx = x + Math.cos(angle) * BARREL_TIP;
+    const by = y + Math.sin(angle) * BARREL_TIP;
+
+    for (let p = 0; p < count; p++) {
+      const t   = count > 1 ? p / (count - 1) : 0.5;
+      const ray = angle + halfSpread * (2 * t - 1);
+      this.grapeshotTracers.push({ x: bx, y: by, angle: ray, range, spawnAt: now, ttl: 180, ammoType });
+    }
+  }
+
+  /**
+   * Called each time a FLAME_WAVE_UPDATE arrives from the server.
+   * The client stores the server-reported state and locally interpolates
+   * the wave front between ticks for smooth 60fps visuals.
+   */
+  updateFlameWave(
+    cannonId: number, _shipId: number,
+    x: number, y: number, angle: number, halfCone: number,
+    waveDist: number, retreating: boolean, retreatDist: number,
+    dead: boolean,
+  ): void {
+    if (dead) { this.flameWaves.delete(cannonId); return; }
+    const prev = this.flameWaves.get(cannonId);
+    // Compute shortest angular distance to derive rotation speed
+    let rotationSpeed = 0;
+    if (prev) {
+      const dt = (performance.now() - prev.serverUpdateAt) / 1000;
+      if (dt > 0.001) {
+        let diff = angle - prev.angle;
+        // Wrap to [-π, π]
+        while (diff >  Math.PI) diff -= 2 * Math.PI;
+        while (diff < -Math.PI) diff += 2 * Math.PI;
+        rotationSpeed = Math.abs(diff) / dt;
+      } else {
+        rotationSpeed = prev.rotationSpeed; // hold last value if update arrived too fast
+      }
+    }
+    this.flameWaves.set(cannonId, {
+      x, y, angle, halfCone,
+      waveDist,
+      retreating,
+      retreatDist,
+      serverUpdateAt: performance.now(),
+      rotationSpeed,
+    });
+  }
+
+  private drawFlameCones(camera: Camera): void {
+    if (this.flameWaves.size === 0) return;
+
+    const WAVE_SPEED    = 350; // px/s — must match FLAME_WAVE_SPEED on server
+    const RETREAT_SPEED = 700; // px/s — must match FLAME_RETREAT_SPEED on server
+    const now           = performance.now();
+
+    for (const [cannonId, fw] of this.flameWaves) {
+      // Auto-expire stale entries (server went silent for > 2s)
+      if (now - fw.serverUpdateAt > 2000) { this.flameWaves.delete(cannonId); continue; }
+
+      // Client-side interpolation: advance wave/retreat from last server report
+      const dt = (now - fw.serverUpdateAt) / 1000;
+      const FLAME_RANGE  = 280;
+      const waveDist    = fw.retreating ? fw.waveDist
+                                        : Math.min(fw.waveDist + dt * WAVE_SPEED, FLAME_RANGE);
+      const retreatDist = fw.retreating ? Math.min(fw.retreatDist + dt * RETREAT_SPEED, FLAME_RANGE) : 0;
+
+      // Nothing to draw if retreat has consumed the whole cone
+      if (retreatDist >= waveDist) continue;
+
+      // ── Particle effects — pulsed wave emission: dense bursts every 110ms ─
+      // 60ms "on" window followed by 50ms gap creates visible waves of flame
+      const emitPhase = now % 110;
+      if (emitPhase <= 60) {
+        this.particleSystem.createFlameConeParticles(
+          Vec2.from(fw.x, fw.y),
+          fw.angle,
+          fw.halfCone,
+          retreatDist,
+          waveDist,
+          fw.rotationSpeed,
+        );
+      }
+    }
+  }
+
+  private drawGrapeshotTracers(camera: Camera): void {
+    if (this.grapeshotTracers.length === 0) return;
+    const now  = performance.now();
+    const ctx  = this.ctx;
+    const zoom = camera.getState().zoom;
+
+    this.grapeshotTracers = this.grapeshotTracers.filter(t => now - t.spawnAt < t.ttl);
+    for (const t of this.grapeshotTracers) {
+      const age    = now - t.spawnAt;
+      const frac   = age / t.ttl;               // 0 → 1 as tracer fades
+      const alpha  = (1 - frac) * 0.85;
+      const origin = camera.worldToScreen(Vec2.from(t.x, t.y));
+      const tipX   = t.x + Math.cos(t.angle) * t.range;
+      const tipY   = t.y + Math.sin(t.angle) * t.range;
+      const tip    = camera.worldToScreen(Vec2.from(tipX, tipY));
+
+      // Faded tracer line: bright white core → transparent tip
+      const grad = ctx.createLinearGradient(origin.x, origin.y, tip.x, tip.y);
+      if (t.ammoType === 12) {
+        // Canister: slightly wider, warm-white
+        grad.addColorStop(0,   `rgba(255,230,180,${alpha.toFixed(3)})`);
+        grad.addColorStop(0.5, `rgba(255,180,80,${(alpha * 0.6).toFixed(3)})`);
+        grad.addColorStop(1,    'rgba(255,120,0,0)');
+        ctx.lineWidth = Math.max(1, 1.5 * zoom);
+      } else {
+        // Grapeshot: thin white tracer
+        grad.addColorStop(0,   `rgba(255,255,220,${alpha.toFixed(3)})`);
+        grad.addColorStop(0.4, `rgba(200,200,160,${(alpha * 0.5).toFixed(3)})`);
+        grad.addColorStop(1,    'rgba(160,160,100,0)');
+        ctx.lineWidth = Math.max(0.5, 1 * zoom);
+      }
+      ctx.strokeStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(origin.x, origin.y);
+      ctx.lineTo(tip.x, tip.y);
+      ctx.stroke();
+    }
+  }
+
+  /** Mark an entity or module as burning for `durationMs` milliseconds. */
+  notifyFireEffect(entityType: 'npc' | 'player' | 'module', id: number, durationMs: number,
+    shipId?: number, moduleId?: number): void {
+    const key = entityType === 'module'
+      ? `module:${shipId}:${moduleId}`
+      : `${entityType}:${id}`;
+    console.log(`[FIRE] notifyFireEffect type=${entityType} key=${key} dur=${durationMs}ms burningCount=${this.burningEntities.size + 1}`);
+    this.burningEntities.set(key, performance.now() + durationMs);
+  }
+
+  /** Clear the burning state for an entity or module. */
+  notifyFireExtinguished(entityType: 'npc' | 'player' | 'module', id: number,
+    shipId?: number, moduleId?: number): void {
+    const key = entityType === 'module'
+      ? `module:${shipId}:${moduleId}`
+      : `${entityType}:${id}`;
+    this.burningEntities.delete(key);
+    if (entityType === 'module') this.moduleFirePoints.delete(key);
+  }
+
+  /** Returns true if an entity/module is currently marked as burning. */
+  private isBurning(entityType: 'npc' | 'player' | 'module', id: number,
+    shipId?: number, moduleId?: number): boolean {
+    const key = entityType === 'module'
+      ? `module:${shipId}:${moduleId}`
+      : `${entityType}:${id}`;
+    const expiry = this.burningEntities.get(key);
+    if (expiry === undefined) return false;
+    if (performance.now() > expiry) { this.burningEntities.delete(key); return false; }
+    return true;
+  }
+
+  /** Draw an animated fire overlay (flicker ring) centred at (cx, cy) in screen space. */
+  private drawFireOverlay(cx: number, cy: number, radius: number): void {
+    const ctx = this.ctx;
+    const t = performance.now() / 1000;
+
+    // ── Seething heat haze ── DISABLED (alpha=0 for debugging)
+    const hazeGrd = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 2.2);
+    hazeGrd.addColorStop(0,   'rgba(255,140,0,0)');
+    hazeGrd.addColorStop(0.5, 'rgba(200,40,0,0)');
+    hazeGrd.addColorStop(1,   'rgba(100,10,0,0)');
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * 2.2, 0, Math.PI * 2);
+    ctx.fillStyle = hazeGrd;
+    ctx.fill();
+
+    // ── Flame tongues ── DISABLED (alpha=0 for debugging)
+    const numFlames = 9;
+    for (let layer = 0; layer < 2; layer++) {
+      const layerScale = layer === 0 ? 1.0 : 0.65;
+      const layerSpeed = layer === 0 ? 3.5 : 5.2;
+      const layerOffset = layer * (Math.PI / numFlames);
+      for (let i = 0; i < numFlames; i++) {
+        const angle   = (i / numFlames) * Math.PI * 2 + t * layerSpeed + layerOffset;
+        const flicker = 0.78 + 0.22 * Math.sin(t * 11 + i * 1.7 + layer * 2.4);
+        const orbitR  = radius * 0.50 * layerScale * flicker;
+        const fx      = cx + Math.cos(angle) * orbitR;
+        const fy      = cy + Math.sin(angle) * orbitR;
+        const fh      = radius * 0.70 * layerScale * flicker;
+        const grad = ctx.createRadialGradient(fx, fy - fh * 0.35, 0, fx, fy, fh);
+        grad.addColorStop(0,   'rgba(255,255,180,0)');
+        grad.addColorStop(0.25,'rgba(255,200,40,0)');
+        grad.addColorStop(0.55,'rgba(255,80,0,0)');
+        grad.addColorStop(1,   'rgba(180,10,0,0)');
+        ctx.beginPath();
+        ctx.ellipse(fx, fy - fh * 0.28, fh * 0.34, fh * 0.62, 0, 0, Math.PI * 2);
+        ctx.fillStyle = grad;
+        ctx.fill();
+      }
+    }
+
+    // ── Central hotspot ── DISABLED (alpha=0 for debugging)
+    const coreGrd = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 0.6);
+    const cf = 0.80 + 0.20 * Math.sin(t * 19);
+    coreGrd.addColorStop(0,   'rgba(255,255,230,0)');
+    coreGrd.addColorStop(0.5, 'rgba(255,160,20,0)');
+    coreGrd.addColorStop(1,   'rgba(255,60,0,0)');
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * 0.6, 0, Math.PI * 2);
+    ctx.fillStyle = coreGrd;
+    ctx.fill();
+
+    // ── Smoke column ── DISABLED (alpha=0 for debugging)
+    const numSmoke = 4;
+    for (let s = 0; s < numSmoke; s++) {
+      const sx    = cx + Math.sin(t * 1.8 + s * 1.2) * radius * 0.3;
+      const riseY = ((t * 28 + s * 22) % (radius * 3)) - radius * 0.5;
+      const sr    = radius * (0.22 + s * 0.06 + riseY / (radius * 6));
+      ctx.beginPath();
+      ctx.arc(sx, cy - radius * 0.9 - riseY, Math.max(2, sr), 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(50,30,10,0)';
+      ctx.fill();
+    }
+  }
+
+  /**
+   * Spawn a sword swing arc effect at a world position.
+   * @param worldPos  Attacker's world position.
+   * @param direction Attack angle in radians.
+   */
+  spawnSwordArc(worldPos: Vec2, direction: number): void {
+    this.effectRenderer.createSwordArc(worldPos, direction);
   }
 
   /**
@@ -152,6 +599,21 @@ export class RenderSystem {
   }
 
   /**
+   * Show a top-centre announcement banner.
+   * @param text    Message to display.
+   * @param kind    'ship_sink' | 'npc_kill' | 'info'
+   * @param duration Seconds to display (default 3.5).
+   */
+  showAnnouncement(text: string, kind: AnnouncementKind = 'info', duration = 3.5): void {
+    this.effectRenderer.createAnnouncement(text, kind, duration);
+  }
+
+  /** Returns the ship ID of the last ship that fired a cannonball near shipId, or null. */
+  getLastAttackerOf(shipId: number): number | null {
+    return this.lastAttackerOf.get(shipId) ?? null;
+  }
+
+  /**
    * Update render system (particles, effects, etc.)
    */
   update(deltaTime: number): void {
@@ -159,11 +621,401 @@ export class RenderSystem {
     this.effectRenderer.update(deltaTime);
   }
   
+  private swordCursorMousePos: Vec2 | null = null;
+  private swordCursorLastAttackMs = 0;
+  private swordCursorCooldownMs   = 1000;
+
+  /** Ladder hold-progress ring (fills over the hold threshold while E is held near a ladder). */
+  private ladderHoldMousePos: Vec2 | null = null;
+  private ladderHoldStartMs = 0;
+  private ladderHoldActive  = false;
+  private _quickFlashPos: Vec2 | null = null;
+  private _quickFlashStartMs = -1;
+
+  /** Generic radial action menu (set by ClientApplication). */
+  private _radialMenu: RadialMenu | null = null;
+  setRadialMenu(menu: RadialMenu): void { this._radialMenu = menu; }
+
+  /** On-screen instruction shown while the player is in "Move To" NPC targeting mode. */
+  private _moveToHint: string | null = null;
+  /** NPC id whose world position is the arrow-line origin while in Move To mode. */
+  private _moveToSourceNpcId: number | null = null;
+
+  /** Set the Move To hint text (shown centre-bottom of screen until cleared). */
+  setMoveToHint(text: string): void { this._moveToHint = text; }
+  /** Record which NPC is the source so the arrow line can originate from it. */
+  setMoveToSourceNpc(npcId: number | null): void { this._moveToSourceNpcId = npcId; }
+  /** Clear the Move To hint and arrow-line source together. */
+  clearMoveToHint(): void { this._moveToHint = null; this._moveToSourceNpcId = null; }
+
+  /** Begin drawing the ladder hold-progress ring at the given screen position. */
+  startLadderHoldRing(mouseScreenPos: Vec2): void {
+    this.ladderHoldMousePos = mouseScreenPos;
+    this.ladderHoldStartMs  = performance.now();
+    this.ladderHoldActive   = true;
+  }
+
+  /** Stop drawing the ladder hold-progress ring. */
+  stopLadderHoldRing(): void {
+    this.ladderHoldActive   = false;
+    this.ladderHoldMousePos = null;
+  }
+
+  /** Flash a green confirmation ring at the given screen position (quick tap feedback). */
+  flashInteract(pos: Vec2): void {
+    this._quickFlashPos     = pos;
+    this._quickFlashStartMs = performance.now();
+  }
+
+  /** Flash a red cancel ring at the given screen position. */
+  flashCancel(pos: Vec2): void {
+    this._quickFlashPos     = pos;
+    this._quickFlashStartMs = -(performance.now()); // negative = red
+  }
+
+  /**
+   * Draw an animated marching-arrow line from the commanded NPC to the mouse cursor.
+   * Shown whenever Move To targeting mode is active.
+   */
+  private drawMoveToArrowLine(worldState: WorldState, camera: Camera): void {
+    if (this._moveToSourceNpcId === null || !this.mouseWorldPos) return;
+
+    // Resolve the NPC's current world position (same logic as drawNpc)
+    const npc = worldState.npcs.find(n => n.id === this._moveToSourceNpcId);
+    if (!npc) return;
+
+    let npcWorldPos = npc.position;
+    if (npc.shipId) {
+      const ship = worldState.ships.find(s => s.id === npc.shipId);
+      if (ship && npc.localPosition) {
+        const cosR = Math.cos(ship.rotation);
+        const sinR = Math.sin(ship.rotation);
+        npcWorldPos = Vec2.from(
+          ship.position.x + npc.localPosition.x * cosR - npc.localPosition.y * sinR,
+          ship.position.y + npc.localPosition.x * sinR + npc.localPosition.y * cosR,
+        );
+      }
+    }
+
+    // ── Module highlight: amber glow when cursor hovers a module in Move To mode ──
+    const now = performance.now();
+    if (this.hoveredModule) {
+      const { ship: modShip, module: mod } = this.hoveredModule;
+      const screenPos   = camera.worldToScreen(modShip.position);
+      const cameraState = camera.getState();
+      const glowPulse   = 0.55 + 0.45 * Math.sin(now / 160);
+      const glowAlpha   = 0.6 + 0.4 * glowPulse;
+
+      // Build the module's local-space path for the given kind
+      const buildModulePath = (ctx: CanvasRenderingContext2D): void => {
+        ctx.beginPath();
+        if (mod.kind === 'mast') {
+          ctx.arc(0, 0, (mod as any).radius || 15, 0, Math.PI * 2);
+        } else if (mod.kind === 'helm' || mod.kind === 'steering-wheel') {
+          ctx.arc(0, 0, 8, 0, Math.PI * 2);
+        } else if (mod.kind === 'cannon') {
+          ctx.rect(-15, -10, 30, 20);
+        } else if (mod.kind === 'swivel') {
+          ctx.arc(0, 0, 10, 0, Math.PI * 2);
+        } else if (mod.kind === 'ladder') {
+          ctx.rect(-10, -20, 20, 40);
+        } else if (mod.kind === 'plank') {
+          const w = (mod as any).length || 20;
+          const h = (mod as any).width  || 10;
+          ctx.rect(-w / 2, -h / 2, w, h);
+        } else {
+          ctx.rect(-10, -10, 20, 20);
+        }
+      };
+
+      this.ctx.save();
+      this.ctx.translate(screenPos.x, screenPos.y);
+      this.ctx.rotate(modShip.rotation - cameraState.rotation);
+      this.ctx.scale(cameraState.zoom, cameraState.zoom);
+      this.ctx.translate(mod.localPos.x, mod.localPos.y);
+      this.ctx.rotate((mod as any).localRot ?? 0);
+
+      // Outer glow pass
+      this.ctx.shadowColor  = '#ffe066';
+      this.ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
+      this.ctx.strokeStyle  = `rgba(255, 220, 60, ${(glowAlpha * 0.55).toFixed(3)})`;
+      this.ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
+      this.ctx.globalAlpha  = 1;
+      buildModulePath(this.ctx);
+      this.ctx.stroke();
+
+      // Inner crisp stroke
+      this.ctx.shadowBlur   = 0;
+      this.ctx.strokeStyle  = `rgba(255, 240, 130, ${(glowAlpha * 0.9).toFixed(3)})`;
+      this.ctx.lineWidth    = 2.5 / cameraState.zoom;
+      this.ctx.globalAlpha  = glowAlpha;
+      buildModulePath(this.ctx);
+      this.ctx.stroke();
+
+      // Translucent amber fill overlay
+      this.ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
+      this.ctx.fillStyle    = '#ffe066';
+      buildModulePath(this.ctx);
+      this.ctx.fill();
+
+      this.ctx.restore();
+    }
+
+    // ── Ship hull highlight: pulse the hull outline when cursor is over a ship ──
+    // Only when: no module is hovered (module highlight takes priority), AND the
+    // NPC is not already on that ship (boarding is the action — not an intra-ship move).
+    const hullHitShip = (() => {
+      if (!this.mouseWorldPos || this.hoveredModule) return null;
+      const pointInPoly = (px: number, py: number, poly: Vec2[]): boolean => {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+          const xi = poly[i].x, yi = poly[i].y;
+          const xj = poly[j].x, yj = poly[j].y;
+          if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi))
+            inside = !inside;
+        }
+        return inside;
+      };
+      for (const s of worldState.ships) {
+        if (!s.hull || s.hull.length < 3) continue;
+        // Skip if the NPC is already on this ship — no boarding would occur
+        if (npc.shipId && npc.shipId === s.id) continue;
+        const dx  = this.mouseWorldPos!.x - s.position.x;
+        const dy  = this.mouseWorldPos!.y - s.position.y;
+        const cos = Math.cos(-s.rotation);
+        const sin = Math.sin(-s.rotation);
+        if (pointInPoly(dx * cos - dy * sin, dx * sin + dy * cos, s.hull)) return s;
+      }
+      return null;
+    })();
+
+    if (hullHitShip) {
+      const screenPos    = camera.worldToScreen(hullHitShip.position);
+      const cameraState  = camera.getState();
+      const hull         = hullHitShip.hull;
+      // Alternating gold/white glow pulse
+      const glowPulse    = 0.55 + 0.45 * Math.sin(now / 160);
+      const glowAlpha    = 0.6 + 0.4 * glowPulse;
+
+      this.ctx.save();
+      this.ctx.translate(screenPos.x, screenPos.y);
+      this.ctx.scale(cameraState.zoom, cameraState.zoom);
+      this.ctx.rotate(hullHitShip.rotation - cameraState.rotation);
+
+      // Outer glow pass  (wider, dimmer)
+      this.ctx.shadowColor  = '#ffe066';
+      this.ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
+      this.ctx.strokeStyle  = `rgba(255, 220, 60, ${(glowAlpha * 0.55).toFixed(3)})`;
+      this.ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
+      this.ctx.globalAlpha  = 1;
+      this.ctx.beginPath();
+      this.ctx.moveTo(hull[0].x, hull[0].y);
+      for (let i = 1; i < hull.length; i++) this.ctx.lineTo(hull[i].x, hull[i].y);
+      this.ctx.closePath();
+      this.ctx.stroke();
+
+      // Inner crisp stroke
+      this.ctx.shadowBlur   = 0;
+      this.ctx.strokeStyle  = `rgba(255, 240, 130, ${(glowAlpha * 0.9).toFixed(3)})`;
+      this.ctx.lineWidth    = (2.5) / cameraState.zoom;
+      this.ctx.globalAlpha  = glowAlpha;
+      this.ctx.beginPath();
+      this.ctx.moveTo(hull[0].x, hull[0].y);
+      for (let i = 1; i < hull.length; i++) this.ctx.lineTo(hull[i].x, hull[i].y);
+      this.ctx.closePath();
+      this.ctx.stroke();
+
+      // Translucent amber fill overlay
+      this.ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
+      this.ctx.fillStyle    = '#ffe066';
+      this.ctx.beginPath();
+      this.ctx.moveTo(hull[0].x, hull[0].y);
+      for (let i = 1; i < hull.length; i++) this.ctx.lineTo(hull[i].x, hull[i].y);
+      this.ctx.closePath();
+      this.ctx.fill();
+
+      this.ctx.restore();
+    }
+
+    // ── Arrow colour mode ─────────────────────────────────────────────────────
+    // yellow  = default (world / hull target)
+    // green   = hovered module that is free
+    // red     = hovered module that is already occupied by another NPC
+    let arrowMode: 'yellow' | 'green' | 'red' = 'yellow';
+    if (this.hoveredModule) {
+      const modKind = this.hoveredModule.module.kind as string;
+      if (SINGLE_OCCUPANCY_KINDS.has(modKind)) {
+        const modId = this.hoveredModule.module.id as number;
+        const occupied = worldState.npcs.some(
+          n => n.id !== this._moveToSourceNpcId && n.assignedWeaponId === modId,
+        );
+        arrowMode = occupied ? 'red' : 'green';
+      } else {
+        arrowMode = 'green'; // non-occupancy modules are always free
+      }
+    }
+
+    // Palette per mode  [base, dimBase(rgba), dot]
+    const ARROW_PALETTES = {
+      yellow: { base: '#ffe066', dim: 'rgba(255,220,60,0.45)',  dot: '#fff8a0' },
+      green:  { base: '#44ff88', dim: 'rgba(68,255,136,0.45)',  dot: '#a0ffe0' },
+      red:    { base: '#ff4455', dim: 'rgba(255,68,80,0.45)',   dot: '#ffb0b8' },
+    } as const;
+    const palette = ARROW_PALETTES[arrowMode];
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const src  = camera.worldToScreen(npcWorldPos);
+    const dst  = camera.worldToScreen(this.mouseWorldPos);
+    const dx   = dst.x - src.x;
+    const dy   = dst.y - src.y;
+    const totalLen = Math.sqrt(dx * dx + dy * dy);
+    if (totalLen < 8) return;
+
+    const UX  = dx / totalLen;
+    const UY  = dy / totalLen;
+    // Perpendicular unit vector
+    const PX  = -UY;
+    const PY  =  UX;
+    const ctx = this.ctx;
+
+    ctx.save();
+
+    // ── Dashed base line (scrolling animation) ───────────────────
+    ctx.setLineDash([8, 6]);
+    ctx.lineDashOffset = -((now / 22) % 14);
+    ctx.beginPath();
+    ctx.moveTo(src.x, src.y);
+    ctx.lineTo(dst.x, dst.y);
+    ctx.strokeStyle = palette.dim;
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineDashOffset = 0;
+
+    // ── Marching chevron arrowheads ────────────────────────────
+    const SPACING   = 38;   // px between arrow tips
+    const HALF_W    = 7;    // half wingspan
+    const BACK_LEN  = 9;    // how far behind the tip the wings start
+    const MARCH_SPD = 0.055; // px per ms
+
+    const marchOffset = (now * MARCH_SPD) % SPACING;
+    const numArrows   = Math.ceil(totalLen / SPACING) + 1;
+
+    ctx.lineWidth   = 2.2;
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
+
+    for (let i = 0; i < numArrows; i++) {
+      // t = distance from src to the arrow tip
+      const t = marchOffset + i * SPACING;
+      if (t < 14 || t > totalLen - 10) continue; // keep clear of endpoints
+
+      // Fade in near src, fade out near dst
+      const edgeFade = Math.min(t / 28, 1) * Math.min((totalLen - 10 - t) / 28, 1);
+      if (edgeFade <= 0) continue;
+
+      // Subtle pulse so each arrow breathes slightly out of phase
+      const pulse = 0.72 + 0.28 * Math.sin(now / 180 + i * 1.1);
+
+      const tx = src.x + UX * t;
+      const ty = src.y + UY * t;
+
+      ctx.globalAlpha = edgeFade * pulse * 0.92;
+      ctx.strokeStyle = palette.base;
+      ctx.beginPath();
+      // Left wing: from rear-left to tip
+      ctx.moveTo(
+        tx - UX * BACK_LEN + PX * HALF_W,
+        ty - UY * BACK_LEN + PY * HALF_W,
+      );
+      ctx.lineTo(tx, ty);
+      // Right wing: tip back to rear-right
+      ctx.lineTo(
+        tx - UX * BACK_LEN - PX * HALF_W,
+        ty - UY * BACK_LEN - PY * HALF_W,
+      );
+      ctx.stroke();
+    }
+
+    // ── Pulsing target ring at the destination ─────────────────────
+    const ringPulse = 0.65 + 0.35 * Math.sin(now / 220);
+    ctx.globalAlpha = 0.85 * ringPulse;
+    ctx.beginPath();
+    ctx.arc(dst.x, dst.y, 10 + (1 - ringPulse) * 4, 0, Math.PI * 2);
+    ctx.strokeStyle = palette.base;
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+
+    // Inner dot at cursor
+    ctx.globalAlpha = 0.95;
+    ctx.beginPath();
+    ctx.arc(dst.x, dst.y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = palette.dot;
+    ctx.fill();
+
+    // ── Source NPC indicator dot ──────────────────────────
+    const srcPulse = 0.6 + 0.4 * Math.sin(now / 200 + Math.PI); // opposite phase to ring
+    ctx.globalAlpha = 0.8 * srcPulse;
+    ctx.beginPath();
+    ctx.arc(src.x, src.y, 12 + (1 - srcPulse) * 4, 0, Math.PI * 2);
+    ctx.strokeStyle = '#80e0ff';
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+
+    ctx.globalAlpha = 1.0;
+    ctx.restore();
+  }
+
+  /** Draw the "Move To" hint banner at the bottom-centre of the screen. */
+  private drawMoveToHint(): void {
+    if (!this._moveToHint) return;
+    const ctx  = this.ctx;
+    const cw   = this.canvas.width;
+    const ch   = this.canvas.height;
+    const text = this._moveToHint;
+    ctx.save();
+    ctx.font      = 'bold 16px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const tw  = ctx.measureText(text).width;
+    const bw  = tw + 32;
+    const bh  = 36;
+    const bx  = (cw - bw) / 2;
+    const by  = ch - 80;
+    ctx.fillStyle   = 'rgba(0,0,0,0.75)';
+    ctx.strokeStyle = '#ffdd00';
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#ffe066';
+    ctx.fillText(`📍 ${text}`, cw / 2, by + bh / 2);
+    ctx.restore();
+  }
+
+  /** Called each frame from ClientApplication to keep sword cursor ring in sync. */
+  updateSwordCooldownCursor(mouseScreenPos: Vec2 | null, lastAttackMs: number, cooldownMs: number): void {
+    this.swordCursorMousePos    = mouseScreenPos;
+    this.swordCursorLastAttackMs = lastAttackMs;
+    this.swordCursorCooldownMs   = cooldownMs;
+  }
+
   /**
    * Update mouse position for hover detection
    */
   updateMousePosition(worldPos: Vec2): void {
     this.mouseWorldPos = worldPos;
+  }
+
+  /**
+   * Notify the render system that a sword swing just happened.
+   * Starts the cooldown ring animation around the cursor.
+   * @param cooldownMs Total cooldown duration in milliseconds (default 800ms).
+   */
+  notifySwordSwing(cooldownMs: number = 800): void {
+    this.lastSwordSwingAt = performance.now();
+    this.swordCooldownMs  = cooldownMs;
   }
   
   /**
@@ -195,6 +1047,20 @@ export class RenderSystem {
    */
   isInMastBuildMode(): boolean {
     return this.mastBuildMode;
+  }
+
+  /**
+   * Enable or disable swivel gun placement build mode
+   */
+  setSwivelBuildMode(active: boolean): void {
+    this.swivelBuildMode = active;
+  }
+
+  /**
+   * Whether swivel build mode is currently active
+   */
+  isInSwivelBuildMode(): boolean {
+    return this.swivelBuildMode;
   }
 
   /**
@@ -253,6 +1119,194 @@ export class RenderSystem {
     return this.hoveredDeckSlot;
   }
 
+  // ── Island structure management ────────────────────────────────────────────
+
+  /** Add (or update) a single placed structure received from the server. */
+  addPlacedStructure(s: PlacedStructure): void {
+    const idx = this.placedStructures.findIndex(p => p.id === s.id);
+    if (idx >= 0) this.placedStructures[idx] = s;
+    else this.placedStructures.push(s);
+  }
+
+  /** Replace the full placed-structure list (e.g. on join). */
+  setPlacedStructures(arr: PlacedStructure[]): void {
+    this.placedStructures = [...arr];
+  }
+
+  /** Remove a single structure by id (e.g. after server confirms demolish). */
+  removePlacedStructure(id: number): void {
+    this.placedStructures = this.placedStructures.filter(s => s.id !== id);
+  }
+
+  /** Update a structure's company ownership (one-way promotion from server). */
+  updateStructureCompany(id: number, companyId: number): void {
+    const s = this.placedStructures.find(p => p.id === id);
+    if (s) s.companyId = companyId;
+  }
+
+  updateStructureHp(id: number, hp: number, maxHp: number): void {
+    const s = this.placedStructures.find(p => p.id === id);
+    if (s) { s.hp = hp; s.maxHp = maxHp; }
+  }
+
+  /** Update door open/closed state after a door_toggled broadcast. */
+  updateStructureDoorOpen(id: number, open: boolean): void {
+    const s = this.placedStructures.find(p => p.id === id);
+    if (s && s.type === 'door') s.doorOpen = open;
+  }
+
+  /** Activate island placement ghost for wooden_floor, workbench, wall, or door, or clear it. */
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | null): void {
+    this.islandBuildKind = kind;
+  }
+
+  /**
+   * Compute the snapped world position for a wooden_floor placement at (wx, wy).
+   * If the point is within SNAP_R of an unoccupied cardinal neighbour slot of any
+   * existing floor, snaps to that slot. Otherwise returns the input unchanged.
+   * Called at click time so it is never stale.
+   */
+  computeSnappedPos(wx: number, wy: number): { x: number; y: number } {
+    const TILE   = 50;
+    const SNAP_R = TILE * 0.8; // 40 px — generous snap pull radius
+    if (this.islandBuildKind !== 'wooden_floor' || this.placedStructures.length === 0) {
+      return { x: wx, y: wy };
+    }
+    let bestDist2 = SNAP_R * SNAP_R;
+    let bestX = wx, bestY = wy;
+    const DIRS = [{ dx: TILE, dy: 0 }, { dx: -TILE, dy: 0 },
+                  { dx: 0, dy: TILE  }, { dx: 0, dy: -TILE  }];
+    for (const s of this.placedStructures) {
+      if (s.type !== 'wooden_floor') continue;
+      for (const d of DIRS) {
+        const nx = s.x + d.dx, ny = s.y + d.dy;
+        const alreadyOccupied = this.placedStructures.some(
+          f => f.type === 'wooden_floor' && Math.abs(f.x - nx) < 1 && Math.abs(f.y - ny) < 1
+        );
+        if (alreadyOccupied) continue;
+        const dist2 = (nx - wx) * (nx - wx) + (ny - wy) * (ny - wy);
+        if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; }
+      }
+    }
+    return { x: bestX, y: bestY };
+  }
+
+  /**
+   * Compute the snapped world position for a wall placement at (wx, wy).
+   * Snaps to the nearest unoccupied edge midpoint of any floor tile.
+   */
+  computeSnappedWallPos(wx: number, wy: number): { x: number; y: number } {
+    const HALF = 25;
+    const SNAP_R = 30;
+    if (this.placedStructures.length === 0) return { x: wx, y: wy };
+    let bestDist2 = SNAP_R * SNAP_R;
+    let bestX = wx, bestY = wy;
+    const EDGES = [
+      { dx: 0, dy: -HALF }, { dx: 0, dy: HALF },
+      { dx: -HALF, dy: 0 }, { dx: HALF, dy: 0 },
+    ];
+    for (const s of this.placedStructures) {
+      if (s.type !== 'wooden_floor') continue;
+      for (const e of EDGES) {
+        const nx = s.x + e.dx, ny = s.y + e.dy;
+        const occ = this.placedStructures.some(
+          w => (w.type === 'wall' || w.type === 'door_frame') && Math.abs(w.x - nx) < 2 && Math.abs(w.y - ny) < 2
+        );
+        if (occ) continue;
+        const dist2 = (nx - wx) * (nx - wx) + (ny - wy) * (ny - wy);
+        if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; }
+      }
+    }
+    return { x: bestX, y: bestY };
+  }
+
+  /** Snap a door panel to the nearest unoccupied door_frame position. */
+  computeSnappedDoorPos(wx: number, wy: number): { x: number; y: number } {
+    const SNAP_R = 30;
+    if (this.placedStructures.length === 0) return { x: wx, y: wy };
+    let bestDist2 = SNAP_R * SNAP_R;
+    let bestX = wx, bestY = wy;
+    for (const s of this.placedStructures) {
+      if (s.type !== 'door_frame') continue;
+      const hasDoor = this.placedStructures.some(
+        d => d.type === 'door' && Math.abs(d.x - s.x) < 2 && Math.abs(d.y - s.y) < 2
+      );
+      if (hasDoor) continue;
+      const dist2 = (s.x - wx) * (s.x - wx) + (s.y - wy) * (s.y - wy);
+      if (dist2 < bestDist2) { bestDist2 = dist2; bestX = s.x; bestY = s.y; }
+    }
+    return { x: bestX, y: bestY };
+  }
+
+  /**
+   * Return the nearest workbench within `range` world-px of the local player,
+   * or null if none found. Used to decide whether E-key triggers interact.
+   */
+  getHoveredWorkbench(range: number = 110): PlacedStructure | null {
+    const player = this._cachedLocalPlayer;
+    if (!player) return null;
+    const px = player.position.x;
+    const py = player.position.y;
+    const rangeSq = range * range;
+    let best: PlacedStructure | null = null;
+    let bestDist = Infinity;
+    for (const s of this.placedStructures) {
+      if (s.type !== 'workbench') continue;
+      const dx = s.x - px;
+      const dy = s.y - py;
+      const dist = dx * dx + dy * dy;
+      if (dist <= rangeSq && dist < bestDist) {
+        bestDist = dist;
+        best = s;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Return the hovered structure if the player is also within `range` world-px
+   * of it (so E-key only fires when actually reachable). Returns null if no
+   * structure is moused-over or the player is too far / on a ship.
+   */
+  getHoveredStructure(range: number = 110): PlacedStructure | null {
+    if (!this._hoveredStructure) return null;
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return null;
+    const dx = this._hoveredStructure.x - player.position.x;
+    const dy = this._hoveredStructure.y - player.position.y;
+    return dx * dx + dy * dy <= range * range ? this._hoveredStructure : null;
+  }
+
+  /** Return hovered tree world pos if player is in range and off-ship, else null. */
+  getHoveredTree(range: number = 110): { wx: number; wy: number } | null {
+    if (!this._hoveredTree) return null;
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return null;
+    const dx = this._hoveredTree.wx - player.position.x;
+    const dy = this._hoveredTree.wy - player.position.y;
+    return dx * dx + dy * dy <= range * range ? this._hoveredTree : null;
+  }
+
+  /** Return hovered fiber plant world pos if player is in range and off-ship, else null. */
+  getHoveredFiberPlant(range: number = 110): { wx: number; wy: number } | null {
+    if (!this._hoveredFiberPlant) return null;
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return null;
+    const dx = this._hoveredFiberPlant.wx - player.position.x;
+    const dy = this._hoveredFiberPlant.wy - player.position.y;
+    return dx * dx + dy * dy <= range * range ? this._hoveredFiberPlant : null;
+  }
+
+  /** Return hovered rock world pos if player is in range and off-ship, else null. */
+  getHoveredRock(range: number = 110): { wx: number; wy: number } | null {
+    if (!this._hoveredRock) return null;
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return null;
+    const dx = this._hoveredRock.wx - player.position.x;
+    const dy = this._hoveredRock.wy - player.position.y;
+    return dx * dx + dy * dy <= range * range ? this._hoveredRock : null;
+  }
+
   /**
    * Whether cannon build mode is currently active
    */
@@ -273,7 +1327,7 @@ export class RenderSystem {
   }
 
   // Explicit B-key build mode ghost preview state
-  private explicitBuildState: { item: 'cannon' | 'sail'; rotationDeg: number } | null = null;
+  private explicitBuildState: { item: 'cannon' | 'sail' | 'swivel'; rotationDeg: number } | null = null;
 
   // Ghost placement plan markers and pending ghost cursor
   private ghostPlacements: GhostPlacement[] = [];
@@ -284,7 +1338,7 @@ export class RenderSystem {
    * Set explicit build mode state for ghost preview rendering.
    * Pass null to disable.
    */
-  setExplicitBuildMode(state: { item: 'cannon' | 'sail'; rotationDeg: number } | null): void {
+  setExplicitBuildMode(state: { item: 'cannon' | 'sail' | 'swivel'; rotationDeg: number } | null): void {
     this.explicitBuildState = state;
   }
 
@@ -422,9 +1476,10 @@ export class RenderSystem {
         const moduleData = module.moduleData;
         if (moduleData.kind !== 'ladder') continue;
         
-        // Ladder renders as fillRect(-10, -20, 20, 40) centered at localPos with localRot
-        const halfWidth = 10;  // 20 / 2
-        const halfHeight = 20; // 40 / 2
+        // Hover bounds match rendered size: 20x40 when extended, 20x12 when retracted
+        const isLadderExtended = (moduleData as any).extended !== false;
+        const halfWidth = 10;
+        const halfHeight = isLadderExtended ? 20 : 6;
         
         const mdx = localX - module.localPos.x;
         const mdy = localY - module.localPos.y;
@@ -466,6 +1521,10 @@ export class RenderSystem {
         } else if (moduleKind === 'cannon') {
           width = 30;
           height = 20;
+        } else if (moduleKind === 'swivel') {
+          // Swivel: circular pivot — use diameter for hit-box
+          width = 22;
+          height = 22;
         } else if (moduleKind === 'mast') {
           // Masts are circles, so use radius for both width and height
           const radius = (module.moduleData?.kind === 'mast' && module.moduleData.radius) || 15;
@@ -537,11 +1596,17 @@ export class RenderSystem {
     phase2Alpha: number;
     phase3Alpha: number;
   } {
-    const waterFill = Math.max(0, Math.min(1, 1 - ship.hullHealth / 100));
+    const isGhostShipForHP = ship.shipType === SHIP_TYPE_GHOST;
+    const maxHullHP = isGhostShipForHP ? GHOST_MAX_HULL_HP : 100;
+    // Once the sink animation has started, lock hullPct at 0 so the fade can't reverse
+    const rawHullPct = Math.max(0, Math.min(1, ship.hullHealth / maxHullHP));
+    const hullPct = this.sinkTimestamps.has(ship.id) ? 0 : rawHullPct;
+    const waterFill = Math.max(0, Math.min(1, 1 - hullPct));
     const floodTint = waterFill >= 0.75 ? (waterFill - 0.75) / 0.25 : 0;
 
     // Start the clock for any live ship the moment hullHealth hits 0 (fallback if SHIP_SINKING arrives late)
-    if (ship.hullHealth <= 0 && !this.sinkTimestamps.has(ship.id)) {
+    const zeroThreshold = ship.shipType === SHIP_TYPE_GHOST ? 1 : 0;
+    if (ship.hullHealth <= zeroThreshold && !this.sinkTimestamps.has(ship.id)) {
       this.sinkTimestamps.set(ship.id, performance.now());
     }
 
@@ -623,10 +1688,17 @@ export class RenderSystem {
   renderWorld(worldState: WorldState, camera: Camera, interpolationAlpha: number): void {
     // Clear canvas
     this.clearCanvas();
-    
+
+    // Cache local player once for the entire frame — shared by all detect* and draw* methods.
+    this._cachedLocalPlayer = this.localPlayerId != null
+      ? worldState.players.find(p => p.id === this.localPlayerId) ?? null
+      : null;
+    this._localCompanyId = this._cachedLocalPlayer?.companyId ?? 0;
+
     // Detect hovered module
     this.detectHoveredModule(worldState);
     this.detectHoveredNpc(worldState);
+    this.detectHoveredShip(worldState);
 
     // In build mode, detect which missing plank slot is under the cursor
     if (this.buildMode) {
@@ -669,6 +1741,9 @@ export class RenderSystem {
     // Draw background elements
     this.drawWater(camera);
     this.drawGrid(camera);
+    this.drawIsland(camera);
+    this.drawPlacedStructures(camera);
+    this.drawIslandBuildGhost(camera);
     
     // Queue all game objects for layered rendering
     this.queueWorldObjects(worldState, camera, interpolationAlpha);
@@ -689,6 +1764,23 @@ export class RenderSystem {
     // Draw effects and particles (always on top)
     this.particleSystem.render(camera);
     this.effectRenderer.render(camera);
+    // Flamethrower instant cone flashes (on top of particles)
+    this.drawFlameCones(camera);
+    // Grapeshot / canister hit-scan tracers
+    this.drawGrapeshotTracers(camera);
+    // Screen-space announcement banners (on top of everything)
+    this.effectRenderer.renderAnnouncements(this.canvas);
+
+    // Sword cooldown cursor ring (topmost — always in screen space)
+    this.drawSwordCooldownCursor();
+    // Ladder hold-progress ring
+    this.drawLadderHoldRing();
+    // Move To directive arrow line (above world, below UI menus)
+    this.drawMoveToArrowLine(worldState, camera);
+    // Radial action menu (topmost)
+    this._radialMenu?.render(this.ctx);
+    // Move To targeting hint banner
+    this.drawMoveToHint();
     
     // Draw hover boundaries debug if enabled
     if (this.showHoverBoundaries) {
@@ -698,8 +1790,59 @@ export class RenderSystem {
     // Draw hover tooltip (screen space, on top of everything)
     this.drawHoverTooltip(camera);
     this.drawNpcTooltip(camera);
+    this.drawShipHullTooltip(camera);
   }
   
+  /**
+   * Draws a shrinking arc ring around the mouse cursor while the sword is on cooldown.
+   * Full ring = just swung; empty ring = ready.
+   */
+  private drawSwordCooldownIndicator(camera: Camera): void {
+    if (!this.mouseWorldPos) return;
+    if (!this.swordEquipped) return;
+
+    const elapsed   = performance.now() - this.lastSwordSwingAt;
+    const onCooldown = elapsed < this.swordCooldownMs;
+    const progress  = onCooldown ? elapsed / this.swordCooldownMs : 1; // 0→1 as cooldown fills
+
+    const screenPos = camera.worldToScreen(this.mouseWorldPos);
+    const RADIUS    = 12;
+    const TRACK_W   = 2.5;
+    const START     = -Math.PI / 2; // 12 o'clock
+
+    const ctx = this.ctx;
+    ctx.save();
+
+    // Dim background track (always shown)
+    ctx.strokeStyle = 'rgba(0,0,0,0.40)';
+    ctx.lineWidth   = TRACK_W + 1;
+    ctx.lineCap     = 'butt';
+    ctx.beginPath();
+    ctx.arc(screenPos.x, screenPos.y, RADIUS, 0, Math.PI * 2);
+    ctx.stroke();
+
+    if (onCooldown) {
+      // Filling arc: draws from empty → full as cooldown completes (red)
+      const END = START + progress * Math.PI * 2;
+      ctx.strokeStyle = 'rgba(220, 40, 40, 0.9)';
+      ctx.lineWidth   = TRACK_W;
+      ctx.lineCap     = 'round';
+      ctx.beginPath();
+      ctx.arc(screenPos.x, screenPos.y, RADIUS, START, END);
+      ctx.stroke();
+    } else {
+      // Ready — full green circle
+      ctx.strokeStyle = 'rgba(80, 220, 100, 0.85)';
+      ctx.lineWidth   = TRACK_W;
+      ctx.lineCap     = 'butt';
+      ctx.beginPath();
+      ctx.arc(screenPos.x, screenPos.y, RADIUS, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
   /**
    * Render loading/connection screen
    */
@@ -775,6 +1918,111 @@ export class RenderSystem {
     this.particleSystem.shutdown();
     this.effectRenderer.shutdown();
   }
+
+  /** Draw the sword cooldown ring around the mouse cursor (screen space). */
+  private drawLadderHoldRing(): void {
+    const ctx = this.ctx;
+    const R   = 18;
+    const now = performance.now();
+
+    ctx.save();
+
+    // ── Hold progress ring ────────────────────────────────────────────────
+    if (this.ladderHoldActive && this.ladderHoldMousePos) {
+      const cx = this.ladderHoldMousePos.x;
+      const cy = this.ladderHoldMousePos.y;
+      const HOLD_MS = 300;
+      const progress = Math.min((now - this.ladderHoldStartMs) / HOLD_MS, 1);
+
+      // Dark track
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+      ctx.lineWidth = 3.5;
+      ctx.stroke();
+
+      // Amber fill arc, clockwise from top
+      if (progress > 0) {
+        const startAngle = -Math.PI / 2;
+        const endAngle   = startAngle + progress * Math.PI * 2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, R, startAngle, endAngle);
+        ctx.strokeStyle = progress >= 1
+          ? 'rgba(255, 220, 80, 1.0)'   // bright gold when complete
+          : 'rgba(255, 160, 30, 0.9)';  // amber while filling
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      }
+    }
+
+    // ── Quick-interact flash ring (expands + fades, green = confirm / red = cancel) ─
+    if (this._quickFlashPos && this._quickFlashStartMs !== -1) {
+      const FLASH_MS  = 380;
+      const isCancel  = this._quickFlashStartMs < 0;
+      const startMs   = isCancel ? -this._quickFlashStartMs : this._quickFlashStartMs;
+      const fp = (now - startMs) / FLASH_MS;
+      if (fp >= 0 && fp < 1) {
+        const alpha = (1 - fp) * 0.9;
+        const fr    = R + fp * 10;
+        ctx.beginPath();
+        ctx.arc(this._quickFlashPos.x, this._quickFlashPos.y, fr, 0, Math.PI * 2);
+        ctx.strokeStyle = isCancel
+          ? `rgba(220, 70, 60, ${alpha.toFixed(3)})`
+          : `rgba(80, 220, 100, ${alpha.toFixed(3)})`;
+        ctx.lineWidth = 3;
+        ctx.lineCap   = 'butt';
+        ctx.stroke();
+      } else if (fp >= 1) {
+        this._quickFlashPos     = null;
+        this._quickFlashStartMs = -1;
+      }
+    }
+
+    ctx.restore();
+  }
+
+  private drawSwordCooldownCursor(): void {
+    if (!this.swordCursorMousePos) return;
+
+    const ctx  = this.ctx;
+    const cx   = this.swordCursorMousePos.x;
+    const cy   = this.swordCursorMousePos.y;
+    const R    = 14; // ring radius (px)
+    const now  = performance.now();
+    const elapsed = now - this.swordCursorLastAttackMs;
+    const progress = Math.min(elapsed / this.swordCursorCooldownMs, 1); // 0→1
+
+    ctx.save();
+
+    // Background track
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    if (progress >= 1) {
+      // Ready: full bright ring
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(200, 220, 255, 0.9)';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    } else {
+      // Filling clockwise from top (−π/2) proportional to progress
+      const startAngle = -Math.PI / 2;
+      const endAngle   = startAngle + progress * Math.PI * 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, startAngle, endAngle);
+      ctx.strokeStyle = 'rgba(140, 180, 255, 0.85)';
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
   
   // Private rendering methods
   
@@ -833,16 +2081,1201 @@ export class RenderSystem {
       this.ctx.stroke();
     }
   }
-  
-  private queueWorldObjects(worldState: WorldState, camera: Camera, alpha: number): void {
-    // Clear render queue
-    this.renderQueue = [];
 
-    // Cache local player's company for enemy-coloring this frame
-    const localPlayer = this.localPlayerId != null
-      ? worldState.players.find(p => p.id === this.localPlayerId)
-      : null;
-    this._localCompanyId = localPlayer?.companyId ?? 0;
+  // ── Island rendering ─────────────────────────────────────────────────────────
+
+  /** Trace an irregular closed blob path using per-point radius bumps. */
+  private traceIslandBlob(
+    camera: Camera,
+    worldCx: number, worldCy: number,
+    radius: number, bumps: number[],
+    segments = 64,
+  ): void {
+    const ctx  = this.ctx;
+    const n    = bumps.length;
+    const TWO_PI = Math.PI * 2;
+    ctx.beginPath();
+    for (let i = 0; i <= segments; i++) {
+      const angle = (i / segments) * TWO_PI;   // 0→2π, matching server island_boundary_r
+      const t     = (angle / TWO_PI) * n;
+      const i0    = Math.floor(t) % n;
+      const i1    = (i0 + 1) % n;
+      const f     = t - Math.floor(t);
+      const r     = radius + bumps[i0] + f * (bumps[i1] - bumps[i0]);
+      const sp    = camera.worldToScreen(Vec2.from(
+        worldCx + Math.cos(angle) * r,
+        worldCy + Math.sin(angle) * r,
+      ));
+      if (i === 0) ctx.moveTo(sp.x, sp.y);
+      else         ctx.lineTo(sp.x, sp.y);
+    }
+    ctx.closePath();
+  }
+
+  /** Trace a closed polygon path in screen space from an array of world-space vertices. */
+  private traceIslandPolygon(
+    camera: Camera,
+    vertices: { x: number; y: number }[],
+  ): void {
+    const ctx = this.ctx;
+    ctx.beginPath();
+    for (let i = 0; i < vertices.length; i++) {
+      const sp = camera.worldToScreen(Vec2.from(vertices[i].x, vertices[i].y));
+      if (i === 0) ctx.moveTo(sp.x, sp.y);
+      else         ctx.lineTo(sp.x, sp.y);
+    }
+    ctx.closePath();
+  }
+
+  private drawIsland(camera: Camera): void {
+    const zoom = camera.getState().zoom;
+    // Reset per-frame hovered resource nodes
+    this._hoveredTree       = null;
+    this._hoveredFiberPlant = null;
+    this._hoveredRock       = null;
+    for (const isl of this.islands) {
+      const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+      // Visibility check: adapt radius to polygon bound or bump-circle
+      const visR = isl.vertices
+        ? Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y))) + 50
+        : (preset.beachRadius + Math.max(0, ...preset.beachBumps.map(Math.abs)) + 20);
+      if (!camera.isWorldPositionVisible(Vec2.from(isl.x, isl.y), visR)) continue;
+      const sc  = camera.worldToScreen(Vec2.from(isl.x, isl.y));
+      const ctx = this.ctx;
+
+      ctx.save();
+
+      if (isl.vertices) {
+        // ── Polygon island ─────────────────────────────────────────────────────
+        const polyBoundR = Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+
+        // Beach
+        this.traceIslandPolygon(camera, isl.vertices);
+        const beachGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, polyBoundR * zoom * 1.05);
+        beachGrad.addColorStop(0.0,  preset.beachColors[0]);
+        beachGrad.addColorStop(0.65, preset.beachColors[1]);
+        beachGrad.addColorStop(1.0,  preset.beachColors[2]);
+        ctx.fillStyle = beachGrad;
+        ctx.fill();
+        ctx.strokeStyle = preset.borderColor;
+        ctx.lineWidth   = Math.max(1, 2 * zoom);
+        ctx.stroke();
+
+        // Grass interior (polygon scaled toward island centre)
+        const gScale = preset.grassPolyScale ?? 0.78;
+        const grassVerts = isl.vertices.map(v => ({
+          x: isl.x + (v.x - isl.x) * gScale,
+          y: isl.y + (v.y - isl.y) * gScale,
+        }));
+        this.traceIslandPolygon(camera, grassVerts);
+        const grassBoundR = polyBoundR * gScale;
+        const grassGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, grassBoundR * zoom);
+        grassGrad.addColorStop(0.0, preset.grassColors[0]);
+        grassGrad.addColorStop(0.7, preset.grassColors[1]);
+        grassGrad.addColorStop(1.0, preset.grassColors[2]);
+        ctx.fillStyle = grassGrad;
+        ctx.fill();
+      } else {
+        // ── Bump-circle island ────────────────────────────────────────────────
+        // Sandy beach
+        this.traceIslandBlob(camera, isl.x, isl.y, preset.beachRadius, preset.beachBumps);
+        const beachGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, preset.beachRadius * zoom * 1.1);
+        beachGrad.addColorStop(0.0,  preset.beachColors[0]);
+        beachGrad.addColorStop(0.65, preset.beachColors[1]);
+        beachGrad.addColorStop(1.0,  preset.beachColors[2]);
+        ctx.fillStyle = beachGrad;
+        ctx.fill();
+        ctx.strokeStyle = preset.borderColor;
+        ctx.lineWidth   = Math.max(1, 2 * zoom);
+        ctx.stroke();
+
+        // Grass interior
+        this.traceIslandBlob(camera, isl.x, isl.y, preset.grassRadius, preset.grassBumps);
+        const grassGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, preset.grassRadius * zoom);
+        grassGrad.addColorStop(0.0, preset.grassColors[0]);
+        grassGrad.addColorStop(0.7, preset.grassColors[1]);
+        grassGrad.addColorStop(1.0, preset.grassColors[2]);
+        ctx.fillStyle = grassGrad;
+        ctx.fill();
+      }
+
+      ctx.restore();
+
+      // ── Resource nodes ───────────────────────────────────────────────────────
+      const localPlayer = this._cachedLocalPlayer;
+      const axeEquipped = (() => {
+        if (!localPlayer || localPlayer.carrierId !== 0) return false;
+        const slot = localPlayer.inventory?.activeSlot ?? 0;
+        return localPlayer.inventory?.slots[slot]?.item === 'axe';
+      })();
+      const pickaxeEquipped = (() => {
+        if (!localPlayer || localPlayer.carrierId !== 0) return false;
+        const slot = localPlayer.inventory?.activeSlot ?? 0;
+        return localPlayer.inventory?.slots[slot]?.item === 'pickaxe';
+      })();
+      const HARVEST_RANGE_SQ = 110 * 110;
+      // Mouse hover radius for trees: hit-test against the canopy circle (17px * zoom)
+      const TREE_HOVER_SQ  = (Math.max(4, 17 * zoom)) * (Math.max(4, 17 * zoom));
+      const PLANT_HOVER_SQ = (Math.max(4, 14 * zoom)) * (Math.max(4, 14 * zoom));
+      const ROCK_HOVER_SQ  = (Math.max(4, 16 * zoom)) * (Math.max(4, 16 * zoom));
+
+      for (const res of isl.resources) {
+        const wx = isl.x + res.ox;
+        const wy = isl.y + res.oy;
+        const sp = camera.worldToScreen(Vec2.from(wx, wy));
+        if (res.type === 'wood') {
+          // Hover detection (screen space)
+          let isHovered = false;
+          if (this.mouseWorldPos) {
+            const msp = camera.worldToScreen(this.mouseWorldPos);
+            const hdx = msp.x - sp.x;
+            const hdy = msp.y - sp.y;
+            isHovered = (hdx * hdx + hdy * hdy) <= TREE_HOVER_SQ;
+          }
+          // Player-proximity for harvest
+          const inRange = axeEquipped && localPlayer
+            ? (() => { const dx = localPlayer.position.x - wx; const dy = localPlayer.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
+            : false;
+
+          if (isHovered) this._hoveredTree = { wx, wy };
+          this.drawIslandTree(sp.x, sp.y, zoom, isHovered, inRange);
+          if (isHovered && axeEquipped) {
+            this.drawHarvestPrompt(sp.x, sp.y, zoom, inRange);
+          } else if (isHovered) {
+            this.drawGatherPrompt(sp.x, sp.y, zoom, false, '(need axe)');
+          }
+        } else if (res.type === 'fiber') {
+          let isHovered = false;
+          if (this.mouseWorldPos) {
+            const msp = camera.worldToScreen(this.mouseWorldPos);
+            const hdx = msp.x - sp.x;
+            const hdy = msp.y - sp.y;
+            isHovered = (hdx * hdx + hdy * hdy) <= PLANT_HOVER_SQ;
+          }
+          const inRange = localPlayer && localPlayer.carrierId === 0
+            ? (() => { const dx = localPlayer.position.x - wx; const dy = localPlayer.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
+            : false;
+
+          if (isHovered) this._hoveredFiberPlant = { wx, wy };
+          this.drawIslandFiberPlant(sp.x, sp.y, zoom, isHovered);
+          if (isHovered) {
+            this.drawGatherPrompt(sp.x, sp.y, zoom, inRange, '[E] Gather Fiber');
+          }
+        } else if (res.type === 'rock') {
+          let isHovered = false;
+          if (this.mouseWorldPos) {
+            const msp = camera.worldToScreen(this.mouseWorldPos);
+            const hdx = msp.x - sp.x;
+            const hdy = msp.y - sp.y;
+            isHovered = (hdx * hdx + hdy * hdy) <= ROCK_HOVER_SQ;
+          }
+          const inRange = pickaxeEquipped && localPlayer
+            ? (() => { const dx = localPlayer.position.x - wx; const dy = localPlayer.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
+            : false;
+
+          if (isHovered) this._hoveredRock = { wx, wy };
+          this.drawIslandRock(sp.x, sp.y, zoom, isHovered);
+          if (isHovered && pickaxeEquipped) {
+            this.drawGatherPrompt(sp.x, sp.y, zoom, inRange, '[E] Mine Rock');
+          } else if (isHovered) {
+            this.drawGatherPrompt(sp.x, sp.y, zoom, false, '(need pickaxe)');
+          }
+        }
+        // 'food' nodes reserved for a future draw method
+      }
+    }
+
+    // Reset hovered nodes (re-set each frame in the loop above)
+    // Done: _hoveredFiberPlant and _hoveredRock are set to null at frame start below
+  }
+
+  /** Draw a floating "[E] Chop" or "Too far" prompt above a tree. */
+  private drawHarvestPrompt(sx: number, sy: number, zoom: number, inRange: boolean): void {
+    const ctx = this.ctx;
+    const canopy    = Math.max(4, 17 * zoom);
+    const label     = inRange ? '[E] Chop' : 'Too far';
+    const borderCol = inRange ? '#f0c040' : '#888888';
+    const textCol   = inRange ? '#f0c040' : '#aaaaaa';
+    const fontSize  = Math.max(10, Math.round(13 * zoom));
+    ctx.save();
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'bottom';
+    const textW = ctx.measureText(label).width;
+    const padX  = 5;
+    const padY  = 3;
+    const bx    = sx - textW / 2 - padX;
+    const by    = sy - canopy * 1.65 - fontSize - padY;
+    const bw    = textW + padX * 2;
+    const bh    = fontSize + padY * 2;
+    // Pulsing alpha only when in range
+    const pulse = inRange ? (0.75 + 0.25 * Math.sin(performance.now() / 350)) : 0.55;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle   = 'rgba(0,0,0,0.75)';
+    ctx.strokeStyle = borderCol;
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = textCol;
+    ctx.fillText(label, sx, sy - canopy * 1.65);
+    ctx.restore();
+  }
+
+  private drawIslandTree(sx: number, sy: number, zoom: number, hovered = false, inRange = false): void {
+    const ctx    = this.ctx;
+    const trunk  = Math.max(2, 4 * zoom);
+    const canopy = Math.max(4, 17 * zoom);
+
+    ctx.save();
+    // Hover glow behind canopy
+    if (hovered) {
+      const glowColor = inRange ? 'rgba(255,230,80,0.22)' : 'rgba(180,180,180,0.15)';
+      const glowR     = inRange ? canopy * 1.25 : canopy * 1.15;
+      ctx.beginPath();
+      ctx.arc(sx, sy, glowR, 0, Math.PI * 2);
+      ctx.fillStyle = glowColor;
+      ctx.fill();
+    }
+    // Trunk
+    ctx.fillStyle = '#5c3518';
+    ctx.beginPath();
+    ctx.ellipse(sx, sy + canopy * 0.45, trunk, trunk * 1.6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Dark shadow canopy
+    ctx.fillStyle = '#2a5214';
+    ctx.beginPath();
+    ctx.arc(sx + canopy * 0.1, sy + canopy * 0.08, canopy, 0, Math.PI * 2);
+    ctx.fill();
+    // Mid canopy
+    ctx.fillStyle = '#3e7a22';
+    ctx.beginPath();
+    ctx.arc(sx - canopy * 0.08, sy - canopy * 0.08, canopy * 0.84, 0, Math.PI * 2);
+    ctx.fill();
+    // Bright highlight
+    ctx.fillStyle = '#52a030';
+    ctx.beginPath();
+    ctx.arc(sx - canopy * 0.15, sy - canopy * 0.2, canopy * 0.52, 0, Math.PI * 2);
+    ctx.fill();
+    // Hover outline ring
+    if (hovered) {
+      ctx.beginPath();
+      ctx.arc(sx, sy, canopy * 1.08, 0, Math.PI * 2);
+      ctx.strokeStyle = inRange ? '#f0c040' : '#888888';
+      ctx.lineWidth   = Math.max(1, 1.8 * zoom);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false): void {
+    const ctx        = this.ctx;
+    const h          = Math.max(5, 15 * zoom);
+    const bladeCount = 6;
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    // Dark base blades
+    ctx.strokeStyle = hovered ? '#7ac040' : '#5a9030';
+    ctx.lineWidth   = Math.max(1, 2.2 * zoom);
+    for (let i = 0; i < bladeCount; i++) {
+      const angle  = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.95;
+      const bend   = Math.sin(i * 1.8) * 0.3;
+      const midX   = sx + Math.cos(angle + bend * 0.5) * h * 0.5;
+      const midY   = sy + Math.sin(angle + bend * 0.5) * h * 0.5;
+      const tipX   = sx + Math.cos(angle + bend) * h;
+      const tipY   = sy + Math.sin(angle + bend) * h;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(midX, midY, tipX, tipY);
+      ctx.stroke();
+    }
+    // Bright inner blades
+    ctx.strokeStyle = hovered ? '#b0ff60' : '#8acc48';
+    ctx.lineWidth   = Math.max(0.5, 1.2 * zoom);
+    for (let i = 1; i < bladeCount - 1; i++) {
+      const angle = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.6;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - h * 0.25);
+      ctx.lineTo(sx + Math.cos(angle) * h * 0.72, sy + Math.sin(angle) * h * 0.72);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  private drawIslandRock(sx: number, sy: number, zoom: number, hovered = false): void {
+    const ctx = this.ctx;
+    const r   = Math.max(4, 12 * zoom);
+    ctx.save();
+    // Main rock body
+    ctx.beginPath();
+    ctx.ellipse(sx, sy + r * 0.15, r, r * 0.7, 0, 0, Math.PI * 2);
+    ctx.fillStyle   = hovered ? '#b0b0b4' : '#888890';
+    ctx.strokeStyle = hovered ? '#ffe090' : '#555560';
+    ctx.lineWidth   = Math.max(1, hovered ? 2.5 * zoom : 1.5 * zoom);
+    ctx.fill();
+    ctx.stroke();
+    // Highlight fleck
+    ctx.beginPath();
+    ctx.ellipse(sx - r * 0.25, sy - r * 0.15, r * 0.28, r * 0.18, -0.5, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.fill();
+    // Crack lines
+    ctx.strokeStyle = hovered ? '#888890' : '#666670';
+    ctx.lineWidth   = Math.max(0.5, zoom);
+    ctx.beginPath();
+    ctx.moveTo(sx - r * 0.1, sy - r * 0.2);
+    ctx.lineTo(sx + r * 0.25, sy + r * 0.3);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** Draw a floating "[E] action" or "Too far" prompt above a resource node. */
+  private drawGatherPrompt(sx: number, sy: number, zoom: number, inRange: boolean, actionLabel: string): void {
+    const ctx = this.ctx;
+    const offsetY  = Math.max(4, 16 * zoom);
+    const label     = inRange ? actionLabel : actionLabel.startsWith('(') ? actionLabel : 'Too far';
+    const borderCol = inRange ? '#a0ff60' : '#888888';
+    const textCol   = inRange ? '#c0ff80' : '#aaaaaa';
+    const fontSize  = Math.max(10, Math.round(12 * zoom));
+    ctx.save();
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'bottom';
+    const textW = ctx.measureText(label).width;
+    const padX = 5, padY = 3;
+    const bx = sx - textW / 2 - padX;
+    const by = sy - offsetY - fontSize - padY;
+    const bw = textW + padX * 2;
+    const bh = fontSize + padY * 2;
+    const pulse = inRange ? (0.75 + 0.25 * Math.sin(performance.now() / 350)) : 0.55;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle   = 'rgba(0,0,0,0.75)';
+    ctx.strokeStyle = borderCol;
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = textCol;
+    ctx.fillText(label, sx, sy - offsetY);
+    ctx.restore();
+  }
+  private drawPlacedStructures(camera: Camera): void {
+    const ctx  = this.ctx;
+    const zoom = camera.getState().zoom;
+
+    // ── Update hovered structure ──────────────────────────────────────────────
+    // Highlight whichever structure the mouse cursor is over (AABB for floor,
+    // landscape rect for workbench).  Interaction hints additionally require
+    // the player to be off-ship and within range.
+    const player = this._cachedLocalPlayer;
+    const INTERACT_R = 110; // world px — must match getHoveredStructure range
+    this._hoveredStructure = null;
+    if (this.mouseWorldPos && !this.islandBuildKind) {
+      const mx = this.mouseWorldPos.x;
+      const my = this.mouseWorldPos.y;
+      const half = 25; // half of 50px tile
+      let floorHit: PlacedStructure | null = null;
+      for (const s of this.placedStructures) {
+        if (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') {
+          // Walls and door frames have priority over floors; door panels highest
+          const isHoriz = this.placedStructures.some(f =>
+            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+          );
+          const hw = isHoriz ? 25 : 6;
+          const hh = isHoriz ? 6 : 25;
+          if (Math.abs(mx - s.x) <= hw && Math.abs(my - s.y) <= hh) {
+            floorHit = s; // walls/door frames/panels treated like floors — workbench still wins
+          }
+          continue;
+        }
+        const hw = s.type === 'workbench' ? 25 * 0.88 : half;
+        const hh = s.type === 'workbench' ? 25 * 0.62 : half;
+        if (Math.abs(mx - s.x) <= hw && Math.abs(my - s.y) <= hh) {
+          if (s.type === 'workbench') {
+            // Workbench always wins — stop searching
+            this._hoveredStructure = s;
+            floorHit = null;
+            break;
+          } else {
+            // Floor match — keep looking in case a workbench overlaps
+            floorHit = s;
+          }
+        }
+      }
+      if (this._hoveredStructure === null) this._hoveredStructure = floorHit;
+    }
+
+    // Floors first, then walls/doors, then workbenches
+    const sorted = [...this.placedStructures].sort((a, b) => {
+      const order = (t: PlacedStructure['type']) =>
+        t === 'wooden_floor' ? 0 : (t === 'wall' || t === 'door_frame') ? 1 : t === 'door' ? 1.5 : 2;
+      return order(a.type) - order(b.type);
+    });
+
+    for (const s of sorted) {
+      const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
+      const sz  = Math.max(4, 50 * zoom);
+      const isHovered = this._hoveredStructure?.id === s.id;
+
+      if (s.type === 'wooden_floor') {
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        // Darken the fill as hp drops (up to 50% darker at 0 hp)
+        const dmgDarken = (1 - hpFrac) * 0.5;
+        const baseColor = isHovered ? '#d09a3a' : '#b8832b';
+        ctx.save();
+        ctx.fillStyle   = baseColor;
+        ctx.strokeStyle = '#7a5520';
+        ctx.lineWidth   = Math.max(1, 2 * zoom);
+        ctx.beginPath();
+        ctx.rect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+        ctx.fill();
+        ctx.stroke();
+        // Damage darkening overlay
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+        }
+        // Plank lines
+        ctx.strokeStyle = 'rgba(90, 55, 15, 0.5)';
+        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+        const third = sz / 3;
+        for (let li = 1; li < 3; li++) {
+          ctx.beginPath();
+          ctx.moveTo(ssp.x - sz / 2, ssp.y - sz / 2 + li * third);
+          ctx.lineTo(ssp.x + sz / 2, ssp.y - sz / 2 + li * third);
+          ctx.stroke();
+        }
+        // Company ownership strip along the top edge
+        const floorCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        const stripH = Math.max(2, 3 * zoom);
+        ctx.fillStyle = floorCompanyColor;
+        ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, stripH);
+        ctx.restore();
+      } else if (s.type === 'workbench') {
+        // Top-down view: wide rectangular bench filling most of the floor tile
+        const bw = sz * 0.88;   // bench width
+        const bh = sz * 0.62;   // bench depth
+        const bx = ssp.x - bw / 2;
+        const by = ssp.y - bh / 2;
+        ctx.save();
+
+        // Outer frame (structural legs / frame seen from above)
+        const frameColor  = isHovered ? '#5a3010' : '#4a2408';
+        ctx.fillStyle   = frameColor;
+        ctx.strokeStyle = '#2a1204';
+        ctx.lineWidth   = Math.max(1, 1.5 * zoom);
+        ctx.beginPath();
+        ctx.rect(bx, by, bw, bh);
+        ctx.fill();
+        ctx.stroke();
+
+        // Inner work surface (inset by frame thickness)
+        const ft = Math.max(2, 4 * zoom); // frame thickness
+        const sx2 = bx + ft, sy2 = by + ft;
+        const sw  = bw - ft * 2, sh = bh - ft * 2;
+        ctx.fillStyle = isHovered ? '#c07838' : '#a86428';
+        ctx.beginPath();
+        ctx.rect(sx2, sy2, sw, sh);
+        ctx.fill();
+
+        // Plank grain lines along the length
+        ctx.strokeStyle = 'rgba(60, 30, 8, 0.35)';
+        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+        const grainCount = 3;
+        for (let gi = 1; gi < grainCount; gi++) {
+          const gy = sy2 + sh * (gi / grainCount);
+          ctx.beginPath();
+          ctx.moveTo(sx2, gy);
+          ctx.lineTo(sx2 + sw, gy);
+          ctx.stroke();
+        }
+
+        // Vise block on the right side
+        const vw = Math.max(2, 5 * zoom);
+        const vh = Math.max(2, sh * 0.45);
+        const vx = sx2 + sw - vw;
+        const vy = sy2 + (sh - vh) / 2;
+        ctx.fillStyle   = isHovered ? '#888' : '#6a6a6a';
+        ctx.strokeStyle = '#3a3a3a';
+        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+        ctx.beginPath();
+        ctx.rect(vx, vy, vw, vh);
+        ctx.fill();
+        ctx.stroke();
+
+        // Corner leg indicators (small dark squares at each corner)
+        const legSz = Math.max(2, 3.5 * zoom);
+        ctx.fillStyle = '#2a1204';
+        for (const [lx, ly] of [[bx, by], [bx + bw - legSz, by],
+                                 [bx, by + bh - legSz], [bx + bw - legSz, by + bh - legSz]]) {
+          ctx.fillRect(lx, ly, legSz, legSz);
+        }
+
+        // ⚒ icon centred on the work surface
+        ctx.font         = `${Math.max(7, Math.round(10 * zoom))}px monospace`;
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = 'rgba(255, 210, 100, 0.9)';
+        ctx.fillText('\u2692', ssp.x - vw / 2, ssp.y);
+
+        // Company ownership strip along the top edge
+        const wbCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        const wbStripH = Math.max(2, 3 * zoom);
+        ctx.fillStyle = wbCompanyColor;
+        ctx.fillRect(bx, by, bw, wbStripH);
+        // Damage darkening overlay
+        const wbHpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const wbDmgDarken = (1 - wbHpFrac) * 0.5;
+        if (wbDmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${wbDmgDarken.toFixed(2)})`;
+          ctx.fillRect(bx, by, bw, bh);
+        }
+
+        ctx.restore();
+      } else if (s.type === 'wall') {
+        // Determine orientation: if a floor shares X and is offset ±25 in Y → horizontal
+        const isHoriz = this.placedStructures.some(f =>
+          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        );
+        const THICK = 0.18; // ratio of tile (50px * 0.18 = 9px)
+        const ww = isHoriz ? sz : sz * THICK;
+        const wh = isHoriz ? sz * THICK : sz;
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const dmgDarken = (1 - hpFrac) * 0.5;
+
+        ctx.save();
+        ctx.fillStyle   = isHovered ? '#7a5030' : '#5c3a1a';
+        ctx.strokeStyle = '#2e1a08';
+        ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
+        ctx.beginPath();
+        ctx.rect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+        ctx.fill();
+        ctx.stroke();
+        // Plank grain lines along the length
+        ctx.strokeStyle = 'rgba(40, 20, 5, 0.4)';
+        ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
+        if (isHoriz) {
+          for (let li = 1; li < 3; li++) {
+            const gx = ssp.x - ww / 2 + ww * (li / 3);
+            ctx.beginPath(); ctx.moveTo(gx, ssp.y - wh / 2); ctx.lineTo(gx, ssp.y + wh / 2); ctx.stroke();
+          }
+        } else {
+          for (let li = 1; li < 3; li++) {
+            const gy = ssp.y - wh / 2 + wh * (li / 3);
+            ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2, gy); ctx.lineTo(ssp.x + ww / 2, gy); ctx.stroke();
+          }
+        }
+        // Company color strip
+        const wallCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        const stripSz = Math.max(1, 2 * zoom);
+        ctx.fillStyle = wallCompanyColor;
+        if (isHoriz) ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, stripSz);
+        else         ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, stripSz, wh);
+        // Damage darkening
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+        }
+        ctx.restore();
+      } else if (s.type === 'door_frame') {
+        // Door Frame: two posts at the ends with an open gap in the centre
+        const isHoriz = this.placedStructures.some(f =>
+          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        );
+        const THICK = 0.18;
+        const ww = isHoriz ? sz : sz * THICK;
+        const wh = isHoriz ? sz * THICK : sz;
+        const POST = sz * 0.14; // post square size
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const dmgDarken = (1 - hpFrac) * 0.5;
+
+        ctx.save();
+        ctx.fillStyle   = isHovered ? '#9a6040' : '#7a4820';
+        ctx.strokeStyle = '#3e200c';
+        ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
+        if (isHoriz) {
+          // Two posts at left and right ends
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
+          ctx.strokeRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
+          ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
+          ctx.strokeRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
+          // Dashed lintel lines to suggest the frame
+          ctx.strokeStyle = 'rgba(120, 70, 30, 0.45)';
+          ctx.lineWidth = Math.max(0.5, 1 * zoom);
+          ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
+          ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2 + POST, ssp.y - wh / 2);
+          ctx.lineTo(ssp.x + ww / 2 - POST, ssp.y - wh / 2); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2 + POST, ssp.y + wh / 2);
+          ctx.lineTo(ssp.x + ww / 2 - POST, ssp.y + wh / 2); ctx.stroke();
+          ctx.setLineDash([]);
+        } else {
+          // Two posts at top and bottom ends
+          ctx.fillRect(ssp.x - POST / 2, ssp.y - wh / 2, POST, POST);
+          ctx.strokeRect(ssp.x - POST / 2, ssp.y - wh / 2, POST, POST);
+          ctx.fillRect(ssp.x - POST / 2, ssp.y + wh / 2 - POST, POST, POST);
+          ctx.strokeRect(ssp.x - POST / 2, ssp.y + wh / 2 - POST, POST, POST);
+          // Dashed side lines
+          ctx.strokeStyle = 'rgba(120, 70, 30, 0.45)';
+          ctx.lineWidth = Math.max(0.5, 1 * zoom);
+          ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
+          ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2, ssp.y - wh / 2 + POST);
+          ctx.lineTo(ssp.x - ww / 2, ssp.y + wh / 2 - POST); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(ssp.x + ww / 2, ssp.y - wh / 2 + POST);
+          ctx.lineTo(ssp.x + ww / 2, ssp.y + wh / 2 - POST); ctx.stroke();
+          ctx.setLineDash([]);
+        }
+        // Company color strip
+        const dfCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        const dfStripSz = Math.max(1, 2 * zoom);
+        ctx.fillStyle = dfCompanyColor;
+        if (isHoriz) ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, dfStripSz);
+        else         ctx.fillRect(ssp.x - POST / 2, ssp.y - wh / 2, dfStripSz, POST);
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          if (isHoriz) {
+            ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
+            ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
+          } else {
+            ctx.fillRect(ssp.x - POST / 2, ssp.y - wh / 2, POST, POST);
+            ctx.fillRect(ssp.x - POST / 2, ssp.y + wh / 2 - POST, POST, POST);
+          }
+        }
+        ctx.restore();
+      } else if (s.type === 'door') {
+        // Door: same shape as wall, but shows open/closed state
+        const isHoriz = this.placedStructures.some(f =>
+          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        );
+        const THICK = 0.18;
+        const ww = isHoriz ? sz : sz * THICK;
+        const wh = isHoriz ? sz * THICK : sz;
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const dmgDarken = (1 - hpFrac) * 0.5;
+        const isOpen = s.doorOpen === true;
+
+        ctx.save();
+        if (!isOpen) {
+          // Closed door: filled planks like wall but with a lighter color
+          ctx.fillStyle   = isHovered ? '#9a6040' : '#7a4820';
+          ctx.strokeStyle = '#3e200c';
+          ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
+          ctx.beginPath();
+          ctx.rect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+          ctx.fill();
+          ctx.stroke();
+          // Center door marker (vertical line or horizontal line)
+          ctx.strokeStyle = 'rgba(30, 12, 4, 0.5)';
+          ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+          if (isHoriz) {
+            ctx.beginPath(); ctx.moveTo(ssp.x, ssp.y - wh / 2); ctx.lineTo(ssp.x, ssp.y + wh / 2); ctx.stroke();
+          } else {
+            ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2, ssp.y); ctx.lineTo(ssp.x + ww / 2, ssp.y); ctx.stroke();
+          }
+        } else {
+          // Open door: just two short end-posts, gap in middle
+          const postSz = sz * 0.15;
+          ctx.fillStyle   = isHovered ? '#9a6040' : '#7a4820';
+          ctx.strokeStyle = '#3e200c';
+          ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
+          if (isHoriz) {
+            ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, postSz, wh);
+            ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, postSz, wh);
+            ctx.fillRect(ssp.x + ww / 2 - postSz, ssp.y - wh / 2, postSz, wh);
+            ctx.strokeRect(ssp.x + ww / 2 - postSz, ssp.y - wh / 2, postSz, wh);
+          } else {
+            ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, postSz);
+            ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, postSz);
+            ctx.fillRect(ssp.x - ww / 2, ssp.y + wh / 2 - postSz, ww, postSz);
+            ctx.strokeRect(ssp.x - ww / 2, ssp.y + wh / 2 - postSz, ww, postSz);
+          }
+          // Dashed outline showing door extent
+          ctx.strokeStyle = 'rgba(150, 100, 60, 0.35)';
+          ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+          ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 3 * zoom)]);
+          ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+          ctx.setLineDash([]);
+        }
+        // Company color strip
+        const doorCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        const doorStripSz = Math.max(1, 2 * zoom);
+        ctx.fillStyle = doorCompanyColor;
+        if (isHoriz) ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, doorStripSz);
+        else         ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, doorStripSz, wh);
+        // Damage darkening
+        if (!isOpen && dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+        }
+        ctx.restore();
+      }
+    } // end for sorted
+
+    if (this._hoveredStructure) {
+      const s   = this._hoveredStructure;
+      const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
+      const sz  = Math.max(4, 50 * zoom);
+
+      ctx.save();
+      ctx.strokeStyle = '#ffe090';
+      ctx.lineWidth   = Math.max(1, 3 * zoom);
+      if (s.type === 'wooden_floor') {
+        ctx.strokeRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+      } else if (s.type === 'workbench') {
+        const bw = sz * 0.88;
+        const bh = sz * 0.62;
+        ctx.strokeRect(ssp.x - bw / 2, ssp.y - bh / 2, bw, bh);
+      } else if (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') {
+        const isHoriz = this.placedStructures.some(f =>
+          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        );
+        const THICK = 0.18;
+        const ww = isHoriz ? sz : sz * THICK;
+        const wh = isHoriz ? sz * THICK : sz;
+        ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+      }
+      ctx.restore();
+
+      // ── HP bar (hover only) ────────────────────────────────────────────
+      {
+        const isHovWall = (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') && (() => {
+          const isHoriz = this.placedStructures.some(f =>
+            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+          );
+          return isHoriz ? sz * 0.18 : sz; // hh
+        })();
+        const hpFrac  = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const barW    = s.type === 'workbench' ? sz * 0.88 : (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') ? (() => {
+          const isHoriz = this.placedStructures.some(f =>
+            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+          );
+          return isHoriz ? sz : sz * 0.18;
+        })() : sz;
+        const barH    = Math.max(2, 3 * zoom);
+        const barX    = ssp.x - barW / 2;
+        const structH = s.type === 'workbench' ? sz * 0.62 : (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') ? (() => {
+          const isHoriz = this.placedStructures.some(f =>
+            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+          );
+          return isHoriz ? sz * 0.18 : sz;
+        })() : sz;
+        const barY    = ssp.y + structH / 2 + Math.max(2, 2 * zoom);
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(barX, barY, barW, barH);
+        ctx.fillStyle = hpFrac > 0.5 ? '#66dd44' : hpFrac > 0.25 ? '#ffaa22' : '#ee3322';
+        ctx.fillRect(barX, barY, barW * hpFrac, barH);
+        ctx.restore();
+      }
+
+      // ── Tooltip ────────────────────────────────────────────────────────
+      const structH = s.type === 'workbench' ? sz * 0.62 : (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') ? (() => {
+        const isHoriz = this.placedStructures.some(f =>
+          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        );
+        return isHoriz ? sz * 0.18 : sz;
+      })() : sz;
+      const tipY = ssp.y - structH / 2 - 8;
+
+      const inRange = player && player.carrierId === 0 && (() => {
+        const dx = s.x - player.position.x;
+        const dy = s.y - player.position.y;
+        return dx * dx + dy * dy <= 110 * 110;
+      })();
+
+      const label = s.type === 'wooden_floor' ? 'Wooden Floor'
+                 : s.type === 'wall' ? 'Wall'
+                 : s.type === 'door_frame' ? 'Door Frame'
+                 : s.type === 'door' ? (s.doorOpen ? 'Door (Open)' : 'Door (Closed)')
+                 : 'Workbench';
+
+      // Determine ownership line text + color
+      const COMPANY_NAMES: Record<number, string> = { 1: 'Pirates', 2: 'Navy', 99: 'Ghosts' };
+      let ownerText: string;
+      if (s.companyId !== 0 && COMPANY_NAMES[s.companyId]) {
+        ownerText = COMPANY_NAMES[s.companyId];
+      } else if (s.placerName) {
+        ownerText = `Player: ${s.placerName}`;
+      } else {
+        ownerText = 'Unclaimed';
+      }
+
+      ctx.save();
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.font      = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
+      ctx.fillStyle = '#ffe8a0';
+      ctx.fillText(label, ssp.x, tipY);
+
+      const lineH = Math.max(12, 14 * zoom);
+      ctx.font = `${Math.max(9, Math.round(10 * zoom))}px Consolas, monospace`;
+
+      // Owner line (colored by faction)
+      ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
+      ctx.fillText(ownerText, ssp.x, tipY - lineH);
+
+      // Interact hint (shifted up one more line)
+      if (inRange) {
+        ctx.fillStyle = 'rgba(200, 255, 180, 0.95)';
+        const interactHint = s.type === 'door' ? 'Tap [E] to open/close'
+                           : s.type === 'door_frame' ? 'Hold [E] to demolish'
+                           : 'Hold [E] to interact';
+        ctx.fillText(interactHint, ssp.x, tipY - lineH * 2);
+      } else {
+        ctx.fillStyle = 'rgba(180, 180, 160, 0.75)';
+        ctx.fillText('(walk closer)', ssp.x, tipY - lineH * 2);
+      }
+      ctx.restore();
+    }
+  }
+
+  /** Draw the island structure placement ghost at the cursor position (drawn once, after all islands). */
+  private drawIslandBuildGhost(camera: Camera): void {
+    this._islandGhostTooFar = false;
+    this._snappedBuildPos   = null;
+    if (!this.islandBuildKind || !this.mouseWorldPos) return;
+    const zoom = camera.getState().zoom;
+    const ctx  = this.ctx;
+    const TILE = 50; // world px — floor tile size
+
+    // Helper: sample bumpy island boundary at an angle (mirrors server island_boundary_r)
+    const sampleBoundary = (baseR: number, bumps: number[], angle: number): number => {
+      const TWO_PI = Math.PI * 2;
+      const n = bumps.length;
+      let a = angle % TWO_PI;
+      if (a < 0) a += TWO_PI;
+      const t = (a / TWO_PI) * n;
+      const i0 = Math.floor(t) % n;
+      const i1 = (i0 + 1) % n;
+      return baseR + bumps[i0] + (t - Math.floor(t)) * (bumps[i1] - bumps[i0]);
+    };
+
+    // ── Snap to adjacent floor neighbour ────────────────────────────────────
+    // When cursor is within SNAP_R world px of any unoccupied cardinal neighbour
+    // slot of an existing floor, lock the ghost position there.
+    let mx = this.mouseWorldPos.x;
+    let my = this.mouseWorldPos.y;
+    if (this.islandBuildKind === 'wooden_floor' && this.placedStructures.length > 0) {
+      const SNAP_R  = TILE * 0.8; // 40 px — snap pull radius
+      let bestDist2 = SNAP_R * SNAP_R;
+      let bestX = mx, bestY = my;
+      const DIRS = [{ dx: TILE, dy: 0 }, { dx: -TILE, dy: 0 },
+                    { dx: 0, dy:  TILE }, { dx: 0, dy: -TILE }];
+      for (const s of this.placedStructures) {
+        if (s.type !== 'wooden_floor') continue;
+        for (const d of DIRS) {
+          const nx = s.x + d.dx, ny = s.y + d.dy;
+          // Skip neighbour slots already occupied by another floor
+          const occupied = this.placedStructures.some(
+            f => f.type === 'wooden_floor' && Math.abs(f.x - nx) < 1 && Math.abs(f.y - ny) < 1
+          );
+          if (occupied) continue;
+          const dist2 = (nx - mx) * (nx - mx) + (ny - my) * (ny - my);
+          if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; }
+        }
+      }
+      mx = bestX; my = bestY;
+    } else if ((this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame') && this.placedStructures.length > 0) {
+      // Snap to unoccupied edge midpoints of floor tiles
+      const HALF = TILE / 2; // 25 px
+      const SNAP_R = TILE * 0.6;
+      let bestDist2 = SNAP_R * SNAP_R;
+      let bestX = mx, bestY = my;
+      const EDGES = [
+        { dx: 0, dy: -HALF }, // N edge → horizontal
+        { dx: 0, dy:  HALF }, // S edge → horizontal
+        { dx: -HALF, dy: 0 }, // W edge → vertical
+        { dx:  HALF, dy: 0 }, // E edge → vertical
+      ];
+      for (const s of this.placedStructures) {
+        if (s.type !== 'wooden_floor') continue;
+        for (const e of EDGES) {
+          const nx = s.x + e.dx, ny = s.y + e.dy;
+          const occ = this.placedStructures.some(
+            w => (w.type === 'wall' || w.type === 'door_frame') && Math.abs(w.x - nx) < 2 && Math.abs(w.y - ny) < 2
+          );
+          if (occ) continue;
+          const dist2 = (nx - mx) * (nx - mx) + (ny - my) * (ny - my);
+          if (dist2 < bestDist2) {
+            bestDist2 = dist2; bestX = nx; bestY = ny;
+            this._wallGhostHorizontal = (e.dy !== 0);
+          }
+        }
+      }
+      mx = bestX; my = bestY;
+    } else if (this.islandBuildKind === 'door' && this.placedStructures.length > 0) {
+      // Snap to unoccupied door_frame positions
+      const SNAP_R = TILE * 0.6;
+      let bestDist2 = SNAP_R * SNAP_R;
+      let bestX = mx, bestY = my;
+      for (const s of this.placedStructures) {
+        if (s.type !== 'door_frame') continue;
+        const hasDoor = this.placedStructures.some(
+          d => d.type === 'door' && Math.abs(d.x - s.x) < 2 && Math.abs(d.y - s.y) < 2
+        );
+        if (hasDoor) continue;
+        const dist2 = (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my);
+        if (dist2 < bestDist2) {
+          bestDist2 = dist2; bestX = s.x; bestY = s.y;
+          this._wallGhostHorizontal = this.placedStructures.some(f =>
+            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+          );
+        }
+      }
+      mx = bestX; my = bestY;
+    }
+    this._snappedBuildPos = { x: mx, y: my };
+
+    // Recalculate screen position after potential snap
+    const msp = camera.worldToScreen(Vec2.from(mx, my));
+    const sz  = Math.max(4, TILE * zoom);
+
+    // Water check: is snapped pos over any island's beach area?
+    let inWater = true;
+    for (const isl of this.islands) {
+      if (isl.vertices) {
+        // Polygon island: ray-cast point-in-polygon
+        let inside = false;
+        const verts = isl.vertices;
+        const n = verts.length;
+        for (let i = 0, j = n - 1; i < n; j = i++) {
+          const xi = verts[i].x, yi = verts[i].y;
+          const xj = verts[j].x, yj = verts[j].y;
+          if ((yi > my) !== (yj > my) && mx < (xj - xi) * (my - yi) / (yj - yi) + xi)
+            inside = !inside;
+        }
+        if (inside) { inWater = false; break; }
+      } else {
+        // Bump-circle island
+        const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+        const dx = mx - isl.x, dy = my - isl.y;
+        const distSq = dx * dx + dy * dy;
+        const broadR = preset.beachRadius + Math.max(...preset.beachBumps.map(Math.abs));
+        if (distSq >= broadR * broadR) continue;
+        const angle   = Math.atan2(dy, dx);
+        const narrowR = sampleBoundary(preset.beachRadius, preset.beachBumps, angle);
+        if (distSq < narrowR * narrowR) { inWater = false; break; }
+      }
+    }
+
+    // Distance check: player must be within 200 px (world space) of placement point
+    const player = this._cachedLocalPlayer;
+    let tooFar = false;
+    if (player) {
+      const dx = mx - player.position.x;
+      const dy = my - player.position.y;
+      tooFar = dx * dx + dy * dy > 200 * 200;
+    }
+
+    // AABB overlap check: floor tile (50×50) must not overlap an existing floor tile
+    let overlaps = false;
+    if (this.islandBuildKind === 'wooden_floor') {
+      overlaps = this.placedStructures.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        return Math.abs(s.x - mx) < TILE && Math.abs(s.y - my) < TILE;
+      });
+    }
+
+    // Tree obstacle: circle-AABB intersection — trees (wood resources) block floor placement
+    const TREE_R = 20; // world px — obstacle exclusion radius around tree trunk+canopy
+    let blockedByTree = false;
+    if (this.islandBuildKind === 'wooden_floor') {
+      const half = TILE / 2;
+      outer:
+      for (const isl of this.islands) {
+        for (const res of isl.resources) {
+          if (res.type !== 'wood') continue;
+          const tx = isl.x + res.ox, ty = isl.y + res.oy;
+          // Closest point on floor AABB to tree centre
+          const cx = Math.max(mx - half, Math.min(tx, mx + half));
+          const cy = Math.max(my - half, Math.min(ty, my + half));
+          const cdx = tx - cx, cdy = ty - cy;
+          if (cdx * cdx + cdy * cdy < TREE_R * TREE_R) { blockedByTree = true; break outer; }
+        }
+      }
+    }
+
+    this._islandGhostTooFar = tooFar || inWater;
+
+    // Workbench needs a floor tile whose AABB contains the cursor point
+    let noFloor = false;
+    if (this.islandBuildKind === 'workbench') {
+      noFloor = !this.placedStructures.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        return Math.abs(s.x - mx) <= 25 && Math.abs(s.y - my) <= 25;
+      });
+    }
+
+    // Wall/door_frame needs to be at a floor tile edge midpoint; door panel needs a door_frame
+    let noEdge = false;
+    let wallOccupied = false;
+    let noDoorFrame = false;
+    let doorOccupied = false;
+    let blockedByStructure = false;  // workbench / door blocks the slot
+    if (this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame') {
+      wallOccupied = this.placedStructures.some(
+        w => (w.type === 'wall' || w.type === 'door_frame') && Math.abs(w.x - mx) < 2 && Math.abs(w.y - my) < 2
+      );
+      noEdge = !this.placedStructures.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        return (Math.abs(mx - s.x) < 3 && Math.abs(Math.abs(my - s.y) - 25) < 3) ||
+               (Math.abs(my - s.y) < 3 && Math.abs(Math.abs(mx - s.x) - 25) < 3);
+      });
+      // Check if a workbench or door panel occupies this slot's AABB
+      if (!wallOccupied && !noEdge) {
+        const isHoriz = this._wallGhostHorizontal;
+        const hw = isHoriz ? 25 : 5;
+        const hh = isHoriz ? 5  : 25;
+        const WB_R = 15;
+        blockedByStructure = this.placedStructures.some(s => {
+          if (s.type === 'wooden_floor' || s.type === 'wall' || s.type === 'door_frame') return false;
+          return Math.abs(s.x - mx) < hw + WB_R && Math.abs(s.y - my) < hh + WB_R;
+        });
+      }
+    } else if (this.islandBuildKind === 'door') {
+      noDoorFrame = !this.placedStructures.some(
+        s => s.type === 'door_frame' && Math.abs(s.x - mx) < 2 && Math.abs(s.y - my) < 2
+      );
+      doorOccupied = this.placedStructures.some(
+        d => d.type === 'door' && Math.abs(d.x - mx) < 2 && Math.abs(d.y - my) < 2
+      );
+    }
+
+    // Enemy territory: any structure not belonging to the current company within 500 world px
+    const myCompany = (this._localCompanyId ?? 0) as number;
+    const enemyTerritory = this.placedStructures.some(s =>
+      s.companyId !== myCompany &&
+      (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) < 500 * 500
+    );
+
+    // Workbench on enemy floor: a floor exists under cursor but belongs to a different company
+    const wrongCompany = this.islandBuildKind === 'workbench' && !noFloor &&
+      !this.placedStructures.some(s =>
+        s.type === 'wooden_floor' &&
+        Math.abs(s.x - mx) <= 25 && Math.abs(s.y - my) <= 25 &&
+        s.companyId === myCompany
+      );
+
+    const invalid = tooFar || inWater || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied;
+    const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
+    const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
+
+    ctx.save();
+    ctx.globalAlpha = 0.72 + 0.14 * Math.sin(performance.now() / 300);
+    ctx.fillStyle   = ghostColor;
+    ctx.strokeStyle = borderColor;
+    ctx.lineWidth   = Math.max(1, 2 * zoom);
+    ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+    const WALL_THICK = 0.18;
+    const isWallOrDoor = this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame' || this.islandBuildKind === 'door';
+    const ghostW = this.islandBuildKind === 'workbench' ? sz * 0.88
+                 : isWallOrDoor ? (this._wallGhostHorizontal ? sz : sz * WALL_THICK)
+                 : sz;
+    const ghostH = this.islandBuildKind === 'workbench' ? sz * 0.62
+                 : isWallOrDoor ? (this._wallGhostHorizontal ? sz * WALL_THICK : sz)
+                 : sz;
+
+    if (this.islandBuildKind === 'door_frame') {
+      // Ghost shaped like a door frame: two posts at ends, dashed span in the middle
+      const POST = sz * 0.14;
+      ctx.setLineDash([]);
+      if (this._wallGhostHorizontal) {
+        ctx.fillRect(msp.x - ghostW / 2, msp.y - POST / 2, POST, POST);
+        ctx.strokeRect(msp.x - ghostW / 2, msp.y - POST / 2, POST, POST);
+        ctx.fillRect(msp.x + ghostW / 2 - POST, msp.y - POST / 2, POST, POST);
+        ctx.strokeRect(msp.x + ghostW / 2 - POST, msp.y - POST / 2, POST, POST);
+        // dashed span lines top + bottom
+        ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
+        ctx.beginPath();
+        ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y - ghostH / 2);
+        ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y - ghostH / 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y + ghostH / 2);
+        ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y + ghostH / 2);
+        ctx.stroke();
+      } else {
+        ctx.fillRect(msp.x - POST / 2, msp.y - ghostH / 2, POST, POST);
+        ctx.strokeRect(msp.x - POST / 2, msp.y - ghostH / 2, POST, POST);
+        ctx.fillRect(msp.x - POST / 2, msp.y + ghostH / 2 - POST, POST, POST);
+        ctx.strokeRect(msp.x - POST / 2, msp.y + ghostH / 2 - POST, POST, POST);
+        // dashed span lines left + right
+        ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
+        ctx.beginPath();
+        ctx.moveTo(msp.x - ghostW / 2, msp.y - ghostH / 2 + POST);
+        ctx.lineTo(msp.x - ghostW / 2, msp.y + ghostH / 2 - POST);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(msp.x + ghostW / 2, msp.y - ghostH / 2 + POST);
+        ctx.lineTo(msp.x + ghostW / 2, msp.y + ghostH / 2 - POST);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    } else {
+      ctx.beginPath();
+      ctx.rect(msp.x - ghostW / 2, msp.y - ghostH / 2, ghostW, ghostH);
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Label above the ghost
+    const labelY = msp.y - ghostH / 2 - 6;
+    ctx.globalAlpha = 1;
+    ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'bottom';
+    if (inWater) {
+      ctx.fillStyle = '#4488ff';
+      ctx.fillText('IN WATER', msp.x, labelY);
+    } else if (enemyTerritory) {
+      ctx.fillStyle = '#ff3333';
+      ctx.fillText('ENEMY FLOOR', msp.x, labelY);
+    } else if (blockedByTree) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('BLOCKED', msp.x, labelY);
+    } else if (blockedByStructure) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('BLOCKED BY STRUCTURE', msp.x, labelY);
+    } else if (overlaps || wallOccupied || doorOccupied) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('OCCUPIED', msp.x, labelY);
+    } else if (noDoorFrame) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('NEEDS DOOR FRAME', msp.x, labelY);
+    } else if (tooFar) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('TOO FAR', msp.x, labelY);
+    } else if (wrongCompany) {
+      ctx.fillStyle = '#ff3333';
+      ctx.fillText('ENEMY FLOOR', msp.x, labelY);
+    } else if (noFloor) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('NEEDS FLOOR', msp.x, labelY);
+    } else if (noEdge) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('NEEDS FLOOR EDGE', msp.x, labelY);
+    } else {
+      ctx.fillStyle = '#aaffaa';
+      const label = this.islandBuildKind === 'wooden_floor' ? 'Wooden Floor'
+                  : this.islandBuildKind === 'wall' ? 'Wall'
+                  : this.islandBuildKind === 'door_frame' ? 'Door Frame'
+                  : this.islandBuildKind === 'door' ? 'Door'
+                  : 'Workbench';
+      ctx.fillText(label, msp.x, labelY);
+    }
+
+    ctx.restore();
+  }
+
+  private queueWorldObjects(worldState: WorldState, camera: Camera, alpha: number): void {
+    // Clear render queue buckets
+    for (const b of this.renderBuckets) b.length = 0;
+
+    // Cache local player's company for enemy-coloring this frame (already set at renderWorld entry)
+    // this._localCompanyId is updated there; no second find() needed.
 
     // ── Sinking ghost management ────────────────────────────────────────────
     // Track every live ship so we can detect despawns frame-to-frame.
@@ -868,9 +3301,68 @@ export class RenderSystem {
       if (!currentShipIds.has(id) && (performance.now() - startTime) / 1000 > 8) {
         this.sinkTimestamps.delete(id);
         this.sinkingGhosts.delete(id);
+        this.sinkSplashTimers.delete(id);
       }
     }
     // ───────────────────────────────────────────────────────────────────────
+
+    // ── NPC kill detection ─────────────────────────────────────────────────
+    // Build current NPC id set and detect disappearances.
+    const currentNpcIds = new Set<number>();
+    for (const npc of worldState.npcs) currentNpcIds.add(npc.id);
+    for (const id of this.lastKnownNpcIds) {
+      if (!currentNpcIds.has(id)) {
+        // NPC vanished — find its last known name from the previous frame's NPC list
+        // (we keep it in lastKnownShips-style via a name map below).
+        const name = this._lastNpcNames.get(id) ?? `Crew ${id}`;
+        this.effectRenderer.createAnnouncement(`${name} eliminated`, 'npc_kill');
+        this._lastNpcNames.delete(id);
+      }
+    }
+    // Update id set and name map for next frame.
+    this.lastKnownNpcIds = currentNpcIds;
+    for (const npc of worldState.npcs) this._lastNpcNames.set(npc.id, npc.name);
+    // ───────────────────────────────────────────────────────────────────────
+    // Emit water-splash bursts for every ship currently in the sink sequence.
+    // Burst rate increases from ~1/s at the start to ~4/s near full submersion.
+    const nowMs = performance.now();
+    for (const [id, sinkStart] of this.sinkTimestamps) {
+      const elapsedS = (nowMs - sinkStart) / 1000;
+      if (elapsedS > 8) continue;
+      // Intensity: ramp from 0.2 at t=0 to 1.0 at t=4s, hold to t=8s
+      const intensity = Math.min(1.0, 0.2 + elapsedS / 5);
+      // Emission interval: 1000ms at start → 250ms near full sink
+      const intervalMs = Math.max(250, 1000 - elapsedS * 100);
+      const lastEmit = this.sinkSplashTimers.get(id) ?? 0;
+      if (nowMs - lastEmit < intervalMs) continue;
+      this.sinkSplashTimers.set(id, nowMs);
+
+      // Resolve world position: prefer live ship, fall back to ghost snapshot
+      let shipPos: Vec2 | null = null;
+      let shipRot = 0;
+      const liveShip = worldState.ships.find(s => s.id === id);
+      if (liveShip) { shipPos = liveShip.position; shipRot = liveShip.rotation; }
+      else {
+        const ghost = this.sinkingGhosts.get(id);
+        if (ghost) { shipPos = ghost.position; shipRot = ghost.rotation; }
+      }
+      if (!shipPos) continue;
+
+      // Emit 2–4 bursts at random positions along the hull waterline
+      const burstCount = Math.max(2, Math.round(intensity * 4));
+      const cosR = Math.cos(shipRot);
+      const sinR = Math.sin(shipRot);
+      for (let b = 0; b < burstCount; b++) {
+        // Random local X along hull (-260 to 190), sides (+/-90)
+        const lx = -260 + Math.random() * 450;
+        const side = (Math.random() < 0.5 ? 1 : -1);
+        const ly = side * (70 + Math.random() * 20); // near the hull edge
+        // Rotate into world space
+        const wx = shipPos.x + lx * cosR - ly * sinR;
+        const wy = shipPos.y + lx * sinR + ly * cosR;
+        this.particleSystem.createSinkSplash(Vec2.from(wx, wy), intensity);
+      }
+    }
     
     // Render order (from lowest to highest):
     // 0: water, gridlines (drawn before this queue)
@@ -885,6 +3377,10 @@ export class RenderSystem {
     // Queue ship hulls (layer 1)
     for (const ship of worldState.ships) {
       this.queueRenderItem(1, 'ship-hull', () => this.drawShipHull(ship, camera));
+      // Ghost fog aura: drawn at layer 0.5 (below hull, like water surface wisps)
+      if (ship.shipType === SHIP_TYPE_GHOST) {
+        this.queueRenderItem(1, `ghost-fog-${ship.id}`, () => this.drawGhostFogAura(ship, camera), -1);
+      }
     }
     
     // Queue players (layer 2)
@@ -892,9 +3388,15 @@ export class RenderSystem {
       this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
     }
     
-    // Queue ship planks (layer 3)
+    // Queue ship planks (layer 3 — ghost ships have no physical planks, purely hull-fade driven)
     for (const ship of worldState.ships) {
-      this.queueRenderItem(3, 'ship-planks', () => this.drawShipPlanks(ship, camera));
+      if (ship.shipType !== SHIP_TYPE_GHOST) {
+        this.queueRenderItem(3, 'ship-planks', () => this.drawShipPlanks(ship, camera));
+      }
+      // Ghost deck effects (runic circle + crew silhouettes) drawn above planks
+      if (ship.shipType === SHIP_TYPE_GHOST) {
+        this.queueRenderItem(3, `ghost-deck-${ship.id}`, () => this.drawGhostDeckEffects(ship, camera), 3);
+      }
     }
 
     // In build mode, overlay missing plank ghost shapes (layer 3, priority 1 = after real planks)
@@ -909,9 +3411,14 @@ export class RenderSystem {
       this.queueRenderItem(3, 'plank-status', () => this.drawPlankStatusIcons(ship, camera), 2);
     }
 
+    // Burning module fire overlays — drawn above module graphics
+    for (const ship of worldState.ships) {
+      this.queueRenderItem(4, `fire-modules-${ship.id}`, () => this.drawBurningModules(ship, camera), 5);
+    }
+
     // Ghost placement plan markers — visible in build menu mode, B-key mode, or hotbar build mode
     if (this.ghostPlacements.length > 0 &&
-        (this.buildMenuOpen || this.explicitBuildState !== null || this.cannonBuildMode || this.mastBuildMode)) {
+        (this.buildMenuOpen || this.explicitBuildState !== null || this.cannonBuildMode || this.mastBuildMode || this.swivelBuildMode)) {
       for (const ship of worldState.ships) {
         const shipGhosts = this.ghostPlacements.filter(g => g.shipId === ship.id);
         if (shipGhosts.length > 0) {
@@ -948,10 +3455,12 @@ export class RenderSystem {
       }
     }
     
-    // Queue cannons and steering wheels (layers 4-6)
+    // Queue cannons, swivel guns, and steering wheels (layers 4-6)
     for (const ship of worldState.ships) {
       this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
+      this.queueRenderItem(4, 'swivel-guns', () => this.drawShipSwivelGuns(ship, camera));
       this.queueRenderItem(4, 'cannon-aim-guides', () => this.drawCannonAimGuides(ship, worldState, camera), 1);
+      this.queueRenderItem(4, 'swivel-aim-guides', () => this.drawSwivelAimGuide(ship, worldState, camera), 1);
       this.queueRenderItem(4, 'rudder', () => this.drawShipRudder(ship, camera));
       if ((this.showGroupOverlay || this.activeWeaponGroups.size > 0) && this.controlGroups) {
         this.queueRenderItem(5, `cannon-groups-${ship.id}`, () => this.drawCannonGroupOverlay(ship, camera));
@@ -973,9 +3482,108 @@ export class RenderSystem {
       this.queueRenderItem(7, 'sail-masts', () => this.drawShipSailMasts(ship, camera));
     }
     
-    // Queue cannonballs (layer 8 - on top of everything)  
+    // Queue cannonballs (layer 8 - on top of everything)
+    const now = performance.now();
+    const liveIds = new Set<number>();
+    for (const cb of worldState.cannonballs) liveIds.add(cb.id);
+    // Prune trails for cannonballs that no longer exist; spawn water splash for expired ones
+    for (const id of this.cannonballTrails.keys()) {
+      if (!liveIds.has(id)) {
+        this.cannonballTrails.delete(id);
+        this.trailLastEmit.delete(id);
+      }
+    }
+    for (const [id, last] of this.cannonballLastPos) {
+      if (!liveIds.has(id)) {
+        // Ball just disappeared — check if it's over open water (not inside any ship hull)
+        const overShip = worldState.ships.some(ship => {
+          const dx = last.x - ship.position.x;
+          const dy = last.y - ship.position.y;
+          return dx * dx + dy * dy < 500 * 500; // covers full brigantine hull (~435px radius) + margin
+        });
+
+        // Check if it disappeared near a structure.
+        // Pass 1: workbenches (server checks these first — they sit on top of floors)
+        // Pass 2: floors (only if no workbench matched)
+        // Guard: skip if last position is at origin (never properly updated)
+        if (last.x === 0 && last.y === 0) {
+          this.cannonballLastPos.delete(id);
+          continue;
+        }
+
+        const hitStructure =
+          this.placedStructures.find(s => {
+            if (s.type !== 'workbench') return false;
+            const dx = last.x - s.x;
+            const dy = last.y - s.y;
+            return dx * dx + dy * dy <= 26.5 * 26.5; // broad-phase radius (matches server)
+          }) ||
+          this.placedStructures.find(s => {
+            if (s.type !== 'wooden_floor') return false;
+            const dx = last.x - s.x;
+            const dy = last.y - s.y;
+            return Math.abs(dx) <= 25 && Math.abs(dy) <= 25; // AABB ±25px
+          });
+
+        // Check near an island tree
+        const hitTree = !hitStructure && this.islands.some(isl =>
+          (isl.resources ?? []).some(r => {
+            if (r.type !== 'wood') return false;
+            const dx = last.x - (isl.x + r.ox);
+            const dy = last.y - (isl.y + r.oy);
+            return dx * dx + dy * dy <= 22 * 22;
+          })
+        );
+
+        if (hitStructure || hitTree) {
+          const intensity = hitStructure ? 0.6 : 0.5;
+          this.particleSystem.createExplosion(Vec2.from(last.x, last.y), intensity);
+          if (hitStructure) {
+            this.spawnDamageNumber(Vec2.from(last.x, last.y), 25, false);
+          }
+        } else if (!overShip && (last.ammoType === 0 || last.ammoType === 1)) {
+          console.log(`💦 SPLASH: cannonball ${id} expired over water at (${last.x.toFixed(1)}, ${last.y.toFixed(1)})`);
+          this.particleSystem.createWaterSplash(Vec2.from(last.x, last.y), 1.2);
+        } else if (overShip) {
+          console.log(`💥 NO SPLASH: cannonball ${id} disappeared near ship at (${last.x.toFixed(1)}, ${last.y.toFixed(1)})`);
+        }
+        this.cannonballLastPos.delete(id);
+      }
+    }
     for (const cannonball of worldState.cannonballs) {
-      this.queueRenderItem(8, 'cannonballs', () => this.drawCannonball(cannonball, camera));
+      // Update last-known position for splash detection
+      this.cannonballLastPos.set(cannonball.id, { x: cannonball.position.x, y: cannonball.position.y, ammoType: cannonball.ammoType });
+      // Leave smoke trails for cannonballs (0/1) and spark trails for grapeshot (10 or server type 2)
+      if (cannonball.ammoType === 0 || cannonball.ammoType === 1 || cannonball.ammoType === 10 || cannonball.ammoType === 2) {
+        const last = this.trailLastEmit.get(cannonball.id) ?? 0;
+        if (now - last >= this.TRAIL_SPACING_MS) {
+          if (!this.cannonballTrails.has(cannonball.id)) this.cannonballTrails.set(cannonball.id, []);
+          this.cannonballTrails.get(cannonball.id)!.push({ x: cannonball.position.x, y: cannonball.position.y, t: now });
+          this.trailLastEmit.set(cannonball.id, now);
+        }
+        // Expire old crumbs
+        const trail = this.cannonballTrails.get(cannonball.id);
+        if (trail) {
+          const cutoff = now - this.TRAIL_DURATION_MS;
+          let start = 0;
+          while (start < trail.length && trail[start].t < cutoff) start++;
+          if (start > 0) trail.splice(0, start);
+        }
+      }
+      this.queueRenderItem(8, 'cannonballs', () => this.drawCannonball(cannonball, camera, worldState));
+    }
+
+    // Track last attacker per ship: record when a cannonball is within 150 units of a ship
+    // it didn't originate from — used to populate the "sunk by" announcement.
+    for (const cb of worldState.cannonballs) {
+      for (const ship of worldState.ships) {
+        if (ship.id === cb.firedFrom) continue;
+        const dx = cb.position.x - ship.position.x;
+        const dy = cb.position.y - ship.position.y;
+        if (dx * dx + dy * dy < 150 * 150) {
+          this.lastAttackerOf.set(ship.id, cb.firedFrom);
+        }
+      }
     }
 
     // Queue NPCs (layer 2 - same as players)
@@ -994,6 +3602,7 @@ export class RenderSystem {
       this.queueRenderItem(1, `ghost-hull-${id}`,       () => this.drawShipHull(ghost, camera));
       this.queueRenderItem(3, `ghost-planks-${id}`,     () => this.drawShipPlanks(ghost, camera));
       this.queueRenderItem(4, `ghost-cannons-${id}`,    () => this.drawShipCannons(ghost, camera));
+      this.queueRenderItem(4, `ghost-swivelguns-${id}`, () => this.drawShipSwivelGuns(ghost, camera));
       this.queueRenderItem(4, `ghost-rudder-${id}`,     () => this.drawShipRudder(ghost, camera));
       this.queueRenderItem(5, `ghost-wheels-${id}`,     () => this.drawShipSteeringWheels(ghost, camera));
       this.queueRenderItem(5, `ghost-ladders-${id}`,    () => this.drawShipLadders(ghost, camera));
@@ -1004,27 +3613,22 @@ export class RenderSystem {
   }
   
   private queueRenderItem(layer: number, layerName: string, renderFn: () => void, priority: number = 0): void {
-    this.renderQueue.push({
-      layer,
-      layerName,
-      renderFn,
-      priority
-    });
+    const idx = layer < 0 ? 0 : layer;
+    this.renderBuckets[idx].push({ layer, layerName, renderFn, priority });
   }
   
   private executeRenderQueue(): void {
-    // Sort by layer, then by priority
-    this.renderQueue.sort((a, b) => {
-      if (a.layer !== b.layer) return a.layer - b.layer;
-      return (a.priority || 0) - (b.priority || 0);
-    });
-    
-    // Execute all render functions
-    for (const item of this.renderQueue) {
-      try {
-        item.renderFn();
-      } catch (error) {
-        console.error(`Error rendering ${item.layerName}:`, error);
+    // Iterate pre-allocated layer buckets in order (bucket 0 = layer -1, 1-9 = layers 1-9).
+    // Sort within each bucket by priority only — far fewer comparisons than a full-queue sort.
+    for (const bucket of this.renderBuckets) {
+      if (bucket.length === 0) continue;
+      if (bucket.length > 1) bucket.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
+      for (const item of bucket) {
+        try {
+          item.renderFn();
+        } catch (error) {
+          console.error(`Error rendering ${item.layerName}:`, error);
+        }
       }
     }
   }
@@ -1053,14 +3657,29 @@ export class RenderSystem {
     this.ctx.strokeStyle = '#8B4513'; // Brown
     this.ctx.fillStyle = '#DEB887'; // BurlyWood
 
+    // Ghost ship: dark spectral hull with cyan edge glow
+    const isGhost = ship.shipType === SHIP_TYPE_GHOST;
+    if (isGhost) {
+      this.ctx.fillStyle   = '#0f0f1a';
+      this.ctx.strokeStyle = '#0a0a16';
+      this.ctx.shadowColor  = '#00eeff';
+      this.ctx.shadowBlur   = 12 / cameraState.zoom;
+    }
+
     // Enemy ship: dark blue hull
     const isEnemy = this._localCompanyId !== 0 && ship.companyId !== 0
       && ship.companyId !== this._localCompanyId;
-    if (isEnemy) {
+    if (!isGhost && isEnemy) {
       this.ctx.strokeStyle = '#1a1a4a';
       this.ctx.fillStyle = '#1e3a6e';
     }
     this.ctx.lineWidth = 2 / cameraState.zoom;
+
+    // Ghost hull fades as it takes damage (health 60000→0 maps opacity 1.0→0.2)
+    if (isGhost) {
+      const healthFade = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
+      this.ctx.globalAlpha = phase1Alpha * healthFade;
+    }
     
     this.ctx.beginPath();
     this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
@@ -1073,10 +3692,35 @@ export class RenderSystem {
     this.ctx.fill();
     this.ctx.stroke();
 
-    // Water flood tint: blue overlay that intensifies from 75% → 100% water
-    if (floodTint > 0) {
-      this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
-      this.ctx.fillStyle = '#1a6eb5';
+    // Ghost ships: add a second thin cyan edge stroke for the spectral glow outline
+    if (isGhost) {
+      const healthMult = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
+      const sinkMult   = phase1Alpha < 1 ? phase1Alpha : 1;
+      this.ctx.shadowBlur   = 0;
+      this.ctx.strokeStyle  = `rgba(0,230,255,${0.55 * sinkMult * healthMult})`;
+      this.ctx.lineWidth    = 1.5 / cameraState.zoom;
+      this.ctx.beginPath();
+      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+      this.ctx.closePath();
+      this.ctx.stroke();
+    }
+
+    // Water flood tint: blue overlay (non-ghost), cyan mist dissolve (ghost)
+    // Ghost mist begins at 75% HP (25% damage) and reaches full intensity at 0 HP
+    const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / GHOST_MAX_HULL_HP) - 0.25) / 0.75 : 0;
+    if (isGhost ? ghostMistAlpha > 0 : floodTint > 0) {
+      if (isGhost) {
+        // Ghost dissolve: cyan/teal mist, starts from 75% HP
+        const sinkMult = phase1Alpha < 1 ? phase1Alpha : 1;
+        this.ctx.globalAlpha = ghostMistAlpha * 0.75 * sinkMult;
+        this.ctx.fillStyle = '#00eeff';
+        this.ctx.shadowColor = '#00eeff';
+        this.ctx.shadowBlur  = 16 / cameraState.zoom;
+      } else {
+        this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
+        this.ctx.fillStyle = '#1a6eb5';
+      }
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
       for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
@@ -1104,9 +3748,14 @@ export class RenderSystem {
 
     const { floodTint, phase1Alpha } = this.computeSinkState(ship);
     if (phase1Alpha <= 0) return;
+
+    const isGhostShip = ship.shipType === SHIP_TYPE_GHOST;
     
     this.ctx.save();
-    if (phase1Alpha < 1) this.ctx.globalAlpha = phase1Alpha;
+    // Ghost planks fade with hull damage (full opacity 0.45 at 60000 HP → 0.05 at 0 HP)
+    const ghostHealthFade = isGhostShip ? Math.max(0.1, ship.hullHealth / GHOST_MAX_HULL_HP) : 1;
+    const baseAlpha = isGhostShip ? Math.min(phase1Alpha, 0.45) * ghostHealthFade : phase1Alpha;
+    if (baseAlpha < 1) this.ctx.globalAlpha = baseAlpha;
     
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
@@ -1134,9 +3783,18 @@ export class RenderSystem {
       // Smoothly darken toward black as health decreases
       const maxHealth = plankData.maxHealth || 10000;
       const healthRatio = Math.max(0, health / maxHealth);
-      const fillColor   = this.darkenByDamage('#8B7355', healthRatio);
-      const strokeColor = this.darkenByDamage('#4A3020', healthRatio);
-      
+      // Ghost planks: dark semi-transparent with cyan tinge; pulsed by health
+      const fillColor   = isGhostShip
+        ? this.darkenByDamage('#1a2a3a', healthRatio)
+        : this.darkenByDamage('#8B7355', healthRatio);
+      const strokeColor = isGhostShip
+        ? this.darkenByDamage('#003055', healthRatio)
+        : this.darkenByDamage('#4A3020', healthRatio);
+
+      if (isGhostShip) {
+        this.ctx.shadowColor = '#00eeff';
+        this.ctx.shadowBlur  = 3;
+      }
       this.ctx.fillStyle = fillColor;
       this.ctx.strokeStyle = strokeColor;
       this.ctx.lineWidth = 1;
@@ -1311,6 +3969,231 @@ export class RenderSystem {
     }
 
     this.ctx.restore();
+  }
+
+  /**
+   * Draw animated fire overlays on burning wooden modules (plank, deck, mast).
+   * Each module has a set of stable fire-point positions in ship-local space
+   * (generated once on first draw, min-distance spaced so they do not clump).
+   */
+  private _fireDbgLastLog = 0;
+  private drawBurningModules(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+    const cosR = Math.cos(ship.rotation);
+    const sinR = Math.sin(ship.rotation);
+    const zoom = camera.getState().zoom;
+
+    // Throttled diagnostic — logs once per 3s if any burning entities exist
+    const now = performance.now();
+    if (this.burningEntities.size > 0 && now - this._fireDbgLastLog > 3000) {
+      this._fireDbgLastLog = now;
+      const woodenMods = ship.modules.filter(m => WOODEN_KINDS.has(m.kind));
+      const burningKeys = [...this.burningEntities.keys()];
+      console.log(`[FIRE DBG] ship=${ship.id} burningEntities=${[...burningKeys]} woodenMods=${woodenMods.map(m => m.kind+':'+m.id)}`);
+    }
+
+    for (const mod of ship.modules) {
+      if (!WOODEN_KINDS.has(mod.kind)) continue;
+      if (!this.isBurning('module', mod.id, ship.id, mod.id)) continue;
+
+      const key = `module:${ship.id}:${mod.id}`;
+      // Generate and cache stable local-space fire positions for this module
+      if (!this.moduleFirePoints.has(key)) {
+        this.moduleFirePoints.set(key, this.generateModuleFirePoints(mod));
+      }
+      const firePts = this.moduleFirePoints.get(key)!;
+
+      // Deck: extract active zone bits (bits 11-13) and draw zone overlays
+      const isDeck = mod.kind === 'deck';
+      const zoneBits = isDeck ? (mod.stateBits ?? 0) : 0;
+      const zone0 = isDeck && (zoneBits & (1 << 11)) !== 0; // bow  (+80 to +240)
+      const zone1 = isDeck && (zoneBits & (1 << 12)) !== 0; // mid  (-80 to +80)
+      const zone2 = isDeck && (zoneBits & (1 << 13)) !== 0; // stern(-240 to -80)
+
+      if (isDeck && (zone0 || zone1 || zone2)) {
+        this.drawDeckZoneOverlays(ship, cosR, sinR, zone0, zone1, zone2, zoom, camera);
+      }
+
+      for (const pt of firePts) {
+        // Zone filtering for deck: only render fire in active zones
+        if (isDeck) {
+          const inZ0 = pt.lx > 80;
+          const inZ1 = pt.lx >= -80 && pt.lx <= 80;
+          const inZ2 = pt.lx < -80;
+          if (inZ0 && !zone0) continue;
+          if (inZ1 && !zone1) continue;
+          if (inZ2 && !zone2) continue;
+        }
+
+        const wx = ship.position.x + pt.lx * cosR - pt.ly * sinR;
+        const wy = ship.position.y + pt.lx * sinR + pt.ly * cosR;
+        const screen = camera.worldToScreen(Vec2.from(wx, wy));
+        const screenR = Math.max(8, pt.r * zoom);
+        this.ctx.save();
+        this.drawFireOverlay(screen.x, screen.y, screenR);
+        this.ctx.restore();
+      }
+    }
+  }
+
+  /** Draw per-zone heat overlays and divider lines for a burning deck. */
+  private drawDeckZoneOverlays(
+    ship: Ship, cosR: number, sinR: number,
+    zone0: boolean, zone1: boolean, zone2: boolean,
+    zoom: number, camera: Camera
+  ): void {
+    // Each zone: 160 units wide, deck ~110 units tall (ly ±55)
+    // Zone 0 = bow  lx [80, 240], Zone 1 = mid lx [-80, 80], Zone 2 = stern lx [-240, -80]
+    const zoneDefs: Array<{ lxMin: number; lxMax: number; active: boolean }> = [
+      { lxMin:  80, lxMax:  240, active: zone0 },
+      { lxMin: -80, lxMax:   80, active: zone1 },
+      { lxMin: -240, lxMax: -80, active: zone2 },
+    ];
+
+    const HALF_H = 55; // half-height of deck in local units
+
+    for (const zone of zoneDefs) {
+      if (!zone.active) continue;
+      // Draw a semi-transparent heat tint over the zone (4 corners → polygon)
+      // Corners in ship-local space
+      const corners: Array<[number, number]> = [
+        [zone.lxMin, -HALF_H],
+        [zone.lxMax, -HALF_H],
+        [zone.lxMax,  HALF_H],
+        [zone.lxMin,  HALF_H],
+      ];
+      const screenCorners = corners.map(([lx, ly]) => {
+        const wx = ship.position.x + lx * cosR - ly * sinR;
+        const wy = ship.position.y + lx * sinR + ly * cosR;
+        return camera.worldToScreen(Vec2.from(wx, wy));
+      });
+
+      this.ctx.save();
+      this.ctx.beginPath();
+      this.ctx.moveTo(screenCorners[0].x, screenCorners[0].y);
+      for (let i = 1; i < screenCorners.length; i++) {
+        this.ctx.lineTo(screenCorners[i].x, screenCorners[i].y);
+      }
+      this.ctx.closePath();
+      this.ctx.fillStyle = 'rgba(255, 80, 0, 0.12)';
+      this.ctx.fill();
+      this.ctx.restore();
+    }
+
+    // Zone divider lines at lx = +80 and lx = -80
+    const dividers: Array<{ lx: number; show: boolean }> = [
+      { lx:  80, show: zone0 || zone1 },
+      { lx: -80, show: zone1 || zone2 },
+    ];
+    for (const div of dividers) {
+      if (!div.show) continue;
+      const top = camera.worldToScreen(Vec2.from(
+        ship.position.x + div.lx * cosR - (-HALF_H) * sinR,
+        ship.position.y + div.lx * sinR + (-HALF_H) * cosR,
+      ));
+      const bot = camera.worldToScreen(Vec2.from(
+        ship.position.x + div.lx * cosR - HALF_H * sinR,
+        ship.position.y + div.lx * sinR + HALF_H * cosR,
+      ));
+      this.ctx.save();
+      this.ctx.beginPath();
+      this.ctx.moveTo(top.x, top.y);
+      this.ctx.lineTo(bot.x, bot.y);
+      this.ctx.strokeStyle = 'rgba(255, 120, 0, 0.65)';
+      this.ctx.lineWidth = Math.max(1, 1.5 * zoom);
+      this.ctx.setLineDash([4 * zoom, 3 * zoom]);
+      this.ctx.stroke();
+      this.ctx.restore();
+    }
+  }
+
+  /**
+   * Generate a stable set of fire-point positions in ship-local space for a burning module.
+   * Points are spaced at least MIN_FIRE_DIST world-units apart.
+   *
+   * - deck  → grid of points across the deck polygon / default bounds
+   * - plank → 1–4 points along the plank span or curve
+   * - mast  → single point at localPos
+   */
+  private generateModuleFirePoints(mod: ShipModule): Array<{lx: number; ly: number; r: number}> {
+    const MIN_DIST = 30; // world-unit minimum spacing between fire points
+    const points: Array<{lx: number; ly: number; r: number}> = [];
+
+    // Deterministic per-module PRNG (LCG) — same layout every time for the same module
+    let seed = (mod.id * 2654435761) >>> 0;
+    const rand = (): number => {
+      seed = Math.imul(seed, 1664525) + 1013904223 >>> 0;
+      return seed / 0x100000000;
+    };
+
+    const tryAdd = (lx: number, ly: number, r: number): boolean => {
+      for (const p of points) {
+        const dx = p.lx - lx, dy = p.ly - ly;
+        if (dx * dx + dy * dy < MIN_DIST * MIN_DIST) return false;
+      }
+      points.push({ lx, ly, r });
+      return true;
+    };
+
+    if (mod.kind === 'deck') {
+      // Sample a grid across the deck polygon; fall back to the default hull footprint
+      const data = mod.moduleData as any;
+      const area: Vec2[] | undefined = data?.area;
+      let minX = -220, minY = -48, maxX = 220, maxY = 48;
+      if (area && area.length > 2) {
+        minX = Infinity; minY = Infinity; maxX = -Infinity; maxY = -Infinity;
+        for (const v of area) {
+          if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+          if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+        }
+      }
+      const spacing = MIN_DIST * 1.05;
+      for (let lx = minX + spacing * 0.55; lx < maxX; lx += spacing) {
+        for (let ly = minY + spacing * 0.55; ly < maxY; ly += spacing) {
+          // Jitter so the grid does not look artificial
+          const jx = lx + (rand() - 0.5) * spacing * 0.55;
+          const jy = ly + (rand() - 0.5) * spacing * 0.55;
+          const pt = Vec2.from(jx, jy);
+          if (area && area.length > 2 && !PolygonUtils.pointInPolygon(pt, area)) continue;
+          tryAdd(jx, jy, 15);
+        }
+      }
+      // Guarantee at least a few visible points
+      if (points.length < 3) {
+        tryAdd(0, 0, 15);
+        tryAdd(-55, 0, 15);
+        tryAdd(55, 0, 15);
+      }
+
+    } else if (mod.kind === 'plank') {
+      const pd = mod.moduleData as PlankModuleData;
+      const lx0 = mod.localPos?.x ?? 0;
+      const ly0 = mod.localPos?.y ?? 0;
+      if (pd?.isCurved && pd.curveData) {
+        // Sample along the bezier curve at t1, midpoint, and t2
+        const { start, control, end, t1, t2 } = pd.curveData;
+        const tSamples = [t1, (t1 + t2) / 2, t2];
+        for (const t of tSamples) {
+          const bx = (1-t)*(1-t)*start.x + 2*(1-t)*t*control.x + t*t*end.x;
+          const by = (1-t)*(1-t)*start.y + 2*(1-t)*t*control.y + t*t*end.y;
+          tryAdd(bx, by, 16);
+        }
+      } else {
+        const len = pd?.length ?? 40;
+        const cos = Math.cos(mod.localRot ?? 0);
+        const sin = Math.sin(mod.localRot ?? 0);
+        const nPts = Math.max(1, Math.min(4, Math.round(len / MIN_DIST)));
+        for (let i = 0; i < nPts; i++) {
+          const f = nPts === 1 ? 0 : i / (nPts - 1) - 0.5;
+          tryAdd(lx0 + cos * len * f, ly0 + sin * len * f, 16);
+        }
+      }
+
+    } else if (mod.kind === 'mast') {
+      tryAdd(mod.localPos?.x ?? 0, mod.localPos?.y ?? 0, 18);
+    }
+
+    return points;
   }
 
   /**
@@ -1628,7 +4511,8 @@ export class RenderSystem {
       if (!helm) continue;
       const base = helm.id;
 
-      const presentIds = new Set(ship.modules.map(m => m.id));
+      const presentIds = new Set<number>();
+      for (const m of ship.modules) presentIds.add(m.id);
 
       // Transform mouse to ship-local space
       const dx = this.mouseWorldPos.x - ship.position.x;
@@ -1663,7 +4547,8 @@ export class RenderSystem {
     if (!helm) return;
     const base = helm.id;
 
-    const presentIds = new Set(ship.modules.map(m => m.id));
+    const presentIds = new Set<number>();
+    for (const m of ship.modules) presentIds.add(m.id);
 
     this.ctx.save();
     const screenPos = camera.worldToScreen(ship.position);
@@ -1740,7 +4625,8 @@ export class RenderSystem {
       if (!helm) continue;
       const base = helm.id;
 
-      const presentIds = new Set(ship.modules.map(m => m.id));
+      const presentIds = new Set<number>();
+      for (const m of ship.modules) presentIds.add(m.id);
 
       const dx = this.mouseWorldPos.x - ship.position.x;
       const dy = this.mouseWorldPos.y - ship.position.y;
@@ -1843,7 +4729,8 @@ export class RenderSystem {
     if (!helm) return;
     const base = helm.id;
 
-    const presentIds = new Set(ship.modules.map(m => m.id));
+    const presentIds = new Set<number>();
+    for (const m of ship.modules) presentIds.add(m.id);
 
     this.ctx.save();
     const screenPos = camera.worldToScreen(ship.position);
@@ -2056,6 +4943,8 @@ export class RenderSystem {
     // Find all cannon modules
     const cannons = ship.modules.filter(m => m.kind === 'cannon');
     
+    const isPhantomBrig = ship.shipType === SHIP_TYPE_GHOST;
+
     for (const cannon of cannons) {
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
       
@@ -2076,7 +4965,49 @@ export class RenderSystem {
       this.ctx.rotate(localRot);
       
       const lineWidth = 1 / cameraState.zoom;
-      
+
+      if (isPhantomBrig) {
+        // ── Phantom Brig spectral cannon ────────────────────────────────────
+        const t = performance.now() / 1000;
+        const pulse = 0.55 + 0.45 * Math.sin(t * 2.2 + x * 0.05 + y * 0.05);
+        const glowAlpha = 0.5 + 0.5 * pulse;
+
+        // Void-dark base with cyan glow
+        this.ctx.shadowColor = `rgba(0,220,190,${glowAlpha * 0.9})`;
+        this.ctx.shadowBlur = 10 / cameraState.zoom;
+        this.ctx.fillStyle = '#060f0d';
+        this.ctx.strokeStyle = `rgba(0,200,180,${glowAlpha})`;
+        this.ctx.lineWidth = lineWidth * 1.5;
+        this.ctx.fillRect(-15, -10, 30, 20);
+        this.ctx.strokeRect(-15, -10, 30, 20);
+
+        // Spectral barrel
+        this.ctx.save();
+        this.ctx.rotate(turretAngle);
+        this.ctx.shadowColor = `rgba(0,240,200,${glowAlpha})`;
+        this.ctx.shadowBlur = 8 / cameraState.zoom;
+        this.ctx.fillStyle = `rgba(0,30,25,${0.85 + 0.15 * pulse})`;
+        this.ctx.strokeStyle = `rgba(0,210,185,${glowAlpha})`;
+        this.ctx.lineWidth = lineWidth * 1.5;
+        this.ctx.beginPath();
+        this.ctx.moveTo(-6, 0);
+        this.ctx.lineTo(-6, -42);
+        this.ctx.lineTo(6, -42);
+        this.ctx.lineTo(6, 0);
+        this.ctx.closePath();
+        this.ctx.fill();
+        this.ctx.stroke();
+        // Muzzle glow ring
+        this.ctx.beginPath();
+        this.ctx.arc(0, -42, 5, 0, Math.PI * 2);
+        this.ctx.fillStyle = `rgba(0,220,190,${glowAlpha * 0.6})`;
+        this.ctx.shadowBlur = 12 / cameraState.zoom;
+        this.ctx.fill();
+        this.ctx.restore();
+
+        this.ctx.shadowColor = 'transparent';
+        this.ctx.shadowBlur = 0;
+      } else {
       // Draw cannon base (doesn't rotate with turret)
       this.ctx.fillStyle = this.darkenByDamage('#8B4513', cannonHealthRatio);
       this.ctx.strokeStyle = '#000000';
@@ -2084,7 +5015,6 @@ export class RenderSystem {
       this.ctx.fillRect(-15, -10, 30, 20);
       this.ctx.strokeRect(-15, -10, 30, 20);
 
-   
       // Save context to apply turret rotation
       this.ctx.save();
       
@@ -2109,14 +5039,262 @@ export class RenderSystem {
       
       // Restore turret rotation
       this.ctx.restore();
-      
+      } // end normal cannon
+
       // Restore cannon position
       this.ctx.restore();
     }
     
     this.ctx.restore();
   }
-  
+
+  /**
+   * Draw swivel guns — small, fast-reload anti-personnel weapons on ship edges.
+   * Visual: circular pivot base + short rotating barrel.
+   */
+  private drawShipSwivelGuns(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const { phase2Alpha } = this.computeSinkState(ship);
+    if (phase2Alpha <= 0) return;
+
+    this.ctx.save();
+    if (phase2Alpha < 1) this.ctx.globalAlpha = phase2Alpha;
+
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const swivels = ship.modules.filter(m => m.kind === 'swivel');
+
+    for (const swivel of swivels) {
+      // Use moduleData if present; fall back to safe defaults so newly-placed swivels always render
+      const swivelData = (swivel.moduleData?.kind === 'swivel') ? swivel.moduleData : null;
+
+      const x = swivel.localPos.x;
+      const y = swivel.localPos.y;
+      const turretAngle = swivelData?.aimDirection ?? 0;
+      const localRot = swivel.localRot || 0;
+      const healthRatio = swivelData ? Math.max(0, swivelData.health / (swivelData.maxHealth || 4000)) : 1;
+      const lineWidth = 1 / cameraState.zoom;
+
+      this.ctx.save();
+      this.ctx.translate(x, y);
+      this.ctx.rotate(localRot);
+
+      // Pivot base — small circle
+      this.ctx.beginPath();
+      this.ctx.arc(0, 0, 8, 0, Math.PI * 2);
+      this.ctx.fillStyle = this.darkenByDamage('#5C3A1E', healthRatio);
+      this.ctx.strokeStyle = '#000000';
+      this.ctx.lineWidth = lineWidth;
+      this.ctx.fill();
+      this.ctx.stroke();
+
+      // Rotating barrel
+      this.ctx.save();
+      this.ctx.rotate(turretAngle);
+      this.ctx.fillStyle = this.darkenByDamage('#2a2a2a', healthRatio);
+      this.ctx.strokeStyle = '#000000';
+      this.ctx.lineWidth = lineWidth;
+      this.ctx.fillRect(-3, 0, 6, -22);   // Short barrel: 6 wide, 22 long
+      this.ctx.strokeRect(-3, 0, 6, -22);
+      this.ctx.restore();
+
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw aim guide for a swivel gun the local player is currently mounted to.
+   * Shows: a short dashed trajectory line, and a ±45° arc indicating the rotation limits.
+   */
+  private drawSwivelAimGuide(ship: Ship, worldState: WorldState, camera: Camera): void {
+    if (!this.playerIsAiming) return;
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const localPlayer = this._cachedLocalPlayer;
+    if (!localPlayer || !localPlayer.isMounted || localPlayer.carrierId !== ship.id) return;
+    if (localPlayer.mountedModuleId == null) return;
+
+    const mountedMod = ship.modules.find(m => m.id === localPlayer.mountedModuleId);
+    if (!mountedMod || mountedMod.kind !== 'swivel') return;
+
+    const swivelData = (mountedMod.moduleData?.kind === 'swivel') ? mountedMod.moduleData : null;
+    const localRot = mountedMod.localRot || 0;
+
+    // Client-predicted aim: mirror server formula (desired_offset = aim - localRot + PI/2),
+    // clamped to ±45°.  This gives zero-lag visual feedback instead of waiting for a
+    // server round-trip to update swivelData.aimDirection.
+    const SWIVEL_LIMIT = 45 * Math.PI / 180;
+    let predictedAimDir = this.playerAimAngleRelative - localRot + Math.PI / 2;
+    while (predictedAimDir >  Math.PI) predictedAimDir -= 2 * Math.PI;
+    while (predictedAimDir < -Math.PI) predictedAimDir += 2 * Math.PI;
+    predictedAimDir = Math.max(-SWIVEL_LIMIT, Math.min(SWIVEL_LIMIT, predictedAimDir));
+    const aimDir = predictedAimDir;
+
+    this.ctx.save();
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    // Move to swivel position and apply its base rotation
+    this.ctx.translate(mountedMod.localPos.x, mountedMod.localPos.y);
+    this.ctx.rotate(localRot);
+
+    const BARREL_TIP = 22;    // px from pivot to barrel tip
+    const RANGE      = 200;   // swivel effective range in client units
+    const LIMIT_RAD  = 45 * Math.PI / 180;
+
+    // ── ±45° arc (limit indicators) ──────────────────────────────────────
+    // The barrel's natural direction in local swivel frame = -π/2 (straight up before rotation)
+    // arc centred on natural barrel direction = angle 0 in the post-localRot frame
+    const arcCentreAngle = -Math.PI / 2; // straight "out" in swivel local space
+    this.ctx.beginPath();
+    this.ctx.arc(0, 0, BARREL_TIP + 6, arcCentreAngle - LIMIT_RAD, arcCentreAngle + LIMIT_RAD);
+    this.ctx.strokeStyle = 'rgba(255,120,40,0.35)';
+    this.ctx.lineWidth = 1 / cameraState.zoom;
+    this.ctx.stroke();
+
+    // ── Barrel trajectory / area overlay (ammo-specific) ─────────────────
+    const barrelAngle = arcCentreAngle + aimDir;
+    const cosB = Math.cos(barrelAngle);
+    const sinB = Math.sin(barrelAngle);
+    // Barrel tip in swivel-local space
+    const tipX = cosB * BARREL_TIP;
+    const tipY = sinB * BARREL_TIP;
+
+    // Normalise ammo ID: 10/2=grapeshot, 11/3=flame, 12/4=canister
+    const ammo = this.selectedAmmoType;
+    const ammoNorm = ammo === 10 ? 10 : ammo === 2 ? 10
+                   : ammo === 11 ? 11 : ammo === 3 ? 11
+                   : ammo === 12 ? 12 : ammo === 4 ? 12
+                   : ammo; // pass-through for cannon types
+
+    if (ammoNorm === 10) {
+      // ── Grapeshot: ±12° hit cone centred on barrel tip, 250px range ─────
+      const GRAPE_RANGE = 250;
+      const SPREAD      = 12 * Math.PI / 180;
+      const leftA  = barrelAngle - SPREAD;
+      const rightA = barrelAngle + SPREAD;
+
+      this.ctx.save();
+      this.ctx.translate(tipX, tipY);
+
+      // Filled wedge
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(Math.cos(leftA) * GRAPE_RANGE, Math.sin(leftA) * GRAPE_RANGE);
+      this.ctx.arc(0, 0, GRAPE_RANGE, leftA, rightA);
+      this.ctx.closePath();
+      this.ctx.fillStyle = 'rgba(255,200,80,0.07)';
+      this.ctx.fill();
+
+      // Cone outline edges
+      this.ctx.strokeStyle = 'rgba(255,200,80,0.55)';
+      this.ctx.lineWidth = 1 / cameraState.zoom;
+      this.ctx.setLineDash([4 / cameraState.zoom, 3 / cameraState.zoom]);
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(Math.cos(leftA) * GRAPE_RANGE, Math.sin(leftA) * GRAPE_RANGE);
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(Math.cos(rightA) * GRAPE_RANGE, Math.sin(rightA) * GRAPE_RANGE);
+      this.ctx.stroke();
+
+      // Solid arc at max range
+      this.ctx.setLineDash([]);
+      this.ctx.globalAlpha = 0.30;
+      this.ctx.beginPath();
+      this.ctx.arc(0, 0, GRAPE_RANGE, leftA, rightA);
+      this.ctx.stroke();
+      this.ctx.globalAlpha = 1.0;
+
+      // Centre aim line (solid, bright)
+      this.ctx.strokeStyle = 'rgba(255,220,100,0.75)';
+      this.ctx.lineWidth = 1.5 / cameraState.zoom;
+      this.ctx.setLineDash([5 / cameraState.zoom, 4 / cameraState.zoom]);
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(cosB * GRAPE_RANGE, sinB * GRAPE_RANGE);
+      this.ctx.stroke();
+      this.ctx.setLineDash([]);
+
+      this.ctx.restore();
+
+    } else if (ammoNorm === 11) {
+      // ── Liquid Flame: ±15° cone centred on barrel tip, 280px range ──────
+      const FLAME_RANGE = 280;
+      const SPREAD      = 15 * Math.PI / 180;
+      const leftA  = barrelAngle - SPREAD;
+      const rightA = barrelAngle + SPREAD;
+
+      this.ctx.save();
+      this.ctx.translate(tipX, tipY);
+
+      // Filled wedge — orange/flame tint
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(Math.cos(leftA) * FLAME_RANGE, Math.sin(leftA) * FLAME_RANGE);
+      this.ctx.arc(0, 0, FLAME_RANGE, leftA, rightA);
+      this.ctx.closePath();
+      this.ctx.fillStyle = 'rgba(255,100,0,0.08)';
+      this.ctx.fill();
+
+      // Cone edges (dashed, flame orange)
+      this.ctx.strokeStyle = 'rgba(255,120,0,0.55)';
+      this.ctx.lineWidth = 1 / cameraState.zoom;
+      this.ctx.setLineDash([3 / cameraState.zoom, 3 / cameraState.zoom]);
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(Math.cos(leftA) * FLAME_RANGE, Math.sin(leftA) * FLAME_RANGE);
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(Math.cos(rightA) * FLAME_RANGE, Math.sin(rightA) * FLAME_RANGE);
+      this.ctx.stroke();
+
+      // Solid arc at max range
+      this.ctx.setLineDash([]);
+      this.ctx.globalAlpha = 0.28;
+      this.ctx.beginPath();
+      this.ctx.arc(0, 0, FLAME_RANGE, leftA, rightA);
+      this.ctx.stroke();
+      this.ctx.globalAlpha = 1.0;
+
+      // Centre aim line — thin solid, shorter than cannon lines
+      this.ctx.strokeStyle = 'rgba(255,160,0,0.80)';
+      this.ctx.lineWidth = 1 / cameraState.zoom;
+      this.ctx.setLineDash([4 / cameraState.zoom, 3 / cameraState.zoom]);
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(cosB * FLAME_RANGE, sinB * FLAME_RANGE);
+      this.ctx.stroke();
+      this.ctx.setLineDash([]);
+
+      this.ctx.restore();
+
+    } else {
+      // ── Default / canister: simple dashed trajectory line ────────────────
+      this.ctx.save();
+      this.ctx.setLineDash([5 / cameraState.zoom, 4 / cameraState.zoom]);
+      this.ctx.strokeStyle = 'rgba(255,200,80,0.85)';
+      this.ctx.lineWidth = 1.5 / cameraState.zoom;
+      this.ctx.beginPath();
+      this.ctx.moveTo(tipX, tipY);
+      this.ctx.lineTo(cosB * (BARREL_TIP + RANGE), sinB * (BARREL_TIP + RANGE));
+      this.ctx.stroke();
+      this.ctx.setLineDash([]);
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
   /**
    * Draw trajectory aim guides for cannons that are currently being manned.
    * A dashed line fans out from the barrel tip in the fire direction, with
@@ -2205,16 +5383,16 @@ export class RenderSystem {
     // (The canvas transform already applies cs.zoom, so 1 unit = 1 screen px at zoom=1.)
 
     for (const mod of ship.modules) {
-      if (mod.kind !== 'cannon') continue;
+      if (mod.kind !== 'cannon' && mod.kind !== 'swivel') continue;
       const info = cannonGroupMap.get(mod.id);
       const lx = mod.localPos.x;
       const ly = mod.localPos.y;
       const lr = (mod as { localRot?: number }).localRot ?? 0;
 
       // Decide visibility:
-      //  • cannon in an active group   → always visible (bright highlight)
-      //  • cannon in a non-active group → only visible when Shift is held
-      //  • unassigned cannon            → only visible when Shift is held
+      //  • weapon in an active group    → always visible (bright highlight)
+      //  • weapon in a non-active group → only visible when Shift is held
+      //  • unassigned weapon             → only visible when Shift is held
       const isActive = info != null && activeGroups.has(info.g);
       if (!isActive && !showAll) continue;
 
@@ -2349,10 +5527,8 @@ export class RenderSystem {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
     if (!this.playerIsAiming) return;
 
-    // Determine which cannons to show guides for based on what the local player is mounted to.
-    const localPlayer = this.localPlayerId != null
-      ? worldState.players.find(p => p.id === this.localPlayerId)
-      : null;
+    // Use frame-cached local player (set once in renderWorld).
+    const localPlayer = this._cachedLocalPlayer;
 
     // Player must be mounted and on this ship
     if (!localPlayer || !localPlayer.isMounted || localPlayer.carrierId !== ship.id) return;
@@ -2378,8 +5554,22 @@ export class RenderSystem {
         const FADE_RAD         = 15 * Math.PI / 180;
         const shipNpcs    = worldState.npcs.filter(n => n.shipId === ship.id);
         const shipPlayers = worldState.players.filter(p => p.carrierId === ship.id && p.isMounted);
+
+        // Build the set of cannon IDs that belong to an active weapon group.
+        // Only cannons in a selected group show trajectory lines.
+        const activeCannonIds = new Set<number>();
+        if (this.controlGroups) {
+          this.controlGroups.forEach((state, g) => {
+            if (this.activeWeaponGroups.has(g)) {
+              for (const id of state.cannonIds) activeCannonIds.add(id);
+            }
+          });
+        }
+
         for (const m of ship.modules) {
-          if (m.kind !== 'cannon') continue;
+          if (m.kind !== 'cannon' && m.kind !== 'swivel') continue;
+          // Only show trajectory for weapons in an active weapon group
+          if (!activeCannonIds.has(m.id)) continue;
           // Angular offset from cannon's natural axis (server convention)
           let offset = aim - (m.localRot || 0) + Math.PI / 2;
           // Normalize to [-π, π]
@@ -2387,7 +5577,7 @@ export class RenderSystem {
           while (offset < -Math.PI) offset += 2 * Math.PI;
           const absOffset = Math.abs(offset);
           if (absOffset > CANNON_LIMIT_RAD + FADE_RAD) continue; // beyond 45° — skip
-          const hasNpc    = shipNpcs.some(n => n.assignedCannonId === m.id && n.state === NPC_STATE_AT_CANNON);
+          const hasNpc    = shipNpcs.some(n => n.assignedWeaponId === m.id && n.state === NPC_STATE_AT_GUN);
           const hasPlayer = shipPlayers.some(p => p.mountedModuleId === m.id);
           if (!hasNpc && !hasPlayer) continue;
           // Don't show trajectory for a reloading cannon
@@ -2414,10 +5604,164 @@ export class RenderSystem {
     const sinR = Math.sin(ship.rotation);
 
     for (const { module: cannon, alpha: fadeAlpha } of cannonsToShow) {
+      // ── Swivel: draw ammo-appropriate aim cone / line from helm ──────────
+      if (cannon.kind === 'swivel') {
+        const SWIVEL_LIMIT = 45 * Math.PI / 180;
+        const localRot = cannon.localRot || 0;
+        let predictedAimDir = this.playerAimAngleRelative - localRot + Math.PI / 2;
+        while (predictedAimDir >  Math.PI) predictedAimDir -= 2 * Math.PI;
+        while (predictedAimDir < -Math.PI) predictedAimDir += 2 * Math.PI;
+        predictedAimDir = Math.max(-SWIVEL_LIMIT, Math.min(SWIVEL_LIMIT, predictedAimDir));
+
+        const BARREL_TIP = 22;
+        const sx = cannon.localPos.x;
+        const sy = cannon.localPos.y;
+        // Barrel direction in ship-local space: localRot sets the "natural out" axis at -π/2
+        const barrelAngle = localRot - Math.PI / 2 + predictedAimDir;
+        const cosB = Math.cos(barrelAngle);
+        const sinB = Math.sin(barrelAngle);
+        const tipX = sx + cosB * BARREL_TIP;
+        const tipY = sy + sinB * BARREL_TIP;
+
+        const ammo = this.selectedAmmoType;
+        const ammoNorm = (ammo === 10 || ammo === 2) ? 10
+                       : (ammo === 11 || ammo === 3) ? 11
+                       : 12; // canister / default
+
+        this.ctx.save();
+        this.ctx.globalAlpha = fadeAlpha;
+
+        // ±45° rotation-limit arc centred on the swivel pivot
+        this.ctx.save();
+        this.ctx.translate(sx, sy);
+        const arcCentre = localRot - Math.PI / 2;
+        const LIMIT_RAD = 45 * Math.PI / 180;
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, BARREL_TIP + 6, arcCentre - LIMIT_RAD, arcCentre + LIMIT_RAD);
+        this.ctx.strokeStyle = 'rgba(255,120,40,0.35)';
+        this.ctx.lineWidth = 1 / cameraState.zoom;
+        this.ctx.stroke();
+        this.ctx.restore();
+
+        if (ammoNorm === 10) {
+          // Grapeshot: ±12° cone, 250px range
+          const GRAPE_RANGE = 250;
+          const SPREAD = 12 * Math.PI / 180;
+          const leftA  = barrelAngle - SPREAD;
+          const rightA = barrelAngle + SPREAD;
+          this.ctx.save();
+          this.ctx.translate(tipX, tipY);
+          // Filled wedge
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(Math.cos(leftA) * GRAPE_RANGE, Math.sin(leftA) * GRAPE_RANGE);
+          this.ctx.arc(0, 0, GRAPE_RANGE, leftA, rightA);
+          this.ctx.closePath();
+          this.ctx.fillStyle = 'rgba(255,200,80,0.07)';
+          this.ctx.fill();
+          // Dashed edges
+          this.ctx.strokeStyle = 'rgba(255,200,80,0.55)';
+          this.ctx.lineWidth = 1 / cameraState.zoom;
+          this.ctx.setLineDash([4 / cameraState.zoom, 3 / cameraState.zoom]);
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(Math.cos(leftA) * GRAPE_RANGE, Math.sin(leftA) * GRAPE_RANGE);
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(Math.cos(rightA) * GRAPE_RANGE, Math.sin(rightA) * GRAPE_RANGE);
+          this.ctx.stroke();
+          // Faint arc at max range
+          this.ctx.setLineDash([]);
+          this.ctx.globalAlpha = 0.30 * fadeAlpha;
+          this.ctx.beginPath();
+          this.ctx.arc(0, 0, GRAPE_RANGE, leftA, rightA);
+          this.ctx.stroke();
+          this.ctx.globalAlpha = fadeAlpha;
+          // Centre aim line
+          this.ctx.strokeStyle = 'rgba(255,220,100,0.75)';
+          this.ctx.lineWidth = 1.5 / cameraState.zoom;
+          this.ctx.setLineDash([5 / cameraState.zoom, 4 / cameraState.zoom]);
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(cosB * GRAPE_RANGE, sinB * GRAPE_RANGE);
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          this.ctx.restore();
+
+        } else if (ammoNorm === 11) {
+          // Liquid flame: ±15° cone, 200px range
+          const FLAME_RANGE = 280;
+          const SPREAD = 15 * Math.PI / 180;
+          const leftA  = barrelAngle - SPREAD;
+          const rightA = barrelAngle + SPREAD;
+          this.ctx.save();
+          this.ctx.translate(tipX, tipY);
+          // Filled wedge
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(Math.cos(leftA) * FLAME_RANGE, Math.sin(leftA) * FLAME_RANGE);
+          this.ctx.arc(0, 0, FLAME_RANGE, leftA, rightA);
+          this.ctx.closePath();
+          this.ctx.fillStyle = 'rgba(255,100,0,0.08)';
+          this.ctx.fill();
+          // Dashed edges
+          this.ctx.strokeStyle = 'rgba(255,120,0,0.55)';
+          this.ctx.lineWidth = 1 / cameraState.zoom;
+          this.ctx.setLineDash([3 / cameraState.zoom, 3 / cameraState.zoom]);
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(Math.cos(leftA) * FLAME_RANGE, Math.sin(leftA) * FLAME_RANGE);
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(Math.cos(rightA) * FLAME_RANGE, Math.sin(rightA) * FLAME_RANGE);
+          this.ctx.stroke();
+          // Faint arc at max range
+          this.ctx.setLineDash([]);
+          this.ctx.globalAlpha = 0.28 * fadeAlpha;
+          this.ctx.beginPath();
+          this.ctx.arc(0, 0, FLAME_RANGE, leftA, rightA);
+          this.ctx.stroke();
+          this.ctx.globalAlpha = fadeAlpha;
+          // Centre aim line
+          this.ctx.strokeStyle = 'rgba(255,160,0,0.80)';
+          this.ctx.lineWidth = 1 / cameraState.zoom;
+          this.ctx.setLineDash([4 / cameraState.zoom, 3 / cameraState.zoom]);
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, 0);
+          this.ctx.lineTo(cosB * FLAME_RANGE, sinB * FLAME_RANGE);
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          this.ctx.restore();
+
+        } else {
+          // Canister / default: simple dashed line
+          this.ctx.save();
+          this.ctx.strokeStyle = 'rgba(255,200,80,0.85)';
+          this.ctx.lineWidth = 1.5 / cameraState.zoom;
+          this.ctx.setLineDash([5 / cameraState.zoom, 4 / cameraState.zoom]);
+          this.ctx.beginPath();
+          this.ctx.moveTo(tipX, tipY);
+          this.ctx.lineTo(tipX + cosB * 200, tipY + sinB * 200);
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          this.ctx.restore();
+        }
+
+        this.ctx.restore();
+        continue;
+      }
+
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
       const cannonData = cannon.moduleData;
 
-      const totalAngle = (cannon.localRot || 0) + (cannonData.aimDirection || 0);
+      // Client-predicted aim direction — mirrors the server formula so the guide
+      // tracks the mouse instantly rather than waiting for a round-trip.
+      // Formula: desired_offset = playerAimAngleRelative - localRot + PI/2
+      const CANNON_LIMIT = 30 * Math.PI / 180;
+      let predictedAimDir = this.playerAimAngleRelative - (cannon.localRot || 0) + Math.PI / 2;
+      while (predictedAimDir >  Math.PI) predictedAimDir -= 2 * Math.PI;
+      while (predictedAimDir < -Math.PI) predictedAimDir += 2 * Math.PI;
+      predictedAimDir = Math.max(-CANNON_LIMIT, Math.min(CANNON_LIMIT, predictedAimDir));
+
+      const totalAngle = (cannon.localRot || 0) + predictedAimDir;
       const cx = cannon.localPos.x;
       const cy = cannon.localPos.y;
 
@@ -2600,25 +5944,221 @@ export class RenderSystem {
       const x = ladder.localPos.x;
       const y = ladder.localPos.y;
       const rot = ladder.localRot || 0;
-      
-      // Save context for this ladder
+      const isExtended = (ladder.moduleData as any)?.extended !== false; // default to extended if unknown
+
       this.ctx.save();
-      
-      // Move to ladder position and apply rotation
       this.ctx.translate(x, y);
       this.ctx.rotate(rot);
-      
-      // Draw ladder as a black rectangle (20x40 pixels)
-      this.ctx.fillStyle = '#000000';
-      this.ctx.fillRect(-10, -20, 20, 40);
-      
-      // Restore ladder transform
+
+      if (isExtended) {
+        // --- Extended ladder: wooden frame with rungs ---
+        const lw = 20; // total width
+        const lh = 40; // total height
+        const railW = 3;
+        const rungCount = 4;
+
+        // Side rails (dark brown)
+        this.ctx.fillStyle = '#5C3A1E';
+        this.ctx.fillRect(-lw / 2, -lh / 2, railW, lh);           // left rail
+        this.ctx.fillRect(lw / 2 - railW, -lh / 2, railW, lh);    // right rail
+
+        // Rungs (lighter tan wood)
+        this.ctx.fillStyle = '#8B5E3C';
+        const rungH = 3;
+        const rungSpacing = lh / (rungCount + 1);
+        for (let i = 1; i <= rungCount; i++) {
+          const ry = -lh / 2 + i * rungSpacing - rungH / 2;
+          this.ctx.fillRect(-lw / 2 + railW, ry, lw - railW * 2, rungH);
+        }
+
+        // Thin outline
+        this.ctx.strokeStyle = '#3A2010';
+        this.ctx.lineWidth = 1;
+        this.ctx.strokeRect(-lw / 2, -lh / 2, lw, lh);
+      } else {
+        // --- Retracted ladder: flat stowed plank, grey-brown, narrow ---
+        this.ctx.fillStyle = '#6B5040';
+        this.ctx.fillRect(-10, -6, 20, 12);
+        this.ctx.strokeStyle = '#3A2010';
+        this.ctx.lineWidth = 1;
+        this.ctx.strokeRect(-10, -6, 20, 12);
+        // Small diagonal lines to suggest folded/stowed state
+        this.ctx.strokeStyle = '#4A3020';
+        this.ctx.lineWidth = 1;
+        this.ctx.beginPath();
+        this.ctx.moveTo(-7, -4); this.ctx.lineTo( 7,  4);
+        this.ctx.moveTo(-7,  4); this.ctx.lineTo( 7, -4);
+        this.ctx.stroke();
+      }
+
       this.ctx.restore();
     }
     
     this.ctx.restore();
   }
   
+  // ─── Ghost Ship FX ────────────────────────────────────────────────────────
+
+  /**
+   * Draw ghostly runic circle on deck + 3 translucent crew silhouettes that
+   * fade in and out asynchronously.
+   */
+  private drawGhostDeckEffects(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+
+    const { phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
+
+    const ctx         = this.ctx;
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cs          = camera.getState();
+    const t           = performance.now() / 1000;
+
+    ctx.save();
+    ctx.globalAlpha = phase1Alpha;
+    ctx.translate(screenPos.x, screenPos.y);
+    ctx.scale(cs.zoom, cs.zoom);
+    ctx.rotate(ship.rotation - cs.rotation);
+
+    // ── Runic circle pulsing glow ─────────────────────────────────────────
+    const pulse  = 0.4 + 0.35 * Math.sin(t * 1.8);
+    const rotate = t * 0.22; // slow rotation
+    const circleR = 55;
+
+    // Outer haze
+    ctx.save();
+    ctx.rotate(rotate);
+    const hazeGrd = ctx.createRadialGradient(0, 0, circleR * 0.55, 0, 0, circleR * 1.4);
+    hazeGrd.addColorStop(0,   `rgba(0,230,255,${(pulse * 0.30).toFixed(3)})`);
+    hazeGrd.addColorStop(1,   'rgba(0,100,160,0)');
+    ctx.fillStyle = hazeGrd;
+    ctx.beginPath();
+    ctx.arc(0, 0, circleR * 1.4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Circle stroke
+    ctx.strokeStyle = `rgba(0,220,255,${(pulse * 0.80).toFixed(3)})`;
+    ctx.lineWidth   = 1.5;
+    ctx.shadowColor = '#00eeff';
+    ctx.shadowBlur  = 6;
+    ctx.beginPath();
+    ctx.arc(0, 0, circleR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 5 rune tick marks around the ring
+    for (let i = 0; i < 5; i++) {
+      const angle = (i / 5) * Math.PI * 2;
+      const ix    = Math.cos(angle) * circleR;
+      const iy    = Math.sin(angle) * circleR;
+      const ox    = Math.cos(angle) * (circleR - 12);
+      const oy    = Math.sin(angle) * (circleR - 12);
+      ctx.strokeStyle = `rgba(0,200,255,${(pulse * 0.70).toFixed(3)})`;
+      ctx.lineWidth   = 1.0;
+      ctx.beginPath();
+      ctx.moveTo(ix, iy);
+      ctx.lineTo(ox, oy);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // ── Ghost crew silhouettes ────────────────────────────────────────────
+    // 3 "figures" at staggered positions along the deck centreline.
+    // Each fades in/out with a different phase offset.
+    const crewPositions = [
+      { x: 60,  y: 0,  phase: 0.0 },
+      { x: -40, y: 20, phase: 1.8 },
+      { x: -40, y: -20, phase: 3.2 },
+    ];
+    for (const crew of crewPositions) {
+      const alpha = Math.max(0, 0.15 + 0.35 * Math.sin(t * 1.1 + crew.phase));
+
+      ctx.save();
+      ctx.translate(crew.x, crew.y);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle   = '#a0e8ff';
+      ctx.shadowColor = '#00eeff';
+      ctx.shadowBlur  = 8;
+
+      // Body (torso + head silhouette)
+      ctx.beginPath();
+      ctx.ellipse(0, -12, 5, 10, 0, 0, Math.PI * 2); // torso
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(0, -24, 5, 0, Math.PI * 2);              // head
+      ctx.fill();
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  /**
+   * Draw wispy fog/mist aura around the ghost ship hull edges + stern whisps.
+   */
+  private drawGhostFogAura(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+
+    const { phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
+
+    const ctx       = this.ctx;
+    const screenPos = camera.worldToScreen(ship.position);
+    const cs        = camera.getState();
+    const t         = performance.now() / 1000;
+
+    ctx.save();
+    ctx.globalAlpha = phase1Alpha;
+    ctx.translate(screenPos.x, screenPos.y);
+    ctx.scale(cs.zoom, cs.zoom);
+    ctx.rotate(ship.rotation - cs.rotation);
+
+    // 8 mist puffs at hull-edge positions: bow, stern, two amidships port/stbd
+    const mistPositions = [
+      { x:  280, y:   0, r: 45 },   // bow
+      { x: -330, y:   0, r: 40 },   // stern
+      { x:   80, y:  80, r: 35 },   // fore-port
+      { x:   80, y: -80, r: 35 },   // fore-stbd
+      { x:  -80, y:  80, r: 35 },   // aft-port
+      { x:  -80, y: -80, r: 35 },   // aft-stbd
+      { x: -170, y:  55, r: 30 },   // far-aft-port
+      { x: -170, y: -55, r: 30 },   // far-aft-stbd
+    ];
+
+    for (let i = 0; i < mistPositions.length; i++) {
+      const mp    = mistPositions[i];
+      const drift = Math.sin(t * 0.7 + i * 1.2) * 8; // gentle drift
+      const alpha = 0.08 + 0.08 * Math.sin(t * 0.9 + i * 0.8);
+
+      const grd = ctx.createRadialGradient(mp.x, mp.y + drift, 2, mp.x, mp.y + drift, mp.r);
+      grd.addColorStop(0,   `rgba(180,240,255,${alpha.toFixed(3)})`);
+      grd.addColorStop(0.4, `rgba(100,200,240,${(alpha * 0.55).toFixed(3)})`);
+      grd.addColorStop(1,   'rgba(0,150,200,0)');
+
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.ellipse(mp.x, mp.y + drift, mp.r, mp.r * 0.55, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Trailing mist wake — cyan wisps stretching behind the stern
+    for (let i = 0; i < 4; i++) {
+      const wx    = -350 - i * 60;
+      const wdrift = Math.sin(t * 0.6 + i * 2.0) * 12;
+      const alpha  = Math.max(0, 0.12 - i * 0.025) * (0.5 + 0.5 * Math.sin(t * 0.5 + i));
+
+      const wgrd = ctx.createRadialGradient(wx, wdrift, 0, wx, wdrift, 30 + i * 10);
+      wgrd.addColorStop(0,   `rgba(120,220,255,${alpha.toFixed(3)})`);
+      wgrd.addColorStop(1,   'rgba(0,120,180,0)');
+
+      ctx.fillStyle = wgrd;
+      ctx.beginPath();
+      ctx.ellipse(wx, wdrift, 30 + i * 10, 18, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
   private drawShipRudder(ship: Ship, camera: Camera): void {
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
@@ -2932,6 +6472,13 @@ export class RenderSystem {
       const mastData = mast.moduleData;
       const x = mast.localPos.x;
       const y = mast.localPos.y;
+
+      // ── Phantom Brig: spectral shroud sails instead of normal cloth ──
+      if (ship.shipType === SHIP_TYPE_GHOST) {
+        this.drawPhantomSail(x, y, mastData.sailWidth, mastData.height, mast.id);
+        continue;
+      }
+
       const width = mastData.sailWidth;
       const height = mastData.height;
       const sailColor = mastData.sailColor;
@@ -2939,14 +6486,111 @@ export class RenderSystem {
       
       // Use sail cloth HP (fiberHealth) for visual degradation, not mast pole HP
       const healthRatio = mastData.fiberMaxHealth > 0 ? mastData.fiberHealth / mastData.fiberMaxHealth : 1;
-      this.drawSailFiber(x, y, width, height, sailColor, mastData.openness / 100, angle, healthRatio, mast.id);
+      const fireIntensity = mastData.sailFireIntensity ?? 0;
+      this.drawSailFiber(x, y, width, height, sailColor, mastData.openness / 100, angle, healthRatio, mast.id, fireIntensity);
       
     }
     
     this.ctx.restore();
   }
   
-  private drawSailFiber(x: number, y: number, width: number, height: number, sailColor: string, openness: number, angle: number, healthRatio: number = 1, moduleId: number = 0): void {
+  /**
+   * Spectral shroud sails for the Phantom Brig.
+   * Called inside drawShipSailFibers, inheriting the ship-level canvas transform.
+   * Wind angle is ignored — sails billow from spectral energy alone.
+   */
+  private drawPhantomSail(x: number, y: number, width: number, height: number, mastId: number): void {
+    const now   = Date.now();
+    const t     = now * 0.001;
+    const phase = mastId * 2.17;
+
+    // Gentle supernatural billow — no wind angle, slight side-to-side sway
+    const billow = Math.sin(t * 0.85 + phase) * 10;
+
+    const sailTopY = -height * 1.4;
+    const sailBotY = -sailTopY;
+    const halfW    = width * 0.5;
+
+    // Build seeded-random torn bottom edge
+    let mseed = (mastId * 2654435761) >>> 0;
+    const mrand = () => { mseed = (mseed * 1664525 + 1013904223) >>> 0; return mseed / 0xFFFFFFFF; };
+    const tearCount = 9;
+    const tearX: number[] = [];
+    const tearY: number[] = [];
+    for (let i = 0; i <= tearCount; i++) {
+      tearX.push(-halfW + (i / tearCount) * width);
+      tearY.push(sailBotY - mrand() * 28 - 4);
+    }
+
+    this.ctx.save();
+    this.ctx.translate(x, y);
+
+    // Build clip path (outline of sail)
+    const buildPath = () => {
+      this.ctx.beginPath();
+      this.ctx.moveTo(-halfW, sailTopY);
+      this.ctx.lineTo(halfW, sailTopY);
+      this.ctx.quadraticCurveTo(halfW + billow * 0.7, 0, tearX[tearCount], tearY[tearCount]);
+      for (let i = tearCount - 1; i >= 0; i--) {
+        this.ctx.lineTo(tearX[i], tearY[i]);
+      }
+      this.ctx.quadraticCurveTo(-halfW + billow * 0.3, 0, -halfW, sailTopY);
+      this.ctx.closePath();
+    };
+
+    // ── Outer glow pass ──
+    this.ctx.shadowColor = '#00ddcc';
+    this.ctx.shadowBlur  = 16;
+    buildPath();
+    this.ctx.strokeStyle = `rgba(0,210,200,${0.45 + 0.15 * Math.sin(t * 1.6 + phase)})`;
+    this.ctx.lineWidth   = 1.5;
+    this.ctx.stroke();
+    this.ctx.shadowBlur = 0;
+
+    // ── Cloth fill — dark void-teal gradient ──
+    const pulse = 0.52 + 0.13 * Math.sin(t * 1.3 + phase);
+    const grad  = this.ctx.createLinearGradient(-halfW, sailTopY, halfW, sailBotY);
+    grad.addColorStop(0,   `rgba(0, 55, 45, ${pulse})`);
+    grad.addColorStop(0.45,`rgba(0, 32, 26, ${pulse * 0.85})`);
+    grad.addColorStop(1,   `rgba(0, 14, 11, ${pulse * 0.65})`);
+    buildPath();
+    this.ctx.fillStyle = grad;
+    this.ctx.fill();
+
+    // ── Spectral vein lines through the sail cloth ──
+    this.ctx.save();
+    buildPath();
+    this.ctx.clip();
+    const veinCount = 3;
+    for (let v = 0; v < veinCount; v++) {
+      const vx     = -halfW * 0.55 + v * (halfW * 0.55);
+      const vAlpha = 0.28 + 0.18 * Math.sin(t * 2.1 + v * 1.5 + phase);
+      this.ctx.shadowColor  = '#00ffee';
+      this.ctx.shadowBlur   = 5;
+      this.ctx.strokeStyle  = `rgba(0, 230, 215, ${vAlpha})`;
+      this.ctx.lineWidth    = 0.9;
+      this.ctx.beginPath();
+      this.ctx.moveTo(vx, sailTopY + 4);
+      this.ctx.quadraticCurveTo(vx + billow * 0.35, 0, vx + billow * 0.15, sailBotY - 18);
+      this.ctx.stroke();
+    }
+    this.ctx.restore();
+
+    // ── Yard (horizontal boom at top) ──
+    this.ctx.shadowColor = '#00ccbb';
+    this.ctx.shadowBlur  = 6;
+    this.ctx.strokeStyle = '#1a4a40';
+    this.ctx.lineWidth   = 2.5;
+    this.ctx.beginPath();
+    this.ctx.moveTo(-halfW - 6, sailTopY);
+    this.ctx.lineTo(halfW  + 6, sailTopY);
+    this.ctx.stroke();
+    this.ctx.shadowBlur = 0;
+
+    this.ctx.restore();
+  }
+
+  private drawSailFiber(x: number, y: number, width: number, height: number, sailColor: string, openness: number, angle: number, healthRatio: number = 1, moduleId: number = 0, fireIntensity: number = 0): void {
     // Clamp health — NaN guard for missing fiberMaxHealth
     const clampedHealth = Math.max(0, Math.min(1, isNaN(healthRatio) ? 1 : healthRatio));
 
@@ -2970,9 +6614,20 @@ export class RenderSystem {
     // Damage factor: 0 = pristine, 1 = nearly destroyed
     const damage = 1 - clampedHealth;
     const grey: [number, number, number] = [110, 110, 110];
+    // Fire factor: 0 = not burning, 1 = fully engulfed
+    const fireFactor = Math.min(1, (fireIntensity ?? 0) / 100);
 
-    const centerColor = lerpColor(hexToRgb(sailColor), grey, damage);
-    const edgeColor   = lerpColor(hexToRgb('#E6E6E6'), grey, damage);
+    let centerRgb = lerpColor(hexToRgb(sailColor), grey, damage);
+    let edgeRgb   = lerpColor(hexToRgb('#E6E6E6'), grey, damage);
+    if (fireFactor > 0) {
+      // Shift sail cloth colour toward orange-red as intensity rises
+      const fireCore: [number, number, number] = [255, 60,  0];
+      const fireEdge: [number, number, number] = [255, 190, 20];
+      centerRgb = lerpColor(hexToRgb(centerRgb), fireCore, fireFactor * 0.55);
+      edgeRgb   = lerpColor(hexToRgb(edgeRgb),   fireEdge, fireFactor * 0.38);
+    }
+    const centerColor = centerRgb;
+    const edgeColor   = edgeRgb;
 
     // Set up rotated coordinate space (yard always rotates with sail angle)
     this.ctx.save();
@@ -3031,6 +6686,56 @@ export class RenderSystem {
       }
 
       this.ctx.restore(); // end sailAlpha save
+
+      // ── Pulsing fire overlay on the sail cloth ──
+      if (fireFactor > 0 && openness > 0) {
+        const now     = Date.now();
+        const flicker = 0.7 + 0.3 * (Math.sin(now * 0.009) * 0.5 + 0.5);
+        this.ctx.save();
+        this.ctx.globalAlpha = fireFactor * 0.30 * flicker * sailAlpha;
+        this.ctx.beginPath();
+        this.ctx.moveTo(0, sailTopY);
+        this.ctx.lineTo(0, -sailTopY);
+        this.ctx.quadraticCurveTo(sailPower + 25, 0, 0, sailTopY);
+        this.ctx.clip();
+        const fireGrad = this.ctx.createLinearGradient(0, sailTopY, 0, 0);
+        fireGrad.addColorStop(0,   `rgba(255,${Math.floor(60 * (1 - fireFactor * 0.8))},0,1)`);
+        fireGrad.addColorStop(0.5, 'rgba(255,120,0,0.7)');
+        fireGrad.addColorStop(1,   'rgba(255,200,0,0)');
+        this.ctx.fillStyle = fireGrad;
+        this.ctx.fillRect(-width, sailTopY, width * 2.5 + sailPower, -sailTopY * 2);
+        this.ctx.restore();
+      }
+    }
+
+    // ── Animated flame licks along the burning sail ──
+    if (fireFactor > 0 && openness > 0 && clampedHealth > 0.02) {
+      const now        = Date.now();
+      const flicker    = 0.7 + 0.3 * (Math.sin(now * 0.009) * 0.5 + 0.5);
+      const flameCount = Math.max(3, Math.round(fireFactor * 7));
+      let fseed = ((moduleId * 6364136) ^ 0xdeadbeef) >>> 0;
+      const flcg  = (): number => { fseed = (fseed * 6364136 + 1442695041) >>> 0; return fseed / 0xFFFFFFFF; };
+      this.ctx.save();
+      for (let i = 0; i < flameCount; i++) {
+        const phase   = flcg() * Math.PI * 2;
+        const baseT   = (i + 0.5) / flameCount;
+        const baseY   = sailTopY + baseT * (-sailTopY * 2.0);
+        const wobbleX = Math.sin(now * 0.008 + phase) * 9 * fireFactor;
+        const px      = sailPower * baseT * 0.55 + wobbleX;
+        const flameH  = (12 + flcg() * 22) * fireFactor;
+        const flameW  = (5  + flcg() * 10) * fireFactor;
+        const alpha   = (0.55 + 0.35 * flicker) * fireFactor * sailAlpha;
+        const innerG  = Math.floor(240 * (1 - fireFactor * 0.7));
+        const fGrad   = this.ctx.createRadialGradient(px, baseY - flameH * 0.35, 0, px, baseY, flameW * 1.5);
+        fGrad.addColorStop(0,   `rgba(255,${innerG},60,${alpha})`);
+        fGrad.addColorStop(0.5, `rgba(255,80,0,${(alpha * 0.65).toFixed(3)})`);
+        fGrad.addColorStop(1,   'rgba(180,20,0,0)');
+        this.ctx.beginPath();
+        this.ctx.ellipse(px, baseY - flameH * 0.5, flameW, flameH, 0, 0, Math.PI * 2);
+        this.ctx.fillStyle = fGrad;
+        this.ctx.fill();
+      }
+      this.ctx.restore();
     }
 
     // ── Horizontal yard (always visible — holds the sail even when cloth is shredded) ──
@@ -3039,9 +6744,33 @@ export class RenderSystem {
     this.ctx.fillRect(-width / 20, sailTopY, width / 10, -sailTopY * 2);
     this.ctx.strokeRect(-width / 20, sailTopY, width / 10, -sailTopY * 2);
 
+    // ── Rising smoke wisps at medium–high fire intensity ──
+    if (fireFactor > 0.3 && openness > 0) {
+      const now    = Date.now();
+      const wCount = Math.max(1, Math.floor(fireFactor * 4));
+      let wseed = ((moduleId * 22695477) ^ 0x6c62272e) >>> 0;
+      const wlcg = (): number => { wseed = (wseed * 22695477 + 1) >>> 0; return wseed / 0xFFFFFFFF; };
+      this.ctx.save();
+      for (let i = 0; i < wCount; i++) {
+        const phase   = wlcg() * Math.PI * 2;
+        const baseX   = (wlcg() - 0.5) * sailPower * 0.7;
+        const drift   = Math.sin(now * 0.004 + phase) * 10;
+        const tOff    = (now * 0.04 + i * 30) % 70;      // each wisp cycles 0→70
+        const wispY   = sailTopY - 8 - tOff;
+        const fadeT   = tOff / 70;
+        const wAlpha  = (1 - fadeT) * 0.18 * fireFactor;
+        const wRadius = 6 + i * 3 + fadeT * 8;
+        this.ctx.beginPath();
+        this.ctx.ellipse(baseX + drift, wispY, wRadius * 0.7, wRadius, Math.PI * 0.15, 0, Math.PI * 2);
+        this.ctx.fillStyle = `rgba(70,65,65,${wAlpha.toFixed(3)})`;
+        this.ctx.fill();
+      }
+      this.ctx.restore();
+    }
+
     this.ctx.restore();
   }
-  
+
   private drawShipAmmoLabel(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
@@ -3102,6 +6831,21 @@ export class RenderSystem {
       const x = mast.localPos.x;
       const y = mast.localPos.y;
       const radius = mastData.radius;
+
+      if (ship.shipType === SHIP_TYPE_GHOST) {
+        // Dark phantom mast — ebony pole with cyan glow
+        this.ctx.shadowColor = '#00ccbb';
+        this.ctx.shadowBlur  = 8;
+        this.ctx.fillStyle   = '#0d1a18';
+        this.ctx.strokeStyle = `rgba(0,200,185,${0.55 + 0.2 * Math.sin(Date.now() * 0.002 + x)})`;
+        this.ctx.lineWidth   = 1.5 / cameraState.zoom;
+        this.ctx.beginPath();
+        this.ctx.arc(x, y, radius, 0, Math.PI * 2);
+        this.ctx.fill();
+        this.ctx.stroke();
+        this.ctx.shadowBlur = 0;
+        continue;
+      }
       
       // Draw mast as a circle
       this.ctx.fillStyle = '#8B4513'; // Brown color for wooden mast
@@ -3146,6 +6890,26 @@ export class RenderSystem {
     this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, 0, Math.PI * 2);
     this.ctx.fill();
     this.ctx.stroke();
+
+    // Damage flash — red overlay that fades out over 300 ms
+    const _pFlashAt = this.playerDamageFlash.get(player.id);
+    if (_pFlashAt !== undefined) {
+      const _pFlashElapsed = performance.now() - _pFlashAt;
+      const PLAYER_FLASH_MS = 300;
+      if (_pFlashElapsed < PLAYER_FLASH_MS) {
+        this.ctx.fillStyle = `rgba(255,40,40,${((1 - _pFlashElapsed / PLAYER_FLASH_MS) * 0.65).toFixed(3)})`;
+        this.ctx.beginPath();
+        this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, 0, Math.PI * 2);
+        this.ctx.fill();
+      } else {
+        this.playerDamageFlash.delete(player.id);
+      }
+    }
+
+    // Fire overlay — animated flames when burning
+    if (this.isBurning('player', player.id)) {
+      this.drawFireOverlay(screenPos.x, screenPos.y, scaledRadius * 1.6);
+    }
     
     // If mounted, draw mount indicator
     if (player.isMounted) {
@@ -3228,13 +6992,132 @@ export class RenderSystem {
     }
   }
   
-  private drawCannonball(cannonball: Cannonball, camera: Camera): void {
+  private drawCannonball(cannonball: Cannonball, camera: Camera, worldState?: WorldState): void {
     if (!camera.isWorldPositionVisible(cannonball.position, 20)) return;
 
     const screenPos = camera.worldToScreen(cannonball.position);
     const zoom      = camera.getState().zoom;
+    const now       = performance.now();
 
-    if (cannonball.ammoType === 1) {
+    // Determine if this projectile was fired from a ghost ship
+    const firedFromGhost = worldState
+      ? (worldState.ships.find(s => s.id === cannonball.firedFrom)?.shipType === SHIP_TYPE_GHOST)
+      : false;
+
+    // ── Smoke trail (cannonball & bar shot only) ───────────────────────────
+    if (cannonball.ammoType === 0 || cannonball.ammoType === 1) {
+      const isBarShot = cannonball.ammoType === 1;
+      const trail = this.cannonballTrails.get(cannonball.id);
+      if (trail && trail.length > 1) {
+        this.ctx.save();
+        for (let i = 0; i < trail.length; i++) {
+          const crumb = trail[i];
+          const age   = (now - crumb.t) / this.TRAIL_DURATION_MS; // 0=fresh … 1=gone
+          if (age >= 1) continue;
+          const ease   = 1 - age * age; // quadratic — stays full longer, drops off at end
+          // Bar shot: thinner, more transparent, no dark core
+          const alpha  = ease * (isBarShot ? 0.32 : 0.72);
+          const radius = Math.max(1, ease * (isBarShot ? 4.5 : 9) * zoom);
+          const sp     = camera.worldToScreen(Vec2.from(crumb.x, crumb.y));
+          // Ghost: spectral green-cyan trail; normal: light grey smoke
+          this.ctx.globalAlpha = alpha;
+          this.ctx.fillStyle   = firedFromGhost ? '#00ff88' : '#c8c8c8';
+          this.ctx.beginPath();
+          this.ctx.arc(sp.x, sp.y, radius, 0, Math.PI * 2);
+          this.ctx.fill();
+          // Ghost: glowing core; normal: black powder dark core (cannonball only, fresh crumbs)
+          if (!isBarShot && age < 0.35) {
+            const coreAlpha  = (0.35 - age) / 0.35 * 0.55;
+            const coreRadius = radius * 0.45;
+            this.ctx.globalAlpha = coreAlpha;
+            this.ctx.fillStyle   = firedFromGhost ? '#00ddaa' : '#3a3a3a';
+            this.ctx.beginPath();
+            this.ctx.arc(sp.x, sp.y, coreRadius, 0, Math.PI * 2);
+            this.ctx.fill();
+          }
+        }
+        this.ctx.globalAlpha = 1.0;
+        this.ctx.restore();
+      }
+    }
+
+    if (cannonball.ammoType === 10) {
+      // ── Grapeshot pellet ───────────────────────────────────────────────────
+      // Hot iron pellet — fast, close-range, anti-personnel.
+      // Spark trail: white-hot crumbs cooling through orange → deep red.
+      const GRAPE_TRAIL_MS = 200;
+      const trail = this.cannonballTrails.get(cannonball.id);
+      if (trail && trail.length > 1) {
+        this.ctx.save();
+        for (let i = 0; i < trail.length; i++) {
+          const crumb = trail[i];
+          const age   = (now - crumb.t) / GRAPE_TRAIL_MS;
+          if (age >= 1) continue;
+          const ease   = 1 - age * age;
+          const alpha  = ease * 0.90;
+          const radius = Math.max(0.5, ease * 3 * zoom);
+          const sp = camera.worldToScreen(Vec2.from(crumb.x, crumb.y));
+          const color = age < 0.20 ? '#ffffc0'    // white-hot
+                      : age < 0.45 ? '#ff9420'    // orange
+                      : '#cc3300';               // deep red
+          this.ctx.globalAlpha = alpha;
+          this.ctx.fillStyle   = color;
+          this.ctx.beginPath();
+          this.ctx.arc(sp.x, sp.y, radius, 0, Math.PI * 2);
+          this.ctx.fill();
+        }
+        this.ctx.globalAlpha = 1.0;
+        this.ctx.restore();
+      }
+
+      // Motion blur streak along velocity direction
+      const vx = cannonball.velocity.x;
+      const vy = cannonball.velocity.y;
+      const speed = Math.sqrt(vx * vx + vy * vy);
+      if (speed > 0.1) {
+        const angle     = Math.atan2(vy, vx);
+        const streakLen = Math.max(4, Math.min(14, speed * 0.08)) * zoom;
+        const streakW   = Math.max(1, 1.8 * zoom);
+        this.ctx.save();
+        this.ctx.translate(screenPos.x, screenPos.y);
+        this.ctx.rotate(angle);
+        const streakGrd = this.ctx.createLinearGradient(streakLen * 0.5, 0, -streakLen * 1.2, 0);
+        streakGrd.addColorStop(0,   'rgba(255,220,80,0.85)');
+        streakGrd.addColorStop(0.4, 'rgba(255,100,0,0.55)');
+        streakGrd.addColorStop(1,   'rgba(180,30,0,0)');
+        this.ctx.fillStyle = streakGrd;
+        this.ctx.beginPath();
+        this.ctx.ellipse(-streakLen * 0.35, 0, streakLen, streakW, 0, 0, Math.PI * 2);
+        this.ctx.fill();
+        this.ctx.restore();
+      }
+
+      // Rim glow — orange halo around pellet
+      const r = Math.max(2, 3 * zoom);
+      this.ctx.globalAlpha = 0.50;
+      const rimGrd = this.ctx.createRadialGradient(screenPos.x, screenPos.y, r * 0.6, screenPos.x, screenPos.y, r * 2.4);
+      rimGrd.addColorStop(0,   'rgba(255,160,0,0.55)');
+      rimGrd.addColorStop(1,   'rgba(200,50,0,0)');
+      this.ctx.fillStyle = rimGrd;
+      this.ctx.beginPath();
+      this.ctx.arc(screenPos.x, screenPos.y, r * 2.4, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.globalAlpha = 1.0;
+
+      // Pellet core: radial gradient — white-hot centre → burnt dark brown rim
+      const coreGrd = this.ctx.createRadialGradient(
+        screenPos.x - r * 0.25, screenPos.y - r * 0.25, r * 0.05,
+        screenPos.x, screenPos.y, r
+      );
+      coreGrd.addColorStop(0,   '#ffffff');
+      coreGrd.addColorStop(0.3, '#ffcc44');
+      coreGrd.addColorStop(0.6, '#cc5500');
+      coreGrd.addColorStop(1,   '#3a1800');
+      this.ctx.fillStyle = coreGrd;
+      this.ctx.beginPath();
+      this.ctx.arc(screenPos.x, screenPos.y, r, 0, Math.PI * 2);
+      this.ctx.fill();
+    } else if (cannonball.ammoType === 1) {
       // ── Bar Shot ───────────────────────────────────────────────────────────
       // Two iron balls connected by a spinning bar.
       // Spin angle: use wall-clock time so it always animates regardless of timeAlive.
@@ -3274,13 +7157,110 @@ export class RenderSystem {
       this.ctx.strokeStyle = '#ff8844';
       this.ctx.lineWidth   = 1;
       this.ctx.stroke();
+    } else if (cannonball.ammoType === 11 || cannonball.ammoType === 3) {
+      // ── Liquid Flame (Flamethrower) ─────────────────────────────────────────
+      // Elongated flame jet oriented along the velocity vector.
+      const ctx     = this.ctx;
+      const t       = performance.now() / 1000;
+      const flicker = 0.88 + 0.12 * Math.sin(t * 14 + cannonball.id * 1.7);
+
+      // Travel angle — use velocity direction; fallback to 0 if stopped
+      const vx    = cannonball.velocity.x;
+      const vy    = cannonball.velocity.y;
+      const angle = (Math.abs(vx) + Math.abs(vy) > 0.01) ? Math.atan2(vy, vx) : 0;
+
+      // Jet dimensions scale with zoom and flicker
+      const jetLen = Math.max(8, 18 * zoom) * flicker;  // along travel axis
+      const jetW   = Math.max(3,  6 * zoom) * flicker;  // perpendicular width
+
+      ctx.save();
+      ctx.translate(screenPos.x, screenPos.y);
+      ctx.rotate(angle);
+      // In local space: +x = forward (travel direction), origin = projectile centre
+
+      // Outer atmospheric haze — wide, intense orange bloom
+      const hazeGrd = ctx.createRadialGradient(-jetLen * 0.1, 0, 0, -jetLen * 0.1, 0, jetLen * 2.2);
+      hazeGrd.addColorStop(0,   `rgba(255,180,30,${(0.55 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(0.35,`rgba(230,80,10,${(0.38 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(0.7, `rgba(160,20,0,${(0.20 * flicker).toFixed(3)})`);
+      hazeGrd.addColorStop(1,   'rgba(80,0,0,0)');
+      ctx.beginPath();
+      ctx.ellipse(0, 0, jetLen * 2.2, jetW * 2.6, 0, 0, Math.PI * 2);
+      ctx.fillStyle = hazeGrd;
+      ctx.fill();
+
+      // Main jet body — bold linear gradient from white-hot tip to deep red tail
+      const jetGrd = ctx.createLinearGradient(jetLen * 0.95, 0, -jetLen * 0.6, 0);
+      jetGrd.addColorStop(0,    `rgba(255,255,220,${(1.0  * flicker).toFixed(3)})`);
+      jetGrd.addColorStop(0.15, `rgba(255,230,60,${(0.95 * flicker).toFixed(3)})`);
+      jetGrd.addColorStop(0.45, `rgba(255,110,0,${(0.80 * flicker).toFixed(3)})`);
+      jetGrd.addColorStop(0.75, `rgba(200,30,0,${(0.55 * flicker).toFixed(3)})`);
+      jetGrd.addColorStop(1,    'rgba(120,0,0,0)');
+      ctx.beginPath();
+      ctx.ellipse(0, 0, jetLen * 1.15, jetW * 1.1, 0, 0, Math.PI * 2);
+      ctx.fillStyle = jetGrd;
+      ctx.fill();
+
+      // Secondary narrower core for depth
+      const coreGrd2 = ctx.createLinearGradient(jetLen * 0.9, 0, -jetLen * 0.2, 0);
+      coreGrd2.addColorStop(0,   `rgba(255,255,255,${(0.85 * flicker).toFixed(3)})`);
+      coreGrd2.addColorStop(0.3, `rgba(255,230,120,${(0.70 * flicker).toFixed(3)})`);
+      coreGrd2.addColorStop(1,   'rgba(255,80,0,0)');
+      ctx.beginPath();
+      ctx.ellipse(jetLen * 0.15, 0, jetLen * 0.75, jetW * 0.50, 0, 0, Math.PI * 2);
+      ctx.fillStyle = coreGrd2;
+      ctx.fill();
+
+      // Inner blazing white-hot spot right at the muzzle tip
+      const wf = 0.92 + 0.08 * Math.sin(t * 26 + cannonball.id * 3.1);
+      ctx.beginPath();
+      ctx.ellipse(jetLen * 0.55, 0, jetLen * 0.28, jetW * 0.32, 0, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,255,255,${(wf).toFixed(3)})`;
+      ctx.fill();
+
+      ctx.restore();
+
+      // Ember particle trail (world-space, behind the projectile)
+      this.particleSystem.createFlameTrail(cannonball.position, angle);
+    } else if (cannonball.ammoType === 12 || cannonball.ammoType === 4) {
+      // ── Canister Shot pellet ───────────────────────────────────────────────
+      // Wider spread than grapeshot — slightly larger, darker iron pellet.
+      const r = Math.max(2, 3.5 * zoom);
+      this.ctx.fillStyle = '#4A3728';
+      this.ctx.beginPath();
+      this.ctx.arc(screenPos.x, screenPos.y, r, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.strokeStyle = '#7A5C47';
+      this.ctx.lineWidth = 0.6;
+      this.ctx.stroke();
     } else {
       // ── Cannonball (default) ───────────────────────────────────────────────
       const scaledRadius = cannonball.radius * zoom;
-      this.ctx.fillStyle = '#000000';
-      this.ctx.beginPath();
-      this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, 0, Math.PI * 2);
-      this.ctx.fill();
+      if (firedFromGhost) {
+        // Ghost projectile: glowing green-cyan ball
+        const t = performance.now() / 1000;
+        const flicker = 0.85 + 0.15 * Math.sin(t * 12 + cannonball.id * 2.3);
+        const r = Math.max(3, scaledRadius * 1.4);
+        // Outer glow
+        const grd = this.ctx.createRadialGradient(screenPos.x, screenPos.y, 0, screenPos.x, screenPos.y, r * 2.5);
+        grd.addColorStop(0,   `rgba(0,255,160,${(0.65 * flicker).toFixed(3)})`);
+        grd.addColorStop(0.4, `rgba(0,200,120,${(0.35 * flicker).toFixed(3)})`);
+        grd.addColorStop(1,   'rgba(0,100,80,0)');
+        this.ctx.fillStyle = grd;
+        this.ctx.beginPath();
+        this.ctx.arc(screenPos.x, screenPos.y, r * 2.5, 0, Math.PI * 2);
+        this.ctx.fill();
+        // Ball core
+        this.ctx.fillStyle = `rgba(0,255,180,${flicker.toFixed(3)})`;
+        this.ctx.beginPath();
+        this.ctx.arc(screenPos.x, screenPos.y, r, 0, Math.PI * 2);
+        this.ctx.fill();
+      } else {
+        this.ctx.fillStyle = '#000000';
+        this.ctx.beginPath();
+        this.ctx.arc(screenPos.x, screenPos.y, scaledRadius, 0, Math.PI * 2);
+        this.ctx.fill();
+      }
     }
   }
   
@@ -3326,15 +7306,37 @@ export class RenderSystem {
     this.ctx.save();
     this.ctx.globalAlpha = isMoving ? 0.7 : 1.0;
 
-    // Colour NPC by their current task assignment (darkened via globalAlpha when moving)
+    // Colour NPC by company then task assignment (darkened via globalAlpha when moving)
     const npcTask = this.npcTaskMap.get(npc.id) ?? 'Idle';
-    this.ctx.fillStyle = NPC_TASK_COLORS[npcTask] ?? '#DAA520';
+    const _npcIsEnemy   = this._localCompanyId !== 0 && npc.companyId !== 0 && npc.companyId !== this._localCompanyId;
+    const _npcIsNeutral = npc.companyId === COMPANY_NEUTRAL;
+    this.ctx.fillStyle = _npcIsNeutral ? '#222222' : _npcIsEnemy ? '#cc2222' : (NPC_TASK_COLORS[npcTask] ?? '#DAA520');
     this.ctx.strokeStyle = '#ffffff';
     this.ctx.lineWidth = 2;
     this.ctx.beginPath();
     this.ctx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
     this.ctx.fill();
     this.ctx.stroke();
+
+    // Damage flash — red overlay that fades out over 300 ms
+    const _nFlashAt = this.npcDamageFlash.get(npc.id);
+    if (_nFlashAt !== undefined) {
+      const _nFlashElapsed = performance.now() - _nFlashAt;
+      const NPC_FLASH_MS = 300;
+      if (_nFlashElapsed < NPC_FLASH_MS) {
+        this.ctx.fillStyle = `rgba(255,40,40,${((1 - _nFlashElapsed / NPC_FLASH_MS) * 0.65).toFixed(3)})`;
+        this.ctx.beginPath();
+        this.ctx.arc(screenPos.x, screenPos.y, radius, 0, Math.PI * 2);
+        this.ctx.fill();
+      } else {
+        this.npcDamageFlash.delete(npc.id);
+      }
+    }
+
+    // Fire overlay — animated flames when burning
+    if (this.isBurning('npc', npc.id)) {
+      this.drawFireOverlay(screenPos.x, screenPos.y, radius * 1.6);
+    }
 
     // Facing direction indicator
     this.ctx.strokeStyle = '#ffffff';
@@ -3362,12 +7364,26 @@ export class RenderSystem {
       this.ctx.fillStyle = '#ffe066';
       this.ctx.fillText(npc.name, screenPos.x, nameY);
 
+      // Lock badge — small padlock icon above the NPC when task_locked
+      if (npc.locked) {
+        const lockSize = Math.max(8, Math.min(12, 10 * cameraState.zoom));
+        const lx = screenPos.x + radius - 2;
+        const ly = screenPos.y - radius - lockSize;
+        this.ctx.fillStyle = '#ffdd00';
+        this.ctx.strokeStyle = '#222';
+        this.ctx.lineWidth = 1;
+        this.ctx.font = `bold ${lockSize + 2}px Arial`;
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'bottom';
+        this.ctx.fillText('🔒', lx, ly);
+      }
+
       // Debug: show assigned cannon/module ID and state below name
-      if (npc.assignedCannonId || npc.state !== 0) {
+      if (npc.assignedWeaponId || npc.state !== 0) {
         const STATE_SHORT: Record<number, string> = { 0: 'IDL', 1: 'MOV', 2: 'MAN', 3: 'REP' };
         const ROLE_SHORT: Record<number, string> = { 0: '-', 1: 'G', 2: 'H', 3: 'R', 4: 'P' };
         const debugLabel = `${ROLE_SHORT[npc.role] ?? '?'}:${STATE_SHORT[npc.state] ?? '?'}`
-          + (npc.assignedCannonId ? ` c${npc.assignedCannonId}` : '');
+          + (npc.assignedWeaponId ? ` c${npc.assignedWeaponId}` : '');
         const debugFontSize = Math.max(8, Math.min(11, 10 * cameraState.zoom));
         this.ctx.font = `${debugFontSize}px monospace`;
         const dtw = this.ctx.measureText(debugLabel).width;
@@ -3525,6 +7541,119 @@ export class RenderSystem {
         this.ctx.restore();
       }
     }
+
+    const ctx  = this.ctx;
+    const zoom = camera.getState().zoom;
+
+    // ── Ship bounding circles (broad-phase, server = 435px client radius) ───
+    const SHIP_BOUNDING_R = 435; // matches sim_create_brigantine bounding_radius
+    for (const ship of worldState.ships) {
+      const sc = camera.worldToScreen(ship.position);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(0,220,255,0.55)';
+      ctx.lineWidth   = 1.5;
+      ctx.setLineDash([8, 5]);
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, SHIP_BOUNDING_R * zoom, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(0,220,255,0.85)';
+      ctx.font = `${11}px monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(`ship#${ship.id} broad`, sc.x, sc.y - SHIP_BOUNDING_R * zoom - 4);
+      ctx.restore();
+    }
+
+    // ── Island physics bodies ────────────────────────────────────────────────
+    // Helper: sample the bumpy boundary at a given angle (mirrors island_boundary_r on server)
+    const sampleBoundary = (baseR: number, bumps: number[], angle: number): number => {
+      const TWO_PI = Math.PI * 2;
+      const n      = bumps.length;
+      let   a      = angle % TWO_PI;
+      if (a < 0) a += TWO_PI;
+      const t  = (a / TWO_PI) * n;
+      const i0 = Math.floor(t) % n;
+      const i1 = (i0 + 1) % n;
+      const f  = t - Math.floor(t);
+      return baseR + bumps[i0] + f * (bumps[i1] - bumps[i0]);
+    };
+
+    const drawBumpyPolygon = (cx: number, cy: number, baseR: number, bumps: number[], segments = 64) => {
+      ctx.beginPath();
+      for (let i = 0; i <= segments; i++) {
+        const angle = (i / segments) * Math.PI * 2;
+        const r     = sampleBoundary(baseR, bumps, angle);
+        const sx    = cx + Math.cos(angle) * r * zoom;
+        const sy    = cy + Math.sin(angle) * r * zoom;
+        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      }
+      ctx.closePath();
+    };
+
+    for (const isl of this.islands) {
+      const preset  = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+      const { beachRadius, grassRadius, beachBumps, grassBumps } = preset;
+      const beachMaxBump = Math.max(...beachBumps.map(Math.abs));
+      const grassMaxBump = Math.max(...grassBumps.map(Math.abs));
+      const sc = camera.worldToScreen(Vec2.from(isl.x, isl.y));
+
+      // Beach broad-phase circle (dashed yellow) — beachRadius + maxBump
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,220,0,0.45)';
+      ctx.lineWidth   = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, (beachRadius + beachMaxBump) * zoom, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      // Beach narrow-phase bumpy polygon (red-orange, solid) — ship collision boundary
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,80,0,0.85)';
+      ctx.lineWidth   = 2;
+      drawBumpyPolygon(sc.x, sc.y, beachRadius, beachBumps);
+      ctx.stroke();
+      ctx.restore();
+
+      // Grass narrow-phase bumpy polygon (green, solid) — player walk zone
+      ctx.save();
+      ctx.strokeStyle = 'rgba(80,220,80,0.85)';
+      ctx.lineWidth   = 2;
+      drawBumpyPolygon(sc.x, sc.y, grassRadius, grassBumps);
+      ctx.stroke();
+      ctx.restore();
+
+      // Grass broad-phase circle (dashed green) — grassRadius + maxBump
+      ctx.save();
+      ctx.strokeStyle = 'rgba(80,220,80,0.35)';
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, (grassRadius + grassMaxBump) * zoom, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      // Island centre cross + label
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.moveTo(sc.x - 8, sc.y); ctx.lineTo(sc.x + 8, sc.y);
+      ctx.moveTo(sc.x, sc.y - 8); ctx.lineTo(sc.x, sc.y + 8);
+      ctx.stroke();
+      ctx.fillStyle    = 'rgba(255,255,255,0.9)';
+      ctx.font         = '11px monospace';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(
+        `island#${isl.id} (${isl.preset}) beach:${beachRadius}+${beachMaxBump} grass:${grassRadius}+${grassMaxBump}`,
+        sc.x, sc.y - (beachRadius + beachMaxBump) * zoom - 4,
+      );
+      ctx.restore();
+    }
   }
   
   /**
@@ -3554,8 +7683,172 @@ export class RenderSystem {
     }
   }
 
+  /** Returns the NPC currently under the cursor (null if none). */
+  getHoveredNpc(): Npc | null { return this.hoveredNpc; }
+
+  /**
+   * Detect whether the cursor is over a foreign ship's hull (polygon hit test).
+   * Sets hoveredShip; cleared when over own ship or no ship.
+   */
+  private detectHoveredShip(worldState: WorldState): void {
+    this.hoveredShip = null;
+    if (!this.mouseWorldPos) return;
+    // Don't show hull tooltip when a module or NPC is already hovered
+    if (this.hoveredModule || this.hoveredNpc) return;
+
+    // Determine the local player's current ship (use frame cache set in renderWorld)
+    const localPlayer = this._cachedLocalPlayer;
+    const ownShipId = localPlayer?.carrierId ?? -1;
+
+    // Ray-cast point-in-polygon helper (ship-local space)
+    const pointInPolygon = (px: number, py: number, poly: Vec2[]): boolean => {
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i].x, yi = poly[i].y;
+        const xj = poly[j].x, yj = poly[j].y;
+        if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+          inside = !inside;
+        }
+      }
+      return inside;
+    };
+
+    for (const ship of worldState.ships) {
+      if (ship.id === ownShipId) continue;
+      if (!ship.hull || ship.hull.length < 3) continue;
+      // Transform mouse to ship-local coordinates
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const lx = dx * cos - dy * sin;
+      const ly = dx * sin + dy * cos;
+      if (pointInPolygon(lx, ly, ship.hull)) {
+        this.hoveredShip = ship;
+        break;
+      }
+    }
+  }
+
+  /**
+   * Draw a tooltip for a hovered foreign ship showing name, company, and hull/deck HP.
+   */
+  private drawShipHullTooltip(camera: Camera): void {
+    if (!this.hoveredShip || !this.mouseWorldPos) return;
+    // Don't overlap module or NPC tooltips
+    if (this.hoveredModule || this.hoveredNpc) return;
+
+    const ship = this.hoveredShip;
+    const COMPANY_NAMES: Record<number, string> = {
+      [COMPANY_NEUTRAL]: 'Neutral',
+      [COMPANY_PIRATES]: 'Pirates',
+      [COMPANY_NAVY]:    'Navy',
+      [COMPANY_GHOST]:   'Ghost Ships',
+    };
+    const companyName = COMPANY_NAMES[ship.companyId] ?? `#${ship.companyId}`;
+    const shipTitle   = ship.shipType === SHIP_TYPE_GHOST
+      ? 'Phantom Brig'
+      : `${companyName} Brigantine`;
+
+    // Sum plank/deck module health
+    let totalPlankHp    = 0;
+    let totalPlankMaxHp = 0;
+    for (const mod of ship.modules) {
+      const md = mod.moduleData as any;
+      if (!md) continue;
+      if (md.kind === 'plank' || md.kind === 'deck') {
+        totalPlankHp    += md.health    ?? md.maxHealth ?? 10000;
+        totalPlankMaxHp += md.maxHealth ?? 10000;
+      }
+    }
+
+    const isGhost = ship.shipType === SHIP_TYPE_GHOST;
+    const maxHullHP = isGhost ? GHOST_MAX_HULL_HP : 100;
+    const hullPct  = Math.max(0, Math.min(1, ship.hullHealth / maxHullHP));
+    const hullText = isGhost
+      ? `Hull: ${ship.hullHealth.toFixed(0)} / ${GHOST_MAX_HULL_HP.toLocaleString()}`
+      : `Hull: ${ship.hullHealth.toFixed(0)}%`;
+    const deckText = totalPlankMaxHp > 0
+      ? `Deck HP: ${Math.round(totalPlankHp)} / ${Math.round(totalPlankMaxHp)}`
+      : 'Deck HP: —';
+    const deckPct  = totalPlankMaxHp > 0 ? totalPlankHp / totalPlankMaxHp : 1;
+
+    const screenPos = camera.worldToScreen(this.mouseWorldPos);
+    const padding   = 10;
+    const barH      = 8;
+    const barW      = 180;
+    const lineH     = 18;
+
+    this.ctx.font = '14px monospace';
+    this.ctx.textAlign    = 'left';
+    this.ctx.textBaseline = 'top';
+
+    const lines    = [shipTitle, `Company: ${companyName}`, hullText, deckText];
+    const barRowH  = barH + 6;
+    let boxW = Math.max(barW + padding * 2, ...lines.map(l => this.ctx.measureText(l).width + padding * 2));
+    let boxH = lines.length * lineH + barRowH * 2 + padding * 2; // hull bar + deck bar
+
+    let tx = screenPos.x + 15;
+    let ty = screenPos.y + 15;
+    if (tx + boxW > this.canvas.width)  tx = screenPos.x - boxW - 15;
+    if (ty + boxH > this.canvas.height) ty = screenPos.y - boxH - 15;
+
+    // Background
+    this.ctx.fillStyle   = 'rgba(12,16,28,0.95)';
+    this.ctx.strokeStyle = '#cc6633';
+    this.ctx.lineWidth   = 1.5;
+    this.ctx.beginPath();
+    (this.ctx as any).roundRect(tx, ty, boxW, boxH, 4);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    let cy = ty + padding;
+
+    // Ship title (gold)
+    this.ctx.fillStyle = '#ffe066';
+    this.ctx.font = '14px monospace';
+    this.ctx.fillText(shipTitle, tx + padding, cy);  cy += lineH;
+
+    // Company
+    this.ctx.fillStyle = '#9ab';
+    this.ctx.font = '12px monospace';
+    this.ctx.fillText(`Company: ${companyName}`, tx + padding, cy);  cy += lineH;
+
+    const bx = tx + padding;
+    const bw = boxW - padding * 2;
+
+    // Hull integrity label
+    this.ctx.fillStyle = '#ccc';
+    this.ctx.fillText(hullText, bx, cy);  cy += lineH;
+    // Hull bar
+    this.ctx.fillStyle = '#333';
+    this.ctx.fillRect(bx, cy, bw, barH);
+    const hullColor = hullPct > 0.6 ? '#44cc66' : hullPct > 0.3 ? '#ffaa44' : '#ff5544';
+    this.ctx.fillStyle = hullColor;
+    this.ctx.fillRect(bx, cy, Math.round(bw * hullPct), barH);
+    this.ctx.strokeStyle = '#556';
+    this.ctx.lineWidth = 0.8;
+    this.ctx.strokeRect(bx, cy, bw, barH);
+    cy += barH + 6;
+
+    // Deck HP label
+    this.ctx.fillStyle = '#ccc';
+    this.ctx.font = '12px monospace';
+    this.ctx.fillText(deckText, bx, cy);  cy += lineH;
+    // Deck bar
+    this.ctx.fillStyle = '#333';
+    this.ctx.fillRect(bx, cy, bw, barH);
+    const deckColor = deckPct > 0.6 ? '#44cc66' : deckPct > 0.3 ? '#ffaa44' : '#ff5544';
+    this.ctx.fillStyle = deckColor;
+    this.ctx.fillRect(bx, cy, Math.round(bw * deckPct), barH);
+    this.ctx.strokeStyle = '#556';
+    this.ctx.lineWidth = 0.8;
+    this.ctx.strokeRect(bx, cy, bw, barH);
+  }
+
   /**
    * Draw hover tooltip for a hovered NPC.
+   * Shows: name + level, role/state, HP bar (always), XP bar (same company only).
    */
   private drawNpcTooltip(camera: Camera): void {
     if (!this.hoveredNpc || !this.mouseWorldPos) return;
@@ -3563,59 +7856,97 @@ export class RenderSystem {
     if (this.hoveredModule) return;
 
     const npc = this.hoveredNpc;
-    const COMPANY_NAMES: Record<number, string> = {
-      [COMPANY_NEUTRAL]: 'Neutral',
-      [COMPANY_PIRATES]: 'Pirates',
-      [COMPANY_NAVY]:    'Navy',
-    };
     const ROLE_NAMES: Record<number, string> = {
-      0: 'None', 1: 'Gunner', 2: 'Helmsman', 3: 'Rigger', 4: 'Repairer',
+      0: 'Sailor', 1: 'Gunner', 2: 'Helmsman', 3: 'Rigger', 4: 'Repairer',
     };
     const STATE_NAMES: Record<number, string> = {
-      0: 'Idle', 1: 'Moving', 2: 'At Cannon', 3: 'Repairing',
+      0: 'Idle', 1: 'Moving', 2: 'At Station', 3: 'Repairing',
     };
-    const companyStr = COMPANY_NAMES[npc.companyId] ?? `ID ${npc.companyId}`;
-    const taskStr = this.npcTaskMap.get(npc.id) ?? 'Idle';
-    const lines: string[] = [
-      npc.name,
-      `ID: ${npc.id}`,
-      `Company: ${companyStr} (${npc.companyId})`,
-      `Role: ${ROLE_NAMES[npc.role] ?? npc.role}`,
-      `State: ${STATE_NAMES[npc.state] ?? npc.state}`,
-      `Task: ${taskStr}`,
-    ];
-    if (npc.assignedCannonId) lines.push(`Cannon: ${npc.assignedCannonId}`);
-    if (npc.shipId) lines.push(`Ship: ${npc.shipId}`);
-    if (npc.localPosition) lines.push(`Local: (${npc.localPosition.x.toFixed(0)}, ${npc.localPosition.y.toFixed(0)})`);
+
+    const sameCompany = this._localCompanyId !== 0 && npc.companyId === this._localCompanyId;
+    const hpPct = npc.maxHealth > 0 ? npc.health / npc.maxHealth : 1;
+    const xpToNext = npc.npcLevel * 100;
+    const xpPct    = Math.min(npc.xp / xpToNext, 1);
 
     const screenPos = camera.worldToScreen(this.mouseWorldPos);
     const padding = 10;
-    const lineHeight = 18;
+    const barH    = 8;
+    const barW    = 180;
+    const lineH   = 18;
 
     this.ctx.font = '14px monospace';
     this.ctx.textAlign = 'left';
     this.ctx.textBaseline = 'top';
-    let maxWidth = 0;
-    for (const line of lines) maxWidth = Math.max(maxWidth, this.ctx.measureText(line).width);
 
-    const boxWidth  = maxWidth + padding * 2;
-    const boxHeight = lines.length * lineHeight + padding * 2;
+    const COMPANY_NAMES: Record<number, string> = { [COMPANY_NEUTRAL]: 'Neutral', [COMPANY_PIRATES]: 'Pirates', [COMPANY_NAVY]: 'Navy', [COMPANY_GHOST]: 'Ghost Ships' };
+    const titleText   = `${npc.name}  Lv.${npc.npcLevel}${npc.locked ? '  🔒' : ''}`;
+    const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
+    const companyText = `Company: ${COMPANY_NAMES[npc.companyId] ?? `#${npc.companyId}`}`;
+    const hpText      = `HP ${npc.health}/${npc.maxHealth} (${Math.round(hpPct * 100)}%)`;
+
+    const lines = [titleText, subText, companyText, hpText];
+    let boxW = Math.max(barW + padding * 2, ...lines.map(l => this.ctx.measureText(l).width + padding * 2));
+    // height: 3 text lines + 2 bars (hp always, xp if sameCompany)
+    const barRowH = barH + 4;
+    let boxH = lines.length * lineH + barRowH + padding * 2; // hp bar
+    if (sameCompany) boxH += barRowH + lineH;                // xp label + xp bar
 
     let tx = screenPos.x + 15;
     let ty = screenPos.y + 15;
-    if (tx + boxWidth  > this.canvas.width)  tx = screenPos.x - boxWidth  - 15;
-    if (ty + boxHeight > this.canvas.height) ty = screenPos.y - boxHeight - 15;
+    if (tx + boxW > this.canvas.width)  tx = screenPos.x - boxW  - 15;
+    if (ty + boxH > this.canvas.height) ty = screenPos.y - boxH  - 15;
 
-    this.ctx.fillStyle   = 'rgba(0,0,0,0.85)';
-    this.ctx.strokeStyle = '#aac8ff';
-    this.ctx.lineWidth   = 2;
-    this.ctx.fillRect(tx, ty, boxWidth, boxHeight);
-    this.ctx.strokeRect(tx, ty, boxWidth, boxHeight);
+    // Background
+    this.ctx.fillStyle   = 'rgba(12,16,28,0.95)';
+    this.ctx.strokeStyle = '#88aaff';
+    this.ctx.lineWidth   = 1.5;
+    this.ctx.beginPath();
+    this.ctx.roundRect(tx, ty, boxW, boxH, 4);
+    this.ctx.fill();
+    this.ctx.stroke();
 
-    // Header line in yellow, rest in white
-    for (let i = 0; i < lines.length; i++) {
-      this.ctx.fillStyle = i === 0 ? '#ffe066' : '#ffffff';
-      this.ctx.fillText(lines[i], tx + padding, ty + padding + i * lineHeight);
+    let cy = ty + padding;
+
+    // Title (gold)
+    this.ctx.fillStyle = '#ffe066';
+    this.ctx.fillText(titleText, tx + padding, cy);  cy += lineH;
+
+    // Sub-line (dim)
+    this.ctx.fillStyle = '#9ab';
+    this.ctx.font = '12px monospace';
+    this.ctx.fillText(subText, tx + padding, cy);  cy += lineH;
+
+    // HP label
+    this.ctx.font = '12px monospace';
+    this.ctx.fillStyle = '#ccc';
+    this.ctx.fillText(hpText, tx + padding, cy);  cy += lineH;
+
+    // HP bar
+    const bx = tx + padding;
+    const bw = boxW - padding * 2;
+    this.ctx.fillStyle = '#333';
+    this.ctx.fillRect(bx, cy, bw, barH);
+    const hpColor = hpPct > 0.6 ? '#44cc66' : hpPct > 0.3 ? '#ffaa44' : '#ff5544';
+    this.ctx.fillStyle = hpColor;
+    this.ctx.fillRect(bx, cy, Math.round(bw * hpPct), barH);
+    this.ctx.strokeStyle = '#556';
+    this.ctx.lineWidth = 0.8;
+    this.ctx.strokeRect(bx, cy, bw, barH);
+    cy += barH + 6;
+
+    if (sameCompany) {
+      // XP label
+      this.ctx.fillStyle = '#9ab';
+      this.ctx.font = '12px monospace';
+      this.ctx.fillText(`XP ${npc.xp} / ${xpToNext}  (next level)`, tx + padding, cy);  cy += lineH;
+      // XP bar
+      this.ctx.fillStyle = '#333';
+      this.ctx.fillRect(bx, cy, bw, barH);
+      this.ctx.fillStyle = '#4488ff';
+      this.ctx.fillRect(bx, cy, Math.round(bw * xpPct), barH);
+      this.ctx.strokeStyle = '#556';
+      this.ctx.lineWidth = 0.8;
+      this.ctx.strokeRect(bx, cy, bw, barH);
     }
   }
 
@@ -3900,8 +8231,9 @@ export class RenderSystem {
 
     // In hotbar mode, find the nearest matching ghost within the 80u snap radius
     const hotbarKind: GhostModuleKind | null =
-      this.cannonBuildMode && !this.explicitBuildState ? 'cannon' :
-      this.mastBuildMode  && !this.explicitBuildState ? 'mast' : null;
+      this.cannonBuildMode  && !this.explicitBuildState ? 'cannon' :
+      this.mastBuildMode   && !this.explicitBuildState ? 'mast' :
+      this.swivelBuildMode && !this.explicitBuildState ? 'swivel' : null;
     let snapGhostId: string | null = null;
     if (hotbarKind && this.mouseWorldPos) {
       let bestDist = 80;
@@ -3984,6 +8316,22 @@ export class RenderSystem {
             this.ctx.lineWidth = 1;
             this.ctx.stroke();
           }
+          break;
+        }
+        case 'swivel': {
+          this.ctx.fillStyle = ghostFill;
+          this.ctx.strokeStyle = ghostStroke;
+          this.ctx.lineWidth = 1.2;
+          this.ctx.setLineDash([3, 2]);
+          // Pivot base circle
+          this.ctx.beginPath();
+          this.ctx.arc(0, 0, 8, 0, Math.PI * 2);
+          this.ctx.fill();
+          this.ctx.stroke();
+          // Barrel stub (pointing up)
+          this.ctx.fillRect(-3, -22, 6, 22);
+          this.ctx.strokeRect(-3, -22, 6, 22);
+          this.ctx.setLineDash([]);
           break;
         }
         case 'deck': {
@@ -4123,10 +8471,16 @@ export class RenderSystem {
       }
 
       // Edge margin — module center must be at least module-radius inset from hull boundary
+      // Swivels are the exception: they mount on the rail within 2–30 px of the hull edge
       if (valid) {
-        const edgeMargin = (kind === 'cannon' || kind === 'mast') ? 15 : 10;
         const edgeDist = PolygonUtils.distanceToPolygonEdge(Vec2.from(localX, localY), nearestShip.hull);
-        if (edgeDist < edgeMargin) { valid = false; invalidReason = 'Too close to edge!'; }
+        if (kind === 'swivel') {
+          if (edgeDist > 30) { valid = false; invalidReason = 'Must be on ship rail!'; }
+          else if (edgeDist < 2) { valid = false; invalidReason = 'Too far outside rail!'; }
+        } else {
+          const edgeMargin = (kind === 'cannon' || kind === 'mast') ? 15 : 10;
+          if (edgeDist < edgeMargin) { valid = false; invalidReason = 'Too close to edge!'; }
+        }
       }
     }
 
@@ -4176,6 +8530,18 @@ export class RenderSystem {
           this.ctx.lineTo(Math.cos(a) * R, Math.sin(a) * R);
           this.ctx.strokeStyle = okColor; this.ctx.lineWidth = 1; this.ctx.stroke();
         }
+        break;
+      }
+      case 'swivel': {
+        // Pivot circle + barrel stub
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, 8, 0, Math.PI * 2);
+        this.ctx.fillStyle = fillColor; this.ctx.fill();
+        this.ctx.strokeStyle = okColor; this.ctx.lineWidth = 1.5; this.ctx.stroke();
+        this.ctx.fillStyle = fillColor;
+        this.ctx.strokeStyle = okColor;
+        this.ctx.fillRect(-3, -22, 6, 22);
+        this.ctx.strokeRect(-3, -22, 6, 22);
         break;
       }
       case 'deck': {
@@ -4251,7 +8617,9 @@ export class RenderSystem {
 
     // Validate placement using geometry (OBB/circle) overlap — not a simple radius check
     const rotRad = (rotationDeg * Math.PI) / 180;
-    const newKind = item === 'cannon' ? 'cannon' as const : 'mast' as const;
+    const newKind = item === 'cannon' ? 'cannon' as const
+                  : item === 'swivel' ? 'swivel' as const
+                  : 'mast' as const;
     const newFp = getModuleFootprint(newKind);
     let overlaps = false;
     let ghostBlocked = false;
@@ -4279,10 +8647,15 @@ export class RenderSystem {
       }
 
       // Edge margin — cannon base half-width / mast radius = 15; center must be that far from hull edge
+      // Swivels mount on the rail (within 2–30 px of hull edge)
       if (!overlaps && !ghostBlocked) {
-        const edgeMargin = newKind === 'cannon' ? 15 : 15;
         const edgeDist = PolygonUtils.distanceToPolygonEdge(Vec2.from(localX, localY), nearestShip.hull);
-        if (edgeDist < edgeMargin) edgeTooClose = true;
+        if (newKind === 'swivel') {
+          if (edgeDist > 30 || edgeDist < 2) edgeTooClose = true;
+        } else {
+          const edgeMargin = 15;
+          if (edgeDist < edgeMargin) edgeTooClose = true;
+        }
       }
     }
     const sailMaxed = item === 'sail' &&
@@ -4333,6 +8706,19 @@ export class RenderSystem {
       this.ctx.strokeStyle = valid ? '#55ee55' : ghostSnap ? '#33ccbb' : ghostBlocked ? '#ee9933' : '#ee5555';
       this.ctx.fillRect(-8, -38, 16, 30);
       this.ctx.strokeRect(-8, -38, 16, 30);
+    } else if (item === 'swivel') {
+      // -- Swivel base (smaller than cannon) --
+      this.ctx.fillStyle   = valid ? '#336633' : ghostSnap ? '#1a4d44' : ghostBlocked ? '#664422' : '#663333';
+      this.ctx.strokeStyle = valid ? '#88ff88' : ghostSnap ? '#44ddcc' : ghostBlocked ? '#ffaa44' : '#ff8888';
+      this.ctx.lineWidth   = 1 / zoom;
+      this.ctx.fillRect(-8, -8, 16, 16);
+      this.ctx.strokeRect(-8, -8, 16, 16);
+
+      // -- Short barrel --
+      this.ctx.fillStyle   = valid ? '#225522' : ghostSnap ? '#1a4d44' : ghostBlocked ? '#553311' : '#552222';
+      this.ctx.strokeStyle = valid ? '#55ee55' : ghostSnap ? '#33ccbb' : ghostBlocked ? '#ee9933' : '#ee5555';
+      this.ctx.fillRect(-4, -22, 8, 16);
+      this.ctx.strokeRect(-4, -22, 8, 16);
     } else {
       // -- Mast pole --
       const radius = 15;
@@ -4359,7 +8745,7 @@ export class RenderSystem {
 
     // Status label in screen space (below ghost)
     const label = valid
-      ? (item === 'cannon' ? 'Place Cannon' : 'Place Sail')
+      ? (item === 'cannon' ? 'Place Cannon' : item === 'swivel' ? 'Place Swivel' : 'Place Sail')
       : ghostSnap        ? '⚡ Snap to plan!'
       : ghostBlocked      ? 'Remove plan first!'
       : overlaps         ? 'Blocked!'

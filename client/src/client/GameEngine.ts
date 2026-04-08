@@ -79,6 +79,7 @@ export class GameEngine {
       infiniteAmmo: true,
       hullHealth: 100,
       companyId: 0,
+      shipType: 3,
       modules: [
         // Ship deck (interior floor)
         ModuleUtils.createShipDeckFromPolygon(shipHull, 200),
@@ -117,6 +118,9 @@ export class GameEngine {
         deckId: ship.modules[0].id,
         isMounted: false,
         companyId: 0,
+        health: 100,
+        maxHealth: 100,
+        onIslandId: 0,
         inventory: createEmptyInventory()
       }],
       cannonballs: [],

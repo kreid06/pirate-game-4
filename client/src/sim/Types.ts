@@ -44,6 +44,9 @@ export interface Ship {
   // Company/faction (COMPANY_* constants)
   companyId: number;
 
+  // Ship type (SHIP_TYPE_* constants); used for spectral/ghost rendering
+  shipType: number;
+
   // Ship progression (from server levelStats; optional until server sends it)
   levelStats?: ShipLevelStats;
 }
@@ -79,6 +82,13 @@ export interface Player {
 
   // Company/faction (COMPANY_* constants)
   companyId: number;
+
+  // Health
+  health: number;      // current HP
+  maxHealth: number;   // max HP (default 100)
+
+  // Island presence (0 = not on island)
+  onIslandId: number;
 }
 
 /**
@@ -103,10 +113,31 @@ export interface Cannonball {
   }>;
 }
 
+/**
+ * A structure placed on an island by a player.
+ */
+export interface PlacedStructure {
+  id: number;
+  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door';
+  islandId: number;
+  x: number;
+  y: number;
+  companyId: number;   // COMPANY_* — faction that owns this structure (0 = neutral)
+  hp: number;          // current hit points
+  maxHp: number;       // maximum hit points
+  placerName: string;  // display name of the player who built this
+  doorOpen?: boolean;  // doors only: true = open (passable)
+}
+
 // Company identifiers (mirror server COMPANY_* constants)
 export const COMPANY_NEUTRAL = 0;
 export const COMPANY_PIRATES = 1;
 export const COMPANY_NAVY    = 2;
+export const COMPANY_GHOST   = 99; // Phantom Brig faction — hostile to all
+
+// Ship type identifiers (mirror server SHIP_TYPE_* constants)
+export const SHIP_TYPE_BRIGANTINE = 3;
+export const SHIP_TYPE_GHOST      = 99; // Ghostship — autonomous enemy, spectral visual
 
 // ─── Ship levelling ───────────────────────────────────────────────────────────
 
@@ -179,6 +210,8 @@ export const NPC_TYPE_SAILOR = 0;
 // NPC movement/AI state (mirrors server WorldNpcState enum)
 export const NPC_STATE_IDLE      = 0;
 export const NPC_STATE_MOVING    = 1;
+export const NPC_STATE_AT_GUN    = 2;
+/** @deprecated use NPC_STATE_AT_GUN */
 export const NPC_STATE_AT_CANNON = 2;
 export const NPC_STATE_REPAIRING = 3;
 
@@ -197,7 +230,48 @@ export interface Npc {
   state: number;          // NPC_STATE_* — used for movement animation
   role: number;           // NPC_ROLE_* — 1=gunner, 3=rigger
   companyId: number;      // COMPANY_* — faction this NPC belongs to
-  assignedCannonId: number; // Module ID of cannon/mast this NPC is stationed at (0 if none)
+  assignedWeaponId: number; // Module ID of cannon/swivel/mast this NPC is stationed at (0 if none)
+
+  // Crew levelling
+  npcLevel: number;       // 1–66 (1 base + 65 upgrades)
+  health: number;         // current HP
+  maxHealth: number;      // max HP (base 100 + statHealth * 20)
+  xp: number;             // XP progress toward next global level
+  statHealth: number;     // upgrade levels, no individual cap (+20 max HP each)
+  statDamage: number;     // upgrade levels (+10% damage each)
+  statStamina: number;    // upgrade levels (+10% reload/work speed each)
+  statWeight: number;     // upgrade levels (+10% carry capacity each)
+  statPoints: number;     // unspent stat points = (npcLevel - 1) - total spent
+  locked: boolean;        // when true: pinned to current module; crew panel cannot reassign
+}
+
+/**
+/**
+ * Island preset names — must match server-side ISLAND_PRESET_* constants.
+ */
+export type IslandPreset = 'tropical' | 'jungle' | 'desert' | 'rocky' | 'pine' | 'continental';
+
+/**
+ * A single resource node on an island (offset from island centre in world px).
+ */
+export interface IslandResource {
+  ox: number;
+  oy: number;
+  type: 'wood' | 'fiber' | 'food' | 'rock';
+}
+
+/**
+ * Server-authoritative island definition.
+ * Sent once via the ISLANDS message on player connect.
+ */
+export interface IslandDef {
+  id: number;
+  x: number;
+  y: number;
+  preset: IslandPreset;
+  resources: IslandResource[];
+  /** Polygon coastline vertices in world-space (present for polygon-mode islands). */
+  vertices?: { x: number; y: number }[];
 }
 
 /**
@@ -256,7 +330,7 @@ export const PhysicsConfig = {
  * Module kinds that can be ghost-placed as planning markers.
  * Subset of ModuleKind — only buildable module types.
  */
-export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck';
+export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck' | 'swivel';
 
 /**
  * A client-local "ghost" placement — a translucent planning marker showing

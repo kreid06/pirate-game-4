@@ -80,6 +80,16 @@ static const char* dashboard_html =
 "</div>\n"
 "<div id=\"spawn-result\" class=\"spawn-result\"></div>\n"
 "</div>\n"
+"<div class=\"card\"><h3>� Spawn Phantom Brig</h3>\n"
+"<p style=\"font-size:0.85rem;color:#555;margin-top:0\">Spawn an autonomous spectral enemy brigantine. Attacks nearby player ships on sight.</p>\n"
+"<div class=\"form-row\">\n"
+"  <div class=\"form-group\"><label>X (px)</label><input id=\"pbrig-x\" type=\"number\" value=\"400\"></div>\n"
+"  <div class=\"form-group\"><label>Y (px)</label><input id=\"pbrig-y\" type=\"number\" value=\"400\"></div>\n"
+"  <button class=\"spawn-btn\" style=\"background:#4a1a7a\" onclick=\"spawnPhantomBrig()\">👻 Spawn Phantom Brig</button>\n"
+"</div>\n"
+"<div id=\"pbrig-result\" class=\"spawn-result\"></div>\n"
+"</div>\n"
+"<div class=\"card\"><h3>�👥 Players</h3><div id=\"player-list\">Loading...</div></div>\n"
 "</div></div>\n"
 "<div id=\"map\" class=\"tab-pane\">\n"
 "<h2>🗺️ Live World Map</h2>\n"
@@ -89,7 +99,7 @@ static const char* dashboard_html =
 "</div></div>\n"
 "<script>\n"
 "let mapCanvas, mapCtx, mapData = null;\n"
-"let mapOffsetX = 0, mapOffsetY = 0;\n"
+"let mapOffsetX = 0, mapOffsetY = 0, mapScale = 0.5;\n"
 "let isDragging = false, lastMouseX = 0, lastMouseY = 0;\n"
 "function showTab(tabName) {\n"
 "document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));\n"
@@ -129,6 +139,18 @@ static const char* dashboard_html =
 "}\n"
 "});\n"
 "mapCanvas.addEventListener('contextmenu', (e) => e.preventDefault());\n"
+"// Scroll to zoom (centered on mouse position)\n"
+"mapCanvas.addEventListener('wheel', (e) => {\n"
+"e.preventDefault();\n"
+"const rect = mapCanvas.getBoundingClientRect();\n"
+"const mx = e.clientX - rect.left;\n"
+"const my = e.clientY - rect.top;\n"
+"const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;\n"
+"mapOffsetX = mx - factor * (mx - mapOffsetX);\n"
+"mapOffsetY = my - factor * (my - mapOffsetY);\n"
+"mapScale = Math.max(0.05, Math.min(5, mapScale * factor));\n"
+"drawMap();\n"
+"}, { passive: false });\n"
 "updateMap();\n"
 "}\n"
 "async function updateMap() {\n"
@@ -143,8 +165,9 @@ static const char* dashboard_html =
 "// Clear canvas with ocean blue\n"
 "ctx.fillStyle = '#2c5aa0'; ctx.fillRect(0, 0, 800, 400);\n"
 "ctx.save();\n"
-"// Apply pan offset\n"
+"// Apply pan + zoom\n"
 "ctx.translate(mapOffsetX, mapOffsetY);\n"
+"ctx.scale(mapScale, mapScale);\n"
 "// Draw grid for reference\n"
 "ctx.strokeStyle = 'rgba(255,255,255,0.1)';\n"
 "ctx.lineWidth = 1;\n"
@@ -153,6 +176,49 @@ static const char* dashboard_html =
 "}\n"
 "for (let i = -1000; i < 1000; i += 50) {\n"
 "ctx.beginPath(); ctx.moveTo(-1000, i); ctx.lineTo(2000, i); ctx.stroke();\n"
+"}\n"
+"// Helper: sample bumpy island boundary (mirrors server island_boundary_r)\n"
+"function islandBndR(bumps, baseR, angle) {\n"
+"const TWO_PI = Math.PI * 2;\n"
+"let a = angle - TWO_PI * Math.floor(angle / TWO_PI);\n"
+"const t = a / TWO_PI * 16;\n"
+"const i0 = Math.floor(t) % 16;\n"
+"const i1 = (i0 + 1) % 16;\n"
+"const f = t - Math.floor(t);\n"
+"return baseR + bumps[i0] + f * (bumps[i1] - bumps[i0]);\n"
+"}\n"
+"// Draw islands (behind ships)\n"
+"if (mapData.islands) {\n"
+"const N = 64;\n"
+"mapData.islands.forEach(isl => {\n"
+"// Beach (sandy)\n"
+"ctx.fillStyle = '#c8a85c';\n"
+"ctx.beginPath();\n"
+"for (let k = 0; k < N; k++) {\n"
+"const a = k / N * Math.PI * 2;\n"
+"const r = islandBndR(isl.beachBumps, isl.beachRadius, a);\n"
+"const px = isl.x + Math.cos(a) * r;\n"
+"const py = isl.y + Math.sin(a) * r;\n"
+"k === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);\n"
+"}\n"
+"ctx.closePath(); ctx.fill();\n"
+"// Grass (green)\n"
+"ctx.fillStyle = '#4a7a3a';\n"
+"ctx.beginPath();\n"
+"for (let k = 0; k < N; k++) {\n"
+"const a = k / N * Math.PI * 2;\n"
+"const r = islandBndR(isl.grassBumps, isl.grassRadius, a);\n"
+"const px = isl.x + Math.cos(a) * r;\n"
+"const py = isl.y + Math.sin(a) * r;\n"
+"k === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);\n"
+"}\n"
+"ctx.closePath(); ctx.fill();\n"
+"// Island label\n"
+"ctx.fillStyle = 'rgba(255,255,255,0.85)';\n"
+"ctx.font = 'bold 12px sans-serif';\n"
+"ctx.textAlign = 'center';\n"
+"ctx.fillText('Island ' + isl.id, isl.x, isl.y + 4);\n"
+"});\n"
 "}\n"
 "// Draw ships first (background layer)\n"
 "mapData.ships.forEach(ship => {\n"
@@ -291,6 +357,14 @@ static const char* dashboard_html =
 "ctx.beginPath(); ctx.arc(26, 108, 4, 0, 2*Math.PI); ctx.fill();\n"
 "ctx.fillStyle = 'white';\n"
 "ctx.fillText('Player (swimming)', 38, 112);\n"
+"ctx.fillStyle = '#c8a85c';\n"
+"ctx.fillRect(20, 120, 8, 8);\n"
+"ctx.fillStyle = 'white';\n"
+"ctx.fillText('Island (beach)', 38, 128);\n"
+"ctx.fillStyle = '#4a7a3a';\n"
+"ctx.fillRect(20, 134, 8, 8);\n"
+"ctx.fillStyle = 'white';\n"
+"ctx.fillText('Island (grass)', 38, 142);\n"
 "}\n"
 "async function fetchJson(url) {\n"
 "try { const r = await fetch(url); return await r.json(); } catch(e) { return null; }\n"
@@ -340,6 +414,83 @@ static const char* dashboard_html =
 "function refreshAll() {\n"
 "updateServerStatus(); updatePhysicsObjects(); updateNetworkStats(); updateMessageStats();\n"
 "if (document.getElementById('map').classList.contains('active')) updateMap();\n"
+"// Players panel refreshes separately — skip if user is actively editing a dropdown\n"
+"const playerList = document.getElementById('player-list');\n"
+"const focused = playerList && playerList.querySelector('select:focus, button:focus');\n"
+"if (!focused) updatePlayers();\n"
+"}\n"
+"const COMPANY_NAMES = ['Neutral', 'Pirates', 'Navy'];\n"
+"const COMPANY_COLORS = ['#95a5a6', '#e74c3c', '#3498db'];\n"
+"async function updatePlayers() {\n"
+"const data = await fetchJson('/api/websocket');\n"
+"const el = document.getElementById('player-list');\n"
+"if (!el) return;\n"
+"if (!data || !data.players || data.players.length === 0) {\n"
+"  el.innerHTML = '<p style=\"color:#888;font-size:0.9rem\">No players connected.</p>';\n"
+"  return;\n"
+"}\n"
+"// Don't rebuild if any select/button inside the panel is focused\n"
+"if (el.querySelector('select:focus, button:focus')) return;\n"
+"let html = '<table style=\"width:100%;border-collapse:collapse;font-size:0.88rem\">';\n"
+"html += '<tr style=\"background:#dee2e6\">';\n"
+"html += '<th style=\"padding:4px 8px;text-align:left\">ID</th>';\n"
+"html += '<th style=\"padding:4px 8px;text-align:left\">Name</th>';\n"
+"html += '<th style=\"padding:4px 8px;text-align:left\">Current Company</th>';\n"
+"html += '<th style=\"padding:4px 8px;text-align:left\">Ship</th>';\n"
+"html += '<th style=\"padding:4px 8px;text-align:left\">Change To</th>';\n"
+"html += '</tr>';\n"
+"data.players.forEach(p => {\n"
+"  const company = typeof p.company === 'number' ? p.company : 0;\n"
+"  const color = COMPANY_COLORS[company] || '#95a5a6';\n"
+"  const companyName = COMPANY_NAMES[company] || 'Unknown';\n"
+"  // Default the dropdown to the next company (not current), so it's obvious what will change\n"
+"  const defaultNew = (company + 1) % COMPANY_NAMES.length;\n"
+"  html += `<tr style=\"border-bottom:1px solid #dee2e6\">`;\n"
+"  html += `<td style=\"padding:6px 8px\">${p.id}</td>`;\n"
+"  html += `<td style=\"padding:6px 8px\">${p.name || 'Player'}</td>`;\n"
+"  html += `<td style=\"padding:6px 8px\">`;\n"
+"  html += `  <span style=\"background:${color};color:#fff;padding:3px 10px;border-radius:4px;font-size:0.82rem;font-weight:bold\">${companyName}</span>`;\n"
+"  html += `</td>`;\n"
+"  html += `<td style=\"padding:6px 8px\">${p.ship_id > 0 ? 'Ship #'+p.ship_id : '—'}</td>`;\n"
+"  html += `<td style=\"padding:6px 8px;display:flex;gap:6px;align-items:center\">`;\n"
+"  html += `<select id=\"pc-${p.id}\" style=\"padding:3px 6px;border-radius:4px;border:1px solid #aaa;font-size:0.85rem\">`;\n"
+"  COMPANY_NAMES.forEach((name, idx) => {\n"
+"    const sel = idx === defaultNew ? ' selected' : '';\n"
+"    html += `<option value=\"${idx}\"${sel}>${name}</option>`;\n"
+"  });\n"
+"  html += `</select>`;\n"
+"  html += `<button onclick=\"assignPlayerCompany(${p.id})\" style=\"padding:3px 12px;border-radius:4px;border:none;background:#27ae60;color:#fff;cursor:pointer;font-size:0.85rem;font-weight:bold\">Set</button>`;\n"
+"  html += `</td>`;\n"
+"  html += `</tr>`;\n"
+"});\n"
+"html += '</table>';\n"
+"el.innerHTML = html;\n"
+"}\n"
+"async function assignPlayerCompany(playerId) {\n"
+"const sel = document.getElementById('pc-'+playerId);\n"
+"if (!sel) return;\n"
+"const company = parseInt(sel.value);\n"
+"const btn = sel.nextElementSibling;\n"
+"if (btn) { btn.disabled = true; btn.textContent = '...'; }\n"
+"try {\n"
+"  const r = await fetch('/api/admin/player/company', {\n"
+"    method: 'POST',\n"
+"    headers: {'Content-Type': 'application/json'},\n"
+"    body: JSON.stringify({playerId, company})\n"
+"  });\n"
+"  const data = await r.json();\n"
+"  if (data.success) {\n"
+"    // Brief success flash then force-refresh the player list\n"
+"    if (btn) { btn.style.background='#2ecc71'; btn.textContent='✓'; }\n"
+"    setTimeout(updatePlayers, 300);\n"
+"  } else {\n"
+"    if (btn) { btn.disabled=false; btn.style.background='#e74c3c'; btn.textContent='Set'; }\n"
+"    alert('Failed: ' + (data.error || 'unknown'));\n"
+"  }\n"
+"} catch(e) {\n"
+"  if (btn) { btn.disabled=false; btn.textContent='Set'; }\n"
+"  alert('Request failed: ' + e.message);\n"
+"}\n"
 "}\n"
 "async function spawnShip() {\n"
 "const x = parseFloat(document.getElementById('spawn-x').value) || 400;\n"
@@ -369,6 +520,32 @@ static const char* dashboard_html =
 "}\n"
 "resultEl.style.display = 'block';\n"
 "btn.disabled = false;\n"
+"refreshAll();\n"
+"}\n"
+"async function spawnPhantomBrig() {\n"
+"const x = parseFloat(document.getElementById('pbrig-x').value) || 400;\n"
+"const y = parseFloat(document.getElementById('pbrig-y').value) || 400;\n"
+"const resultEl = document.getElementById('pbrig-result');\n"
+"resultEl.style.display = 'none';\n"
+"try {\n"
+"const r = await fetch('/api/admin/phantom-brig', {\n"
+"  method: 'POST',\n"
+"  headers: {'Content-Type': 'application/json'},\n"
+"  body: JSON.stringify({x, y})\n"
+"});\n"
+"const data = await r.json();\n"
+"if (data.success) {\n"
+"  resultEl.className = 'spawn-result ok';\n"
+"  resultEl.textContent = `✅ Phantom Brig #${data.shipId} spawned at (${x}, ${y})`;\n"
+"} else {\n"
+"  resultEl.className = 'spawn-result err';\n"
+"  resultEl.textContent = `❌ ${data.error || 'Unknown error'}`;\n"
+"}\n"
+"} catch(e) {\n"
+"resultEl.className = 'spawn-result err';\n"
+"resultEl.textContent = '❌ Request failed: ' + e.message;\n"
+"}\n"
+"resultEl.style.display = 'block';\n"
 "refreshAll();\n"
 "}\n"
 "refreshAll(); setInterval(refreshAll, 2000);\n"
@@ -501,18 +678,18 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                 post_start += 5;
                 char *path_end = strchr(post_start, ' ');
                 if (path_end) {
+                    // Search for the body BEFORE null-terminating the path, so strstr
+                    // on the full buffer still works (inserting '\0' would cut it short).
+                    char *body = strstr(path_end, "\r\n\r\n");
+                    if (body) body += 4;
+
                     *path_end = '\0';
 
                     struct HttpResponse resp = {0};
                     if (strcmp(post_start, "/api/admin/ship") == 0) {
-                        // Parse JSON body for x, y, company
-                        // Body starts after the blank line (\r\n\r\n)
                         float x = 400.0f, y = 400.0f;
                         uint8_t company = 1; // COMPANY_PIRATES default
-                        char *body = strstr(buffer, "\r\n\r\n");
                         if (body) {
-                            body += 4;
-                            // Simple extraction — no full JSON parser needed
                             char *p;
                             p = strstr(body, "\"x\"");
                             if (p) { p = strchr(p, ':'); if (p) x = (float)atof(p + 1); }
@@ -522,6 +699,27 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                             if (p) { p = strchr(p, ':'); if (p) company = (uint8_t)atoi(p + 1); }
                         }
                         admin_api_create_ship(&resp, x, y, company);
+                    } else if (strcmp(post_start, "/api/admin/phantom-brig") == 0) {
+                        float x = 400.0f, y = 400.0f;
+                        if (body) {
+                            char *p;
+                            p = strstr(body, "\"x\"");
+                            if (p) { p = strchr(p, ':'); if (p) x = (float)atof(p + 1); }
+                            p = strstr(body, "\"y\"");
+                            if (p) { p = strchr(p, ':'); if (p) y = (float)atof(p + 1); }
+                        }
+                        admin_api_create_phantom_brig(&resp, x, y);
+                    } else if (strcmp(post_start, "/api/admin/player/company") == 0) {
+                        uint32_t player_id = 0;
+                        uint8_t company = 0;
+                        if (body) {
+                            char *p;
+                            p = strstr(body, "\"playerId\"");
+                            if (p) { p = strchr(p, ':'); if (p) player_id = (uint32_t)atoi(p + 1); }
+                            p = strstr(body, "\"company\"");
+                            if (p) { p = strchr(p, ':'); if (p) company = (uint8_t)atoi(p + 1); }
+                        }
+                        admin_api_set_player_company(&resp, player_id, company);
                     } else {
                         resp.status_code = 404;
                         resp.body = "Not Found";

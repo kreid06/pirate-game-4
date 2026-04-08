@@ -6,7 +6,7 @@
  */
 
 import { NetworkConfig } from '../client/ClientConfig.js';
-import { WorldState, InputFrame, Npc } from '../sim/Types.js';
+import { WorldState, InputFrame, Npc, Ship, IslandDef, IslandResource, IslandPreset, PlacedStructure } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { createShipAtPosition } from '../sim/ShipUtils.js';
 import { ShipModule, ModuleKind, MODULE_TYPE_MAP } from '../sim/modules.js';
@@ -57,9 +57,11 @@ export enum MessageType {
   
   // Cannon control messages
   CANNON_AIM = 'cannon_aim',
-  CANNON_FIRE = 'cannon_fire',
+  CANNON_FIRE = 'fire_weapon',   // universal weapon fire (cannon, swivel, future: ballista)
   CANNON_GROUP_CONFIG = 'cannon_group_config',
   CANNON_GROUP_STATE = 'cannon_group_state',
+  // Swivel control messages
+  SWIVEL_AIM = 'swivel_aim',
 
   SLOT_SELECT = 'slot_select',
   UNEQUIP = 'unequip',
@@ -71,10 +73,27 @@ export enum MessageType {
   PLACE_CANNON = 'place_cannon',
   PLACE_CANNON_AT = 'place_cannon_at',
   PLACE_MAST = 'place_mast',
+  HARVEST_RESOURCE = 'harvest_resource',
+  HARVEST_SUCCESS  = 'harvest_success',
+  HARVEST_FAILURE  = 'harvest_failure',
+  HARVEST_FIBER    = 'harvest_fiber',
+  HARVEST_FIBER_SUCCESS = 'harvest_fiber_success',
+  HARVEST_FIBER_FAILURE = 'harvest_fiber_failure',
+  HARVEST_ROCK     = 'harvest_rock',
+  HARVEST_ROCK_SUCCESS  = 'harvest_rock_success',
+  HARVEST_ROCK_FAILURE  = 'harvest_rock_failure',
+  PLACE_STRUCTURE  = 'place_structure',
+  STRUCTURE_INTERACT = 'structure_interact',
   PLACE_MAST_AT = 'place_mast_at',
   REPLACE_HELM = 'replace_helm',
   PLACE_DECK = 'place_deck',
+  PLACE_SWIVEL_AT = 'place_swivel_at',
   CREW_ASSIGN = 'crew_assign',
+  NPC_RECRUIT = 'npc_recruit',
+  NPC_MOVE_ABOARD = 'npc_move_aboard',
+  NPC_LOCK = 'npc_lock',
+  NPC_GOTO_MODULE = 'npc_goto_module',
+  NPC_MOVE_TO_POS = 'npc_move_to_pos',
 
   PING = 'ping',
   
@@ -89,6 +108,11 @@ export enum MessageType {
   
   // Server notifications
   PLAYER_BOARDED = 'player_boarded',
+  STRUCTURE_PLACED = 'structure_placed',
+  STRUCTURE_DEMOLISHED = 'structure_demolished',
+  DEMOLISH_STRUCTURE = 'demolish_structure',
+  CRAFTING_OPEN  = 'crafting_open',
+  STRUCTURES_LIST = 'STRUCTURES',
 
   // Connection Management
   CONNECT = 'connect',
@@ -230,12 +254,21 @@ interface CannonAimMessage extends NetworkMessage {
 }
 
 /**
+ * Swivel aim message — ship-relative barrel heading sent by a mounted player.
+ */
+interface SwivelAimMessage extends NetworkMessage {
+  type: MessageType.SWIVEL_AIM;
+  timestamp: number;
+  aim_angle: number; // Radians, relative to ship rotation
+}
+
+/**
  * Cannon fire message
  */
 interface CannonFireMessage extends NetworkMessage {
   type: MessageType.CANNON_FIRE;
   timestamp: number;
-  cannon_ids?: number[]; // Specific cannons to fire, or undefined for all aimed cannons
+  weapon_ids?: number[]; // Specific weapons to fire, or undefined for all aimed cannons
   fire_all?: boolean;    // True if double-click (fire all cannons)
   freefire?: boolean;    // True if freefire/targetfire mode — skip server aim-angle check
   ammo_type?: number;    // 0 = cannonball (default), 1 = bar shot
@@ -250,7 +283,7 @@ interface CannonGroupConfigMessage extends NetworkMessage {
   timestamp: number;
   group_index: number;          // 0–9
   mode: 'aiming' | 'freefire' | 'haltfire' | 'targetfire';
-  cannon_ids: number[];         // Module IDs of cannons in this group
+  weapon_ids: number[];         // Module IDs of cannons/swivels in this group
   target_ship_id: number;       // Server ship entity ID for targetfire; 0 otherwise
 }
 
@@ -369,6 +402,15 @@ interface PlaceDeckMessage extends NetworkMessage {
   timestamp: number;
 }
 
+interface PlaceSwivelAtMessage extends NetworkMessage {
+  type: MessageType.PLACE_SWIVEL_AT;
+  timestamp: number;
+  shipId: number;
+  localX: number;
+  localY: number;
+  rotation: number;
+}
+
 interface CrewAssignMessage extends NetworkMessage {
   type: MessageType.CREW_ASSIGN;
   timestamp: number;
@@ -377,7 +419,26 @@ interface CrewAssignMessage extends NetworkMessage {
   task: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage;
+interface HarvestResourceMessage extends NetworkMessage {
+  type: MessageType.HARVEST_RESOURCE;
+  timestamp: number;
+}
+
+interface PlaceStructureMessage extends NetworkMessage {
+  type: MessageType.PLACE_STRUCTURE;
+  timestamp: number;
+  structure_type: string;
+  x: number;
+  y: number;
+}
+
+interface StructureInteractMessage extends NetworkMessage {
+  type: MessageType.STRUCTURE_INTERACT;
+  timestamp: number;
+  structure_id: number;
+}
+
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage;
 
 /**
  * Main network manager class
@@ -413,7 +474,13 @@ export class NetworkManager {
   };
   
   private latency = 0;
-  
+
+  // ── Per-tick allocation caches ────────────────────────────────────────────
+  /** Brigantine hull/module template — created once, reused on every GAME_STATE message. */
+  private _shipTemplate: { planks: ShipModule[]; deck: ShipModule[]; ship: Ship } | null = null;
+  /** Plank-health lookup buffer — cleared and refilled each tick instead of being re-allocated. */
+  private readonly _plankHealthBuf = new Map<number, { health: number; maxHealth: number }>();
+
   // Event callbacks
   public onWorldStateReceived: ((worldState: WorldState) => void) | null = null;
   public onConnectionStateChanged: ((state: ConnectionState) => void) | null = null;
@@ -425,10 +492,77 @@ export class NetworkManager {
   public onShipSinking: ((shipId: number) => void) | null = null;
   public onShipLevelUp: ((shipId: number, attribute: string, attrLevel: number, xp: number, shipLevel: number, totalCap: number, nextUpgradeCost: number) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
+  /**
+   * Fired when the server accepts or rejects a Move To module command.
+   * ok=true → module dispatched successfully; ok=false → module was occupied or invalid.
+   */
+  public onNpcMoveResult: ((ok: boolean, npcId: number) => void) | null = null;
+  /** Fired when the server confirms an NPC stat upgrade. */
+  public onNpcStatUp: ((npcId: number, stat: string, statLevel: number, xp: number,
+    maxHealth: number, npcLevel: number,
+    statHealth: number, statDamage: number, statStamina: number, statWeight: number,
+    statPoints: number) => void) | null = null;
+  /** Fired when a cannonball hits an NPC or player. */
+  /** Fired when any weapon fires — used to render hit-scan tracers (grapeshot, canister). */
+  public onCannonFireEvent: ((cannonId: number, shipId: number, x: number, y: number,
+    angle: number, projectileId: number, ammoType: number) => void) | null = null;
+
+  public onEntityHit: ((entityType: 'npc' | 'player', id: number, x: number, y: number,
+    damage: number, health: number, maxHealth: number, killed: boolean) => void) | null = null;
+  /** Fired when liquid flame ignites an entity or wooden module. */
+  public onFireEffect: ((entityType: 'npc' | 'player' | 'module', id: number, x: number, y: number,
+    durationMs: number, shipId?: number, moduleId?: number) => void) | null = null;
+  /** Fired when a burning entity or module's fire timer expires. */
+  public onFireExtinguished: ((entityType: 'npc' | 'player' | 'module', id: number,
+    shipId?: number, moduleId?: number) => void) | null = null;
+  /** Fired each 500ms tick with updated sail fiber fire intensity. */
+  public onSailFiberFire: ((shipId: number, moduleId: number, intensity: number,
+    fiberHealth: number, windEfficiency: number) => void) | null = null;
+  /** Fired when a player performs a sword swing (for arc animation). */
+  public onSwordSwing: ((playerId: number, x: number, y: number, angle: number, range: number) => void) | null = null;
+  public onLadderState: ((shipId: number, moduleId: number, retracted: boolean) => void) | null = null;
   /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
   public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
   /** Fired when the server confirms the player has boarded a ship (via ladder). */
   public onPlayerBoarded: ((shipId: number) => void) | null = null;
+  /** Fired when the server responds to a harvest_resource request. */
+  public onHarvestResult: ((success: boolean, wood: number, reason: string) => void) | null = null;
+  /** Fired when the server responds to a harvest_fiber request. */
+  public onFiberHarvestResult: ((success: boolean, fiber: number, reason: string) => void) | null = null;
+  /** Fired when the server responds to a harvest_rock request. */
+  public onRockHarvestResult: ((success: boolean, metal: number, reason: string) => void) | null = null;
+  /**
+   * Fired once on connect with the full list of server-defined islands.
+   * Falls back to client defaults if the server never sends this.
+   */
+  public onIslands: ((islands: IslandDef[]) => void) | null = null;
+
+  /** Fired when the server broadcasts a newly placed structure to all clients. */
+  public onStructurePlaced: ((s: PlacedStructure) => void) | null = null;
+  /** Fired when the server confirms a structure has been demolished. */
+  public onStructureDemolished: ((id: number, x?: number, y?: number) => void) | null = null;
+  /** Fired when a structure's company ownership is promoted (one-way, neutral → non-neutral). */
+  public onStructureCompanyUpdated: ((id: number, companyId: number) => void) | null = null;
+  /** Fired when a structure takes damage from a cannonball hit. Includes world position for FX. */
+  public onStructureHpChanged: ((id: number, hp: number, maxHp: number, x: number, y: number) => void) | null = null;
+  /** Fired when a cannonball hits a tree (trees are indestructible). */
+  public onTreeHit: ((x: number, y: number) => void) | null = null;
+  /** Fired when the server sends the full list of existing placed structures on join. */
+  public onStructuresList: ((structures: PlacedStructure[]) => void) | null = null;
+  /** Fired when the server confirms a workbench can be opened (E-key interact). */
+  public onCraftingOpen: ((structureId: number, structureType: string) => void) | null = null;
+  /** Fired when the server responds to a craft_item request. */
+  public onCraftResult: ((success: boolean, recipeId: string, reason?: string) => void) | null = null;
+  /** Fired when a door is toggled open or closed by any player. */
+  public onDoorToggled: ((id: number, open: boolean) => void) | null = null;
+
+  /** Fired each server tick with the current state of an active flamethrower wave. */
+  public onFlameWaveUpdate: ((
+    cannonId: number, shipId: number,
+    x: number, y: number, angle: number, halfCone: number,
+    waveDist: number, retreating: boolean, retreatDist: number,
+    dead: boolean
+  ) => void) | null = null;
   
   constructor(config: NetworkConfig) {
     this.config = config;
@@ -608,6 +742,7 @@ export class NetworkManager {
             this.socket!.onmessage = originalHandler;
             console.log('🤝 Handshake completed - Player ID received');
             this.requestGameState();
+            this.requestStructures();
             resolve();
           } else if (data.includes('message_ack') || data.includes('status') || data.startsWith('PONG')) {
             // Fallback acknowledgment
@@ -615,13 +750,21 @@ export class NetworkManager {
             this.socket!.onmessage = originalHandler;
             console.log('🤝 Handshake completed - Server acknowledged');
             this.requestGameState();
+            this.requestStructures();
             resolve();
           } else {
-            // Any response means server is alive - accept it
+            // Non-handshake message arrived first (e.g. ISLANDS/STRUCTURES sent before
+            // handshake_response by an older server build). Restore the main handler and
+            // forward the current event through it so no data is lost.
             clearTimeout(timeout);
             this.socket!.onmessage = originalHandler;
-            console.log('🤝 Handshake completed (server responded)');
+            console.log('🤝 Handshake completed (server responded with non-handshake first)');
+            // Forward this event to the main handler so ISLANDS/STRUCTURES aren't dropped
+            if (originalHandler) {
+              try { originalHandler.call(this.socket!, event); } catch { /* ignore */ }
+            }
             this.requestGameState();
+            this.requestStructures();
             resolve();
           }
         } catch (error) {
@@ -631,6 +774,7 @@ export class NetworkManager {
           this.socket!.onmessage = originalHandler;
           console.log('🤝 Handshake completed (server alive)');
           this.requestGameState();
+          this.requestStructures();
           resolve();
         }
       };
@@ -656,8 +800,18 @@ export class NetworkManager {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       this.socket.send('STATE');
       this.stats.messagesSent++;
-      this.stats.bytesSent += 5; // 'STATE'.length
+      this.stats.bytesSent += 5;
       console.log('📤 Requested game state from server');
+    }
+  }
+
+  /** Ask the server to re-send the full placed-structures list. */
+  requestStructures(): void {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send('GET_STRUCTURES');
+      this.stats.messagesSent++;
+      this.stats.bytesSent += 14;
+      console.log('📤 Requested structures list from server');
     }
   }
   
@@ -676,8 +830,6 @@ export class NetworkManager {
     const shouldSend = true; // Always send for debugging
     
     if (shouldSend) {
-      console.log(`🔍 Input frame check - Movement: ${hasMovement}, Actions: ${hasActions}, Sending: ${shouldSend}`);
-      
       // Validate movement vector before sending
       const movementMagnitude = Math.sqrt(inputFrame.movement.lengthSq());
       if (movementMagnitude > 1.1) { // Allow small tolerance for floating point precision
@@ -699,7 +851,6 @@ export class NetworkManager {
         actions: inputFrame.actions
       };
       
-      console.log(`🎮 Sending input - Movement: (${inputFrame.movement.x.toFixed(2)}, ${inputFrame.movement.y.toFixed(2)}), Rotation: ${inputFrame.rotation.toFixed(2)} rad, Magnitude: ${movementMagnitude.toFixed(2)}, Actions: ${inputFrame.actions}`);
       this.sendMessage(message);
     }
   }
@@ -763,7 +914,9 @@ export class NetworkManager {
       } : undefined
     };
 
-    console.log(`⚡ Action: ${action}${target ? ` at (${target.x.toFixed(1)}, ${target.y.toFixed(1)})` : ''}`);
+    if (action !== 'block') {
+      console.log(`⚡ Action: ${action}${target ? ` at (${target.x.toFixed(1)}, ${target.y.toFixed(1)})` : ''}`);
+    }
     this.sendMessage(message);
   }
 
@@ -860,6 +1013,30 @@ export class NetworkManager {
   }
 
   /**
+   * Send swivel gun aim direction.
+   * @param aimAngle - Ship-relative aim angle in radians
+   */
+  sendSwivelAim(aimAngle: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - this.lastAimSentTime < this.AIM_SEND_INTERVAL_MS) {
+      return; // throttle to 20 Hz
+    }
+    this.lastAimSentTime = now;
+
+    const message: SwivelAimMessage = {
+      type: MessageType.SWIVEL_AIM,
+      timestamp: now,
+      aim_angle: aimAngle,
+    };
+
+    this.sendMessage(message);
+  }
+
+  /**
    * Send cannon fire command
    * @param cannonIds - Specific cannon IDs to fire, or undefined for aimed cannons
    * @param fireAll - True if double-click (fire all cannons)
@@ -874,18 +1051,17 @@ export class NetworkManager {
     const message: CannonFireMessage = {
       type: MessageType.CANNON_FIRE,
       timestamp: Date.now(),
-      cannon_ids: cannonIds,
+      weapon_ids: cannonIds,
       fire_all: fireAll,
       freefire: freefire || undefined,
       ammo_type: ammoType
     };
 
-    console.log(`💥 Cannon fire: ${fireAll ? 'ALL' : cannonIds ? `IDs ${cannonIds.join(',')}` : 'aimed'} [${ammoType === 1 ? 'BAR SHOT' : 'CANNONBALL'}]${freefire ? ' FREEFIRE' : ''}`);
+    console.log(`💥 Cannon fire: ${fireAll ? 'ALL' : cannonIds ? `IDs ${cannonIds.join(',')}` : 'aimed'}${freefire ? ' FREEFIRE' : ''}`);
     this.sendMessage(message);
   }
 
   /**
-   * Send weapon control group configuration to the server.
    * Call this whenever a group's mode, cannon assignment, or target changes.
    *
    * @param groupIndex     0–9 group slot
@@ -907,10 +1083,10 @@ export class NetworkManager {
       timestamp: Date.now(),
       group_index: groupIndex,
       mode,
-      cannon_ids: cannonIds,
+      weapon_ids: cannonIds,
       target_ship_id: targetShipId
     };
-    console.log(`🎯 Group ${groupIndex} config → mode=${mode} cannons=[${cannonIds.join(',')}] target=${targetShipId}`);
+    console.log(`🎯 Group ${groupIndex} config → mode=${mode} weapons=[${cannonIds.join(',')}] target=${targetShipId}`);
     this.sendMessage(message);
   }
 
@@ -967,6 +1143,57 @@ export class NetworkManager {
   sendRepairPlank(shipId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.REPAIR_PLANK, timestamp: Date.now(), shipId });
+  }
+
+  /**
+   * Request server to harvest the nearest wood resource on the current island.
+   * Requires the axe to be in the active hotbar slot.
+   * Server grants planks and sends harvest_success / harvest_failure in response.
+   */
+  sendHarvestResource(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.HARVEST_RESOURCE, timestamp: Date.now() });
+  }
+
+  /** Request server to harvest the nearest fiber plant on the current island. */
+  sendHarvestFiber(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'harvest_fiber', timestamp: Date.now() }));
+  }
+
+  /** Request server to mine the nearest rock outcrop on the current island. */
+  sendHarvestRock(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'harvest_rock', timestamp: Date.now() }));
+  }
+
+  /**
+   * Ask the server to place a structure (wooden_floor or workbench) at world (x, y).
+   * The server validates that the player is on an island, has the item, and for
+   * workbench that a floor tile is close enough.
+   */
+  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door', x: number, y: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y });
+  }
+
+  /**
+   * Ask the server to interact with a placed structure (e.g. open a workbench).
+   */
+  sendStructureInteract(structureId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.STRUCTURE_INTERACT, timestamp: Date.now(), structure_id: structureId });
+  }
+
+  sendDemolishStructure(structureId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'demolish_structure', timestamp: Date.now(), structure_id: structureId }));
+  }
+
+  /** Send a crafting request to the server for the given recipe ID. */
+  sendCraftItem(recipeId: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'craft_item', recipe_id: recipeId, timestamp: Date.now() }));
   }
 
   /**
@@ -1029,6 +1256,16 @@ export class NetworkManager {
   }
 
   /**
+   * Request the server to place a new swivel gun at an arbitrary ship-local position.
+   * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
+   * Consumes 1 ITEM_SWIVEL from the player's inventory.
+   */
+  sendPlaceSwivelAt(shipId: number, localX: number, localY: number, rotation: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_SWIVEL_AT, timestamp: Date.now(), shipId, localX, localY, rotation });
+  }
+
+  /**
    * Request the server to replace the helm if it was destroyed.
    * Consumes 1 ITEM_HELM from the player's inventory.
    */
@@ -1062,7 +1299,56 @@ export class NetworkManager {
       });
     }
   }
-  
+
+  /**
+   * Recruit a neutral (company 0) NPC into the player's company.
+   * The NPC must be free-standing in the world (shipId 0, companyId 0).
+   */
+  sendNpcRecruit(npcId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.NPC_RECRUIT, timestamp: Date.now(), npcId }));
+  }
+
+  /**
+   * Move a recruited NPC aboard the player's current ship.
+   * The NPC must already belong to the player's company.
+   */
+  sendNpcMoveAboard(npcId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.NPC_MOVE_ABOARD, timestamp: Date.now(), npcId }));
+  }
+
+  /**
+   * Lock or unlock an NPC to their current module.
+   * When locked the crew panel and auto cannon-sector dispatch cannot reassign them.
+   */
+  sendNpcLock(npcId: number, locked: boolean): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.NPC_LOCK, timestamp: Date.now(), npcId, locked }));
+  }
+
+  /**
+   * Direct an NPC to a specific module on their ship by module ID.
+   * Clears any existing task lock so the NPC walks to the commanded post.
+   */
+  sendNpcGotoModule(npcId: number, moduleId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.NPC_GOTO_MODULE, timestamp: Date.now(), npcId, moduleId }));
+  }
+
+  /**
+   * Walk an NPC to a world position or board/walk on a specific ship.
+   * shipId=0  → detach from current ship, walk to world coords.
+   * shipId>0  → attach to that ship and walk to the clicked on-deck position.
+   */
+  sendNpcMoveToPos(npcId: number, worldX: number, worldY: number, shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({
+      type: MessageType.NPC_MOVE_TO_POS, timestamp: Date.now(),
+      npcId, worldX, worldY, shipId,
+    }));
+  }
+
   /**
    * Request the server to spend XP upgrading one attribute on the player's ship.
    * attribute must be one of: 'weight' | 'resistance' | 'damage' | 'crew' | 'sturdiness'
@@ -1070,6 +1356,15 @@ export class NetworkManager {
   sendUpgradeShipAttribute(shipId: number, attribute: string): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: 'upgrade_ship', shipId, attribute }));
+  }
+
+  /**
+   * Request the server to spend NPC XP upgrading one stat.
+   * stat must be one of: 'health' | 'damage' | 'stamina' | 'weight'
+   */
+  sendCrewUpgrade(npcId: number, stat: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'upgrade_crew_stat', npcId, stat }));
   }
 
   /**
@@ -1221,11 +1516,16 @@ export class NetworkManager {
           tick: message.tick || 0,
           timestamp: Date.now(),
           ships: (message.ships || []).map((ship: any) => {
-            // Create proper ship with brigantine design (hull, deck, planks, modules)
-            // This ensures all ships have the correct visual appearance and collision geometry
-            const position = Vec2.from(ship.x || 0, ship.y || 0);
-            const rotation = ship.rotation || 0;
-            const properShip = createShipAtPosition(position, rotation);
+            // Use cached brigantine template — avoids recreating hull curve geometry on every tick.
+            if (!this._shipTemplate) {
+              const s = createShipAtPosition(Vec2.from(0, 0), 0);
+              this._shipTemplate = {
+                planks: s.modules.filter(m => m.kind === 'plank'),
+                deck:   s.modules.filter(m => m.kind === 'deck'),
+                ship:   s,
+              };
+            }
+            const tmpl = this._shipTemplate;
             
             // Parse modules from server if available
             // Server sends: modules: [{id, typeId, x, y, rotation}, ...]
@@ -1243,20 +1543,24 @@ export class NetworkManager {
             if (ship.modules && Array.isArray(ship.modules)) {
               // Separate gameplay modules from structural modules
               const gameplayModules: ShipModule[] = [];
-              const plankHealthUpdates = new Map<number, { health: number; maxHealth: number }>();
+              const plankHealthBuf = this._plankHealthBuf;
+              plankHealthBuf.clear();
+              let deckStateBitsFromServer: number | undefined;
               
               for (const mod of ship.modules) {
                 const kind = MODULE_TYPE_MAP.toKind(mod.typeId);
                 
                 if (kind === 'plank') {
                   // Plank: Server only sends health, client generates positions
-                  plankHealthUpdates.set(mod.id, {
+                  plankHealthBuf.set(mod.id, {
                     health: mod.health ?? 10000,
                     maxHealth: mod.maxHealth ?? 10000,
                   });
                 } else if (kind === 'deck') {
-                  // Deck: Client generates from hull, server sends ID only
-                  // Skip - client already has deck module
+                  // Deck: client generates polygon from hull; track state bits to apply after
+                  if (mod.stateBits !== undefined) {
+                    deckStateBitsFromServer = mod.stateBits ?? 0;
+                  }
                 } else {
                   // Gameplay modules: Full transform data from server
                   let moduleData: any = undefined;
@@ -1295,6 +1599,7 @@ export class NetworkManager {
                       windEfficiency: mod.windEfficiency ?? 1.0,
                       fiberHealth: mod.fiberHealth ?? 15000,
                       fiberMaxHealth: mod.fiberMaxHealth ?? 15000,
+                      sailFireIntensity: mod.fiberFireIntensity ?? 0,
                       radius: 15,
                       height: 120,
                       sailWidth: 80,
@@ -1308,7 +1613,20 @@ export class NetworkManager {
                       length: 40,
                       width: 20,
                       climbSpeed: 2.0,
-                      deployState: 'deployed'
+                      deployState: 'deployed',
+                      // Derive extended from state bits: MODULE_STATE_RETRACTED = (1 << 10) = 1024
+                      // NOTE: bit 0 is MODULE_STATE_ACTIVE (always set) — do NOT use & 1
+                      extended: !((mod.state ?? 0) & 1024),
+                    };
+                  } else if (kind === 'swivel') {
+                    moduleData = {
+                      kind: 'swivel',
+                      aimDirection: mod.aimDir ?? 0,
+                      desiredAimDirection: mod.aimDir ?? 0,
+                      reloadTime: 1.2,
+                      timeSinceLastFire: 0,
+                      health: mod.health ?? 4000,
+                      maxHealth: mod.maxHealth ?? 4000,
                     };
                   }
                   
@@ -1325,50 +1643,58 @@ export class NetworkManager {
                 }
               }
               
-              // Merge: Keep client-generated planks/deck, add server gameplay modules
-              const clientPlanks = properShip.modules.filter(m => m.kind === 'plank');
-              const clientDeck = properShip.modules.filter(m => m.kind === 'deck');
+              // Merge: Keep client-generated planks/deck (shallow-cloned from template) + server gameplay modules.
+              // Plank objects are cloned so health can be updated per-tick without mutating the template.
+              const clientDeck = tmpl.deck.map(p => ({
+                ...p,
+                stateBits: deckStateBitsFromServer !== undefined ? deckStateBitsFromServer : p.stateBits,
+              }) as ShipModule);
 
-              // Only include planks the server still reports — absence means destroyed
-              const serverPlankIds = new Set(plankHealthUpdates.keys());
-              const activePlanks = clientPlanks.filter(p => serverPlankIds.has(p.id));
+              // Only include planks the server still reports — absence means destroyed.
+              // Build with updated health directly (avoids separate filter + mutation loop).
+              const activePlanks = tmpl.planks
+                .filter(p => plankHealthBuf.has(p.id))
+                .map(p => {
+                  const d = plankHealthBuf.get(p.id)!;
+                  const md = p.moduleData;
+                  return {
+                    ...p,
+                    moduleData: md?.kind === 'plank'
+                      ? { ...md, health: d.health, maxHealth: d.maxHealth }
+                      : md,
+                  } as ShipModule;
+                });
 
-              // Update health on surviving planks
-              for (const plank of activePlanks) {
-                const serverData = plankHealthUpdates.get(plank.id);
-                if (serverData !== undefined && plank.moduleData && plank.moduleData.kind === 'plank') {
-                  plank.moduleData.health = serverData.health;
-                  plank.moduleData.maxHealth = serverData.maxHealth;
-                }
-              }
-              
               // Combine: client planks/deck + server gameplay modules
               serverModules = [...clientDeck, ...activePlanks, ...gameplayModules];
             }
             
             // Override with server's authoritative state
             return {
-              ...properShip,
-              id: ship.id || properShip.id, // Use server-assigned ship ID
+              ...tmpl.ship,
+              id: ship.id || 0,
+              position: Vec2.from(ship.x || 0, ship.y || 0),
+              rotation: ship.rotation || 0,
               velocity: Vec2.from(ship.velocity_x || 0, ship.velocity_y || 0),
               angularVelocity: ship.angular_velocity || 0,
               
               // Use server modules if provided, otherwise keep client defaults
-              modules: serverModules || properShip.modules,
+              modules: serverModules || tmpl.ship.modules,
               
               // Parse physics properties from server (override defaults if provided)
               // Server sends: mass, moment_of_inertia, max_speed, turn_rate, water_drag, angular_drag
-              mass: ship.mass ?? properShip.mass,
-              momentOfInertia: ship.moment_of_inertia ?? properShip.momentOfInertia,
-              maxSpeed: ship.max_speed ?? properShip.maxSpeed,
-              turnRate: ship.turn_rate ?? properShip.turnRate,
-              waterDrag: ship.water_drag ?? properShip.waterDrag,
-              angularDrag: ship.angular_drag ?? properShip.angularDrag,
+              mass: ship.mass ?? tmpl.ship.mass,
+              momentOfInertia: ship.moment_of_inertia ?? tmpl.ship.momentOfInertia,
+              maxSpeed: ship.max_speed ?? tmpl.ship.maxSpeed,
+              turnRate: ship.turn_rate ?? tmpl.ship.turnRate,
+              waterDrag: ship.water_drag ?? tmpl.ship.waterDrag,
+              angularDrag: ship.angular_drag ?? tmpl.ship.angularDrag,
               rudderAngle: ship.rudder_angle ?? 0,
               cannonAmmo: ship.ammo ?? 0,
               infiniteAmmo: ship.infiniteAmmo ?? true,
               hullHealth: ship.hullHealth ?? 100,
               companyId: ship.company ?? 0,
+              shipType: ship.shipType ?? 3,
               levelStats: ship.levelStats ? {
                 levels: [
                   ship.levelStats.weight     ?? 1,
@@ -1389,7 +1715,7 @@ export class NetworkManager {
                   ship.levelStats.attrCaps?.crew       ?? 50,
                   ship.levelStats.attrCaps?.sturdiness ?? 25,
                 ],
-              } : properShip.levelStats,
+              } : tmpl.ship.levelStats,
             };
           }),
           players: (message.players || []).map((player: any) => ({
@@ -1434,6 +1760,9 @@ export class NetworkManager {
               : createEmptyInventory(),
 
             companyId: player.company ?? 0,
+            health: player.health ?? 100,
+            maxHealth: player.max_health ?? 100,
+            onIslandId: player.on_island ?? 0,
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,
@@ -1460,28 +1789,21 @@ export class NetworkManager {
             state: n.state ?? 0,
             role: n.role ?? 0,
             companyId: n.company ?? 0,
-            assignedCannonId: n.assigned_cannon_id ?? 0,
+            assignedWeaponId: n.assigned_weapon_id ?? 0,
+            // Crew levelling
+            npcLevel:   n.npc_level   ?? 1,
+            health:     n.health      ?? 100,
+            maxHealth:  n.max_health  ?? 100,
+            xp:         n.xp          ?? 0,
+            statHealth:  n.stat_health  ?? 0,
+            statDamage:  n.stat_damage  ?? 0,
+            statStamina: n.stat_stamina ?? 0,
+            statWeight:  n.stat_weight  ?? 0,
+            statPoints:  n.stat_points  ?? 0,
+            locked:      !!(n.locked),
           })),
           carrierDetection: new Map() // Will be populated as needed
         };
-        
-        // Debug: Log cannonballs received
-        if (worldState.cannonballs.length > 0) {
-          console.log(`💥 Received ${worldState.cannonballs.length} cannonballs:`, worldState.cannonballs.map(cb => ({
-            id: cb.id,
-            pos: `(${cb.position.x.toFixed(1)}, ${cb.position.y.toFixed(1)})`,
-            vel: `(${cb.velocity.x.toFixed(1)}, ${cb.velocity.y.toFixed(1)})`
-          })));
-        }
-        
-        
-        // Debug: Log ship and player data
-        if (worldState.ships.length > 0) {
-          const ship = worldState.ships[0];
-        }
-        if (worldState.players.length > 0) {
-          const player = worldState.players[0];
-        }
         
         this.onWorldStateReceived?.(worldState);
         break;
@@ -1500,6 +1822,15 @@ export class NetworkManager {
         break;
         
       case MessageType.MESSAGE_ACK:
+        if (message.status === 'npc_moved_to_module') {
+          this.onNpcMoveResult?.(true, message.npcId ?? 0);
+        }
+        break;
+
+      case 'error':
+        if (message.message === 'module_occupied' || message.message === 'cannot_goto_module') {
+          this.onNpcMoveResult?.(false, message.npcId ?? 0);
+        }
         break;
         
       case MessageType.MODULE_INTERACT_SUCCESS:
@@ -1516,10 +1847,44 @@ export class NetworkManager {
         break;
       }
 
+      case MessageType.HARVEST_SUCCESS:
+        this.onHarvestResult?.(true, message.wood ?? message.planks ?? 0, '');
+        break;
+
+      case MessageType.HARVEST_FAILURE:
+        this.onHarvestResult?.(false, 0, message.reason ?? 'unknown');
+        break;
+
+      case MessageType.HARVEST_FIBER_SUCCESS:
+        this.onFiberHarvestResult?.(true, message.fiber ?? 0, '');
+        break;
+
+      case MessageType.HARVEST_FIBER_FAILURE:
+        this.onFiberHarvestResult?.(false, 0, message.reason ?? 'unknown');
+        break;
+
+      case MessageType.HARVEST_ROCK_SUCCESS:
+        this.onRockHarvestResult?.(true, message.metal ?? 0, '');
+        break;
+
+      case MessageType.HARVEST_ROCK_FAILURE:
+        this.onRockHarvestResult?.(false, 0, message.reason ?? 'unknown');
+        break;
+
       case 'npc_dialogue':
         console.log(`💬 [NPC] ${message.npc_name}: "${message.text}"`);
         this.onNpcDialogue?.(message.npc_id, message.npc_name, message.text);
         break;
+
+      case 'NPC_STAT_UP': {
+        this.onNpcStatUp?.(
+          message.npcId, message.stat, message.level, message.xp,
+          message.maxHealth, message.npcLevel,
+          message.statHealth, message.statDamage, message.statStamina, message.statWeight,
+          message.statPoints ?? 0,
+        );
+        break;
+      }
 
       case MessageType.CANNON_GROUP_STATE: {
         const gsShipId: number = message.shipId || 0;
@@ -1551,6 +1916,7 @@ export class NetworkManager {
         const damage: number = message.damage || 0;
         const hitX: number | undefined = message.x;
         const hitY: number | undefined = message.y;
+        console.log(`💥 MODULE_DAMAGED: ship ${shipId} module ${moduleId} took ${damage} damage at (${hitX}, ${hitY})`);
         this.onModuleDamaged?.(shipId, moduleId, damage, hitX, hitY);
         break;
       }
@@ -1562,6 +1928,7 @@ export class NetworkManager {
         const plankDmg: number = message.damage || 0;
         const plankHitX: number | undefined = message.x;
         const plankHitY: number | undefined = message.y;
+        console.log(`💥 PLANK_HIT: ship ${plankShipId} plank ${plankId} destroyed — ${plankDmg} dmg at (${plankHitX}, ${plankHitY})`);
         this.onModuleDestroyed?.(plankShipId, plankId, plankDmg, plankHitX, plankHitY);
         break;
       }
@@ -1573,7 +1940,21 @@ export class NetworkManager {
         const plankDamage: number = message.damage || 0;
         const plankHitX: number | undefined = message.x;
         const plankHitY: number | undefined = message.y;
+        console.log(`💥 PLANK_DAMAGED: ship ${plankShipId} plank ${plankId} — ${plankDamage} dmg at (${plankHitX}, ${plankHitY})`);
         this.onModuleDamaged?.(plankShipId, plankId, plankDamage, plankHitX, plankHitY);
+        break;
+      }
+
+      case 'HULL_HIT': {
+        // Cannonball passed through the hull interior without hitting a specific module.
+        // Still show explosion + damage number at the hit position.
+        const hullShipId: number = message.shipId || 0;
+        const hullDmg: number = message.damage || 0;
+        const hullHitX: number | undefined = message.x;
+        const hullHitY: number | undefined = message.y;
+        console.log(`💥 HULL_HIT: ship ${hullShipId} took ${hullDmg} hull damage at (${hullHitX}, ${hullHitY})`);
+        // Re-use onModuleDamaged with moduleId=0 — ClientApplication handles id=0 gracefully
+        this.onModuleDamaged?.(hullShipId, 0, hullDmg, hullHitX, hullHitY);
         break;
       }
 
@@ -1591,6 +1972,224 @@ export class NetworkManager {
         break;
       }
 
+      case 'ENTITY_HIT': {
+        const hitEntityType: 'npc' | 'player' = message.entityType === 'player' ? 'player' : 'npc';
+        this.onEntityHit?.(
+          hitEntityType,
+          message.id       ?? 0,
+          message.x        ?? 0,
+          message.y        ?? 0,
+          message.damage   ?? 0,
+          message.health   ?? 0,
+          message.maxHealth ?? 100,
+          message.killed   ?? false,
+        );
+        break;
+      }
+
+      case 'FIRE_EFFECT': {
+        console.log(`[NET] FIRE_EFFECT received: entityType=${message.entityType} shipId=${message.shipId} moduleId=${message.moduleId} id=${message.id}`);
+        const fireEntityType: 'npc' | 'player' | 'module' =
+          message.entityType === 'player' ? 'player' :
+          message.entityType === 'module' ? 'module' : 'npc';
+        const fireId = message.entityType === 'module'
+          ? (message.moduleId ?? 0)
+          : (message.id ?? 0);
+        this.onFireEffect?.(
+          fireEntityType,
+          fireId,
+          message.x        ?? 0,
+          message.y        ?? 0,
+          message.durationMs ?? 10000,
+          message.shipId   ?? undefined,
+          message.moduleId ?? undefined,
+        );
+        break;
+      }
+
+      case 'FIRE_EXTINGUISHED': {
+        const extEntityType: 'npc' | 'player' | 'module' =
+          message.entityType === 'player' ? 'player' :
+          message.entityType === 'module' ? 'module' : 'npc';
+        const extId = message.entityType === 'module'
+          ? (message.moduleId ?? 0)
+          : (message.id ?? 0);
+        this.onFireExtinguished?.(
+          extEntityType,
+          extId,
+          message.shipId   ?? undefined,
+          message.moduleId ?? undefined,
+        );
+        break;
+      }
+
+      case 'SAIL_FIBER_FIRE': {
+        // Real-time sail fiber fire intensity update
+        this.onSailFiberFire?.(
+          message.shipId    ?? 0,
+          message.moduleId  ?? 0,
+          message.intensity ?? 0,
+          message.fiberHealth ?? 0,
+          message.windEff   ?? 1.0,
+        );
+        break;
+      }
+
+      case 'ISLANDS': {
+        const islands: IslandDef[] = (message.islands ?? []).map((isl: any) => ({
+          id:        isl.id       ?? 0,
+          x:         isl.x       ?? 0,
+          y:         isl.y       ?? 0,
+          preset:    (isl.preset ?? 'tropical') as IslandPreset,
+          resources: (isl.resources ?? []).map((r: any): IslandResource => ({
+            ox:   r.ox   ?? 0,
+            oy:   r.oy   ?? 0,
+            type: (r.type ?? 'wood') as IslandResource['type'],
+          })),
+          vertices: isl.vertices
+            ? (isl.vertices as any[]).map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 }))
+            : undefined,
+        }));
+        this.onIslands?.(islands);
+        break;
+      }
+
+      case 'STRUCTURES': {
+        const structs: PlacedStructure[] = (message.structures ?? []).map((s: any): PlacedStructure => ({
+          id:        s.id       ?? 0,
+          type:      s.structure_type === 'workbench'  ? 'workbench'
+                   : s.structure_type === 'wall'       ? 'wall'
+                   : s.structure_type === 'door_frame' ? 'door_frame'
+                   : s.structure_type === 'door'       ? 'door'
+                   : 'wooden_floor',
+          islandId:  s.island_id ?? 0,
+          x:         s.x ?? 0,
+          y:         s.y ?? 0,
+          companyId: s.company_id ?? 0,
+          hp:        s.hp     ?? 100,
+          maxHp:     s.max_hp ?? 100,
+          placerName: s.placer_name ?? '',
+          doorOpen:  s.open ?? false,
+        }));
+        this.onStructuresList?.(structs);
+        break;
+      }
+
+      case 'structure_placed': {
+        const sp: PlacedStructure = {
+          id:        message.id       ?? 0,
+          type:      message.structure_type === 'workbench'  ? 'workbench'
+                   : message.structure_type === 'wall'       ? 'wall'
+                   : message.structure_type === 'door_frame' ? 'door_frame'
+                   : message.structure_type === 'door'       ? 'door'
+                   : 'wooden_floor',
+          islandId:  message.island_id ?? 0,
+          x:         message.x ?? 0,
+          y:         message.y ?? 0,
+          companyId: message.company_id ?? 0,
+          hp:        message.hp     ?? 100,
+          maxHp:     message.max_hp ?? 100,
+          placerName: message.placer_name ?? '',
+          doorOpen:  message.open ?? false,
+        };
+        this.onStructurePlaced?.(sp);
+        break;
+      }
+
+      case 'door_toggled':
+        this.onDoorToggled?.(message.id ?? 0, message.open === true);
+        break;
+
+      case 'structure_demolished':
+        this.onStructureDemolished?.(
+          message.structure_id ?? message.id ?? 0,
+          message.x,
+          message.y,
+        );
+        break;
+
+      case 'structure_company_updated':
+        this.onStructureCompanyUpdated?.(message.structure_id ?? 0, message.company_id ?? 0);
+        break;
+
+      case 'structure_hp_changed':
+        this.onStructureHpChanged?.(
+          message.structure_id ?? 0,
+          message.hp ?? 0,
+          message.max_hp ?? 100,
+          message.x ?? 0,
+          message.y ?? 0,
+        );
+        break;
+
+      case 'tree_cannonball_hit':
+        this.onTreeHit?.(message.x ?? 0, message.y ?? 0);
+        break;
+
+      case 'craft_result':
+        this.onCraftResult?.(
+          message.success === true,
+          message.recipe_id ?? '',
+          message.reason,
+        );
+        break;
+
+      case 'crafting_open':
+        this.onCraftingOpen?.(message.structure_id ?? 0, message.structure_type ?? 'workbench');
+        break;
+
+      case 'FLAME_CONE_FIRE': // legacy — ignore
+        break;
+
+      case 'CANNON_FIRE_EVENT': {
+        this.onCannonFireEvent?.(
+          message.cannonId    ?? 0,
+          message.shipId      ?? 0,
+          message.x           ?? 0,
+          message.y           ?? 0,
+          message.angle       ?? 0,
+          message.projectileId ?? 0,
+          message.ammoType    ?? 0,
+        );
+        break;
+      }
+
+      case 'FLAME_WAVE_UPDATE': {
+        this.onFlameWaveUpdate?.(
+          message.cannonId    ?? 0,
+          message.shipId      ?? 0,
+          message.x           ?? 0,
+          message.y           ?? 0,
+          message.angle       ?? 0,
+          message.halfCone    ?? 0.2618,
+          message.waveDist    ?? 0,
+          message.retreating  ?? false,
+          message.retreatDist ?? 0,
+          message.dead        ?? false,
+        );
+        break;
+      }
+
+      case 'ladder_state': {
+        this.onLadderState?.(
+          message.ship_id  ?? 0,
+          message.module_id ?? 0,
+          message.retracted ?? false,
+        );
+        break;
+      }
+
+      case 'SWORD_SWING': {
+        this.onSwordSwing?.(
+          message.playerId ?? 0,
+          message.x        ?? 0,
+          message.y        ?? 0,
+          message.angle    ?? 0,
+          message.range    ?? 80,
+        );
+        break;
+      }
+
       case 'SHIP_LEVEL_UP': {
         const lvlShipId:         number = message.shipId          || 0;
         const lvlAttribute:      string = message.attribute        || '';
@@ -1605,7 +2204,6 @@ export class NetworkManager {
       }
 
       default:
-        console.log('📦 Received message:', message.type, message);
         break;
     }
   }
@@ -1633,6 +2231,25 @@ export class NetworkManager {
    * Handle successful module interaction (mounting)
    */
   private handleModuleInteractSuccess(message: ModuleInteractSuccessMessage): void {
+    // Ladder toggle responses have an "action" field instead of "module_kind".
+    // They are not mount events — just acknowledge the state change.
+    const action = (message as any).action as string | undefined;
+    if (action === 'ladder_retracted' || action === 'ladder_extended') {
+      console.log(`🪜 Ladder interact success: ${action}`);
+      return;
+    }
+    if (action === 'unmounted') {
+      // Server acknowledged dismount — mount state is updated via GAME_STATE / onMountStateUpdate
+      console.log('🎮 Module interact success: unmounted');
+      return;
+    }
+
+    // Guard: module_kind missing on unexpected response shapes
+    if (!message.module_kind) {
+      console.warn('⚠️ module_interact_success missing module_kind, ignoring', message);
+      return;
+    }
+
     console.log(`✅ [MOUNT] Successfully mounted to ${message.module_kind.toUpperCase()} (ID: ${message.module_id})`);
     
     // Parse mount offset if provided
@@ -1656,6 +2273,10 @@ export class NetworkManager {
   /**
    * Send module interaction to server
    */
+  sendToggleLadder(moduleId: number): void {
+    this.sendMessage({ type: 'toggle_ladder' as any, module_id: moduleId, moduleId, timestamp: Date.now() } as any);
+  }
+
   sendModuleInteract(moduleId: number): void {
     const message: ModuleInteractMessage = {
       type: MessageType.MODULE_INTERACT,

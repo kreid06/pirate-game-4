@@ -3,35 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>🏴‍☠️ Pirate Game - Client-Server Network Demo</title>
+    <title>🏴‍☠️ Pirate Game</title>
     <style>
-      body {
+      html, body {
         margin: 0;
-        padding: 20px;
-        background: #1a1a1a;
-        font-family: Arial, sans-serif;
-        color: white;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #000033;
+        touch-action: none;
       }
-      
+
       #canvas-wrapper {
-        display: block;
-        margin: 20px auto;
-        width: fit-content;
-        position: relative;
+        position: fixed;
+        inset: 0;
       }
 
       canvas {
-        border: 1px solid #444;
-        background: #000033;
         display: block;
+        width: 100%;
+        height: 100%;
+        background: #000033;
       }
 
       #zoom-controls {
         position: absolute;
-        /* Equip panel: 110px wide, 90px tall, 8px from bottom-right of canvas.
-           Centre buttons (36px each) horizontally over the 110px equip box:
-           right = 8 + (110 - 36) / 2 = 45px
-           bottom = 8 (equip margin) + 90 (equip height) + 6 (gap) = 104px */
         right: 45px;
         bottom: 104px;
         display: flex;
@@ -39,34 +36,15 @@
         gap: 4px;
         z-index: 10;
       }
-      
-      .controls {
-        text-align: center;
-        margin: 20px;
-      }
-      
-      .info {
-        text-align: center;
-        margin: 10px;
-        font-size: 14px;
-      }
     </style>
   </head>
   <body>
-    <h1>🏴‍☠️ Enhanced Pirate Game - Week 3-4 Client</h1>
-    <div class="info">
-      Enhanced multiplayer client with server-side prediction, rollback networking, and Week 3-4 server integration.
-    </div>
     <div id="canvas-wrapper">
-      <canvas id="gameCanvas" width="1200" height="800"></canvas>
+      <canvas id="gameCanvas"></canvas>
       <div id="zoom-controls">
         <button id="zoom-in-btn" title="Zoom In" style="width:36px;height:36px;font-size:20px;font-weight:bold;background:rgba(0,0,0,0.65);color:#fff;border:1px solid #666;border-radius:6px;cursor:pointer;line-height:1;">+</button>
         <button id="zoom-out-btn" title="Zoom Out" style="width:36px;height:36px;font-size:20px;font-weight:bold;background:rgba(0,0,0,0.65);color:#fff;border:1px solid #666;border-radius:6px;cursor:pointer;line-height:1;">−</button>
       </div>
-    </div>
-    <div class="controls">
-      <p>Network Features: Client-server protocol • WebSocket connectivity • Private network support</p>
-      <p><strong>Controls:</strong> WASD/Arrow Keys = Move | Space = Jump/Action | E = Interact | Q = Dismount | F = Destroy Plank</p>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

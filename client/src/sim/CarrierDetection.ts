@@ -86,8 +86,16 @@ export function updateCarrierDetection(
 ): { newState: CarrierDetectionState; events: CarrierChangeEvent[] } {
   const events: CarrierChangeEvent[] = [];
   const newState = { ...detectionState };
-  newState.candidateStates = new Map(detectionState.candidateStates);
-  
+  // Lazily copy candidateStates on first write (copy-on-write) — avoids a Map allocation
+  // on every tick for players who haven't changed carrier state.
+  let _candidatesCopied = false;
+  function ensureCandidatesCopied(): void {
+    if (!_candidatesCopied) {
+      newState.candidateStates = new Map(detectionState.candidateStates);
+      _candidatesCopied = true;
+    }
+  }
+
   const epsilon = DETECTION_CONFIG.EPSILON_FACTOR * player.radius;
   
   // Failsafe: If player is moving fast in water but still marked as on-deck, force exit
@@ -98,7 +106,8 @@ export function updateCarrierDetection(
       const relativeVel = player.velocity.sub(currentShip.velocity);
       if (relativeVel.length() > PhysicsConfig.PLAYER_SWIM_SPEED * 0.6) {
         console.log(`Player ${player.id} swimming fast but marked on-deck - forcing exit`);
-        newState.candidateStates.delete(newState.currentCarrierId);
+        ensureCandidatesCopied();
+        newState.candidateStates.delete(newState.currentCarrierId!);
         events.push({
           type: 'leftDeck',
           playerId: player.id,
@@ -132,7 +141,8 @@ export function updateCarrierDetection(
       
       if (distanceToCarrier > maxCarrierDistance) {
         // Player is too far - force immediate exit regardless of hysteresis
-        newState.candidateStates.delete(newState.currentCarrierId);
+        ensureCandidatesCopied();
+        newState.candidateStates.delete(newState.currentCarrierId!);
         events.push({
           type: 'leftDeck',
           playerId: player.id,
@@ -177,25 +187,31 @@ export function updateCarrierDetection(
     }
   }
   
-  // Update candidate states
-  for (const [shipId, state] of newState.candidateStates.entries()) {
+  // Update candidate states — copy-on-write: only allocate the new Map if we actually change it.
+  for (const [shipId, state] of detectionState.candidateStates.entries()) {
     if (!currentDetections.has(shipId)) {
-      // No longer detecting this ship - start counting down
-      state.confirmationTicks = Math.max(0, state.confirmationTicks - 1);
+      ensureCandidatesCopied();
+      newState.candidateStates.get(shipId)!.confirmationTicks =
+        Math.max(0, state.confirmationTicks - 1);
     }
   }
-  
+
   // Add new detections
   for (const [shipId, detection] of currentDetections.entries()) {
+    ensureCandidatesCopied();
     newState.candidateStates.set(shipId, detection);
   }
-  
+
   // Remove expired states
-  for (const [shipId, state] of newState.candidateStates.entries()) {
+  for (const [shipId, state] of (_candidatesCopied ? newState : detectionState).candidateStates.entries()) {
     if (state.confirmationTicks === 0 && !currentDetections.has(shipId)) {
+      ensureCandidatesCopied();
       newState.candidateStates.delete(shipId);
     }
   }
+
+  // If nothing was written, newState still shares candidateStates with detectionState — that's fine
+  // since the caller immediately replaces this entry in carrierDetectionMap.
   
   // Determine new carrier using tie-breaking logic
   const newCarrierId = selectCarrier(newState, currentTime);

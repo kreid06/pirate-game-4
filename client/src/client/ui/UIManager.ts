@@ -15,6 +15,7 @@ import { ManningPriorityPanel } from './ManningPriorityPanel.js';
 import { CompanyMenu } from './CompanyMenu.js';
 import { PlayerMenu } from './PlayerMenu.js';
 import { ShipMenu } from './ShipMenu.js';
+import { CrewLevelMenu } from './CrewLevelMenu.js';
 
 /**
  * UI render context
@@ -40,6 +41,8 @@ export interface UIRenderContext {
   playerShip?: Ship | null;
   /** User-defined weapon control groups — set while on helm. */
   controlGroups?: Map<number, WeaponGroupState>;
+  /** Active ammo group on helm: 'cannon' (IDs 0-1) or 'swivel' (IDs 2-4). */
+  activeAmmoGroup?: 'cannon' | 'swivel';
 }
 
 /**
@@ -74,12 +77,14 @@ export class UIManager {
   // Manning priority panel
   private manningPanel = new ManningPriorityPanel();
 
-  // Company menu (toggled by [L])
+  // Company menu (toggled by [K])
   private companyMenu = new CompanyMenu();
   // Player character menu (toggled by [E] when menu is open)
   private playerMenu = new PlayerMenu();
   // Ship status menu (toggled by [F])
   private shipMenu = new ShipMenu();
+  // Crew level / upgrade panel (opened by clicking an NPC)
+  private crewMenu = new CrewLevelMenu();
 
   // UI State
   private showDebugOverlay = false;
@@ -93,14 +98,21 @@ export class UIManager {
   // Explicit build mode (B key) overlay state
   private buildModeState: {
     active: boolean;
-    selectedItem: 'cannon' | 'sail';
+    selectedItem: 'cannon' | 'sail' | 'swivel';
     rotationDeg: number;
     sailCount: number;
     maxSails: number;
   } | null = null;
 
-  /** Called when the player clicks a build item button (cannon/sail). */
-  public onBuildItemSelect: ((item: 'cannon' | 'sail') => void) | null = null;
+  // Island structure build mode overlay state
+  private islandBuildState: {
+    kind: 'wooden_floor' | 'workbench';
+    tooFar: boolean;
+    enemyClose: boolean;
+  } | null = null;
+
+  /** Called when the player clicks a build item button (cannon/sail/swivel). */
+  public onBuildItemSelect: ((item: 'cannon' | 'sail' | 'swivel') => void) | null = null;
   /** Called when a weapon group has its mode cycled via right-click. */
   public onGroupModeChange: ((groupIndex: number, mode: WeaponGroupMode) => void) | null = null;
   /** Cached from last render frame — used by handleRightClick for hotbar hit-testing. */
@@ -118,10 +130,11 @@ export class UIManager {
   private static readonly BUILD_PANEL_ENTRIES: Array<{
     kind: GhostModuleKind; label: string; symbol: string; color: string; borderColor: string;
   }> = [
-    { kind: 'cannon', label: 'Cannon', symbol: '⚫', color: '#444',    borderColor: '#888'    },
-    { kind: 'mast',   label: 'Sail',   symbol: '⛵', color: '#1e8c6e', borderColor: '#0f5c48' },
-    { kind: 'helm',   label: 'Helm',   symbol: 'W',  color: '#6a3d8f', borderColor: '#3d2060' },
-    { kind: 'deck',   label: 'Deck',   symbol: '⊟', color: '#8b5e3c', borderColor: '#5c3a1c' },
+    { kind: 'cannon', label: 'Cannon',     symbol: '⚫', color: '#444',    borderColor: '#888'    },
+    { kind: 'swivel', label: 'Swivel Gun', symbol: '›', color: '#7a4a2a', borderColor: '#4a2810' },
+    { kind: 'mast',   label: 'Sail',       symbol: '⛵', color: '#1e8c6e', borderColor: '#0f5c48' },
+    { kind: 'helm',   label: 'Helm',       symbol: 'W',  color: '#6a3d8f', borderColor: '#3d2060' },
+    { kind: 'deck',   label: 'Deck',       symbol: '⊟', color: '#8b5e3c', borderColor: '#5c3a1c' },
   ];
 
   private static readonly BUILD_PANEL_W = 164;
@@ -256,24 +269,50 @@ export class UIManager {
     
     // Render manning priority panel (always on top, left side)
     const shipId = context.playerShipId ?? 0;
-    this.manningPanel.render(ctx, context.worldState.npcs ?? [], shipId);
+    const _localPlayer = context.worldState.players.find(p => p.id === context.assignedPlayerId);
+    const _localCompanyId = _localPlayer?.companyId ?? 0;
+    this.manningPanel.render(ctx, context.worldState.npcs ?? [], shipId, _localCompanyId);
     
     // Always render FPS in top-right corner
     this.renderFPS(ctx, context);
 
-    // Ammo selector widget — show when mounted to a cannon or the helm
-    if (context.mountKind === 'cannon' || context.mountKind === 'helm') {
+    // Ammo selector widget
+    if (context.mountKind === 'cannon') {
       this.renderAmmoSelector(ctx, context.selectedAmmoType ?? 0, context.pendingAmmoType ?? context.selectedAmmoType ?? 0);
+    } else if (context.mountKind === 'helm') {
+      // Combined cannon+swivel row with [U] group switching
+      this.renderHelmCombinedAmmoSelector(
+        ctx,
+        context.selectedAmmoType ?? 0,
+        context.pendingAmmoType ?? context.selectedAmmoType ?? 0,
+        context.activeAmmoGroup ?? 'cannon'
+      );
+    }
+
+    // Swivel ammo selector — three types, shown when mounted to a swivel
+    if (context.mountKind === 'swivel') {
+      this.renderSwivelAmmoSelector(ctx, context.selectedAmmoType ?? 2, context.pendingAmmoType ?? context.selectedAmmoType ?? 2);
     }
 
     // Company menu renders last so it sits above all other UI
     this.companyMenu.render(ctx, context.worldState, context.assignedPlayerId);
     this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId);
     this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
+    // Crew level menu — update live NPC data before rendering
+    if (this.crewMenu.visible && this.crewMenu.npcId) {
+      const liveNpc = context.worldState.npcs.find(n => n.id === this.crewMenu.npcId);
+      if (liveNpc) this.crewMenu.update(liveNpc);
+    }
+    this.crewMenu.render(ctx, ctx.canvas);
 
     // Explicit build mode overlay (renders on top of everything, including menus)
     if (this.buildModeState?.active) {
       this.renderBuildModeOverlay(ctx, ctx.canvas);
+    }
+
+    // Island structure build mode overlay
+    if (this.islandBuildState) {
+      this.renderIslandBuildOverlay(ctx, ctx.canvas);
     }
 
     // Ghost build menu panel — left side of screen
@@ -322,6 +361,170 @@ export class UIManager {
     ctx.textBaseline = 'top';
     ctx.fillText(text, x + padding, y + padding);
     
+    ctx.restore();
+  }
+
+  /**
+   * Helm combined ammo selector — bottom-left corner.
+   * Shows all 5 ammo types in one row: [CANNONBALL][BAR SHOT] | [GRAPESHOT][LIQ.FLAME][CANISTER]
+   * Active group is fully opaque; inactive group is dimmed.
+   * [U] toggles between cannon/swivel group;  [X] cycles within the active group.
+   */
+  private renderHelmCombinedAmmoSelector(
+    ctx: CanvasRenderingContext2D,
+    loadedAmmoType: number,
+    pendingAmmoType: number,
+    activeGroup: 'cannon' | 'swivel'
+  ): void {
+    ctx.save();
+
+    // Normalise client UI IDs (10/11/12) → internal swivel IDs (2/3/4)
+    const normSwivel = (id: number) => id === 10 ? 2 : id === 11 ? 3 : id === 12 ? 4 : id;
+    loadedAmmoType  = normSwivel(loadedAmmoType);
+    pendingAmmoType = normSwivel(pendingAmmoType);
+
+    const slotW  = 68;
+    const slotH  = 48;
+    const margin = 3;
+    const divW   = 12;   // gap for the | divider
+    const x0     = 12;
+    const y0     = ctx.canvas.height - slotH - 12;
+    const pad    = 4;
+
+    const cannonAmmos: { id: number; name: string; icon: string; color: string }[] = [
+      { id: 0, name: 'CANNONBALL', icon: '●',   color: '#c0c0a0' },
+      { id: 1, name: 'BAR SHOT',   icon: '◉━◉', color: '#ff7733' },
+    ];
+    const swivelAmmos: { id: number; name: string; icon: string; color: string; desc: string }[] = [
+      { id: 2, name: 'GRAPESHOT',  icon: '∷', color: '#c8c8b0', desc: 'crew dmg'  },
+      { id: 3, name: 'LIQ. FLAME', icon: '≈', color: '#ff8832', desc: 'fire dmg'  },
+      { id: 4, name: 'CANISTER',   icon: '⊠', color: '#90d890', desc: 'spread'    },
+    ];
+
+    const switchPending = pendingAmmoType !== loadedAmmoType;
+
+    const renderSlot = (
+      slotX: number,
+      ammo: { id: number; name: string; icon: string; color: string; desc?: string },
+      groupActive: boolean
+    ) => {
+      const isLoaded  = ammo.id === loadedAmmoType;
+      const isPending = ammo.id === pendingAmmoType && switchPending;
+
+      let bgColor: string;
+      let borderColor: string;
+      let borderWidth: number;
+      let textColor: string;
+      let iconColor: string;
+      let dotColor: string | null = null;
+
+      if (isLoaded) {
+        bgColor     = 'rgba(50,220,80,0.20)';
+        borderColor = '#44dd66';
+        borderWidth = 2;
+        iconColor   = ammo.color;
+        textColor   = '#ccffcc';
+        dotColor    = '#44dd66';
+      } else if (isPending) {
+        bgColor     = 'rgba(255,200,50,0.18)';
+        borderColor = '#ffd700';
+        borderWidth = 2;
+        iconColor   = ammo.color;
+        textColor   = '#fffccc';
+        dotColor    = '#ffd700';
+      } else {
+        bgColor     = 'rgba(0,0,0,0.55)';
+        borderColor = '#445';
+        borderWidth = 1;
+        iconColor   = '#556';
+        textColor   = '#668';
+      }
+
+      const alpha = groupActive ? 1.0 : 0.35;
+      ctx.globalAlpha = alpha;
+
+      ctx.fillStyle   = bgColor;
+      ctx.fillRect(slotX, y0, slotW, slotH);
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth   = borderWidth;
+      ctx.strokeRect(slotX, y0, slotW, slotH);
+
+      // Icon
+      ctx.font         = '11px Consolas, monospace';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = iconColor;
+      ctx.fillText(ammo.icon, slotX + pad + 1, y0 + slotH / 2 - 4);
+
+      // Name
+      ctx.font      = (isLoaded || isPending) ? 'bold 8px Consolas, monospace' : '8px Consolas, monospace';
+      ctx.fillStyle = textColor;
+      ctx.fillText(ammo.name, slotX + pad + 1, y0 + slotH / 2 + 5);
+
+      // Desc (swivel only)
+      if (ammo.desc) {
+        ctx.font      = '6px Consolas, monospace';
+        ctx.fillStyle = (isLoaded || isPending) ? 'rgba(160,200,160,0.65)' : 'rgba(90,100,100,0.50)';
+        ctx.fillText(ammo.desc, slotX + pad + 1, y0 + slotH / 2 + 13);
+      }
+
+      // Dot indicator
+      if (dotColor) {
+        ctx.fillStyle = dotColor;
+        ctx.beginPath();
+        ctx.arc(slotX + slotW - 7, y0 + 7, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.globalAlpha = 1.0;
+    };
+
+    // --- Cannon slots ---
+    for (let i = 0; i < cannonAmmos.length; i++) {
+      renderSlot(x0 + i * (slotW + margin), cannonAmmos[i], activeGroup === 'cannon');
+    }
+
+    // --- Divider ---
+    const divX = x0 + cannonAmmos.length * (slotW + margin);
+    ctx.globalAlpha = 0.55;
+    ctx.strokeStyle = 'rgba(160,160,200,0.70)';
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(divX + divW / 2, y0 + 5);
+    ctx.lineTo(divX + divW / 2, y0 + slotH - 5);
+    ctx.stroke();
+    ctx.globalAlpha = 1.0;
+
+    // --- Swivel slots ---
+    const swivelStartX = divX + divW;
+    for (let i = 0; i < swivelAmmos.length; i++) {
+      renderSlot(swivelStartX + i * (slotW + margin), swivelAmmos[i], activeGroup === 'swivel');
+    }
+
+    // --- Group labels above each section ---
+    ctx.font         = 'bold 6px Consolas, monospace';
+    ctx.textBaseline = 'bottom';
+    ctx.textAlign    = 'center';
+
+    const cannonCx = x0 + (cannonAmmos.length * slotW + (cannonAmmos.length - 1) * margin) / 2;
+    ctx.globalAlpha = activeGroup === 'cannon' ? 0.85 : 0.38;
+    ctx.fillStyle   = '#c8d8c8';
+    ctx.fillText('CANNON', cannonCx, y0 - 3);
+
+    const swivelCx = swivelStartX + (swivelAmmos.length * slotW + (swivelAmmos.length - 1) * margin) / 2;
+    ctx.globalAlpha = activeGroup === 'swivel' ? 0.85 : 0.38;
+    ctx.fillStyle   = '#c8d8c8';
+    ctx.fillText('SWIVEL', swivelCx, y0 - 3);
+
+    ctx.globalAlpha = 1.0;
+
+    // --- Hint row ---
+    ctx.font         = '9px Consolas, monospace';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle    = 'rgba(120,120,140,0.70)';
+    ctx.fillText('[U] switch group  |  [X] cycle  |  hold X (0.5s) → force reload', x0 + 2, y0 + slotH + 3);
+
     ctx.restore();
   }
 
@@ -453,6 +656,143 @@ export class UIManager {
   }
 
   /**
+   * Swivel gun ammo selector widget — bottom-left corner.
+   * Shows three slots: Grapeshot, Liquid Flame, Canister Shot.
+   * Ammo IDs: 2 = GRAPESHOT, 3 = LIQUID FLAME, 4 = CANISTER SHOT
+   */
+  private renderSwivelAmmoSelector(ctx: CanvasRenderingContext2D, loadedAmmoType: number, pendingAmmoType: number): void {
+    ctx.save();
+
+    // Normalise client UI IDs (10/11/12) → internal swivel IDs (2/3/4)
+    const normSwivel = (id: number) => id === 10 ? 2 : id === 11 ? 3 : id === 12 ? 4 : id;
+    const validIds = [2, 3, 4];
+    const safeLoaded  = validIds.includes(normSwivel(loadedAmmoType))  ? normSwivel(loadedAmmoType)  : 2;
+    const safePending = validIds.includes(normSwivel(pendingAmmoType)) ? normSwivel(pendingAmmoType) : safeLoaded;
+
+    const ammoTypes = [
+      { id: 2, name: 'GRAPESHOT',  icon: '∷', color: '#c8c8b0', desc: 'crew damage'  },
+      { id: 3, name: 'LIQ. FLAME', icon: '≈',  color: '#ff8832', desc: 'fire damage'  },
+      { id: 4, name: 'CANISTER',   icon: '⊠',  color: '#90d890', desc: 'wide spread'  },
+    ];
+
+    const slotW  = 96;
+    const slotH  = 52;
+    const margin = 5;
+    const pad    = 6;
+    const x0     = 12;
+    const y0     = ctx.canvas.height - slotH - 14;
+
+    const switchPending = safePending !== safeLoaded;
+
+    // Header label
+    ctx.font         = 'bold 9px Consolas, monospace';
+    ctx.fillStyle    = 'rgba(200,160,80,0.80)';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('⚫ SWIVEL AMMO', x0, y0 - 4);
+
+    for (let i = 0; i < ammoTypes.length; i++) {
+      const ammo      = ammoTypes[i];
+      const isLoaded  = ammo.id === safeLoaded;
+      const isPending = ammo.id === safePending;
+      const sx        = x0 + i * (slotW + margin);
+
+      let bgColor: string;
+      let borderColor: string;
+      let borderWidth: number;
+      let textColor: string;
+      let iconColor: string;
+      let dotColor: string | null = null;
+
+      if (isLoaded) {
+        bgColor     = 'rgba(50,220,80,0.18)';
+        borderColor = '#44dd66';
+        borderWidth = 2;
+        iconColor   = ammo.color;
+        textColor   = '#ccffcc';
+        dotColor    = '#44dd66';
+      } else if (isPending) {
+        bgColor     = 'rgba(255,200,50,0.18)';
+        borderColor = '#ffd700';
+        borderWidth = 2;
+        iconColor   = ammo.color;
+        textColor   = '#fffccc';
+        dotColor    = '#ffd700';
+      } else {
+        bgColor     = 'rgba(0,0,0,0.55)';
+        borderColor = '#445';
+        borderWidth = 1;
+        iconColor   = '#556';
+        textColor   = '#668';
+      }
+
+      // Background
+      ctx.fillStyle = bgColor;
+      ctx.fillRect(sx, y0, slotW, slotH);
+
+      // Border
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth   = borderWidth;
+      ctx.strokeRect(sx, y0, slotW, slotH);
+
+      // Icon
+      ctx.font         = '17px Consolas, monospace';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = iconColor;
+      ctx.fillText(ammo.icon, sx + pad, y0 + slotH / 2 - 8);
+
+      // Name
+      ctx.font         = (isLoaded || isPending) ? 'bold 10px Consolas, monospace' : '10px Consolas, monospace';
+      ctx.fillStyle    = textColor;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(ammo.name, sx + pad, y0 + slotH / 2 + 5);
+
+      // Desc line
+      ctx.font      = '8px Consolas, monospace';
+      ctx.fillStyle = (isLoaded || isPending) ? 'rgba(180,220,180,0.65)' : 'rgba(100,100,120,0.5)';
+      ctx.fillText(ammo.desc, sx + pad, y0 + slotH / 2 + 17);
+
+      // LOADED / NEXT sub-label
+      if (isLoaded && switchPending) {
+        ctx.font         = '8px Consolas, monospace';
+        ctx.fillStyle    = '#44dd66';
+        ctx.textAlign    = 'right';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('LOADED', sx + slotW - 4, y0 + slotH - 3);
+        ctx.textAlign = 'left';
+      } else if (isPending && switchPending) {
+        ctx.font         = '8px Consolas, monospace';
+        ctx.fillStyle    = '#ffd700';
+        ctx.textAlign    = 'right';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('NEXT', sx + slotW - 4, y0 + slotH - 3);
+        ctx.textAlign = 'left';
+      }
+
+      // Status indicator dot (top-right of slot)
+      if (dotColor) {
+        ctx.fillStyle = dotColor;
+        ctx.beginPath();
+        ctx.arc(sx + slotW - 9, y0 + 9, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Key hint below the slots
+    ctx.font         = '10px Consolas, monospace';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle    = 'rgba(120,120,140,0.7)';
+    const hint = switchPending
+      ? '[X] cycle  |  hold X (0.5s) → force load'
+      : '[X] cycle ammo  |  hold X (0.5s) → force swap';
+    ctx.fillText(hint, x0 + 2, y0 + slotH + 3);
+
+    ctx.restore();
+  }
+
+  /**
    * Set callback for crew assignment changes from the manning priority panel.
    * The callback receives the player's ship ID and the full assignment list.
    */
@@ -473,17 +813,50 @@ export class UIManager {
   }
 
   /**
+   * Set callback for NPC stat upgrades from the crew level menu.
+   * Called when the player clicks an affordable upgrade button.
+   */
+  setCrewUpgradeCallback(
+    cb: (npcId: number, stat: string) => void
+  ): void {
+    this.crewMenu.onUpgradeRequest = cb;
+    // Also wire ShipMenu NPC rows → open crew menu
+    this.shipMenu.onNpcClick = (npc) => {
+      this.crewMenu.open(npc);
+    };
+  }
+
+  /**
+   * Open the crew level menu for a specific NPC (e.g. from a world click).
+   */
+  openCrewMenuForNpc(npc: Npc): void {
+    this.crewMenu.open(npc);
+  }
+
+  /**
    * Update explicit build mode state (called by ClientApplication each frame / on change).
    * Pass null to hide the build mode overlay.
    */
   setBuildModeState(state: {
     active: boolean;
-    selectedItem: 'cannon' | 'sail';
+    selectedItem: 'cannon' | 'sail' | 'swivel';
     rotationDeg: number;
     sailCount: number;
     maxSails: number;
   } | null): void {
     this.buildModeState = state;
+  }
+
+  /**
+   * Set island structure placement build mode state.
+   * Pass null to hide the overlay.
+   */
+  setIslandBuildState(state: {
+    kind: 'wooden_floor' | 'workbench';
+    tooFar: boolean;
+    enemyClose: boolean;
+  } | null): void {
+    this.islandBuildState = state;
   }
 
   /**
@@ -535,6 +908,11 @@ export class UIManager {
       this.playerMenu.close();
       return true;
     }
+    if (this.crewMenu.visible) {
+      const consumed = this.crewMenu.handleClick(x, y);
+      if (!consumed) this.crewMenu.close();
+      return true;
+    }
     if (this.shipMenu.visible) {
       // Forward to shipMenu — returns true if inside panel (upgrade click or panel area)
       const consumed = this.shipMenu.handleClick(x, y);
@@ -553,8 +931,8 @@ export class UIManager {
    * Called when the local player boards a new ship.
    * Seeds the crew panel from the ship's authoritative NPC states and resets delta tracking.
    */
-  syncCrewFromBoarding(npcs: Npc[], shipId: number): void {
-    this.manningPanel.syncFromBoarding(npcs, shipId);
+  syncCrewFromBoarding(npcs: Npc[], shipId: number, localCompanyId: number = 0): void {
+    this.manningPanel.syncFromBoarding(npcs, shipId, localCompanyId);
   }
 
   // -----------------------------------------------------------------------
@@ -667,6 +1045,8 @@ export class UIManager {
 
     const itemLabel = selectedItem === 'cannon'
       ? '🔫 CANNON'
+      : selectedItem === 'swivel'
+      ? '🔫 SWIVEL'
       : `⛵ SAIL (${sailCount}/${maxSails})`;
     ctx.font = 'bold 22px Consolas, monospace';
     ctx.textAlign = 'center';
@@ -681,6 +1061,53 @@ export class UIManager {
     // 2) ROTATION DIAL — above the hotbar, centered
     // ================================================================
     this.renderRotationDial(ctx, canvas, rotationDeg);
+
+    ctx.restore();
+  }
+
+  /** Amber top banner shown when the player has a wooden_floor or workbench equipped. */
+  private renderIslandBuildOverlay(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    if (!this.islandBuildState) return;
+    const { kind, tooFar, enemyClose } = this.islandBuildState;
+
+    ctx.save();
+
+    const BANNER_H = 48;
+    const cw = canvas.width;
+
+    // Background — amber for normal, red-tint for warnings
+    const topColor    = (tooFar || enemyClose) ? '#a83000' : '#c87800';
+    const bottomColor = (tooFar || enemyClose) ? '#661800' : '#7a4800';
+    const bannerGrad = ctx.createLinearGradient(0, 0, 0, BANNER_H);
+    bannerGrad.addColorStop(0, topColor);
+    bannerGrad.addColorStop(1, bottomColor);
+    ctx.fillStyle = bannerGrad;
+    ctx.fillRect(0, 0, cw, BANNER_H);
+
+    // Bottom edge
+    ctx.strokeStyle = (tooFar || enemyClose) ? '#ff7744' : '#ffcc44';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, BANNER_H);
+    ctx.lineTo(cw, BANNER_H);
+    ctx.stroke();
+
+    // Item label
+    const itemLabel = kind === 'wooden_floor' ? '\u229f WOODEN FLOOR' : '\u2692 WORKBENCH';
+
+    // Status suffix
+    let status = '';
+    if (enemyClose) status = '  \u26a0\ufe0f ENEMY NEARBY — retreat to place';
+    else if (tooFar) status = '  \u26a0\ufe0f TOO FAR — move closer';
+
+    ctx.font = 'bold 20px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff8e0';
+    ctx.fillText(
+      `\u2301  BUILD MODE — ${itemLabel}  |  [Click] Place  |  [Esc / change slot] Cancel${status}`,
+      cw / 2, BANNER_H / 2
+    );
 
     ctx.restore();
   }
@@ -963,8 +1390,8 @@ export class UIManager {
     }
 
     switch (event.code) {
-      case 'KeyL':
-        // [L] toggles (opens or closes) the company ledger menu
+      case 'KeyK':
+        // [K] toggles (opens or closes) the company ledger menu
         this.companyMenu.toggle();
         // Close sibling menus so only one is open at a time
         if (this.companyMenu.visible) { this.playerMenu.close(); this.shipMenu.close(); }

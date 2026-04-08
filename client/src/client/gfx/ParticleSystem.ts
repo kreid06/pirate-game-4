@@ -18,7 +18,6 @@ interface Particle {
   size: number;
   color: string;
   alpha: number;
-  gravity: number;     // Gravity affect factor
 }
 
 /**
@@ -29,7 +28,10 @@ export enum ParticleEffectType {
   CANNONBALL_SMOKE = 'cannonball_smoke',
   EXPLOSION = 'explosion',
   WATER_FOAM = 'water_foam',
-  SAIL_FIBER = 'sail_fiber'
+  SAIL_FIBER = 'sail_fiber',
+  SINK_SPLASH = 'sink_splash',
+  FLAME_TRAIL = 'flame_trail',
+  FLAME_CONE_EMBERS = 'flame_cone_embers',
 }
 
 /**
@@ -61,7 +63,7 @@ export class ParticleSystem {
     medium: 1.0,
     high: 2.0
   };
-  
+
   constructor(ctx: CanvasRenderingContext2D) {
     this.ctx = ctx;
   }
@@ -84,9 +86,10 @@ export class ParticleSystem {
       const effect = this.effects[i];
       this.updateEffect(effect, dt);
       
-      // Remove effects with no particles
+      // Remove effects with no particles (swap-and-pop)
       if (effect.particles.length === 0) {
-        this.effects.splice(i, 1);
+        this.effects[i] = this.effects[this.effects.length - 1];
+        this.effects.pop();
       }
     }
   }
@@ -105,37 +108,79 @@ export class ParticleSystem {
   }
   
   /**
-   * Create a water splash effect
+   * Create a dramatic water splash for cannonball impact / expiry over water.
+   * Three passes: central geyser column, radial base ring, foam mist.
    */
   createWaterSplash(position: Vec2, intensity: number = 1.0): void {
-    const particleCount = Math.floor(20 * intensity * this.qualityMultipliers[this.quality]);
+    const q = this.qualityMultipliers[this.quality];
     const particles: Particle[] = [];
-    
-    for (let i = 0; i < particleCount; i++) {
-      const angle = (i / particleCount) * Math.PI * 2;
-      const speed = 80 + Math.random() * 120;
-      const lifetime = 1.5 + Math.random() * 1.0;
-      
+
+    const waterColors  = ['#ffffff', '#daf0ff', '#a8d8f0', '#87ceeb', '#c8e8ff'];
+    const foamColors   = ['#ffffff', '#f0f8ff', '#e0f0ff'];
+
+    // ── Pass 1: Central geyser — tall upward column ──────────────────────────
+    const geyserCount = Math.floor(28 * intensity * q);
+    for (let i = 0; i < geyserCount; i++) {
+      const spread = (Math.random() - 0.5) * 0.45; // ±13° from straight up
+      const angle  = -Math.PI / 2 + spread;
+      const speed  = 220 + Math.random() * 280;     // fast enough to arc high
       particles.push({
-        position: position.clone(),
-        velocity: Vec2.from(
-          Math.cos(angle) * speed,
-          Math.sin(angle) * speed
-        ),
+        position: position.add(Vec2.from((Math.random() - 0.5) * 12, 0)),
+        velocity: Vec2.from(Math.cos(angle) * speed, Math.sin(angle) * speed),
         life: 0,
-        maxLife: lifetime,
-        size: 2 + Math.random() * 3,
-        color: '#87ceeb', // Sky blue for water
-        alpha: 0.8,
-        gravity: 50 // Water falls down
+        maxLife: 0.9 + Math.random() * 0.8,
+        size: 4 + Math.random() * 7,
+        color: waterColors[Math.floor(Math.random() * waterColors.length)],
+        alpha: 0.85 + Math.random() * 0.15,
       });
     }
-    
+
+    // ── Pass 2: Radial base ring — fans out to all sides ─────────────────────
+    const ringCount = Math.floor(36 * intensity * q);
+    for (let i = 0; i < ringCount; i++) {
+      const angle = (i / ringCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.3;
+      // Bias toward horizontal: [-60°, +60°] from the ring plane (y = 0)
+      const vertBias = (Math.random() - 0.5) * Math.PI * 0.4;
+      const finalAngle = angle + vertBias * 0.3;
+      const speed = 150 + Math.random() * 200;
+      particles.push({
+        position: position.add(Vec2.from(
+          (Math.random() - 0.5) * 20,
+          (Math.random() - 0.5) * 10,
+        )),
+        velocity: Vec2.from(Math.cos(finalAngle) * speed, Math.sin(finalAngle) * speed - 60),
+        life: 0,
+        maxLife: 0.7 + Math.random() * 0.7,
+        size: 3 + Math.random() * 6,
+        color: waterColors[Math.floor(Math.random() * waterColors.length)],
+        alpha: 0.7 + Math.random() * 0.25,
+      });
+    }
+
+    // ── Pass 3: Foam mist — small slow particles that linger ─────────────────
+    const mistCount = Math.floor(20 * intensity * q);
+    for (let i = 0; i < mistCount; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 40 + Math.random() * 90;
+      particles.push({
+        position: position.add(Vec2.from(
+          (Math.random() - 0.5) * 40,
+          (Math.random() - 0.5) * 20,
+        )),
+        velocity: Vec2.from(Math.cos(angle) * speed, Math.sin(angle) * speed - 30),
+        life: 0,
+        maxLife: 1.4 + Math.random() * 1.0,
+        size: 6 + Math.random() * 10,
+        color: foamColors[Math.floor(Math.random() * foamColors.length)],
+        alpha: 0.35 + Math.random() * 0.3,
+      });
+    }
+
     this.effects.push({
       position: position.clone(),
       type: ParticleEffectType.WATER_SPLASH,
       intensity,
-      particles
+      particles,
     });
   }
   
@@ -167,7 +212,6 @@ export class ParticleSystem {
         size: 3 + Math.random() * 4,
         color: '#555555', // Gray smoke
         alpha: 0.6,
-        gravity: -10 // Smoke rises
       });
     }
     
@@ -202,7 +246,6 @@ export class ParticleSystem {
         size: 3 + Math.random() * 5,
         color: Math.random() > 0.5 ? '#ff6600' : '#ffaa00', // Orange/yellow explosion
         alpha: 1.0,
-        gravity: 0 // Explosion particles don't fall initially
       });
     }
     
@@ -214,6 +257,48 @@ export class ParticleSystem {
     });
   }
   
+  /**
+   * Create a sinking-ship splash burst.
+   * Called continuously while a ship sinks — emits a small geyser of water
+   * droplets and foam at the given world position.
+   * @param position  World-space origin of the burst (a point on the hull edge).
+   * @param intensity 0–1 scale: 1 = mid-sink, higher = near fully submerged.
+   */
+  createSinkSplash(position: Vec2, intensity: number = 1.0): void {
+    const count = Math.max(2, Math.floor(6 * intensity * this.qualityMultipliers[this.quality]));
+    const particles: Particle[] = [];
+
+    // Colour palette — white foam + blue water + translucent bubbles
+    const waterColors = ['#ffffff', '#e8f4f8', '#c8e8f8', '#87ceeb', '#b0d8f0'];
+
+    for (let i = 0; i < count; i++) {
+      // Upward cone with horizontal scatter
+      const spreadAngle = (Math.random() - 0.5) * Math.PI * 0.9; // ±80° from straight up
+      const speed = 60 + Math.random() * 100 * intensity;
+      const angle  = -Math.PI * 0.5 + spreadAngle; // mostly upward
+
+      particles.push({
+        position: position.add(Vec2.from(
+          (Math.random() - 0.5) * 30,
+          (Math.random() - 0.5) * 15,
+        )),
+        velocity: Vec2.from(Math.cos(angle) * speed, Math.sin(angle) * speed),
+        life: 0,
+        maxLife: 0.6 + Math.random() * 0.9,
+        size: 2 + Math.random() * 4 * intensity,
+        color: waterColors[Math.floor(Math.random() * waterColors.length)],
+        alpha: 0.7 + Math.random() * 0.3,
+      });
+    }
+
+    this.effects.push({
+      position: position.clone(),
+      type: ParticleEffectType.SINK_SPLASH,
+      intensity,
+      particles,
+    });
+  }
+
   /**
    * Create sail fiber damage effect — torn cloth shreds flying from a mast hit
    */
@@ -241,7 +326,6 @@ export class ParticleSystem {
         size: 2 + Math.random() * 5,
         color: clothColors[Math.floor(Math.random() * clothColors.length)],
         alpha: 0.9,
-        gravity: 120  // Cloth strips fall faster than smoke
       });
     }
 
@@ -250,6 +334,156 @@ export class ParticleSystem {
       type: ParticleEffectType.SAIL_FIBER,
       intensity,
       particles
+    });
+  }
+
+  /**
+   * Scatter fire blobs through the live flame-cone volume.
+   * Called every frame from RenderSystem.drawFlameCones.
+   *
+   * Color is fixed at birth (reference style): r=255, g=100-190, b=10-30.
+   * Rendered as per-particle radial gradients with additive compositing.
+   * Velocity combines forward cone direction, cross-cone spread, and world-space upward rise.
+   */
+  createFlameConeParticles(
+    origin: Vec2,
+    angle: number,
+    halfCone: number,
+    innerDist: number,
+    outerDist: number,
+    rotationSpeed = 0,  // rad/s — widens cone when aim flicks fast
+  ): void {
+    if (Math.random() > 0.50) return; // 50% gate — pairs with outer pulse gate in RenderSystem
+    // Widen the spray when the player rotates fast; cap at 80° half-angle
+    const effectiveHalfCone = Math.min(halfCone * (1 + rotationSpeed * 0.4), Math.PI * 0.44);
+    const span = outerDist - innerDist;
+    if (span <= 0) return;
+
+    const quality   = this.qualityMultipliers[this.quality];
+    const count     = Math.max(1, Math.floor(3 * quality));  // reduced from 6
+    const sideCount = Math.max(1, Math.floor(1 * quality));  // reduced from 3
+    const particles: Particle[] = [];
+
+    // ── Main forward embers ─────────────────────────────────────────────────
+    for (let i = 0; i < count; i++) {
+      const a    = angle + (Math.random() * 2 - 1) * effectiveHalfCone;
+      const dist = innerDist + Math.random() * span;
+      const frac = dist / Math.max(1, outerDist);
+
+      const r = Math.round(220 + Math.random() * 35); // 220–255
+      // Brighter/more-yellow near barrel (frac≈0), cooler orange toward tip (frac≈1)
+      const g = Math.min(255, Math.round((150 - frac * 90) + Math.random() * 50)); // 150–200 barrel → 60–110 tip
+      const b = Math.round(0   + Math.random() * 15);  // 0–15
+
+      const fwdSpeed   = 20 + frac * 45 + Math.random() * 25;
+      const crossSpeed = (Math.random() - 0.5) * 30;
+      const riseSpeed  = 20 + Math.random() * 35;
+      const velX = Math.cos(angle) * fwdSpeed + (-Math.sin(angle)) * crossSpeed;
+      const velY = Math.sin(angle) * fwdSpeed + Math.cos(angle) * crossSpeed - riseSpeed;
+      // Barrel brightness stored in alpha (not overwritten for fire particles in updateEffect)
+      const brightness = 0.65 + (1.0 - frac) * 0.35; // 1.0 at barrel → 0.65 at tip
+
+      particles.push({
+        position: origin.add(Vec2.from(
+          Math.cos(a) * dist + (Math.random() - 0.5) * 8,
+          Math.sin(a) * dist + (Math.random() - 0.5) * 8,
+        )),
+        velocity: Vec2.from(velX, velY),
+        life:    0,
+        maxLife: 0.18 + Math.random() * 0.32,
+        size:    18 - frac * 6 + Math.random() * 8,   // small at spawn — grows in render
+        color:   `${r},${g},${b}`,
+        alpha:   brightness,
+      });
+    }
+
+    // ── Side-scatter embers — spawn near the cone edges, fly sideways ───────
+    // perpX/perpY = unit vector perpendicular to the cone axis
+    const perpX = -Math.sin(angle);
+    const perpY =  Math.cos(angle);
+    for (let i = 0; i < sideCount; i++) {
+      // Place along the cone edge: pick a random depth then offset to one edge
+      const dist = innerDist + Math.random() * span;
+      const frac = dist / Math.max(1, outerDist);
+      const side = Math.random() < 0.5 ? -1 : 1; // left or right edge
+
+      // Spawn position: at the cone edge (halfCone) ± small jitter
+      const edgeAngle = angle + side * halfCone * (0.75 + Math.random() * 0.25);
+      const spawnX = origin.x + Math.cos(edgeAngle) * dist + (Math.random() - 0.5) * 6;
+      const spawnY = origin.y + Math.sin(edgeAngle) * dist + (Math.random() - 0.5) * 6;
+
+      // Velocity: mostly sideways away from the cone + slower forward bleed + upward
+      const lateralSpeed = 25 + Math.random() * 45;
+      const forwardBleed = 8  + Math.random() * 18;
+      const riseSpeed    = 15 + Math.random() * 30;
+      const velX = Math.cos(angle) * forwardBleed + perpX * side * lateralSpeed;
+      const velY = Math.sin(angle) * forwardBleed + perpY * side * lateralSpeed - riseSpeed;
+
+      // Cooler colors — side embers have had more time to cool
+      const r = Math.round(200 + Math.random() * 55); // 200–255
+      const g = Math.round(40  + Math.random() * 80);  // 40–120 warm orange
+      const b = 0;
+
+      particles.push({
+        position: Vec2.from(spawnX, spawnY),
+        velocity: Vec2.from(velX, velY),
+        life:    0,
+        maxLife: 0.10 + Math.random() * 0.20, // shorter — they escape the flame
+        size:    12 + frac * 14 + Math.random() * 10,
+        color:   `${r},${g},${b}`,
+        alpha:   1.0,
+      });
+    }
+
+    this.effects.push({
+      position: origin.clone(),
+      type:     ParticleEffectType.FLAME_CONE_EMBERS,
+      intensity: 1.0,
+      particles,
+    });
+  }
+
+  /**
+   * Create a flame trail behind a flamethrower projectile.
+   * Uses the same reference-style radial-gradient approach as the cone.
+   */
+  createFlameTrail(position: Vec2, direction: number): void {
+    if (Math.random() > 0.60) return;
+
+    const count = Math.max(1, Math.floor(3 * this.qualityMultipliers[this.quality]));
+    const particles: Particle[] = [];
+    const backX = -Math.cos(direction);
+    const backY = -Math.sin(direction);
+
+    for (let i = 0; i < count; i++) {
+      const spread     = (Math.random() - 0.5) * Math.PI * 0.5;
+      const spawnAngle = direction + Math.PI + spread;
+      const offsetDist = 2 + Math.random() * 8;
+      const r = Math.round(220 + Math.random() * 35);
+      const g = Math.round(80  + Math.random() * 120);
+      const b = Math.round(0   + Math.random() * 15);
+      particles.push({
+        position: position.add(Vec2.from(
+          backX * offsetDist + (Math.random() - 0.5) * 6,
+          backY * offsetDist + (Math.random() - 0.5) * 6,
+        )),
+        velocity: Vec2.from(
+          Math.cos(spawnAngle) * (12 + Math.random() * 28),
+          Math.sin(spawnAngle) * (12 + Math.random() * 28) - 20,
+        ),
+        life:    0,
+        maxLife: 0.15 + Math.random() * 0.25,
+        size:    20 + Math.random() * 22,
+        color:   `${r},${g},${b}`,
+        alpha:   1.0,
+      });
+    }
+
+    this.effects.push({
+      position: position.clone(),
+      type:     ParticleEffectType.FLAME_TRAIL,
+      intensity: 1.0,
+      particles,
     });
   }
 
@@ -272,30 +506,38 @@ export class ParticleSystem {
   // Private methods
   
   private updateEffect(effect: ParticleEffect, deltaTime: number): void {
-    // Update all particles in the effect
+    const isFire = effect.type === ParticleEffectType.FLAME_CONE_EMBERS
+                || effect.type === ParticleEffectType.FLAME_TRAIL;
+
     for (let i = effect.particles.length - 1; i >= 0; i--) {
       const particle = effect.particles[i];
-      
-      // Update particle life
       particle.life += deltaTime;
-      
-      // Remove expired particles
+
       if (particle.life >= particle.maxLife) {
-        effect.particles.splice(i, 1);
+        effect.particles[i] = effect.particles[effect.particles.length - 1];
+        effect.particles.pop();
         continue;
       }
-      
-      // Update particle physics
-      this.updateParticle(particle, deltaTime);
+
+      if (isFire) {
+        // Drag: heavier, realistic slowdown — frame-rate independent
+        const drag = Math.pow(0.97, deltaTime * 60);
+        particle.velocity = particle.velocity.mul(drag);
+        // Turbulence flicker
+        particle.velocity = particle.velocity.add(Vec2.from(
+          (Math.random() - 0.5) * 14,
+          (Math.random() - 0.5) * 6,
+        ));
+        particle.position = particle.position.add(particle.velocity.mul(deltaTime));
+      } else {
+        this.updateParticle(particle, deltaTime);
+      }
     }
   }
   
   private updateParticle(particle: Particle, deltaTime: number): void {
     // Apply velocity
     particle.position = particle.position.add(particle.velocity.mul(deltaTime));
-    
-    // Apply gravity
-    particle.velocity = particle.velocity.add(Vec2.from(0, particle.gravity).mul(deltaTime));
     
     // Update alpha based on life (fade out over time)
     const lifeRatio = particle.life / particle.maxLife;
@@ -308,32 +550,97 @@ export class ParticleSystem {
   }
   
   private renderEffect(effect: ParticleEffect, camera: Camera): void {
+    if (effect.type === ParticleEffectType.FLAME_CONE_EMBERS
+     || effect.type === ParticleEffectType.FLAME_TRAIL) {
+      this.renderFireEffect(effect, camera);
+      return;
+    }
+
     for (const particle of effect.particles) {
-      // Skip particles that are too faded or too small
       if (particle.alpha <= 0.1 || particle.size <= 0.5) continue;
-      
-      // Check if particle is visible
       if (!camera.isWorldPositionVisible(particle.position, 50)) continue;
-      
-      // Convert to screen coordinates
-      const screenPos = camera.worldToScreen(particle.position);
-      const cameraState = camera.getState();
-      const scaledSize = particle.size * cameraState.zoom;
-      
-      // Skip particles that are too small to see
+      const screenPos  = camera.worldToScreen(particle.position);
+      const scaledSize = particle.size * camera.getState().zoom;
       if (scaledSize < 1) continue;
-      
-      // Set particle style
       this.ctx.globalAlpha = particle.alpha;
-      this.ctx.fillStyle = particle.color;
-      
-      // Draw particle
+      this.ctx.fillStyle   = particle.color;
       this.ctx.beginPath();
       this.ctx.arc(screenPos.x, screenPos.y, scaledSize, 0, Math.PI * 2);
       this.ctx.fill();
     }
-    
-    // Reset global alpha
     this.ctx.globalAlpha = 1.0;
+  }
+
+  /**
+   * Render fire particles (FLAME_CONE_EMBERS / FLAME_TRAIL).
+   *
+   * Canvas 2D translation of shader-based fire concepts:
+   *   u_power      → power-curve opacity: Math.pow(1-lifeRatio, 0.7) — bright longer, sharp tail
+   *   u_shape_offset → per-particle elongation along velocity direction (ctx.scale(elongation, 1))
+   *   u_addition   → multi-stop gradient: hot yellow-orange core → birth colour body → dim edge
+   *
+   * Each blob is drawn in its own transformed context so it stretches as a "tongue of flame"
+   * along whichever direction it is currently travelling.
+   */
+  private renderFireEffect(effect: ParticleEffect, camera: Camera): void {
+    const ctx  = this.ctx;
+    const zoom = camera.getState().zoom;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+
+    for (const p of effect.particles) {
+      if (p.life >= p.maxLife) continue;
+      if (!camera.isWorldPositionVisible(p.position, p.size * 2)) continue;
+
+      const lifeRatio = p.life / p.maxLife;
+
+      // Solid when born, fade out toward death (exponent < 1 = slow fade start, sharp tail).
+      // p.alpha = barrel brightness (1.0 near nozzle → 0.65 at tip).
+      const power   = Math.pow(1.0 - lifeRatio, 0.40) * p.alpha;
+      const opacity = p.alpha >= 0.95 ? power : Math.min(0.55 * p.alpha, power);
+      if (opacity <= 0.02) continue;
+
+      const sp           = camera.worldToScreen(p.position);
+      // Grow from 15 % at birth to 100 % at peak (lifeRatio ≈ 0.4), hold there.
+      const growScale    = Math.min(1.0, 0.15 + lifeRatio * 2.2);
+      const screenRadius = Math.max(2, p.size * zoom * growScale);
+
+      // Rounder when fresh (tight bud), more elongated as it disperses.
+      const elongation = 1.3 + lifeRatio * 1.6; // 1.3 at birth → 2.9 at death
+
+      // Derive the angle from current velocity so the tongue tracks actual motion
+      const velAngle = Math.atan2(p.velocity.y, p.velocity.x);
+
+      // u_addition analog: multi-stop gradient gives each blob an internal hot core.
+      // Stop layout:  hot yellow-orange core → birth colour body → dim translucent edge → transparent
+      const col       = p.color; // "R,G,B" stored at spawn
+      const coreAlpha = (opacity * 0.98).toFixed(3);
+      const bodyAlpha = (opacity * 0.80).toFixed(3);
+      const edgeAlpha = (opacity * 0.22).toFixed(3);
+      // Core stop expands as particle grows — wide solid blob when fresh, diffuse ring when old
+      const coreStop  = (0.30 - lifeRatio * 0.22).toFixed(3); // 0.30 → 0.08
+
+      ctx.save();
+      ctx.translate(sp.x, sp.y);
+      ctx.rotate(velAngle);
+      ctx.scale(elongation, 1.0); // stretch along travel axis
+
+      // Gradient is defined in the scaled/rotated space — rings become ellipses on screen
+      const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, screenRadius);
+      grd.addColorStop(0.00,            `rgba(255,230,100,${coreAlpha})`); // hot yellow core
+      grd.addColorStop(+coreStop,       `rgba(${col},${coreAlpha})`);      // solid birth colour
+      grd.addColorStop(+coreStop + 0.15,`rgba(${col},${bodyAlpha})`);      // body
+      grd.addColorStop(+coreStop + 0.28,`rgba(${col},${edgeAlpha})`);      // trailing edge
+      grd.addColorStop(1.00,            `rgba(${col},0)`);                 // transparent boundary
+
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.arc(0, 0, screenRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore(); // ← restores per-particle transform; composite stays source-over
+    }
+
+    ctx.restore(); // ← restores composite operation
   }
 }

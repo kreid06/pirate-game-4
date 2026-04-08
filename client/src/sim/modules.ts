@@ -12,6 +12,7 @@ export type ModuleKind =
   | 'ladder'         // Boarding ladder - helps players board from water
   | 'plank'          // Ship plank - structural hull component
   | 'deck'           // Ship deck - interior floor surface
+  | 'swivel'         // Swivel gun - fast, anti-personnel edge weapon
   | 'custom';        // User-defined module types
 
 /**
@@ -27,6 +28,7 @@ export enum ModuleTypeId {
   LADDER = 5,
   PLANK = 6,
   DECK = 7,
+  SWIVEL = 8,
   CUSTOM = 255  // Use high value for custom types
 }
 
@@ -44,6 +46,7 @@ export const MODULE_TYPE_MAP = {
       case 'ladder': return ModuleTypeId.LADDER;
       case 'plank': return ModuleTypeId.PLANK;
       case 'deck': return ModuleTypeId.DECK;
+      case 'swivel': return ModuleTypeId.SWIVEL;
       case 'custom': return ModuleTypeId.CUSTOM;
     }
   },
@@ -57,6 +60,7 @@ export const MODULE_TYPE_MAP = {
       case ModuleTypeId.LADDER: return 'ladder';
       case ModuleTypeId.PLANK: return 'plank';
       case ModuleTypeId.DECK: return 'deck';
+      case ModuleTypeId.SWIVEL: return 'swivel';
       case ModuleTypeId.CUSTOM: return 'custom';
       default: return 'custom';
     }
@@ -103,6 +107,7 @@ export type ModuleData =
   | LadderModuleData
   | PlankModuleData
   | DeckModuleData
+  | SwivelModuleData
   | CustomModuleData;
 
 /**
@@ -155,6 +160,7 @@ export interface MastModuleData {
   fiberHealth: number;          // Sail cloth HP (base max: 15000, same as mast)
   fiberMaxHealth: number;       // Sail cloth max HP
   angle: number;               // Sail angle in radians (from server)
+  sailFireIntensity: number;   // 0-100: fiber fire intensity (0=not burning, 100=fully engulfed)
 }
 
 /**
@@ -211,6 +217,20 @@ export interface DeckModuleData {
   texture: 'smooth' | 'rough' | 'planked' | 'tiled'; // Surface texture
   walkable: boolean;           // Whether players can walk on this deck section
   deckLevel: number;           // Deck height level (0 = main deck, 1 = upper deck, -1 = lower deck)
+}
+
+/**
+ * Swivel gun module data — anti-personnel edge weapon.
+ * Skeleton: aim direction tracked; firing is future work.
+ */
+export interface SwivelModuleData {
+  kind: 'swivel';
+  aimDirection: number;         // Current aim direction in radians (ship-relative)
+  desiredAimDirection: number;  // Target aim direction
+  reloadTime: number;           // Reload time in seconds (default 1.2)
+  timeSinceLastFire: number;    // Time since last shot (seconds)
+  health: number;               // Current HP (base max: 4000)
+  maxHealth: number;            // Max HP
 }
 
 /**
@@ -332,6 +352,7 @@ export class ModuleUtils {
           maxHealth: 15000,
           fiberHealth: 15000,     // Sail cloth HP (same base as mast)
           fiberMaxHealth: 15000,
+          sailFireIntensity: 0,
         } as MastModuleData;
         break;
 
@@ -386,6 +407,18 @@ export class ModuleUtils {
           walkable: true,          // Players can walk on it
           deckLevel: 0,            // Main deck level
         } as DeckModuleData;
+        break;
+
+      case 'swivel':
+        baseModule.moduleData = {
+          kind: 'swivel',
+          aimDirection: 0,
+          desiredAimDirection: 0,
+          reloadTime: 1.2,
+          timeSinceLastFire: 0,
+          health: 4000,
+          maxHealth: 4000,
+        } as SwivelModuleData;
         break;
 
       case 'custom':
@@ -841,6 +874,7 @@ export function getModuleFootprint(kind: ModuleKind): ModuleFootprint {
   switch (kind) {
     case 'cannon':
     case 'steering-wheel': return { kind: 'box', hw: 16, hh: 25 };
+    case 'swivel':         return { kind: 'circle', radius: 11 };
     case 'mast':           return { kind: 'circle', radius: 16 };
     case 'helm':           return { kind: 'box', hw: 14, hh: 14 };
     case 'seat':           return { kind: 'box', hw: 10, hh: 10 };

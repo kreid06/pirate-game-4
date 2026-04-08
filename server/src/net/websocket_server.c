@@ -1,5 +1,6 @@
 #include "net/websocket_server.h"
 #include "sim/ship_level.h"
+#include "sim/island.h"
 #include "net/websocket_protocol.h"
 #include "net/network.h"
 #include "sim/simulation.h"
@@ -56,8 +57,11 @@ struct WebSocketClient {
      * Broadcast is deferred until all messages from this client in the current
      * frame have been handled, so a burst of group-config messages (e.g. the
      * client switching two groups to AIMING simultaneously) produces exactly
-     * one broadcast rather than one per message. */
+     * one broadcast rather than one per message.
+     * company_id stores which company's groups changed so the broadcast is
+     * only sent to clients of the same company. */
     uint32_t pending_group_broadcast_ship_id;
+    uint8_t  pending_group_broadcast_company_id;
 };
 
 struct WebSocketServer {
@@ -126,6 +130,7 @@ static uint32_t next_npc_id = 5000;
 static WorldNpc world_npcs[MAX_WORLD_NPCS] = {0};
 static int world_npc_count = 0;
 static uint32_t next_world_npc_id = 9000;
+static bool g_npcs_dirty = true; // set whenever NPC state changes; cleared after JSON rebuild
 
 // Global ship data (simple ships for testing)
 #define MAX_SIMPLE_SHIPS 50
@@ -135,10 +140,27 @@ static int next_ship_id = 1;
 // Monotonically-increasing module ID base — never reused, avoids collisions on slot recycle
 static uint32_t next_mid_base = 3000u;
 
-// Helper function to find a ship by ID
+// ── Island placed structures ─────────────────────────────────────────────────
+static PlacedStructure placed_structures[MAX_PLACED_STRUCTURES];
+static uint32_t placed_structure_count = 0;
+static uint32_t next_structure_id = 1;
+
+// ── O(1) ship lookup ────────────────────────────────────────────────────────
+// Ship IDs are small sequential integers starting at 1 (next_ship_id begins
+// at 1, MAX_SIMPLE_SHIPS=50, so IDs stay well below 512).  The array is
+// self-validating: every hit checks active+ship_id so stale entries from
+// a deactivated/recycled slot are transparently bypassed.
+#define SHIP_ID_LOOKUP_SIZE 512
+static SimpleShip* g_ship_by_id[SHIP_ID_LOOKUP_SIZE]; // zero-initialised by C
+
 static SimpleShip* find_ship(uint32_t ship_id) {
+    if (ship_id > 0 && ship_id < SHIP_ID_LOOKUP_SIZE) {
+        SimpleShip* cached = g_ship_by_id[ship_id];
+        if (cached && cached->active && cached->ship_id == ship_id) return cached;
+    }
     for (int i = 0; i < ship_count; i++) {
         if (ships[i].active && ships[i].ship_id == ship_id) {
+            if (ship_id < SHIP_ID_LOOKUP_SIZE) g_ship_by_id[ship_id] = &ships[i];
             return &ships[i];
         }
     }
@@ -167,33 +189,42 @@ static void update_mounted_players_on_ship(uint32_t ship_id) {
     }
 }
 
+// ── O(1) simulation-ship lookup ─────────────────────────────────────────────
+// Declared early so sync_simple_ships_from_simulation can use it.
+// Full definition lives after find_ship_by_id (below).
+#define SIM_SHIP_ID_SIZE 512
+static struct Ship* g_sim_ship_by_id[SIM_SHIP_ID_SIZE]; // zero-init by C
+static struct Ship* find_sim_ship(uint32_t id);          // forward declaration
+
 // Sync SimpleShip state from simulation ships (position, rotation, velocity)
 static void sync_simple_ships_from_simulation(void) {
     if (!global_sim || global_sim->ship_count == 0) return;
-    
+
+    // Rebuild sim-ship cache once per tick so all subsequent callers get O(1) lookups.
+    memset(g_sim_ship_by_id, 0, sizeof(g_sim_ship_by_id));
+    for (uint32_t ci = 0; ci < global_sim->ship_count; ci++) {
+        uint32_t sid = (uint32_t)global_sim->ships[ci].id;
+        if (sid > 0 && sid < SIM_SHIP_ID_SIZE)
+            g_sim_ship_by_id[sid] = &global_sim->ships[ci];
+    }
+
     for (int s = 0; s < ship_count; s++) {
         if (!ships[s].active) continue;
-        
-        // Find matching simulation ship by ID
-        for (uint32_t sim_idx = 0; sim_idx < global_sim->ship_count; sim_idx++) {
-            if (global_sim->ships[sim_idx].id == ships[s].ship_id) {
-                struct Ship* sim_ship = &global_sim->ships[sim_idx];
-                
-                // Sync position, rotation, velocity from simulation to SimpleShip
-                ships[s].x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->position.x));
-                ships[s].y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->position.y));
-                ships[s].rotation = Q16_TO_FLOAT(sim_ship->rotation);
-                ships[s].velocity_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->velocity.x));
-                ships[s].velocity_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->velocity.y));
-                ships[s].angular_velocity = Q16_TO_FLOAT(sim_ship->angular_velocity);
-                // Propagate company to sim layer for projectile friendly-fire checks
-                sim_ship->company_id = ships[s].company_id;
-                
-                // Update mounted players' world positions with new ship transform
-                update_mounted_players_on_ship(ships[s].ship_id);
-                break;
-            }
-        }
+        struct Ship* sim_ship = find_sim_ship(ships[s].ship_id);
+        if (!sim_ship) continue;
+
+        // Sync position, rotation, velocity from simulation to SimpleShip
+        ships[s].x              = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->position.x));
+        ships[s].y              = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->position.y));
+        ships[s].rotation       = Q16_TO_FLOAT(sim_ship->rotation);
+        ships[s].velocity_x     = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->velocity.x));
+        ships[s].velocity_y     = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->velocity.y));
+        ships[s].angular_velocity = Q16_TO_FLOAT(sim_ship->angular_velocity);
+        // Propagate company to sim layer for projectile friendly-fire checks
+        sim_ship->company_id    = ships[s].company_id;
+
+        // Update mounted players' world positions with new ship transform
+        update_mounted_players_on_ship(ships[s].ship_id);
     }
 }
 
@@ -216,24 +247,53 @@ static void ship_world_to_local(const SimpleShip* ship, float world_x, float wor
     *local_y = dx * sin_r + dy * cos_r;
 }
 
+// Helper: minimum distance from a local point (server float units) to the nearest hull edge segment.
+static float swivel_dist_to_hull_edge(float sx, float sy, const struct Ship* ship) {
+    float min_dist_sq = 1e20f;
+    uint8_t n = ship->hull_vertex_count;
+    for (uint8_t i = 0; i < n; i++) {
+        uint8_t j = (i + 1) % n;
+        float ax = Q16_TO_FLOAT(ship->hull_vertices[i].x);
+        float ay = Q16_TO_FLOAT(ship->hull_vertices[i].y);
+        float bx = Q16_TO_FLOAT(ship->hull_vertices[j].x);
+        float by = Q16_TO_FLOAT(ship->hull_vertices[j].y);
+        float dx = bx - ax, dy = by - ay;
+        float len_sq = dx*dx + dy*dy;
+        float t = 0.0f;
+        if (len_sq > 1e-10f) {
+            t = ((sx-ax)*dx + (sy-ay)*dy) / len_sq;
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+        }
+        float cx = ax + t*dx, cy = ay + t*dy;
+        float ex = sx - cx, ey = sy - cy;
+        float d = ex*ex + ey*ey;
+        if (d < min_dist_sq) min_dist_sq = d;
+    }
+    return sqrtf(min_dist_sq);
+}
+
 // Helper to check if player is outside hull polygon (using simulation ship hull)
 static bool is_outside_deck(uint32_t ship_id, float local_x, float local_y) {
-    if (!global_sim) {
-        return false; // No simulation, can't check
+    struct Ship* sim_ship = find_sim_ship(ship_id);
+    if (!sim_ship || sim_ship->hull_vertex_count < 3) return false;
+
+    // Fast AABB pre-check: hull fits within ±300 × ±100 server units for a brigantine.
+    // Convert client local coords to server units for the comparison.
+    float sx = CLIENT_TO_SERVER(local_x);
+    float sy = CLIENT_TO_SERVER(local_y);
+    // Compute hull AABB.
+    float hmin_x = Q16_TO_FLOAT(sim_ship->hull_vertices[0].x);
+    float hmax_x = hmin_x;
+    float hmin_y = Q16_TO_FLOAT(sim_ship->hull_vertices[0].y);
+    float hmax_y = hmin_y;
+    for (uint8_t _v = 1; _v < sim_ship->hull_vertex_count; _v++) {
+        float vx = Q16_TO_FLOAT(sim_ship->hull_vertices[_v].x);
+        float vy = Q16_TO_FLOAT(sim_ship->hull_vertices[_v].y);
+        if (vx < hmin_x) hmin_x = vx; if (vx > hmax_x) hmax_x = vx;
+        if (vy < hmin_y) hmin_y = vy; if (vy > hmax_y) hmax_y = vy;
     }
-    
-    // Find the ship in the simulation
-    struct Ship* sim_ship = NULL;
-    for (uint16_t i = 0; i < global_sim->ship_count; i++) {
-        if (global_sim->ships[i].id == ship_id) {
-            sim_ship = &global_sim->ships[i];
-            break;
-        }
-    }
-    
-    if (!sim_ship || sim_ship->hull_vertex_count < 3) {
-        return false; // No hull to check against
-    }
+    if (sx < hmin_x || sx > hmax_x || sy < hmin_y || sy > hmax_y) return true; // clearly outside
     
     // Convert client local coordinates to server coordinates for comparison
     Vec2Q16 point = {
@@ -271,8 +331,28 @@ static float module_collision_radius(ModuleTypeId type) {
         case MODULE_TYPE_STEERING_WHEEL: return 18.0f;
         case MODULE_TYPE_MAST:           return 14.0f;
         case MODULE_TYPE_CANNON:         return 20.0f;
+        case MODULE_TYPE_SWIVEL:         return 10.0f;
         default:                         return 0.0f; // ladder/plank/deck/seat — passable
     }
+}
+
+/**
+ * Determine if a placed wall/door is horizontal (N/S edge, runs along X axis)
+ * by scanning for a floor tile whose north or south edge midpoint matches (wx,wy).
+ * Returns false (vertical) if no horizontal floor edge is found.
+ */
+static bool wall_is_horizontal(float wx, float wy) {
+    const float TOL = 4.0f;
+    for (uint32_t fi = 0; fi < placed_structure_count; fi++) {
+        if (!placed_structures[fi].active) continue;
+        if (placed_structures[fi].type != STRUCT_WOODEN_FLOOR) continue;
+        float fx = placed_structures[fi].x;
+        float fy = placed_structures[fi].y;
+        if (fabsf(wx - fx) < TOL &&
+            (fabsf(wy - (fy - 25.0f)) < TOL || fabsf(wy - (fy + 25.0f)) < TOL))
+            return true;
+    }
+    return false; /* assume vertical */
 }
 
 /**
@@ -355,7 +435,7 @@ static void resolve_player_npc_collisions(const SimpleShip* ship,
 // Helper to board a player onto a ship
 static void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y) {
     player->parent_ship_id = ship->ship_id;
-    player->company_id     = ship->company_id;  // inherit faction from ship
+    // company_id is NOT inherited from ship — assigned by admin or player choice
     player->local_x = local_x;
     player->local_y = local_y;
     player->movement_state = PLAYER_STATE_WALKING;
@@ -542,10 +622,21 @@ static void remove_player(uint32_t player_id);
 static ShipModule* find_module_by_id(SimpleShip* ship, uint32_t module_id);
 static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship);
 
+// ── O(1) player lookup ──────────────────────────────────────────────────────
+// Player IDs are sequential starting at 1000.  Using (id & mask) as the slot
+// gives a direct collision-free index for the first 1048 sequential IDs.
+// Self-validating: every hit re-checks active+player_id.
+#define PLAYER_ID_MASK 2047u   // 2048 slots
+static WebSocketPlayer* g_player_by_id[PLAYER_ID_MASK + 1]; // zero-initialised by C
+
 // Player management functions
 static WebSocketPlayer* find_player(uint32_t player_id) {
+    uint32_t slot = player_id & PLAYER_ID_MASK;
+    WebSocketPlayer* cached = g_player_by_id[slot];
+    if (cached && cached->active && cached->player_id == player_id) return cached;
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (players[i].active && players[i].player_id == player_id) {
+            g_player_by_id[slot] = &players[i];
             return &players[i];
         }
     }
@@ -584,6 +675,8 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].local_x = 0.0f;
             players[i].local_y = 0.0f;
             players[i].movement_state = PLAYER_STATE_SWIMMING;
+            players[i].health = 100;
+            players[i].max_health = 100;
             
             // ===== ADD PLAYER TO C SIMULATION FOR COLLISION DETECTION =====
             if (global_sim) {
@@ -650,27 +743,22 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].mounted_module_id = 0;
             players[i].controlling_ship_id = 0;
 
-            // Initialize inventory — give starter items for testing
-            // Slot 0 must NOT be a plank or the client enters build mode and
-            // left-click places planks instead of firing cannons.
+            // Initialize inventory — 4 starter items: swivel, hammer, sword, axe + building items
             memset(&players[i].inventory, 0, sizeof(PlayerInventory));
             players[i].inventory.active_slot = 0;
-            players[i].inventory.slots[0].item     = ITEM_CANNON_BALL;
-            players[i].inventory.slots[0].quantity = 10;
-            players[i].inventory.slots[1].item     = ITEM_PLANK;
-            players[i].inventory.slots[1].quantity = 10;
-            players[i].inventory.slots[2].item     = ITEM_HAMMER;
+            players[i].inventory.slots[0].item     = ITEM_SWIVEL;
+            players[i].inventory.slots[0].quantity = 3;
+            players[i].inventory.slots[1].item     = ITEM_HAMMER;
+            players[i].inventory.slots[1].quantity = 1;
+            players[i].inventory.slots[2].item     = ITEM_SWORD;
             players[i].inventory.slots[2].quantity = 1;
-            players[i].inventory.slots[3].item     = ITEM_REPAIR_KIT;
-            players[i].inventory.slots[3].quantity = 3;
-            players[i].inventory.slots[4].item     = ITEM_CANNON;
-            players[i].inventory.slots[4].quantity = 3;
-            players[i].inventory.slots[5].item     = ITEM_SAIL;
-            players[i].inventory.slots[5].quantity = 3;
-            players[i].inventory.slots[6].item     = ITEM_HELM;
-            players[i].inventory.slots[6].quantity = 1;
-            players[i].inventory.slots[7].item     = ITEM_DECK;
-            players[i].inventory.slots[7].quantity = 3;
+            players[i].inventory.slots[3].item     = ITEM_AXE;
+            players[i].inventory.slots[3].quantity = 1;
+            players[i].inventory.slots[4].item     = ITEM_WOODEN_FLOOR;
+            players[i].inventory.slots[4].quantity = 10;
+            players[i].inventory.slots[5].item     = ITEM_WORKBENCH;
+            players[i].inventory.slots[5].quantity = 2;
+            // slots 6-9 remain empty (zeroed by memset)
 
             return &players[i];
         }
@@ -688,25 +776,26 @@ static void remove_player(uint32_t player_id) {
         if (players[i].active && players[i].player_id == player_id) {
             // If mounted, clear the module's occupied state so other players can use it.
             if (players[i].is_mounted && players[i].mounted_module_id != 0) {
-                for (int s = 0; s < ship_count; s++) {
-                    if (!ships[s].active) continue;
-                    ShipModule* mod = find_module_by_id(&ships[s], players[i].mounted_module_id);
-                    if (!mod) continue;
-                    switch (mod->type_id) {
-                        case MODULE_TYPE_HELM:
-                        case MODULE_TYPE_STEERING_WHEEL:
-                            mod->data.helm.occupied_by = 0;
-                            break;
-                        case MODULE_TYPE_SEAT:
-                            mod->data.seat.occupied_by = 0;
-                            break;
-                        default:
-                            break;
+                /* Use O(1) ship lookup; parent_ship_id is set when mounted */
+                SimpleShip* ms = find_ship(players[i].parent_ship_id);
+                if (ms) {
+                    ShipModule* mod = find_module_by_id(ms, players[i].mounted_module_id);
+                    if (mod) {
+                        switch (mod->type_id) {
+                            case MODULE_TYPE_HELM:
+                            case MODULE_TYPE_STEERING_WHEEL:
+                                mod->data.helm.occupied_by = 0;
+                                break;
+                            case MODULE_TYPE_SEAT:
+                                mod->data.seat.occupied_by = 0;
+                                break;
+                            default:
+                                break;
+                        }
+                        mod->state_bits &= ~MODULE_STATE_OCCUPIED;
+                        log_info("🔓 Cleared occupied state on module %u (player %u disconnected)",
+                                 mod->id, player_id);
                     }
-                    mod->state_bits &= ~MODULE_STATE_OCCUPIED;
-                    log_info("🔓 Cleared occupied state on module %u (player %u disconnected)",
-                             mod->id, player_id);
-                    break;
                 }
             }
             // Remove the physics/collision entity from the simulation first so
@@ -745,6 +834,7 @@ static const char* get_module_type_name(ModuleTypeId type_id) {
         case MODULE_TYPE_PLANK: return "PLANK";
         case MODULE_TYPE_DECK: return "DECK";
         case MODULE_TYPE_STEERING_WHEEL: return "STEERING_WHEEL";
+        case MODULE_TYPE_SWIVEL: return "SWIVEL";
         default: return "UNKNOWN";
     }
 }
@@ -753,13 +843,77 @@ static const char* get_module_type_name(ModuleTypeId type_id) {
  * Find ship by ID
  */
 __attribute__((unused))
+// Alias kept for call-sites that use the longer name; delegates to the O(1) path.
 static SimpleShip* find_ship_by_id(uint32_t ship_id) {
-    for (int i = 0; i < ship_count; i++) {
-        if (ships[i].active && ships[i].ship_id == ship_id) {
-            return &ships[i];
+    return find_ship(ship_id);
+}
+
+// ── O(1) simulation-ship lookup (implementation) ────────────────────────────
+// Array g_sim_ship_by_id and SIM_SHIP_ID_SIZE defined earlier, before
+// sync_simple_ships_from_simulation().
+
+static struct Ship* find_sim_ship(uint32_t id) {
+    if (id > 0 && id < SIM_SHIP_ID_SIZE) {
+        struct Ship* cached = g_sim_ship_by_id[id];
+        if (cached && (uint32_t)cached->id == id) return cached;
+    }
+    if (!global_sim) return NULL;
+    for (uint32_t i = 0; i < global_sim->ship_count; i++) {
+        if ((uint32_t)global_sim->ships[i].id == id) {
+            if (id < SIM_SHIP_ID_SIZE) g_sim_ship_by_id[id] = &global_sim->ships[i];
+            return &global_sim->ships[i];
         }
     }
     return NULL;
+}
+
+/**
+ * Returns true if any intact plank on `ship` blocks the line segment from
+ * (ox,oy) to (tx,ty) in client-space units.
+ *
+ * Method: treat each plank as an infinite line defined by its centre + normal.
+ * If the origin and target lie on opposite sides of that line AND the crossing
+ * falls within the plank's estimated half-span, the plank occludes.
+ */
+static bool plank_occludes_ray(const SimpleShip* ship,
+                                float ox, float oy,   /* flame origin */
+                                float tx, float ty)   /* target position */
+{
+    const float PLANK_HALF_SPAN = 260.0f; /* generous half-length for brigantine planks */
+    float cos_rs = cosf(ship->rotation);
+    float sin_rs = sinf(ship->rotation);
+    for (int pm = 0; pm < ship->module_count; pm++) {
+        const ShipModule* pl = &ship->modules[pm];
+        if (pl->type_id != MODULE_TYPE_PLANK) continue;
+        if (pl->state_bits & MODULE_STATE_DESTROYED) continue;
+        /* Plank centre in world space (client units) */
+        float plx = SERVER_TO_CLIENT(Q16_TO_FLOAT(pl->local_pos.x));
+        float ply = SERVER_TO_CLIENT(Q16_TO_FLOAT(pl->local_pos.y));
+        float pwx = ship->x + (plx * cos_rs - ply * sin_rs);
+        float pwy = ship->y + (plx * sin_rs + ply * cos_rs);
+        /* Plank normal: perpendicular to the plank's lengthwise direction */
+        float plank_angle = ship->rotation + Q16_TO_FLOAT(pl->local_rot);
+        float nx = -sinf(plank_angle);
+        float ny =  cosf(plank_angle);
+        /* Signed distances of origin and target from plank's infinite line */
+        float d_o = (ox - pwx) * nx + (oy - pwy) * ny;
+        float d_t = (tx - pwx) * nx + (ty - pwy) * ny;
+        /* Same side → no crossing */
+        if (d_o * d_t >= 0.0f) continue;
+        /* Intersection parameter t along origin→target */
+        float denom = d_o - d_t;
+        if (fabsf(denom) < 1e-4f) continue;
+        float t = d_o / denom;
+        if (t <= 0.0f || t >= 1.0f) continue;
+        /* Intersection world point */
+        float ix = ox + t * (tx - ox);
+        float iy = oy + t * (ty - oy);
+        /* Check along-plank extent */
+        float cos_pa = cosf(plank_angle), sin_pa = sinf(plank_angle);
+        float along = (ix - pwx) * cos_pa + (iy - pwy) * sin_pa;
+        if (fabsf(along) <= PLANK_HALF_SPAN) return true;
+    }
+    return false;
 }
 
 /**
@@ -809,6 +963,24 @@ static void send_mount_success(struct WebSocketClient* client, ShipModule* modul
 }
 
 /**
+ * Send mount success with a local-space mount offset so the client can
+ * instantly snap the player to the correct position (e.g. swivel guns).
+ */
+static void send_mount_success_with_offset(struct WebSocketClient* client, ShipModule* module, float offset_x, float offset_y) {
+    char response[320];
+    snprintf(response, sizeof(response),
+             "{\"type\":\"module_interact_success\",\"module_id\":%u,\"module_kind\":\"%s\",\"mounted\":true,"
+             "\"mount_offset\":{\"x\":%.2f,\"y\":%.2f}}",
+             module->id, get_module_type_name(module->type_id), offset_x, offset_y);
+
+    char frame[512];
+    size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0) {
+        send(client->fd, frame, frame_len, 0);
+    }
+}
+
+/**
  * Send interaction success (non-mounting actions)
  */
 static void send_interaction_success(struct WebSocketClient* client, const char* action) {
@@ -849,7 +1021,27 @@ static void handle_cannon_interact(WebSocketPlayer* player, struct WebSocketClie
             return;
         }
     }
-    
+
+    // NPC occupancy check: block mounting if an enemy NPC gunner is stationed here.
+    for (int _ni = 0; _ni < world_npc_count; _ni++) {
+        WorldNpc* _npc = &world_npcs[_ni];
+        if (!_npc->active) continue;
+        if (_npc->assigned_weapon_id != module->id) continue;
+        if (_npc->state != WORLD_NPC_STATE_AT_GUN && _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
+        if (_npc->company_id == 0) continue;           // neutral never blocks
+        if (player->company_id != 0 && _npc->company_id == player->company_id) continue; // friendly OK
+        send_interaction_failure(client, "npc_occupied");
+        return;
+    }
+
+    /* Company check: cannot mount a cannon on an enemy ship */
+    if (ship->company_id != COMPANY_NEUTRAL &&
+        player->company_id != COMPANY_NEUTRAL &&
+        player->company_id != ship->company_id) {
+        send_interaction_failure(client, "wrong_company");
+        return;
+    }
+
     // Mount player to cannon
     module->state_bits |= MODULE_STATE_OCCUPIED;
     player->is_mounted = true;
@@ -887,7 +1079,19 @@ static void handle_helm_interact(WebSocketPlayer* player, struct WebSocketClient
         send_interaction_failure(client, "module_occupied");
         return;
     }
-    
+
+    // NPC occupancy check: if an enemy NPC helmsman is stationed at this helm, block mounting.
+    for (int _ni = 0; _ni < world_npc_count; _ni++) {
+        WorldNpc* _npc = &world_npcs[_ni];
+        if (!_npc->active) continue;
+        if (_npc->assigned_weapon_id != module->id) continue;
+        if (_npc->state != WORLD_NPC_STATE_AT_GUN && _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
+        if (_npc->company_id == 0) continue;  // neutral never blocks
+        if (player->company_id != 0 && _npc->company_id == player->company_id) continue;  // friendly OK
+        send_interaction_failure(client, "npc_occupied");
+        return;
+    }
+
     // Mount player and grant ship control
     module->data.helm.occupied_by = player->player_id;
     module->state_bits |= MODULE_STATE_OCCUPIED;
@@ -967,14 +1171,48 @@ static void handle_mast_interact(WebSocketPlayer* player, struct WebSocketClient
 }
 
 static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
-    // Check if player is already on this ship
+    // Check if ladder is retracted — nobody can board via a retracted ladder
+    if (module->state_bits & MODULE_STATE_RETRACTED) {
+        send_interaction_failure(client, "ladder_retracted");
+        return;
+    }
+    // Check if player is already on this ship — pressing E at a ladder toggles its retract state.
+    // Any player already on the ship can do this; no company check.
     if (player->parent_ship_id == ship->ship_id) {
-        log_info("🪜 Player %u already on ship %u, no need to board", player->player_id, ship->ship_id);
-        send_interaction_success(client, "already_aboard");
+        bool now_retracted = !(module->state_bits & MODULE_STATE_RETRACTED);
+        if (now_retracted)
+            module->state_bits |= MODULE_STATE_RETRACTED;
+        else
+            module->state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
+        // Mirror state change into the simulation ship module array
+        {
+            struct Ship* _lss = find_sim_ship(ship->ship_id);
+            if (_lss) {
+                for (uint8_t _m = 0; _m < _lss->module_count; _m++) {
+                    if (_lss->modules[_m].id == module->id) {
+                        if (now_retracted)
+                            _lss->modules[_m].state_bits |= MODULE_STATE_RETRACTED;
+                        else
+                            _lss->modules[_m].state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
+                        break;
+                    }
+                }
+            }
+        }
+        log_info("🪜 Player %u toggled ladder %u on ship %u → %s (via E-interact)",
+                 player->player_id, module->id, ship->ship_id,
+                 now_retracted ? "RETRACTED" : "EXTENDED");
+        char lad_msg[192];
+        snprintf(lad_msg, sizeof(lad_msg),
+                 "{\"type\":\"ladder_state\",\"ship_id\":%u,\"module_id\":%u,\"retracted\":%s}",
+                 ship->ship_id, module->id, now_retracted ? "true" : "false");
+        websocket_server_broadcast(lad_msg);
+        send_interaction_success(client, now_retracted ? "ladder_retracted" : "ladder_extended");
         return;
     }
     
-    // Player is swimming - board them onto the ship at the ladder position
+    // Player is swimming or on another ship — board via ladder.
+    // Any player may board an unretracted ladder; no company restriction.
     if (player->parent_ship_id == 0) {
         // Get ladder position in ship-local coordinates (convert from server to client)
         float ladder_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
@@ -1021,6 +1259,116 @@ static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClie
         /* Unicast group state after ship transfer too. */
         send_cannon_group_state_to_client(client, ship);
     }
+}
+
+static void handle_swivel_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
+    // Reject if already occupied by another player
+    if (module->state_bits & MODULE_STATE_OCCUPIED) {
+        send_interaction_failure(client, "module_occupied");
+        return;
+    }
+
+    // NPC occupancy check: block mounting if an enemy NPC gunner is stationed here.
+    for (int _ni = 0; _ni < world_npc_count; _ni++) {
+        WorldNpc* _npc = &world_npcs[_ni];
+        if (!_npc->active) continue;
+        if (_npc->assigned_weapon_id != module->id) continue;
+        if (_npc->state != WORLD_NPC_STATE_AT_GUN && _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
+        if (_npc->company_id == 0) continue;           // neutral never blocks
+        if (player->company_id != 0 && _npc->company_id == player->company_id) continue; // friendly OK
+        send_interaction_failure(client, "npc_occupied");
+        return;
+    }
+
+    /* Company check: cannot mount a swivel on an enemy ship */
+    if (ship->company_id != COMPANY_NEUTRAL &&
+        player->company_id != COMPANY_NEUTRAL &&
+        player->company_id != ship->company_id) {
+        send_interaction_failure(client, "wrong_company");
+        return;
+    }
+
+    module->state_bits |= MODULE_STATE_OCCUPIED;
+    player->is_mounted = true;
+    player->mounted_module_id = module->id;
+
+    // Snap player inward from the swivel toward the ship center.
+    // Mount offset = normalize(-swivel_pos) * SWIVEL_MOUNT_DIST (client pixels).
+    float swivel_local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+    float swivel_local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+    float vec_x = -swivel_local_x;
+    float vec_y = -swivel_local_y;
+    float mag = sqrtf(vec_x * vec_x + vec_y * vec_y);
+    const float SWIVEL_MOUNT_DIST = 18.0f; // client pixels inward from swivel pivot
+    float offset_x = 0.0f, offset_y = 0.0f;
+    if (mag > 1.0f) {
+        offset_x = (vec_x / mag) * SWIVEL_MOUNT_DIST;
+        offset_y = (vec_y / mag) * SWIVEL_MOUNT_DIST;
+    }
+
+    player->local_x = swivel_local_x + offset_x;
+    player->local_y = swivel_local_y + offset_y;
+    ship_local_to_world(ship, player->local_x, player->local_y, &player->x, &player->y);
+
+    log_info("🔫 Player %u mounted to swivel %u at local (%.1f, %.1f) (offset %.1f,%.1f)",
+             player->player_id, module->id, player->local_x, player->local_y, offset_x, offset_y);
+
+    send_mount_success_with_offset(client, module, offset_x, offset_y);
+    broadcast_player_mounted(player, module, ship);
+}
+
+/**
+ * Handle a swivel_aim message from a mounted player.
+ * Converts the ship-relative aim angle into a barrel offset from the swivel's
+ * natural direction, then clamps to the lateral limit of ±45°.
+ */
+static void handle_swivel_aim(WebSocketPlayer* player, float aim_angle) {
+    if (!player->is_mounted || player->parent_ship_id == 0) return;
+
+    SimpleShip* ship = find_ship(player->parent_ship_id);
+    if (!ship) return;
+
+    /* Defense-in-depth: refuse aim if player company doesn't match ship company */
+    if (ship->company_id != COMPANY_NEUTRAL &&
+        player->company_id != COMPANY_NEUTRAL &&
+        player->company_id != ship->company_id) return;
+
+    ShipModule* module = find_module_by_id(ship, player->mounted_module_id);
+    if (!module || module->type_id != MODULE_TYPE_SWIVEL) return;
+
+    /* Natural barrel direction in ship space = local_rot - π/2.
+     * Mirrors the cannon convention: barrel is at -Y in local frame,
+     * so in ship frame it sits at (local_rot - π/2). */
+    float swivel_base  = Q16_TO_FLOAT(module->local_rot);
+    float desired_offset = aim_angle - swivel_base + (float)(M_PI / 2.0);
+
+    /* Normalise to -π … +π */
+    while (desired_offset >  (float)M_PI) desired_offset -= 2.0f * (float)M_PI;
+    while (desired_offset < -(float)M_PI) desired_offset += 2.0f * (float)M_PI;
+
+    /* Clamp to ±45° lateral limit */
+    const float SWIVEL_AIM_LIMIT = 45.0f * ((float)M_PI / 180.0f);
+    if (desired_offset >  SWIVEL_AIM_LIMIT) desired_offset =  SWIVEL_AIM_LIMIT;
+    if (desired_offset < -SWIVEL_AIM_LIMIT) desired_offset = -SWIVEL_AIM_LIMIT;
+
+    module->data.swivel.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
+
+    /* Mirror into global_sim so sim-path snapshots see the updated target */
+    {
+        struct Ship* _ss = find_sim_ship(ship->ship_id);
+        if (_ss) {
+            for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                if (_ss->modules[mi].id == module->id) {
+                    _ss->modules[mi].data.swivel.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
+                    break;
+                }
+            }
+        }
+    }
+
+    log_info("🔫 swivel_aim: player %u swivel %u → %.1f°",
+             player->player_id, module->id,
+             desired_offset * 180.0f / (float)M_PI);
 }
 
 static void handle_seat_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
@@ -1111,18 +1459,37 @@ static void handle_module_unmount(WebSocketPlayer* player, struct WebSocketClien
 
 /**
  * Returns true if a WorldNpc rigger is stationed at this specific mast module
- * (assigned_cannon_id == mast_id AND state == AT_CANNON).
+ * (assigned_weapon_id == mast_id AND state == AT_GUN).
  */
 static bool is_mast_manned(uint32_t ship_id, uint32_t mast_id) {
     for (int i = 0; i < world_npc_count; i++) {
         WorldNpc* w = &world_npcs[i];
         if (!w->active || w->ship_id != ship_id) continue;
         if (w->role == NPC_ROLE_RIGGER &&
-            w->assigned_cannon_id == mast_id &&
-            w->state == WORLD_NPC_STATE_AT_CANNON)
+            w->assigned_weapon_id == mast_id &&
+            w->state == WORLD_NPC_STATE_AT_GUN)
             return true;
     }
     return false;
+}
+
+/** Returns true if a friendly rigger (same company as player_company_id, or neutral NPC)
+ *  is stationed at mast_id. A neutral NPC (company 0) obeys any player.
+ *  A player with company 0 can only command neutral NPCs. */
+static bool is_mast_manned_by_friendly(uint32_t ship_id, uint32_t mast_id, uint8_t player_company_id) {
+    for (int i = 0; i < world_npc_count; i++) {
+        WorldNpc* w = &world_npcs[i];
+        if (!w->active || w->ship_id != ship_id) continue;
+        if (w->role != NPC_ROLE_RIGGER) continue;
+        if (w->assigned_weapon_id != mast_id) continue;
+        if (w->state != WORLD_NPC_STATE_AT_GUN) continue;
+        // A rigger is here — is it friendly?
+        if (w->company_id == 0) return true;            // neutral obeys anyone
+        if (player_company_id != 0 &&
+            w->company_id == player_company_id) return true;  // same company
+        return false;  // enemy rigger
+    }
+    return false;  // no rigger at this mast
 }
 
 /**
@@ -1130,15 +1497,16 @@ static bool is_mast_manned(uint32_t ship_id, uint32_t mast_id) {
  * Sets the desired openness - actual openness will gradually adjust in tick
  */
 static void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, int desired_openness) {
-    /* Gate: at least one rigger must be stationed at a mast before allowing sail control. */
+/* Gate: at least one friendly rigger must be stationed at a mast before allowing sail control.
+     * Enemy/neutral-to-player riggers on a mast cannot be commanded. */
     {
         bool any_rigger = false;
         for (int m = 0; m < ship->module_count && !any_rigger; m++) {
             if (ship->modules[m].type_id == MODULE_TYPE_MAST)
-                any_rigger = is_mast_manned(ship->ship_id, ship->modules[m].id);
+                any_rigger = is_mast_manned_by_friendly(ship->ship_id, ship->modules[m].id, player->company_id);
         }
         if (!any_rigger) {
-            log_info("⛵ Sail control rejected for player %u — no rigger manning any mast on ship %u",
+            log_info("⛵ Sail control rejected for player %u — no friendly rigger manning any mast on ship %u",
                      player->player_id, ship->ship_id);
             return;
         }
@@ -1151,13 +1519,9 @@ static void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketCl
     //          player->player_id, ship->ship_id, desired_openness);
 
     // Store desired openness — the tick will only apply it to individually manned masts
-    if (global_sim && global_sim->ship_count > 0) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                global_sim->ships[s].desired_sail_openness = (uint8_t)desired_openness;
-                break;
-            }
-        }
+    {
+        struct Ship* _ss = find_sim_ship(ship->ship_id);
+        if (_ss) _ss->desired_sail_openness = (uint8_t)desired_openness;
     }
 
     // Also store in simple ship for compatibility
@@ -1199,13 +1563,9 @@ static void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocket
     //          player->player_id, ship->ship_id, direction, target_angle);
     
     // Update simulation ship target rudder angle
-    if (global_sim && global_sim->ship_count > 0) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                global_sim->ships[s].target_rudder_angle = target_angle;
-                break;
-            }
-        }
+    {
+        struct Ship* _ss = find_sim_ship(ship->ship_id);
+        if (_ss) _ss->target_rudder_angle = target_angle;
     }
     
     // Send acknowledgment
@@ -1236,19 +1596,14 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
     q16_t angle_q16 = Q16_FROM_FLOAT(angle_radians);
 
     // Update simulation ship masts — only those with a rigger stationed at them
-    if (global_sim && global_sim->ship_count > 0) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                struct Ship* sim_ship = &global_sim->ships[s];
-                for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                    if (sim_ship->modules[m].type_id == MODULE_TYPE_MAST &&
-                        is_mast_manned(ship->ship_id, sim_ship->modules[m].id)) {
-                        sim_ship->modules[m].data.mast.angle = angle_q16;
-                        // log_info("  🌀 Mast %u angle set to %.1f° (%.3f rad)",
-                        //          sim_ship->modules[m].id, desired_angle, angle_radians);
-                    }
+    {
+        struct Ship* sim_ship = find_sim_ship(ship->ship_id);
+        if (sim_ship) {
+            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                if (sim_ship->modules[m].type_id == MODULE_TYPE_MAST &&
+                    is_mast_manned_by_friendly(ship->ship_id, sim_ship->modules[m].id, player->company_id)) {
+                    sim_ship->modules[m].data.mast.angle = angle_q16;
                 }
-                break;
             }
         }
     }
@@ -1256,7 +1611,7 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
     // Also update SimpleShip for compatibility (manned masts only)
     for (int i = 0; i < ship->module_count; i++) {
         if (ship->modules[i].type_id == MODULE_TYPE_MAST &&
-            is_mast_manned(ship->ship_id, ship->modules[i].id)) {
+            is_mast_manned_by_friendly(ship->ship_id, ship->modules[i].id, player->company_id)) {
             ship->modules[i].data.mast.angle = angle_q16;
         }
     }
@@ -1285,19 +1640,23 @@ static void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSo
 static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float world_x, float world_y, 
                                   float angle, entity_id projectile_id, uint8_t ammo_type);
 static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired, uint8_t ammo_type);
+static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw, WebSocketPlayer* player, uint8_t ammo_type);
+static void handle_swivel_fire(WebSocketPlayer* player, uint8_t ammo_type);
 static void handle_cannon_force_reload(WebSocketPlayer* player);
 static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_type,
                                uint32_t* explicit_ids, int explicit_count, bool skip_aim_check);
 static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
-                                       WeaponGroupMode mode, uint32_t* cannon_ids,
-                                       int cannon_count, uint32_t target_ship_id);
-static WeaponGroup* find_cannon_weapon_group(uint32_t ship_id, uint32_t cannon_id);
+                                       WeaponGroupMode mode, uint32_t* weapon_ids,
+                                       int weapon_count, uint32_t target_ship_id);
+static WeaponGroup* find_weapon_group(uint32_t ship_id, uint32_t cannon_id, uint8_t company_id);
 static void assign_weapon_group_crew(SimpleShip* ship);
 static void tick_cannon_needed_expiry(void);
+static void tick_swivel_crew_demand(SimpleShip* ship);
 static void tick_ship_weapon_groups(void);
 static void tick_sinking_ships(void);
+static void tick_ghost_ships(float dt);
 static void ship_init_default_weapon_groups(SimpleShip* ship);
-static void broadcast_cannon_group_state(SimpleShip* ship);
+static void broadcast_cannon_group_state(SimpleShip* ship, uint8_t company_id);
 static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship);
 static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* task);
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle);
@@ -1345,17 +1704,14 @@ static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float 
     cannon->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
 
     // Mirror into sim-ship so fire_cannon reads the correct value
-    if (global_sim) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                struct Ship* sim_ship = &global_sim->ships[s];
-                for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                    if (sim_ship->modules[m].id == cannon->id) {
-                        sim_ship->modules[m].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
-                        break;
-                    }
+    {
+        struct Ship* sim_ship = find_sim_ship(ship->ship_id);
+        if (sim_ship) {
+            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                if (sim_ship->modules[m].id == cannon->id) {
+                    sim_ship->modules[m].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
+                    break;
                 }
-                break;
             }
         }
     }
@@ -1365,7 +1721,7 @@ static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float 
  * Apply a single crew task assignment from the client manning-priority panel.
  *
  * task == "Sails"   → become RIGGER, walk to the next free mast
- * task == "Cannons" → become GUNNER,  sector system places at closest cannon
+ * task == "Gunners" → become GUNNER,  sector system places at closest cannon
  * task == "Combat"  → same as Cannons
  * anything else     → become NONE,    walk back to idle spawn position
  */
@@ -1375,13 +1731,13 @@ static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float 
 static void dismount_npc(WorldNpc* npc, SimpleShip* ship) {
     if (npc->role == NPC_ROLE_GUNNER) {
         npc->wants_cannon       = false;
-        npc->assigned_cannon_id = 0;
+        npc->assigned_weapon_id = 0;
         /* Re-run sector so remaining gunners can claim the vacated cannon */
         if (ship) update_npc_cannon_sector(ship, ship->active_aim_angle);
 
     } else if (npc->role == NPC_ROLE_RIGGER) {
         /* Free the mast — clear id so is_mast_manned() returns false immediately */
-        npc->assigned_cannon_id = 0;
+        npc->assigned_weapon_id = 0;
         npc->port_cannon_id     = 0;
         npc->starboard_cannon_id= 0;
     }
@@ -1405,11 +1761,17 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
         return;
     }
 
+    /* Locked NPCs cannot be reassigned via the crew panel or crew_assign messages */
+    if (npc->task_locked) {
+        log_info("🔒 crew_assign: NPC %u (%s) is task-locked — reassignment blocked", npc_id, npc->name);
+        return;
+    }
+
     /* Dismount from current module before applying new role */
     dismount_npc(npc, ship);
 
     bool want_sails   = (strncmp(task, "Sails",   5) == 0);
-    bool want_cannons = (strncmp(task, "Cannons", 7) == 0 || strncmp(task, "Combat", 6) == 0);
+    bool want_cannons = (strncmp(task, "Gunners", 7) == 0 || strncmp(task, "Combat", 6) == 0);
     bool want_repairs = (strncmp(task, "Repairs", 7) == 0);
 
     if (want_sails) {
@@ -1423,7 +1785,7 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
                 WorldNpc* other = &world_npcs[j];
                 if (!other->active || other->id == npc->id) continue;
                 if (other->ship_id != ship_id) continue;
-                if (other->role == NPC_ROLE_RIGGER && other->assigned_cannon_id == mid) {
+                if (other->role == NPC_ROLE_RIGGER && other->assigned_weapon_id == mid) {
                     occupied = true;
                     break;
                 }
@@ -1438,7 +1800,7 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
                 float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(mast->local_pos.y));
                 npc->target_local_x     = mx;
                 npc->target_local_y     = my + 20.0f;
-                npc->assigned_cannon_id = free_mast;
+                npc->assigned_weapon_id = free_mast;
             }
             // log_info("⛵ NPC %u (%s) → RIGGER, walking to mast %u", npc->id, npc->name, free_mast);
         } else {
@@ -1459,7 +1821,7 @@ static void handle_crew_assign(uint32_t ship_id, uint32_t npc_id, const char* ta
     } else if (want_repairs) {
         /* Become a repairer — walk to idle position, tick_world_npcs will dispatch to a module */
         npc->role           = NPC_ROLE_REPAIRER;
-        npc->assigned_cannon_id = 0;
+        npc->assigned_weapon_id = 0;
         npc->target_local_x = npc->idle_local_x;
         npc->target_local_y = npc->idle_local_y;
         npc->state          = WORLD_NPC_STATE_MOVING;
@@ -1503,20 +1865,90 @@ static void tick_npc_agents(float dt) {
                 // Don't fire on allied ships
                 if (is_allied(ship->company_id, target->company_id)) break;
 
-                // Only aim/fire while the WorldNpc gunner is stationary at this cannon.
+                // Only aim/fire while the WorldNpc gunner is stationary at this weapon.
                 // Find the corresponding WorldNpc for this module and check its state.
-                bool npc_at_cannon = false;
+                bool npc_at_gun = false;
                 for (int wn = 0; wn < world_npc_count; wn++) {
                     WorldNpc* wnpc = &world_npcs[wn];
                     if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
                         wnpc->ship_id == ship->ship_id &&
-                        wnpc->assigned_cannon_id == module->id &&
-                        wnpc->state == WORLD_NPC_STATE_AT_CANNON) {
-                        npc_at_cannon = true;
+                        wnpc->assigned_weapon_id == module->id &&
+                        wnpc->state == WORLD_NPC_STATE_AT_GUN) {
+                        npc_at_gun = true;
                         break;
                     }
                 }
-                if (!npc_at_cannon) break;
+                if (!npc_at_gun) break;
+
+                /* ── Swivel path ──────────────────────────────────────────── */
+                if (module->type_id == MODULE_TYPE_SWIVEL) {
+                    WeaponGroup* grp = find_weapon_group(ship->ship_id, module->id, ship->company_id);
+                    if (grp && grp->mode == WEAPON_GROUP_MODE_HALTFIRE) break; /* suppressed */
+
+                    /* AIMING / FREEFIRE group → NPC defers to player's helm aim angle
+                     * (same as cannon NPCs tracking ship->active_aim_angle).
+                     * TARGETFIRE / not in any group → NPC auto-aims at target ship. */
+                    bool player_controls_aim = grp &&
+                        (grp->mode == WEAPON_GROUP_MODE_AIMING ||
+                         grp->mode == WEAPON_GROUP_MODE_FREEFIRE);
+
+                    float desired_off;
+                    if (player_controls_aim) {
+                        /* Sync to ship->active_aim_angle — same convention as handle_swivel_aim */
+                        float sw_base = Q16_TO_FLOAT(module->local_rot);
+                        desired_off = ship->active_aim_angle - sw_base + (float)(M_PI / 2.0f);
+                        while (desired_off >  (float)M_PI) desired_off -= 2.0f * (float)M_PI;
+                        while (desired_off < -(float)M_PI) desired_off += 2.0f * (float)M_PI;
+                    } else {
+                        /* Auto-aim at target ship centre */
+                        float cos_r  = cosf(ship->rotation);
+                        float sin_r  = sinf(ship->rotation);
+                        float local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+                        float local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+                        float world_x = ship->x + (local_x * cos_r - local_y * sin_r);
+                        float world_y = ship->y + (local_x * sin_r + local_y * cos_r);
+                        float dx = target->x - world_x;
+                        float dy = target->y - world_y;
+                        float world_angle = atan2f(dy, dx);
+                        float sw_base = Q16_TO_FLOAT(module->local_rot) - (float)(M_PI / 2.0f);
+                        desired_off = world_angle - ship->rotation - sw_base;
+                        while (desired_off >  (float)M_PI) desired_off -= 2.0f * (float)M_PI;
+                        while (desired_off < -(float)M_PI) desired_off += 2.0f * (float)M_PI;
+                    }
+
+                    const float SWIVEL_AIM_RANGE = 90.0f * ((float)M_PI / 180.0f);
+                    if (desired_off >  SWIVEL_AIM_RANGE) desired_off =  SWIVEL_AIM_RANGE;
+                    if (desired_off < -SWIVEL_AIM_RANGE) desired_off = -SWIVEL_AIM_RANGE;
+                    module->data.swivel.aim_direction = Q16_FROM_FLOAT(desired_off);
+                    /* Mirror to global_sim */
+                    {
+                        struct Ship* _ss = find_sim_ship(ship->ship_id);
+                        if (_ss) {
+                            for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                                if (_ss->modules[mi].id == module->id) {
+                                    _ss->modules[mi].data.swivel.aim_direction = Q16_FROM_FLOAT(desired_off);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    /* Auto-aiming NPCs fire when reload is complete.
+                     * Player-aim mode: swivel fires on the player's fire command. */
+                    if (!player_controls_aim &&
+                        module->data.swivel.time_since_fire >= module->data.swivel.reload_time) {
+                        ShipModule* gsw = NULL;
+                        {
+                            struct Ship* _ss2 = find_sim_ship(ship->ship_id);
+                            if (_ss2) {
+                                for (uint8_t mi = 0; mi < _ss2->module_count; mi++) {
+                                    if (_ss2->modules[mi].id == module->id) { gsw = &_ss2->modules[mi]; break; }
+                                }
+                            }
+                        }
+                        fire_swivel(ship, module, gsw, NULL, PROJ_TYPE_GRAPESHOT);
+                    }
+                    break;
+                }
 
                 /* ── Weapon-group override ──────────────────────────────────
                  * If this cannon belongs to a player's weapon control group,
@@ -1528,7 +1960,7 @@ static void tick_npc_agents(float dt) {
                  *   AIMING / FREEFIRE → NPC aims normally (follows ship aim angle).
                  * ─────────────────────────────────────────────────────────── */
                 {
-                    WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, module->id);
+                    WeaponGroup* grp = find_weapon_group(ship->ship_id, module->id, ship->company_id);
                     if (grp) {
                         if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   break; /* suppressed */
                         if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE)  break; /* aim owned by tick_player_weapon_groups */
@@ -1553,17 +1985,14 @@ static void tick_npc_agents(float dt) {
                         desired_offset = (desired_offset > 0.0f) ? CANNON_AIM_RANGE : -CANNON_AIM_RANGE;
                     module->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
                     // Mirror into sim-ship
-                    if (global_sim) {
-                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                            if (global_sim->ships[si].id == ship->ship_id) {
-                                for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                    if (global_sim->ships[si].modules[mi].id == module->id) {
-                                        global_sim->ships[si].modules[mi].data.cannon.desired_aim_direction
-                                            = Q16_FROM_FLOAT(desired_offset);
-                                        break;
-                                    }
+                    {
+                        struct Ship* _ss = find_sim_ship(ship->ship_id);
+                        if (_ss) {
+                            for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                                if (_ss->modules[mi].id == module->id) {
+                                    _ss->modules[mi].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
+                                    break;
                                 }
-                                break;
                             }
                         }
                     }
@@ -1585,16 +2014,14 @@ static void tick_npc_agents(float dt) {
                     // Apply desired sail angle
                     module->data.mast.angle = Q16_FROM_FLOAT(ship->desired_sail_angle);
                     // Mirror into sim-ship
-                    if (global_sim) {
-                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                            if (global_sim->ships[si].id == ship->ship_id) {
-                                for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                    if (global_sim->ships[si].modules[mi].id == module->id) {
-                                        global_sim->ships[si].modules[mi].data.mast.angle = module->data.mast.angle;
-                                        break;
-                                    }
+                    {
+                        struct Ship* _ss = find_sim_ship(ship->ship_id);
+                        if (_ss) {
+                            for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                                if (_ss->modules[mi].id == module->id) {
+                                    _ss->modules[mi].data.mast.angle = module->data.mast.angle;
+                                    break;
                                 }
-                                break;
                             }
                         }
                     }
@@ -1673,14 +2100,24 @@ static uint32_t spawn_ship_crew(uint32_t ship_id, const char* name) {
     npc->active         = true;
     npc->role           = NPC_ROLE_NONE;  /* assigned dynamically by manning panel */
     npc->ship_id        = ship_id;
-    npc->company_id     = ship->company_id; /* inherit faction from ship */
+    npc->company_id     = ship->company_id; /* faction set once at spawn — never changed by ship transfers */
     npc->wants_cannon   = false;
     npc->move_speed     = 80.0f;
     npc->interact_radius= 40.0f;
     npc->state          = WORLD_NPC_STATE_IDLE;
-    npc->assigned_cannon_id = 0;
+    npc->assigned_weapon_id = 0;
     strncpy(npc->name,     name,              sizeof(npc->name)     - 1);
     strncpy(npc->dialogue, "Aye aye, Captain!", sizeof(npc->dialogue) - 1);
+
+    /* Crew levelling — fresh recruit */
+    npc->npc_level   = 1;
+    npc->stat_health = 0;
+    npc->stat_damage = 0;
+    npc->stat_stamina= 0;
+    npc->stat_weight = 0;
+    npc->max_health  = (uint16_t)(100 + npc->stat_health * 20);
+    npc->health      = npc->max_health;
+    npc->xp          = 0;
 
     /* Stagger idle positions along ship centreline */
     int slot_idx = (int)(npc->id % 9);
@@ -1692,6 +2129,58 @@ static uint32_t spawn_ship_crew(uint32_t ship_id, const char* name) {
     npc->target_local_y = npc->local_y;
     ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
     log_info("🧑 Crew '%s' (id %u) on ship %u — idle", npc->name, npc->id, ship_id);
+    return npc->id;
+}
+
+/* ============================================================================
+ * UNCLAIMED NPC SPAWN
+ * Spawns a free-floating, neutral NPC in the water at world position (wx, wy).
+ * Called when a ghost ship is destroyed — 2-3 survivors wash up as recruitable.
+ * index 0-2 produces a scatter offset so they don't all stack.
+ * ========================================================================= */
+static uint32_t spawn_unclaimed_npc(float wx, float wy, int index) {
+    if (world_npc_count >= MAX_WORLD_NPCS) {
+        log_warn("spawn_unclaimed_npc: MAX_WORLD_NPCS reached");
+        return 0;
+    }
+    static const char* const SURVIVOR_NAMES[] = {
+        "Phantom Sailor", "Ghost Deckhand", "Spectre Mariner",
+        "Wraith Jackal",  "Haunt Gunner",  "Moor Spirit",
+    };
+    const int NAME_COUNT = (int)(sizeof(SURVIVOR_NAMES) / sizeof(SURVIVOR_NAMES[0]));
+    /* Scatter: each survivor drifts slightly away from the wreck */
+    static const float OFFSETS_X[3] = {  20.0f, -30.0f,  10.0f };
+    static const float OFFSETS_Y[3] = { -20.0f,  10.0f,  40.0f };
+    float ox = OFFSETS_X[index < 3 ? index : 0];
+    float oy = OFFSETS_Y[index < 3 ? index : 0];
+
+    WorldNpc* npc = &world_npcs[world_npc_count++];
+    memset(npc, 0, sizeof(WorldNpc));
+    npc->id              = next_world_npc_id++;
+    npc->active          = true;
+    npc->role            = NPC_ROLE_NONE;
+    npc->ship_id         = 0;         /* free-standing — not on any ship */
+    npc->company_id      = 0;         /* unclaimed: COMPANY_NEUTRAL */
+    npc->move_speed      = 60.0f;
+    npc->interact_radius = 60.0f;     /* larger — floating in the water */
+    npc->state           = WORLD_NPC_STATE_IDLE;
+    npc->in_water        = true;
+    npc->x               = wx + ox;
+    npc->y               = wy + oy;
+    npc->local_x         = 0.0f;
+    npc->local_y         = 0.0f;
+
+    const char* chosen = SURVIVOR_NAMES[(npc->id) % NAME_COUNT];
+    strncpy(npc->name,     chosen,       sizeof(npc->name)     - 1);
+    strncpy(npc->dialogue, "Help me...", sizeof(npc->dialogue) - 1);
+
+    npc->npc_level   = 1;
+    npc->max_health  = 100;
+    npc->health      = 100;
+    npc->xp          = 0;
+
+    log_info("👻 Unclaimed NPC '%s' (id %u) in water at (%.0f, %.0f)",
+             npc->name, npc->id, npc->x, npc->y);
     return npc->id;
 }
 
@@ -1709,16 +2198,17 @@ static uint32_t spawn_ship_crew(uint32_t ship_id, const char* name) {
  * ============================================================================*/
 #define SWAP_HYSTERESIS (10.0f * ((float)M_PI / 180.0f))  /* 10° dead-band */
 
-/* Walk a gunner to the given cannon module. */
-static void dispatch_gunner_to_cannon(WorldNpc* npc, SimpleShip* ship,
+/* Walk a gunner to the given cannon or swivel module. */
+static void dispatch_gunner_to_weapon(WorldNpc* npc, SimpleShip* ship,
                                       uint32_t cannon_id, float abs_diff_deg) {
     ShipModule* cannon = find_module_by_id(ship, cannon_id);
     if (!cannon) return;
     float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));
     float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.y));
     float barrel_angle = Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f);
-    const float CANNON_MOUNT_DIST = 25.0f;
-    npc->assigned_cannon_id = cannon_id;
+    /* Swivels are smaller — NPC stands slightly closer to the pivot */
+    const float CANNON_MOUNT_DIST = (cannon->type_id == MODULE_TYPE_SWIVEL) ? 18.0f : 25.0f;
+    npc->assigned_weapon_id = cannon_id;
     npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->state              = WORLD_NPC_STATE_MOVING;
@@ -1764,7 +2254,7 @@ static void tick_cannon_needed_expiry(void) {
         if (!ship->active) continue;
         for (int m = 0; m < ship->module_count; m++) {
             ShipModule* mod = &ship->modules[m];
-            if (mod->type_id != MODULE_TYPE_CANNON) continue;
+            if (mod->type_id != MODULE_TYPE_CANNON && mod->type_id != MODULE_TYPE_SWIVEL) continue;
             if (!(mod->state_bits & MODULE_STATE_NEEDED)) continue;
 
             uint32_t last_aim = ship->cannon_last_needed_ms[m];
@@ -1793,6 +2283,15 @@ static void tick_cannon_needed_expiry(void) {
 }
 
 /**
+ * Mark swivel guns as NEEDED when this ship's NPC agents have an active enemy target.
+ * This drives the crew dispatch system to send gunner NPCs to unmanned swivels.
+ * Called once per tick before assign_weapon_group_crew().
+ */
+static void tick_swivel_crew_demand(SimpleShip* ship) {
+    (void)ship; /* NEEDED for swivels is now driven by handle_cannon_aim sector-check, same as cannons */
+}
+
+/**
  * Assign free on-duty gunner NPCs to any weapon-group cannon that is currently
  * unmanned and has MODULE_STATE_NEEDED set.
  *
@@ -1808,9 +2307,9 @@ static void assign_weapon_group_crew(SimpleShip* ship) {
 
     for (int m = 0; m < ship->module_count; m++) {
         ShipModule* mod = &ship->modules[m];
-        if (mod->type_id != MODULE_TYPE_CANNON) continue;
+        if (mod->type_id != MODULE_TYPE_CANNON && mod->type_id != MODULE_TYPE_SWIVEL) continue;
 
-        /* Only dispatch to cannons that are actively NEEDED. */
+        /* Only dispatch to weapons that are actively NEEDED. */
         if (!(mod->state_bits & MODULE_STATE_NEEDED)) continue;
 
         /* Check occupancy: player seated here? */
@@ -1828,8 +2327,8 @@ static void assign_weapon_group_crew(SimpleShip* ship) {
                 WorldNpc* npc = &world_npcs[ni];
                 if (npc->active && npc->role == NPC_ROLE_GUNNER &&
                     npc->ship_id == ship->ship_id &&
-                    npc->assigned_cannon_id == mod->id) {
-                    if (npc->state == WORLD_NPC_STATE_AT_CANNON) occupied  = true;
+                    npc->assigned_weapon_id == mod->id) {
+                    if (npc->state == WORLD_NPC_STATE_AT_GUN) occupied  = true;
                     else                                          en_route  = true;
                     break;
                 }
@@ -1849,9 +2348,9 @@ static void assign_weapon_group_crew(SimpleShip* ship) {
             WorldNpc* npc = &world_npcs[ni];
             if (!npc->active || npc->ship_id != ship->ship_id) continue;
             if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
-            if (npc->assigned_cannon_id != 0) {
+            if (npc->assigned_weapon_id != 0) {
                 /* Only pull from a cannon whose NEEDED has expired */
-                ShipModule* cur = find_module_on_ship(ship, npc->assigned_cannon_id);
+                ShipModule* cur = find_module_on_ship(ship, npc->assigned_weapon_id);
                 if (cur && (cur->state_bits & MODULE_STATE_NEEDED)) continue;
             }
             float dx = npc->local_x - cx;
@@ -1863,7 +2362,7 @@ static void assign_weapon_group_crew(SimpleShip* ship) {
         if (best) {
             // log_info("🎯 Cannon %u NEEDED+unmanned — dispatching NPC %u (%s)",
             //          mod->id, best->id, best->name);
-            dispatch_gunner_to_cannon(best, ship, mod->id, 0.0f);
+            dispatch_gunner_to_weapon(best, ship, mod->id, 0.0f);
         }
     }
 
@@ -1881,11 +2380,11 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
      * are never completely invisible to the sector system.                     */
     uint32_t sorted_ids [MAX_MODULES_PER_SHIP];
     float    sorted_diff[MAX_MODULES_PER_SHIP];
-    int      cannon_count = 0;
+    int      weapon_count = 0;
 
     for (int m = 0; m < ship->module_count; m++) {
         ShipModule* mod = &ship->modules[m];
-        if (mod->type_id != MODULE_TYPE_CANNON) continue;
+        if (mod->type_id != MODULE_TYPE_CANNON && mod->type_id != MODULE_TYPE_SWIVEL) continue;
 
         float fire_dir = Q16_TO_FLOAT(mod->local_rot) - (float)(M_PI / 2.0f);
         float diff = aim_angle - fire_dir;
@@ -1899,13 +2398,13 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
         if (mod->state_bits & MODULE_STATE_NEEDED)
             abs_diff -= 2.0f * (float)M_PI;   /* guaranteed negative → sorts first */
         else {
-            WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, mod->id);
+            WeaponGroup* grp = find_weapon_group(ship->ship_id, mod->id, ship->company_id);
             if (grp && grp->mode == WEAPON_GROUP_MODE_HALTFIRE)
                 abs_diff += 2.0f * (float)M_PI; /* sorts last */
         }
 
         /* Insertion sort: smallest diff first */
-        int pos = cannon_count;
+        int pos = weapon_count;
         while (pos > 0 && sorted_diff[pos - 1] > abs_diff) {
             sorted_ids [pos] = sorted_ids [pos - 1];
             sorted_diff[pos] = sorted_diff[pos - 1];
@@ -1913,9 +2412,9 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
         }
         sorted_ids [pos] = mod->id;
         sorted_diff[pos] = abs_diff;
-        cannon_count++;
+        weapon_count++;
     }
-    if (cannon_count == 0) return;
+    if (weapon_count == 0) return;
 
     /* ─ Step 2: dispatch unassigned or released gunners to NEEDED cannons only.
      *
@@ -1927,12 +2426,14 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
         WorldNpc* npc = &world_npcs[i];
         if (!npc->active || npc->ship_id != ship->ship_id) continue;
         if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
+        /* Locked NPCs stay pinned to their current cannon regardless of sector changes */
+        if (npc->task_locked) continue;
 
         /* NPC is already heading to or sitting at a cannon — keep them
          * unless their cannon's NEEDED has expired AND another cannon
          * has NEEDED and is uncovered. */
-        if (npc->assigned_cannon_id != 0) {
-            ShipModule* cur = find_module_on_ship(ship, npc->assigned_cannon_id);
+        if (npc->assigned_weapon_id != 0) {
+            ShipModule* cur = find_module_on_ship(ship, npc->assigned_weapon_id);
             bool cur_needed = cur && (cur->state_bits & MODULE_STATE_NEEDED);
             if (cur_needed) continue; /* their cannon is still active — stay */
 
@@ -1940,8 +2441,9 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
              * NEEDED cannon that is uncovered. */
             bool any_needed_elsewhere = false;
             for (int mn = 0; mn < ship->module_count; mn++) {
-                if (ship->modules[mn].id == npc->assigned_cannon_id) continue;
-                if (ship->modules[mn].type_id == MODULE_TYPE_CANNON &&
+                if (ship->modules[mn].id == npc->assigned_weapon_id) continue;
+                if ((ship->modules[mn].type_id == MODULE_TYPE_CANNON ||
+                     ship->modules[mn].type_id == MODULE_TYPE_SWIVEL) &&
                     (ship->modules[mn].state_bits & MODULE_STATE_NEEDED)) {
                     bool covered = false;
                     for (int j = 0; j < world_npc_count; j++) {
@@ -1949,7 +2451,7 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
                         WorldNpc* o = &world_npcs[j];
                         if (o->active && o->role == NPC_ROLE_GUNNER &&
                             o->ship_id == ship->ship_id &&
-                            o->assigned_cannon_id == ship->modules[mn].id) {
+                            o->assigned_weapon_id == ship->modules[mn].id) {
                             covered = true; break;
                         }
                     }
@@ -1962,12 +2464,12 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
         /* Find the highest-priority NEEDED cannon not already covered by another NPC */
         uint32_t best_id = 0;
         float    best_diff = (float)M_PI * 4.0f; /* sorted_diff can be negative for NEEDED */
-        for (int c = 0; c < cannon_count; c++) {
+        for (int c = 0; c < weapon_count; c++) {
             uint32_t cid = sorted_ids[c];
             ShipModule* cmod = find_module_on_ship(ship, cid);
             if (!cmod || !(cmod->state_bits & MODULE_STATE_NEEDED)) continue;
             /* Already assigned to this one? Stay */
-            if (cid == npc->assigned_cannon_id) { best_id = cid; best_diff = sorted_diff[c]; break; }
+            if (cid == npc->assigned_weapon_id) { best_id = cid; best_diff = sorted_diff[c]; break; }
             /* Check nobody else is already covering it */
             bool covered = false;
             for (int j = 0; j < world_npc_count; j++) {
@@ -1975,14 +2477,14 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
                 WorldNpc* o = &world_npcs[j];
                 if (o->active && o->role == NPC_ROLE_GUNNER &&
                     o->ship_id == ship->ship_id &&
-                    o->assigned_cannon_id == cid) { covered = true; break; }
+                    o->assigned_weapon_id == cid) { covered = true; break; }
             }
             if (!covered) { best_id = cid; best_diff = sorted_diff[c]; break; }
         }
 
-        if (best_id == 0 || best_id == npc->assigned_cannon_id) continue;
+        if (best_id == 0 || best_id == npc->assigned_weapon_id) continue;
 
-        dispatch_gunner_to_cannon(npc, ship, best_id,
+        dispatch_gunner_to_weapon(npc, ship, best_id,
                                   best_diff * 180.0f / (float)M_PI);
     }
 
@@ -1991,10 +2493,48 @@ static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
     //          sorted_ids[0], sorted_diff[0] * 180.0f / (float)M_PI);
 }
 
+/* ── NPC global levelling constants ───────────────────────────────────────── */
+/* Max global level: 1 base + 65 upgrades */
+#define NPC_MAX_LEVEL       66u
+/* XP needed to advance from level L to L+1: NPC_LEVEL_XP_BASE * L */
+#define NPC_LEVEL_XP_BASE  100u
+
+/*
+ * Grant XP to a crew NPC and apply any level-ups.
+ * Stops accumulating XP once NPC_MAX_LEVEL is reached.
+ * Each level-up gives 1 stat point (= npc_level - 1 - total_stats_spent).
+ */
+static void npc_apply_xp(WorldNpc* npc, uint32_t xp_gain) {
+    if (npc->npc_level >= NPC_MAX_LEVEL) return; /* already max level — no more XP */
+    npc->xp += xp_gain;
+    /* Process level-ups: cost to advance from L to L+1 is NPC_LEVEL_XP_BASE * L */
+    while (npc->npc_level < NPC_MAX_LEVEL) {
+        uint32_t cost = NPC_LEVEL_XP_BASE * (uint32_t)npc->npc_level;
+        if (npc->xp < cost) break;
+        npc->xp -= cost;
+        npc->npc_level++;
+    }
+}
+
+// ── Repairer occupancy: small precomputed set rebuilt each tick ──────────────
+// All active repairers with a current assignment are snapshotted before the NPC
+// loop.  Entries are added inline whenever a new claim is made so that
+// subsequent NPCs in the same tick see it and don't double-claim the same slot.
+typedef struct { uint32_t npc_id; uint32_t ship_id; uint32_t mod_id; } NpcOccEntry;
+
+static bool occ_taken_by_other(const NpcOccEntry* buf, int cnt,
+                                uint32_t self_npc_id, uint32_t ship_id, uint32_t mod_id) {
+    for (int k = 0; k < cnt; k++)
+        if (buf[k].ship_id == ship_id && buf[k].mod_id == mod_id && buf[k].npc_id != self_npc_id)
+            return true;
+    return false;
+}
+
 /**
  * Tick world NPCs: animate movement across deck, then update world positions.
  */
 static void tick_world_npcs(float dt) {
+    g_npcs_dirty = true; // NPCs ticked this frame — JSON must be rebuilt
     // Plank centre positions in client-space local coords (match HULL_POINTS in modules.ts)
     // Order: bow_port, bow_starboard, 3× starboard, stern_starboard, stern_port, 3× port
     static const float s_plank_cx[10] = {
@@ -2006,38 +2546,37 @@ static void tick_world_npcs(float dt) {
         -45.0f,  45.0f,  90.0f,  90.0f,  90.0f
     };
 
+    // Snapshot current repairer assignments for O(1) occupancy checks.
+    // Updated inline when a new claim is made mid-tick.
+    NpcOccEntry occ_buf[MAX_WORLD_NPCS];
+    int occ_cnt = 0;
+    for (int _bi = 0; _bi < world_npc_count; _bi++) {
+        WorldNpc* _bn = &world_npcs[_bi];
+        if (_bn->active && _bn->role == NPC_ROLE_REPAIRER && _bn->assigned_weapon_id != 0)
+            occ_buf[occ_cnt++] = (NpcOccEntry){ _bn->id, _bn->ship_id, _bn->assigned_weapon_id };
+    }
+
     for (int i = 0; i < world_npc_count; i++) {
         WorldNpc* npc = &world_npcs[i];
         if (!npc->active) continue;
 
         if (npc->state == WORLD_NPC_STATE_MOVING) {
             // ── Repairer walking home: interrupt if new damage appears ──────────
-            if (npc->role == NPC_ROLE_REPAIRER && npc->assigned_cannon_id == 0 && global_sim) {
-                struct Ship* intr_ship = NULL;
-                for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-                    if ((uint32_t)global_sim->ships[s].id == npc->ship_id) {
-                        intr_ship = &global_sim->ships[s]; break;
-                    }
-                }
+            if (npc->role == NPC_ROLE_REPAIRER && npc->assigned_weapon_id == 0 && global_sim) {
+                struct Ship* intr_ship = find_sim_ship(npc->ship_id);
                 if (intr_ship) {
                     // Check for missing deck (highest priority)
                     bool intr_deck_present = false;
                     for (uint8_t m = 0; m < intr_ship->module_count; m++) {
                         if (intr_ship->modules[m].id == 200) { intr_deck_present = true; break; }
                     }
-                    bool intr_deck_taken = false;
-                    if (!intr_deck_present) {
-                        for (int j = 0; j < world_npc_count; j++) {
-                            WorldNpc* other = &world_npcs[j];
-                            if (!other->active || other->id == npc->id) continue;
-                            if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
-                                other->assigned_cannon_id == 200) { intr_deck_taken = true; break; }
-                        }
-                    }
+                    bool intr_deck_taken = !intr_deck_present &&
+                        occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, 200);
                     if (!intr_deck_present && !intr_deck_taken) {
                         npc->target_local_x     = 0.0f;
                         npc->target_local_y     = 0.0f;
-                        npc->assigned_cannon_id = 200;
+                        npc->assigned_weapon_id = 200;
+                        occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, 200 };
                         log_info("🔨 NPC %u (%s) interrupted — redirecting to replace missing deck",
                                  npc->id, npc->name);
                     } else {
@@ -2050,14 +2589,8 @@ static void tick_world_npcs(float dt) {
                     int intr_missing = -1;
                     for (int k = 0; k < 10; k++) {
                         if (present[k]) continue;
-                        bool taken = false;
-                        for (int j = 0; j < world_npc_count; j++) {
-                            WorldNpc* other = &world_npcs[j];
-                            if (!other->active || other->id == npc->id) continue;
-                            if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
-                                other->assigned_cannon_id == (uint32_t)(100 + k)) { taken = true; break; }
-                        }
-                        if (!taken) { intr_missing = k; break; }
+                        if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, (uint32_t)(100 + k)))
+                            { intr_missing = k; break; }
                     }
                     if (intr_missing >= 0) {
                         float pcx = s_plank_cx[intr_missing], pcy = s_plank_cy[intr_missing];
@@ -2065,7 +2598,8 @@ static void tick_world_npcs(float dt) {
                         if (pmag > 0.0f) { pcx -= (pcx / pmag) * 28.0f; pcy -= (pcy / pmag) * 28.0f; }
                         npc->target_local_x     = pcx;
                         npc->target_local_y     = pcy;
-                        npc->assigned_cannon_id = (uint32_t)(100 + intr_missing);
+                        npc->assigned_weapon_id = (uint32_t)(100 + intr_missing);
+                        occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                         log_info("🔨 NPC %u (%s) interrupted — redirecting to missing plank %u",
                                  npc->id, npc->name, 100 + intr_missing);
                     } else {
@@ -2079,13 +2613,7 @@ static void tick_world_npcs(float dt) {
                             if (mod->max_health == 0) continue;
                             float ratio = (float)mod->health / (float)mod->max_health;
                             if (ratio >= 1.0f) continue;
-                            bool taken = false;
-                            for (int j = 0; j < world_npc_count; j++) {
-                                WorldNpc* other = &world_npcs[j];
-                                if (!other->active || other->id == npc->id) continue;
-                                if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
-                                    other->assigned_cannon_id == (uint32_t)mod->id) { taken = true; break; }
-                            }
+                            bool taken = occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, (uint32_t)mod->id);
                             if (!taken && ratio < intr_worst)  { intr_mod   = mod; intr_worst  = ratio; }
                             if ( taken && ratio < intr_stack_r){ intr_stack = mod; intr_stack_r = ratio; }
                         }
@@ -2097,7 +2625,8 @@ static void tick_world_npcs(float dt) {
                             if (mmag > 0.0f) { mx -= (mx / mmag) * 28.0f; my -= (my / mmag) * 28.0f; }
                             npc->target_local_x     = mx;
                             npc->target_local_y     = my;
-                            npc->assigned_cannon_id = (uint32_t)intr_mod->id;
+                            npc->assigned_weapon_id = (uint32_t)intr_mod->id;
+                            occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                             log_info("🔧 NPC %u (%s) interrupted — redirecting to damaged module %u (%.0f%% HP)",
                                      npc->id, npc->name, intr_mod->id, intr_worst * 100.0f);
                         }
@@ -2113,11 +2642,39 @@ static void tick_world_npcs(float dt) {
             if (dist <= step || dist < 0.5f) {
                 npc->local_x = npc->target_local_x;
                 npc->local_y = npc->target_local_y;
-                if (npc->assigned_cannon_id != 0) {
+
+                /* ── Boarding arrival: NPC swam to the hull entry point ── */
+                if (npc->boarding_ship_id != 0 && npc->ship_id == 0) {
+                    SimpleShip* bship = find_ship(npc->boarding_ship_id);
+                    if (bship) {
+                        /* Convert the hull entry world pos → ship-local coords */
+                        float bcos = cosf(-bship->rotation);
+                        float bsin = sinf(-bship->rotation);
+                        float bdx  = npc->local_x - bship->x;  /* local_x == world_x when ship_id==0 */
+                        float bdy  = npc->local_y - bship->y;
+                        npc->local_x           = bdx * bcos - bdy * bsin;
+                        npc->local_y           = bdx * bsin + bdy * bcos;
+                        npc->ship_id           = npc->boarding_ship_id;
+                        npc->in_water          = false;
+                        npc->target_local_x    = npc->boarding_local_x;
+                        npc->target_local_y    = npc->boarding_local_y;
+                        npc->boarding_ship_id  = 0;
+                        npc->state             = WORLD_NPC_STATE_MOVING;
+                        log_info("\u2693 NPC %u (%s) boarded ship %u, walking to (%.0f, %.0f)",
+                                 npc->id, npc->name, npc->ship_id,
+                                 npc->target_local_x, npc->target_local_y);
+                    } else {
+                        /* Ship disappeared — cancel boarding */
+                        npc->boarding_ship_id = 0;
+                        npc->state = WORLD_NPC_STATE_IDLE;
+                    }
+                    continue; /* re-evaluate on next tick */
+                }
+                if (npc->assigned_weapon_id != 0) {
                     /* Repair crew arrives at a damaged module; gunners/riggers arrive at a post */
                     npc->state = (npc->role == NPC_ROLE_REPAIRER)
                                ? WORLD_NPC_STATE_REPAIRING
-                               : WORLD_NPC_STATE_AT_CANNON;
+                               : WORLD_NPC_STATE_AT_GUN;
 
                     /* Rigger just arrived at mast — immediately apply current sail angle/openness
                      * so the sail snaps to the correct position without waiting for the next
@@ -2125,23 +2682,22 @@ static void tick_world_npcs(float dt) {
                     if (npc->role == NPC_ROLE_RIGGER) {
                         SimpleShip* rship = find_ship(npc->ship_id);
                         if (rship) {
-                            ShipModule* mast = find_module_by_id(rship, npc->assigned_cannon_id);
+                            ShipModule* mast = find_module_by_id(rship, npc->assigned_weapon_id);
                             if (mast && mast->type_id == MODULE_TYPE_MAST) {
                                 uint8_t tgt_open = rship->desired_sail_openness;
                                 mast->data.mast.openness = tgt_open;
                                 if (tgt_open > 0) mast->state_bits |=  MODULE_STATE_DEPLOYED;
                                 else              mast->state_bits &= ~MODULE_STATE_DEPLOYED;
                                 mast->data.mast.angle = Q16_FROM_FLOAT(rship->desired_sail_angle);
-                                if (global_sim) {
-                                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                                        if (global_sim->ships[si].id != rship->ship_id) continue;
-                                        for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                            if (global_sim->ships[si].modules[mi].id == mast->id) {
-                                                global_sim->ships[si].modules[mi].data.mast.angle = mast->data.mast.angle;
+                                {
+                                    struct Ship* _ss = find_sim_ship(rship->ship_id);
+                                    if (_ss) {
+                                        for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                                            if (_ss->modules[mi].id == mast->id) {
+                                                _ss->modules[mi].data.mast.angle = mast->data.mast.angle;
                                                 break;
                                             }
                                         }
-                                        break;
                                     }
                                 }
                             }
@@ -2157,30 +2713,69 @@ static void tick_world_npcs(float dt) {
             }
         }
 
+        // Integrate knockback velocity and apply drag
+        if (npc->velocity_x != 0.0f || npc->velocity_y != 0.0f) {
+            const float DRAG = 8.0f; // decay rate (higher = stops faster)
+            npc->local_x   += npc->velocity_x * dt;
+            npc->local_y   += npc->velocity_y * dt;
+            float decay     = 1.0f - DRAG * dt;
+            if (decay < 0.0f) decay = 0.0f;
+            npc->velocity_x *= decay;
+            npc->velocity_y *= decay;
+            if (fabsf(npc->velocity_x) < 0.5f) npc->velocity_x = 0.0f;
+            if (fabsf(npc->velocity_y) < 0.5f) npc->velocity_y = 0.0f;
+        }
+
+        /* Deck-bounds water check: if the NPC slid off the ship edges, mark in_water.
+         * Ship is ~480 wide x 120 tall client units; use generous margins.
+         * If ship_id == 0 (ship sank) the NPC is always in water. */
+        {
+            const float DECK_HALF_LEN = 260.0f;
+            const float DECK_HALF_WID =  75.0f;
+            bool was_water = npc->in_water;
+            npc->in_water = (npc->ship_id == 0) ||
+                            (fabsf(npc->local_x) > DECK_HALF_LEN ||
+                             fabsf(npc->local_y) > DECK_HALF_WID);
+            if (!was_water && npc->in_water && npc->fire_timer_ms > 0) {
+                /* Fell into water while burning — extinguish immediately */
+                npc->fire_timer_ms = 0;
+                char fx[192];
+                char fxf[256];
+                snprintf(fx, sizeof(fx),
+                    "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"npc\",\"id\":%u}",
+                    npc->id);
+                size_t fxfl = websocket_create_frame(WS_OPCODE_TEXT, fx, strlen(fx), fxf, sizeof(fxf));
+                if (fxfl > 0) {
+                    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                        struct WebSocketClient* wc = &ws_server.clients[ci];
+                        if (wc->connected && wc->handshake_complete) send(wc->fd, fxf, fxfl, 0);
+                    }
+                }
+            }
+        }
+
         // Keep world position in sync with ship transform
         if (npc->ship_id != 0) {
             SimpleShip* ship = find_ship(npc->ship_id);
             if (ship) ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
+        } else {
+            /* Off-ship NPCs: local_x/y ARE the world coordinates — keep x/y in sync */
+            npc->x = npc->local_x;
+            npc->y = npc->local_y;
         }
 
-        // ── Repair crew (NPC_ROLE_REPAIRER) ─────────────────────────────────────
+        // ── Repair crew (NPC_ROLE_REPAIRER) ───────────────────────────────────────────────
         if (npc->role != NPC_ROLE_REPAIRER) continue;
         if (!global_sim) continue;
 
-        struct Ship* sim_ship = NULL;
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if ((uint32_t)global_sim->ships[s].id == npc->ship_id) {
-                sim_ship = &global_sim->ships[s];
-                break;
-            }
-        }
+        struct Ship* sim_ship = find_sim_ship(npc->ship_id);
 
         // ── REPAIRING: actively fix the assigned module ──────────────────────────
         if (npc->state == WORLD_NPC_STATE_REPAIRING) {
             bool still_working = false;
 
             if (sim_ship) {
-                uint32_t target_id = npc->assigned_cannon_id;
+                uint32_t target_id = npc->assigned_weapon_id;
 
                 // If the deck is missing, place it first
                 if (target_id == 200) {
@@ -2267,8 +2862,10 @@ static void tick_world_npcs(float dt) {
 
             if (!still_working) {
                 log_info("✅ NPC %u (%s) finished with module %u",
-                         npc->id, npc->name, npc->assigned_cannon_id);
-                npc->assigned_cannon_id = 0;
+                         npc->id, npc->name, npc->assigned_weapon_id);
+                /* Award XP for completing a repair */
+                npc_apply_xp(npc, 25);
+                npc->assigned_weapon_id = 0;
                 // Fall through to the IDLE scan below so the NPC goes directly to
                 // the next damaged/missing module without returning home first.
                 npc->state = WORLD_NPC_STATE_IDLE;
@@ -2287,18 +2884,12 @@ static void tick_world_npcs(float dt) {
                 if (sim_ship->modules[m].id == 200) { deck_present = true; break; }
             }
             if (!deck_present) {
-                bool deck_taken = false;
-                for (int j = 0; j < world_npc_count; j++) {
-                    WorldNpc* other = &world_npcs[j];
-                    if (!other->active || other->id == npc->id) continue;
-                    if (other->ship_id == npc->ship_id && other->role == NPC_ROLE_REPAIRER &&
-                        other->assigned_cannon_id == 200) { deck_taken = true; break; }
-                }
-                if (!deck_taken) {
+                if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, 200)) {
                     npc->target_local_x     = 0.0f;
                     npc->target_local_y     = 0.0f;
-                    npc->assigned_cannon_id = 200;
+                    npc->assigned_weapon_id = 200;
                     npc->state              = WORLD_NPC_STATE_MOVING;
+                    occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, 200 };
                     log_info("🔨 NPC %u (%s) → walking to replace missing deck", npc->id, npc->name);
                     continue;
                 }
@@ -2313,17 +2904,8 @@ static void tick_world_npcs(float dt) {
             int missing_idx = -1;
             for (int k = 0; k < 10; k++) {
                 if (present[k]) continue;
-                bool taken = false;
-                for (int j = 0; j < world_npc_count; j++) {
-                    WorldNpc* other = &world_npcs[j];
-                    if (!other->active || other->id == npc->id) continue;
-                    if (other->ship_id == npc->ship_id &&
-                        other->role   == NPC_ROLE_REPAIRER &&
-                        other->assigned_cannon_id == (uint32_t)(100 + k)) {
-                        taken = true; break;
-                    }
-                }
-                if (!taken) { missing_idx = k; break; }
+                if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, (uint32_t)(100 + k)))
+                    { missing_idx = k; break; }
             }
 
             if (missing_idx >= 0) {
@@ -2333,8 +2915,9 @@ static void tick_world_npcs(float dt) {
                 if (pmag > 0.0f) { pcx -= (pcx / pmag) * 28.0f; pcy -= (pcy / pmag) * 28.0f; }
                 npc->target_local_x     = pcx;
                 npc->target_local_y     = pcy;
-                npc->assigned_cannon_id = (uint32_t)(100 + missing_idx);
+                npc->assigned_weapon_id = (uint32_t)(100 + missing_idx);
                 npc->state              = WORLD_NPC_STATE_MOVING;
+                occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                 log_info("🔨 NPC %u (%s) → walking to place missing plank %u",
                          npc->id, npc->name, 100 + missing_idx);
                 continue;
@@ -2362,16 +2945,7 @@ static void tick_world_npcs(float dt) {
                     }
                 }
                 if (ratio >= 1.0f) continue;
-                bool taken = false;
-                for (int j = 0; j < world_npc_count; j++) {
-                    WorldNpc* other = &world_npcs[j];
-                    if (!other->active || other->id == npc->id) continue;
-                    if (other->ship_id == npc->ship_id &&
-                        other->role   == NPC_ROLE_REPAIRER &&
-                        other->assigned_cannon_id == (uint32_t)mod->id) {
-                        taken = true; break;
-                    }
-                }
+                bool taken = occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, (uint32_t)mod->id);
                 if (!taken && ratio < worst_ratio) { target_mod = mod; worst_ratio = ratio; }
                 if ( taken && ratio < stack_ratio)  { stack_mod  = mod; stack_ratio = ratio; }
             }
@@ -2386,8 +2960,9 @@ static void tick_world_npcs(float dt) {
                 if (mmag > 0.0f) { mx -= (mx / mmag) * 28.0f; my -= (my / mmag) * 28.0f; }
                 npc->target_local_x     = mx;
                 npc->target_local_y     = my;
-                npc->assigned_cannon_id = (uint32_t)target_mod->id;
+                npc->assigned_weapon_id = (uint32_t)target_mod->id;
                 npc->state              = WORLD_NPC_STATE_MOVING;
+                occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                 log_info("🔧 NPC %u (%s) → walking to repair module %u (%.0f%% HP)",
                          npc->id, npc->name, target_mod->id, worst_ratio * 100.0f);
                 continue;
@@ -2407,7 +2982,7 @@ static void tick_world_npcs(float dt) {
 
 /**
  * Parse a JSON array of uint32_t values for a given key.
- * Supports keys like "cannon_ids":[101,103,105].
+ * Supports keys like "weapon_ids":[101,103,105].
  * Returns the number of values written into out[] (capped at max_out).
  */
 static int parse_json_uint32_array(const char* json, const char* key, uint32_t* out, int max_out) {
@@ -2443,22 +3018,27 @@ static int parse_json_uint32_array(const char* json, const char* key, uint32_t* 
  *    (cannon is removed from any other group before being added here)
  */
 static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
-                                       WeaponGroupMode mode, uint32_t* cannon_ids,
-                                       int cannon_count, uint32_t target_ship_id) {
+                                       WeaponGroupMode mode, uint32_t* weapon_ids,
+                                       int weapon_count, uint32_t target_ship_id) {
     if (group_index < 0 || group_index >= MAX_WEAPON_GROUPS) return;
     if (player->parent_ship_id == 0) return;
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship) return;
 
-    /* ── Validate: strip any cannon ID not belonging to a real cannon module on
-     *    this ship.  Prevents clients from referencing foreign-ship cannons. ── */
-    uint32_t valid_ids[MAX_CANNONS_PER_GROUP];
+    /* Which company slot does this player write to?  Players of each company
+     * maintain their own independent group config so enemy boarders cannot
+     * read or corrupt the original crew's setup. */
+    uint8_t cid = (player->company_id < MAX_COMPANIES) ? player->company_id : 0;
+
+    /* ── Validate: strip any ID not belonging to a cannon or swivel on
+     *    this ship.  Prevents clients from referencing foreign-ship weapons. ── */
+    uint32_t valid_ids[MAX_WEAPONS_PER_GROUP];
     int      valid_count = 0;
-    int      limit = (cannon_count > MAX_CANNONS_PER_GROUP) ? MAX_CANNONS_PER_GROUP : cannon_count;
+    int      limit = (weapon_count > MAX_WEAPONS_PER_GROUP) ? MAX_WEAPONS_PER_GROUP : weapon_count;
     for (int i = 0; i < limit; i++) {
-        ShipModule* mod = find_module_on_ship(ship, cannon_ids[i]);
-        if (mod && mod->type_id == MODULE_TYPE_CANNON) {
-            valid_ids[valid_count++] = cannon_ids[i];
+        ShipModule* mod = find_module_on_ship(ship, weapon_ids[i]);
+        if (mod && (mod->type_id == MODULE_TYPE_CANNON || mod->type_id == MODULE_TYPE_SWIVEL)) {
+            valid_ids[valid_count++] = weapon_ids[i];
         }
     }
 
@@ -2467,23 +3047,23 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
     for (int i = 0; i < valid_count; i++) {
         for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
             if (g == group_index) continue;
-            WeaponGroup* other = &ship->weapon_groups[g];
-            for (int c = 0; c < other->cannon_count; c++) {
-                if (other->cannon_ids[c] == valid_ids[i]) {
+            WeaponGroup* other = &ship->weapon_groups[cid][g];
+            for (int c = 0; c < other->weapon_count; c++) {
+                if (other->weapon_ids[c] == valid_ids[i]) {
                     /* Compact: overwrite with last entry */
-                    other->cannon_ids[c] = other->cannon_ids[other->cannon_count - 1];
-                    other->cannon_count--;
+                    other->weapon_ids[c] = other->weapon_ids[other->weapon_count - 1];
+                    other->weapon_count--;
                     break;
                 }
             }
         }
     }
 
-    WeaponGroup* group = &ship->weapon_groups[group_index];
+    WeaponGroup* group = &ship->weapon_groups[cid][group_index];
     group->mode         = mode;
-    group->cannon_count = (uint8_t)valid_count;
+    group->weapon_count = (uint8_t)valid_count;
     for (int i = 0; i < valid_count; i++) {
-        group->cannon_ids[i] = valid_ids[i];
+        group->weapon_ids[i] = valid_ids[i];
     }
     group->target_ship_id = (mode == WEAPON_GROUP_MODE_TARGETFIRE) ? target_ship_id : 0;
 
@@ -2500,8 +3080,8 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
      * Also covers multi-group onAimEnd: each group sends its own config
      * message, and all need their NEEDED bits cleaned up. */
     if (mode == WEAPON_GROUP_MODE_HALTFIRE || mode == WEAPON_GROUP_MODE_TARGETFIRE) {
-        for (int ci = 0; ci < group->cannon_count; ci++) {
-            ShipModule* mod = find_module_on_ship(ship, group->cannon_ids[ci]);
+        for (int ci = 0; ci < group->weapon_count; ci++) {
+            ShipModule* mod = find_module_on_ship(ship, group->weapon_ids[ci]);
             if (mod) mod->state_bits &= ~MODULE_STATE_NEEDED;
         }
     }
@@ -2524,7 +3104,7 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
     }
 
     log_info("🎯 Player %u group %d → mode=%d cannons=%d target=%u",
-             player->player_id, group_index, mode, group->cannon_count, group->target_ship_id);
+             player->player_id, group_index, mode, group->weapon_count, group->target_ship_id);
 
     /* Defer the broadcast: mark the sender's client slot as dirty so that all
      * group-config messages in one frame collapse into a single broadcast at
@@ -2535,7 +3115,8 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
     for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
         struct WebSocketClient* c = &ws_server.clients[ci];
         if (c->connected && c->player_id == player->player_id) {
-            c->pending_group_broadcast_ship_id = ship->ship_id;
+            c->pending_group_broadcast_ship_id    = ship->ship_id;
+            c->pending_group_broadcast_company_id = cid;
             break;
         }
     }
@@ -2550,13 +3131,14 @@ static void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
  * Find the WeaponGroup that owns cannon_id on ship_id, from any active player.
  * Returns NULL if no weapon group claims this cannon.
  */
-static WeaponGroup* find_cannon_weapon_group(uint32_t ship_id, uint32_t cannon_id) {
+static WeaponGroup* find_weapon_group(uint32_t ship_id, uint32_t cannon_id, uint8_t company_id) {
     SimpleShip* ship = find_ship(ship_id);
     if (!ship) return NULL;
+    uint8_t cid = (company_id < MAX_COMPANIES) ? company_id : 0;
     for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-        WeaponGroup* grp = &ship->weapon_groups[g];
-        for (int c = 0; c < grp->cannon_count; c++) {
-            if (grp->cannon_ids[c] == cannon_id) return grp;
+        WeaponGroup* grp = &ship->weapon_groups[cid][g];
+        for (int c = 0; c < grp->weapon_count; c++) {
+            if (grp->weapon_ids[c] == cannon_id) return grp;
         }
     }
     return NULL;
@@ -2569,15 +3151,15 @@ static void tick_ship_weapon_groups(void) {
         if (ship->is_sinking) continue; /* no auto-fire while sinking */
 
         for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-            WeaponGroup* group = &ship->weapon_groups[g];
+            WeaponGroup* group = &ship->weapon_groups[ship->company_id][g];
             if (group->mode != WEAPON_GROUP_MODE_TARGETFIRE) continue;
-            if (group->target_ship_id == 0 || group->cannon_count == 0) continue;
+            if (group->target_ship_id == 0 || group->weapon_count == 0) continue;
 
             SimpleShip* target = find_ship(group->target_ship_id);
             if (!target || !target->active) continue;
 
-            for (int c = 0; c < group->cannon_count; c++) {
-                ShipModule* cannon = find_module_on_ship(ship, group->cannon_ids[c]);
+            for (int c = 0; c < group->weapon_count; c++) {
+                ShipModule* cannon = find_module_on_ship(ship, group->weapon_ids[c]);
                 if (!cannon || cannon->type_id != MODULE_TYPE_CANNON) continue;
                 npc_aim_cannon_at_world(ship, cannon, target->x, target->y);
             }
@@ -2642,16 +3224,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
     const float CANNON_AIM_RANGE = 30.0f * (M_PI / 180.0f); // ±30 degrees
 
     // Get simulation ship to update cannon modules
-    struct Ship* sim_ship = NULL;
-    if (global_sim && global_sim->ship_count > 0) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                sim_ship = &global_sim->ships[s];
-                break;
-            }
-        }
-    }
-
+    struct Ship* sim_ship = find_sim_ship(ship->ship_id);
     if (!sim_ship) return;
 
     // Update cannon(s) depending on how the player is mounted:
@@ -2669,7 +3242,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
      * ────────────────────────────────────────────────────────────────────── */
     bool player_has_groups = false;
     for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-        if (ship->weapon_groups[g].cannon_count > 0) {
+        if (ship->weapon_groups[player->company_id][g].weapon_count > 0) {
             player_has_groups = true;
             break;
         }
@@ -2681,7 +3254,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
         ShipModule* cannon = &sim_ship->modules[m];
 
         /* Resolve weapon group membership once for this cannon */
-        WeaponGroup* grp = find_cannon_weapon_group(ship->ship_id, cannon->id);
+        WeaponGroup* grp = find_weapon_group(ship->ship_id, cannon->id, player->company_id);
 
         /* ── Pass 1: MODULE_STATE_NEEDED update (SET-ONLY / sticky) ───────────
          *
@@ -2707,9 +3280,9 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 for (int ag = 0; ag < active_group_count && !in_active; ag++) {
                     uint32_t tg = active_group_indices[ag];
                     if (tg >= MAX_WEAPON_GROUPS) continue;
-                    WeaponGroup* chk = &ship->weapon_groups[tg];
-                    for (int ci = 0; ci < chk->cannon_count && !in_active; ci++) {
-                        if (chk->cannon_ids[ci] == cannon->id) in_active = true;
+                    WeaponGroup* chk = &ship->weapon_groups[player->company_id][tg];
+                    for (int ci = 0; ci < chk->weapon_count && !in_active; ci++) {
+                        if (chk->weapon_ids[ci] == cannon->id) in_active = true;
                     }
                 }
                 if (active_group_count == 0) {
@@ -2782,9 +3355,9 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             for (int ag = 0; ag < active_group_count && !in_active_pass2; ag++) {
                 uint32_t tg = active_group_indices[ag];
                 if (tg >= MAX_WEAPON_GROUPS) continue;
-                WeaponGroup* chk = &ship->weapon_groups[tg];
-                for (int ci = 0; ci < chk->cannon_count && !in_active_pass2; ci++) {
-                    if (chk->cannon_ids[ci] == cannon->id) in_active_pass2 = true;
+                WeaponGroup* chk = &ship->weapon_groups[player->company_id][tg];
+                for (int ci = 0; ci < chk->weapon_count && !in_active_pass2; ci++) {
+                    if (chk->weapon_ids[ci] == cannon->id) in_active_pass2 = true;
                 }
             }
             if (!in_active_pass2) {
@@ -2802,7 +3375,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             continue; /* ungrouped cannon in group mode — already handled in pass 1 */
         }
 
-        // Only move a cannon if it is occupied (player mounted or WorldNpc AT_CANNON).
+        // Only move a cannon if it is occupied (player mounted or WorldNpc AT_GUN).
         // Cannons cannot aim without crew present.
         bool cannon_has_occupant = (cannon->state_bits & MODULE_STATE_OCCUPIED) != 0;
         if (!cannon_has_occupant) {
@@ -2810,8 +3383,8 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 WorldNpc* wnpc = &world_npcs[ni];
                 if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
                     wnpc->ship_id == ship->ship_id &&
-                    wnpc->assigned_cannon_id == cannon->id &&
-                    wnpc->state == WORLD_NPC_STATE_AT_CANNON) {
+                    wnpc->assigned_weapon_id == cannon->id &&
+                    wnpc->state == WORLD_NPC_STATE_AT_GUN) {
                     cannon_has_occupant = true;
                     break;
                 }
@@ -2824,14 +3397,14 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 WorldNpc* wnpc = &world_npcs[ni];
                 if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
                     wnpc->ship_id == ship->ship_id &&
-                    wnpc->assigned_cannon_id == cannon->id) {
+                    wnpc->assigned_weapon_id == cannon->id) {
                     npc_state = wnpc->state;
                     npc_assigned = wnpc->id;
                     break;
                 }
             }
             int grp_idx = -1;
-            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[gg] == grp) { grp_idx = gg; break; } } }
+            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[player->company_id][gg] == grp) { grp_idx = gg; break; } } }
             log_info("🔫 P2 c%u g%d: SKIP no_occupant (sim_occ=%d npc_id=%u npc_state=%d in_active=%d)",
                      cannon->id, grp_idx,
                      (cannon->state_bits & MODULE_STATE_OCCUPIED) ? 1 : 0,
@@ -2846,10 +3419,10 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
         if (!in_active_pass2) {
             bool in_haltfire = false;
             for (int g = 0; g < MAX_WEAPON_GROUPS && !in_haltfire; g++) {
-                WeaponGroup* wg = &ship->weapon_groups[g];
+                WeaponGroup* wg = &ship->weapon_groups[player->company_id][g];
                 if (wg->mode != WEAPON_GROUP_MODE_HALTFIRE) continue;
-                for (int ci = 0; ci < wg->cannon_count; ci++) {
-                    if (wg->cannon_ids[ci] == cannon->id) { in_haltfire = true; break; }
+                for (int ci = 0; ci < wg->weapon_count; ci++) {
+                    if (wg->weapon_ids[ci] == cannon->id) { in_haltfire = true; break; }
                 }
             }
             if (in_haltfire) {
@@ -2860,7 +3433,7 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
 
         {
             int grp_idx = -1;
-            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[gg] == grp) { grp_idx = gg; break; } } }
+            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[player->company_id][gg] == grp) { grp_idx = gg; break; } } }
             log_info("🔫 P2 c%u g%d: AIM PROPAGATED (in_active=%d mode=%d)",
                      cannon->id, grp_idx, in_active_pass2 ? 1 : 0, grp ? grp->mode : -1);
         }
@@ -2911,13 +3484,123 @@ static void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             ShipModule* dm_mod = &ship->modules[dm];
             if (dm_mod->type_id != MODULE_TYPE_CANNON) continue;
             int needed = (dm_mod->state_bits & MODULE_STATE_NEEDED) ? 1 : 0;
-            WeaponGroup* dg = find_cannon_weapon_group(ship->ship_id, dm_mod->id);
+            WeaponGroup* dg = find_weapon_group(ship->ship_id, dm_mod->id, player->company_id);
             int gi = -1;
-            if (dg) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[gg] == dg) { gi = gg; break; } } }
+            if (dg) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[player->company_id][gg] == dg) { gi = gg; break; } } }
             npos += snprintf(nbuf + npos, (size_t)(256 - npos), " c%u:g%d:%s",
                              dm_mod->id, gi, needed ? "NEED" : "----");
         }
         log_info("📊 Ship %u NEEDED map:%s", ship->ship_id, nbuf);
+    }
+
+    /* ── Swivel pass: NEEDED + aim-propagation (mirrors cannon logic above) ─────
+     * Pass 1 — set MODULE_STATE_NEEDED when the aim angle is within the swivel's
+     *          ±45° arc and the swivel is in an active AIMING group (or ungrouped
+     *          when player_has_groups is false).
+     * Pass 2 — propagate desired_aim_direction from the helm so NPC-manned swivels
+     *          track the player cursor.  Only applies when at_helm; swivel-mounted
+     *          players already receive direct aim updates via handle_swivel_aim. ── */
+    for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+        ShipModule* sw = &sim_ship->modules[m];
+        if (sw->type_id != MODULE_TYPE_SWIVEL) continue;
+
+        WeaponGroup* grp = find_weapon_group(ship->ship_id, sw->id, player->company_id);
+
+        /* ── Swivel Pass 1: NEEDED ─────────────────────────────────────────── */
+        {
+            bool do_needed_update;
+            if (!grp) {
+                do_needed_update = !player_has_groups;
+            } else {
+                bool in_active = false;
+                for (int ag = 0; ag < active_group_count && !in_active; ag++) {
+                    uint32_t tg = active_group_indices[ag];
+                    if (tg >= MAX_WEAPON_GROUPS) continue;
+                    WeaponGroup* chk = &ship->weapon_groups[player->company_id][tg];
+                    for (int ci = 0; ci < chk->weapon_count && !in_active; ci++) {
+                        if (chk->weapon_ids[ci] == sw->id) in_active = true;
+                    }
+                }
+                if (active_group_count == 0)
+                    in_active = (grp->mode == WEAPON_GROUP_MODE_AIMING);
+                do_needed_update = in_active;
+            }
+            if (do_needed_update) {
+                const float SWIVEL_NEEDED_RANGE = 45.0f * ((float)M_PI / 180.0f);
+                float fire_dir = Q16_TO_FLOAT(sw->local_rot) - (float)(M_PI / 2.0f);
+                float diff = aim_angle - fire_dir;
+                while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+                while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+                if (fabsf(diff) <= SWIVEL_NEEDED_RANGE) {
+                    ShipModule* ssw = find_module_on_ship(ship, sw->id);
+                    if (ssw) {
+                        ssw->state_bits |= MODULE_STATE_NEEDED;
+                        uint32_t now = get_time_ms();
+                        for (int mi = 0; mi < ship->module_count; mi++) {
+                            if (ship->modules[mi].id == sw->id) {
+                                ship->cannon_last_needed_ms[mi] = now;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /* ── Swivel Pass 2: aim propagation (helm only) ────────────────────── */
+        if (at_cannon) continue; /* player on specific cannon — skip swivels */
+
+        /* Group-mode filter */
+        if (grp) {
+            if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE)   continue; /* suppressed */
+            if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) continue; /* auto-aim owns it */
+            bool sw_in_active = false;
+            for (int ag = 0; ag < active_group_count && !sw_in_active; ag++) {
+                uint32_t tg = active_group_indices[ag];
+                if (tg >= MAX_WEAPON_GROUPS) continue;
+                WeaponGroup* chk = &ship->weapon_groups[player->company_id][tg];
+                for (int ci = 0; ci < chk->weapon_count && !sw_in_active; ci++) {
+                    if (chk->weapon_ids[ci] == sw->id) sw_in_active = true;
+                }
+            }
+            if (active_group_count == 0)
+                sw_in_active = (grp->mode == WEAPON_GROUP_MODE_AIMING ||
+                                grp->mode == WEAPON_GROUP_MODE_FREEFIRE);
+            if (!sw_in_active) continue;
+        } else if (player_has_groups) {
+            continue; /* ungrouped swivel in group mode */
+        }
+
+        /* Only aim a swivel when a crew member is physically present at the station
+         * (same gate as the cannon Pass 2 occupant check above).
+         * A WorldNpc in WORLD_NPC_STATE_AT_GUN counts as present. */
+        {
+            bool swivel_has_occupant = false;
+            for (int ni = 0; ni < world_npc_count; ni++) {
+                WorldNpc* wnpc = &world_npcs[ni];
+                if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
+                    wnpc->ship_id == ship->ship_id &&
+                    wnpc->assigned_weapon_id == sw->id &&
+                    wnpc->state == WORLD_NPC_STATE_AT_GUN) {
+                    swivel_has_occupant = true;
+                    break;
+                }
+            }
+            if (!swivel_has_occupant) continue;
+        }
+
+        /* Propagate helm aim angle onto swivel desired_aim_direction.
+         * Uses the same offset convention as handle_swivel_aim. */
+        float sw_base     = Q16_TO_FLOAT(sw->local_rot);
+        float desired_off = aim_angle - sw_base + (float)(M_PI / 2.0f);
+        while (desired_off >  (float)M_PI) desired_off -= 2.0f * (float)M_PI;
+        while (desired_off < -(float)M_PI) desired_off += 2.0f * (float)M_PI;
+        const float SWIVEL_AIM_LIMIT = 45.0f * ((float)M_PI / 180.0f);
+        if (desired_off >  SWIVEL_AIM_LIMIT) desired_off =  SWIVEL_AIM_LIMIT;
+        if (desired_off < -SWIVEL_AIM_LIMIT) desired_off = -SWIVEL_AIM_LIMIT;
+        sw->data.swivel.desired_aim_direction = Q16_FROM_FLOAT(desired_off);
+        ShipModule* ssw = find_module_on_ship(ship, sw->id);
+        if (ssw) ssw->data.swivel.desired_aim_direction = Q16_FROM_FLOAT(desired_off);
     }
 
     if (do_sector_update) {
@@ -3020,6 +3703,10 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
                 proj->firing_company = ship->company_id;
                 proj->firing_ship_id = (entity_id)ship->ship_id;
                 proj->type = ammo_type;
+                // Cannonball and bar shot: 5-second lifetime (then water splash on client)
+                if (ammo_type == PROJ_TYPE_CANNONBALL || ammo_type == PROJ_TYPE_BAR_SHOT) {
+                    proj->lifetime = Q16_FROM_FLOAT(5.0f);
+                }
                 // Apply the firing ship's Damage level multiplier
                 struct Ship* sim_ship = sim_get_ship(global_sim, (entity_id)ship->ship_id);
                 if (sim_ship) {
@@ -3056,6 +3743,53 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
 /**
  * Broadcast cannon fire event to all connected clients
  */
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Flamethrower wave state
+ *
+ * Instead of spawning projectiles, the flamethrower maintains a per-swivel
+ * advancing "wave front".  Each server tick the front moves outward at
+ * FLAME_WAVE_SPEED px/s and fire is applied to anything newly in range.
+ * When the player releases (no fire pulse for > FLAME_STALE_MS), a retreat
+ * front sweeps from barrel to tip at the same speed, driving the client
+ * visual.  Fire DoT timers run naturally after the wave passes.
+ * ══════════════════════════════════════════════════════════════════════════ */
+#define MAX_FLAME_WAVES   16
+#define FLAME_WAVE_SPEED  350.0f    /* px/s — fast travel-time feel           */
+#define FLAME_RANGE       280.0f    /* max reach, client px                  */
+#define FLAME_HALF_CONE   (15.0f * (float)(M_PI / 180.0f))  /* ±15°         */
+#define FLAME_STALE_MS    250u      /* ms without a pulse → start retreating  */
+#define FLAME_RETREAT_SPEED 700.0f  /* px/s — retreat 2× faster than advance */
+#define FIRE_DURATION_MS  4000u    /* ms an entity burns after ignition      */
+#define FLAME_HALF_CONE_MODULE (25.0f * (float)(M_PI / 180.0f)) /* wider test vs ±15° entity cone */
+
+typedef struct {
+    bool     active;
+    uint32_t swivel_id;
+    uint32_t ship_id;
+    float    origin_x, origin_y;
+    float    fire_angle;
+    float    wave_dist;      /* leading wave front (px):  0 → FLAME_RANGE */
+    bool     retreating;
+    float    retreat_dist;   /* trailing edge during retreat (px) */
+    uint32_t last_fire_ms;   /* wall-clock ms of last fire_swivel call */
+} FlameWave;
+
+static FlameWave  flame_waves[MAX_FLAME_WAVES];
+static bool       flame_waves_initialized = false;
+
+/** Broadcast a raw JSON string to every connected WebSocket client. */
+static void broadcast_json_all(const char* json) {
+    char frame[1024];
+    size_t flen = websocket_create_frame(WS_OPCODE_TEXT, json, strlen(json), frame, sizeof(frame));
+    if (flen == 0) return;
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        struct WebSocketClient* wc = &ws_server.clients[i];
+        if (wc->connected && wc->handshake_complete)
+            send(wc->fd, frame, flen, 0);
+    }
+}
+
 static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float world_x, float world_y, 
                                   float angle, entity_id projectile_id, uint8_t ammo_type) {
     char message[512];
@@ -3082,21 +3816,22 @@ static void broadcast_cannon_fire(uint32_t cannon_id, uint32_t ship_id, float wo
  * Broadcast authoritative weapon group state for ship to ALL connected clients.
  * Clients on other ships will ignore this message by checking shipId.
  */
-static void broadcast_cannon_group_state(SimpleShip* ship) {
+static void broadcast_cannon_group_state(SimpleShip* ship, uint8_t company_id) {
     if (!ship) return;
+    uint8_t cid = (company_id < MAX_COMPANIES) ? company_id : 0;
     static const char* mode_names[] = { "aiming", "freefire", "haltfire", "targetfire" };
     char message[4096];
     int pos = snprintf(message, sizeof(message),
         "{\"type\":\"cannon_group_state\",\"shipId\":%u,\"groups\":[", ship->ship_id);
     for (int g = 0; g < MAX_WEAPON_GROUPS && pos < (int)sizeof(message) - 64; g++) {
-        WeaponGroup* grp = &ship->weapon_groups[g];
+        WeaponGroup* grp = &ship->weapon_groups[cid][g];
         const char* mode_str = (grp->mode < 4) ? mode_names[grp->mode] : "haltfire";
         pos += snprintf(message + pos, sizeof(message) - pos,
             "%s{\"index\":%d,\"mode\":\"%s\",\"cannonIds\":[",
             (g > 0 ? "," : ""), g, mode_str);
-        for (int c = 0; c < grp->cannon_count && pos < (int)sizeof(message) - 32; c++) {
+        for (int c = 0; c < grp->weapon_count && pos < (int)sizeof(message) - 32; c++) {
             pos += snprintf(message + pos, sizeof(message) - pos,
-                "%s%u", (c > 0 ? "," : ""), grp->cannon_ids[c]);
+                "%s%u", (c > 0 ? "," : ""), grp->weapon_ids[c]);
         }
         pos += snprintf(message + pos, sizeof(message) - pos,
             "],\"targetShipId\":%u}", grp->target_ship_id);
@@ -3108,9 +3843,13 @@ static void broadcast_cannon_group_state(SimpleShip* ship) {
     size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, message, strlen(message), frame, sizeof(frame));
     if (frame_len > 0) {
         for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-            struct WebSocketClient* client = &ws_server.clients[i];
-            if (client->connected && client->handshake_complete)
-                send(client->fd, frame, frame_len, 0);
+            struct WebSocketClient* cl = &ws_server.clients[i];
+            if (!cl->connected || !cl->handshake_complete) continue;
+            /* Only send to players of the same company (or neutral) */
+            WebSocketPlayer* p = find_player(cl->player_id);
+            if (p && p->company_id != COMPANY_NEUTRAL && cid != COMPANY_NEUTRAL &&
+                p->company_id != cid) continue;
+            send(cl->fd, frame, frame_len, 0);
         }
     }
 }
@@ -3124,19 +3863,22 @@ static void broadcast_cannon_group_state(SimpleShip* ship) {
 static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship) {
     if (!client || !ship) return;
     if (!client->connected || !client->handshake_complete) return;
+    /* Determine which company slot to show: look up the client's player. */
+    WebSocketPlayer* pl = find_player(client->player_id);
+    uint8_t cid = (pl && pl->company_id < MAX_COMPANIES) ? pl->company_id : 0;
     static const char* mode_names[] = { "aiming", "freefire", "haltfire", "targetfire" };
     char message[4096];
     int pos = snprintf(message, sizeof(message),
         "{\"type\":\"cannon_group_state\",\"shipId\":%u,\"groups\":[", ship->ship_id);
     for (int g = 0; g < MAX_WEAPON_GROUPS && pos < (int)sizeof(message) - 64; g++) {
-        WeaponGroup* grp = &ship->weapon_groups[g];
+        WeaponGroup* grp = &ship->weapon_groups[cid][g];
         const char* mode_str = (grp->mode < 4) ? mode_names[grp->mode] : "haltfire";
         pos += snprintf(message + pos, sizeof(message) - pos,
             "%s{\"index\":%d,\"mode\":\"%s\",\"cannonIds\":[",
             (g > 0 ? "," : ""), g, mode_str);
-        for (int c = 0; c < grp->cannon_count && pos < (int)sizeof(message) - 32; c++) {
+        for (int c = 0; c < grp->weapon_count && pos < (int)sizeof(message) - 32; c++) {
             pos += snprintf(message + pos, sizeof(message) - pos,
-                "%s%u", (c > 0 ? "," : ""), grp->cannon_ids[c]);
+                "%s%u", (c > 0 ? "," : ""), grp->weapon_ids[c]);
         }
         pos += snprintf(message + pos, sizeof(message) - pos,
             "],\"targetShipId\":%u}", grp->target_ship_id);
@@ -3162,15 +3904,7 @@ static void handle_cannon_force_reload(WebSocketPlayer* player) {
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship) return;
 
-    struct Ship* sim_ship = NULL;
-    if (global_sim) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                sim_ship = &global_sim->ships[s];
-                break;
-            }
-        }
-    }
+    struct Ship* sim_ship = find_sim_ship(ship->ship_id);
     if (!sim_ship) return;
 
     ShipModule* mmod = find_module_by_id(ship, player->mounted_module_id);
@@ -3199,6 +3933,287 @@ static void handle_cannon_force_reload(WebSocketPlayer* player) {
 
     log_info("⚡ Force-reload: player %u reset %d cannon(s) on ship %u",
              player->player_id, reloaded, ship->ship_id);
+}
+
+/**
+ * Fire the swivel gun a player is currently mounted to.
+ *
+ * ammo_type PROJ_TYPE_GRAPESHOT    (10) → hit-scan, ±18° cone, 60 dmg/target
+ * ammo_type PROJ_TYPE_LIQUID_FLAME (11) → flame wave projection
+ * ammo_type PROJ_TYPE_CANISTER_SHOT(12) → 3 spread projectiles
+ */
+static void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
+                        WebSocketPlayer* player, uint8_t ammo_type) {
+    if (!global_sim) { log_error("Cannot fire swivel — global_sim is NULL"); return; }
+
+    /* Reset reload on SimpleShip copy */
+    sw->data.swivel.time_since_fire = 0;
+    sw->data.swivel.loaded_ammo     = ammo_type;
+    sw->state_bits |= MODULE_STATE_RELOADING;
+    sw->state_bits &= ~MODULE_STATE_FIRING;
+
+    /* Refresh crew-dispatch timestamps — same as fire_cannon() does for cannons.
+     * Marks the swivel NEEDED and resets both fire and needed timestamps so the
+     * NPC crew member stays at this swivel for the full reload + grace period. */
+    {
+        uint32_t now_sw = get_time_ms();
+        for (int _sfi = 0; _sfi < ship->module_count; _sfi++) {
+            if (ship->modules[_sfi].id == sw->id) {
+                ship->cannon_last_fire_ms[_sfi]   = now_sw;
+                ship->cannon_last_needed_ms[_sfi] = now_sw;
+                ship->modules[_sfi].state_bits   |= MODULE_STATE_NEEDED;
+                break;
+            }
+        }
+    }
+
+    /* Mirror state to global_sim copy */
+    if (gsw) {
+        gsw->data.swivel.time_since_fire = 0;
+        gsw->data.swivel.loaded_ammo     = ammo_type;
+        gsw->state_bits = sw->state_bits;
+    }
+
+    /* World position of the swivel pivot */
+    float cos_r   = cosf(ship->rotation);
+    float sin_r   = sinf(ship->rotation);
+    float local_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sw->local_pos.x));
+    float local_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sw->local_pos.y));
+    float world_x = ship->x + (local_x * cos_r - local_y * sin_r);
+    float world_y = ship->y + (local_x * sin_r + local_y * cos_r);
+
+    /* Fire angle: same barrel convention as cannons (local_rot - PI/2 + aim_offset) */
+    float sw_base    = Q16_TO_FLOAT(sw->local_rot);
+    float aim_off    = Q16_TO_FLOAT(sw->data.swivel.aim_direction);
+    float fire_angle = ship->rotation + (sw_base - (float)(M_PI / 2.0)) + aim_off;
+
+    const float SWIVEL_SPEED = CLIENT_TO_SERVER(350.0f); /* px/s — slower than cannon's 500 */
+    const float BARREL_LEN   = 22.0f;                    /* client pixels — matches visual barrel tip (fillRect 22px) */
+    float ship_vx = CLIENT_TO_SERVER(ship->velocity_x);
+    float ship_vy = CLIENT_TO_SERVER(ship->velocity_y);
+    uint32_t owner_id = (player != NULL) ? player->player_id : ship->ship_id;
+
+    if (ammo_type == PROJ_TYPE_GRAPESHOT) {
+        /* Pure hit-scan anti-personnel burst — 3 rays at -12°, 0°, +12°.
+         * No projectiles are spawned; modules are intentionally immune.
+         * Range: 250 px, damage: 60 HP per pellet hit. */
+        const float GRAPE_RANGE    = 250.0f;
+        const float GRAPE_DAMAGE   = 60.0f;
+        const float SPREAD_STEP    = 12.0f * (float)(M_PI / 180.0f);
+        const int   NUM_PELLETS    = 3;
+
+        /* Offset origin to barrel tip so tracers and hit-scan start from the muzzle */
+        const float BARREL_LEN = 20.0f;
+        float muzzle_x = world_x + cosf(fire_angle) * BARREL_LEN;
+        float muzzle_y = world_y + sinf(fire_angle) * BARREL_LEN;
+
+        /* Broadcast the visual shot event (reuses CANNON_FIRE format) so clients
+         * show the muzzle flash / tracer for each ray. Use id=0 for projectile
+         * since there is no real projectile entity. */
+        for (int p = 0; p < NUM_PELLETS; p++) {
+            float angle = fire_angle + SPREAD_STEP * (float)(p - 1);
+            broadcast_cannon_fire(sw->id, ship->ship_id, muzzle_x, muzzle_y, angle, 0, PROJ_TYPE_GRAPESHOT);
+        }
+
+        /* Scan NPCs */
+        for (int ni = 0; ni < world_npc_count; ni++) {
+            WorldNpc* npc = &world_npcs[ni];
+            if (!npc->active) continue;
+            if (npc->ship_id == ship->ship_id) continue; /* friendly */
+            float dx = npc->x - muzzle_x, dy = npc->y - muzzle_y;
+            float dist = sqrtf(dx*dx + dy*dy);
+            if (dist > GRAPE_RANGE) continue;
+            if (dist < 0.01f) { dx = 1.0f; dy = 0.0f; dist = 1.0f; }
+            float nx = dx / dist, ny = dy / dist;
+            float fdir_x = cosf(fire_angle), fdir_y = sinf(fire_angle);
+            /* Check if NPC falls within any of the 3 pellet rays (cone ±18°) */
+            float half_cone = 18.0f * (float)(M_PI / 180.0f);
+            float dot = nx * fdir_x + ny * fdir_y;
+            if (dot < cosf(half_cone)) continue;
+            uint16_t dmg = (uint16_t)GRAPE_DAMAGE;
+            bool killed = false;
+            if (npc->health <= dmg) { npc->health = 0; npc->active = false; killed = true; }
+            else { npc->health -= dmg; }
+            char hit_msg[256];
+            snprintf(hit_msg, sizeof(hit_msg),
+                "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
+                "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                npc->id, npc->x, npc->y, GRAPE_DAMAGE,
+                (unsigned)npc->health, (unsigned)npc->max_health,
+                killed ? "true" : "false");
+            broadcast_json_all(hit_msg);
+        }
+
+        /* Scan players */
+        for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
+            WebSocketPlayer* wp = &players[wpi];
+            if (!wp->active || wp->parent_ship_id == ship->ship_id) continue;
+            float dx = wp->x - muzzle_x, dy = wp->y - muzzle_y;
+            float dist = sqrtf(dx*dx + dy*dy);
+            if (dist > GRAPE_RANGE) continue;
+            if (dist < 0.01f) { dx = 1.0f; dy = 0.0f; dist = 1.0f; }
+            float nx = dx / dist, ny = dy / dist;
+            float fdir_x = cosf(fire_angle), fdir_y = sinf(fire_angle);
+            float half_cone = 18.0f * (float)(M_PI / 180.0f);
+            float dot = nx * fdir_x + ny * fdir_y;
+            if (dot < cosf(half_cone)) continue;
+            uint16_t dmg = (uint16_t)GRAPE_DAMAGE;
+            if (wp->health <= dmg) wp->health = 0; else wp->health -= dmg;
+            char hit_msg[256];
+            snprintf(hit_msg, sizeof(hit_msg),
+                "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
+                "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                wp->player_id, wp->x, wp->y, GRAPE_DAMAGE,
+                (unsigned)wp->health, (unsigned)wp->max_health,
+                wp->health == 0 ? "true" : "false");
+            broadcast_json_all(hit_msg);
+        }
+
+        log_info("Swivel %u fired GRAPESHOT (hit-scan) on ship %u", sw->id, ship->ship_id);
+    } else if (ammo_type == PROJ_TYPE_LIQUID_FLAME) {
+        /* ── Flamethrower wave: register / refresh this swivel's wave entry ──────
+         * Hit application happens in update_flame_waves() each server tick so
+         * that fire reaches distant targets progressively (travel-time feel). */
+        {
+        if (!flame_waves_initialized) {
+            memset(flame_waves, 0, sizeof(flame_waves));
+            flame_waves_initialized = true;
+        }
+        uint32_t now_fw = get_time_ms();
+        /* Barrel-tip origin for the flame wave — matches visual and hit-scan */
+        float flame_ox = world_x + cosf(fire_angle) * BARREL_LEN;
+        float flame_oy = world_y + sinf(fire_angle) * BARREL_LEN;
+        /* Find existing slot for this swivel */
+        bool fw_handled = false;
+        for (int fi = 0; fi < MAX_FLAME_WAVES; fi++) {
+            if (!flame_waves[fi].active || flame_waves[fi].swivel_id != sw->id) continue;
+            if (!flame_waves[fi].retreating) {
+                /* Continuous hold — refresh heartbeat and aim; wave keeps advancing */
+                flame_waves[fi].origin_x     = flame_ox;
+                flame_waves[fi].origin_y     = flame_oy;
+                flame_waves[fi].fire_angle   = fire_angle;
+                flame_waves[fi].last_fire_ms = now_fw;
+                fw_handled = true;
+            } else {
+                /* Was retreating — kill it; fall through to spawn a fresh wave */
+                flame_waves[fi].active = false;
+            }
+            break;
+        }
+        if (!fw_handled) {
+            /* Allocate a fresh slot (new fire or re-fire after retreat) */
+            for (int fi = 0; fi < MAX_FLAME_WAVES; fi++) {
+                if (flame_waves[fi].active) continue;
+                FlameWave* fw = &flame_waves[fi];
+                memset(fw, 0, sizeof(*fw));
+                fw->active       = true;
+                fw->swivel_id    = sw->id;
+                fw->ship_id      = ship->ship_id;
+                fw->wave_dist    = 0.0f;
+                fw->retreat_dist = 0.0f;
+                fw->retreating   = false;
+                fw->origin_x     = flame_ox;
+                fw->origin_y     = flame_oy;
+                fw->fire_angle   = fire_angle;
+                fw->last_fire_ms = now_fw;
+                break;
+            }
+        }
+        } /* end LIQUID_FLAME wave registration */
+    } else if (ammo_type == PROJ_TYPE_CANISTER_SHOT) {
+        /* 5 pellets spread ±20° — wide anti-personnel sweep */
+        const int   NUM_PELLETS = 5;
+        const float HALF_SPREAD = 20.0f * (float)(M_PI / 180.0f);
+        for (int p = 0; p < NUM_PELLETS; p++) {
+            float t     = (NUM_PELLETS > 1) ? (float)p / (float)(NUM_PELLETS - 1) : 0.5f;
+            float angle = fire_angle + HALF_SPREAD * (2.0f * t - 1.0f);
+            float sx = world_x + cosf(angle) * BARREL_LEN;
+            float sy = world_y + sinf(angle) * BARREL_LEN;
+            Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(sx)),
+                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy)) };
+            Vec2Q16 vel = { Q16_FROM_FLOAT(cosf(angle) * SWIVEL_SPEED + ship_vx),
+                            Q16_FROM_FLOAT(sinf(angle) * SWIVEL_SPEED + ship_vy) };
+            entity_id pid = sim_create_projectile(global_sim, pos, vel, owner_id, PROJ_TYPE_CANISTER_SHOT);
+            if (pid != INVALID_ENTITY_ID) {
+                struct Projectile* proj = sim_get_projectile(global_sim, pid);
+                if (proj) {
+                    proj->damage         = Q16_FROM_FLOAT(300.0f);
+                    proj->lifetime       = Q16_FROM_FLOAT(1.2f);
+                    proj->firing_company = ship->company_id;
+                    proj->firing_ship_id = (entity_id)ship->ship_id;
+                    proj->type           = PROJ_TYPE_CANISTER_SHOT;
+                }
+                broadcast_cannon_fire(sw->id, ship->ship_id, sx, sy, angle, pid, PROJ_TYPE_CANISTER_SHOT);
+            }
+        }
+        log_info("Swivel %u fired CANISTER SHOT (5 pellets) on ship %u", sw->id, ship->ship_id);
+    } else {
+        /* Unknown/invalid ammo type: default to grapeshot */
+        log_info("Swivel %u: unknown ammo_type %u, defaulting to grapeshot", sw->id, (unsigned)ammo_type);
+        const float SPREAD_STEP = 12.0f * (float)(M_PI / 180.0f);
+        for (int p = 0; p < 3; p++) {
+            float angle = fire_angle + SPREAD_STEP * (float)(p - 1);
+            float sx = world_x + cosf(angle) * BARREL_LEN;
+            float sy = world_y + sinf(angle) * BARREL_LEN;
+            Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(sx)),
+                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy)) };
+            Vec2Q16 vel = { Q16_FROM_FLOAT(cosf(angle) * SWIVEL_SPEED + ship_vx),
+                            Q16_FROM_FLOAT(sinf(angle) * SWIVEL_SPEED + ship_vy) };
+            entity_id pid = sim_create_projectile(global_sim, pos, vel, owner_id, PROJ_TYPE_GRAPESHOT);
+            if (pid != INVALID_ENTITY_ID) {
+                struct Projectile* proj = sim_get_projectile(global_sim, pid);
+                if (proj) {
+                    proj->damage         = Q16_FROM_FLOAT(450.0f);
+                    proj->lifetime       = Q16_FROM_FLOAT(1.5f);
+                    proj->firing_company = ship->company_id;
+                    proj->firing_ship_id = (entity_id)ship->ship_id;
+                    proj->type           = PROJ_TYPE_GRAPESHOT;
+                }
+                broadcast_cannon_fire(sw->id, ship->ship_id, world_x, world_y, angle, pid, PROJ_TYPE_GRAPESHOT);
+            }
+        }
+    }
+}
+
+/**
+ * Handle a fire_weapon request when the player is mounted to a swivel gun.
+ */
+static void handle_swivel_fire(WebSocketPlayer* player, uint8_t ammo_type) {
+    if (!player->is_mounted || player->parent_ship_id == 0) return;
+    SimpleShip* ship = find_ship(player->parent_ship_id);
+    if (!ship || ship->is_sinking) return;
+
+    /* Defense-in-depth: refuse fire if player company doesn't match ship company */
+    if (ship->company_id != COMPANY_NEUTRAL &&
+        player->company_id != COMPANY_NEUTRAL &&
+        player->company_id != ship->company_id) return;
+
+    /* SimpleShip module — reload timer ticks ships[] so check here */
+    ShipModule* sw = find_module_by_id(ship, player->mounted_module_id);
+    if (!sw || sw->type_id != MODULE_TYPE_SWIVEL) return;
+
+    /* Also locate global_sim copy so fire_swivel can reset it */
+    ShipModule* gsw = NULL;
+    {
+        struct Ship* _ss = find_sim_ship(ship->ship_id);
+        if (_ss) {
+            for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                if (_ss->modules[mi].id == sw->id) { gsw = &_ss->modules[mi]; break; }
+            }
+        }
+    }
+
+    /* Liquid flame uses a short per-shot interval; other ammo needs a full reload */
+    uint32_t effective_cooldown = (ammo_type == PROJ_TYPE_LIQUID_FLAME)
+                                  ? SWIVEL_FLAME_INTERVAL_MS
+                                  : sw->data.swivel.reload_time;
+    if (sw->data.swivel.time_since_fire < effective_cooldown) {
+        return; /* still cooling down */
+    }
+
+    fire_swivel(ship, sw, gsw, player, ammo_type);
 }
 
 /**
@@ -3239,12 +4254,16 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
             } else if (mmod->type_id == MODULE_TYPE_CANNON) {
                 at_cannon = true;
                 mounted_cannon_id = mmod->id;
+            } else if (mmod->type_id == MODULE_TYPE_SWIVEL) {
+                /* Route to swivel-specific handler */
+                handle_swivel_fire(player, ammo_type);
+                return;
             }
         }
     }
 
     if (!at_helm && !at_cannon) {
-        log_warn("Player %u tried to fire cannons but is not at helm or cannon", player->player_id);
+        log_warn("Player %u tried to fire weapon but is not at helm, cannon, or swivel", player->player_id);
         return;
     }
 
@@ -3254,29 +4273,20 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
     bool manually_fired = at_cannon;
     
     // Get simulation ship for up-to-date cannon data
-    struct Ship* sim_ship = NULL;
-    if (global_sim && global_sim->ship_count > 0) {
-        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
-            if (global_sim->ships[s].id == ship->ship_id) {
-                sim_ship = &global_sim->ships[s];
-                break;
-            }
-        }
-    }
-    
+    struct Ship* sim_ship = find_sim_ship(ship->ship_id);
     if (!sim_ship) {
         log_warn("Simulation ship %u not found", ship->ship_id);
         return;
     }
     
-    // Iterate through all modules to find cannons
+    // Iterate through all modules to find cannons and NPC-manned swivels
     for (uint8_t m = 0; m < sim_ship->module_count; m++) {
         ShipModule* module = &sim_ship->modules[m];
         
-        if (module->type_id != MODULE_TYPE_CANNON) continue;
+        if (module->type_id != MODULE_TYPE_CANNON && module->type_id != MODULE_TYPE_SWIVEL) continue;
 
-        // If the client sent an explicit cannon-ID list (weapon-group fire), only
-        // fire cannons that appear in that list.
+        // If the client sent an explicit id-list (weapon-group fire), only
+        // fire modules that appear in that list.
         if (explicit_ids && explicit_count > 0) {
             bool in_list = false;
             for (int ei = 0; ei < explicit_count; ei++) {
@@ -3284,7 +4294,39 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
             }
             if (!in_list) continue;
         } else if (at_cannon && module->id != mounted_cannon_id) {
-            // If mounted to a specific cannon, skip every other cannon
+            // If mounted to a specific cannon, skip every other cannon/swivel
+            continue;
+        }
+
+        /* ── Swivel branch: only fires when an NPC gunner is physically at the station ── */
+        if (module->type_id == MODULE_TYPE_SWIVEL) {
+            bool swivel_occupied = false;
+            for (int wn = 0; wn < world_npc_count; wn++) {
+                WorldNpc* wnpc = &world_npcs[wn];
+                if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
+                    wnpc->ship_id == ship->ship_id &&
+                    wnpc->assigned_weapon_id == module->id &&
+                    wnpc->state == WORLD_NPC_STATE_AT_GUN) {
+                    swivel_occupied = true;
+                    break;
+                }
+            }
+            if (!swivel_occupied) continue;
+            /* Find SimpleShip copy for timer check and fire_swivel() */
+            ShipModule* sw = find_module_by_id(ship, module->id);
+            if (!sw) continue;
+            /* NPC swivels must always use swivel ammo (10-12).
+             * If the incoming ammo_type is a cannon ammo (0-1), fall back to the
+             * swivel's own loaded ammo; default to grapeshot if not yet set. */
+            uint8_t swivel_ammo = (ammo_type >= PROJ_TYPE_GRAPESHOT) ? ammo_type
+                                : (sw->data.swivel.loaded_ammo >= PROJ_TYPE_GRAPESHOT
+                                   ? sw->data.swivel.loaded_ammo : PROJ_TYPE_GRAPESHOT);
+            uint32_t eff_cd = (swivel_ammo == PROJ_TYPE_LIQUID_FLAME)
+                              ? SWIVEL_FLAME_INTERVAL_MS
+                              : sw->data.swivel.reload_time;
+            if (sw->data.swivel.time_since_fire < eff_cd) continue;
+            fire_swivel(ship, sw, module, player, swivel_ammo);
+            cannons_fired++;
             continue;
         }
 
@@ -3320,8 +4362,8 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
                     WorldNpc* wnpc = &world_npcs[wn];
                     if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
                         wnpc->ship_id == ship->ship_id &&
-                        wnpc->assigned_cannon_id == module->id &&
-                        wnpc->state == WORLD_NPC_STATE_AT_CANNON) {
+                        wnpc->assigned_weapon_id == module->id &&
+                        wnpc->state == WORLD_NPC_STATE_AT_GUN) {
                         cannon_occupied = true;
                         break;
                     }
@@ -3367,7 +4409,11 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
         }
         
         if (should_fire) {
-            fire_cannon(ship, module, player, manually_fired, ammo_type);
+            /* Cannons only accept cannon-valid ammo types; swivel-only ammo
+             * (grapeshot=2, liquid_flame=3, canister=4) is silently clamped
+             * to cannonball so mixed weapon groups can't fire flame from cannons. */
+            uint8_t cannon_ammo = (ammo_type <= PROJ_TYPE_BAR_SHOT) ? ammo_type : PROJ_TYPE_CANNONBALL;
+            fire_cannon(ship, module, player, manually_fired, cannon_ammo);
             cannons_fired++;
             
             // Also update simple ship module for sync
@@ -3392,8 +4438,999 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
 // ============================================================================
 
 /**
+ * Handle harvest_resource request from client.
+ * Requires: player is on an island, active slot holds ITEM_AXE,
+ * and a 'wood' resource node is within HARVEST_RANGE world-px.
+ * Grants 1–2 planks into the first available inventory slot.
+ */
+#define HARVEST_RANGE 110.0f   /* world-px, generous for feel */
+
+/* ── Island structure placement ─────────────────────────────────────────────
+ * place_structure: payload = {"type":"place_structure","structure_type":"wooden_floor","x":123,"y":456}
+ * Validates: player on island, item in active slot, workbench needs floor under it.
+ * On success broadcasts structure_placed to all clients.
+ */
+#define STRUCT_FLOOR_RADIUS  30.0f  /* world-px half-extent of a floor tile (for overlap, not enforced hard) */
+#define STRUCT_PLACE_RANGE  200.0f  /* player must be within this range of placement point */
+#define STRUCT_FLOOR_REQ_R   55.0f  /* workbench centre must be within this of a floor tile */
+#define STRUCT_INTERACT_R   110.0f  /* E-key range to open workbench */
+
+static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[256];
+
+    /* Parse placement position first (needed for island boundary check) */
+    float px = player->x, py = player->y;
+    {
+        char* pxs = strstr(payload, "\"x\":");
+        char* pys = strstr(payload, "\"y\":");
+        if (pxs) sscanf(pxs + 4, "%f", &px);
+        if (pys) sscanf(pys + 4, "%f", &py);
+    }
+
+    /* Placement point (px,py) must lie within a valid island beach boundary.
+       This replaces the old on_island_id check and also prevents water placement. */
+    uint32_t target_island_id = 0;
+    {
+        for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+            const IslandDef *isl = &ISLAND_PRESETS[ii];
+            float dx     = px - isl->x, dy = py - isl->y;
+            float dist_sq = dx*dx + dy*dy;
+            bool on_isl;
+            if (isl->vertex_count > 0) {
+                on_isl = (dist_sq < isl->poly_bound_r * isl->poly_bound_r)
+                      && island_poly_contains(isl, px, py);
+            } else {
+                float broad_r = isl->beach_radius_px + isl->beach_max_bump;
+                if (dist_sq >= broad_r * broad_r) { on_isl = false; }
+                else {
+                    float angle   = atan2f(dy, dx);
+                    float narrow_r = island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle);
+                    on_isl = (dist_sq < narrow_r * narrow_r);
+                }
+            }
+            if (on_isl) { target_island_id = (uint32_t)isl->id; break; }
+        }
+    }
+    if (target_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"place_structure_fail\",\"reason\":\"in_water\"}");
+        goto ps_send;
+    }
+
+    /* Parse structure_type */
+    char stype[32] = {0};
+    char* st = strstr(payload, "\"structure_type\":\"");
+    if (st) {
+        st += 18;
+        int ti = 0;
+        while (ti < 31 && *st && *st != '"') stype[ti++] = *st++;
+    }
+
+    PlacedStructureType stype_enum;
+    ItemKind required_item;
+    if (strcmp(stype, "wooden_floor") == 0) {
+        stype_enum    = STRUCT_WOODEN_FLOOR;
+        required_item = ITEM_WOODEN_FLOOR;
+    } else if (strcmp(stype, "workbench") == 0) {
+        stype_enum    = STRUCT_WORKBENCH;
+        required_item = ITEM_WORKBENCH;
+    } else if (strcmp(stype, "wall") == 0) {
+        stype_enum    = STRUCT_WALL;
+        required_item = ITEM_WALL;
+    } else if (strcmp(stype, "door_frame") == 0) {
+        stype_enum    = STRUCT_DOOR_FRAME;
+        required_item = ITEM_DOOR_FRAME;
+    } else if (strcmp(stype, "door") == 0) {
+        stype_enum    = STRUCT_DOOR;
+        required_item = ITEM_DOOR;
+    } else {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"place_structure_fail\",\"reason\":\"unknown_type\"}");
+        goto ps_send;
+    }
+
+    /* Player must have the item somewhere in their inventory */
+    int found_slot = -1;
+    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+        if (player->inventory.slots[s].item == required_item &&
+            player->inventory.slots[s].quantity > 0) {
+            found_slot = s;
+            break;
+        }
+    }
+    if (found_slot < 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"place_structure_fail\",\"reason\":\"missing_item\"}");
+        goto ps_send;
+    }
+
+    /* Player must be reasonably close to placement point */
+    {
+        float dx = player->x - px, dy = player->y - py;
+        if (dx*dx + dy*dy > STRUCT_PLACE_RANGE * STRUCT_PLACE_RANGE) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"too_far\"}");
+            goto ps_send;
+        }
+    }
+
+    /* Cannot place within 500 px of an enemy-company structure */
+    {
+        bool enemy_block = false;
+        for (uint32_t si = 0; si < placed_structure_count && !enemy_block; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].company_id == (uint8_t)player->company_id) continue; /* own */
+            float dx = placed_structures[si].x - px;
+            float dy = placed_structures[si].y - py;
+            if (dx*dx + dy*dy < 500.0f * 500.0f) enemy_block = true;
+        }
+        if (enemy_block) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"enemy_territory\"}");
+            goto ps_send;
+        }
+    }
+
+    /* Wooden floor: AABB overlap check — tiles are 50×50 px, no two may share space */
+    if (stype_enum == STRUCT_WOODEN_FLOOR) {
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
+            float dx = fabsf(placed_structures[si].x - px);
+            float dy = fabsf(placed_structures[si].y - py);
+            if (dx < 50.0f && dy < 50.0f) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
+                goto ps_send;
+            }
+        }
+    }
+
+    /* Wooden floor: must not intersect a tree (wood resource) on any island.
+       Obstacle radius TREE_R=20 px; test via circle-AABB closest-point. */
+    if (stype_enum == STRUCT_WOODEN_FLOOR) {
+        const float TREE_R  = 20.0f;
+        const float HALF    = 25.0f; /* half tile */
+        bool blocked = false;
+        for (int ii = 0; ii < ISLAND_COUNT && !blocked; ii++) {
+            const IslandDef *isl = &ISLAND_PRESETS[ii];
+            for (int ri = 0; ri < isl->resource_count && !blocked; ri++) {
+                if (strcmp(isl->resources[ri].type, ISLAND_RES_WOOD) != 0) continue;
+                float tx = isl->x + isl->resources[ri].ox;
+                float ty = isl->y + isl->resources[ri].oy;
+                /* Closest point on AABB [px-HALF, px+HALF] x [py-HALF, py+HALF] to tree */
+                float cx = tx < px - HALF ? px - HALF : (tx > px + HALF ? px + HALF : tx);
+                float cy = ty < py - HALF ? py - HALF : (ty > py + HALF ? py + HALF : ty);
+                float cdx = tx - cx, cdy = ty - cy;
+                if (cdx*cdx + cdy*cdy < TREE_R * TREE_R) blocked = true;
+            }
+        }
+        if (blocked) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"blocked_by_tree\"}");
+            goto ps_send;
+        }
+    }
+
+    /* Workbench: centre point must fall inside the AABB of a wooden_floor tile (50x50 px)
+       AND that floor tile must belong to the same company as the placing player. */
+    if (stype_enum == STRUCT_WORKBENCH) {
+        bool has_floor     = false;
+        bool wrong_company = false;
+        const float HALF_TILE = 25.0f;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
+            float dx = fabsf(placed_structures[si].x - px);
+            float dy = fabsf(placed_structures[si].y - py);
+            if (dx <= HALF_TILE && dy <= HALF_TILE) {
+                if (placed_structures[si].company_id != (uint8_t)player->company_id)
+                    wrong_company = true;
+                else
+                    has_floor = true;
+                break;
+            }
+        }
+        if (!has_floor) {
+            snprintf(response, sizeof(response), wrong_company
+                     ? "{\"type\":\"place_structure_fail\",\"reason\":\"wrong_company\"}"
+                     : "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor\"}");
+            goto ps_send;
+        }
+    }
+
+    /* Wall / Door: must snap to an edge midpoint of an existing same-company floor tile.
+       Edge midpoints are at (fx, fy±25) and (fx±25, fy) for floor at (fx, fy). */
+    if (stype_enum == STRUCT_WALL || stype_enum == STRUCT_DOOR_FRAME) {
+        const float EDGE_TOL  = 3.0f;
+        const float HALF_TILE = 25.0f;
+        bool has_edge     = false;
+        bool wrong_company = false;
+        bool wall_occupied = false;
+        bool wall_horiz   = false;  /* set during edge validation */
+        /* First: overlap check — no two walls/doors at same position */
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_WALL &&
+                placed_structures[si].type != STRUCT_DOOR_FRAME) continue;
+            if (fabsf(placed_structures[si].x - px) < EDGE_TOL &&
+                fabsf(placed_structures[si].y - py) < EDGE_TOL) {
+                wall_occupied = true; break;
+            }
+        }
+        if (wall_occupied) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
+            goto ps_send;
+        }
+        /* Validate floor-edge alignment and determine orientation */
+        for (uint32_t si = 0; si < placed_structure_count && !has_edge; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
+            float fx = placed_structures[si].x;
+            float fy = placed_structures[si].y;
+            bool n_edge = fabsf(px - fx) < EDGE_TOL && fabsf(py - (fy - HALF_TILE)) < EDGE_TOL;
+            bool s_edge = fabsf(px - fx) < EDGE_TOL && fabsf(py - (fy + HALF_TILE)) < EDGE_TOL;
+            bool w_edge = fabsf(py - fy) < EDGE_TOL && fabsf(px - (fx - HALF_TILE)) < EDGE_TOL;
+            bool e_edge = fabsf(py - fy) < EDGE_TOL && fabsf(px - (fx + HALF_TILE)) < EDGE_TOL;
+            if (n_edge || s_edge || w_edge || e_edge) {
+                if (placed_structures[si].company_id != (uint8_t)player->company_id)
+                    wrong_company = true;
+                else {
+                    has_edge   = true;
+                    wall_horiz = (n_edge || s_edge); /* N/S edge → horizontal */
+                }
+            }
+        }
+        if (!has_edge) {
+            snprintf(response, sizeof(response), wrong_company
+                     ? "{\"type\":\"place_structure_fail\",\"reason\":\"wrong_company\"}"
+                     : "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor_edge\"}");
+            goto ps_send;
+        }
+        /* Check if any player is occupying the wall/door space */
+        {
+            const float PLAYER_R = 8.0f;
+            float hw = wall_horiz ? 25.0f : 5.0f;
+            float hh = wall_horiz ? 5.0f  : 25.0f;
+            bool player_in_way = false;
+            for (int pi2 = 0; pi2 < MAX_PLAYERS && !player_in_way; pi2++) {
+                if (!players[pi2].active) continue;
+                float cpx = players[pi2].x - px;
+                float cpy = players[pi2].y - py;
+                float clamp_cpx = cpx < -hw ? -hw : (cpx > hw ? hw : cpx);
+                float clamp_cpy = cpy < -hh ? -hh : (cpy > hh ? hh : cpy);
+                float dpx = cpx - clamp_cpx, dpy = cpy - clamp_cpy;
+                if (dpx*dpx + dpy*dpy < PLAYER_R * PLAYER_R) player_in_way = true;
+            }
+            if (player_in_way) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"blocked_by_player\"}");
+                goto ps_send;
+            }
+        }
+        /* Check if any non-floor structure (workbench/door) blocks this space */
+        {
+            float hw = wall_horiz ? 25.0f : 5.0f;
+            float hh = wall_horiz ? 5.0f  : 25.0f;
+            const float WB_R = 15.0f; /* conservative workbench interaction radius */
+            bool struct_in_way = false;
+            for (uint32_t si = 0; si < placed_structure_count && !struct_in_way; si++) {
+                if (!placed_structures[si].active) continue;
+                if (placed_structures[si].type == STRUCT_WOODEN_FLOOR) continue;
+                if (placed_structures[si].type == STRUCT_WALL) continue;
+                if (placed_structures[si].type == STRUCT_DOOR_FRAME) continue;
+                if (placed_structures[si].type == STRUCT_DOOR) continue;
+                float dpx = fabsf(placed_structures[si].x - px);
+                float dpy = fabsf(placed_structures[si].y - py);
+                if (dpx < hw + WB_R && dpy < hh + WB_R) struct_in_way = true;
+            }
+            if (struct_in_way) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
+                goto ps_send;
+            }
+        }
+    }
+
+    /* Door (panel): must snap onto an existing door_frame at the same position */
+    if (stype_enum == STRUCT_DOOR) {
+        const float POS_TOL = 3.0f;
+        bool has_frame  = false;
+        bool door_taken = false;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (fabsf(placed_structures[si].x - px) >= POS_TOL ||
+                fabsf(placed_structures[si].y - py) >= POS_TOL) continue;
+            if (placed_structures[si].type == STRUCT_DOOR_FRAME) has_frame  = true;
+            if (placed_structures[si].type == STRUCT_DOOR)       door_taken = true;
+        }
+        if (door_taken) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
+            goto ps_send;
+        }
+        if (!has_frame) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"needs_door_frame\"}");
+            goto ps_send;
+        }
+    }
+
+    /* Space for more structures? */
+    if (placed_structure_count >= MAX_PLACED_STRUCTURES) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"place_structure_fail\",\"reason\":\"world_full\"}");
+        goto ps_send;
+    }
+
+    /* Consume 1 item from the found slot */
+    {
+        player->inventory.slots[found_slot].quantity--;
+        if (player->inventory.slots[found_slot].quantity == 0)
+            player->inventory.slots[found_slot].item = ITEM_NONE;
+    }
+
+    /* Add structure */
+    uint32_t new_id = next_structure_id++;
+    placed_structures[placed_structure_count].active     = true;
+    placed_structures[placed_structure_count].id         = new_id;
+    placed_structures[placed_structure_count].type       = stype_enum;
+    placed_structures[placed_structure_count].island_id  = target_island_id;
+    placed_structures[placed_structure_count].x          = px;
+    placed_structures[placed_structure_count].y          = py;
+    placed_structures[placed_structure_count].company_id = (uint8_t)player->company_id;
+    placed_structures[placed_structure_count].max_hp     = 100;
+    placed_structures[placed_structure_count].hp         = 100;
+    placed_structures[placed_structure_count].placer_id  = player->player_id;
+    strncpy(placed_structures[placed_structure_count].placer_name, player->name,
+            sizeof(placed_structures[placed_structure_count].placer_name) - 1);
+    placed_structures[placed_structure_count].placer_name[
+        sizeof(placed_structures[placed_structure_count].placer_name) - 1] = '\0';
+    placed_structures[placed_structure_count].open       = false;
+    placed_structure_count++;
+
+    log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
+             player->player_id, stype, new_id, px, py, target_island_id);
+
+    /* Broadcast to all clients */
+    char bcast[384];
+    bool new_is_door = (stype_enum == STRUCT_DOOR);
+    snprintf(bcast, sizeof(bcast),
+             "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
+             "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
+             "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"%s}",
+             new_id, stype, target_island_id, px, py,
+             (unsigned)player->company_id, 100u, 100u, player->name,
+             new_is_door ? ",\"open\":false" : "");
+    websocket_server_broadcast(bcast);
+    return; /* already sent via broadcast */
+
+ps_send:;
+    char frame[512];
+    size_t flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (flen > 0 && flen < sizeof(frame)) send(client->fd, frame, flen, 0);
+}
+
+/*
+ * structure_interact: player presses E near a placed structure.
+ * Only workbenches currently do anything (open crafting UI).
+ */
+static void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[256];
+
+    if (player->on_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"structure_interact_fail\",\"reason\":\"not_on_island\"}");
+        goto si_send;
+    }
+
+    uint32_t sid = 0;
+    char* sp = strstr(payload, "\"structure_id\":");
+    if (sp) sscanf(sp + 15, "%u", &sid);
+
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        if (!placed_structures[i].active || placed_structures[i].id != sid) continue;
+        float dx = player->x - placed_structures[i].x;
+        float dy = player->y - placed_structures[i].y;
+        if (dx*dx + dy*dy > STRUCT_INTERACT_R * STRUCT_INTERACT_R) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"structure_interact_fail\",\"reason\":\"too_far\"}");
+            goto si_send;
+        }
+        if (placed_structures[i].type == STRUCT_WORKBENCH) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"crafting_open\",\"structure_id\":%u,\"structure_type\":\"workbench\"}",
+                     sid);
+            goto si_send;
+        }
+        if (placed_structures[i].type == STRUCT_DOOR) {
+            /* Toggle door open/closed and broadcast to all clients */
+            placed_structures[i].open = !placed_structures[i].open;
+            char bcast[128];
+            snprintf(bcast, sizeof(bcast),
+                     "{\"type\":\"door_toggled\",\"id\":%u,\"open\":%s}",
+                     sid, placed_structures[i].open ? "true" : "false");
+            websocket_server_broadcast(bcast);
+            return; /* broadcast sent, no per-client response needed */
+        }
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"structure_interact_fail\",\"reason\":\"not_interactive\"}");
+        goto si_send;
+    }
+
+    snprintf(response, sizeof(response),
+             "{\"type\":\"structure_interact_fail\",\"reason\":\"not_found\"}");
+
+si_send:;
+    char frame[512];
+    size_t flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (flen > 0 && flen < sizeof(frame)) send(client->fd, frame, flen, 0);
+}
+
+/*
+ * demolish_structure: player holds E on a placed structure to remove it.
+ * Validates proximity, then removes from placed_structures[] and broadcasts.
+ */
+static void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[256];
+
+    uint32_t sid = 0;
+    const char* sp = strstr(payload, "\"structure_id\":");
+    if (sp) sscanf(sp + 15, "%u", &sid);
+
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        if (!placed_structures[i].active || placed_structures[i].id != sid) continue;
+        float dx = player->x - placed_structures[i].x;
+        float dy = player->y - placed_structures[i].y;
+        if (dx*dx + dy*dy > STRUCT_INTERACT_R * STRUCT_INTERACT_R) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"demolish_fail\",\"reason\":\"too_far\"}");
+            goto ds_send;
+        }
+        /* Only the owner's company may demolish their own structures */
+        if (placed_structures[i].company_id != (uint8_t)player->company_id) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"demolish_fail\",\"reason\":\"wrong_company\"}");
+            goto ds_send;
+        }
+        /* Save position/type before compacting — needed for cascade below */
+        PlacedStructureType demolished_type = placed_structures[i].type;
+        float fx = placed_structures[i].x;
+        float fy = placed_structures[i].y;
+        /* Shift subsequent entries down to keep the array dense */
+        for (uint32_t j = i; j + 1 < placed_structure_count; j++)
+            placed_structures[j] = placed_structures[j + 1];
+        placed_structure_count--;
+        log_info("🔨 Player %u demolished structure %u", player->player_id, sid);
+        /* Broadcast removal to all clients */
+        char bcast[128];
+        snprintf(bcast, sizeof(bcast),
+                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", sid);
+        websocket_server_broadcast(bcast);
+        /* Cascade: if a floor was demolished, remove any workbenches sitting on it
+           and any walls at its edges that have no other supporting floor. */
+        if (demolished_type == STRUCT_WOODEN_FLOOR) {
+            uint32_t j = 0;
+            while (j < placed_structure_count) {
+                if (placed_structures[j].type == STRUCT_WORKBENCH) {
+                    float wdx = fabsf(placed_structures[j].x - fx);
+                    float wdy = fabsf(placed_structures[j].y - fy);
+                    if (wdx <= 25.0f && wdy <= 25.0f) {
+                        uint32_t wid = placed_structures[j].id;
+                        for (uint32_t k = j; k + 1 < placed_structure_count; k++)
+                            placed_structures[k] = placed_structures[k + 1];
+                        placed_structure_count--;
+                        log_info("🔨 Cascade-demolished workbench %u (floor %u removed)", wid, sid);
+                        char wbcast[128];
+                        snprintf(wbcast, sizeof(wbcast),
+                                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", wid);
+                        websocket_server_broadcast(wbcast);
+                        continue; /* don't increment — array shifted left */
+                    }
+                } else if (placed_structures[j].type == STRUCT_WALL ||
+                           placed_structures[j].type == STRUCT_DOOR_FRAME ||
+                           placed_structures[j].type == STRUCT_DOOR) {
+                    /* Wall is at one of the 4 edge midpoints of the demolished floor? */
+                    float wx = placed_structures[j].x;
+                    float wy = placed_structures[j].y;
+                    bool at_edge =
+                        (fabsf(wx - fx) < 3.0f && fabsf(fabsf(wy - fy) - 25.0f) < 3.0f) ||
+                        (fabsf(wy - fy) < 3.0f && fabsf(fabsf(wx - fx) - 25.0f) < 3.0f);
+                    if (at_edge) {
+                        /* Check if another active floor still supports this wall edge */
+                        bool has_support = false;
+                        for (uint32_t fi = 0; fi < placed_structure_count && !has_support; fi++) {
+                            PlacedStructure* f = &placed_structures[fi];
+                            if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                            bool supports =
+                                (fabsf(wx - f->x) < 3.0f && fabsf(fabsf(wy - f->y) - 25.0f) < 3.0f) ||
+                                (fabsf(wy - f->y) < 3.0f && fabsf(fabsf(wx - f->x) - 25.0f) < 3.0f);
+                            if (supports) has_support = true;
+                        }
+                        if (!has_support) {
+                            uint32_t wid = placed_structures[j].id;
+                            for (uint32_t k = j; k + 1 < placed_structure_count; k++)
+                                placed_structures[k] = placed_structures[k + 1];
+                            placed_structure_count--;
+                            log_info("🔨 Cascade-demolished wall %u (floor %u removed)", wid, sid);
+                            char wcast[128];
+                            snprintf(wcast, sizeof(wcast),
+                                     "{\"type\":\"structure_demolished\",\"structure_id\":%u}", wid);
+                            websocket_server_broadcast(wcast);
+                            continue;
+                        }
+                    }
+                }
+                j++;
+            }
+        }
+        /* door_frame demolished: cascade any door panel sitting on it */
+        if (demolished_type == STRUCT_DOOR_FRAME) {
+            for (uint32_t j = 0; j < placed_structure_count; j++) {
+                if (placed_structures[j].type != STRUCT_DOOR) continue;
+                if (fabsf(placed_structures[j].x - fx) >= 3.0f ||
+                    fabsf(placed_structures[j].y - fy) >= 3.0f) continue;
+                uint32_t dpid = placed_structures[j].id;
+                for (uint32_t k = j; k + 1 < placed_structure_count; k++)
+                    placed_structures[k] = placed_structures[k + 1];
+                placed_structure_count--;
+                log_info("\U0001F528 Cascade-demolished door panel %u (frame removed)", dpid);
+                char dpcast[128];
+                snprintf(dpcast, sizeof(dpcast),
+                         "{\"type\":\"structure_demolished\",\"structure_id\":%u}", dpid);
+                websocket_server_broadcast(dpcast);
+                break;
+            }
+        }
+        return; /* already sent via broadcast */
+    }
+
+    snprintf(response, sizeof(response),
+             "{\"type\":\"demolish_fail\",\"reason\":\"not_found\"}");
+
+ds_send:;
+    char ds_frame[256];
+    size_t ds_flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), ds_frame, sizeof(ds_frame));
+    if (ds_flen > 0 && ds_flen < sizeof(ds_frame)) send(client->fd, ds_frame, ds_flen, 0);
+}
+
+static void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* client) {
+    char response[256];
+
+    /* Must be standing on an island */
+    if (player->on_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_failure\",\"reason\":\"not_on_island\"}");
+        goto send_and_ret;
+    }
+
+    /* Active item must be the axe */
+    {
+        uint8_t slot = player->inventory.active_slot;
+        if (slot >= INVENTORY_SLOTS ||
+            player->inventory.slots[slot].item != ITEM_AXE ||
+            player->inventory.slots[slot].quantity == 0)
+        {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_failure\",\"reason\":\"need_axe\"}");
+            goto send_and_ret;
+        }
+    }
+
+    /* Find the island definition */
+    const IslandDef *isl = NULL;
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        if ((uint32_t)ISLAND_PRESETS[ii].id == player->on_island_id) {
+            isl = &ISLAND_PRESETS[ii];
+            break;
+        }
+    }
+    if (!isl) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_failure\",\"reason\":\"island_not_found\"}");
+        goto send_and_ret;
+    }
+
+    /* Find the nearest 'wood' resource node within range */
+    float best_dist_sq = HARVEST_RANGE * HARVEST_RANGE;
+    bool found = false;
+    for (int ri = 0; ri < isl->resource_count; ri++) {
+        if (strcmp(isl->resources[ri].type, ISLAND_RES_WOOD) != 0) continue;
+        float wx = isl->x + isl->resources[ri].ox;
+        float wy = isl->y + isl->resources[ri].oy;
+        float dx = player->x - wx;
+        float dy = player->y - wy;
+        float d2 = dx * dx + dy * dy;
+        if (d2 <= best_dist_sq) {
+            best_dist_sq = d2;
+            found = true;
+        }
+    }
+    if (!found) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_failure\",\"reason\":\"too_far\"}");
+        goto send_and_ret;
+    }
+
+    /* Grant 2 planks — find an existing plank stack or a free slot */
+    {
+        int grant_slot = -1;
+        /* Prefer an existing wood stack that isn't full */
+        for (int s = 0; s < INVENTORY_SLOTS; s++) {
+            if (player->inventory.slots[s].item == ITEM_WOOD &&
+                player->inventory.slots[s].quantity < 99) {
+                grant_slot = s;
+                break;
+            }
+        }
+        /* Fall back to first empty slot */
+        if (grant_slot < 0) {
+            for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                if (player->inventory.slots[s].item == ITEM_NONE ||
+                    player->inventory.slots[s].quantity == 0) {
+                    grant_slot = s;
+                    break;
+                }
+            }
+        }
+        if (grant_slot < 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_failure\",\"reason\":\"inventory_full\"}");
+            goto send_and_ret;
+        }
+
+        if (player->inventory.slots[grant_slot].item == ITEM_WOOD) {
+            int new_qty = (int)player->inventory.slots[grant_slot].quantity + 10;
+            if (new_qty > 99) new_qty = 99;
+            player->inventory.slots[grant_slot].quantity = (uint8_t)new_qty;
+        } else {
+            player->inventory.slots[grant_slot].item     = ITEM_WOOD;
+            player->inventory.slots[grant_slot].quantity = 10;
+        }
+
+        log_info("🪓 Player %u harvested wood → +10 wood (slot %d qty=%d)",
+                 player->player_id, grant_slot,
+                 (int)player->inventory.slots[grant_slot].quantity);
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_success\",\"wood\":10}");
+    }
+
+send_and_ret:;
+    char frame[512];
+    size_t frame_len = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0 && frame_len < sizeof(frame))
+        send(client->fd, frame, frame_len, 0);
+}
+
+/**
  * Handle module interaction request from client
  */
+/* ── Fiber / rock harvest handlers ──────────────────────────────────────── */
+/* Forward declaration — defined in the Crafting helpers block below */
+static bool craft_grant(WebSocketPlayer* player, ItemKind item, int amount);
+
+/**
+ * Handle harvest_fiber: player presses E near a fiber plant.
+ * Grants 5 ITEM_FIBER if a fiber resource node is within HARVEST_RANGE.
+ */
+static void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* client) {
+    char response[256];
+
+    if (player->on_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_fiber_failure\",\"reason\":\"not_on_island\"}");
+        goto send_fiber_ret;
+    }
+
+    {
+        /* Find the island */
+        const IslandDef *isl = NULL;
+        for (int i = 0; i < ISLAND_COUNT; i++) {
+            if (ISLAND_PRESETS[i].id == (int)player->on_island_id) {
+                isl = &ISLAND_PRESETS[i];
+                break;
+            }
+        }
+        if (!isl) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_fiber_failure\",\"reason\":\"island_not_found\"}");
+            goto send_fiber_ret;
+        }
+
+        /* Find nearest fiber node within range */
+        float best_dist_sq = (float)(HARVEST_RANGE * HARVEST_RANGE);
+        bool  found = false;
+        for (int ri = 0; ri < isl->resource_count; ri++) {
+            if (strcmp(isl->resources[ri].type, ISLAND_RES_FIBER) != 0) continue;
+            float fx = isl->x + isl->resources[ri].ox;
+            float fy = isl->y + isl->resources[ri].oy;
+            float dx = player->x - fx;
+            float dy = player->y - fy;
+            float dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= best_dist_sq) {
+                best_dist_sq = dist_sq;
+                found = true;
+            }
+        }
+
+        if (!found) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_fiber_failure\",\"reason\":\"too_far\"}");
+            goto send_fiber_ret;
+        }
+
+        /* Grant 5 fiber */
+        if (!craft_grant(player, ITEM_FIBER, 5)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_fiber_failure\",\"reason\":\"inventory_full\"}");
+            goto send_fiber_ret;
+        }
+
+        log_info("🌿 Player %u gathered fiber → +5 fiber", player->player_id);
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_fiber_success\",\"fiber\":5}");
+    }
+
+send_fiber_ret:;
+    char frame[512];
+    size_t frame_len = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0 && frame_len < sizeof(frame))
+        send(client->fd, frame, frame_len, 0);
+}
+
+/**
+ * Handle harvest_rock: player presses E (with pickaxe) near a rock outcrop.
+ * Grants 3 ITEM_METAL if a rock resource node is within HARVEST_RANGE.
+ */
+static void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client) {
+    char response[256];
+
+    if (player->on_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_rock_failure\",\"reason\":\"not_on_island\"}");
+        goto send_rock_ret;
+    }
+
+    /* Check pickaxe equipped */
+    {
+        bool has_pickaxe = false;
+        int active = player->inventory.active_slot;
+        if (player->inventory.slots[active].item == ITEM_PICKAXE)
+            has_pickaxe = true;
+        if (!has_pickaxe) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_rock_failure\",\"reason\":\"need_pickaxe\"}");
+            goto send_rock_ret;
+        }
+    }
+
+    {
+        const IslandDef *isl = NULL;
+        for (int i = 0; i < ISLAND_COUNT; i++) {
+            if (ISLAND_PRESETS[i].id == (int)player->on_island_id) {
+                isl = &ISLAND_PRESETS[i];
+                break;
+            }
+        }
+        if (!isl) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_rock_failure\",\"reason\":\"island_not_found\"}");
+            goto send_rock_ret;
+        }
+
+        float best_dist_sq = (float)(HARVEST_RANGE * HARVEST_RANGE);
+        bool  found = false;
+        for (int ri = 0; ri < isl->resource_count; ri++) {
+            if (strcmp(isl->resources[ri].type, ISLAND_RES_ROCK) != 0) continue;
+            float rx = isl->x + isl->resources[ri].ox;
+            float ry = isl->y + isl->resources[ri].oy;
+            float dx = player->x - rx;
+            float dy = player->y - ry;
+            float dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= best_dist_sq) {
+                best_dist_sq = dist_sq;
+                found = true;
+            }
+        }
+
+        if (!found) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_rock_failure\",\"reason\":\"too_far\"}");
+            goto send_rock_ret;
+        }
+
+        if (!craft_grant(player, ITEM_METAL, 3)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_rock_failure\",\"reason\":\"inventory_full\"}");
+            goto send_rock_ret;
+        }
+
+        log_info("⛏ Player %u mined rock → +3 metal", player->player_id);
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_rock_success\",\"metal\":3}");
+    }
+
+send_rock_ret:;
+    char frame[512];
+    size_t frame_len = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0 && frame_len < sizeof(frame))
+        send(client->fd, frame, frame_len, 0);
+}
+
+/* ── Crafting helpers ──────────────────────────────────────────────────── */
+
+/** Count total quantity of an item across all inventory slots. */
+static int craft_count_item(WebSocketPlayer* player, ItemKind item) {
+    int total = 0;
+    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+        if (player->inventory.slots[s].item == item)
+            total += player->inventory.slots[s].quantity;
+    }
+    return total;
+}
+
+/** Consume `amount` units of `item` from inventory. Returns true on success. */
+static bool craft_consume(WebSocketPlayer* player, ItemKind item, int amount) {
+    int remaining = amount;
+    for (int s = 0; s < INVENTORY_SLOTS && remaining > 0; s++) {
+        if (player->inventory.slots[s].item == item) {
+            int take = (player->inventory.slots[s].quantity < remaining)
+                       ? player->inventory.slots[s].quantity : remaining;
+            player->inventory.slots[s].quantity -= (uint8_t)take;
+            remaining -= take;
+            if (player->inventory.slots[s].quantity == 0)
+                player->inventory.slots[s].item = ITEM_NONE;
+        }
+    }
+    return remaining == 0;
+}
+
+/** Grant `amount` units of `item` into inventory. Returns false if no space. */
+static bool craft_grant(WebSocketPlayer* player, ItemKind item, int amount) {
+    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+        if (player->inventory.slots[s].item == item &&
+            player->inventory.slots[s].quantity < 99) {
+            int new_qty = (int)player->inventory.slots[s].quantity + amount;
+            if (new_qty > 99) new_qty = 99;
+            player->inventory.slots[s].quantity = (uint8_t)new_qty;
+            return true;
+        }
+    }
+    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+        if (player->inventory.slots[s].item == ITEM_NONE ||
+            player->inventory.slots[s].quantity == 0) {
+            player->inventory.slots[s].item     = item;
+            player->inventory.slots[s].quantity = (uint8_t)(amount > 99 ? 99 : amount);
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Handle craft_item request from client.
+ * Validates ingredients, consumes them, grants output item.
+ */
+static void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[256];
+
+    /* Parse recipe_id */
+    char recipe_id[64] = {0};
+    const char* rid_start = strstr(payload, "\"recipe_id\":");
+    if (rid_start) {
+        rid_start += 12;
+        while (*rid_start == ' ' || *rid_start == '"') rid_start++;
+        int i = 0;
+        while (*rid_start && *rid_start != '"' && i < (int)sizeof(recipe_id) - 1)
+            recipe_id[i++] = *rid_start++;
+        recipe_id[i] = '\0';
+    }
+
+    if (recipe_id[0] == '\0') {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"craft_result\",\"success\":false,\"reason\":\"unknown_recipe\",\"recipe_id\":\"\"}");
+        goto send_craft_resp;
+    }
+
+    /* Recipe table */
+    typedef struct { ItemKind item; int count; } CraftIng;
+    typedef struct {
+        const char* id;
+        ItemKind    output;
+        int         output_count;
+        CraftIng    ing[2];
+        int         ing_count;
+    } CraftRecipe;
+
+    static const CraftRecipe recipes[] = {
+        { "craft_plank",  ITEM_PLANK,  1, { {ITEM_WOOD, 20}, {0,0} }, 1 },
+        { "craft_sail",   ITEM_SAIL,   1, { {ITEM_WOOD, 15}, {ITEM_FIBER, 50} }, 2 },
+        { "craft_helm",   ITEM_HELM,   1, { {ITEM_WOOD, 10}, {0,0} }, 1 },
+        { "craft_cannon", ITEM_CANNON, 1, { {ITEM_WOOD,  8}, {ITEM_METAL, 20} }, 2 },
+        { "craft_swivel", ITEM_SWIVEL, 1, { {ITEM_WOOD,  5}, {ITEM_METAL,  8} }, 2 },
+        { "craft_sword",  ITEM_SWORD,  1, { {ITEM_WOOD,  2}, {ITEM_METAL,  5} }, 2 },
+        { "craft_wall",   ITEM_WALL,   4, { {ITEM_WOOD,  6}, {0,0} }, 1 },
+        { "craft_door_frame", ITEM_DOOR_FRAME, 1, { {ITEM_WOOD, 4}, {0,0} }, 1 },
+        { "craft_door",       ITEM_DOOR,       1, { {ITEM_WOOD, 4}, {0,0} }, 1 },
+    };
+    const int num_recipes = (int)(sizeof(recipes) / sizeof(recipes[0]));
+
+    const CraftRecipe* recipe = NULL;
+    for (int i = 0; i < num_recipes; i++) {
+        if (strcmp(recipes[i].id, recipe_id) == 0) {
+            recipe = &recipes[i];
+            break;
+        }
+    }
+
+    if (!recipe) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"craft_result\",\"success\":false,\"reason\":\"unknown_recipe\",\"recipe_id\":\"%s\"}", recipe_id);
+        goto send_craft_resp;
+    }
+
+    /* Check ingredients */
+    for (int i = 0; i < recipe->ing_count; i++) {
+        if (craft_count_item(player, recipe->ing[i].item) < recipe->ing[i].count) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"craft_result\",\"success\":false,\"reason\":\"missing_ingredients\",\"recipe_id\":\"%s\"}", recipe_id);
+            goto send_craft_resp;
+        }
+    }
+
+    /* Check output space */
+    if (!craft_grant(player, recipe->output, 0)) {
+        /* Dry-run: just test if a slot exists — grant 0 won't do anything */
+        /* Actually check differently: count free or matching slots */
+        bool has_space = false;
+        for (int s = 0; s < INVENTORY_SLOTS; s++) {
+            if ((player->inventory.slots[s].item == recipe->output &&
+                 player->inventory.slots[s].quantity < 99) ||
+                player->inventory.slots[s].item == ITEM_NONE ||
+                player->inventory.slots[s].quantity == 0) {
+                has_space = true;
+                break;
+            }
+        }
+        if (!has_space) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"craft_result\",\"success\":false,\"reason\":\"inventory_full\",\"recipe_id\":\"%s\"}", recipe_id);
+            goto send_craft_resp;
+        }
+    }
+
+    /* Consume ingredients */
+    for (int i = 0; i < recipe->ing_count; i++) {
+        craft_consume(player, recipe->ing[i].item, recipe->ing[i].count);
+    }
+
+    /* Grant output */
+    if (!craft_grant(player, recipe->output, recipe->output_count)) {
+        /* Should not happen since we checked space, but handle gracefully */
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"craft_result\",\"success\":false,\"reason\":\"inventory_full\",\"recipe_id\":\"%s\"}", recipe_id);
+        goto send_craft_resp;
+    }
+
+    log_info("\u2692 Player %u crafted '%s'", player->player_id, recipe_id);
+    snprintf(response, sizeof(response),
+             "{\"type\":\"craft_result\",\"success\":true,\"recipe_id\":\"%s\"}", recipe_id);
+
+send_craft_resp:;
+    char frame[512];
+    size_t frame_len = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0 && frame_len < sizeof(frame))
+        send(client->fd, frame, frame_len, 0);
+}
+
 static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
     // Parse module_id from JSON
     uint32_t module_id = 0;
@@ -3407,7 +5444,7 @@ static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClie
         return;
     }
     
-    // log_info("🎮 [MODULE_INTERACT] Player %u -> Module %u", player->player_id, module_id);
+    log_info("🎮 [MODULE_INTERACT] Player %u -> Module %u", player->player_id, module_id);
     
     // For ladder interactions, we need to find which ship has this ladder
     // For other modules, player must be on the ship
@@ -3435,7 +5472,30 @@ static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClie
     
     // Special handling for ladders - can be used from water or different ships
     bool is_ladder = (module->type_id == MODULE_TYPE_LADDER);
-    
+
+    // NPC occupancy check: if an enemy NPC is currently stationed at this module, block it.
+    // (Enemy ship modules are otherwise freely usable — only NPC presence blocks access.)
+    if (!is_ladder) {
+        for (int _ni = 0; _ni < world_npc_count; _ni++) {
+            WorldNpc* _npc = &world_npcs[_ni];
+            if (!_npc->active) continue;
+            if (_npc->assigned_weapon_id != module->id) continue;
+            // Only block when the NPC is physically at the module, not just en route
+            if (_npc->state != WORLD_NPC_STATE_AT_GUN &&
+                _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
+            // Neutral NPCs (company 0) never block anyone
+            if (_npc->company_id == 0) continue;
+            // Friendly NPC — fine to share the module
+            if (player->company_id != 0 && _npc->company_id == player->company_id) continue;
+            // Enemy NPC is stationed here
+            log_warn("⛔ Player %u (company %u) blocked from module %u: NPC %u (company %u) is stationed there",
+                     player->player_id, player->company_id, module_id,
+                     _npc->id, _npc->company_id);
+            send_interaction_failure(client, "npc_occupied");
+            return;
+        }
+    }
+
     // For non-ladder modules, player must be on the same ship
     if (!is_ladder && player->parent_ship_id != target_ship->ship_id) {
         if (player->parent_ship_id == 0) {
@@ -3488,7 +5548,8 @@ static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClie
     }
     
     distance = sqrtf(dx * dx + dy * dy);
-    const float MAX_INTERACT_RANGE = 60.0f; // Slightly more lenient on server
+    // Ladders allow boarding from water — use a generous range; other modules require proximity
+    const float MAX_INTERACT_RANGE = (module->type_id == MODULE_TYPE_LADDER) ? 120.0f : 60.0f;
     
     if (distance > MAX_INTERACT_RANGE) {
         log_warn("Player %u too far from module %u (%.1fpx > %.1fpx)", 
@@ -3530,6 +5591,10 @@ static void handle_module_interact(WebSocketPlayer* player, struct WebSocketClie
             
         case MODULE_TYPE_SEAT:
             handle_seat_interact(player, client, target_ship, module);
+            break;
+
+        case MODULE_TYPE_SWIVEL:
+            handle_swivel_interact(player, client, target_ship, module);
             break;
             
         case MODULE_TYPE_PLANK:
@@ -3870,15 +5935,9 @@ static void tick_sinking_ships(void) {
         if (!ship->active || !ship->is_sinking) continue;
 
         /* Keep the vessel stationary — zero velocity in the sim ship every tick */
-        if (global_sim) {
-            for (uint32_t ss = 0; ss < global_sim->ship_count; ss++) {
-                if ((uint32_t)global_sim->ships[ss].id == ship->ship_id) {
-                    global_sim->ships[ss].velocity.x = 0;
-                    global_sim->ships[ss].velocity.y = 0;
-                    global_sim->ships[ss].angular_velocity = 0;
-                    break;
-                }
-            }
+        {
+            struct Ship* _ss = find_sim_ship(ship->ship_id);
+            if (_ss) { _ss->velocity.x = 0; _ss->velocity.y = 0; _ss->angular_velocity = 0; }
         }
         ship->velocity_x = 0.0f;
         ship->velocity_y = 0.0f;
@@ -3900,6 +5959,14 @@ static void tick_sinking_ships(void) {
             players[pi].controlling_ship_id = 0;
             players[pi].x = SERVER_TO_CLIENT(CLIENT_TO_SERVER(wx));
             players[pi].y = SERVER_TO_CLIENT(CLIENT_TO_SERVER(wy));
+        }
+
+        /* Eject any remaining NPCs — clear ship_id so they are orphaned in the world */
+        for (int ni = 0; ni < world_npc_count; ni++) {
+            if (!world_npcs[ni].active || world_npcs[ni].ship_id != sunk_id) continue;
+            world_npcs[ni].ship_id  = 0;
+            world_npcs[ni].in_water = true;
+            world_npcs[ni].fire_timer_ms = 0;
         }
 
         /* Destroy in sim */
@@ -3932,29 +5999,37 @@ static void tick_sinking_ships(void) {
  */
 static void ship_init_default_weapon_groups(SimpleShip* ship) {
     /* Reset all groups to HALTFIRE with no cannons */
-    for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-        ship->weapon_groups[g].mode         = WEAPON_GROUP_MODE_HALTFIRE;
-        ship->weapon_groups[g].cannon_count = 0;
-        ship->weapon_groups[g].target_ship_id = 0;
-    }
-
-    /* Partition cannons: port (local_y > 0) → group 1, starboard → group 2 */
-    for (int m = 0; m < ship->module_count; m++) {
-        ShipModule* mod = &ship->modules[m];
-        if (mod->type_id != MODULE_TYPE_CANNON) continue;
-
-        float local_y = Q16_TO_FLOAT(mod->local_pos.y);
-        int   target_group = (local_y > 0.0f) ? 1 : 2;
-        WeaponGroup* grp = &ship->weapon_groups[target_group];
-        if (grp->cannon_count < MAX_CANNONS_PER_GROUP) {
-            grp->cannon_ids[grp->cannon_count++] = mod->id;
+    /* Reset all company slots to HALTFIRE with no cannons */
+    for (int co = 0; co < MAX_COMPANIES; co++) {
+        for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
+            ship->weapon_groups[co][g].mode         = WEAPON_GROUP_MODE_HALTFIRE;
+            ship->weapon_groups[co][g].weapon_count = 0;
+            ship->weapon_groups[co][g].target_ship_id = 0;
         }
     }
 
-    log_info("🔫 Ship %u: default groups — port=%d cannons (grp1), starboard=%d cannons (grp2)",
+    /* Partition cannons: port (local_y > 0) → group 1, starboard → group 2.
+     * Apply to ALL company slots so that any company boarding the ship starts
+     * with a sensible default layout. */
+    for (int co = 0; co < MAX_COMPANIES; co++) {
+        for (int m = 0; m < ship->module_count; m++) {
+            ShipModule* mod = &ship->modules[m];
+            if (mod->type_id != MODULE_TYPE_CANNON) continue;
+
+            float local_y = Q16_TO_FLOAT(mod->local_pos.y);
+            int   target_group = (local_y > 0.0f) ? 1 : 2;
+            WeaponGroup* grp = &ship->weapon_groups[co][target_group];
+            if (grp->weapon_count < MAX_WEAPONS_PER_GROUP) {
+                grp->weapon_ids[grp->weapon_count++] = mod->id;
+            }
+        }
+    }
+
+    log_info("🔫 Ship %u: default groups — port=%d cannons (grp1), starboard=%d cannons (grp2) [all %d company slots]",
              ship->ship_id,
-             ship->weapon_groups[1].cannon_count,
-             ship->weapon_groups[2].cannon_count);
+             ship->weapon_groups[0][1].weapon_count,
+             ship->weapon_groups[0][2].weapon_count,
+             MAX_COMPANIES);
 }
 
 // Initialize a brigantine ship at the given slot index, world position (client pixels), module ID base, and company
@@ -4043,6 +6118,29 @@ static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t
     s->modules[s->module_count].state_bits  = MODULE_STATE_ACTIVE;
     s->module_count++;
 
+    /* Brigantine hull: 10 planks (IDs 100-109) + centre deck (ID 200).
+     * Fixed IDs match the client layout in modules.ts / NetworkManager. */
+    {
+        static const float plank_cx[10] = {
+             246.25f,  246.25f,  115.0f,  -35.0f, -185.0f,
+            -281.25f, -281.25f, -185.0f,  -35.0f,  115.0f
+        };
+        static const float plank_cy[10] = {
+             45.0f, -45.0f, -90.0f, -90.0f, -90.0f,
+            -45.0f,  45.0f,  90.0f,  90.0f,  90.0f
+        };
+        for (int i = 0; i < 10 && s->module_count < MAX_MODULES_PER_SHIP; i++) {
+            Vec2Q16 pos = {
+                Q16_FROM_FLOAT(CLIENT_TO_SERVER(plank_cx[i])),
+                Q16_FROM_FLOAT(CLIENT_TO_SERVER(plank_cy[i]))
+            };
+            s->modules[s->module_count++] = module_create((uint16_t)(100 + i), MODULE_TYPE_PLANK, pos, 0);
+        }
+        if (s->module_count < MAX_MODULES_PER_SHIP) {
+            s->modules[s->module_count++] = module_create(200, MODULE_TYPE_DECK, (Vec2Q16){0, 0}, 0);
+        }
+    }
+
     /* Set up default weapon control groups now that all modules are registered */
     ship_init_default_weapon_groups(s);
 
@@ -4082,8 +6180,470 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
     ships[ship_count].ship_id = sim_id;
     ship_count++;
 
+    /* Sync sim ship module IDs to match SimpleShip IDs so all ID-based mirror
+     * operations (aim_direction, desired_aim_direction) work correctly.
+     * SimpleShip uses sequential IDs from mid_base (3000+);
+     * sim_create_ship uses ship->id * 1000 + n — they never match by default.
+     * We match by (type_id + local_pos) which is identical in both. */
+    {
+        SimpleShip* ss = &ships[ship_count - 1];
+        if (global_sim) {
+            for (uint32_t si2 = 0; si2 < global_sim->ship_count; si2++) {
+                if (global_sim->ships[si2].id != sim_id) continue;
+                struct Ship* sim2 = &global_sim->ships[si2];
+                for (uint8_t sm2 = 0; sm2 < sim2->module_count; sm2++) {
+                    float sx = Q16_TO_FLOAT(sim2->modules[sm2].local_pos.x);
+                    float sy = Q16_TO_FLOAT(sim2->modules[sm2].local_pos.y);
+                    ModuleTypeId stype = sim2->modules[sm2].type_id;
+                    for (int pm = 0; pm < ss->module_count; pm++) {
+                        if (ss->modules[pm].type_id != stype) continue;
+                        float px = Q16_TO_FLOAT(ss->modules[pm].local_pos.x);
+                        float py = Q16_TO_FLOAT(ss->modules[pm].local_pos.y);
+                        float d2 = (px - sx) * (px - sx) + (py - sy) * (py - sy);
+                        if (d2 < 0.01f) {
+                            sim2->modules[sm2].id = ss->modules[pm].id;
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+
     log_info("🚢 Admin spawned ship (ID: %u) at (%.0f, %.0f) company=%u", sim_id, x, y, company_id);
     return sim_id;
+}
+
+/* Ghost cannon arc — ±90 degrees (much wider than normal 30°) */
+#define GHOST_CANNON_ARC    (90.0f * (float)(M_PI / 180.0))
+/* Cannon sweep: side-to-side oscillation rate while chasing */
+#define GHOST_SWEEP_RATE    0.14f  /* rad/s — very slow haunting sweep (5× slower) */
+/* Sweep amplitude (radians). ~40° wide arc swing side-to-side */
+#define GHOST_SWING_AMP     0.785f  /* ±45° sweep amplitude */
+/* How much the ship BODY sways left/right while chasing (radians) */
+#define GHOST_HEADING_SWING 0.785f /* ±45° — slow haunting weave while pursuing */
+
+/**
+ * Aim a ghost-ship cannon at a world target.
+ *
+ * aim_direction is the OFFSET from the cannon's natural firing direction
+ * (defined by local_rot).  The turret can swing at most ±45° (GHOST_AIM_LIMIT)
+ * from that natural direction.  If the target falls outside that arc the turret
+ * parks at the limit and the fire gate (fire_diff check) prevents firing.
+ *
+ * Convention that matches the client renderer and fire-angle math:
+ *   natural world fire angle = ship->rotation + local_rot - π/2
+ *   actual world fire angle  = natural + aim_direction
+ */
+#define GHOST_AIM_LIMIT  ((float)(M_PI / 4.0f))   /* ±45° turret travel */
+static void ghost_aim_cannon(SimpleShip* ship, ShipModule* cannon,
+                             float target_x, float target_y) {
+    float dx = target_x - ship->x;
+    float dy = target_y - ship->y;
+    float world_angle = atan2f(dy, dx);
+
+    /* Angle to target relative to ship heading */
+    float relative_angle = world_angle - ship->rotation;
+    while (relative_angle >  (float)M_PI) relative_angle -= 2.0f * (float)M_PI;
+    while (relative_angle < -(float)M_PI) relative_angle += 2.0f * (float)M_PI;
+
+    /* How far the turret must rotate from its rest position (local_rot - π/2)
+     * to point at the target.  desired_offset == 0 means cannon aims along
+     * its natural direction. */
+    float cannon_base_angle = Q16_TO_FLOAT(cannon->local_rot);
+    float desired_offset = relative_angle - cannon_base_angle + (float)(M_PI / 2.0f);
+    while (desired_offset >  (float)M_PI) desired_offset -= 2.0f * (float)M_PI;
+    while (desired_offset < -(float)M_PI) desired_offset += 2.0f * (float)M_PI;
+
+    /* Clamp to ±45° — the turret physically cannot rotate further */
+    if (desired_offset >  GHOST_AIM_LIMIT) desired_offset =  GHOST_AIM_LIMIT;
+    if (desired_offset < -GHOST_AIM_LIMIT) desired_offset = -GHOST_AIM_LIMIT;
+
+    cannon->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(desired_offset);
+
+    /* Mirror desired AND current aim_direction onto the sim cannon.
+     * Match by position rather than ID because SimpleShip uses mid_base+n IDs
+     * while sim_create_ship uses ship_id*1000+n — they never match by default.
+     * Position is identical in both (same CLIENT_TO_SERVER values). */
+    if (global_sim) {
+        float cx = Q16_TO_FLOAT(cannon->local_pos.x);
+        float cy = Q16_TO_FLOAT(cannon->local_pos.y);
+        for (uint32_t s = 0; s < global_sim->ship_count; s++) {
+            if (global_sim->ships[s].id == ship->ship_id) {
+                struct Ship* sim_ship = &global_sim->ships[s];
+                for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                    if (sim_ship->modules[m].type_id != MODULE_TYPE_CANNON) continue;
+                    float sx = Q16_TO_FLOAT(sim_ship->modules[m].local_pos.x);
+                    float sy = Q16_TO_FLOAT(sim_ship->modules[m].local_pos.y);
+                    float d2 = (sx - cx) * (sx - cx) + (sy - cy) * (sy - cy);
+                    if (d2 < 0.01f) {
+                        sim_ship->modules[m].data.cannon.desired_aim_direction =
+                            Q16_FROM_FLOAT(desired_offset);
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
+/* ============================================================================
+ * PHANTOM BRIG SPAWN  (ship_type = SHIP_TYPE_GHOST = 99)
+ * Creates a "Phantom Brig" brigantine at the given world position.  The ship
+ * belongs to COMPANY_GHOST (99) and has its port/starboard cannon groups set to
+ * TARGETFIRE from the start so tick_ghost_ships can auto-aim them.
+ * Phantom Brigs deal hull-only damage — interior module breaches are filtered
+ * out in the hit-event processing loop.
+ * ========================================================================= */
+uint32_t websocket_server_create_ghost_ship(float x, float y) {
+    uint32_t ship_id = websocket_server_create_ship(x, y, COMPANY_GHOST);
+    if (ship_id == 0) return 0;
+
+    SimpleShip* ship = find_ship(ship_id);
+    if (!ship) return ship_id;
+
+    /* Tag as ghost */
+    ship->ship_type = SHIP_TYPE_GHOST;
+
+    /* Ghost ships have no physical planks — hull damage is tracked directly via
+     * hull_health in simulation.c (7 HP per cannonball hit, heals 1 HP/s).
+     * Strip all plank modules from both SimpleShip and sim ship so the plank
+     * drain logic never runs and the hit path goes through the ghost entry point. */
+    {
+        /* Strip planks from SimpleShip */
+        int write = 0;
+        for (int m = 0; m < ship->module_count; m++) {
+            if (ship->modules[m].type_id != MODULE_TYPE_PLANK)
+                ship->modules[write++] = ship->modules[m];
+        }
+        ship->module_count = write;
+
+        /* Strip planks from sim ship */
+        if (global_sim) {
+            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                if (global_sim->ships[si].id != ship_id) continue;
+                struct Ship* sim_ship = &global_sim->ships[si];
+                uint8_t sw = 0;
+                for (uint8_t sm = 0; sm < sim_ship->module_count; sm++) {
+                    if (sim_ship->modules[sm].type_id != MODULE_TYPE_PLANK)
+                        sim_ship->modules[sw++] = sim_ship->modules[sm];
+                }
+                sim_ship->module_count = sw;
+                /* initial_plank_count = 0 so the drain tick never fires */
+                sim_ship->initial_plank_count = 0;
+                /* Ghost hull HP stored as raw int32, not Q16. */
+                sim_ship->hull_health = 60000;
+                break;
+            }
+        }
+    }
+
+    /* Ghost ships have infinite spectral ammo */
+    ship->infinite_ammo = 1;
+
+    /* Ghost ships do NOT use weapon groups — tick_ghost_ships() fires cannons
+     * directly with a custom 90° arc + oscillating sweep AI.
+     * Disable all weapon groups so tick_ship_weapon_groups() ignores this ship. */
+    for (int co = 0; co < MAX_COMPANIES; co++) {
+        for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
+            ship->weapon_groups[co][g].mode = WEAPON_GROUP_MODE_HALTFIRE;
+            ship->weapon_groups[co][g].target_ship_id = 0;
+        }
+    }
+
+    /* Add 2 bow-facing cannons at the front of the hull.
+     * local_rot = PI/2 → barrel_angle = local_rot - PI/2 = 0 (fires forward).
+     * IDs 300 and 301 are reserved for ghost bow cannons (won't conflict with
+     * sequential IDs 0–11 or hardcoded plank IDs 100–109 / deck ID 200). */
+    if (ship->module_count + 2 <= MAX_MODULES_PER_SHIP) {
+        /* Bow port cannon (ID 300) */
+        ship->modules[ship->module_count].id          = 300;
+        ship->modules[ship->module_count].type_id     = MODULE_TYPE_CANNON;
+        ship->modules[ship->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(210.0f));
+        ship->modules[ship->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(22.0f));
+        ship->modules[ship->module_count].local_rot   = Q16_FROM_FLOAT((float)M_PI / 2.0f);
+        ship->modules[ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
+        ship->modules[ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
+        ship->modules[ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+        ship->modules[ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
+        ship->modules[ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
+        ship->module_count++;
+
+        /* Bow starboard cannon (ID 301) */
+        ship->modules[ship->module_count].id          = 301;
+        ship->modules[ship->module_count].type_id     = MODULE_TYPE_CANNON;
+        ship->modules[ship->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(210.0f));
+        ship->modules[ship->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-22.0f));
+        ship->modules[ship->module_count].local_rot   = Q16_FROM_FLOAT((float)M_PI / 2.0f);
+        ship->modules[ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
+        ship->modules[ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
+        ship->modules[ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+        ship->modules[ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
+        ship->modules[ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
+        ship->module_count++;
+    }
+
+    /* Mirror bow cannons (300, 301) into the sim ship so the game-state
+     * broadcast (which serialises ship->modules[] on the sim ship) sends them
+     * to the client.  Without this they would exist only in SimpleShip and
+     * never appear on screen. */
+    if (global_sim) {
+        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+            if (global_sim->ships[si].id != ship_id) continue;
+            struct Ship* sim_ship = &global_sim->ships[si];
+            if (sim_ship->module_count + 2 <= MAX_MODULES_PER_SHIP) {
+                /* Bow port cannon (ID 300) */
+                sim_ship->modules[sim_ship->module_count].id          = 300;
+                sim_ship->modules[sim_ship->module_count].type_id     = MODULE_TYPE_CANNON;
+                sim_ship->modules[sim_ship->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(210.0f));
+                sim_ship->modules[sim_ship->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(22.0f));
+                sim_ship->modules[sim_ship->module_count].local_rot   = Q16_FROM_FLOAT((float)M_PI / 2.0f);
+                sim_ship->modules[sim_ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
+                sim_ship->modules[sim_ship->module_count].health      = 100;
+                sim_ship->modules[sim_ship->module_count].max_health  = 100;
+                sim_ship->modules[sim_ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
+                sim_ship->modules[sim_ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+                sim_ship->modules[sim_ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
+                sim_ship->modules[sim_ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
+                sim_ship->module_count++;
+
+                /* Bow starboard cannon (ID 301) */
+                sim_ship->modules[sim_ship->module_count].id          = 301;
+                sim_ship->modules[sim_ship->module_count].type_id     = MODULE_TYPE_CANNON;
+                sim_ship->modules[sim_ship->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(210.0f));
+                sim_ship->modules[sim_ship->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-22.0f));
+                sim_ship->modules[sim_ship->module_count].local_rot   = Q16_FROM_FLOAT((float)M_PI / 2.0f);
+                sim_ship->modules[sim_ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
+                sim_ship->modules[sim_ship->module_count].health      = 100;
+                sim_ship->modules[sim_ship->module_count].max_health  = 100;
+                sim_ship->modules[sim_ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
+                sim_ship->modules[sim_ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+                sim_ship->modules[sim_ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
+                sim_ship->modules[sim_ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
+                sim_ship->module_count++;
+            }
+            break;
+        }
+    }
+
+    /* Spawn a helmsman NPC agent so the ship steers itself.
+     * The helmsman uses the MODULE_TYPE_HELM to turn. */
+    ShipModule* helm = NULL;
+    for (int m = 0; m < ship->module_count; m++) {
+        if (ship->modules[m].type_id == MODULE_TYPE_HELM ||
+            ship->modules[m].type_id == MODULE_TYPE_STEERING_WHEEL) {
+            helm = &ship->modules[m];
+            break;
+        }
+    }
+    if (helm) {
+        uint32_t npc_id = websocket_server_create_npc(ship_id, helm->id, NPC_ROLE_HELMSMAN);
+        (void)npc_id;  /* we don't need to track it separately */
+    }
+
+    log_info("👻 Phantom Brig spawned (ID: %u) at (%.0f, %.0f)", ship_id, x, y);
+    return ship_id;
+}
+
+/* ============================================================================
+ * GHOST SHIP AI  —  tick_ghost_ships(dt)
+ *
+ *  Called every server tick (after tick_sinking_ships).
+ *  For each active SHIP_TYPE_GHOST ship:
+ *    1. Scan enemy ships within GHOST_ATTACK_RANGE client-px.
+ *    2. If target found: steer toward it + set all TARGETFIRE groups on it.
+ *    3. If no target: wander (change heading every GHOST_WANDER_INTERVAL_MS ms).
+ *    4. Apply thrust forward (ghost ships accelerate under their own spectral
+ *       power — we write directly to velocity like the helmsman AI does).
+ *
+ *  Per-ship wander timer is stored in `ship->active_aim_angle` re-purposed as
+ *  a float wander_timer (slightly hacky but avoids a struct change).  When in
+ *  attack mode we do NOT touch it, so on loss-of-target the wander resumes.
+ * ========================================================================= */
+
+/* Maximum distance (client pixels) to scan for an enemy.
+ * ~800 px ≈ 4-5 ship lengths — about half a screen width at normal zoom. */
+#define GHOST_ATTACK_RANGE      2400.0f
+/* Wander: new random heading every N seconds */
+#define GHOST_WANDER_INTERVAL_S 5.0f
+/* Top speed (client-px / s) while chasing — a bit slower than a player ship */
+#define GHOST_CHASE_SPEED       20.0f  /* slow, eerie drifting pursuit */
+/* Idle drift speed (client-px / s) */
+#define GHOST_WANDER_SPEED      10.0f  /* very slow spectral drift */
+/* Turn rate (rad / s) — slightly sluggish on purpose */
+#define GHOST_TURN_RATE         2.0f   /* rad/s — very agile, feels supernatural */
+/* Slow spin rate added every tick while wandering — makes the brig spiral/spiral */
+#define GHOST_SPIN_RATE         1.0f   /* rad/s — roughly 1 full rotation per 6 s */
+/* Per-ghost wander timer array indexed by ship slot.  Initialised to 0.
+ * Value = seconds remaining until next heading change.  When it hits 0 we
+ * pick a new heading and reset. */
+static float ghost_wander_timer[MAX_SIMPLE_SHIPS] = {0};
+static float ghost_desired_heading[MAX_SIMPLE_SHIPS] = {0};
+/* Oscillating sweeping aim phase (radians, accumulates over time) */
+static float ghost_aim_phase[MAX_SIMPLE_SHIPS] = {0};
+
+static void tick_ghost_ships(float dt) {
+    for (int s = 0; s < ship_count; s++) {
+        SimpleShip* ship = &ships[s];
+        if (!ship->active) continue;
+        if (ship->ship_type != SHIP_TYPE_GHOST) continue;
+        if (ship->is_sinking) continue;
+
+        /* ── 1. Find nearest enemy (COMPANY_PIRATES or any non-NAVY ship) ── */
+        SimpleShip* target = NULL;
+        float best_dist2   = GHOST_ATTACK_RANGE * GHOST_ATTACK_RANGE;
+
+        for (int t = 0; t < ship_count; t++) {
+            if (t == s) continue;
+            SimpleShip* cand = &ships[t];
+            if (!cand->active || cand->is_sinking) continue;
+            if (is_allied(ship->company_id, cand->company_id)) continue; /* skip friendly */
+
+            float dx = cand->x - ship->x;
+            float dy = cand->y - ship->y;
+            float d2 = dx * dx + dy * dy;
+            if (d2 < best_dist2) {
+                best_dist2 = d2;
+                target     = cand;
+            }
+        }
+
+        /* ── 2. Steer and configure weapons ─────────────────────────────── */
+        float desired_heading;
+        float move_speed;
+
+        if (target) {
+            /* Attack mode — head toward the target ship */
+            float dx      = target->x - ship->x;
+            float dy      = target->y - ship->y;
+            /* Body sway: oscillate the ship heading so it weaves while chasing */
+            ghost_aim_phase[s] += GHOST_SWEEP_RATE * dt;
+            float phase_sin = sinf(ghost_aim_phase[s]);
+            desired_heading = atan2f(dy, dx) + phase_sin * GHOST_HEADING_SWING;
+            move_speed      = GHOST_CHASE_SPEED;
+
+            /* Find the sim ship once — reload state lives in sim modules, not
+             * SimpleShip modules (SimpleShip copy is reset by fire_cannon but
+             * never re-incremented; only the sim reload loop increments it). */
+            struct Ship* ghost_sim = find_sim_ship(ship->ship_id);
+
+            for (int m = 0; m < ship->module_count; m++) {
+                ShipModule* cannon = &ship->modules[m];
+                if (cannon->type_id != MODULE_TYPE_CANNON) continue;
+
+                /* Aim each cannon independently at the target.  desired_aim_direction
+                 * is the offset from the cannon's natural direction (local_rot - π/2).
+                 * The function clamps to ±45°; if the target is outside that arc the
+                 * turret parks at the limit and the fire gate below blocks firing. */
+                ghost_aim_cannon(ship, cannon, target->x, target->y);
+
+                /* Find matching sim module by position (ID schemes differ between
+                 * SimpleShip and sim ship — position is always identical). */
+                ShipModule* sim_cannon = NULL;
+                if (ghost_sim) {
+                    float cx = Q16_TO_FLOAT(cannon->local_pos.x);
+                    float cy = Q16_TO_FLOAT(cannon->local_pos.y);
+                    for (uint8_t sm = 0; sm < ghost_sim->module_count; sm++) {
+                        if (ghost_sim->modules[sm].type_id != MODULE_TYPE_CANNON) continue;
+                        float sx = Q16_TO_FLOAT(ghost_sim->modules[sm].local_pos.x);
+                        float sy = Q16_TO_FLOAT(ghost_sim->modules[sm].local_pos.y);
+                        float d2 = (sx - cx) * (sx - cx) + (sy - cy) * (sy - cy);
+                        if (d2 < 0.01f) { sim_cannon = &ghost_sim->modules[sm]; break; }
+                    }
+                }
+                uint32_t tsf  = sim_cannon ? sim_cannon->data.cannon.time_since_fire
+                                           : cannon->data.cannon.time_since_fire;
+                uint32_t trel = sim_cannon ? sim_cannon->data.cannon.reload_time
+                                           : cannon->data.cannon.reload_time;
+
+                /* Fire when reloaded AND the barrel is actually pointing within
+                 * ±30° of the target (gives the turret time to track without
+                 * bursting instantly; also naturally rejects out-of-arc targets
+                 * because the turret parks at ±45° and fire_diff stays large). */
+                if (tsf >= trel) {
+                    float actual_aim = sim_cannon
+                        ? Q16_TO_FLOAT(sim_cannon->data.cannon.aim_direction)
+                        : Q16_TO_FLOAT(cannon->data.cannon.aim_direction);
+                    float wfa = ship->rotation
+                        + Q16_TO_FLOAT(cannon->local_rot) - (float)(M_PI / 2.0f)
+                        + actual_aim;
+                    float fire_diff = wfa - atan2f(dy, dx);
+                    while (fire_diff >  (float)M_PI) fire_diff -= 2.0f * (float)M_PI;
+                    while (fire_diff < -(float)M_PI) fire_diff += 2.0f * (float)M_PI;
+                    if (fabsf(fire_diff) < (float)(M_PI / 6.0f)) { /* ±30° fire gate */
+                        fire_cannon(ship, cannon, NULL, false, PROJ_TYPE_CANNONBALL);
+                        if (sim_cannon) sim_cannon->data.cannon.time_since_fire = 0;
+                    }
+                }
+            }
+        } else {
+            /* Wander mode — pick a new random heading every 5-8 s and drift
+             * slowly toward it.  Uses the wander timer + a stable per-ship seed
+             * so each ghost wanders independently without a shared rand() state. */
+            ghost_wander_timer[s] -= dt;
+            if (ghost_wander_timer[s] <= 0.0f) {
+                /* Cheap deterministic pseudo-random: mix ship index with a
+                 * counter scaled by current heading to get varied offsets. */
+                static uint32_t wander_seed = 0x9e3779b9u;
+                wander_seed ^= (uint32_t)(s * 2654435761u) ^ (uint32_t)(ghost_aim_phase[s] * 1000.0f);
+                wander_seed = wander_seed * 1664525u + 1013904223u; /* LCG */
+                /* Turn ±PI from current heading for an organic wandering arc */
+                float turn_offset = ((float)(wander_seed & 0xFFFFu) / 65535.0f) * 2.0f * (float)M_PI
+                                    - (float)M_PI;
+                ghost_desired_heading[s] = ghost_desired_heading[s] + turn_offset * 0.65f;
+                while (ghost_desired_heading[s] >  (float)M_PI) ghost_desired_heading[s] -= 2.0f * (float)M_PI;
+                while (ghost_desired_heading[s] < -(float)M_PI) ghost_desired_heading[s] += 2.0f * (float)M_PI;
+                /* Next heading change in 5–8 s */
+                wander_seed = wander_seed * 1664525u + 1013904223u;
+                ghost_wander_timer[s] = 5.0f + ((float)(wander_seed & 0xFFFFu) / 65535.0f) * 3.0f;
+            }
+            desired_heading = ghost_desired_heading[s];
+            move_speed      = GHOST_WANDER_SPEED;
+        }
+
+        /* Store in ship slot for rendering-side debug convenience */
+        ghost_desired_heading[s] = desired_heading;
+
+        /* ── 3. Apply rotation (same pattern as NPC_ROLE_HELMSMAN) ────────── */
+        float diff = desired_heading - ship->rotation;
+        while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+        while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+
+        float turn = diff;
+        if (turn >  GHOST_TURN_RATE * dt) turn =  GHOST_TURN_RATE * dt;
+        if (turn < -GHOST_TURN_RATE * dt) turn = -GHOST_TURN_RATE * dt;
+        ship->rotation += turn;
+
+        /* Normalise rotation to -PI..PI */
+        while (ship->rotation >  (float)M_PI) ship->rotation -= 2.0f * (float)M_PI;
+        while (ship->rotation < -(float)M_PI) ship->rotation += 2.0f * (float)M_PI;
+
+        /* Mirror rotation into the physics simulation */
+        {
+            struct Ship* _gs = find_sim_ship(ship->ship_id);
+            if (_gs) _gs->rotation = Q16_FROM_FLOAT(ship->rotation);
+        }
+
+        /* ── 4. Apply forward thrust (ghost ships ignore normal sail physics) ── */
+        float thrust_x = cosf(ship->rotation) * move_speed;
+        float thrust_y = sinf(ship->rotation) * move_speed;
+
+        /* Smooth approach to desired velocity (soft cap) */
+        const float ACCEL_RATE = 0.08f; /* blend factor per tick */
+        ship->velocity_x += (thrust_x - ship->velocity_x) * ACCEL_RATE;
+        ship->velocity_y += (thrust_y - ship->velocity_y) * ACCEL_RATE;
+
+        /* Mirror velocity into sim */
+        {
+            struct Ship* _gs = find_sim_ship(ship->ship_id);
+            if (_gs) {
+                _gs->velocity.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ship->velocity_x));
+                _gs->velocity.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ship->velocity_y));
+            }
+        }
+    }
 }
 
 int websocket_server_init(uint16_t port) {
@@ -4232,9 +6792,249 @@ void websocket_server_cleanup(void) {
     log_info("✅ WebSocket server cleanup complete");
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * Cannonball vs. static-world collision: placed structures and island trees.
+ * Called once per tick before processing network I/O. Projectile positions
+ * are in Q16 server units (1/10 of client pixels); convert with SERVER_TO_CLIENT.
+ * Damage per cannonball hit on a structure: 25 HP (4 shots to destroy).
+ * Trees are indestructible — they simply stop the cannonball.
+ * ────────────────────────────────────────────────────────────────────────────*/
+#define PROJ_HIT_STRUCT_DAMAGE      25u     /* HP deducted per cannonball hit      */
+#define TREE_COLLISION_R_PX         22.0f   /* tree stop radius, client pixels     */
+#define STRUCT_FLOOR_HALF_EXT       25.0f   /* floor tile half-extent (50px tile)  */
+#define STRUCT_WB_HALF_W            22.0f   /* workbench half-width  (44px wide)   */
+#define STRUCT_WB_HALF_H            15.5f   /* workbench half-height (31px tall)   */
+#define STRUCT_WB_BROAD_R           26.5f   /* broad-phase radius (AABB diagonal)  */
+
+static void check_projectile_static_collisions(struct Sim* sim) {
+    if (!sim) return;
+    int i = 0;
+    while (i < (int)sim->projectile_count) {
+        struct Projectile* proj = &sim->projectiles[i];
+        /* Convert projectile world position from server units → client pixels */
+        float px = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
+        float py = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
+        bool removed = false;
+
+        /* ── Island broad-phase: skip projectiles that are out at sea ────── */
+        /* Only run structure/tree checks when the cannonball is within the
+         * outer boundary of at least one island (beach_radius + max_bump). */
+        bool near_island = false;
+        for (int ii = 0; ii < ISLAND_COUNT && !near_island; ii++) {
+            const IslandDef* isl = &ISLAND_PRESETS[ii];
+            float broad_r = (isl->vertex_count > 0) ? isl->poly_bound_r
+                                                       : (isl->beach_radius_px + isl->beach_max_bump);
+            float idx = px - isl->x;
+            float idy = py - isl->y;
+            if (idx * idx + idy * idy <= broad_r * broad_r) near_island = true;
+        }
+        if (!near_island) { i++; continue; }
+
+        /* ── Test vs. placed structures ──────────────────────────────────── */
+        /* Pass 0: walls — thin hard barriers, hit before workbenches/floors. */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_WALL) continue;
+            /* Determine wall orientation by checking for a supporting floor */
+            bool is_horizontal = false;
+            for (uint32_t fi = 0; fi < placed_structure_count; fi++) {
+                PlacedStructure* f = &placed_structures[fi];
+                if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                if (fabsf(f->x - s->x) < 3.0f && fabsf(fabsf(f->y - s->y) - 25.0f) < 3.0f) {
+                    is_horizontal = true; break;
+                }
+            }
+            float half_w = is_horizontal ? 25.0f : 5.0f;
+            float half_h = is_horizontal ? 5.0f  : 25.0f;
+            float dx = px - s->x;
+            float dy = py - s->y;
+            if (!(dx >= -half_w && dx <= half_w && dy >= -half_h && dy <= half_h)) continue;
+            /* Hit wall */
+            uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
+            s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
+            char msg[192];
+            if (s->hp == 0) {
+                s->active = false;
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_demolished\",\"structure_id\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, s->x, s->y);
+            } else {
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_hp_changed\","
+                         "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
+            }
+            websocket_server_broadcast(msg);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+
+        /* Pass 1: workbenches — checked first so they can be independently
+         * hit and damaged even when a floor tile below overlaps the same area. */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_WORKBENCH) continue;
+            float dx = px - s->x;
+            float dy = py - s->y;
+            /* Broad-phase radial cull, then narrow AABB (44×31px footprint) */
+            if (dx * dx + dy * dy > STRUCT_WB_BROAD_R * STRUCT_WB_BROAD_R) continue;
+            if (!(dx >= -STRUCT_WB_HALF_W && dx <= STRUCT_WB_HALF_W &&
+                  dy >= -STRUCT_WB_HALF_H && dy <= STRUCT_WB_HALF_H)) continue;
+            /* Hit workbench */
+            uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
+            s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
+            char msg[192];
+            if (s->hp == 0) {
+                s->active = false;
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_demolished\",\"structure_id\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, s->x, s->y);
+            } else {
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_hp_changed\","
+                         "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
+            }
+            websocket_server_broadcast(msg);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+
+        /* Pass 2: floors (only if no workbench was hit in Pass 1) */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_WOODEN_FLOOR) continue;
+            float dx = px - s->x;
+            float dy = py - s->y;
+            /* Wooden floor: AABB check (square 50×50 tile, ±25px) */
+            if (!(dx >= -STRUCT_FLOOR_HALF_EXT && dx <= STRUCT_FLOOR_HALF_EXT &&
+                  dy >= -STRUCT_FLOOR_HALF_EXT && dy <= STRUCT_FLOOR_HALF_EXT)) continue;
+            /* Hit floor */
+            uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
+            s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
+            char msg[192];
+            if (s->hp == 0) {
+                float kx = s->x, ky = s->y;
+                s->active = false;
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_demolished\",\"structure_id\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, kx, ky);
+                websocket_server_broadcast(msg);
+                /* Cascade: floor destroyed — demolish workbenches that were resting
+                 * on this floor and have no other active floor still supporting them,
+                 * and demolish walls at its edges with no other supporting floor.
+                 * (The killed floor is already inactive so the inner scan finds only
+                 * surviving floors.) */
+                for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
+                    PlacedStructure* wb = &placed_structures[ci];
+                    if (!wb->active) continue;
+                    if (wb->type == STRUCT_WORKBENCH) {
+                        if (fabsf(wb->x - kx) > 25.0f || fabsf(wb->y - ky) > 25.0f) continue;
+                        bool has_support = false;
+                        for (uint32_t fi = 0; fi < placed_structure_count && !has_support; fi++) {
+                            PlacedStructure* f = &placed_structures[fi];
+                            if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                            if (fabsf(wb->x - f->x) <= 25.0f && fabsf(wb->y - f->y) <= 25.0f)
+                                has_support = true;
+                        }
+                        if (!has_support) {
+                            wb->active = false;
+                            char cwmsg[192];
+                            snprintf(cwmsg, sizeof(cwmsg),
+                                     "{\"type\":\"structure_demolished\","
+                                     "\"structure_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                     wb->id, wb->x, wb->y);
+                            websocket_server_broadcast(cwmsg);
+                        }
+                    } else if (wb->type == STRUCT_WALL) {
+                        bool at_edge =
+                            (fabsf(wb->x - kx) < 3.0f && fabsf(fabsf(wb->y - ky) - 25.0f) < 3.0f) ||
+                            (fabsf(wb->y - ky) < 3.0f && fabsf(fabsf(wb->x - kx) - 25.0f) < 3.0f);
+                        if (!at_edge) continue;
+                        bool has_support = false;
+                        for (uint32_t fi = 0; fi < placed_structure_count && !has_support; fi++) {
+                            PlacedStructure* f = &placed_structures[fi];
+                            if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                            bool supports =
+                                (fabsf(wb->x - f->x) < 3.0f && fabsf(fabsf(wb->y - f->y) - 25.0f) < 3.0f) ||
+                                (fabsf(wb->y - f->y) < 3.0f && fabsf(fabsf(wb->x - f->x) - 25.0f) < 3.0f);
+                            if (supports) has_support = true;
+                        }
+                        if (!has_support) {
+                            wb->active = false;
+                            char cwmsg[192];
+                            snprintf(cwmsg, sizeof(cwmsg),
+                                     "{\"type\":\"structure_demolished\","
+                                     "\"structure_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                     wb->id, wb->x, wb->y);
+                            websocket_server_broadcast(cwmsg);
+                        }
+                    }
+                }
+            } else {
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_hp_changed\","
+                         "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
+                websocket_server_broadcast(msg);
+            }
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+
+        /* ── Test vs. island trees ───────────────────────────────────────── */
+        if (!removed) {
+            for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {
+                const IslandDef* isl = &ISLAND_PRESETS[ii];
+                for (int ri = 0; ri < isl->resource_count && !removed; ri++) {
+                    const IslandResource* res = &isl->resources[ri];
+                    if (strcmp(res->type, ISLAND_RES_WOOD) != 0) continue;
+                    float tx = isl->x + res->ox;
+                    float ty = isl->y + res->oy;
+                    float dx = px - tx;
+                    float dy = py - ty;
+                    if (dx * dx + dy * dy <= TREE_COLLISION_R_PX * TREE_COLLISION_R_PX) {
+                        /* Trees are indestructible — broadcast hit so client shows explosion */
+                        char tmsg[96];
+                        snprintf(tmsg, sizeof(tmsg),
+                                 "{\"type\":\"tree_cannonball_hit\",\"x\":%.1f,\"y\":%.1f}",
+                                 tx, ty);
+                        websocket_server_broadcast(tmsg);
+                        memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                                ((size_t)sim->projectile_count - (size_t)i - 1u)
+                                * sizeof(struct Projectile));
+                        sim->projectile_count--;
+                        removed = true;
+                    }
+                }
+            }
+        }
+
+        if (!removed) i++;
+    }
+}
+
 int websocket_server_update(struct Sim* sim) {
     if (!ws_server.running) return 0;
-    
+
+    /* Check cannonball hits against structures and trees from last sim tick */
+    check_projectile_static_collisions(sim);
+
     // Accept new connections
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
@@ -4338,13 +7138,24 @@ int websocket_server_update(struct Sim* sim) {
                     
                     char response[1024];
                     bool handled = false;
-                    
+
                     // Check if message is JSON or text command
                     if (payload[0] == '{') {
-                        // JSON message - parse type
-                        // JSON message - parsing type
-                        
-                        if (strstr(payload, "\"type\":\"handshake\"")) {
+                        // JSON message — extract "type" value once so branch conditions
+                        // can use strcmp instead of strstr on the full payload.
+                        char msg_type[64] = "";
+                        {
+                            const char* _tp = strstr(payload, "\"type\":\"");
+                            if (_tp) {
+                                _tp += 8; // skip past "type":"
+                                int _ti = 0;
+                                while (_ti < 63 && _tp[_ti] && _tp[_ti] != '"')
+                                    { msg_type[_ti] = _tp[_ti]; _ti++; }
+                                msg_type[_ti] = '\0';
+                            }
+                        }
+
+                        if (strcmp(msg_type, "handshake") == 0) {
                             // Processing HANDSHAKE message
                             // Extract player name from handshake if provided
                             char player_name[32] = "Player";
@@ -4454,6 +7265,14 @@ int websocket_server_update(struct Sim* sim) {
                                                         m > 0 ? "," : "", module->id, module->type_id,
                                                         module_x, module_y, module_rot, aim_direction,
                                                         (unsigned)module->state_bits);
+                                                } else if (module->type_id == MODULE_TYPE_SWIVEL) {
+                                                    // Swivel: include current aim direction and state
+                                                    float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
+                                                    ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
+                                                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
+                                                        m > 0 ? "," : "", module->id, module->type_id,
+                                                        module_x, module_y, module_rot, aim_dir,
+                                                        (unsigned)module->state_bits);
                                                 } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                                                     // Helm: include wheel rotation, occupied status, state
                                                     float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
@@ -4512,7 +7331,91 @@ int websocket_server_update(struct Sim* sim) {
                                         send(client->fd, game_state_frame, game_state_frame_len, 0);
                                         // Sent initial game state
                                     }
-                                    
+
+                                    // Send ISLANDS so client can render island geometry
+                                    {
+                                        static char hs_islands_buf[8192];
+                                        int hsi_pos = 0;
+                                        hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                            "{\"type\":\"ISLANDS\",\"islands\":[");
+                                        for (int hii = 0; hii < ISLAND_COUNT; hii++) {
+                                            const IslandDef *isl = &ISLAND_PRESETS[hii];
+                                            hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                                "%s{\"id\":%d,\"x\":%.1f,\"y\":%.1f,\"preset\":\"%s\"",
+                                                                hii ? "," : "",
+                                                                isl->id, isl->x, isl->y, isl->preset);
+                                            if (isl->vertex_count > 0) {
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"vertices\":[");
+                                                for (int vi = 0; vi < isl->vertex_count; vi++) {
+                                                    hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                                        "%s{\"x\":%.1f,\"y\":%.1f}",
+                                                                        vi ? "," : "",
+                                                                        isl->x + isl->vx[vi], isl->y + isl->vy[vi]);
+                                                }
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
+                                            }
+                                            hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"resources\":[");
+                                            for (int hri = 0; hri < isl->resource_count; hri++) {
+                                                const IslandResource *r = &isl->resources[hri];
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                                    "%s{\"ox\":%.1f,\"oy\":%.1f,\"type\":\"%s\"}",
+                                                                    hri ? "," : "",
+                                                                    r->ox, r->oy, r->type);
+                                            }
+                                            hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]}");
+                                        }
+                                        hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]}");
+                                        char hs_isl_frame[8704];
+                                        size_t hs_isl_len = websocket_create_frame(
+                                            WS_OPCODE_TEXT, hs_islands_buf, (size_t)hsi_pos,
+                                            hs_isl_frame, sizeof(hs_isl_frame));
+                                        if (hs_isl_len > 0 && hs_isl_len < sizeof(hs_isl_frame))
+                                            send(client->fd, hs_isl_frame, hs_isl_len, 0);
+                                        log_info("🏝️  Sent ISLANDS to JSON-handshake player %u", client->player_id);
+                                    }
+
+                                    // Send current placed structures
+                                    {
+                                        static char hs_structs_buf[8192];
+                                        int hs_sp = 0;
+                                        hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
+                                                          "{\"type\":\"STRUCTURES\",\"structures\":[");
+                                        bool hs_sfirst = true;
+                                        for (uint32_t si = 0; si < placed_structure_count; si++) {
+                                            if (!placed_structures[si].active) continue;
+                                        const char* hs_stype =
+                                            placed_structures[si].type == STRUCT_WOODEN_FLOOR ? "wooden_floor" :
+                                            placed_structures[si].type == STRUCT_WORKBENCH    ? "workbench" :
+                                            placed_structures[si].type == STRUCT_WALL         ? "wall" :
+                                            placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
+                                            placed_structures[si].type == STRUCT_DOOR         ? "door" : "unknown";
+                                        bool hs_is_door = (placed_structures[si].type == STRUCT_DOOR);
+                                        hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
+                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
+                                                          "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"%s}",
+                                                          hs_sfirst ? "" : ",",
+                                                          placed_structures[si].id, hs_stype,
+                                                          placed_structures[si].island_id,
+                                                          placed_structures[si].x, placed_structures[si].y,
+                                                          (unsigned)placed_structures[si].company_id,
+                                                          (unsigned)placed_structures[si].hp,
+                                                          (unsigned)placed_structures[si].max_hp,
+                                                          placed_structures[si].placer_name,
+                                                          hs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "");
+                                            hs_sfirst = false;
+                                        }
+                                        hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp, "]}");
+                                        char hs_sf[8448];
+                                        size_t hs_sflen = websocket_create_frame(
+                                            WS_OPCODE_TEXT, hs_structs_buf, (size_t)hs_sp,
+                                            hs_sf, sizeof(hs_sf));
+                                        if (hs_sflen > 0 && hs_sflen < sizeof(hs_sf))
+                                            send(client->fd, hs_sf, hs_sflen, 0);
+                                        log_info("📦 Sent STRUCTURES (%u) to JSON-handshake player %u",
+                                                 placed_structure_count, client->player_id);
+                                    }
+
                                     // Skip normal response sending since we already sent
                                     ws_server.packets_sent += 2;
                                     ws_server.packets_received++;
@@ -4520,7 +7423,7 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"input_frame\"")) {
+                        } else if (strcmp(msg_type, "input_frame") == 0) {
                             // Input frame message - parse movement data
                             ws_server.input_messages_received++;
                             ws_server.last_input_time = get_time_ms();
@@ -4589,7 +7492,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"movement_state\"")) {
+                        } else if (strcmp(msg_type, "movement_state") == 0) {
                             // HYBRID: Movement state change message
                             ws_server.input_messages_received++;
                             ws_server.last_input_time = get_time_ms();
@@ -4641,7 +7544,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"rotation_update\"")) {
+                        } else if (strcmp(msg_type, "rotation_update") == 0) {
                             // HYBRID: Rotation update message
                             
                             if (client->player_id == 0) {
@@ -4679,9 +7582,9 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"module_interact\"")) {
+                        } else if (strcmp(msg_type, "module_interact") == 0) {
                             // MODULE_INTERACT message
-                            // log_info("🎮 Processing MODULE_INTERACT message");
+                            log_info("🎮 Processing MODULE_INTERACT from player %u", client->player_id);
                             
                             if (client->player_id == 0) {
                                 log_warn("Module interact from client %s:%u with no player ID", client->ip_address, client->port);
@@ -4698,7 +7601,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"module_unmount\"")) {
+                        } else if (strcmp(msg_type, "module_unmount") == 0) {
                             // MODULE_UNMOUNT message
                             // log_info("🔓 Processing MODULE_UNMOUNT message");
                             
@@ -4717,7 +7620,76 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"action_event\"")) {
+                        } else if (strcmp(msg_type, "harvest_resource") == 0) {
+                            // HARVEST RESOURCE: player presses E with axe near a tree
+                            if (client->player_id == 0) {
+                                log_warn("harvest_resource from client %s:%u with no player ID", client->ip_address, client->port);
+                                strcpy(response, "{\"type\":\"harvest_failure\",\"reason\":\"no_player\"}");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    handle_harvest_resource(player, client);
+                                } else {
+                                    log_warn("harvest_resource for non-existent player %u", client->player_id);
+                                    strcpy(response, "{\"type\":\"harvest_failure\",\"reason\":\"player_not_found\"}");
+                                }
+                                handled = true;
+                            }
+
+                        } else if (strcmp(msg_type, "harvest_fiber") == 0) {
+                            // HARVEST FIBER: player presses E near a fiber plant
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_harvest_fiber(player, client);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "harvest_rock") == 0) {
+                            // HARVEST ROCK: player presses E with pickaxe near a rock
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_harvest_rock(player, client);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "place_structure") == 0) {
+                            // ISLAND BUILDING: place a floor tile or workbench
+                            if (client->player_id == 0) {
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_place_structure(player, client, payload);
+                                handled = true;
+                            }
+
+                        } else if (strcmp(msg_type, "structure_interact") == 0) {
+                            // ISLAND BUILDING: E-key on placed structure (open workbench)
+                            if (client->player_id == 0) {
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_structure_interact(player, client, payload);
+                                handled = true;
+                            }
+
+                        } else if (strcmp(msg_type, "demolish_structure") == 0) {
+                            // Hold E: demolish a placed structure
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_demolish_structure(player, client, payload);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "craft_item") == 0) {
+                            // Craft a recipe at a workbench
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_craft_item(player, client, payload);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "action_event") == 0) {
                             // HYBRID: Action event message
                             // log_info("⚡ Processing ACTION_EVENT message");
                             
@@ -4743,6 +7715,7 @@ int websocket_server_update(struct Sim* sim) {
                                     
                                     // log_info("⚡ Player %u action: %s", player->player_id, action);
                                     
+                                    response[0] = '\0'; /* prevent action_processed from overwriting per-action responses */
                                     // Process action immediately (no state persistence)
                                     if (strcmp(action, "fire_cannon") == 0) {
                                         // TODO: Implement cannon firing
@@ -4814,7 +7787,7 @@ int websocket_server_update(struct Sim* sim) {
                                         if (player->is_mounted) {
                                             log_warn("⚔️ Player %u attack rejected (mounted)", player->player_id);
                                         } else {
-                                            // Parse optional target position from "target":{x,y}
+                                            // Parse target position from "target":{x,y}
                                             float target_x = player->x;
                                             float target_y = player->y;
                                             char* target_start = strstr(payload, "\"target\":{");
@@ -4824,15 +7797,138 @@ int websocket_server_update(struct Sim* sim) {
                                                 if (xp) target_x = strtof(xp + 4, NULL);
                                                 if (yp) target_y = strtof(yp + 4, NULL);
                                             }
-                                            log_info("⚔️ Player %u attacked toward (%.1f, %.1f)",
-                                                     player->player_id, target_x, target_y);
-                                            // Broadcast attack event to all players nearby
-                                            char attack_msg[256];
-                                            snprintf(attack_msg, sizeof(attack_msg),
-                                                "{\"type\":\"player_attack\",\"player_id\":%u,\"target_x\":%.2f,\"target_y\":%.2f}",
-                                                player->player_id, target_x, target_y);
-                                            websocket_server_broadcast(attack_msg);
+
+                                            // ── Sword attack ──────────────────────────────
+                                            uint8_t aslot = player->inventory.active_slot;
+                                            bool holding_sword = (aslot < INVENTORY_SLOTS &&
+                                                player->inventory.slots[aslot].item == ITEM_SWORD &&
+                                                player->inventory.slots[aslot].quantity > 0);
+
+                                            if (holding_sword) {
+                                                const uint32_t SWORD_COOLDOWN_MS = 1000u;
+                                                uint32_t now_ms = get_time_ms();
+                                                if (now_ms - player->sword_last_attack_ms < SWORD_COOLDOWN_MS) {
+                                                    log_warn("Player %u sword attack rejected: on cooldown", player->player_id);
+                                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"sword_cooldown\"}");
+                                                    goto sword_attack_done;
+                                                }
+                                                player->sword_last_attack_ms = now_ms;
+
+                                                const float SWORD_RANGE  = 45.0f;
+                                                const float SWORD_DAMAGE = 30.0f;
+                                                const float SWORD_RANGE2 = SWORD_RANGE * SWORD_RANGE;
+
+                                                // Direction vector toward target
+                                                float atk_dx = target_x - player->x;
+                                                float atk_dy = target_y - player->y;
+                                                float atk_len = sqrtf(atk_dx*atk_dx + atk_dy*atk_dy);
+                                                if (atk_len < 0.1f) { atk_dx = 1.0f; atk_dy = 0.0f; }
+                                                else { atk_dx /= atk_len; atk_dy /= atk_len; }
+                                                float atk_angle = atan2f(atk_dy, atk_dx);
+
+                                                // ── Hit NPCs ──────────────────────────────
+                                                for (int ni = 0; ni < world_npc_count; ni++) {
+                                                    WorldNpc* tnpc = &world_npcs[ni];
+                                                    if (!tnpc->active) continue;
+                                    // No friendly fire: skip NPCs of the same company
+                                    if (player->company_id != 0 &&
+                                        tnpc->company_id == player->company_id) continue;
+                                                    float nx = tnpc->x - player->x;
+                                                    float ny = tnpc->y - player->y;
+                                                    if (nx*nx + ny*ny > SWORD_RANGE2) continue;
+
+                                                    // 120-degree arc (±60°)
+                                                    float npc_angle = atan2f(ny, nx);
+                                                    float diff = npc_angle - atk_angle;
+                                                    while (diff >  (float)M_PI) diff -= 2.0f*(float)M_PI;
+                                                    while (diff < -(float)M_PI) diff += 2.0f*(float)M_PI;
+                                                    if (fabsf(diff) > (float)M_PI / 3.0f * 2.0f) continue;
+
+                                                    uint16_t dmg16 = (uint16_t)SWORD_DAMAGE;
+                                                    bool killed_npc = false;
+                                                    if (tnpc->health <= dmg16) {
+                                                        tnpc->health = 0;
+                                                        tnpc->active = false;
+                                                        killed_npc = true;
+                                                    } else {
+                                                        tnpc->health -= dmg16;
+                                                    }
+
+                                                    // Small knockback impulse
+                                                    float dist = sqrtf(nx*nx + ny*ny);
+                                                    float kx = (dist > 0.1f) ? (nx/dist) : atk_dx;
+                                                    float ky = (dist > 0.1f) ? (ny/dist) : atk_dy;
+                                                    tnpc->velocity_x += kx * 30.0f;
+                                                    tnpc->velocity_y += ky * 30.0f;
+
+                                                    char hit_msg[256];
+                                                    snprintf(hit_msg, sizeof(hit_msg),
+                                                        "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
+                                                        "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                                                        "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                                                        tnpc->id, tnpc->x, tnpc->y, SWORD_DAMAGE,
+                                                        (unsigned)tnpc->health, (unsigned)tnpc->max_health,
+                                                        killed_npc ? "true" : "false");
+                                                    websocket_server_broadcast(hit_msg);
+
+                                                    log_info("⚔️  Player %u sword hit NPC %u (HP %u/%u)%s",
+                                                             player->player_id, tnpc->id,
+                                                             (unsigned)tnpc->health, (unsigned)tnpc->max_health,
+                                                             killed_npc ? " KILLED" : "");
+                                                }
+
+                                                // ── Hit Players (PvP) ─────────────────────
+                                                for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
+                                                    WebSocketPlayer* tp = &players[wpi];
+                                                    if (!tp->active || tp->player_id == player->player_id) continue;
+                                    // No friendly fire: skip players of the same company
+                                    if (player->company_id != 0 &&
+                                        tp->company_id == player->company_id) continue;
+                                                    float px2 = tp->x - player->x;
+                                                    float py2 = tp->y - player->y;
+                                                    if (px2*px2 + py2*py2 > SWORD_RANGE2) continue;
+
+                                                    float p_angle = atan2f(py2, px2);
+                                                    float pdiff   = p_angle - atk_angle;
+                                                    while (pdiff >  (float)M_PI) pdiff -= 2.0f*(float)M_PI;
+                                                    while (pdiff < -(float)M_PI) pdiff += 2.0f*(float)M_PI;
+                                                    if (fabsf(pdiff) > (float)M_PI / 3.0f * 2.0f) continue;
+
+                                                    uint16_t dmg16 = (uint16_t)SWORD_DAMAGE;
+                                                    if (tp->health <= dmg16) tp->health = 0;
+                                                    else tp->health -= dmg16;
+
+                                                    char hit_msg[256];
+                                                    snprintf(hit_msg, sizeof(hit_msg),
+                                                        "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
+                                                        "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                                                        "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                                                        tp->player_id, tp->x, tp->y, SWORD_DAMAGE,
+                                                        (unsigned)tp->health, (unsigned)tp->max_health,
+                                                        tp->health == 0 ? "true" : "false");
+                                                    websocket_server_broadcast(hit_msg);
+                                                }
+
+                                                // Broadcast sword swing (for client animation)
+                                                char swing_msg[256];
+                                                snprintf(swing_msg, sizeof(swing_msg),
+                                                    "{\"type\":\"SWORD_SWING\",\"playerId\":%u,"
+                                                    "\"x\":%.1f,\"y\":%.1f,\"angle\":%.3f,\"range\":%.0f}",
+                                                    player->player_id, player->x, player->y,
+                                                    atk_angle, SWORD_RANGE);
+                                                websocket_server_broadcast(swing_msg);
+
+                                            } else {
+                                                // Unarmed / generic attack broadcast
+                                                char attack_msg[256];
+                                                snprintf(attack_msg, sizeof(attack_msg),
+                                                    "{\"type\":\"player_attack\",\"player_id\":%u,"
+                                                    "\"target_x\":%.2f,\"target_y\":%.2f}",
+                                                    player->player_id, target_x, target_y);
+                                                websocket_server_broadcast(attack_msg);
+                                            }
                                         }
+                                        sword_attack_done:;
                                     } else if (strcmp(action, "block") == 0) {
                                         // Walking block — reject if mounted
                                         if (player->is_mounted) {
@@ -4847,7 +7943,7 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                     }
                                     
-                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"action_processed\"}");
+                                    if (response[0] == '\0') strcpy(response, "{\"type\":\"message_ack\",\"status\":\"action_processed\"}");
                                 } else {
                                     log_warn("Action event for non-existent player %u", client->player_id);
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"player_not_found\"}");
@@ -4855,7 +7951,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"ship_sail_control\"")) {
+                        } else if (strcmp(msg_type, "ship_sail_control") == 0) {
                             // SHIP SAIL CONTROL message
                             // log_info("⛵ Processing SHIP_SAIL_CONTROL message");
                             
@@ -4895,7 +7991,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"ship_rudder_control\"")) {
+                        } else if (strcmp(msg_type, "ship_rudder_control") == 0) {
                             // SHIP RUDDER CONTROL message
                             // log_info("🚢 Processing SHIP_RUDDER_CONTROL message");
                             
@@ -4932,7 +8028,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"ship_sail_angle_control\"")) {
+                        } else if (strcmp(msg_type, "ship_sail_angle_control") == 0) {
                             // SHIP SAIL ANGLE CONTROL message
                             // log_info("🌀 Processing SHIP_SAIL_ANGLE_CONTROL message");
                             
@@ -4972,7 +8068,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
                             
-                        } else if (strstr(payload, "\"type\":\"cannon_aim\"")) {
+                        } else if (strcmp(msg_type, "cannon_aim") == 0) {
                             // CANNON AIM message
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
@@ -5025,11 +8121,28 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 handled = true;
                             }
-                            
-                        } else if (strstr(payload, "\"type\":\"cannon_fire\"")) {
-                            // CANNON FIRE message
-                            log_info("💥 Processing CANNON_FIRE message");
-                            
+
+                        } else if (strcmp(msg_type, "swivel_aim") == 0) {
+                            // SWIVEL AIM — update the aim direction of the player's mounted swivel
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                handled = true;
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player && player->parent_ship_id != 0) {
+                                    float aim_angle = 0.0f;
+                                    char* angle_start = strstr(payload, "\"aim_angle\":");
+                                    if (angle_start) sscanf(angle_start + 12, "%f", &aim_angle);
+                                    handle_swivel_aim(player, aim_angle);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"swivel_aim_updated\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                }
+                                handled = true;
+                            }
+
+                        } else if (strcmp(msg_type, "cannon_fire") == 0 || strcmp(msg_type, "fire_weapon") == 0) {
+                            // FIRE WEAPON message (cannon, swivel, future: ballista/catapult)
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                                 handled = true;
@@ -5040,15 +8153,23 @@ int websocket_server_update(struct Sim* sim) {
                                     bool fire_all = strstr(payload, "\"fire_all\":true") != NULL;
                                     // freefire: skip aim-angle check (set by client for freefire/targetfire modes)
                                     bool freefire = strstr(payload, "\"freefire\":true") != NULL;
-                                    // Parse ammo_type (0=cannonball, 1=bar_shot)
+                                    // Parse ammo_type:
+                                    //   cannon ammo: 0=cannonball, 1=bar_shot
+                                    //   swivel ammo: 10=grapeshot, 11=liquid_flame, 12=canister_shot
                                     uint8_t ammo_type = PROJ_TYPE_CANNONBALL;
                                     char* at = strstr(payload, "\"ammo_type\":");
                                     if (at) ammo_type = (uint8_t)atoi(at + 12);
-                                    if (ammo_type > PROJ_TYPE_BAR_SHOT) ammo_type = PROJ_TYPE_CANNONBALL;
-                                    // Parse optional cannon_ids array
-                                    uint32_t explicit_ids[MAX_CANNONS_PER_GROUP];
+                                    /* Translate client UI IDs (10/11/12) → internal PROJ_TYPE (2/3/4) */
+                                    if      (ammo_type == 10) ammo_type = PROJ_TYPE_GRAPESHOT;
+                                    else if (ammo_type == 11) ammo_type = PROJ_TYPE_LIQUID_FLAME;
+                                    else if (ammo_type == 12) ammo_type = PROJ_TYPE_CANISTER_SHOT;
+                                    /* Reject anything not a valid cannon (0-1) or swivel (2-4) type */
+                                    if (ammo_type > 1 && (ammo_type < PROJ_TYPE_GRAPESHOT || ammo_type > PROJ_TYPE_CANISTER_SHOT))
+                                        ammo_type = PROJ_TYPE_CANNONBALL;
+                                    // Parse optional weapon_ids array
+                                    uint32_t explicit_ids[MAX_WEAPONS_PER_GROUP];
                                     int explicit_count = parse_json_uint32_array(
-                                        payload, "cannon_ids", explicit_ids, MAX_CANNONS_PER_GROUP);
+                                        payload, "weapon_ids", explicit_ids, MAX_WEAPONS_PER_GROUP);
                                     
                                     handle_cannon_fire(player, fire_all, ammo_type,
                                                        explicit_count > 0 ? explicit_ids : NULL,
@@ -5061,7 +8182,7 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
 
-                        } else if (strstr(payload, "\"type\":\"cannon_force_reload\"")) {
+                        } else if (strcmp(msg_type, "cannon_force_reload") == 0) {
                             // CANNON FORCE RELOAD — discard current round, restart reload
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
@@ -5076,7 +8197,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"cannon_group_config\"")) {
+                        } else if (strcmp(msg_type, "cannon_group_config") == 0) {
                             // WEAPON GROUP CONFIG — set mode, cannon list, and optional target for a group
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
@@ -5095,10 +8216,10 @@ int websocket_server_update(struct Sim* sim) {
                                     else if (strstr(payload, "\"mode\":\"targetfire\"")) mode = WEAPON_GROUP_MODE_TARGETFIRE;
                                     else if (strstr(payload, "\"mode\":\"haltfire\""))   mode = WEAPON_GROUP_MODE_HALTFIRE;
 
-                                    // Parse cannon_ids array
-                                    uint32_t cannon_ids[MAX_CANNONS_PER_GROUP];
-                                    int cannon_count = parse_json_uint32_array(
-                                        payload, "cannon_ids", cannon_ids, MAX_CANNONS_PER_GROUP);
+                                    // Parse weapon_ids array
+                                    uint32_t weapon_ids[MAX_WEAPONS_PER_GROUP];
+                                    int weapon_count = parse_json_uint32_array(
+                                        payload, "weapon_ids", weapon_ids, MAX_WEAPONS_PER_GROUP);
 
                                     // Parse optional target_ship_id
                                     uint32_t target_ship_id = 0;
@@ -5107,7 +8228,7 @@ int websocket_server_update(struct Sim* sim) {
 
                                     if (group_index >= 0 && group_index < MAX_WEAPON_GROUPS) {
                                         handle_cannon_group_config(player, group_index, mode,
-                                                                   cannon_ids, cannon_count,
+                                                                   weapon_ids, weapon_count,
                                                                    target_ship_id);
                                         strcpy(response, "{\"type\":\"message_ack\",\"status\":\"group_configured\"}");
                                     } else {
@@ -5119,14 +8240,14 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"ping\"")) {
+                        } else if (strcmp(msg_type, "ping") == 0) {
                             // JSON ping message
                             snprintf(response, sizeof(response),
                                     "{\"type\":\"pong\",\"timestamp\":%u,\"server_time\":%u}",
                                     get_time_ms(), get_time_ms());
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"slot_select\"")) {
+                        } else if (strcmp(msg_type, "slot_select") == 0) {
                             // INVENTORY: player changed active hotbar slot
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
@@ -5145,7 +8266,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"unequip\"")) {
+                        } else if (strcmp(msg_type, "unequip") == 0) {
                             // INVENTORY: player deselected active slot (Q key) — sentinel 255 = nothing equipped
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
@@ -5160,7 +8281,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"give_item\"")) {
+                        } else if (strcmp(msg_type, "give_item") == 0) {
                             // INVENTORY: server-side item grant (used by admin/tests)
                             // {"type":"give_item","slot":0,"item":1,"quantity":10}
                             if (client->player_id != 0) {
@@ -5186,7 +8307,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"place_deck\"")) {
+                        } else if (strcmp(msg_type, "place_deck") == 0) {
                             // PLACE DECK: re-insert a destroyed deck on the player's ship.
                             // Consumes 1 ITEM_DECK from inventory (infinite for NPCs).
                             if (client->player_id == 0) {
@@ -5246,7 +8367,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"place_plank\"")) {
+                        } else if (strcmp(msg_type, "place_plank") == 0) {
                             // PLACE PLANK: re-insert a destroyed hull plank on the player's ship.
                             // Consumes 1 ITEM_PLANK from the player's inventory.
                             if (client->player_id == 0) {
@@ -5329,7 +8450,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"repair_plank\"")) {
+                        } else if (strcmp(msg_type, "repair_plank") == 0) {
                             // REPAIR PLANK: restore 5000 HP to the most damaged plank on the ship.
                             // Consumes 1 ITEM_REPAIR_KIT from the player's inventory.
                             if (client->player_id == 0) {
@@ -5397,7 +8518,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"use_hammer\"")) {
+                        } else if (strcmp(msg_type, "use_hammer") == 0) {
                             // USE HAMMER: apply 20% of target module's max_health as instant repair.
                             // Targets the specific module ID sent by the client (must be on same ship).
                             // Hammer is a reusable tool; not consumed.
@@ -5466,7 +8587,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"repair_sail\"")) {
+                        } else if (strcmp(msg_type, "repair_sail") == 0) {
                             // REPAIR SAIL FIBERS: restore openness (+50, cap 100) and wind_efficiency
                             // (+0.5, cap 1.0) on a specific mast. Consumes 1 ITEM_REPAIR_KIT.
                             // Payload: {"type":"repair_sail","shipId":N,"mastIndex":N}  (0=bow,1=mid,2=stern)
@@ -5552,7 +8673,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"place_cannon_at\"")) {
+                        } else if (strcmp(msg_type, "place_cannon_at") == 0) {
                             // FREE-PLACE CANNON: place a cannon at an arbitrary ship-local position.
                             // Payload: {"type":"place_cannon_at","shipId":N,"localX":F,"localY":F,"rotation":F}
                             // Consumes 1 ITEM_CANNON from the placing player's inventory.
@@ -5653,7 +8774,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"place_mast_at\"")) {
+                        } else if (strcmp(msg_type, "place_mast_at") == 0) {
                             // FREE-PLACE MAST: place a mast at an arbitrary ship-local position.
                             // Payload: {"type":"place_mast_at","shipId":N,"localX":F,"localY":F}
                             // Consumes 1 ITEM_SAIL from the placing player's inventory.
@@ -5741,7 +8862,112 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"place_cannon\"")) {
+                        } else if (strcmp(msg_type, "place_swivel_at") == 0) {
+                            // FREE-PLACE SWIVEL: place a swivel gun at an arbitrary ship-local position.
+                            // Payload: {"type":"place_swivel_at","shipId":N,"localX":F,"localY":F,"rotation":F}
+                            // Consumes 1 ITEM_SWIVEL from the placing player's inventory.
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    int sw_slot = -1;
+                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                        if (player->inventory.slots[s].item == ITEM_SWIVEL &&
+                                            player->inventory.slots[s].quantity > 0) {
+                                            sw_slot = s; break;
+                                        }
+                                    }
+                                    if (sw_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_swivel\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        uint32_t target_ship_id = player->parent_ship_id;
+                                        const char* p_sid = strstr(payload, "\"shipId\":");
+                                        if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = sid; }
+
+                                        SimpleShip* sw_simple = find_ship(target_ship_id);
+                                        struct Ship* sw_sim = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == target_ship_id) {
+                                                sw_sim = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        if (!sw_sim || !sw_simple) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else if (sw_sim->module_count >= MAX_MODULES_PER_SHIP ||
+                                                   sw_simple->module_count >= MAX_MODULES_PER_SHIP) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                        } else {
+                                            float local_x = 0.0f, local_y = 0.0f, rotation = 0.0f;
+                                            const char* px = strstr(payload, "\"localX\":");
+                                            const char* py = strstr(payload, "\"localY\":");
+                                            const char* pr = strstr(payload, "\"rotation\":");
+                                            if (px) sscanf(px + 9,  "%f", &local_x);
+                                            if (py) sscanf(py + 9,  "%f", &local_y);
+                                            if (pr) sscanf(pr + 11, "%f", &rotation);
+
+                                            // Swivels must be placed on the hull rail (plank band):
+                                            // edge distance must be within [0, 2.5] server units = [0, 25] client px.
+                                            if (is_outside_deck(target_ship_id, local_x, local_y)) {
+                                                strcpy(response, "{\"type\":\"error\",\"message\":\"outside_deck\"}");
+                                            } else {
+                                            float _sv_x = CLIENT_TO_SERVER(local_x);
+                                            float _sv_y = CLIENT_TO_SERVER(local_y);
+                                            float _edge_dist = swivel_dist_to_hull_edge(_sv_x, _sv_y, sw_sim);
+                                            if (_edge_dist > 2.5f) {
+                                                snprintf(response, sizeof(response),
+                                                    "{\"type\":\"error\",\"message\":\"swivel_must_be_on_rail\",\"edge_dist\":%.2f}",
+                                                    _edge_dist * WORLD_SCALE_FACTOR);
+                                            } else {
+
+                                            uint16_t max_id = 0;
+                                            for (uint8_t m = 0; m < sw_sim->module_count; m++)
+                                                if (sw_sim->modules[m].id > max_id) max_id = sw_sim->modules[m].id;
+                                            for (uint8_t m = 0; m < sw_simple->module_count; m++)
+                                                if (sw_simple->modules[m].id > max_id) max_id = sw_simple->modules[m].id;
+                                            uint16_t new_id = max_id + 1;
+
+                                            ShipModule ns;
+                                            memset(&ns, 0, sizeof(ShipModule));
+                                            ns.id          = new_id;
+                                            ns.type_id     = MODULE_TYPE_SWIVEL;
+                                            ns.local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_x));
+                                            ns.local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
+                                            ns.local_rot   = Q16_FROM_FLOAT(rotation);
+                                            ns.state_bits  = MODULE_STATE_ACTIVE;
+                                            ns.health      = 6000;
+                                            ns.max_health  = 6000;
+                                            ns.data.swivel.aim_direction         = Q16_FROM_FLOAT(0.0f);
+                                            ns.data.swivel.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+                                            ns.data.swivel.reload_time           = SWIVEL_RELOAD_TIME_MS;
+                                            ns.data.swivel.time_since_fire       = SWIVEL_RELOAD_TIME_MS; /* start ready to fire */
+                                            ns.data.swivel.loaded_ammo           = 0; /* default: cannonball */
+
+                                            sw_sim->modules[sw_sim->module_count++]       = ns;
+                                            sw_simple->modules[sw_simple->module_count++] = ns;
+
+                                            player->inventory.slots[sw_slot].quantity--;
+                                            if (player->inventory.slots[sw_slot].quantity == 0)
+                                                player->inventory.slots[sw_slot].item = ITEM_NONE;
+
+                                            log_info("🔫 Player %u placed swivel %u at (%.1f,%.1f) rot=%.2f on ship %u",
+                                                     player->player_id, new_id, local_x, local_y, rotation, sw_sim->id);
+                                            snprintf(response, sizeof(response),
+                                                "{\"type\":\"message_ack\",\"status\":\"swivel_placed_at\",\"swivel_id\":%u}",
+                                                new_id);
+                                            } // edge check
+                                            } // outside_deck check
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "place_cannon") == 0) {
                             // PLACE CANNON: re-install a destroyed cannon on the player's ship.
                             // Consumes 1 ITEM_CANNON. Server finds the first missing cannon slot
                             // (IDs base+1..base+6) and recreates it at the correct position.
@@ -5827,7 +9053,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"place_mast\"")) {
+                        } else if (strcmp(msg_type, "place_mast") == 0) {
                             // PLACE MAST: re-install a destroyed mast on the player's ship.
                             // Consumes 1 ITEM_SAIL. First missing mast slot (IDs base+7..base+9).
                             // Layout: mast_xs[3]={165,-35,-235}, y=0, rot=0.
@@ -5927,7 +9153,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"replace_helm\"")) {
+                        } else if (strcmp(msg_type, "replace_helm") == 0) {
                             // REPLACE HELM: re-install the helm if destroyed.
                             // Consumes 1 ITEM_HELM. Helm ID = base+0, pos (-90, 0).
                             if (client->player_id == 0) {
@@ -6004,7 +9230,7 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"crew_assign\"")) {
+                        } else if (strcmp(msg_type, "crew_assign") == 0) {
                             // CREW ASSIGN: player sets a WorldNpc's manning task.
                             // {"type":"crew_assign","ship_id":N,"npc_id":N,"task":"Sails|Cannons|Repairs|Combat|Idle"}
                             uint32_t ca_ship = 0, ca_npc = 0;
@@ -6014,14 +9240,301 @@ int websocket_server_update(struct Sim* sim) {
                             p = strstr(payload, "\"npc_id\":");  if (p) sscanf(p +  9, "%u", &ca_npc);
                             p = strstr(payload, "\"task\":\"");
                             if (p) sscanf(p + 8, "%15[^\"]s", ca_task);
-                            if (ca_ship != 0 && ca_npc != 0)
-                                handle_crew_assign(ca_ship, ca_npc, ca_task);
-                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"crew_assigned\"}");
+                            if (ca_ship != 0 && ca_npc != 0) {
+                                // Company check: player may only command NPCs of their own company.
+                                // Neutral players (company 0) cannot command any company-owned NPC.
+                                WebSocketPlayer* ca_player = find_player(client->player_id);
+                                WorldNpc* ca_npc_ptr = NULL;
+                                for (int _ci = 0; _ci < world_npc_count; _ci++) {
+                                    if (world_npcs[_ci].active && world_npcs[_ci].id == ca_npc) {
+                                        ca_npc_ptr = &world_npcs[_ci]; break;
+                                    }
+                                }
+                                if (ca_player && ca_npc_ptr &&
+                                    ca_npc_ptr->company_id != 0 &&
+                                    ca_npc_ptr->company_id != ca_player->company_id) {
+                                    log_warn("⛔ Player %u (company %u) cannot command NPC %u (company %u)",
+                                             ca_player->player_id, ca_player->company_id,
+                                             ca_npc_ptr->id, ca_npc_ptr->company_id);
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"company_mismatch\"}");
+                                } else {
+                                    handle_crew_assign(ca_ship, ca_npc, ca_task);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"crew_assigned\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"crew_assigned\"}");
+                            }
                             handled = true;
 
-                        } else if (strstr(payload, "\"type\":\"upgrade_ship\"")) {
+                        } else if (strcmp(msg_type, "npc_recruit") == 0) {
+                            // NPC RECRUIT: player claims a neutral (company 0) NPC into their company.
+                            // {"type":"npc_recruit","npcId":N}
+                            uint32_t rn_npc_id = 0;
+                            { char* rp = strstr(payload, "\"npcId\":"); if (rp) sscanf(rp + 8, "%u", &rn_npc_id); }
+                            WebSocketPlayer* rn_player = find_player(client->player_id);
+                            if (rn_player && rn_npc_id != 0) {
+                                WorldNpc* rn_npc_ptr = NULL;
+                                for (int _ni = 0; _ni < world_npc_count; _ni++) {
+                                    if (world_npcs[_ni].active && world_npcs[_ni].id == rn_npc_id) {
+                                        rn_npc_ptr = &world_npcs[_ni]; break;
+                                    }
+                                }
+                                if (rn_npc_ptr && rn_npc_ptr->company_id == 0) {
+                                    rn_npc_ptr->company_id = rn_player->company_id;
+                                    log_info("🤝 Player %u recruited NPC %u '%s' (company %u)",
+                                             rn_player->player_id, rn_npc_id,
+                                             rn_npc_ptr->name, rn_player->company_id);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"recruited\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_recruit\"}");
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "npc_move_aboard") == 0) {
+                            // NPC MOVE ABOARD: move a recruited NPC to the player's current ship.
+                            // {"type":"npc_move_aboard","npcId":N}
+                            uint32_t ma_npc_id = 0;
+                            { char* mp2 = strstr(payload, "\"npcId\":"); if (mp2) sscanf(mp2 + 8, "%u", &ma_npc_id); }
+                            WebSocketPlayer* ma_player = find_player(client->player_id);
+                            if (ma_player && ma_npc_id != 0 && ma_player->parent_ship_id != 0) {
+                                WorldNpc* ma_npc_ptr = NULL;
+                                for (int _ni = 0; _ni < world_npc_count; _ni++) {
+                                    if (world_npcs[_ni].active && world_npcs[_ni].id == ma_npc_id) {
+                                        ma_npc_ptr = &world_npcs[_ni]; break;
+                                    }
+                                }
+                                SimpleShip* ma_ship = find_ship(ma_player->parent_ship_id);
+                                if (ma_npc_ptr && ma_ship &&
+                                    ma_npc_ptr->company_id == ma_player->company_id) {
+                                    ma_npc_ptr->ship_id        = ma_player->parent_ship_id;
+                                    ma_npc_ptr->in_water       = false;
+                                    int slot_idx = (int)(ma_npc_ptr->id % 9);
+                                    ma_npc_ptr->local_x        = -200.0f + slot_idx * 50.0f;
+                                    ma_npc_ptr->local_y        = 0.0f;
+                                    ma_npc_ptr->idle_local_x   = ma_npc_ptr->local_x;
+                                    ma_npc_ptr->idle_local_y   = ma_npc_ptr->local_y;
+                                    ma_npc_ptr->target_local_x = ma_npc_ptr->local_x;
+                                    ma_npc_ptr->target_local_y = ma_npc_ptr->local_y;
+                                    ma_npc_ptr->state          = WORLD_NPC_STATE_IDLE;
+                                    ship_local_to_world(ma_ship,
+                                        ma_npc_ptr->local_x, ma_npc_ptr->local_y,
+                                        &ma_npc_ptr->x, &ma_npc_ptr->y);
+                                    log_info("⚓ NPC %u '%s' moved aboard ship %u for player %u",
+                                             ma_npc_id, ma_npc_ptr->name,
+                                             ma_player->parent_ship_id, ma_player->player_id);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"moved_aboard\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_move_aboard\"}");
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "npc_lock") == 0) {
+                            // NPC LOCK: pin or unpin an NPC to their current module.
+                            // {"type":"npc_lock","npcId":N,"locked":true/false}
+                            uint32_t lk_npc_id = 0;
+                            int      lk_locked  = 0;
+                            { char* lp = strstr(payload, "\"npcId\":"); if (lp) sscanf(lp + 8, "%u", &lk_npc_id); }
+                            { char* lp = strstr(payload, "\"locked\":"); if (lp) { lk_locked = (strncmp(lp + 9, "true", 4) == 0) ? 1 : 0; } }
+                            WebSocketPlayer* lk_player = find_player(client->player_id);
+                            if (lk_player && lk_npc_id != 0) {
+                                WorldNpc* lk_npc = NULL;
+                                for (int _ni = 0; _ni < world_npc_count; _ni++) {
+                                    if (world_npcs[_ni].active && world_npcs[_ni].id == lk_npc_id) {
+                                        lk_npc = &world_npcs[_ni]; break;
+                                    }
+                                }
+                                if (lk_npc && lk_npc->company_id == lk_player->company_id) {
+                                    lk_npc->task_locked = (bool)lk_locked;
+                                    log_info("%s NPC %u (%s) by player %u",
+                                             lk_locked ? "🔒 Locked" : "🔓 Unlocked",
+                                             lk_npc_id, lk_npc->name, lk_player->player_id);
+                                    strcpy(response, lk_locked
+                                        ? "{\"type\":\"message_ack\",\"status\":\"npc_locked\"}"
+                                        : "{\"type\":\"message_ack\",\"status\":\"npc_unlocked\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_lock_npc\"}");
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "npc_goto_module") == 0) {
+                            // NPC GOTO MODULE: direct an NPC to a specific module on their ship.
+                            // {"type":"npc_goto_module","npcId":N,"moduleId":M}
+                            // Clears task_locked so the NPC can be re-dispatched after arriving.
+                            uint32_t gm_npc_id = 0, gm_mod_id = 0;
+                            { char* gp = strstr(payload, "\"npcId\":"); if (gp) sscanf(gp + 8, "%u", &gm_npc_id); }
+                            { char* gp = strstr(payload, "\"moduleId\":"); if (gp) sscanf(gp + 11, "%u", &gm_mod_id); }
+                            WebSocketPlayer* gm_player = find_player(client->player_id);
+                            if (gm_player && gm_npc_id != 0 && gm_mod_id != 0) {
+                                WorldNpc* gm_npc = NULL;
+                                for (int _ni = 0; _ni < world_npc_count; _ni++) {
+                                    if (world_npcs[_ni].active && world_npcs[_ni].id == gm_npc_id) {
+                                        gm_npc = &world_npcs[_ni]; break;
+                                    }
+                                }
+                                SimpleShip* gm_ship = gm_npc ? find_ship(gm_npc->ship_id) : NULL;
+                                ShipModule*  gm_mod  = gm_ship ? find_module_by_id(gm_ship, gm_mod_id) : NULL;
+                                if (gm_npc && gm_ship && gm_mod &&
+                                    gm_npc->company_id == gm_player->company_id) {
+                                    /* ── Occupancy check: single-occupancy modules only ──────────────────── */
+                                    /* Cannon, swivel, mast and helm each hold exactly one NPC.              */
+                                    /* If another NPC is already assigned there, reject the command.         */
+                                    bool gm_occupied = false;
+                                    if (gm_mod->type_id == MODULE_TYPE_CANNON ||
+                                        gm_mod->type_id == MODULE_TYPE_SWIVEL ||
+                                        gm_mod->type_id == MODULE_TYPE_MAST   ||
+                                        gm_mod->type_id == MODULE_TYPE_HELM) {
+                                        for (int _oi = 0; _oi < world_npc_count && !gm_occupied; _oi++) {
+                                            WorldNpc* other = &world_npcs[_oi];
+                                            if (!other->active)                      continue;
+                                            if (other->id == gm_npc_id)              continue; /* the NPC itself */
+                                            if (other->ship_id != gm_ship->ship_id)  continue;
+                                            if (other->assigned_weapon_id == gm_mod_id) gm_occupied = true;
+                                        }
+                                    }
+                                    if (gm_occupied) {
+                                        snprintf(response, 1024,
+                                                 "{\"type\":\"error\",\"message\":\"module_occupied\",\"npcId\":%u,\"moduleId\":%u}",
+                                                 gm_npc_id, gm_mod_id);
+                                        log_info("🚫 NPC %u cannot go to module %u — already occupied", gm_npc_id, gm_mod_id);
+                                    } else {
+                                    float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(gm_mod->local_pos.x));
+                                    float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(gm_mod->local_pos.y));
+                                    // Dismount from current post before re-dispatching
+                                    dismount_npc(gm_npc, gm_ship);
+                                    // Clear lock — Move To always unfastens the pin
+                                    gm_npc->task_locked = false;
+                                    if (gm_mod->type_id == MODULE_TYPE_CANNON ||
+                                        gm_mod->type_id == MODULE_TYPE_SWIVEL) {
+                                        gm_npc->role        = NPC_ROLE_GUNNER;
+                                        gm_npc->wants_cannon = false; /* specific pin, not sector-driven */
+                                        dispatch_gunner_to_weapon(gm_npc, gm_ship, gm_mod_id, 0.0f);
+                                    } else if (gm_mod->type_id == MODULE_TYPE_MAST) {
+                                        gm_npc->role            = NPC_ROLE_RIGGER;
+                                        gm_npc->assigned_weapon_id = gm_mod_id;
+                                        gm_npc->target_local_x  = mx;
+                                        gm_npc->target_local_y  = my + 20.0f;
+                                        gm_npc->state           = WORLD_NPC_STATE_MOVING;
+                                    } else {
+                                        /* Generic walk-to (helm, deck position, etc.) */
+                                        gm_npc->role            = NPC_ROLE_NONE;
+                                        gm_npc->assigned_weapon_id = gm_mod_id;
+                                        gm_npc->target_local_x  = mx;
+                                        gm_npc->target_local_y  = my + 20.0f;
+                                        gm_npc->state           = WORLD_NPC_STATE_MOVING;
+                                    }
+                                    log_info("📍 NPC %u (%s) → module %u (type %u) on ship %u",
+                                             gm_npc_id, gm_npc->name, gm_mod_id,
+                                             gm_mod->type_id, gm_npc->ship_id);
+                                    snprintf(response, 1024,
+                                             "{\"type\":\"message_ack\",\"status\":\"npc_moved_to_module\",\"npcId\":%u}",
+                                             gm_npc_id);
+                                    } /* end else (not occupied) */
+                                } else {
+                                    snprintf(response, 1024,
+                                             "{\"type\":\"error\",\"message\":\"cannot_goto_module\",\"npcId\":%u}",
+                                             gm_npc_id);
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "npc_move_to_pos") == 0) {
+                            // NPC MOVE TO POSITION: walk NPC to world coords or board/walk on a ship.
+                            // {"type":"npc_move_to_pos","npcId":N,"worldX":F,"worldY":F,"shipId":S}
+                            // shipId=0  -> detach from ship and walk to world position
+                            // shipId>0  -> attach to that ship and walk to the clicked local position
+                            uint32_t tp_npc_id = 0, tp_ship_id = 0;
+                            float tp_wx = 0.0f, tp_wy = 0.0f;
+                            { char* p = strstr(payload, "\"npcId\":");  if (p) sscanf(p +  8, "%u", &tp_npc_id); }
+                            { char* p = strstr(payload, "\"worldX\":"); if (p) sscanf(p +  9, "%f", &tp_wx); }
+                            { char* p = strstr(payload, "\"worldY\":"); if (p) sscanf(p +  9, "%f", &tp_wy); }
+                            { char* p = strstr(payload, "\"shipId\":"); if (p) sscanf(p +  9, "%u", &tp_ship_id); }
+                            WebSocketPlayer* tp_player = find_player(client->player_id);
+                            if (tp_player && tp_npc_id != 0) {
+                                WorldNpc* tp_npc = NULL;
+                                for (int _ni = 0; _ni < world_npc_count; _ni++) {
+                                    if (world_npcs[_ni].active && world_npcs[_ni].id == tp_npc_id) {
+                                        tp_npc = &world_npcs[_ni]; break;
+                                    }
+                                }
+                                if (tp_npc && tp_npc->company_id == tp_player->company_id) {
+                                    /* Dismount from current post first */
+                                    SimpleShip* tp_old_ship = find_ship(tp_npc->ship_id);
+                                    dismount_npc(tp_npc, tp_old_ship);
+                                    tp_npc->task_locked        = false;
+                                    tp_npc->assigned_weapon_id = 0;
+                                    tp_npc->role               = NPC_ROLE_NONE;
+
+                                    if (tp_ship_id != 0) {
+                                        /* Board or walk on a specific ship */
+                                        SimpleShip* tp_ship = find_ship(tp_ship_id);
+                                    if (tp_ship) {
+                                            /* Convert world click → ship-local coords */
+                                            float cos_r = cosf(-tp_ship->rotation);
+                                            float sin_r = sinf(-tp_ship->rotation);
+                                            float ddx    = tp_wx - tp_ship->x;
+                                            float ddy    = tp_wy - tp_ship->y;
+                                            float lx     = ddx * cos_r - ddy * sin_r;
+                                            float ly     = ddx * sin_r + ddy * cos_r;
+
+                                            if (tp_npc->ship_id == tp_ship_id) {
+                                                /* Already on the target ship — just walk to the clicked position */
+                                                tp_npc->target_local_x = lx;
+                                                tp_npc->target_local_y = ly;
+                                                tp_npc->state          = WORLD_NPC_STATE_MOVING;
+                                                log_info("\u2693 NPC %u (%s) \u2192 on-deck (%.0f, %.0f)",
+                                                         tp_npc_id, tp_npc->name, lx, ly);
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_moving\"}");
+                                            } else {
+                                                /* Detach from old ship (if any) and swim to the hull */
+                                                float wx = tp_npc->x;  /* world pos before detach */
+                                                float wy = tp_npc->y;
+                                                tp_npc->ship_id          = 0;
+                                                tp_npc->in_water         = true;
+                                                tp_npc->local_x          = wx;
+                                                tp_npc->local_y          = wy;
+                                                /* The world-click pos is on the hull — swim straight there */
+                                                tp_npc->target_local_x   = tp_wx;
+                                                tp_npc->target_local_y   = tp_wy;
+                                                /* After boarding, walk to the on-deck destination */
+                                                tp_npc->boarding_ship_id = tp_ship_id;
+                                                tp_npc->boarding_local_x = lx;
+                                                tp_npc->boarding_local_y = ly;
+                                                tp_npc->state            = WORLD_NPC_STATE_MOVING;
+                                                log_info("\U0001f30a NPC %u (%s) swimming to ship %u @ world (%.0f,%.0f) then deck (%.0f,%.0f)",
+                                                         tp_npc_id, tp_npc->name, tp_ship_id, tp_wx, tp_wy, lx, ly);
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_moving\"}");
+                                            }
+                                        } else {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        }
+                                    } else {
+                                        /* World walk / disembark */
+                                        /* Use current world pos as local origin for path continuity */
+                                        tp_npc->local_x          = tp_npc->x;
+                                        tp_npc->local_y          = tp_npc->y;
+                                        tp_npc->ship_id          = 0;
+                                        tp_npc->in_water         = true;
+                                        tp_npc->boarding_ship_id = 0;  /* cancel any pending boarding */
+                                        tp_npc->target_local_x   = tp_wx;
+                                        tp_npc->target_local_y   = tp_wy;
+                                        tp_npc->state            = WORLD_NPC_STATE_MOVING;
+                                        log_info("\U0001f30a NPC %u (%s) \u2192 world (%.0f, %.0f)",
+                                                 tp_npc_id, tp_npc->name, tp_wx, tp_wy);
+                                        strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_moving\"}");
+                                    }
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_move_npc\"}");
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "upgrade_ship") == 0) {
                             // UPGRADE SHIP: spend XP to advance one attribute on the player's ship.
                             // {"type":"upgrade_ship","shipId":N,"attribute":"resistance"}
+                            WebSocketPlayer* player = find_player(client->player_id);
                             uint32_t upg_ship_id = 0;
                             char upg_attr[32] = "";
                             char* p2;
@@ -6034,6 +9547,12 @@ int websocket_server_update(struct Sim* sim) {
                                 struct Ship* upg_sim_ship = sim_get_ship(global_sim, (entity_id)upg_ship_id);
                                 if (!upg_sim_ship) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                } else if (upg_sim_ship->company_id != 0 &&
+                                           upg_sim_ship->company_id != player->company_id) {
+                                    log_warn("⛔ Player %u (company %u) cannot upgrade ship %u (company %u)",
+                                             player->player_id, player->company_id,
+                                             upg_ship_id, upg_sim_ship->company_id);
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"company_mismatch\"}");
                                 } else {
                                     ShipAttribute attr = ship_attr_from_name(upg_attr);
                                     if (attr == SHIP_ATTR_COUNT) {
@@ -6093,6 +9612,160 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "upgrade_crew_stat") == 0) {
+                            // UPGRADE CREW STAT: spend an earned stat point to level one stat.
+                            // {"type":"upgrade_crew_stat","npcId":N,"stat":"health"}
+                            // Stats: health | damage | stamina | weight
+                            // Cost: 1 stat point (earned per global level-up, no XP deducted).
+                            // Stat points available = (npc_level - 1) - total_stats_spent.
+                            // No per-stat cap — all 65 points can go into any one stat.
+                            WebSocketPlayer* player = find_player(client->player_id);
+                            uint32_t uc_npc_id = 0;
+                            char uc_stat[32] = "";
+                            char* p3;
+                            p3 = strstr(payload, "\"npcId\":");  if (p3) sscanf(p3 + 8, "%u", &uc_npc_id);
+                            p3 = strstr(payload, "\"stat\":\""); if (p3) sscanf(p3 + 8, "%31[^\"]", uc_stat);
+
+                            WorldNpc* uc_npc = NULL;
+                            for (int ni = 0; ni < world_npc_count; ni++) {
+                                if (world_npcs[ni].active && world_npcs[ni].id == uc_npc_id) {
+                                    uc_npc = &world_npcs[ni]; break;
+                                }
+                            }
+                            if (!uc_npc) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"npc_not_found\"}");
+                            } else if (uc_npc->company_id != 0 &&
+                                       uc_npc->company_id != player->company_id) {
+                                log_warn("⛔ Player %u (company %u) cannot upgrade NPC %u (company %u)",
+                                         player->player_id, player->company_id,
+                                         uc_npc->id, uc_npc->company_id);
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"company_mismatch\"}");
+                            } else {
+                                uint8_t* stat_ptr = NULL;
+                                if      (strcmp(uc_stat, "health")  == 0) stat_ptr = &uc_npc->stat_health;
+                                else if (strcmp(uc_stat, "damage")  == 0) stat_ptr = &uc_npc->stat_damage;
+                                else if (strcmp(uc_stat, "stamina") == 0) stat_ptr = &uc_npc->stat_stamina;
+                                else if (strcmp(uc_stat, "weight")  == 0) stat_ptr = &uc_npc->stat_weight;
+
+                                if (!stat_ptr) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"unknown_stat\"}");
+                                } else {
+                                    /* Stat points available = levels earned - points already spent */
+                                    uint8_t total_spent = (uint8_t)(
+                                        uc_npc->stat_health + uc_npc->stat_damage +
+                                        uc_npc->stat_stamina + uc_npc->stat_weight);
+                                    uint8_t points_earned = (uint8_t)(uc_npc->npc_level - 1);
+                                    if (total_spent >= points_earned) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"error\",\"message\":\"no_stat_points\","
+                                            "\"npcLevel\":%u,\"pointsEarned\":%u,\"pointsSpent\":%u}",
+                                            uc_npc->npc_level, points_earned, total_spent);
+                                    } else {
+                                        (*stat_ptr)++;
+                                        /* Recalculate derived stats */
+                                        uint16_t new_max = (uint16_t)(100 + uc_npc->stat_health * 20);
+                                        if (new_max > uc_npc->max_health)
+                                            uc_npc->health += (new_max - uc_npc->max_health);
+                                        uc_npc->max_health = new_max;
+                                        uint8_t stat_points_left = (uint8_t)(points_earned - (total_spent + 1));
+                                        log_info("👤 NPC %u '%s' upgraded %s → %u (level %u, %u stat points left)",
+                                                 uc_npc->id, uc_npc->name, uc_stat, *stat_ptr,
+                                                 uc_npc->npc_level, stat_points_left);
+                                        /* Broadcast NPC_STAT_UP */
+                                        char su_msg[256];
+                                        snprintf(su_msg, sizeof(su_msg),
+                                            "{\"type\":\"NPC_STAT_UP\",\"npcId\":%u,\"stat\":\"%s\","
+                                            "\"level\":%u,\"xp\":%u,\"maxHealth\":%u,\"npcLevel\":%u,"
+                                            "\"statHealth\":%u,\"statDamage\":%u,\"statStamina\":%u,\"statWeight\":%u,"
+                                            "\"statPoints\":%u}",
+                                            uc_npc->id, uc_stat, *stat_ptr, uc_npc->xp,
+                                            uc_npc->max_health, uc_npc->npc_level,
+                                            uc_npc->stat_health, uc_npc->stat_damage,
+                                            uc_npc->stat_stamina, uc_npc->stat_weight,
+                                            stat_points_left);
+                                        uint8_t su_frame[512];
+                                        size_t su_flen = websocket_create_frame(WS_OPCODE_TEXT,
+                                            su_msg, strlen(su_msg), (char*)su_frame, sizeof(su_frame));
+                                        if (su_flen > 0) {
+                                            for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                                                struct WebSocketClient* wc = &ws_server.clients[ci];
+                                                if (wc->connected && wc->handshake_complete)
+                                                    send(wc->fd, su_frame, su_flen, 0);
+                                            }
+                                        }
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"message_ack\",\"status\":\"stat_upgraded\","
+                                            "\"stat\":\"%s\",\"level\":%u,\"statPoints\":%u}",
+                                            uc_stat, *stat_ptr, stat_points_left);
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "toggle_ladder") == 0) {
+                            // TOGGLE LADDER: retract or extend a ladder on the player's current ship.
+                            // {"type":"toggle_ladder","moduleId":N}
+                            WebSocketPlayer* player = find_player(client->player_id);
+                            uint32_t tl_module_id = 0;
+                            char *p_tl = strstr(payload, "\"moduleId\":");
+                            if (p_tl) tl_module_id = (uint32_t)atoi(p_tl + 11);
+
+                            SimpleShip* tl_ship = NULL;
+                            ShipModule* tl_module = NULL;
+                            for (int si = 0; si < ship_count && !tl_module; si++) {
+                                if (!ships[si].active) continue;
+                                ShipModule* fm = find_module_by_id(&ships[si], tl_module_id);
+                                if (fm) { tl_ship = &ships[si]; tl_module = fm; }
+                            }
+
+                            if (!tl_module || !tl_ship || tl_module->type_id != MODULE_TYPE_LADDER) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"ladder_not_found\"}");
+                            } else if (tl_ship->company_id != 0 &&
+                                       player->company_id != 0 &&
+                                       player->company_id != tl_ship->company_id) {
+                                /* Only block if both have a company and they differ.
+                                 * Neutral players (company_id==0) may extend any ladder. */
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"company_mismatch\"}");
+                            } else if (player->parent_ship_id != tl_ship->ship_id &&
+                                       player->parent_ship_id != 0) {
+                                /* Player is on a DIFFERENT ship — block, but allow from water */ 
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                            } else {
+                                bool now_retracted = !(tl_module->state_bits & MODULE_STATE_RETRACTED);
+                                if (now_retracted)
+                                    tl_module->state_bits |= MODULE_STATE_RETRACTED;
+                                else
+                                    tl_module->state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
+                                // Mirror state change into the simulation ship module array
+                                {
+                                    struct Ship* _ts = find_sim_ship(tl_ship->ship_id);
+                                    if (_ts) {
+                                        for (uint8_t _m = 0; _m < _ts->module_count; _m++) {
+                                            if (_ts->modules[_m].id == tl_module_id) {
+                                                if (now_retracted)
+                                                    _ts->modules[_m].state_bits |= MODULE_STATE_RETRACTED;
+                                                else
+                                                    _ts->modules[_m].state_bits &= ~(uint16_t)MODULE_STATE_RETRACTED;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                log_info("🪜 Player %u toggled ladder %u → %s",
+                                         player->player_id, tl_module_id,
+                                         now_retracted ? "RETRACTED" : "EXTENDED");
+                                char tl_msg[192];
+                                snprintf(tl_msg, sizeof(tl_msg),
+                                    "{\"type\":\"ladder_state\",\"ship_id\":%u,\"module_id\":%u,\"retracted\":%s}",
+                                    tl_ship->ship_id, tl_module_id,
+                                    now_retracted ? "true" : "false");
+                                websocket_server_broadcast(tl_msg);
+                                snprintf(response, sizeof(response),
+                                    "{\"type\":\"message_ack\",\"status\":\"ladder_toggled\",\"retracted\":%s}",
+                                    now_retracted ? "true" : "false");
+                            }
+                            handled = true;
+
                         } else {
                             ws_server.unknown_messages_received++;
                             ws_server.last_unknown_time = get_time_ms();
@@ -6144,10 +9817,146 @@ int websocket_server_update(struct Sim* sim) {
                                 snprintf(response, sizeof(response),
                                         "{\"type\":\"handshake_response\",\"player_id\":%u,\"player_name\":\"%s\",\"server_time\":%u,\"status\":\"connected\"}",
                                         player_id, player_name, get_time_ms());
-                                // Player joined
+                                /* Send handshake_response FIRST so the client's temp handler
+                                   processes it (and sets assignedPlayerId) before ISLANDS and
+                                   STRUCTURES arrive — which must go through the main handler. */
+                                {
+                                    char hr_frame[512];
+                                    size_t hr_len = websocket_create_frame(
+                                        WS_OPCODE_TEXT, response, strlen(response),
+                                        hr_frame, sizeof(hr_frame));
+                                    if (hr_len > 0 && hr_len < sizeof(hr_frame)) {
+                                        send(client->fd, hr_frame, hr_len, 0);
+                                        log_info("🤝 Sent handshake_response to player %u", player_id);
+                                    }
+                                    /* Replace response with a no-op ack so the generic deferred
+                                       sender at the bottom of this block doesn't emit a duplicate
+                                       or malformed message. */
+                                    strcpy(response, "{\"type\":\"ack\"}");
+                                }
+                                // Send ISLANDS
+                                {
+                                    static char islands_buf[8192];
+                                    int pos = 0;
+                                    pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
+                                                    "{\"type\":\"ISLANDS\",\"islands\":[");
+                                    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+                                        const IslandDef *isl = &ISLAND_PRESETS[ii];
+                                        pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
+                                                        "%s{\"id\":%d,\"x\":%.1f,\"y\":%.1f,\"preset\":\"%s\"",
+                                                        ii ? "," : "",
+                                                        isl->id, isl->x, isl->y, isl->preset);
+                                        if (isl->vertex_count > 0) {
+                                            pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, ",\"vertices\":[");
+                                            for (int vi = 0; vi < isl->vertex_count; vi++) {
+                                                pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
+                                                                "%s{\"x\":%.1f,\"y\":%.1f}",
+                                                                vi ? "," : "",
+                                                                isl->x + isl->vx[vi], isl->y + isl->vy[vi]);
+                                            }
+                                            pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]");
+                                        }
+                                        pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, ",\"resources\":[");
+                                        for (int ri = 0; ri < isl->resource_count; ri++) {
+                                            const IslandResource *r = &isl->resources[ri];
+                                            pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
+                                                            "%s{\"ox\":%.1f,\"oy\":%.1f,\"type\":\"%s\"}",
+                                                            ri ? "," : "",
+                                                            r->ox, r->oy, r->type);
+                                        }
+                                        pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
+                                    }
+                                    pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
+                                    char isl_frame[8704];
+                                    size_t isl_frame_len = websocket_create_frame(
+                                        WS_OPCODE_TEXT, islands_buf, (size_t)pos,
+                                        isl_frame, sizeof(isl_frame));
+                                    if (isl_frame_len > 0 && isl_frame_len < sizeof(isl_frame)) {
+                                        send(client->fd, isl_frame, isl_frame_len, 0);
+                                        log_info("🏝️  Sent ISLANDS (%d islands) to player %u", ISLAND_COUNT, player_id);
+                                    }
+                                }
+                                /* Send current placed structures */
+                                {
+                                    static char structs_buf[8192];
+                                    int spos = 0;
+                                    spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
+                                                     "{\"type\":\"STRUCTURES\",\"structures\":[");
+                                    bool sfirst = true;
+                                    for (uint32_t si = 0; si < placed_structure_count; si++) {
+                                        if (!placed_structures[si].active) continue;
+                                        const char* stype_str =
+                                            placed_structures[si].type == STRUCT_WOODEN_FLOOR ? "wooden_floor" :
+                                            placed_structures[si].type == STRUCT_WORKBENCH    ? "workbench" :
+                                            placed_structures[si].type == STRUCT_WALL         ? "wall" :
+                                            placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
+                                            placed_structures[si].type == STRUCT_DOOR         ? "door" : "unknown";
+                                        bool is_door_s = (placed_structures[si].type == STRUCT_DOOR);
+                                        spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
+                                                         "%s{\"id\":%u,\"structure_type\":\"%s\","
+                                                         "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                                                         "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"%s}",
+                                                         sfirst ? "" : ",",
+                                                         placed_structures[si].id,
+                                                         stype_str,
+                                                         placed_structures[si].island_id,
+                                                         placed_structures[si].x,
+                                                         placed_structures[si].y,
+                                                         (unsigned)placed_structures[si].company_id,
+                                                         (unsigned)placed_structures[si].hp,
+                                                         (unsigned)placed_structures[si].max_hp,
+                                                         placed_structures[si].placer_name,
+                                                         is_door_s ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "");
+                                        sfirst = false;
+                                    }
+                                    spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos, "]}");
+                                    char sf[8448];
+                                    size_t sflen = websocket_create_frame(
+                                        WS_OPCODE_TEXT, structs_buf, (size_t)spos, sf, sizeof(sf));
+                                    if (sflen > 0 && sflen < sizeof(sf))
+                                        send(client->fd, sf, sflen, 0);
+                                }
                             }
                             handled = true;
                             
+                        } else if (strncmp(payload, "GET_STRUCTURES", 14) == 0) {
+                            /* Re-send the full placed-structures list to this client. */
+                            {
+                                static char gs_buf[8192];
+                                int gp = 0;
+                                gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
+                                               "{\"type\":\"STRUCTURES\",\"structures\":[");
+                                bool gfirst = true;
+                                for (uint32_t si = 0; si < placed_structure_count; si++) {
+                                    if (!placed_structures[si].active) continue;
+                                    const char* gs_type = placed_structures[si].type == STRUCT_WOODEN_FLOOR
+                                                          ? "wooden_floor" : "workbench";
+                                    gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
+                                                   "%s{\"id\":%u,\"structure_type\":\"%s\","
+                                                   "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                                                   "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"}",
+                                                   gfirst ? "" : ",",
+                                                   placed_structures[si].id, gs_type,
+                                                   placed_structures[si].island_id,
+                                                   placed_structures[si].x, placed_structures[si].y,
+                                                   (unsigned)placed_structures[si].company_id,
+                                                   (unsigned)placed_structures[si].hp,
+                                                   (unsigned)placed_structures[si].max_hp,
+                                                   placed_structures[si].placer_name);
+                                    gfirst = false;
+                                }
+                                gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp, "]}");
+                                char gf[8448];
+                                size_t gflen = websocket_create_frame(
+                                    WS_OPCODE_TEXT, gs_buf, (size_t)gp, gf, sizeof(gf));
+                                if (gflen > 0 && gflen < sizeof(gf))
+                                    send(client->fd, gf, gflen, 0);
+                                log_info("📦 Sent STRUCTURES (%u) on GET_STRUCTURES to player %u",
+                                         placed_structure_count, client->player_id);
+                            }
+                            strcpy(response, "{\"type\":\"ack\"}");
+                            handled = true;
+
                         } else if (strncmp(payload, "STATE", 5) == 0) {
                             // Request game state
                             snprintf(response, sizeof(response),
@@ -6171,8 +9980,9 @@ int websocket_server_update(struct Sim* sim) {
                      * ──────────────────────────────────────────────────────────────────── */
                     if (client->pending_group_broadcast_ship_id != 0) {
                         SimpleShip* bship = find_ship(client->pending_group_broadcast_ship_id);
-                        if (bship) broadcast_cannon_group_state(bship);
-                        client->pending_group_broadcast_ship_id = 0;
+                        if (bship) broadcast_cannon_group_state(bship, client->pending_group_broadcast_company_id);
+                        client->pending_group_broadcast_ship_id    = 0;
+                        client->pending_group_broadcast_company_id = 0;
                     }
 
                     // Send response
@@ -6277,10 +10087,10 @@ int websocket_server_update(struct Sim* sim) {
         // Log which ship source we're using
         static uint32_t last_ship_source_log = 0;
         if (current_time - last_ship_source_log > 5000) {
-            log_info("📦 Ship source: sim=%p, sim->ship_count=%d, simple_ship_count=%d",
-                     (void*)sim, sim ? sim->ship_count : 0, ship_count);
+            // log_info("📦 Ship source: sim=%p, sim->ship_count=%d, simple_ship_count=%d",
+            //          (void*)sim, sim ? sim->ship_count : 0, ship_count);
             if (ship_count > 0) {
-                log_info("📦 Simple ship[0]: module_count=%d", ships[0].module_count);
+                // log_info("📦 Simple ship[0]: module_count=%d", ships[0].module_count);
             }
             last_ship_source_log = current_time;
         }
@@ -6302,24 +10112,26 @@ int websocket_server_update(struct Sim* sim) {
                 float ang_vel = Q16_TO_FLOAT(ship->angular_velocity);
                 float rudder_radians = ship->rudder_angle * (3.14159f / 180.0f); // Convert degrees to radians
 
-                // Look up matching SimpleShip for ammo data
-                const SimpleShip* simple_ship = NULL;
-                for (int ss = 0; ss < ship_count; ss++) {
-                    if (ships[ss].ship_id == ship->id) { simple_ship = &ships[ss]; break; }
-                }
+                // Look up matching SimpleShip for ammo data (O(1) via cache)
+                const SimpleShip* simple_ship = find_ship(ship->id);
 
                 char ship_entry[6144];
-                float hull_health_pct = Q16_TO_FLOAT(ship->hull_health); // 0.0–100.0
+                /* Ghost ships store hull_health as raw int32 (0–60000).
+                 * Normal ships use Q16 encoding (0.0–100.0). */
+                float hull_health_pct = (ship->company_id == COMPANY_GHOST)
+                    ? (float)ship->hull_health
+                    : Q16_TO_FLOAT(ship->hull_health);
                 int offset = snprintf(ship_entry, sizeof(ship_entry),
                         "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                         "\"rudder_angle\":%.3f,"
-                        "\"hullHealth\":%.2f,\"company\":%u,"
+                        "\"hullHealth\":%.2f,\"company\":%u,\"shipType\":%u,"
                         "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                         ship->id, pos_x, pos_y, rotation, vel_x, vel_y, ang_vel,
                         rudder_radians,
                         hull_health_pct,
                         simple_ship ? simple_ship->company_id : COMPANY_NEUTRAL,
+                        simple_ship ? simple_ship->ship_type  : SHIP_TYPE_BRIGANTINE,
                         simple_ship ? simple_ship->cannon_ammo : 0,
                         (simple_ship && simple_ship->infinite_ammo) ? "true" : "false");
                 
@@ -6336,10 +10148,10 @@ int websocket_server_update(struct Sim* sim) {
                             m > 0 ? "," : "", module->id, module->type_id,
                             (int)module->health, (int)module->max_health);
                     } else if (module->type_id == MODULE_TYPE_DECK) {
-                        // Deck: only ID/type (client generates polygon from hull)
+                        // Deck: ID, type, and fire zone state bits (client generates polygon from hull)
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u}",
-                            m > 0 ? "," : "", module->id, module->type_id);
+                            "%s{\"id\":%u,\"typeId\":%u,\"stateBits\":%u}",
+                            m > 0 ? "," : "", module->id, module->type_id, (unsigned)module->state_bits);
                     } else {
                         // Gameplay modules: full transform data
                         float module_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
@@ -6354,10 +10166,11 @@ int websocket_server_update(struct Sim* sim) {
                             float fh         = Q16_TO_FLOAT(module->data.mast.fiber_health);
                             float fhmax      = Q16_TO_FLOAT(module->data.mast.fiber_max_health);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"health\":%d,\"maxHealth\":%d}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"fiberFireIntensity\":%u,\"health\":%d,\"maxHealth\":%d}",
                                 m > 0 ? "," : "", module->id, module->type_id, 
                                 module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff,
-                                fh, fhmax, (int)module->health, (int)module->max_health);
+                                fh, fhmax, (unsigned)module->data.mast.sail_fire_intensity,
+                                (int)module->health, (int)module->max_health);
                         } else if (module->type_id == MODULE_TYPE_CANNON) {
                             // Cannon: include aim direction, state, and health
                             float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
@@ -6365,6 +10178,15 @@ int websocket_server_update(struct Sim* sim) {
                                 "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"maxHealth\":%d}",
                                 m > 0 ? "," : "", module->id, module->type_id,
                                 module_x, module_y, module_rot, aim_direction,
+                                (unsigned)module->state_bits,
+                                (int)module->health, (int)module->max_health);
+                        } else if (module->type_id == MODULE_TYPE_SWIVEL) {
+                            // Swivel: include current aim direction, state, and health
+                            float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
+                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"maxHealth\":%d}",
+                                m > 0 ? "," : "", module->id, module->type_id,
+                                module_x, module_y, module_rot, aim_dir,
                                 (unsigned)module->state_bits,
                                 (int)module->health, (int)module->max_health);
                         } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
@@ -6483,6 +10305,14 @@ int websocket_server_update(struct Sim* sim) {
                                 m > 0 ? "," : "", module->id, module->type_id,
                                 module_x, module_y, module_rot, aim_direction,
                                 (unsigned)module->state_bits);
+                        } else if (module->type_id == MODULE_TYPE_SWIVEL) {
+                            // Swivel: include current aim direction and state
+                            float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
+                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
+                                m > 0 ? "," : "", module->id, module->type_id,
+                                module_x, module_y, module_rot, aim_dir,
+                                (unsigned)module->state_bits);
                         } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                             // Helm: include wheel rotation, occupied status, state
                             float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
@@ -6545,14 +10375,14 @@ int websocket_server_update(struct Sim* sim) {
                                     (int)players[p].inventory.shield,
                                     (int)players[p].inventory.active_slot);
 
-                char player_entry[640];
+                char player_entry[680];
                 snprintf(player_entry, sizeof(player_entry),
                         "{\"id\":%u,\"name\":\"Player_%u\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
                         "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
                         "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\","
                         "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
-                        "\"company\":%u%s}",
+                        "\"company\":%u,\"health\":%u,\"max_health\":%u,\"on_island\":%u%s}",
                         players[p].player_id, players[p].player_id,
                         players[p].x, players[p].y, players[p].rotation,
                         players[p].velocity_x, players[p].velocity_y,
@@ -6564,6 +10394,8 @@ int websocket_server_update(struct Sim* sim) {
                         players[p].mounted_module_id,
                         players[p].controlling_ship_id,
                         players[p].company_id,
+                        players[p].health, players[p].max_health,
+                        players[p].on_island_id,
                         inv_buf);
                 players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "%s", player_entry);
                 first_player = false;
@@ -6608,30 +10440,45 @@ int websocket_server_update(struct Sim* sim) {
         }
         projectiles_offset += snprintf(projectiles_json + projectiles_offset, sizeof(projectiles_json) - projectiles_offset, "]");
 
-        // Build world NPCs JSON array
-        char npcs_json[4096];
-        int npcs_offset = 0;
-        npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "[");
-        bool first_npc = true;
-        for (int n = 0; n < world_npc_count; n++) {
-            const WorldNpc* npc = &world_npcs[n];
-            if (!npc->active) continue;
-            if (!first_npc)
-                npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, ",");
-            npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset,
-                "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
-                "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
-                "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
-                "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u,"
-                "\"assigned_cannon_id\":%u}",
-                npc->id, npc->name,
-                npc->x, npc->y, npc->rotation,
-                npc->ship_id, npc->local_x, npc->local_y,
-                npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id,
-                npc->assigned_cannon_id);
-            first_npc = false;
+        // Build world NPCs JSON array — only rebuilt when g_npcs_dirty is set.
+        // tick_world_npcs() marks it dirty every tick; on idle (no NPC tick) we reuse
+        // the previous buffer, saving ~32 KB of snprintf work per broadcast.
+        static char npcs_json[32768];
+        static int  npcs_offset = 2; // starts valid: "[]" written at init
+        if (npcs_offset < 2) { npcs_json[0] = '['; npcs_json[1] = ']'; npcs_json[2] = '\0'; }
+        if (g_npcs_dirty) {
+            npcs_offset = 0;
+            npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "[");
+            bool first_npc = true;
+            for (int n = 0; n < world_npc_count; n++) {
+                const WorldNpc* npc = &world_npcs[n];
+                if (!npc->active) continue;
+                if (!first_npc)
+                    npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, ",");
+                npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset,
+                    "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
+                    "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
+                    "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
+                    "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u,"
+                    "\"assigned_weapon_id\":%u,"
+                    "\"npc_level\":%u,\"health\":%u,\"max_health\":%u,\"xp\":%u,"
+                    "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
+                    "\"stat_points\":%u,\"locked\":%d}",
+                    npc->id, npc->name,
+                    npc->x, npc->y, npc->rotation,
+                    npc->ship_id, npc->local_x, npc->local_y,
+                    npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id,
+                    npc->assigned_weapon_id,
+                    (unsigned)npc->npc_level, (unsigned)npc->health, (unsigned)npc->max_health, npc->xp,
+                    (unsigned)npc->stat_health, (unsigned)npc->stat_damage, (unsigned)npc->stat_stamina, (unsigned)npc->stat_weight,
+                    (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
+                        (npc->stat_health + npc->stat_damage + npc->stat_stamina + npc->stat_weight)),
+                    (int)npc->task_locked);
+                first_npc = false;
+            }
+            npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "]");
+            g_npcs_dirty = false;
         }
-        npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "]");
         
         // Adaptive tick rate based on activity
         bool has_recent_movement = (current_time - g_last_movement_time) < 2000; // Movement in last 2 seconds
@@ -6650,24 +10497,53 @@ int websocket_server_update(struct Sim* sim) {
         // Cap at maximum rate
         if (current_update_rate > 30) current_update_rate = 30;
         
-        // Broadcasting game state
-        
-        static char game_state[131072]; // 128 KB: ships(64K) + players + projectiles + npcs
-        snprintf(game_state, sizeof(game_state),
-                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":%s,\"projectiles\":%s,\"npcs\":%s}",
-                current_time / 33, current_time, ships_json, players_json, projectiles_json, npcs_json);
-        
-        // Broadcast to all connected clients
-        for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-            struct WebSocketClient* client = &ws_server.clients[i];
-            if (client->connected && client->handshake_complete) {
-                static char frame[131086]; // Must be >= game_state size + WebSocket header (14)
-                size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state, strlen(game_state), frame, sizeof(frame));
-                if (frame_len > 0) {
-                    ssize_t sent = send(client->fd, frame, frame_len, 0);
-                    if (sent > 0) {
-                        ws_server.packets_sent++;
-                    }
+        // ── Assemble GAME_STATE directly — no intermediate copy ────────────────────
+        // Builds the JSON by memcpy-ing the already-serialised sub-blobs directly
+        // into the output buffer.  Avoids a second full-size snprintf that would
+        // scan and copy up to 100 KB purely to concatenate strings.
+        static char game_state[131072];
+        int gs_off = 0;
+        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
+                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":",
+                current_time / 33, current_time);
+        if (gs_off + ships_offset < (int)sizeof(game_state) - 1) {
+            memcpy(game_state + gs_off, ships_json, (size_t)ships_offset);
+            gs_off += ships_offset;
+        }
+        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off, ",\"players\":");
+        if (gs_off + players_offset < (int)sizeof(game_state) - 1) {
+            memcpy(game_state + gs_off, players_json, (size_t)players_offset);
+            gs_off += players_offset;
+        }
+        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off, ",\"projectiles\":");
+        if (gs_off + projectiles_offset < (int)sizeof(game_state) - 1) {
+            memcpy(game_state + gs_off, projectiles_json, (size_t)projectiles_offset);
+            gs_off += projectiles_offset;
+        }
+        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off, ",\"npcs\":");
+        if (gs_off + npcs_offset < (int)sizeof(game_state) - 1) {
+            memcpy(game_state + gs_off, npcs_json, (size_t)npcs_offset);
+            gs_off += npcs_offset;
+        }
+        if (gs_off < (int)sizeof(game_state) - 1) {
+            game_state[gs_off++] = '}';
+            game_state[gs_off]   = '\0';
+        }
+
+        // ── Frame once, broadcast to every client ──────────────────────────────
+        // strlen + websocket_create_frame computed once outside the loop.
+        // All clients receive the identical pre-built frame buffer.
+        static char broadcast_frame[131086];
+        size_t gs_payload_len = (size_t)gs_off;
+        size_t broadcast_frame_len = websocket_create_frame(
+            WS_OPCODE_TEXT, game_state, gs_payload_len,
+            broadcast_frame, sizeof(broadcast_frame));
+        if (broadcast_frame_len > 0) {
+            for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+                struct WebSocketClient* client = &ws_server.clients[i];
+                if (client->connected && client->handshake_complete) {
+                    ssize_t sent = send(client->fd, broadcast_frame, broadcast_frame_len, 0);
+                    if (sent > 0) ws_server.packets_sent++;
                 }
             }
         }
@@ -6830,6 +10706,37 @@ int websocket_server_get_players(WebSocketPlayer** out_players, int* out_count) 
     return 0;
 }
 
+int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id) {
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (players[i].active && players[i].player_id == player_id) {
+            players[i].company_id = company_id;
+            log_info("🏴 Admin set player %u company → %u", player_id, company_id);
+
+            /* One-way structure promotion: if the new company is non-neutral,
+             * upgrade every neutral structure this player placed to that company.
+             * Structures already claimed by a non-neutral company are never changed. */
+            if (company_id != COMPANY_NEUTRAL) {
+                for (uint32_t si = 0; si < placed_structure_count; si++) {
+                    if (!placed_structures[si].active) continue;
+                    if (placed_structures[si].placer_id != player_id) continue;
+                    if (placed_structures[si].company_id != COMPANY_NEUTRAL) continue;
+                    placed_structures[si].company_id = company_id;
+                    char upd[128];
+                    snprintf(upd, sizeof(upd),
+                             "{\"type\":\"structure_company_updated\","
+                             "\"structure_id\":%u,\"company_id\":%u}",
+                             placed_structures[si].id, (unsigned)company_id);
+                    websocket_server_broadcast(upd);
+                    log_info("🏴 Structure %u promoted to company %u (player %u joined)",
+                             placed_structures[si].id, company_id, player_id);
+                }
+            }
+            return 0;
+        }
+    }
+    return -1; // not found
+}
+
 // HYBRID: Apply movement state to all active players (called every server tick)
 void websocket_server_tick(float dt) {
     uint32_t current_time = get_time_ms();
@@ -6845,30 +10752,28 @@ void websocket_server_tick(float dt) {
             const struct HitEvent* ev = &global_sim->hit_events[e];
             char msg[256];
 
+            /* ── Phantom Brig hull-only damage rule ──
+             * SHIP_TYPE_GHOST cannonballs skip interior module breaches entirely;
+             * only plank hits and sink events pass through to clients.
+             * This prevents phantoms from stripping modules — they attack the hull. */
+            if (ev->is_breach && !ev->is_sink && ev->shooter_ship_id != 0) {
+                SimpleShip* shooter = find_ship(ev->shooter_ship_id);
+                if (shooter && shooter->ship_type == SHIP_TYPE_GHOST) continue;
+            }
+
             if (ev->is_sink) {
                 // Ship hull_health reached 0 — enter sinking state instead of immediate despawn.
                 entity_id sunk_id = ev->ship_id;
-                SimpleShip* sinking_ship = NULL;
-                for (int s = 0; s < ship_count; s++) {
-                    if (ships[s].active && ships[s].ship_id == sunk_id) {
-                        sinking_ship = &ships[s];
-                        break;
-                    }
-                }
+                SimpleShip* sinking_ship = find_ship(sunk_id);
+                /* When hull_health hits 0 the ship enters its dissolve state. */
                 if (sinking_ship && !sinking_ship->is_sinking) {
                     sinking_ship->is_sinking    = true;
                     sinking_ship->sink_start_ms = get_time_ms();
 
                     /* Zero the sim-ship velocity so the ship stops dead */
-                    if (global_sim) {
-                        for (uint32_t ss = 0; ss < global_sim->ship_count; ss++) {
-                            if ((uint32_t)global_sim->ships[ss].id == sunk_id) {
-                                global_sim->ships[ss].velocity.x = 0;
-                                global_sim->ships[ss].velocity.y = 0;
-                                global_sim->ships[ss].angular_velocity = 0;
-                                break;
-                            }
-                        }
+                    {
+                        struct Ship* _ss = find_sim_ship((uint32_t)sunk_id);
+                        if (_ss) { _ss->velocity.x = 0; _ss->velocity.y = 0; _ss->angular_velocity = 0; }
                     }
 
                     /* Dismount all players from the sinking ship */
@@ -6880,10 +10785,21 @@ void websocket_server_tick(float dt) {
                         players[pi].movement_state      = PLAYER_STATE_WALKING;
                     }
 
-                    /* Dismount all NPCs from the sinking ship */
+                    /* Dismount all NPCs from the sinking ship and mark them as in water */
                     for (int ni = 0; ni < world_npc_count; ni++) {
                         if (!world_npcs[ni].active || world_npcs[ni].ship_id != sunk_id) continue;
                         dismount_npc(&world_npcs[ni], sinking_ship);
+                        world_npcs[ni].in_water = true;
+                        /* Extinguish any burning NPCs that hit the water */
+                        world_npcs[ni].fire_timer_ms = 0;
+                    }
+
+                    /* Ghost ship survivors: spawn 2-3 unclaimed recruitable sailors */
+                    if (sinking_ship->ship_type == SHIP_TYPE_GHOST) {
+                        int n_survivors = 2 + (int)(next_world_npc_id % 2); /* 2 or 3 */
+                        for (int sv = 0; sv < n_survivors; sv++) {
+                            spawn_unclaimed_npc(sinking_ship->x, sinking_ship->y, sv);
+                        }
                     }
 
                     /* Broadcast SHIP_SINKING so clients start the animation immediately */
@@ -6898,6 +10814,26 @@ void websocket_server_tick(float dt) {
                 /* Skip building the broadcast msg for this event — no module_id / damage info */
                 continue;
             } else if (ev->is_breach) {
+                /* Ghost ship planks participate in hull-health tracking for the
+                 * damage-fade / mist-dissolve system.  Only block cascade-
+                 * destruction of interior modules (deck ID 200, cannons >= 300). */
+                {
+                    SimpleShip* breach_victim = find_ship(ev->ship_id);
+                    if (breach_victim && breach_victim->ship_type == SHIP_TYPE_GHOST
+                        && ev->destroyed && ev->module_id >= 200) continue;
+                }
+                // module_id == 0 means direct hull damage (no specific module was hit).
+                // Emit a HULL_HIT so the client can show an explosion at the position.
+                if (ev->module_id == 0) {
+                    snprintf(msg, sizeof(msg),
+                        "{\"type\":\"HULL_HIT\",\"shipId\":%u,"
+                        "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                        ev->ship_id, ev->damage_dealt,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                    log_info("📤 Broadcasting HULL_HIT: ship %u damage %.0f at (%.1f, %.1f)",
+                        ev->ship_id, ev->damage_dealt,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                } else
                 if (ev->destroyed) {
                     // Interior module destroyed through breach: remove from SimpleShip and broadcast MODULE_HIT
                     SimpleShip* simple = find_ship(ev->ship_id);
@@ -6917,14 +10853,7 @@ void websocket_server_tick(float dt) {
                         log_info("💥 Deck destroyed on ship %u — cascading destruction", ev->ship_id);
 
                         // Destroy on the sim ship
-                        struct Ship* sim_ship = NULL;
-                        if (global_sim) {
-                            for (uint32_t ss = 0; ss < global_sim->ship_count; ss++) {
-                                if ((uint32_t)global_sim->ships[ss].id == ev->ship_id) {
-                                    sim_ship = &global_sim->ships[ss]; break;
-                                }
-                            }
-                        }
+                        struct Ship* sim_ship = find_sim_ship((uint32_t)ev->ship_id);
                         if (sim_ship) {
                             uint8_t m = 0;
                             while (m < sim_ship->module_count) {
@@ -6994,6 +10923,9 @@ void websocket_server_tick(float dt) {
                         "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                    log_info("📤 Broadcasting MODULE_DAMAGED: ship %u module %u damage %.0f at (%.1f, %.1f)",
+                        ev->ship_id, ev->module_id, ev->damage_dealt,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
                 }
             } else {
                 if (ev->destroyed) {
@@ -7014,6 +10946,9 @@ void websocket_server_tick(float dt) {
                         "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                    log_info("📤 Broadcasting PLANK_HIT: ship %u plank %u destroyed, %.0f dmg at (%.1f, %.1f)",
+                        ev->ship_id, ev->module_id, ev->damage_dealt,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
                 } else {
                     // Non-fatal plank hit: just broadcast PLANK_DAMAGED for damage numbers
                     snprintf(msg, sizeof(msg),
@@ -7021,6 +10956,21 @@ void websocket_server_tick(float dt) {
                         "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                    log_info("📤 Broadcasting PLANK_DAMAGED: ship %u plank %u, %.0f dmg at (%.1f, %.1f)",
+                        ev->ship_id, ev->module_id, ev->damage_dealt,
+                        SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                }
+            }
+
+            /* Award combat XP to NPC gunners on the shooter ship */
+            if (ev->shooter_ship_id != 0 && ev->shooter_ship_id != ev->ship_id) {
+                uint32_t xp_gain = 10 + (uint32_t)(ev->damage_dealt / 10.0f);
+                for (int ni = 0; ni < world_npc_count; ni++) {
+                    WorldNpc* gnpc = &world_npcs[ni];
+                    if (gnpc->active && gnpc->role == NPC_ROLE_GUNNER &&
+                        gnpc->ship_id == ev->shooter_ship_id) {
+                        npc_apply_xp(gnpc, xp_gain);
+                    }
                 }
             }
 
@@ -7036,15 +10986,309 @@ void websocket_server_tick(float dt) {
         global_sim->hit_event_count = 0;
     }
 
+    // ===== CANNONBALL / GRAPESHOT / LIQUID FLAME / CANISTER SHOT vs ENTITY HIT DETECTION =====
+    // Cannonballs (PROJ_TYPE_CANNONBALL) deal base 75 HP damage to NPCs and
+    // players.  Grapeshot (PROJ_TYPE_GRAPESHOT) uses a tighter hit radius (20 px)
+    // and lower damage (35 HP per pellet). Unmounted entities are knocked back.
+    // Liquid flame (PROJ_TYPE_LIQUID_FLAME) deals 0 direct HP damage but sets
+    // fire_timer_ms on hit entities (NPCs/players) and nearby wooden modules
+    // (planks, decks, masts). Fire burns for 10 seconds dealing DoT.
+    if (global_sim) {
+        const float ENTITY_HIT_RADIUS    = 40.0f;   // client pixels (cannonball)
+        const float ENTITY_BASE_DAMAGE   = 75.0f;
+        const float ENTITY_KNOCKBACK     = 40.0f;   // velocity impulse (client px/s)
+        /* FIRE_DURATION_MS is a file-scope #define (10000 ms) */
+
+        /* Helper: broadcast a FIRE_EFFECT event */
+        #define BROADCAST_FIRE_EFFECT(msg_buf, ...) do { \
+            snprintf((msg_buf), sizeof(msg_buf), __VA_ARGS__); \
+            char _ff[320]; \
+            size_t _ffl = websocket_create_frame(WS_OPCODE_TEXT, (msg_buf), strlen(msg_buf), _ff, sizeof(_ff)); \
+            if (_ffl > 0) { \
+                for (int _ci = 0; _ci < WS_MAX_CLIENTS; _ci++) { \
+                    struct WebSocketClient* _wc = &ws_server.clients[_ci]; \
+                    if (_wc->connected && _wc->handshake_complete) send(_wc->fd, _ff, _ffl, 0); \
+                } \
+            } \
+        } while (0)
+
+        uint16_t pi = 0;
+        while (pi < global_sim->projectile_count) {
+            struct Projectile* proj = &global_sim->projectiles[pi];
+
+            // Only projectile types that harm entities directly
+            // (PROJ_TYPE_LIQUID_FLAME removed — flamethrower is now instant hit-scan, no projectiles)
+            if (proj->type != PROJ_TYPE_CANNONBALL && proj->type != PROJ_TYPE_GRAPESHOT &&
+                proj->type != PROJ_TYPE_CANISTER_SHOT) { pi++; continue; }
+
+            float px = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
+            float py = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
+
+            // Damage multiplier from firing ship level stats
+            float dmg_mult = 1.0f;
+            if (proj->firing_ship_id != INVALID_ENTITY_ID) {
+                struct Ship* fship = sim_get_ship(global_sim, (entity_id)proj->firing_ship_id);
+                if (fship) dmg_mult = ship_level_damage_mult(&fship->level_stats);
+            }
+            /* Per-type hit radius and base entity damage */
+            float ent_hit_radius, damage;
+            bool is_flame = (proj->type == PROJ_TYPE_LIQUID_FLAME);
+            if (is_flame) {
+                ent_hit_radius = 30.0f;
+                damage         = 0.0f; /* fire DoT handled in 100ms tick */
+            } else if (proj->type == PROJ_TYPE_GRAPESHOT || proj->type == PROJ_TYPE_CANISTER_SHOT) {
+                ent_hit_radius = (proj->type == PROJ_TYPE_CANISTER_SHOT) ? 15.0f : 20.0f;
+                damage         = (proj->type == PROJ_TYPE_CANISTER_SHOT) ? 25.0f * dmg_mult : 35.0f * dmg_mult;
+            } else {
+                ent_hit_radius = ENTITY_HIT_RADIUS;
+                damage         = ENTITY_BASE_DAMAGE * dmg_mult;
+            }
+            float hit_r2  = ent_hit_radius * ent_hit_radius;
+
+            bool proj_consumed = false;
+
+            // ── Check NPCs ──────────────────────────────────────────────────
+            // Flame iterates ALL NPCs (pass-through — never consumed).
+            // Other types stop at the first hit (proj_consumed).
+            for (int ni = 0; ni < world_npc_count && (is_flame || !proj_consumed); ni++) {
+                WorldNpc* npc = &world_npcs[ni];
+                if (!npc->active) continue;
+                // No friendly fire: skip NPCs on the firing ship
+                if (proj->firing_ship_id != INVALID_ENTITY_ID &&
+                    npc->ship_id == (uint32_t)proj->firing_ship_id) continue;
+
+                float dx = npc->x - px;
+                float dy = npc->y - py;
+                if (dx * dx + dy * dy > hit_r2) continue;
+
+                if (is_flame) {
+                    /* Pass-through: ignite NPC; broadcast only on first ignition */
+                    if (npc->fire_timer_ms == 0) {
+                        npc->fire_timer_ms = FIRE_DURATION_MS;
+                        char hit_msg[256];
+                        BROADCAST_FIRE_EFFECT(hit_msg,
+                            "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"npc\",\"id\":%u,"
+                            "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                            npc->id, npc->x, npc->y, FIRE_DURATION_MS);
+                    } else {
+                        npc->fire_timer_ms = FIRE_DURATION_MS; /* refresh silently */
+                    }
+                    /* proj_consumed stays false — flame keeps flying */
+                } else {
+                    uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
+                    if (npc->health <= dmg16) {
+                        npc->health = 0;
+                        npc->active = false;
+                    } else {
+                        npc->health -= dmg16;
+                    }
+                    bool npc_at_station = (npc->state == WORLD_NPC_STATE_AT_GUN ||
+                                           npc->state == WORLD_NPC_STATE_REPAIRING);
+                    if (!npc_at_station) {
+                        float dist = sqrtf(dx * dx + dy * dy);
+                        float kx   = (dist > 0.1f) ? (dx / dist) : 1.0f;
+                        float ky   = (dist > 0.1f) ? (dy / dist) : 0.0f;
+                        npc->velocity_x += kx * ENTITY_KNOCKBACK;
+                        npc->velocity_y += ky * ENTITY_KNOCKBACK;
+                    }
+                    char hit_msg[256];
+                    snprintf(hit_msg, sizeof(hit_msg),
+                        "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
+                        "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                        "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                        npc->id, npc->x, npc->y, damage,
+                        (unsigned)npc->health, (unsigned)npc->max_health,
+                        (!npc->active) ? "true" : "false");
+                    char hit_frame[320];
+                    size_t hfl = websocket_create_frame(WS_OPCODE_TEXT, hit_msg, strlen(hit_msg),
+                                                        hit_frame, sizeof(hit_frame));
+                    if (hfl > 0) {
+                        for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                            struct WebSocketClient* wc = &ws_server.clients[ci];
+                            if (wc->connected && wc->handshake_complete)
+                                send(wc->fd, hit_frame, hfl, 0);
+                        }
+                    }
+                    log_info("💣 DESPAWN proj %u — NPC %u hit at (%.1f,%.1f) dmg=%.0f",
+                             proj->id, npc->id, npc->x, npc->y, damage);
+                    proj_consumed = true;
+                }
+            }
+
+            // ── Check Players ────────────────────────────────────────────────
+            for (int wpi = 0; wpi < WS_MAX_CLIENTS && (is_flame || !proj_consumed); wpi++) {
+                WebSocketPlayer* wp = &players[wpi];
+                if (!wp->active) continue;
+                if (proj->firing_ship_id != INVALID_ENTITY_ID &&
+                    wp->parent_ship_id == (uint32_t)proj->firing_ship_id) continue;
+
+                float dx = wp->x - px;
+                float dy = wp->y - py;
+                if (dx * dx + dy * dy > hit_r2) continue;
+
+                if (is_flame) {
+                    if (wp->fire_timer_ms == 0) {
+                        wp->fire_timer_ms = FIRE_DURATION_MS;
+                        char hit_msg[256];
+                        BROADCAST_FIRE_EFFECT(hit_msg,
+                            "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"player\",\"id\":%u,"
+                            "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                            wp->player_id, wp->x, wp->y, FIRE_DURATION_MS);
+                    } else {
+                        wp->fire_timer_ms = FIRE_DURATION_MS;
+                    }
+                } else {
+                    uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
+                    if (wp->health <= dmg16) { wp->health = 0; } else { wp->health -= dmg16; }
+                    if (!wp->is_mounted) {
+                        float dist = sqrtf(dx * dx + dy * dy);
+                        float kx   = (dist > 0.1f) ? (dx / dist) : 1.0f;
+                        float ky   = (dist > 0.1f) ? (dy / dist) : 0.0f;
+                        if (wp->parent_ship_id != 0) {
+                            wp->local_x += kx * ENTITY_KNOCKBACK;
+                            wp->local_y += ky * ENTITY_KNOCKBACK;
+                            SimpleShip* wp_ship = find_ship(wp->parent_ship_id);
+                            if (wp_ship) ship_local_to_world(wp_ship, wp->local_x, wp->local_y,
+                                                              &wp->x, &wp->y);
+                        } else {
+                            wp->x += kx * ENTITY_KNOCKBACK;
+                            wp->y += ky * ENTITY_KNOCKBACK;
+                            wp->velocity_x += kx * ENTITY_KNOCKBACK * 3.0f;
+                            wp->velocity_y += ky * ENTITY_KNOCKBACK * 3.0f;
+                            if (wp->sim_entity_id != 0) {
+                                for (uint16_t spi = 0; spi < global_sim->player_count; spi++) {
+                                    if (global_sim->players[spi].id == wp->sim_entity_id) {
+                                        global_sim->players[spi].position.x =
+                                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->x));
+                                        global_sim->players[spi].position.y =
+                                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->y));
+                                        global_sim->players[spi].velocity.x =
+                                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->velocity_x));
+                                        global_sim->players[spi].velocity.y =
+                                            Q16_FROM_FLOAT(CLIENT_TO_SERVER(wp->velocity_y));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    char hit_msg[256];
+                    snprintf(hit_msg, sizeof(hit_msg),
+                        "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
+                        "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                        "\"health\":%u,\"maxHealth\":%u}",
+                        wp->player_id, wp->x, wp->y, damage,
+                        (unsigned)wp->health, (unsigned)wp->max_health);
+                    char hit_frame[320];
+                    size_t hfl = websocket_create_frame(WS_OPCODE_TEXT, hit_msg, strlen(hit_msg),
+                                                        hit_frame, sizeof(hit_frame));
+                    if (hfl > 0) {
+                        for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                            struct WebSocketClient* wc = &ws_server.clients[ci];
+                            if (wc->connected && wc->handshake_complete)
+                                send(wc->fd, hit_frame, hfl, 0);
+                        }
+                    }
+                    log_info("💣 DESPAWN proj %u — player %u hit at (%.1f,%.1f) dmg=%.0f",
+                             proj->id, wp->player_id, wp->x, wp->y, damage);
+                    proj_consumed = true;
+                }
+            }
+
+            // ── Module fire pass: flame hits ALL modules in range; others stop at first ──
+            {
+                const float MOD_FIRE_RADIUS = 35.0f;
+                const float mfr2 = MOD_FIRE_RADIUS * MOD_FIRE_RADIUS;
+                for (int s = 0; s < ship_count && (is_flame || !proj_consumed); s++) {
+                    if (!ships[s].active) continue;
+                    SimpleShip* fship = &ships[s];
+                    if (proj->firing_ship_id != INVALID_ENTITY_ID &&
+                        fship->ship_id == (uint32_t)proj->firing_ship_id) continue;
+                    float cos_r = cosf(fship->rotation);
+                    float sin_r = sinf(fship->rotation);
+                    for (int m = 0; m < fship->module_count && (is_flame || !proj_consumed); m++) {
+                        ShipModule* mod = &fship->modules[m];
+                        ModuleTypeId mt = mod->type_id;
+                        if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK &&
+                            mt != MODULE_TYPE_MAST) continue;
+                        if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
+                        float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                        float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                        float wx = fship->x + (lx * cos_r - ly * sin_r);
+                        float wy = fship->y + (lx * sin_r + ly * cos_r);
+                        float ddx = wx - px, ddy = wy - py;
+                        if (ddx * ddx + ddy * ddy > mfr2) continue;
+
+                        /* Mirror fire_timer to global_sim (O(1) via find_sim_ship cache) */
+                        #define SET_MODULE_FIRE(_fship, _mod) do { \
+                            (_mod)->fire_timer_ms = FIRE_DURATION_MS; \
+                            { \
+                                struct Ship* _smf = find_sim_ship((_fship)->ship_id); \
+                                if (_smf) { \
+                                    for (uint8_t _mi = 0; _mi < _smf->module_count; _mi++) { \
+                                        if (_smf->modules[_mi].id == (_mod)->id) { \
+                                            _smf->modules[_mi].fire_timer_ms = FIRE_DURATION_MS; \
+                                            break; \
+                                        } \
+                                    } \
+                                } \
+                            } \
+                        } while (0)
+
+                        if (is_flame) {
+                            /* Pass-through: ignite all wooden modules in cone range.
+                             * Only broadcast FIRE_EFFECT on first ignition. */
+                            if (mod->fire_timer_ms == 0) {
+                                SET_MODULE_FIRE(fship, mod);
+                                char fmsg[256];
+                                BROADCAST_FIRE_EFFECT(fmsg,
+                                    "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"module\","
+                                    "\"shipId\":%u,\"moduleId\":%u,"
+                                    "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                                    fship->ship_id, mod->id, wx, wy, FIRE_DURATION_MS);
+                            } else {
+                                SET_MODULE_FIRE(fship, mod); /* refresh silently */
+                            }
+                            /* no proj_consumed, no break — keep scanning */
+                        } else {
+                            /* Cannonball/grapeshot/canister: physical impact only — no ignition.
+                             * Module HP damage and projectile removal are handled by the sim
+                             * layer collision (handle_projectile_collisions). Do NOT consume
+                             * the projectile here or the sim will never see it and despawn
+                             * logs/damage will silently be skipped. */
+                            (void)0;
+                        }
+                        #undef SET_MODULE_FIRE
+                    }
+                }
+            }
+
+            /* Flame projectiles expire via lifetime — never removed on hit.
+             * Non-flame projectiles are removed when consumed by their first hit. */
+            if (!is_flame && proj_consumed) {
+                memmove(&global_sim->projectiles[pi],
+                        &global_sim->projectiles[pi + 1],
+                        (global_sim->projectile_count - pi - 1) * sizeof(struct Projectile));
+                global_sim->projectile_count--;
+            } else {
+                pi++;
+            }
+        }
+        #undef BROADCAST_FIRE_EFFECT
+    }
+
     // ===== TICK NPC AGENTS =====
     tick_npc_agents(dt);
     tick_world_npcs(dt);
 
-    // ===== ASSIGN CREW TO WEAPON-GROUP CANNONS =====
-    // Expire stale NEEDED flags, then dispatch idle gunners to NEEDED cannons.
+    // ===== ASSIGN CREW TO WEAPON-GROUP CANNONS + SWIVELS =====
+    // Mark swivels needed, expire stale NEEDED flags, then dispatch idle gunners.
     tick_cannon_needed_expiry();
     for (int s = 0; s < ship_count; s++) {
-        if (ships[s].active) assign_weapon_group_crew(&ships[s]);
+        if (ships[s].active) {
+            tick_swivel_crew_demand(&ships[s]);
+            assign_weapon_group_crew(&ships[s]);
+        }
     }
 
     // ===== TICK SHIP WEAPON GROUPS (TARGETFIRE auto-aim) =====
@@ -7053,13 +11297,20 @@ void websocket_server_tick(float dt) {
     // ===== TICK SINKING SHIPS (velocity=0, despawn after 8s) =====
     tick_sinking_ships();
 
+    // ===== TICK GHOST SHIPS (wander + attack AI) =====
+    tick_ghost_ships(dt);
+
     // ===== ADVANCE CANNON AIM TOWARD DESIRED (turn-speed limit) =====
-    // Cannons rotate at a maximum of 60 degrees per second.
+    // Normal cannons: 60 deg/s.  Ghost ship cannons: 180 deg/s so their swept
+    // barrels track the oscillation without visible lag.
     {
-        const float CANNON_TURN_SPEED = 60.0f * (float)(M_PI / 180.0f); // rad/s
-        const float max_step = CANNON_TURN_SPEED * dt;
+        const float CANNON_TURN_SPEED        = 60.0f  * (float)(M_PI / 180.0f); // rad/s
+        const float GHOST_CANNON_TURN_SPEED  = 180.0f * (float)(M_PI / 180.0f); // rad/s
         for (int s = 0; s < ship_count; s++) {
             if (!ships[s].active) continue;
+            const float max_step = (ships[s].ship_type == SHIP_TYPE_GHOST
+                                    ? GHOST_CANNON_TURN_SPEED
+                                    : CANNON_TURN_SPEED) * dt;
             for (int m = 0; m < ships[s].module_count; m++) {
                 ShipModule* mod = &ships[s].modules[m];
                 if (mod->type_id != MODULE_TYPE_CANNON) continue;
@@ -7075,17 +11326,69 @@ void websocket_server_tick(float dt) {
                     cur += (diff > 0.0f ? max_step : -max_step);
                 }
                 mod->data.cannon.aim_direction = Q16_FROM_FLOAT(cur);
-                // Mirror into sim-ship
-                if (global_sim) {
-                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                        if (global_sim->ships[si].id == ships[s].ship_id) {
-                            for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
-                                if (global_sim->ships[si].modules[mi].id == mod->id) {
-                                    global_sim->ships[si].modules[mi].data.cannon.aim_direction = mod->data.cannon.aim_direction;
+                // Mirror aim_direction into sim-ship — O(1) via cache.
+                // Try ID match first; fall back to position match (ghost ships
+                // use different ID schemes between SimpleShip and sim ship).
+                {
+                    struct Ship* _ss = find_sim_ship(ships[s].ship_id);
+                    if (_ss) {
+                        bool mirrored = false;
+                        for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                            if (_ss->modules[mi].id == mod->id) {
+                                _ss->modules[mi].data.cannon.aim_direction = mod->data.cannon.aim_direction;
+                                mirrored = true;
+                                break;
+                            }
+                        }
+                        if (!mirrored) {
+                            float mx = Q16_TO_FLOAT(mod->local_pos.x);
+                            float my = Q16_TO_FLOAT(mod->local_pos.y);
+                            for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                                if (_ss->modules[mi].type_id != MODULE_TYPE_CANNON) continue;
+                                float sx = Q16_TO_FLOAT(_ss->modules[mi].local_pos.x);
+                                float sy = Q16_TO_FLOAT(_ss->modules[mi].local_pos.y);
+                                float d2 = (sx - mx)*(sx - mx) + (sy - my)*(sy - my);
+                                if (d2 < 0.01f) {
+                                    _ss->modules[mi].data.cannon.aim_direction = mod->data.cannon.aim_direction;
                                     break;
                                 }
                             }
-                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ===== ADVANCE SWIVEL AIM TOWARD DESIRED (180°/s — faster than cannon) =====
+    {
+        const float SWIVEL_TURN_SPEED = 180.0f * (float)(M_PI / 180.0f); // rad/s
+        const float max_step = SWIVEL_TURN_SPEED * dt;
+        const float SWIVEL_AIM_LIMIT = 45.0f * ((float)M_PI / 180.0f);
+        for (int s = 0; s < ship_count; s++) {
+            if (!ships[s].active) continue;
+            for (int m = 0; m < ships[s].module_count; m++) {
+                ShipModule* mod = &ships[s].modules[m];
+                if (mod->type_id != MODULE_TYPE_SWIVEL) continue;
+                float cur  = Q16_TO_FLOAT(mod->data.swivel.aim_direction);
+                float tgt  = Q16_TO_FLOAT(mod->data.swivel.desired_aim_direction);
+                /* Re-clamp target in case it drifted somehow */
+                if (tgt >  SWIVEL_AIM_LIMIT) tgt =  SWIVEL_AIM_LIMIT;
+                if (tgt < -SWIVEL_AIM_LIMIT) tgt = -SWIVEL_AIM_LIMIT;
+                float diff = tgt - cur;
+                while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+                while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+                cur = (fabsf(diff) <= max_step) ? tgt : cur + (diff > 0.0f ? max_step : -max_step);
+                mod->data.swivel.aim_direction = Q16_FROM_FLOAT(cur);
+                /* Mirror into global_sim so sim-path snapshots reflect the interpolated angle */
+                {
+                    struct Ship* _ss = find_sim_ship(ships[s].ship_id);
+                    if (_ss) {
+                        for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
+                            if (_ss->modules[mi].id == mod->id) {
+                                _ss->modules[mi].data.swivel.aim_direction = mod->data.swivel.aim_direction;
+                                break;
+                            }
                         }
                     }
                 }
@@ -7241,6 +11544,90 @@ void websocket_server_tick(float dt) {
                                 //          ws_player->local_x, ws_player->local_y,
                                 //          ws_player->x, ws_player->y);
                             }
+                        } else if (ws_player->on_island_id != 0) {
+                            // ===== ISLAND WALKING (WORLD COORDINATES) =====
+                            float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED);
+                            float new_x = ws_player->x + movement_x * walk_speed_client * dt;
+                            float new_y = ws_player->y + movement_y * walk_speed_client * dt;
+                            /* Walk freely on beach + grass. Step off the beach → swim. */
+                            const IslandDef *isl_mv = NULL;
+                            for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+                                if (ISLAND_PRESETS[ii].id == (int)ws_player->on_island_id) {
+                                    isl_mv = &ISLAND_PRESETS[ii]; break;
+                                }
+                            }
+                            if (isl_mv) {
+                                float dx = new_x - isl_mv->x;
+                                float dy = new_y - isl_mv->y;
+                                float dist_sq = dx * dx + dy * dy;
+                                bool still_inside;
+                                if (isl_mv->vertex_count > 0) {
+                                    still_inside = island_poly_contains(isl_mv, new_x, new_y);
+                                } else {
+                                    float angle   = atan2f(dy, dx);
+                                    float beach_r = island_boundary_r(isl_mv->beach_radius_px,
+                                                                      isl_mv->beach_bumps, angle);
+                                    still_inside = (dist_sq <= beach_r * beach_r);
+                                }
+                                (void)dist_sq;
+                                if (!still_inside) {
+                                    /* Player walked off the island — transition to swimming */
+                                    ws_player->on_island_id = 0;
+                                    ws_player->movement_state = PLAYER_STATE_SWIMMING;
+                                    log_info("\U0001F30A Player %u walked off island",
+                                             ws_player->player_id);
+                                    /* Carry the walking velocity into swim so motion feels continuous */
+                                    sim_player->velocity.x = Q16_FROM_FLOAT(
+                                        CLIENT_TO_SERVER(movement_x * walk_speed_client));
+                                    sim_player->velocity.y = Q16_FROM_FLOAT(
+                                        CLIENT_TO_SERVER(movement_y * walk_speed_client));
+                                }
+                            }
+                            /* Apply position regardless — if walking off, land at the new spot so
+                               next tick the player is already outside and swim takes over */
+                            if (ws_player->on_island_id != 0) {
+                                /* Resolve collisions with walls and closed doors on this island */
+                                {
+                                    const float PLAYER_R = 8.0f;
+                                    for (uint32_t wi = 0; wi < placed_structure_count; wi++) {
+                                        PlacedStructure *ws = &placed_structures[wi];
+                                        if (!ws->active) continue;
+                                        if (ws->island_id != ws_player->on_island_id) continue;
+                                        bool is_wall = (ws->type == STRUCT_WALL);
+                                        bool is_door = (ws->type == STRUCT_DOOR && !ws->open);
+                                        if (!is_wall && !is_door) continue;
+                                        bool horiz = wall_is_horizontal(ws->x, ws->y);
+                                        float hw = horiz ? 25.0f : 5.0f;
+                                        float hh = horiz ? 5.0f  : 25.0f;
+                                        float cpx = new_x - ws->x;
+                                        float cpy = new_y - ws->y;
+                                        float clamp_x = cpx < -hw ? -hw : (cpx > hw ? hw : cpx);
+                                        float clamp_y = cpy < -hh ? -hh : (cpy > hh ? hh : cpy);
+                                        float dpx = cpx - clamp_x;
+                                        float dpy = cpy - clamp_y;
+                                        float dist_sq = dpx*dpx + dpy*dpy;
+                                        if (dist_sq < PLAYER_R * PLAYER_R && dist_sq > 0.0001f) {
+                                            float dist = sqrtf(dist_sq);
+                                            float pen  = PLAYER_R - dist;
+                                            new_x += (dpx / dist) * pen;
+                                            new_y += (dpy / dist) * pen;
+                                        }
+                                    }
+                                }
+                                ws_player->x = new_x;
+                                ws_player->y = new_y;
+                                sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_x));
+                                sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_y));
+                                sim_player->velocity.x = 0;
+                                sim_player->velocity.y = 0;
+                            } else {
+                                /* Transitioned to swimming — write the new_x/new_y so the player
+                                   is placed at the water's edge, not stuck inside the beach */
+                                ws_player->x = new_x;
+                                ws_player->y = new_y;
+                                sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_x));
+                                sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_y));
+                            }
                         } else {
                             // ===== SWIMMING MOVEMENT (WORLD COORDINATES) =====
                             // Apply acceleration in movement direction
@@ -7276,7 +11663,11 @@ void websocket_server_tick(float dt) {
                 } else {
                     // Player stopped moving - no deceleration needed for on-ship movement
                     // (player position is fixed relative to ship, ship velocity handles world movement)
-                    if (!on_ship) {
+                    if (!on_ship && ws_player->on_island_id != 0) {
+                        /* On island and stopped — zero velocity, no deceleration needed */
+                        sim_player->velocity.x = 0;
+                        sim_player->velocity.y = 0;
+                    } else if (!on_ship) {
                         // Only apply deceleration for swimming players
                         float current_vx = Q16_TO_FLOAT(sim_player->velocity.x);
                         float current_vy = Q16_TO_FLOAT(sim_player->velocity.y);
@@ -7322,6 +11713,73 @@ void websocket_server_tick(float dt) {
                     ws_player->y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->position.y));
                     ws_player->velocity_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->velocity.x));
                     ws_player->velocity_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->velocity.y));
+                    /* Island enter/leave detection (every tick, all non-ship players) */
+                    float wx = ws_player->x, wy = ws_player->y;
+                    if (ws_player->on_island_id == 0) {
+                        /* Entering: broad phase → narrow BEACH boundary (bump-circle or polygon) */
+                        for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+                            const IslandDef *isl = &ISLAND_PRESETS[ii];
+                            float dx = wx - isl->x, dy = wy - isl->y;
+                            float dist_sq = dx*dx + dy*dy;
+                            bool entering;
+                            if (isl->vertex_count > 0) {
+                                entering = (dist_sq < isl->poly_bound_r * isl->poly_bound_r)
+                                        && island_poly_contains(isl, wx, wy);
+                            } else {
+                                float broad_r = isl->beach_radius_px + isl->beach_max_bump;
+                                if (dist_sq >= broad_r * broad_r) { entering = false; }
+                                else {
+                                    float angle   = atan2f(dy, dx);
+                                    float narrow_r = island_boundary_r(isl->beach_radius_px,
+                                                                       isl->beach_bumps, angle);
+                                    entering = (dist_sq < narrow_r * narrow_r);
+                                }
+                            }
+                            if (entering) {
+                                ws_player->on_island_id = (uint32_t)isl->id;
+                                ws_player->movement_state = PLAYER_STATE_WALKING;
+                                sim_player->velocity.x = 0;
+                                sim_player->velocity.y = 0;
+                                log_info("\U0001F3DD\uFE0F Player %u stepped onto island %d",
+                                         ws_player->player_id, isl->id);
+                                break;
+                            }
+                        }
+                    } else {
+                        /* Leaving: fallback exit when outside BEACH boundary + 10px hysteresis.
+                           Primary exit is handled inline in the movement block above. */
+                        const IslandDef *isl = NULL;
+                        for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+                            if ((uint32_t)ISLAND_PRESETS[ii].id == ws_player->on_island_id) {
+                                isl = &ISLAND_PRESETS[ii]; break;
+                            }
+                        }
+                        if (isl) {
+                            float dx = wx - isl->x, dy = wy - isl->y;
+                            float dist_sq = dx*dx + dy*dy;
+                            /* Broad phase: skip narrow test if clearly still inside */
+                            bool still_on;
+                            if (isl->vertex_count > 0) {
+                                still_on = island_poly_contains(isl, wx, wy);
+                            } else {
+                                still_on = true;
+                                float inner_r = isl->beach_radius_px - isl->beach_max_bump;
+                                if (dist_sq > inner_r * inner_r) {
+                                    float angle   = atan2f(dy, dx);
+                                    float narrow_r = island_boundary_r(isl->beach_radius_px,
+                                                                       isl->beach_bumps, angle)
+                                                     + 10.0f; /* 10px hysteresis */
+                                    still_on = (dist_sq <= narrow_r * narrow_r);
+                                }
+                            }
+                            if (!still_on) {
+                                    ws_player->on_island_id = 0;
+                                    ws_player->movement_state = PLAYER_STATE_SWIMMING;
+                                    log_info("\U0001F30A Player %u left island", ws_player->player_id);
+                            }
+                            }
+                        }
+                    }
                 } else {
                     // For on-ship players, recalculate world position from local coords
                     // (ship might have moved/rotated since last tick)
@@ -7424,9 +11882,10 @@ void websocket_server_tick(float dt) {
         last_rudder_update = current_time;
     }
     
-    // ===== UPDATE CANNON RELOAD TIMERS =====
-    // Track time since last fire for each cannon
+    // ===== UPDATE CANNON AND SWIVEL RELOAD TIMERS =====
+    // Track time since last fire for each cannon/swivel
     static uint32_t last_cannon_update = 0;
+    static uint32_t last_dot_update = 0;
     
     if (current_time - last_cannon_update >= 100) { // Update every 100ms
         uint32_t time_elapsed = current_time - last_cannon_update;
@@ -7452,8 +11911,586 @@ void websocket_server_tick(float dt) {
                 }
             }
         }
+
+        /* Swivel reload — tick ships[] (SimpleShip); handle_swivel_fire checks this array */
+        for (int s = 0; s < ship_count; s++) {
+            if (!ships[s].active) continue;
+            for (int m = 0; m < ships[s].module_count; m++) {
+                if (ships[s].modules[m].type_id != MODULE_TYPE_SWIVEL) continue;
+                ShipModule* sw = &ships[s].modules[m];
+                if (sw->data.swivel.time_since_fire < sw->data.swivel.reload_time) {
+                    sw->data.swivel.time_since_fire += time_elapsed;
+                    if (sw->data.swivel.time_since_fire > sw->data.swivel.reload_time)
+                        sw->data.swivel.time_since_fire = sw->data.swivel.reload_time;
+                }
+            }
+        }
         
         last_cannon_update = current_time;
+
+        /* ===== FLAME WAVE UPDATE (every 100ms) ===== */
+        /* Advance each active flamethrower wave, apply fire to newly-reached
+         * targets, and broadcast the current wave state to clients for
+         * smooth client-side interpolation. */
+        if (flame_waves_initialized) {
+            const float cos_hc = cosf(FLAME_HALF_CONE);
+            const float dt_s   = (float)time_elapsed / 1000.0f;
+            for (int fi = 0; fi < MAX_FLAME_WAVES; fi++) {
+                FlameWave* fw = &flame_waves[fi];
+                if (!fw->active) continue;
+
+                /* Check staleness — start retreating if no pulse for > FLAME_STALE_MS */
+                uint32_t now_fw2 = get_time_ms();
+                if (!fw->retreating && (now_fw2 - fw->last_fire_ms) > FLAME_STALE_MS) {
+                    fw->retreating   = true;
+                    fw->retreat_dist = 0.0f;
+                }
+
+                /* Advance leading edge */
+                if (!fw->retreating) {
+                    fw->wave_dist += dt_s * FLAME_WAVE_SPEED;
+                    if (fw->wave_dist > FLAME_RANGE) fw->wave_dist = FLAME_RANGE;
+                }
+
+                /* Advance retreat front — faster than advance so flame snaps off */
+                if (fw->retreating) {
+                    fw->retreat_dist += dt_s * FLAME_RETREAT_SPEED;
+                    if (fw->retreat_dist >= FLAME_RANGE) {
+                        /* Fully retreated — deactivate */
+                        fw->active = false;
+                        char dead_msg[128];
+                        snprintf(dead_msg, sizeof(dead_msg),
+                            "{\"type\":\"FLAME_WAVE_UPDATE\",\"cannonId\":%u,\"dead\":true}",
+                            fw->swivel_id);
+                        broadcast_json_all(dead_msg);
+                        continue;
+                    }
+                }
+
+                /* ── Apply fire to targets within the leading wave front ── */
+                if (!fw->retreating) {
+                    float fdir_x = cosf(fw->fire_angle);
+                    float fdir_y = sinf(fw->fire_angle);
+
+                    /* NPCs */
+                    for (int ni = 0; ni < world_npc_count; ni++) {
+                        WorldNpc* npc = &world_npcs[ni];
+                        if (!npc->active) continue;
+                        if (npc->ship_id == fw->ship_id) continue;
+                        if (npc->in_water) continue; /* NPC is in water */
+                        float dx = npc->x - fw->origin_x, dy = npc->y - fw->origin_y;
+                        float dist = sqrtf(dx*dx + dy*dy);
+                        if (dist > fw->wave_dist + 30.0f) continue;
+                        float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
+                        if (dot < cos_hc) continue;
+                        /* Plank-occlusion check: if an intact plank on the NPC's own ship lies
+                         * between the flame origin and the NPC, the plank shields them. */
+                        {
+                            SimpleShip* npc_ship = find_ship_by_id(npc->ship_id);
+                            if (npc_ship && plank_occludes_ray(npc_ship, fw->origin_x, fw->origin_y,
+                                                               npc->x, npc->y)) continue;
+                        }
+                        npc->fire_timer_ms = FIRE_DURATION_MS;
+                        {
+                            char fmsg[256];
+                            snprintf(fmsg, sizeof(fmsg),
+                                "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"npc\",\"id\":%u,"
+                                "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                                npc->id, npc->x, npc->y, FIRE_DURATION_MS);
+                            broadcast_json_all(fmsg);
+                        }
+                    }
+
+                    /* Players */
+                    for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
+                        WebSocketPlayer* wp = &players[wpi];
+                        if (!wp->active) continue;
+                        if (wp->parent_ship_id == fw->ship_id) continue;
+                        if (wp->movement_state == PLAYER_STATE_SWIMMING) continue; /* player is in water */
+                        float dx = wp->x - fw->origin_x, dy = wp->y - fw->origin_y;
+                        float dist = sqrtf(dx*dx + dy*dy);
+                        if (dist > fw->wave_dist + 30.0f) continue;
+                        float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
+                        if (dot < cos_hc) continue;
+                        /* Same plank-occlusion check for players as for NPCs */
+                        {
+                            SimpleShip* pl_ship = find_ship_by_id(wp->parent_ship_id);
+                            if (pl_ship && plank_occludes_ray(pl_ship, fw->origin_x, fw->origin_y,
+                                                              wp->x, wp->y)) continue;
+                        }
+                        wp->fire_timer_ms = FIRE_DURATION_MS;
+                        {
+                            char fmsg[256];
+                            snprintf(fmsg, sizeof(fmsg),
+                                "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"player\",\"id\":%u,"
+                                "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                                wp->player_id, wp->x, wp->y, FIRE_DURATION_MS);
+                            broadcast_json_all(fmsg);
+                        }
+                    }
+
+                    /* Wooden modules — any ship (including firing ship; fire doesn't pick sides) */
+                    const float cos_hc_mod = cosf(FLAME_HALF_CONE_MODULE);
+                    for (int s = 0; s < ship_count; s++) {
+                        if (!ships[s].active) continue;
+                        SimpleShip* fship = &ships[s];
+                        float cos_r = cosf(fship->rotation);
+                        float sin_r = sinf(fship->rotation);
+                        for (int m = 0; m < fship->module_count; m++) {
+                            ShipModule* mod = &fship->modules[m];
+                            ModuleTypeId mt = mod->type_id;
+                            if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK &&
+                                mt != MODULE_TYPE_MAST) continue;
+                            if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
+                            /* Compute world-space module position for the flame check.
+                             * Deck modules use per-zone ignition; other modules use their centre. */
+                            float lx, ly, wx, wy, dist = 0.0f;
+                            if (mt == MODULE_TYPE_DECK) {
+                                /* Test each of the 3 deck zone centres independently.
+                                 * Zone 0 = bow (+160 client), 1 = mid, 2 = stern (-160 client).
+                                 * Bits 11-13 are set for each zone that the flame reaches.
+                                 * A zone is not ignited if an intact plank on fship lies between
+                                 * the flame origin and the zone centre (plank-occlusion rule). */
+                                const float zone_lx3[3] = { 160.0f, 0.0f, -160.0f };
+                                bool any_zone = false;
+                                for (int z = 0; z < 3; z++) {
+                                    float z_wx = fship->x + zone_lx3[z] * cos_r;
+                                    float z_wy = fship->y + zone_lx3[z] * sin_r;
+                                    float zdx = z_wx - fw->origin_x, zdy = z_wy - fw->origin_y;
+                                    float zdist = sqrtf(zdx*zdx + zdy*zdy);
+                                    if (zdist > fw->wave_dist + 40.0f) continue;
+                                    float zdot = (zdist > 0.01f)
+                                        ? (zdx/zdist*fdir_x + zdy/zdist*fdir_y) : 1.0f;
+                                    if (zdot < cos_hc_mod) continue;
+                                    /* Skip if an intact plank blocks flame→zone centre */
+                                    if (plank_occludes_ray(fship, fw->origin_x, fw->origin_y,
+                                                           z_wx, z_wy)) continue;
+                                    mod->state_bits |= (uint16_t)(1u << (11 + z));
+                                    any_zone = true;
+                                }
+                                if (!any_zone) continue;
+                                /* Use ship centre for FIRE_EFFECT position broadcast */
+                                lx = 0.0f; ly = 0.0f;
+                                wx = fship->x; wy = fship->y;
+                            } else {
+                                lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                                ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                                wx = fship->x + (lx * cos_r - ly * sin_r);
+                                wy = fship->y + (lx * sin_r + ly * cos_r);
+                                float dx = wx - fw->origin_x, dy = wy - fw->origin_y;
+                                dist = sqrtf(dx*dx + dy*dy);
+                                if (dist > fw->wave_dist + 40.0f) continue;
+                                float dot = (dist > 0.01f) ? (dx/dist*fdir_x + dy/dist*fdir_y) : 1.0f;
+                                if (dot < cos_hc_mod) continue;
+                                /* Sail fiber plank occlusion: skip if an intact plank
+                                 * lies between the flame origin and the mast centre. */
+                                if (mt == MODULE_TYPE_MAST &&
+                                    plank_occludes_ray(fship, fw->origin_x, fw->origin_y, wx, wy))
+                                    continue;
+                            }
+                            /* Sail fiber ignition: boost intensity on each flame contact */
+                            if (mt == MODULE_TYPE_MAST) {
+                                int ni = (int)mod->data.mast.sail_fire_intensity + 25;
+                                if (ni > 100) ni = 100;
+                                mod->data.mast.sail_fire_intensity = (uint8_t)ni;
+                            }
+                            bool first = (mod->fire_timer_ms == 0);
+                            mod->fire_timer_ms = FIRE_DURATION_MS;
+                            if (global_sim) {
+                                struct Ship* _fss = find_sim_ship(fship->ship_id);
+                                if (_fss) {
+                                    for (uint8_t mi = 0; mi < _fss->module_count; mi++) {
+                                        if (_fss->modules[mi].id == mod->id) {
+                                            _fss->modules[mi].fire_timer_ms = FIRE_DURATION_MS;
+                                            _fss->modules[mi].state_bits    = mod->state_bits;
+                                            if (mod->type_id == MODULE_TYPE_MAST)
+                                                _fss->modules[mi].data.mast.sail_fire_intensity =
+                                                    mod->data.mast.sail_fire_intensity;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            /* Always broadcast FIRE_EFFECT — refreshes client timer on every
+                               flame contact, preventing client/server desync where client timer
+                               expires while server keeps module burning. */
+                            log_info("🔥 Module %u (ship %u type %d) %s by flame wave (dist=%.1f wave=%.1f)",
+                                     mod->id, fship->ship_id, (int)mt,
+                                     first ? "ignited" : "re-ignited", dist, fw->wave_dist);
+                            {
+                                char fmsg[256];
+                                snprintf(fmsg, sizeof(fmsg),
+                                    "{\"type\":\"FIRE_EFFECT\",\"entityType\":\"module\","
+                                    "\"shipId\":%u,\"moduleId\":%u,"
+                                    "\"x\":%.1f,\"y\":%.1f,\"durationMs\":%u}",
+                                    fship->ship_id, mod->id, wx, wy, FIRE_DURATION_MS);
+                                broadcast_json_all(fmsg);
+                            }
+                        }
+                    }
+                } /* end !retreating fire application */
+
+                /* Broadcast current wave state — client interpolates between ticks */
+                {
+                    char state_msg[320];
+                    snprintf(state_msg, sizeof(state_msg),
+                        "{\"type\":\"FLAME_WAVE_UPDATE\","
+                        "\"cannonId\":%u,\"shipId\":%u,"
+                        "\"x\":%.1f,\"y\":%.1f,\"angle\":%.3f,"
+                        "\"halfCone\":%.4f,\"waveDist\":%.1f,"
+                        "\"retreating\":%s,\"retreatDist\":%.1f}",
+                        fw->swivel_id, fw->ship_id,
+                        fw->origin_x, fw->origin_y, fw->fire_angle,
+                        FLAME_HALF_CONE, fw->wave_dist,
+                        fw->retreating ? "true" : "false",
+                        fw->retreat_dist);
+                    broadcast_json_all(state_msg);
+                }
+            }
+        } /* end FLAME WAVE UPDATE */
+
+        /* ===== FIRE DOT TICK (every 500ms, 5x damage per tick = same DPS, fewer broadcasts) ===== */
+        if (current_time - last_dot_update >= 500) {
+        uint32_t dot_elapsed = current_time - last_dot_update;
+        last_dot_update = current_time;
+        /* NPCs on fire: 5 base HP + 1.25% max_health per 500ms tick */
+        for (int ni = 0; ni < world_npc_count; ni++) {
+            WorldNpc* npc = &world_npcs[ni];
+            if (!npc->active || npc->fire_timer_ms == 0) continue;
+            /* Water extinguishes fire — NPC overboard */
+            if (npc->in_water) {
+                npc->fire_timer_ms = 0;
+                char fx[192];
+                snprintf(fx, sizeof(fx),
+                    "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"npc\",\"id\":%u}",
+                    npc->id);
+                broadcast_json_all(fx);
+                continue;
+            }
+            uint16_t npc_fire_dmg = 5u + (uint16_t)(npc->max_health / 80u);
+            if (npc->health > npc_fire_dmg) npc->health -= npc_fire_dmg; else npc->health = 0;
+            if (npc->health == 0) {
+                npc->active = false;
+                npc->fire_timer_ms = 0;
+                char death_msg[192];
+                snprintf(death_msg, sizeof(death_msg),
+                    "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
+                    "\"x\":%.1f,\"y\":%.1f,\"damage\":%u,"
+                    "\"health\":0,\"maxHealth\":%u,\"killed\":true}",
+                    npc->id, npc->x, npc->y, (unsigned)npc_fire_dmg, (unsigned)npc->max_health);
+                char death_frame[256];
+                size_t dfl = websocket_create_frame(WS_OPCODE_TEXT, death_msg, strlen(death_msg), death_frame, sizeof(death_frame));
+                if (dfl > 0) {
+                    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                        struct WebSocketClient* wc = &ws_server.clients[ci];
+                        if (wc->connected && wc->handshake_complete) send(wc->fd, death_frame, dfl, 0);
+                    }
+                }
+                continue;
+            }
+            if (npc->fire_timer_ms > dot_elapsed) {
+                npc->fire_timer_ms -= dot_elapsed;
+            } else {
+                npc->fire_timer_ms = 0;
+                /* Broadcast FIRE_EXTINGUISHED for NPC */
+                char fx[192];
+                snprintf(fx, sizeof(fx),
+                    "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"npc\",\"id\":%u}",
+                    npc->id);
+                char fxf[256];
+                size_t fxfl = websocket_create_frame(WS_OPCODE_TEXT, fx, strlen(fx), fxf, sizeof(fxf));
+                if (fxfl > 0) {
+                    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                        struct WebSocketClient* wc = &ws_server.clients[ci];
+                        if (wc->connected && wc->handshake_complete) send(wc->fd, fxf, fxfl, 0);
+                    }
+                }
+            }
+        }
+
+        /* Players on fire: 5 base HP + 1.25% max_health per 500ms tick */
+        for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
+            WebSocketPlayer* wp = &players[wpi];
+            if (!wp->active || wp->fire_timer_ms == 0) continue;
+            /* Water extinguishes fire — player swimming */
+            if (wp->movement_state == PLAYER_STATE_SWIMMING) {
+                wp->fire_timer_ms = 0;
+                char fx[192];
+                snprintf(fx, sizeof(fx),
+                    "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"player\",\"id\":%u}",
+                    wp->player_id);
+                broadcast_json_all(fx);
+                continue;
+            }
+            uint16_t pl_fire_dmg = 5u + (uint16_t)(wp->max_health / 80u);
+            if (wp->health > pl_fire_dmg) wp->health -= pl_fire_dmg; else wp->health = 0;
+            if (wp->fire_timer_ms > dot_elapsed) {
+                wp->fire_timer_ms -= dot_elapsed;
+            } else {
+                wp->fire_timer_ms = 0;
+                char fx[192];
+                snprintf(fx, sizeof(fx),
+                    "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"player\",\"id\":%u}",
+                    wp->player_id);
+                char fxf[256];
+                size_t fxfl = websocket_create_frame(WS_OPCODE_TEXT, fx, strlen(fx), fxf, sizeof(fxf));
+                if (fxfl > 0) {
+                    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                        struct WebSocketClient* wc = &ws_server.clients[ci];
+                        if (wc->connected && wc->handshake_complete) send(wc->fd, fxf, fxfl, 0);
+                    }
+                }
+            }
+        }
+
+        /* Wooden modules on fire: 50 HP per tick (~500 HP/s, 5000 HP over 10 s) */
+        for (int s = 0; s < ship_count; s++) {
+            if (!ships[s].active) continue;
+            SimpleShip* fship = &ships[s];
+            float cos_r = cosf(fship->rotation);
+            float sin_r = sinf(fship->rotation);
+            for (int m = 0; m < fship->module_count; m++) {
+                ShipModule* mod = &fship->modules[m];
+                if (mod->fire_timer_ms == 0) continue;
+                /* Stop DOT ticking on already-destroyed modules and extinguish
+                   their fire — prevents repeated "destroyed" log spam. */
+                if (mod->state_bits & MODULE_STATE_DESTROYED) {
+                    mod->fire_timer_ms = 0;
+                    continue;
+                }
+                ModuleTypeId mt = mod->type_id;
+                if (mt != MODULE_TYPE_PLANK && mt != MODULE_TYPE_DECK && mt != MODULE_TYPE_MAST) continue;
+
+                /* ── Mast/sail fiber fire: intensity-based system ── */
+                if (mt == MODULE_TYPE_MAST) {
+                    uint8_t intensity = mod->data.mast.sail_fire_intensity;
+                    uint8_t openness  = mod->data.mast.openness;
+                    if (intensity == 0) {
+                        mod->fire_timer_ms = 0;
+                        continue;
+                    }
+                    if (openness == 0) {
+                        /* Furled sails douse the flames: -15 per 500ms tick (~3.3 s to fully extinguish) */
+                        int ni = (int)intensity - 15;
+                        if (ni <= 0) {
+                            mod->data.mast.sail_fire_intensity = 0;
+                            mod->fire_timer_ms = 0;
+                            /* Sync global_sim */
+                            {
+                                struct Ship* _fss = find_sim_ship(fship->ship_id);
+                                if (_fss) {
+                                    for (uint8_t gm = 0; gm < _fss->module_count; gm++) {
+                                        if (_fss->modules[gm].id == mod->id) {
+                                            _fss->modules[gm].data.mast.sail_fire_intensity = 0;
+                                            _fss->modules[gm].fire_timer_ms = 0;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            {
+                                float mx2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                                float my2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                                float mwx = fship->x + (mx2 * cos_r - my2 * sin_r);
+                                float mwy = fship->y + (mx2 * sin_r + my2 * cos_r);
+                                char fx[256];
+                                snprintf(fx, sizeof(fx),
+                                    "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"module\","
+                                    "\"shipId\":%u,\"moduleId\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                    fship->ship_id, mod->id, mwx, mwy);
+                                broadcast_json_all(fx);
+                            }
+                            continue;
+                        }
+                        mod->data.mast.sail_fire_intensity = (uint8_t)ni;
+                    } else {
+                        /* Open sails: intensity creeps up naturally while burning (+2 per 500ms) */
+                        int ni = (int)intensity + 2;
+                        if (ni > 100) ni = 100;
+                        mod->data.mast.sail_fire_intensity = (uint8_t)ni;
+                        mod->fire_timer_ms = FIRE_DURATION_MS; /* keep the flame alive */
+                    }
+                    /* Fiber damage: base DOT scaled by current intensity (0-100%) */
+                    float fh    = Q16_TO_FLOAT(mod->data.mast.fiber_health);
+                    float fhmax = Q16_TO_FLOAT(mod->data.mast.fiber_max_health);
+                    float fiber_dot = (37.5f + fhmax * 0.00625f)
+                                    * ((float)mod->data.mast.sail_fire_intensity / 100.0f);
+                    fh -= fiber_dot;
+                    if (fh < 0.0f) fh = 0.0f;
+                    mod->data.mast.fiber_health    = Q16_FROM_FLOAT(fh);
+                    mod->data.mast.wind_efficiency = (fhmax > 0.0f)
+                        ? Q16_FROM_FLOAT(fh / fhmax) : 0;
+                    /* Sync global_sim mast data */
+                    {
+                        struct Ship* _fss = find_sim_ship(fship->ship_id);
+                        if (_fss) {
+                            for (uint8_t gm = 0; gm < _fss->module_count; gm++) {
+                                if (_fss->modules[gm].id == mod->id) {
+                                    _fss->modules[gm].data.mast.fiber_health       = mod->data.mast.fiber_health;
+                                    _fss->modules[gm].data.mast.wind_efficiency    = mod->data.mast.wind_efficiency;
+                                    _fss->modules[gm].data.mast.sail_fire_intensity = mod->data.mast.sail_fire_intensity;
+                                    _fss->modules[gm].fire_timer_ms                = mod->fire_timer_ms;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    /* Broadcast per-tick sail fiber fire update */
+                    {
+                        float mx2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                        float my2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                        float mwx = fship->x + (mx2 * cos_r - my2 * sin_r);
+                        float mwy = fship->y + (mx2 * sin_r + my2 * cos_r);
+                        char dmsg[256];
+                        snprintf(dmsg, sizeof(dmsg),
+                            "{\"type\":\"SAIL_FIBER_FIRE\",\"shipId\":%u,\"moduleId\":%u,"
+                            "\"intensity\":%u,\"fiberHealth\":%.0f,\"windEff\":%.3f,"
+                            "\"x\":%.1f,\"y\":%.1f}",
+                            fship->ship_id, mod->id,
+                            (unsigned)mod->data.mast.sail_fire_intensity,
+                            fh, Q16_TO_FLOAT(mod->data.mast.wind_efficiency),
+                            mwx, mwy);
+                        broadcast_json_all(dmsg);
+                    }
+                    /* Tick the fire timer normally */
+                    if (mod->fire_timer_ms > dot_elapsed) {
+                        mod->fire_timer_ms -= dot_elapsed;
+                    } else {
+                        /* Timer expired without fresh flame contact — extinguish */
+                        mod->fire_timer_ms = 0;
+                        mod->data.mast.sail_fire_intensity = 0;
+                        {
+                            struct Ship* _fss = find_sim_ship(fship->ship_id);
+                            if (_fss) {
+                                for (uint8_t gm = 0; gm < _fss->module_count; gm++) {
+                                    if (_fss->modules[gm].id == mod->id) {
+                                        _fss->modules[gm].data.mast.sail_fire_intensity = 0;
+                                        _fss->modules[gm].fire_timer_ms = 0;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue; /* skip generic plank/deck path below */
+                }
+
+                /* Apply 7.5 base + 0.125% of max_health per 100ms tick.
+                 * mod->health is a raw integer (not Q16-scaled), so compute
+                 * DOT as a plain integer too — do NOT use Q16_FROM_FLOAT here. */
+                q16_t fire_dot = (q16_t)(37.5f + (float)mod->max_health * 0.00625f);
+                /* Deck: scale damage by the number of burning zones (1 – 3×). */
+                if (mt == MODULE_TYPE_DECK) {
+                    uint8_t zones = (uint8_t)(((mod->state_bits >> 11) & 1u)
+                                           + ((mod->state_bits >> 12) & 1u)
+                                           + ((mod->state_bits >> 13) & 1u));
+                    if (zones > 1) fire_dot = (q16_t)(fire_dot * zones);
+                }
+                module_apply_damage(mod, fire_dot);
+
+                /* Sync updated health/state back to global_sim Ship module so that
+                 * GAME_STATE (which reads from sim->ships[]) broadcasts the correct value.
+                 * SimpleShip and Ship are separate structs; fire DOT only writes to SimpleShip. */
+                {
+                    struct Ship* _fss = find_sim_ship(fship->ship_id);
+                    if (_fss) {
+                        for (uint8_t gm = 0; gm < _fss->module_count; gm++) {
+                            if (_fss->modules[gm].id == mod->id) {
+                                _fss->modules[gm].health     = mod->health;
+                                _fss->modules[gm].state_bits = mod->state_bits;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                /* Broadcast damage tick so client sees health decreasing. */
+                {
+                    float lx2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                    float ly2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                    float wx2 = fship->x + (lx2 * cos_r - ly2 * sin_r);
+                    float wy2 = fship->y + (lx2 * sin_r + ly2 * cos_r);
+                    char dmsg[256];
+                    bool destroyed_now = (mod->state_bits & MODULE_STATE_DESTROYED) != 0;
+                    uint32_t mod_id_saved = mod->id; /* save before potential memmove */
+                    if (destroyed_now) {
+                        /* Module burnt out — remove from ship and broadcast destruction */
+                        if (mt == MODULE_TYPE_PLANK || mt == MODULE_TYPE_DECK) {
+                            /* Remove plank/deck from SimpleShip (same as cannon projectile path) */
+                            for (int rm = 0; rm < fship->module_count; rm++) {
+                                if (fship->modules[rm].id == mod_id_saved) {
+                                    memmove(&fship->modules[rm], &fship->modules[rm + 1],
+                                            (fship->module_count - rm - 1) * sizeof(ShipModule));
+                                    fship->module_count--;
+                                    mod = NULL; /* pointer now stale */
+                                    break;
+                                }
+                            }
+                            snprintf(dmsg, sizeof(dmsg),
+                                "{\"type\":\"PLANK_HIT\",\"shipId\":%u,\"plankId\":%u,"
+                                "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                                fship->ship_id, mod_id_saved, (float)fire_dot, wx2, wy2);
+                        } else {
+                            snprintf(dmsg, sizeof(dmsg),
+                                "{\"type\":\"MODULE_HIT\",\"shipId\":%u,\"moduleId\":%u,"
+                                "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                                fship->ship_id, mod_id_saved, (float)fire_dot, wx2, wy2);
+                        }
+                    } else {
+                        if (mt == MODULE_TYPE_PLANK || mt == MODULE_TYPE_DECK) {
+                            snprintf(dmsg, sizeof(dmsg),
+                                "{\"type\":\"PLANK_DAMAGED\",\"shipId\":%u,\"plankId\":%u,"
+                                "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                                fship->ship_id, mod->id, (float)fire_dot, wx2, wy2);
+                        } else {
+                            snprintf(dmsg, sizeof(dmsg),
+                                "{\"type\":\"MODULE_DAMAGED\",\"shipId\":%u,\"moduleId\":%u,"
+                                "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
+                                fship->ship_id, mod->id, (float)fire_dot, wx2, wy2);
+                        }
+                    }
+                    broadcast_json_all(dmsg);
+                    /* Destroyed modules get their fire timer cleared and we skip to next */
+                    if (!mod || (mod->state_bits & MODULE_STATE_DESTROYED)) {
+                        if (mod) mod->fire_timer_ms = 0;
+                        continue;
+                    }
+                }
+
+                /* Tick module fire timer */
+                bool extinguished = false;
+                if (mod->fire_timer_ms > dot_elapsed) {
+                    mod->fire_timer_ms -= dot_elapsed;
+                } else {
+                    mod->fire_timer_ms = 0;
+                    extinguished = true;
+                }
+                if (extinguished) {
+                    /* Clear deck zone bits that accumulated during this burn */
+                    if (mt == MODULE_TYPE_DECK) {
+                        mod->state_bits &= (uint16_t)~((1u<<11)|(1u<<12)|(1u<<13));
+                    }
+                    float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                    float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                    float wx = fship->x + (lx * cos_r - ly * sin_r);
+                    float wy = fship->y + (lx * sin_r + ly * cos_r);
+                    char fx[256];
+                    snprintf(fx, sizeof(fx),
+                        "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"module\","
+                        "\"shipId\":%u,\"moduleId\":%u,\"x\":%.1f,\"y\":%.1f}",
+                        fship->ship_id, mod->id, wx, wy);
+                    char fxf[320];
+                    size_t fxfl = websocket_create_frame(WS_OPCODE_TEXT, fx, strlen(fx), fxf, sizeof(fxf));
+                    if (fxfl > 0) {
+                        for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                            struct WebSocketClient* wc = &ws_server.clients[ci];
+                            if (wc->connected && wc->handshake_complete) send(wc->fd, fxf, fxfl, 0);
+                        }
+                    }
+                }
+            }
+        }
+        } /* end FIRE DOT TICK 500ms */
     }
     
     // ===== APPLY WIND-BASED SHIP MOVEMENT =====

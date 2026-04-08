@@ -385,6 +385,9 @@ export class ModuleInteractionSystem {
           case 'mast':
             this.updateMastModule(module, deltaTime);
             break;
+          case 'swivel':
+            this.updateSwivelModule(module, deltaTime);
+            break;
           // Add other module types as needed
         }
       }
@@ -412,5 +415,26 @@ export class ModuleInteractionSystem {
     // Update sail state transitions
     // (For now, sail state is controlled directly by input)
     // Future: Add animated transitions between sail states
+  }
+
+  private updateSwivelModule(module: ShipModule, deltaTime: number): void {
+    if (!module.moduleData || module.moduleData.kind !== 'swivel') return;
+    
+    const swivelData = module.moduleData as any;
+    
+    // Track reload timer (skeleton — firing not yet implemented)
+    if (swivelData.timeSinceLastFire !== undefined &&
+        swivelData.reloadTime !== undefined &&
+        swivelData.timeSinceLastFire < swivelData.reloadTime) {
+      swivelData.timeSinceLastFire += deltaTime;
+    }
+
+    // Interpolate aim direction toward desired direction (skeleton)
+    if (swivelData.desiredAimDirection !== undefined) {
+      const maxAimSpeed = Math.PI * 2; // 360 deg/s — fast swivel
+      const diff = swivelData.desiredAimDirection - (swivelData.aimDirection || 0);
+      const step = Math.max(-maxAimSpeed * deltaTime, Math.min(maxAimSpeed * deltaTime, diff));
+      swivelData.aimDirection = (swivelData.aimDirection || 0) + step;
+    }
   }
 }

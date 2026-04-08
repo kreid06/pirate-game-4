@@ -97,6 +97,13 @@ export class ModuleSerialization {
           ammunition: data.ammunition,
           timeSinceLastFire: data.timeSinceLastFire
         };
+
+      case 'swivel':
+        return {
+          aimDirection: data.aimDirection,
+          desiredAimDirection: data.desiredAimDirection,
+          timeSinceLastFire: data.timeSinceLastFire
+        };
       
       case 'mast':
         return {

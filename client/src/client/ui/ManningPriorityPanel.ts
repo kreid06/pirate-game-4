@@ -10,17 +10,17 @@
 
 import { Npc } from '../../sim/Types.js';
 
-export type ManningTask = 'Sails' | 'Cannons' | 'Repairs' | 'Combat';
+export type ManningTask = 'Sails' | 'Gunners' | 'Repairs' | 'Combat';
 
 /** NPC state constants (mirror server WorldNpcState) */
-const NPC_STATE_AT_CANNON = 2;
+const NPC_STATE_AT_GUN = 2;
 const NPC_STATE_REPAIRING = 3;
 
 const TASK_COLORS: Record<ManningTask, string> = {
   Sails:   '#5aafff',
-  Cannons: '#ffaa44',
+  Gunners: '#ffaa44',
   Repairs: '#55dd66',
-  Combat:  '#ff5555',
+  Combat:  '#aa44ff',
 };
 
 interface HitArea {
@@ -30,13 +30,13 @@ interface HitArea {
 
 export class ManningPriorityPanel {
   // Mutable priority order (index 0 = highest priority)
-  private priorityOrder: ManningTask[] = ['Sails', 'Cannons', 'Repairs', 'Combat'];
+  private priorityOrder: ManningTask[] = ['Sails', 'Gunners', 'Repairs', 'Combat'];
 
   // Explicit NPC ID lists per task. The only way an NPC enters a task is via + picking
   // from the idle pool. The only way it leaves is via −. Never implicitly re-allocated.
   private taskNpcs: Map<ManningTask, number[]> = new Map([
     ['Sails',   []],
-    ['Cannons', []],
+    ['Gunners', []],
     ['Repairs', []],
     ['Combat',  []],
   ]);
@@ -49,6 +49,7 @@ export class ManningPriorityPanel {
   private lastSentAssignment: Map<number, string> = new Map();
   private _currentShipId = 0;
   private _currentNpcs: Npc[] = [];
+  private _localCompanyId = 0;
 
   /**
    * Fires whenever assignments change. Carries the full list of {npcId, task} including
@@ -65,23 +66,24 @@ export class ManningPriorityPanel {
    * Seeds the task panel from the authoritative NPC states already in the world state
    * so the UI reflects reality instead of stale assignments from the previous ship.
    */
-  syncFromBoarding(npcs: Npc[], shipId: number): void {
+  syncFromBoarding(npcs: Npc[], shipId: number, localCompanyId: number = 0): void {
     this._currentShipId = shipId;
+    this._localCompanyId = localCompanyId;
     this.lastSentAssignment.clear();
     for (const list of this.taskNpcs.values()) list.length = 0;
     this.lastTaskMap.clear();
     if (shipId === 0) return;
 
-    const shipNpcs = npcs.filter(n => n.shipId === shipId);
+    const shipNpcs = npcs.filter(n => n.shipId === shipId && n.companyId === localCompanyId);
 
     // Seed task lists from the server-authoritative NPC role field.
-    // role 1 = Gunner  → Cannons
+    // role 1 = Gunner  → Gunners
     // role 3 = Rigger  → Sails
     // role 4 = Repairer → Repairs
     // role 0/2 (None/Helmsman) → unassigned/Idle
     for (const npc of shipNpcs) {
       if (npc.role === 1) {
-        this.taskNpcs.get('Cannons')?.push(npc.id);
+        this.taskNpcs.get('Gunners')?.push(npc.id);
       } else if (npc.role === 3) {
         this.taskNpcs.get('Sails')?.push(npc.id);
       } else if (npc.role === 4) {
@@ -131,7 +133,7 @@ export class ManningPriorityPanel {
    * @param npcs  Full NPC list from WorldState (will be filtered to shipId)
    * @param shipId  Player's current ship. Pass 0 when not aboard — hides panel.
    */
-  render(ctx: CanvasRenderingContext2D, npcs: Npc[], shipId: number): void {
+  render(ctx: CanvasRenderingContext2D, npcs: Npc[], shipId: number, localCompanyId: number = 0): void {
     this.hitAreas = [];
     if (shipId === 0) return; // Not on a ship — nothing to manage
 
@@ -143,6 +145,7 @@ export class ManningPriorityPanel {
     }
     this._currentShipId = shipId;
     this._currentNpcs = npcs;
+    this._localCompanyId = localCompanyId;
 
     const tasks = this.priorityOrder;
     const { PX: px, PY: py, PW: pw, HEADER_H, ROW_H } = this;
@@ -169,9 +172,9 @@ export class ManningPriorityPanel {
     ctx.textBaseline = 'middle';
     ctx.fillText('CREW PRIORITY', px + pw / 2, py + HEADER_H / 2);
 
-    // ---- NPC pool: sort by ID (stable) ----
+    // ---- NPC pool: sort by ID (stable), same company only ----
     const shipNpcs = npcs
-      .filter(n => n.shipId === shipId)
+      .filter(n => n.shipId === shipId && n.companyId === localCompanyId)
       .sort((a, b) => a.id - b.id);
 
     // Prune stale NPC IDs (left ship / disconnected)
@@ -181,6 +184,48 @@ export class ManningPriorityPanel {
         if (!shipNpcIdSet.has(list[i])) list.splice(i, 1);
       }
     }
+
+    // ── Server-role reconciliation ──────────────────────────────────────────
+    // Sync taskNpcs with the broadcast npc.role so that npc_goto_module changes
+    // are reflected immediately without waiting for + / - button presses.
+    // Mapping: role 1 (GUNNER) → Gunners, role 3 (RIGGER) → Sails,
+    //          role 4 (REPAIRER) → Repairs, role 0/2 → Idle (no task pin).
+    const ROLE_TO_TASK: Record<number, ManningTask | null> = {
+      0: null,  // NONE    → Idle
+      1: 'Gunners',
+      2: null,  // HELMSMAN → not tracked in panel
+      3: 'Sails',
+      4: 'Repairs',
+    };
+    for (const npc of shipNpcs) {
+      const desiredTask = ROLE_TO_TASK[npc.role] ?? null;
+
+      // Determine which task (if any) the NPC is currently pinned to
+      let currentTask: ManningTask | null = null;
+      for (const [t, ids] of this.taskNpcs) {
+        if (ids.includes(npc.id)) { currentTask = t; break; }
+      }
+
+      if (desiredTask === null) {
+        // Role is NONE / HELMSMAN — ensure the NPC is not pinned to any task
+        if (currentTask !== null) {
+          const list = this.taskNpcs.get(currentTask)!;
+          list.splice(list.indexOf(npc.id), 1);
+          // Mark as Idle in sent-state so the panel won't re-send a crew_assign
+          this.lastSentAssignment.set(npc.id, 'Idle');
+        }
+      } else if (currentTask !== desiredTask) {
+        // Role changed to a different task — move the pin
+        if (currentTask !== null) {
+          const oldList = this.taskNpcs.get(currentTask)!;
+          oldList.splice(oldList.indexOf(npc.id), 1);
+        }
+        this.taskNpcs.get(desiredTask)!.push(npc.id);
+        // Silence the delta-send so we don't echo back what the server already did
+        this.lastSentAssignment.set(npc.id, desiredTask);
+      }
+    }
+    // ── end reconciliation ──────────────────────────────────────────────────
 
     const assignments = this.computeAssignments(shipNpcs);
 
@@ -241,7 +286,7 @@ export class ManningPriorityPanel {
       // ---- Assigned NPC chips (small text row) ----
       if (assignedNpcs.length > 0) {
         const chipParts = assignedNpcs.map(n => {
-          const avail = n.state !== NPC_STATE_AT_CANNON && n.state !== NPC_STATE_REPAIRING;
+          const avail = n.state !== NPC_STATE_AT_GUN && n.state !== NPC_STATE_REPAIRING;
           return `#${n.id}${avail ? '' : '●'}`;
         });
         ctx.fillStyle = 'rgba(200,220,255,0.65)';
@@ -312,14 +357,14 @@ export class ManningPriorityPanel {
 
   private increment(task: ManningTask): void {
     const shipNpcs = this._currentNpcs
-      .filter(n => n.shipId === this._currentShipId)
+      .filter(n => n.shipId === this._currentShipId && n.companyId === this._localCompanyId)
       .sort((a, b) => a.id - b.id);
     const assigned = new Set(Array.from(this.taskNpcs.values()).flat());
     // Only pick from genuinely idle NPCs — never steal from another task
     const idle = shipNpcs.filter(n => !assigned.has(n.id));
     if (idle.length === 0) return;
     // Prefer a non-stationed NPC (state !== AT_CANNON/REPAIRING) to avoid interrupting active work
-    const pick = idle.find(n => n.state !== NPC_STATE_AT_CANNON && n.state !== NPC_STATE_REPAIRING) ?? idle[0];
+    const pick = idle.find(n => n.state !== NPC_STATE_AT_GUN && n.state !== NPC_STATE_REPAIRING) ?? idle[0];
     this.taskNpcs.get(task)!.push(pick.id);
     this.notifyAssignment();
   }
@@ -335,7 +380,7 @@ export class ManningPriorityPanel {
     if (!this.onAssignmentChanged || this._currentShipId === 0) return;
     // Use the same stable ID-only sort so computed assignments match the displayed panel
     const shipNpcs = this._currentNpcs
-      .filter(n => n.shipId === this._currentShipId)
+      .filter(n => n.shipId === this._currentShipId && n.companyId === this._localCompanyId)
       .sort((a, b) => a.id - b.id);
     const assignments = this.computeAssignments(shipNpcs);
 

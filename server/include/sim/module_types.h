@@ -8,6 +8,10 @@
 /** Cannon reload time: shared by all sources so every cannon reloads identically. */
 #define CANNON_RELOAD_TIME_MS 3000
 
+/** Swivel gun reload time: faster than cannon, anti-personnel weapon. */
+#define SWIVEL_RELOAD_TIME_MS   1200
+#define SWIVEL_FLAME_INTERVAL_MS  200  /* Liquid flame stream: ms between shots */
+
 /**
  * Module Type IDs - matches client ModuleTypeId enum
  * These are used for efficient network serialization
@@ -21,6 +25,7 @@ typedef enum {
     MODULE_TYPE_LADDER = 5,         // Boarding ladder
     MODULE_TYPE_PLANK = 6,          // Hull segment
     MODULE_TYPE_DECK = 7,           // Floor surface
+    MODULE_TYPE_SWIVEL = 8,         // Swivel gun — fast, low-damage, anti-personnel
     MODULE_TYPE_CUSTOM = 255        // User-defined
 } ModuleTypeId;
 
@@ -39,9 +44,17 @@ typedef enum {
     MODULE_STATE_REPAIRING = (1 << 8),   // Repair has been initiated (enables passive regen)
     /** Cannon needs a gunner: player is aiming at it but no crew is stationed.
      *  Set by handle_cannon_aim() on the SimpleShip module; cleared when an NPC
-     *  arrives at AT_CANNON.  NPCs treat NEEDED cannons as their top-priority
+     *  arrives at AT_GUN.  NPCs treat NEEDED cannons as their top-priority
      *  destination regardless of weapon-group membership. */
-    MODULE_STATE_NEEDED = (1 << 9)
+    MODULE_STATE_NEEDED = (1 << 9),
+    /** Set by toggle_ladder: ladder is pulled up and cannot be climbed. */
+    MODULE_STATE_RETRACTED = (1 << 10),
+    /** Deck fire zones (bits 11-13): each bit marks one third of the deck as burning.
+     *  Zone 0 = bow (+160 client), Zone 1 = mid (0), Zone 2 = stern (-160 client).
+     *  Set by the flame-wave loop; cleared when the deck fire extinguishes. */
+    MODULE_STATE_DECK_ZONE0 = (1 << 11),
+    MODULE_STATE_DECK_ZONE1 = (1 << 12),
+    MODULE_STATE_DECK_ZONE2 = (1 << 13)
 } ModuleStateBits;
 
 /**
@@ -64,6 +77,7 @@ typedef struct {
     q16_t wind_efficiency;      // Current wind capture efficiency (derived from fiber_health)
     q16_t fiber_health;         // Sail cloth HP — same base as mast pole (15000)
     q16_t fiber_max_health;     // Sail cloth max HP
+    uint8_t sail_fire_intensity; // 0-100: fiber fire intensity (0=not burning, 100=fully engulfed)
 } MastModuleData;
 
 /**
@@ -89,6 +103,18 @@ typedef struct {
 } PlankModuleData;
 
 /**
+ * Swivel gun — fast, low-damage, anti-personnel weapon mounted at ship edges.
+ */
+typedef struct {
+    q16_t aim_direction;         // Current aim direction (ship-relative, radians)
+    q16_t desired_aim_direction; // Target aim direction
+    uint32_t time_since_fire;    // Time since last fire (ms)
+    uint32_t reload_time;        // Reload time (ms) — defaults to SWIVEL_RELOAD_TIME_MS
+    uint8_t  loaded_ammo;        // Currently loaded ammo type (0=cannonball, 1=grapeshot)
+    uint8_t  _pad[3];            // Alignment padding
+} SwivelModuleData;
+
+/**
  * Generic ship module structure
  */
 typedef struct {
@@ -110,7 +136,11 @@ typedef struct {
         HelmModuleData helm;
         SeatModuleData seat;
         PlankModuleData plank;
+        SwivelModuleData swivel;
     } data;
+
+    // Status effects (separate from type-specific data)
+    uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
 } ShipModule;
 
 /**

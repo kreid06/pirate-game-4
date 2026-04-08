@@ -22,6 +22,8 @@ import { PhysicsConfig } from '../sim/Types.js';
 
 // UI System
 import { UIManager } from './ui/UIManager.js';
+import { RadialMenu } from './ui/RadialMenu.js';
+import { CraftingMenu } from './ui/CraftingMenu.js';
 
 // Audio System
 import { AudioManager } from './audio/AudioManager.js';
@@ -87,7 +89,7 @@ export class ClientApplication {
 
   // Explicit build mode (B key) — independent of hotbar item build modes
   private explicitBuildMode = false;
-  private buildSelectedItem: 'cannon' | 'sail' = 'cannon';
+  private buildSelectedItem: 'cannon' | 'sail' | 'swivel' = 'cannon';
   private buildRotationDeg = 0;
 
   // Ghost placement system — B key opens build menu, player places planning markers
@@ -116,6 +118,38 @@ export class ClientApplication {
   // Timing
   private running = false;
   private lastFrameTime = 0;
+  /** Timestamp (ms) of the last sword attack sent to the server — enforces client-side cooldown matching the server's 600ms. */
+  private lastSwordSwingMs = 0;
+  private readonly SWORD_COOLDOWN_MS = 600;
+  /** E-hold interaction state — covers ladders and mountable modules. */
+  private _ladderHoldTimer: ReturnType<typeof setTimeout> | null = null;
+  private _suppressLadderInteract = false;
+  private _ladderHoldModuleId: number | null = null;
+  private _ladderHoldIsExtended = false;
+  /** True if player was on the ladder's ship when E was pressed. */
+  private _ladderHoldOnShip = false;
+  /** What kind of module the current E-hold targets: 'ladder' | 'mount' | 'npc' | 'structure' | null */
+  private _interactKind: 'ladder' | 'mount' | 'npc' | 'structure' | null = null;
+  /** Placed-structure id locked in at E-keydown for the structure interact path. */
+  private _hoveredStructureId: number | null = null;
+  /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | null = null;
+  /** True when the E-hold was started while the player was already mounted (dismount path). */
+  private _ladderHoldWasMounted = false;
+  /** Ship ID that owns the locked-in module (for keyup range validation). */
+  private _ladderHoldShipId: number | null = null;
+  /** NPC id locked in at E-keydown for the NPC radial interact path. */
+  private _npcInteractId: number | null = null;
+  /** NPC id for the pending "Move To" targeting mode (ctrl+click → Move To → click module). */
+  private _moveToNpcId: number | null = null;
+  /** Screen-space position to flash once the server confirms (or rejects) a goto-module command. */
+  private _pendingModuleFlashPos: Vec2 | null = null;
+  /** Generic radial action menu instance (rendered by RenderSystem). */
+  private _radialMenu = new RadialMenu();
+  /** Crafting panel opened when the player presses E near a workbench. */
+  private craftingMenu = new CraftingMenu();
+  /** True when the player's active slot is wooden_floor or workbench on an island. */
+  private islandBuildMode = false;
   private accumulator = 0;
   private readonly clientTickDuration: number; // milliseconds per client tick
   
@@ -124,6 +158,8 @@ export class ClientApplication {
   private fpsTimer = 0;
   private currentFPS = 0;
   private lastRenderLogTime = 0;
+  /** Timestamp (ms) of the last sword swing, for cursor cooldown ring. */
+  private swordLastAttackMs = 0;
   
   constructor(canvas: HTMLCanvasElement, config: ClientConfig) {
     this.canvas = canvas;
@@ -150,6 +186,7 @@ export class ClientApplication {
       // Initialize Graphics System
       this.renderSystem = new RenderSystem(this.canvas, this.config.graphics);
       await this.renderSystem.initialize();
+      this.renderSystem.setRadialMenu(this._radialMenu);
       
       // Initialize Network System
       this.networkManager = new NetworkManager(this.config.network);
@@ -192,6 +229,10 @@ export class ClientApplication {
           if (hitMod?.kind === 'mast') {
             this.renderSystem.spawnSailFiberEffect(Vec2.from(worldX, worldY), 2.0);
           }
+          // Hull/plank or cannon destruction: big explosion burst
+          if (hitMod?.kind === 'plank' || hitMod?.kind === 'cannon') {
+            this.renderSystem.spawnExplosion(Vec2.from(worldX, worldY), 1.2);
+          }
         }
 
         // Remove the destroyed module immediately from world state so it disappears
@@ -205,7 +246,8 @@ export class ClientApplication {
         }
       };
       this.networkManager.onModuleDamaged = (shipId, moduleId, damage, hitX, hitY) => {
-        // Non-fatal hit — spawn damage number but keep the module alive
+        // Visual effects only — health is authoritative from server GAME_STATE updates
+        console.log(`🎨 onModuleDamaged callback: ship ${shipId} module ${moduleId} damage ${damage} at (${hitX}, ${hitY})`);
         let worldX: number | null = (hitX !== undefined) ? hitX : null;
         let worldY: number | null = (hitY !== undefined) ? hitY : null;
 
@@ -225,6 +267,13 @@ export class ClientApplication {
 
         if (worldX !== null && worldY !== null) {
           this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage, false);
+          // Impact explosion for hull/plank and cannon hits
+          const hitShipDmg = ws?.ships.find(s => s.id === shipId);
+          const hitModDmg  = hitShipDmg?.modules.find(m => m.id === moduleId);
+          // moduleId === 0 → direct hull hit (no specific module); always show explosion
+          if (moduleId === 0 || hitModDmg?.kind === 'plank' || hitModDmg?.kind === 'cannon') {
+            this.renderSystem.spawnExplosion(Vec2.from(worldX, worldY), 0.5);
+          }
           // If the hit module is a mast, spawn sail fiber shred particles
           const ship = ws?.ships.find(s => s.id === shipId);
           const mod  = ship?.modules.find(m => m.id === moduleId);
@@ -243,18 +292,45 @@ export class ClientApplication {
         // Trigger the client-side fade animation immediately when the server enters sinking state
         this.renderSystem.markShipSinking(shipId);
 
-        // Dismount the local player if they were on this ship
+        // Single declaration shared by announcement and dismount logic
         const myPlayerId = this.networkManager.getAssignedPlayerId();
+
+        // Announcement banner — distinguish own ship vs enemy
+        const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        const myPlayer    = myPlayerId !== null ? ws?.players.find(p => p.id === myPlayerId) : null;
+        const sinkingShip = ws?.ships.find(s => s.id === shipId);
+        if (sinkingShip) {
+          const FACTION: Record<number, string> = { 0: 'Neutral', 1: 'Pirates', 2: 'Navy', 99: 'Phantom Brig' };
+          const shipLabel = (s: Ship) => FACTION[s.companyId] ?? `Ship #${s.id}`;
+          const sinkLabel  = shipLabel(sinkingShip);
+          const isOwnShip  = myPlayer?.carrierId === shipId;
+          if (isOwnShip) {
+            const attackerId = this.renderSystem.getLastAttackerOf(shipId);
+            const attacker   = attackerId !== null ? ws?.ships.find(s => s.id === attackerId) : null;
+            const msg = attacker
+              ? `Your ${sinkLabel} was sunk by ${shipLabel(attacker)}`
+              : `Your s${sinkLabel} was sunk!`;
+            this.renderSystem.showAnnouncement(msg, 'ship_sink', 4.0);
+          } else {
+            const myShip  = myPlayer?.carrierId ? ws?.ships.find(s => s.id === myPlayer!.carrierId) : null;
+            const myLabel = myShip ? shipLabel(myShip) : 'Our ship';
+            this.renderSystem.showAnnouncement(`Your ${myLabel} sunk ${sinkLabel}`, 'ship_sink', 4.0);
+          }
+        }
+
+        // Dismount the local player only if they were on THIS sinking ship
         if (myPlayerId !== null) {
-          for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
-            if (!ws) continue;
-            const me = ws.players.find(p => p.id === myPlayerId);
+          let wasOnSinkingShip = false;
+          for (const wsState of [this.authoritativeWorldState, this.predictedWorldState]) {
+            if (!wsState) continue;
+            const me = wsState.players.find(p => p.id === myPlayerId);
             if (me && me.carrierId === shipId) {
               me.isMounted = false;
               me.mountedModuleId = undefined;
+              wasOnSinkingShip = true;
             }
           }
-          if (this.inputManager) {
+          if (wasOnSinkingShip && this.inputManager) {
             this.inputManager.setMountState(false);
           }
         }
@@ -279,6 +355,47 @@ export class ClientApplication {
       // updates the player's carrierId.
       this.networkManager.onPlayerBoarded = (shipId) => {
         this.pendingGroupShipId = shipId;
+      };
+
+      this.networkManager.onHarvestResult = (success, wood, reason) => {
+        if (success) {
+          this.renderSystem.showAnnouncement(`🪓 Harvested  +${wood} wood`, 'info', 2.5);
+        } else {
+          const msg: Record<string, string> = {
+            need_axe:        'Equip the axe to chop trees',
+            too_far:         'Move closer to a tree',
+            not_on_island:   'You must be on an island',
+            inventory_full:  'Inventory is full',
+          };
+          this.renderSystem.showAnnouncement(`🪓 ${msg[reason] ?? 'Cannot harvest right now'}`, 'info', 2.0);
+        }
+      };
+
+      this.networkManager.onFiberHarvestResult = (success, fiber, reason) => {
+        if (success) {
+          this.renderSystem.showAnnouncement(`🌿 Gathered  +${fiber} fiber`, 'info', 2.5);
+        } else {
+          const msg: Record<string, string> = {
+            too_far:        'Move closer to a plant',
+            not_on_island:  'You must be on an island',
+            inventory_full: 'Inventory is full',
+          };
+          this.renderSystem.showAnnouncement(`🌿 ${msg[reason] ?? 'Cannot gather right now'}`, 'info', 2.0);
+        }
+      };
+
+      this.networkManager.onRockHarvestResult = (success, metal, reason) => {
+        if (success) {
+          this.renderSystem.showAnnouncement(`⛏ Mined  +${metal} metal`, 'info', 2.5);
+        } else {
+          const msg: Record<string, string> = {
+            need_pickaxe:   'Equip the pickaxe to mine rocks',
+            too_far:        'Move closer to a rock',
+            not_on_island:  'You must be on an island',
+            inventory_full: 'Inventory is full',
+          };
+          this.renderSystem.showAnnouncement(`⛏ ${msg[reason] ?? 'Cannot mine right now'}`, 'info', 2.0);
+        }
       };
 
       // Authoritative per-ship weapon group state from server
@@ -341,6 +458,49 @@ export class ClientApplication {
         this.networkManager.sendRotationUpdate(rotation);
       };
       this.inputManager.onActionEvent = (action, target) => {
+        // ── Move To targeting mode — intercept the next left-click to dispatch an NPC ──
+        if (action === 'attack' && this._moveToNpcId !== null) {
+          const moveNpcId = this._moveToNpcId;
+          this._moveToNpcId = null;
+          this.renderSystem.clearMoveToHint(); // also clears _moveToSourceNpcId
+
+          const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+          const flashPos = this.inputManager.getMouseScreenPosition();
+
+          // Priority 1: specific module hovered — most precise command
+          // Flash is deferred: server checks occupancy and responds with ok/reject.
+          const hovMod = this.renderSystem.getHoveredModule();
+          if (hovMod) {
+            this._pendingModuleFlashPos = flashPos;
+            this.networkManager.sendNpcGotoModule(moveNpcId, hovMod.module.id);
+            console.log(`📍 NPC ${moveNpcId} → module ${hovMod.module.id}`);
+            return;
+          }
+
+          // Priority 2: click landed on a ship hull (board / walk to deck position)
+          if (target && ws) {
+            const targetShip = this.findShipAtWorldPos(target, ws);
+            if (targetShip) {
+              this.networkManager.sendNpcMoveToPos(moveNpcId, target.x, target.y, targetShip.id);
+              this.renderSystem.flashInteract(flashPos);
+              console.log(`📍 NPC ${moveNpcId} → ship ${targetShip.id} @ (${target.x.toFixed(0)}, ${target.y.toFixed(0)})`);
+              return;
+            }
+          }
+
+          // Priority 3: open-water / world position (also disembarks if NPC is on a ship)
+          if (target) {
+            this.networkManager.sendNpcMoveToPos(moveNpcId, target.x, target.y, 0);
+            this.renderSystem.flashInteract(flashPos);
+            console.log(`🌊 NPC ${moveNpcId} → world (${target.x.toFixed(0)}, ${target.y.toFixed(0)})`);
+            return;
+          }
+
+          // Fallback: no target position (shouldn’t happen but guard anyway)
+          this.renderSystem.flashCancel(flashPos);
+          return;
+        }
+
         // Hammer tool: left-click on hovered module while holding hammer → minigame
         if (action === 'attack') {
           const playerId = this.networkManager.getAssignedPlayerId();
@@ -418,12 +578,31 @@ export class ClientApplication {
             });
             return;
           }
-          // Not a hammer click — pass to server
+          // Not a hammer click — check for sword
+          if (activeItem === 'sword' && player && !player.isMounted) {
+            const now = performance.now();
+            if (now - this.swordLastAttackMs < this.SWORD_COOLDOWN_MS) return;
+            this.swordLastAttackMs = now;
+            const dir = target
+              ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
+              : player.rotation;
+            this.networkManager.sendAction(action, target);
+            // Optimistic local arc (appears immediately without waiting for server)
+            this.renderSystem.spawnSwordArc(player.position, dir);
+            // Start cooldown ring around cursor (visual, matches server cooldown)
+            this.renderSystem.notifySwordSwing(this.SWORD_COOLDOWN_MS);
+            return;
+          }
+          // Not a hammer or sword click — pass to server
           this.networkManager.sendAction(action, target);
           return;
         }
 
         if (action === 'interact') {
+          // If the dedicated E keydown ladder handler is active, suppress all
+          // game-loop interact events to prevent mount/other modules firing.
+          if (this._suppressLadderInteract) return;
+
           // Exit build/plan mode on any interaction attempt
           this.exitAllBuildModes();
 
@@ -440,54 +619,144 @@ export class ClientApplication {
             return;
           }
 
-          // Player pressed E - interact with hovered module
+          // Harvest mode: active slot = axe + not on a ship + hovering a tree → chop
+          if (activeItem === 'axe' && player && player.carrierId === 0) {
+            const tree = this.renderSystem.getHoveredTree();
+            if (tree) {
+              console.log(`🪓 [HARVEST] Sending harvest_resource`);
+              this.networkManager.sendHarvestResource();
+              return;
+            }
+          }
+
+          // Harvest fiber: hover a fiber plant → press E (no tool required)
+          if (player && player.carrierId === 0) {
+            const plant = this.renderSystem.getHoveredFiberPlant();
+            if (plant) {
+              this.networkManager.sendHarvestFiber();
+              return;
+            }
+          }
+
+          // Mine rock: pickaxe equipped + hovering rock → press E
+          if (activeItem === 'pickaxe' && player && player.carrierId === 0) {
+            const rock = this.renderSystem.getHoveredRock();
+            if (rock) {
+              this.networkManager.sendHarvestRock();
+              return;
+            }
+          }
+
+          // Workbench interaction: player on island, workbench under cursor and within range → open crafting
+          if (player && player.carrierId === 0) {
+            if (this.craftingMenu.visible) {
+              this.craftingMenu.close();
+              return;
+            }
+            const hovered = this.renderSystem.getHoveredStructure();
+            if (hovered?.type === 'workbench') {
+              console.log(`⚒ [INTERACT] Sending structure_interact for workbench ${hovered.id}`);
+              this.networkManager.sendStructureInteract(hovered.id);
+              return;
+            }
+          }
+
+          // Module interaction takes priority over NPC menu
           const hoveredModule = this.renderSystem.getHoveredModule();
-          
-          if (hoveredModule) {
-            if (playerId !== null) {
-              // Check if player is close enough to the module
-              if (!worldState) return;
-              
-              
-              if (player) {
-                let distance: number;
-                let moduleWorldPos: Vec2;
-                
-                // Calculate module world position
-                const cos = Math.cos(hoveredModule.ship.rotation);
-                const sin = Math.sin(hoveredModule.ship.rotation);
-                const moduleWorldX = hoveredModule.ship.position.x + 
-                  (hoveredModule.module.localPos.x * cos - hoveredModule.module.localPos.y * sin);
-                const moduleWorldY = hoveredModule.ship.position.y + 
-                  (hoveredModule.module.localPos.x * sin + hoveredModule.module.localPos.y * cos);
-                moduleWorldPos = Vec2.from(moduleWorldX, moduleWorldY);
-                
-                // If player is on the same ship as the module, use local (ship-relative) coordinates
-                if (player.carrierId === hoveredModule.ship.id && player.localPosition) {
-                  // Both player and module are on the same ship - use local coordinates
-                  const moduleLocalPos = hoveredModule.module.localPos;
-                  distance = player.localPosition.sub(moduleLocalPos).length();
-                } else {
-                  // Player not on ship or on different ship - use world coordinates
-                  distance = player.position.sub(moduleWorldPos).length();
+
+          if (hoveredModule && player) {
+            if (!worldState) return;
+
+            // Calculate module world position
+            const cos = Math.cos(hoveredModule.ship.rotation);
+            const sin = Math.sin(hoveredModule.ship.rotation);
+            const moduleWorldX = hoveredModule.ship.position.x +
+              (hoveredModule.module.localPos.x * cos - hoveredModule.module.localPos.y * sin);
+            const moduleWorldY = hoveredModule.ship.position.y +
+              (hoveredModule.module.localPos.x * sin + hoveredModule.module.localPos.y * cos);
+            const moduleWorldPos = Vec2.from(moduleWorldX, moduleWorldY);
+
+            // Use local distance when both player and module are on the same ship
+            let distance: number;
+            if (player.carrierId === hoveredModule.ship.id && player.localPosition) {
+              distance = player.localPosition.sub(hoveredModule.module.localPos).length();
+            } else {
+              distance = player.position.sub(moduleWorldPos).length();
+            }
+
+            const maxInteractDistance = 120;
+
+            if (distance <= maxInteractDistance) {
+              // All module interactions (including ladders) are handled by the E
+              // keydown → keyup path in setupDebugKeys. That handler sets
+              // _suppressLadderInteract=true before InputManager can fire a second
+              // event, so nothing should be dispatched here. Falling through to the
+              // proximity / NPC paths is intentional.
+            }
+          }
+
+          // E key: NPC interactions are now fully handled by the E-hold radial
+          // system in setupDebugKeys (which sets _suppressLadderInteract=true before
+          // this game-loop path runs). Skip here to avoid double-firing.
+          if (this.renderSystem.getHoveredNpc()) return;
+
+          if (!hoveredModule && !this._suppressLadderInteract) {
+            // Proximity fallback: scan for nearest ladder WITHOUT requiring mouse hover.
+            // This is only for off-ship players trying to board — once on a ship the
+            // hover path above always works and the distance-only scan would fire on
+            // the wrong ladder (e.g. retracting a ladder you just climbed).
+            const wsL = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+            if (wsL && player && player.carrierId === 0) {
+              const LADDER_RANGE = 200;
+              let nearestLadder: { ship: any; module: any } | null = null;
+              let nearestDist = Infinity;
+              let nearestAnyDist = Infinity;
+              for (const ship of wsL.ships) {
+                const cos = Math.cos(ship.rotation);
+                const sin = Math.sin(ship.rotation);
+                for (const mod of ship.modules) {
+                  if (mod.kind !== 'ladder') continue;
+                  const mwx = ship.position.x + (mod.localPos.x * cos - mod.localPos.y * sin);
+                  const mwy = ship.position.y + (mod.localPos.x * sin + mod.localPos.y * cos);
+                  let dist: number;
+                  // Only use local coords when genuinely on this ship (carrierId !== 0)
+                  if (player.carrierId !== 0 && player.carrierId === ship.id && player.localPosition) {
+                    dist = Math.hypot(
+                      (player.localPosition as any).x - mod.localPos.x,
+                      (player.localPosition as any).y - mod.localPos.y
+                    );
+                  } else {
+                    dist = Math.hypot(player.position.x - mwx, player.position.y - mwy);
+                  }
+                  if (dist < nearestAnyDist) nearestAnyDist = dist;
+                  if (dist <= LADDER_RANGE && dist < nearestDist) {
+                    nearestDist = dist;
+                    nearestLadder = { ship, module: mod };
+                  }
                 }
-                
-                const maxInteractDistance = 50; // Maximum interaction range
-                
-                if (distance <= maxInteractDistance) {
-                  console.log(`🎯 [INTERACTION] Player interacting with ${hoveredModule.module.kind.toUpperCase()} (ID: ${hoveredModule.module.id}) at distance ${distance.toFixed(1)}px`);
-                  console.log(`   Player world: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}), Module world: (${moduleWorldPos.x.toFixed(1)}, ${moduleWorldPos.y.toFixed(1)})`);
-                  this.networkManager.sendModuleInteract(hoveredModule.module.id);
+              }
+              if (nearestLadder) {
+                const onShip = player.carrierId === nearestLadder.ship.id;
+                const isExtended = (nearestLadder.module.moduleData as any)?.extended !== false;
+                console.log(`🪜 proximity: ladder ${nearestLadder.module.id} onShip=${onShip} extended=${isExtended} dist=${nearestDist.toFixed(0)}px`);
+                if (onShip) {
+                  // On-ship: module_interact → handle_ladder_interact toggles (no company check)
+                  this.networkManager.sendModuleInteract(nearestLadder.module.id);
+                } else if (isExtended) {
+                  // Off-ship + extended: climb/board
+                  this.networkManager.sendModuleInteract(nearestLadder.module.id);
                 } else {
-                  console.log(`❌ [INTERACTION] ${hoveredModule.module.kind.toUpperCase()} too far: ${distance.toFixed(1)}px > ${maxInteractDistance}px`);
-                  console.log(`   Player world: (${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}), Module world: (${moduleWorldPos.x.toFixed(1)}, ${moduleWorldPos.y.toFixed(1)})`);
+                  // Off-ship + retracted: extend via toggle_ladder (module_interact would fail)
+                  this.networkManager.sendToggleLadder(nearestLadder.module.id);
                 }
               }
             }
-          } else {
-            console.log(`⚠️ [INTERACTION] No module hovered - move mouse over a module and press E`);
           }
         } else {
+          // 'dismount' is owned by the E-hold radial while the suppress flag is live —
+          // prevent the InputManager game-loop from firing it independently so the
+          // radial cancel dead zone still works.
+          if (action === 'dismount' && this._suppressLadderInteract) return;
           // Other actions go to server
           this.networkManager.sendAction(action, target);
         }
@@ -508,12 +777,15 @@ export class ClientApplication {
       this.inputManager.onCannonAim = (aimAngle, activeGroups) => {
         this.networkManager.sendCannonAim(aimAngle, activeGroups);
       };
+      this.inputManager.onSwivelAim = (aimAngle) => {
+        this.networkManager.sendSwivelAim(aimAngle);
+      };
       this.inputManager.onCannonFire = (cannonIds, fireAll, ammoType, weaponGroup, weaponGroups) => {
         // Multi-group fire: fire all cannons in every selected group
         const groups = weaponGroups && weaponGroups.size > 0 ? weaponGroups : (weaponGroup !== undefined && weaponGroup >= 0 ? new Set([weaponGroup]) : null);
-        if (groups && !fireAll) {
+        if (groups) {
           const allIds: number[] = [];
-          let skipAimCheck = false;
+          let skipAimCheck = !!fireAll; // double-click always skips aim-angle check
           for (const g of groups) {
             const gs = this.controlGroups.get(g);
             if (!gs || gs.cannonIds.length === 0) continue;
@@ -581,6 +853,25 @@ export class ClientApplication {
 
       // Build placement: left-click in build mode → send place_plank / place_cannon / place_mast / replace_helm
       this.inputManager.onBuildPlace = (worldPos) => {
+        // Island structure placement (wooden floor or workbench)
+        if (this.islandBuildMode) {
+          const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+          const pid = this.networkManager.getAssignedPlayerId();
+          const p   = ws?.players.find(pl => pl.id === pid);
+          const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
+          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door') {
+            // Compute snap at click time (not from stale render state)
+            const pos = kind === 'wooden_floor'
+              ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
+              : (kind === 'wall' || kind === 'door_frame')
+              ? this.renderSystem.computeSnappedWallPos(worldPos.x, worldPos.y)
+              : kind === 'door'
+              ? this.renderSystem.computeSnappedDoorPos(worldPos.x, worldPos.y)
+              : { x: worldPos.x, y: worldPos.y };
+            this.networkManager.sendPlaceStructure(kind, pos.x, pos.y);
+          }
+          return;
+        }
         // Ghost menu pending placement takes highest priority
         if (this.buildMenuOpen && this.pendingGhostKind !== null) {
           this.handleGhostPlace(worldPos);
@@ -652,9 +943,9 @@ export class ClientApplication {
           // If a buildable item is in the hotbar, also enter free-placement mode
           const activeSlot = player.inventory?.activeSlot ?? 0;
           const activeItem = player.inventory?.slots[activeSlot]?.item ?? 'none';
-          if (activeItem === 'cannon' || activeItem === 'sail') {
+          if (activeItem === 'cannon' || activeItem === 'sail' || activeItem === 'swivel') {
             this.explicitBuildMode = true;
-            this.buildSelectedItem = activeItem as 'cannon' | 'sail';
+            this.buildSelectedItem = activeItem as 'cannon' | 'sail' | 'swivel';
           }
           console.log(`🏗️ [BUILD MENU] OPENED${this.explicitBuildMode ? ` (free-place: ${this.buildSelectedItem})` : ' (plan mode)'}`);
         }
@@ -688,18 +979,82 @@ export class ClientApplication {
 
       // Let UI panels (e.g. manning priority panel) consume clicks before game logic
       this.inputManager.onUIClick = (x, y) => {
-        return this.uiManager?.handleClick(x, y) ?? false;
+        if (this.craftingMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
+        if (this.uiManager?.handleClick(x, y)) return true;
+        return false;
       };
 
       // Ctrl+left-click: assign/remove cannon from the active weapon group
+      //   — but if an NPC is hovered, open an NPC command radial instead
       this.inputManager.onGroupAssign = () => {
+        // ── Ctrl+click on an NPC → command radial ───────────────────────────
+        const hovNpcCtrl = this.renderSystem.getHoveredNpc();
+        if (hovNpcCtrl) {
+          const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+          const myId = this.networkManager.getAssignedPlayerId();
+          const me = (myId !== null ? ws?.players.find(p => p.id === myId) : null) ?? ws?.players[0] ?? null;
+          const myCompany = me?.companyId ?? 0;
+          // Only command your own crew
+          if (hovNpcCtrl.companyId !== myCompany || myCompany === 0) return;
+
+          // Build radial options
+          const cmdOpts: Array<{ id: string; label: string }> = [];
+          if (hovNpcCtrl.assignedWeaponId !== 0) {
+            // At a module — show lock toggle
+            cmdOpts.push(hovNpcCtrl.locked
+              ? { id: 'unlock', label: '🔓 Unlock' }
+              : { id: 'lock',   label: '🔒 Lock at Post' });
+          }
+          cmdOpts.push({ id: 'move_to', label: '📍 Move To...' });
+
+          if (cmdOpts.length === 1 && cmdOpts[0].id === 'move_to') {
+            // Only one option — execute immediately
+            this._moveToNpcId = hovNpcCtrl.id;
+            this.renderSystem.setMoveToSourceNpc(hovNpcCtrl.id);
+            this.renderSystem.setMoveToHint(`Moving ${hovNpcCtrl.name} — click a module, ship, or open water`);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            return;
+          }
+
+          const mp = this.inputManager.getMouseScreenPosition();
+          this._radialMenu.open(mp.x, mp.y, cmdOpts);
+
+          // Wait for the next pointerup / mouseup to resolve the selection
+          const onUp = () => {
+            window.removeEventListener('pointerup', onUp);
+            const selected = this._radialMenu.getHoveredId();
+            this._radialMenu.close();
+            if (!selected) {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+              return;
+            }
+            const npc = ws?.npcs.find(n => n.id === hovNpcCtrl.id);
+            if (!npc) return;
+            if (selected === 'lock') {
+              this.networkManager.sendNpcLock(npc.id, true);
+              console.log(`🔒 Locking NPC ${npc.id} (${npc.name}) at post`);
+            } else if (selected === 'unlock') {
+              this.networkManager.sendNpcLock(npc.id, false);
+              console.log(`🔓 Unlocking NPC ${npc.id} (${npc.name})`);
+            } else if (selected === 'move_to') {
+              this._moveToNpcId = npc.id;
+              this.renderSystem.setMoveToSourceNpc(npc.id);
+              this.renderSystem.setMoveToHint(`Moving ${npc.name} — click a module, ship, or open water`);
+              console.log(`📍 Move To mode for NPC ${npc.id} (${npc.name})`);
+            }
+          };
+          window.addEventListener('pointerup', onUp);
+          return;
+        }
+
+        // ── Default: cannon group assignment ────────────────────────────────
         const hovered = this.renderSystem.getHoveredModule();
         if (!hovered) {
           console.warn(`⚠️ GroupAssign: no module hovered`);
           return;
         }
-        if (hovered.module.kind !== 'cannon') {
-          console.warn(`⚠️ GroupAssign: hovered module is '${hovered.module.kind}', not a cannon`);
+        if (hovered.module.kind !== 'cannon' && hovered.module.kind !== 'swivel') {
+          console.warn(`⚠️ GroupAssign: hovered module is '${hovered.module.kind}', not a cannon or swivel`);
           return;
         }
         const cannonId = hovered.module.id;
@@ -738,7 +1093,7 @@ export class ClientApplication {
 
       this.inputManager.onGroupAssignTo = (targetGroup: number) => {
         const hovered = this.renderSystem.getHoveredModule();
-        if (!hovered || hovered.module.kind !== 'cannon') return;
+        if (!hovered || (hovered.module.kind !== 'cannon' && hovered.module.kind !== 'swivel')) return;
         const cannonId = hovered.module.id;
         const state = this.controlGroups.get(targetGroup);
         if (!state) return;
@@ -758,6 +1113,19 @@ export class ClientApplication {
           console.log(`\ud83c\udfaf Cannon ${cannonId} \u2192 group G${targetGroup}`);
         }
         this.networkManager.sendCannonGroupConfig(targetGroup, state.mode, state.cannonIds, state.targetId > 0 ? state.targetId : 0);
+      };
+
+      // Left-click while mounted: Move To mode takes priority over cannon fire
+      this.inputManager.onBeforeLeftClick = () => this._moveToNpcId !== null;
+
+      // Right-click: cancel Move To mode before any other right-click handling
+      this.inputManager.onBeforeRightClick = () => {
+        if (this._moveToNpcId !== null) {
+          this._moveToNpcId = null;
+          this.renderSystem.clearMoveToHint();
+          return true; // consume — don't aim, retarget, etc.
+        }
+        return false;
       };
 
       // Right-click intercepted by UIManager (e.g. cycling weapon group mode on hotbar)
@@ -847,6 +1215,176 @@ export class ClientApplication {
       this.uiManager.setShipUpgradeCallback((shipId, attribute) => {
         this.networkManager.sendUpgradeShipAttribute(shipId, attribute);
       });
+
+      // Wire NPC stat upgrade requests from the crew level menu to the server
+      this.uiManager.setCrewUpgradeCallback((npcId, stat) => {
+        this.networkManager.sendCrewUpgrade(npcId, stat);
+      });
+
+      // Handle NPC_STAT_UP broadcast: refresh world-state NPC fields
+      this.networkManager.onNpcStatUp = (npcId, _stat, _statLevel, xp,
+          maxHealth, npcLevel, statHealth, statDamage, statStamina, statWeight, statPoints) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const npc = ws.npcs.find(n => n.id === npcId);
+          if (!npc) continue;
+          npc.xp         = xp;
+          npc.maxHealth  = maxHealth;
+          npc.npcLevel   = npcLevel;
+          npc.statHealth  = statHealth;
+          npc.statDamage  = statDamage;
+          npc.statStamina = statStamina;
+          npc.statWeight  = statWeight;
+          npc.statPoints  = statPoints;
+        }
+      };
+
+      // Handle npc_goto_module server response — flash green on success, red if occupied/invalid
+      this.networkManager.onNpcMoveResult = (ok: boolean) => {
+        const pos = this._pendingModuleFlashPos;
+        this._pendingModuleFlashPos = null;
+        if (!pos) return;
+        if (ok) {
+          this.renderSystem.flashInteract(pos);
+        } else {
+          this.renderSystem.flashCancel(pos);
+        }
+      };
+
+      // Handle ENTITY_HIT: update NPC/player health and show floating damage number
+      this.networkManager.onEntityHit = (entityType, id, x, y, damage, health, maxHealth, killed) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          if (entityType === 'npc') {
+            const npc = ws.npcs.find(n => n.id === id);
+            if (npc) { npc.health = health; npc.maxHealth = maxHealth; if (killed) npc.health = 0; }
+          } else {
+            const player = ws.players.find(p => p.id === id);
+            if (player) { player.health = health; player.maxHealth = maxHealth; }
+          }
+        }
+        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), damage, killed);
+        this.renderSystem.notifyEntityDamaged(id, entityType === 'npc');
+      };
+
+      // Handle FIRE_EFFECT: mark entity/module as burning
+      this.networkManager.onFireEffect = (entityType, id, x, y, durationMs, shipId, moduleId) => {
+        this.renderSystem.notifyFireEffect(entityType, id, durationMs, shipId, moduleId);
+      };
+
+      // Handle ISLANDS: server-defined island layout
+      this.networkManager.onIslands = (islands) => {
+        this.renderSystem.setIslands(islands);
+      };
+
+      // Handle placed structures
+      this.networkManager.onStructuresList = (structs) => {
+        this.renderSystem.setPlacedStructures(structs);
+      };
+      this.networkManager.onStructureDemolished = (id, x, y) => {
+        this.renderSystem.removePlacedStructure(id);
+        if (x !== undefined && y !== undefined) {
+          // Cannonball kill — big explosion
+          this.renderSystem.spawnExplosion(Vec2.from(x, y), 1.2);
+          this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, true);
+        }
+      };
+      this.networkManager.onStructureCompanyUpdated = (id, companyId) => {
+        this.renderSystem.updateStructureCompany(id, companyId);
+      };
+      this.networkManager.onStructureHpChanged = (id, hp, maxHp, x, y) => {
+        this.renderSystem.updateStructureHp(id, hp, maxHp);
+        this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.6);
+        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, false);
+      };
+      this.networkManager.onTreeHit = (x, y) => {
+        this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.5);
+      };
+      this.networkManager.onStructurePlaced = (s) => {
+        this.renderSystem.addPlacedStructure(s);
+      };
+      this.networkManager.onDoorToggled = (id, open) => {
+        this.renderSystem.updateStructureDoorOpen(id, open);
+      };
+      this.networkManager.onCraftingOpen = (structureId, _structureType) => {
+        this.craftingMenu.open(structureId);
+      };
+
+      this.craftingMenu.onCraft = (recipeId) => {
+        this.networkManager.sendCraftItem(recipeId);
+      };
+
+      this.networkManager.onCraftResult = (success, recipeId, reason) => {
+        if (success) {
+          this.renderSystem.showAnnouncement(`\u2692 Crafted ${recipeId.replace('craft_', '')}!`, 'info', 2.5);
+        } else {
+          const msg: Record<string, string> = {
+            missing_ingredients: 'Not enough materials',
+            inventory_full:      'Inventory is full',
+            not_at_workbench:    'Must be at a workbench',
+            unknown_recipe:      'Unknown recipe',
+          };
+          this.renderSystem.showAnnouncement(`\u2692 ${msg[reason ?? ''] ?? 'Cannot craft right now'}`, 'info', 2.0);
+        }
+      };
+
+      // Handle FLAME_CONE_FIRE / FLAME_WAVE_UPDATE: advancing/retreating cone visual
+      this.networkManager.onFlameWaveUpdate = (cannonId, shipId, x, y, angle, halfCone, waveDist, retreating, retreatDist, dead) => {
+        this.renderSystem.updateFlameWave(cannonId, shipId, x, y, angle, halfCone, waveDist, retreating, retreatDist, dead);
+      };
+
+      // Handle CANNON_FIRE_EVENT: render hit-scan tracers for grapeshot / canister
+      this.networkManager.onCannonFireEvent = (_cannonId, _shipId, x, y, angle, projectileId, ammoType) => {
+        // Only spawn tracers for hit-scan ammo types (no real projectile, id=0)
+        if (projectileId === 0 && (ammoType === 10 || ammoType === 12)) {
+          this.renderSystem.spawnGrapeshotTracers(x, y, angle, ammoType);
+        }
+      };
+
+      // Handle FIRE_EXTINGUISHED: clear burning state
+      this.networkManager.onFireExtinguished = (entityType, id, shipId, moduleId) => {
+        this.renderSystem.notifyFireExtinguished(entityType, id, shipId, moduleId);
+        // Clear sail fire intensity when a mast module is extinguished
+        if (entityType === 'module' && shipId !== undefined && moduleId !== undefined) {
+          const ws = this.authoritativeWorldState || this.predictedWorldState;
+          const ship = ws?.ships.find(s => s.id === shipId);
+          const mod = ship?.modules.find(m => m.id === moduleId && m.kind === 'mast');
+          if (mod?.moduleData?.kind === 'mast') {
+            mod.moduleData.sailFireIntensity = 0;
+          }
+        }
+      };
+
+      // Handle SAIL_FIBER_FIRE: update mast module fire intensity in real time
+      this.networkManager.onSailFiberFire = (shipId, moduleId, intensity, fiberHealth, windEff) => {
+        const ws = this.authoritativeWorldState || this.predictedWorldState;
+        const ship = ws?.ships.find(s => s.id === shipId);
+        const mod  = ship?.modules.find(m => m.id === moduleId && m.kind === 'mast');
+        if (mod?.moduleData?.kind === 'mast') {
+          mod.moduleData.sailFireIntensity = intensity;
+          mod.moduleData.fiberHealth       = fiberHealth;
+          mod.moduleData.windEfficiency    = windEff;
+        }
+      };
+
+      this.networkManager.onLadderState = (shipId, moduleId, retracted) => {
+        const ws = this.authoritativeWorldState || this.predictedWorldState;
+        if (!ws) return;
+        const ship = ws.ships.find(s => s.id === shipId);
+        if (!ship) return;
+        const mod = ship.modules.find(m => m.id === moduleId);
+        if (!mod || mod.kind !== 'ladder' || !mod.moduleData || mod.moduleData.kind !== 'ladder') return;
+        mod.moduleData.extended = !retracted;
+        console.log(`🪤 Ladder ${moduleId} on ship ${shipId}: ${retracted ? 'retracted' : 'extended'}`);
+      };
+
+      // Handle SWORD_SWING: show arc for other players' sword attacks
+      this.networkManager.onSwordSwing = (playerId, x, y, angle, _range) => {
+        const myId = this.networkManager.getAssignedPlayerId();
+        // Skip own swing — already shown optimistically in onActionEvent
+        if (playerId === myId) return;
+        this.renderSystem.spawnSwordArc(Vec2.from(x, y), angle);
+      };
 
       // Build mode item selection (cannon/sail buttons in build mode panel)
       this.uiManager.onBuildItemSelect = (item) => {
@@ -1106,13 +1644,15 @@ export class ClientApplication {
         // Get current rotation from input manager
         const currentRotation = this.inputManager.getCurrentInputFrame().rotation;
         
-        // Clone interpolated state and replace our player with predicted version (including rotation)
-        worldToRender = {
-          ...interpolatedState,
-          players: interpolatedState.players.map(p => 
-            p.id === assignedPlayerId ? { ...predictedPlayer, rotation: currentRotation } : p
-          )
-        };
+        // Splice predicted player in — avoid allocating N player objects when only 1 changes.
+        const localIdx = interpolatedState.players.findIndex(p => p.id === assignedPlayerId);
+        if (localIdx >= 0) {
+          const newPlayers = interpolatedState.players.slice(); // 1 array alloc
+          newPlayers[localIdx] = { ...predictedPlayer, rotation: currentRotation }; // 1 player alloc
+          worldToRender = { ...interpolatedState, players: newPlayers };
+        } else {
+          worldToRender = interpolatedState;
+        }
       }
     }
     
@@ -1129,10 +1669,11 @@ export class ClientApplication {
         if (entries.length === 0) { this.localPendingModules.delete(ship.id); return ship; }
         this.localPendingModules.set(ship.id, entries);
         anyPending = true;
-        // Don't add duplicates — skip if server already sent a module at same spot
+        // Don't add duplicates — skip if server already sent a module of the SAME KIND at same spot
         const newMods = entries
           .map(e => e.module)
           .filter(pm => !ship.modules.some(m =>
+            m.kind === pm.kind &&
             Math.abs(m.localPos.x - pm.localPos.x) < 5 &&
             Math.abs(m.localPos.y - pm.localPos.y) < 5
           ));
@@ -1148,7 +1689,7 @@ export class ClientApplication {
     } else {
       // Pass aiming state so cannon aim guides only draw when actively aiming
       this.renderSystem.playerIsAiming = this.inputManager?.isRightMouseDown ?? false;
-      this.renderSystem.localPlayerId = this.networkManager.getAssignedPlayerId();
+      this.renderSystem.localPlayerId = assignedPlayerId;
       this.renderSystem.playerAimAngleRelative = this.inputManager?.cannonAimAngleRelative ?? 0;
       this.renderSystem.selectedAmmoType = this.inputManager?.getLoadedAmmoType() ?? 0;
       this.renderSystem.npcTaskMap = this.uiManager.getNpcTaskMap();
@@ -1156,23 +1697,51 @@ export class ClientApplication {
       this.renderSystem.showGroupOverlay = this.inputManager?.isCtrlHeld() ?? false;
       this.renderSystem.activeWeaponGroups = this.inputManager?.activeWeaponGroups ?? new Set();
 
-      // Keep explicit build mode UI in sync with latest world state (sail count may change)
+      // Resolve local player once — reused by sword equip check, cursor cooldown ring, and UI render.
+      const localPlayer = assignedPlayerId !== null
+        ? worldToRender.players.find(p => p.id === assignedPlayerId) ?? null
+        : null;
+
+      // Sword cooldown ring: only visible when sword is the active item and player is unmounted
+      const _activeSlot  = localPlayer?.inventory?.activeSlot ?? 0;
+      this.renderSystem.swordEquipped =
+        (localPlayer?.inventory?.slots[_activeSlot]?.item === 'sword') &&
+        !(localPlayer?.isMounted ?? false);
       if (this.explicitBuildMode) this.syncBuildModeState();
 
       // Render game world with hybrid state
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
-      
-      // Pipe screen-space mouse position so UIManager can render hotbar tooltips
+
+      // Update sword cooldown cursor ring
       if (this.inputManager) {
         const mp = this.inputManager.getMouseScreenPosition();
         this.uiManager.setMousePos(mp.x, mp.y);
+
+        // Pass sword cooldown state so RenderSystem can draw the cursor ring
+        const activeSlot2 = localPlayer?.inventory?.activeSlot ?? 0;
+        const activeItem2 = localPlayer?.inventory?.slots[activeSlot2]?.item ?? 'none';
+        if (activeItem2 === 'sword') {
+          this.renderSystem.updateSwordCooldownCursor(mp, this.swordLastAttackMs, this.SWORD_COOLDOWN_MS);
+        } else {
+          this.renderSystem.updateSwordCooldownCursor(null, 0, this.SWORD_COOLDOWN_MS);
+        }
+      }
+
+      // Update island build mode overlay state
+      if (this.islandBuildMode) {
+        const activeSlotB = localPlayer?.inventory?.activeSlot ?? 0;
+        const islandBuildKind = (localPlayer?.inventory?.slots[activeSlotB]?.item ?? 'wooden_floor') as 'wooden_floor' | 'workbench';
+        this.uiManager.setIslandBuildState({
+          kind: islandBuildKind,
+          tooFar: this.renderSystem.getIslandBuildTooFar(),
+          enemyClose: false, // TODO: detect when enemies are nearby
+        });
+      } else {
+        this.uiManager.setIslandBuildState(null);
       }
 
       // Render UI overlay
-      const assignedPlayerId = this.networkManager.getAssignedPlayerId();
-      const playerShipId = assignedPlayerId !== null
-        ? (worldToRender.players.find(p => p.id === assignedPlayerId)?.carrierId ?? 0)
-        : 0;
+      const playerShipId = localPlayer?.carrierId ?? 0;
       const playerShip = playerShipId
         ? (worldToRender.ships.find(s => s.id === playerShipId) ?? null)
         : null;
@@ -1187,11 +1756,21 @@ export class ClientApplication {
         selectedAmmoType: this.inputManager?.getLoadedAmmoType() ?? 0,
         pendingAmmoType: this.inputManager?.selectedAmmoType ?? 0,
         mountKind: this.inputManager?.getMountKind() ?? 'none',
+        activeAmmoGroup: this.inputManager?.activeAmmoGroup ?? 'cannon',
         activeWeaponGroup: this.inputManager?.activeWeaponGroup ?? -1,
         activeWeaponGroups: this.inputManager?.activeWeaponGroups,
         playerShip,
         controlGroups: this.controlGroups,
       });
+
+      // Crafting menu (rendered on top of all other UI)
+      if (this.craftingMenu.visible) {
+        this.craftingMenu.render(
+          this.renderSystem.getContext(),
+          this.canvas.width,
+          this.canvas.height,
+        );
+      }
     }
   }
   
@@ -1294,7 +1873,7 @@ export class ClientApplication {
           if (newCarrierId) {
             console.log(`⚓ [BOARD] Boarded ship ${newCarrierId} (was: ${this.previousCarrierId ?? 'none'}) — syncing ammo type & crew tasks`);
             this.inputManager.resetAmmoType();
-            this.uiManager.syncCrewFromBoarding(worldState.npcs, newCarrierId);
+            this.uiManager.syncCrewFromBoarding(worldState.npcs, newCarrierId, player.companyId ?? 0);
           }
           this.previousCarrierId = newCarrierId;
         }
@@ -1387,6 +1966,24 @@ export class ClientApplication {
    * Use this whenever the player does something incompatible with build/plan mode
    * (interact, mount, dismount, etc.).
    */
+  /**
+   * Find the first ship whose hull polygon contains the given world position.
+   * Checks ALL ships (including the player’s own) so Move To can target any deck.
+   */
+  private findShipAtWorldPos(pos: Vec2, worldState: WorldState): Ship | null {
+    for (const ship of worldState.ships) {
+      if (!ship.hull || ship.hull.length < 3) continue;
+      const dx     = pos.x - ship.position.x;
+      const dy     = pos.y - ship.position.y;
+      const cosR   = Math.cos(-ship.rotation);
+      const sinR   = Math.sin(-ship.rotation);
+      const localX = dx * cosR - dy * sinR;
+      const localY = dx * sinR + dy * cosR;
+      if (PolygonUtils.pointInPolygon(Vec2.from(localX, localY), ship.hull)) return ship;
+    }
+    return null;
+  }
+
   private exitAllBuildModes(): void {
     if (!this.buildMenuOpen && !this.explicitBuildMode && this.pendingGhostKind === null) return;
     this.buildMenuOpen      = false;
@@ -1411,14 +2008,22 @@ export class ClientApplication {
     const activeSlot  = player?.inventory?.activeSlot ?? 0;
     const activeItem  = player?.inventory?.slots[activeSlot]?.item ?? 'none';
     const inBuildMode       = activeItem === 'plank';
-    const inCannonBuildMode = activeItem === 'cannon';
-    const inMastBuildMode   = activeItem === 'sail';
+    const inCannonBuildMode  = activeItem === 'cannon';
+    const inMastBuildMode    = activeItem === 'sail';
+    const inSwivelBuildMode  = activeItem === 'swivel';
     const inHelmBuildMode   = activeItem === 'helm_kit';
     const inDeckBuildMode   = activeItem === 'deck';
 
+    // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
+    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door');
+    this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
+    this.renderSystem.setIslandBuildItem(
+      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door') : null
+    );
+
     // Track whether the active item changed while in explicit build mode
     if (this.explicitBuildMode) {
-      if (activeItem === 'cannon' || activeItem === 'sail') {
+      if (activeItem === 'cannon' || activeItem === 'sail' || activeItem === 'swivel') {
         // Keep item type in sync with hotbar
         if (this.buildSelectedItem !== activeItem) {
           this.buildSelectedItem = activeItem;
@@ -1433,7 +2038,7 @@ export class ClientApplication {
         this.syncBuildModeState();
         console.log('🔨 [BUILD MODE] EXITED (item changed)');
       }
-    } else if (this.buildMenuOpen && (activeItem === 'cannon' || activeItem === 'sail')) {
+    } else if (this.buildMenuOpen && (activeItem === 'cannon' || activeItem === 'sail' || activeItem === 'swivel')) {
       // Plan mode is open and player equipped a buildable item — jump straight into build
       this.explicitBuildMode = true;
       this.buildSelectedItem = activeItem;
@@ -1445,10 +2050,11 @@ export class ClientApplication {
     this.renderSystem.setBuildMode(!this.explicitBuildMode && inBuildMode);
     this.renderSystem.setCannonBuildMode(!this.explicitBuildMode && inCannonBuildMode);
     this.renderSystem.setMastBuildMode(!this.explicitBuildMode && inMastBuildMode);
+    this.renderSystem.setSwivelBuildMode(!this.explicitBuildMode && inSwivelBuildMode);
     this.renderSystem.setHelmBuildMode(!this.explicitBuildMode && inHelmBuildMode);
     this.renderSystem.setDeckBuildMode(!this.explicitBuildMode && inDeckBuildMode);
     this.inputManager.buildMode = this.explicitBuildMode || this.buildMenuOpen
-      || inBuildMode || inCannonBuildMode || inMastBuildMode || inHelmBuildMode || inDeckBuildMode;
+      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || this.islandBuildMode;
   }
 
   /**
@@ -1556,11 +2162,19 @@ export class ClientApplication {
     }
 
     // Edge margin — ghost center must be at least module-radius inset from hull boundary
-    const ghostMargin = this.pendingGhostKind === 'cannon' ? 15 : this.pendingGhostKind === 'mast' ? 15 : 10;
     const ghostEdgeDist = PolygonUtils.distanceToPolygonEdge(Vec2.from(localX, localY), nearestShip.hull);
-    if (ghostEdgeDist < ghostMargin) {
-      console.log(`❌ [GHOST] Too close to hull edge (dist ${ghostEdgeDist.toFixed(1)}, min ${ghostMargin})`);
-      return;
+    if (this.pendingGhostKind === 'swivel') {
+      // Swivels mount on the hull rail — must be within the plank/edge band (2–30 px from hull)
+      if (ghostEdgeDist > 30 || ghostEdgeDist < 2) {
+        console.log(`❌ [GHOST] Swivel must be on ship rail (edge dist ${ghostEdgeDist.toFixed(1)}, need 2–30)`);
+        return;
+      }
+    } else {
+      const ghostMargin = this.pendingGhostKind === 'cannon' ? 15 : this.pendingGhostKind === 'mast' ? 15 : 10;
+      if (ghostEdgeDist < ghostMargin) {
+        console.log(`❌ [GHOST] Too close to hull edge (dist ${ghostEdgeDist.toFixed(1)}, min ${ghostMargin})`);
+        return;
+      }
     }
 
     // Geometry-based overlap check against existing ship modules (same logic as real placement)
@@ -1639,7 +2253,7 @@ export class ClientApplication {
     const activeSlot  = player.inventory?.activeSlot ?? 0;
     const activeItem  = player.inventory?.slots[activeSlot]?.item ?? 'none';
     const itemToKind: Partial<Record<string, GhostModuleKind>> = {
-      cannon: 'cannon', sail: 'mast',
+      cannon: 'cannon', sail: 'mast', swivel: 'swivel',
     };
     const matchKind = itemToKind[activeItem];
     if (!matchKind) return false;
@@ -1698,6 +2312,18 @@ export class ClientApplication {
       pending.push({ module: newCannon, expiry: Date.now() + 5000 });
       this.localPendingModules.set(ship.id, pending);
       this.networkManager.sendPlaceCannonAt(ship.id, localX, localY, localRot);
+    } else if (matchKind === 'swivel') {
+      console.log(`🔫 [GHOST SNAP] Placing swivel at ghost pos (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${(localRot * 180 / Math.PI).toFixed(0)}°`);
+      const newSwivel = ModuleUtils.createDefaultModule(tempId, 'swivel', Vec2.from(localX, localY));
+      newSwivel.localRot = localRot;
+      for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
+        const s = state?.ships.find(sh => sh.id === ship.id);
+        if (s) s.modules.push(newSwivel);
+      }
+      const pending = this.localPendingModules.get(ship.id) ?? [];
+      pending.push({ module: newSwivel, expiry: Date.now() + 5000 });
+      this.localPendingModules.set(ship.id, pending);
+      this.networkManager.sendPlaceSwivelAt(ship.id, localX, localY, localRot);
     } else {
       // mast
       const mastCount = ship.modules.filter(m => m.kind === 'mast').length;
@@ -1760,14 +2386,24 @@ export class ClientApplication {
     if (this.buildSelectedItem === 'sail') localY = 0;
 
     // Geometry-based overlap check against existing non-plank, non-deck modules
-    const newKind = this.buildSelectedItem === 'cannon' ? 'cannon' as const : 'mast' as const;
+    const newKind = this.buildSelectedItem === 'cannon' ? 'cannon' as const
+                  : this.buildSelectedItem === 'swivel' ? 'swivel' as const
+                  : 'mast' as const;
 
     // Cannon base half-width = 15; mast radius = 15 — center must be at least this far from hull edge
-    const placementMargin = 15;
+    // Swivels are the exception: they mount ON the rail (2–30 px from the hull edge)
     const edgeDist = PolygonUtils.distanceToPolygonEdge(Vec2.from(localX, localY), nearestShip.hull);
-    if (edgeDist < placementMargin) {
-      console.log(`❌ [BUILD] Too close to hull edge (dist ${edgeDist.toFixed(1)}, min ${placementMargin})`);
-      return;
+    if (this.buildSelectedItem === 'swivel') {
+      if (edgeDist > 30 || edgeDist < 2) {
+        console.log(`❌ [BUILD] Swivel must be on ship rail (edge dist ${edgeDist.toFixed(1)}, need 2–30)`);
+        return;
+      }
+    } else {
+      const placementMargin = 15;
+      if (edgeDist < placementMargin) {
+        console.log(`❌ [BUILD] Too close to hull edge (dist ${edgeDist.toFixed(1)}, min ${placementMargin})`);
+        return;
+      }
     }
 
     const newFp = getModuleFootprint(newKind);
@@ -1824,6 +2460,18 @@ export class ClientApplication {
       pending.push({ module: newCannon, expiry: Date.now() + 5000 });
       this.localPendingModules.set(shipRef.id, pending);
       this.networkManager.sendPlaceCannonAt(shipRef.id, localX, localY, rotationRad);
+    } else if (this.buildSelectedItem === 'swivel') {
+      console.log(`🔫 [BUILD] Placing swivel at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${this.buildRotationDeg}° on ship ${shipRef.id}`);
+      const newSwivel = ModuleUtils.createDefaultModule(tempId, 'swivel', Vec2.from(localX, localY));
+      newSwivel.localRot = rotationRad;
+      for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
+        const s = state?.ships.find(sh => sh.id === shipRef.id);
+        if (s) s.modules.push(newSwivel);
+      }
+      const pending = this.localPendingModules.get(shipRef.id) ?? [];
+      pending.push({ module: newSwivel, expiry: Date.now() + 5000 });
+      this.localPendingModules.set(shipRef.id, pending);
+      this.networkManager.sendPlaceSwivelAt(shipRef.id, localX, localY, rotationRad);
     } else {
       // Sail — constrain to rectangular body of ship (away from bow/stern curves)
       const MAST_X_MIN = -240, MAST_X_MAX = 200;
@@ -1881,6 +2529,8 @@ export class ClientApplication {
       
       // Update render system for hover detection
       this.renderSystem.updateMousePosition(worldPos);
+      // Feed radial menu mouse position (screen space)
+      this._radialMenu.updateMouse(screenX, screenY);
     });
     
     console.log('🖱️ Mouse tracking initialized for directional movement');
@@ -1911,9 +2561,7 @@ export class ClientApplication {
   private setupDebugKeys(): void {
     window.addEventListener('keydown', (e) => {
       // Only handle if not typing in an input field
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return;
-      }
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
       // Route Space / Enter to UIManager for minigame handling first
       if (this.uiManager?.handleKeyDown(e.key)) {
@@ -1922,13 +2570,566 @@ export class ClientApplication {
       }
 
       switch (e.key) {
+        case 'Escape':
+        case 'q':
+        case 'Q': {
+          // Cancel "Move To" targeting mode if active
+          if (this._moveToNpcId !== null) {
+            this._moveToNpcId = null;
+            this.renderSystem.clearMoveToHint();
+            this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            e.preventDefault();
+          }
+          break;
+        }
+
+        case 'e':
+        case 'E': {
+          if (e.repeat) break; // no auto-repeat for E-hold logic
+          const wsE = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+          const myIdE = this.networkManager.getAssignedPlayerId();
+          if (!wsE) { console.warn('🪜 E: no world state'); break; }
+
+          const meE = (myIdE !== null ? wsE.players.find(p => p.id === myIdE) : null) ?? wsE.players[0] ?? null;
+          if (!meE) { console.warn('🪜 E: player not found'); break; }
+
+          // ── Dismount: player is already mounted ──────────────────────────────
+          // No hover required — player is physically AT the mounted module.
+          if (meE.isMounted && meE.carrierId !== 0) {
+            // Find the module by ID if known, else fall back to kind search on current ship
+            const MOUNTABLE = new Set(['helm', 'cannon', 'mast', 'swivel']);
+            let dismountMod: { ship: any; module: any; kind: string } | null = null;
+            for (const ship of wsE.ships) {
+              if (ship.id !== meE.carrierId) continue;
+              for (const mod of ship.modules) {
+                if (!MOUNTABLE.has(mod.kind)) continue;
+                if (meE.mountedModuleId !== undefined && mod.id === meE.mountedModuleId) {
+                  dismountMod = { ship, module: mod, kind: mod.kind };
+                  break;
+                }
+                if (!dismountMod) dismountMod = { ship, module: mod, kind: mod.kind }; // first match
+              }
+              if (dismountMod) break;
+            }
+
+            if (dismountMod) {
+              // Dismount immediately on keydown — no hold ring or radial needed.
+              this._suppressLadderInteract = true; // cleared on keyup; blocks game-loop double-fire
+              this.networkManager.sendAction('dismount');
+              this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+              console.log(`🎮 E: dismount ${dismountMod.kind} ${dismountMod.module.id}`);
+              break;
+            }
+          }
+
+          // ── NPC Interact: only when no module is hovered (module takes priority) ─
+          {
+            const hovNpcE = this.renderSystem.getHoveredNpc();
+            if (hovNpcE && !this.renderSystem.getHoveredModule()) {
+              const npcDist = meE.position.sub(hovNpcE.position).length();
+              if (npcDist > hovNpcE.interactRadius + 80) {
+                console.warn(`🤝 E: NPC out of range (dist=${npcDist.toFixed(0)})`);
+                this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+                break;
+              }
+
+              this._interactKind = 'npc';
+              this._suppressLadderInteract = true;
+              this._npcInteractId = hovNpcE.id;
+
+              const myCompanyE = meE.companyId ?? 0;
+              const npcCompanyE = hovNpcE.companyId;
+
+              // Enemy-company NPC: no interaction
+              if (npcCompanyE !== 0 && npcCompanyE !== myCompanyE) {
+                console.log(`🚫 E: NPC ${hovNpcE.id} belongs to enemy company ${npcCompanyE}`);
+                this._interactKind = null;
+                this._suppressLadderInteract = false;
+                this._npcInteractId = null;
+                this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+                break;
+              }
+
+              let npcOpts: { id: string; label: string }[];
+              if (npcCompanyE === 0) {
+                npcOpts = [{ id: 'recruit', label: 'Recruit to Company' }];
+              } else if (npcCompanyE === myCompanyE && hovNpcE.shipId !== meE.carrierId) {
+                npcOpts = [{ id: 'move_aboard', label: 'Move Aboard' }];
+              } else {
+                // Same company, same ship
+                npcOpts = [{ id: 'crew_menu', label: 'Manage Crew' }];
+              }
+              const npcOptsSnap = npcOpts;
+
+              this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
+              this._ladderHoldTimer = setTimeout(() => {
+                this._ladderHoldTimer = null;
+                this.renderSystem.stopLadderHoldRing();
+                const mp = this.inputManager.getMouseScreenPosition();
+                this._radialMenu.open(mp.x, mp.y, npcOptsSnap);
+              }, 300);
+              break;
+            }
+          }
+
+          // ── Structure interact: floors and workbenches, only when off-ship ──
+          if (meE.carrierId === 0) {
+            const struct = this.renderSystem.getHoveredStructure();
+            if (struct) {
+              const myCompanyE = meE.companyId ?? 0;
+              const isOwnCompany = struct.companyId === myCompanyE;
+
+              // Can't interact at all with another company's floor (no use, no demolish)
+              if (!isOwnCompany && struct.type === 'wooden_floor') {
+                this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+                break;
+              }
+
+              this._interactKind = 'structure';
+              this._hoveredStructureId = struct.id;
+              this._hoveredStructureType = struct.type;
+              this._suppressLadderInteract = true;
+              const mp = this.inputManager.getMouseScreenPosition();
+              this.renderSystem.startLadderHoldRing(mp);
+              if (struct.type === 'workbench') {
+                // Tap E = open workbench; hold E = radial with options based on ownership
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  const opts: { id: string; label: string }[] = [{ id: 'use', label: 'Open Workbench' }];
+                  if (isOwnCompany) opts.push({ id: 'demolish', label: 'Demolish' });
+                  this._radialMenu.open(mp2.x, mp2.y, opts);
+                }, 400);
+              } else if (struct.type === 'wall') {
+                // Wall: hold E = radial with only Demolish
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  this._radialMenu.open(mp2.x, mp2.y, [
+                    { id: 'demolish', label: 'Demolish Wall' },
+                  ]);
+                }, 600);
+              } else if (struct.type === 'door_frame') {
+                // Door Frame: hold E = radial with Demolish (removing the frame also removes the panel)
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  this._radialMenu.open(mp2.x, mp2.y, [
+                    { id: 'demolish', label: 'Demolish Door Frame' },
+                  ]);
+                }, 600);
+              } else if (struct.type === 'door') {
+                // Door: tap E = toggle open/closed; hold E = radial with Demolish
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  const doorOpts: { id: string; label: string }[] = [
+                    { id: 'use', label: struct.doorOpen ? 'Close Door' : 'Open Door' },
+                  ];
+                  if (isOwnCompany) doorOpts.push({ id: 'demolish', label: 'Demolish' });
+                  this._radialMenu.open(mp2.x, mp2.y, doorOpts);
+                }, 400);
+              } else {
+                // Floor: hold E = radial with only Demolish (only reachable if isOwnCompany)
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  this._radialMenu.open(mp2.x, mp2.y, [
+                    { id: 'demolish', label: 'Demolish Floor' },
+                  ]);
+                }, 600);
+              }
+              break;
+            }
+          }
+
+          // ── Mount / ladder: target is locked in HERE at keydown from the
+          // hovered module. Continued hover is NOT required — the module ID and
+          // ship ID are cached and used for the entire hold/keyup sequence.
+          // A range check at keyup confirmation ensures the player hasn't wandered
+          // too far before releasing E.
+          const hov = this.renderSystem.getHoveredModule();
+          if (!hov) {
+            console.warn('🪜 E: no module under cursor');
+            break;
+          }
+
+          // ── Range check at keydown — flash red and bail immediately if too far ─
+          {
+            const hovCos = Math.cos(hov.ship.rotation);
+            const hovSin = Math.sin(hov.ship.rotation);
+            const mwx = hov.ship.position.x + (hov.module.localPos.x * hovCos - hov.module.localPos.y * hovSin);
+            const mwy = hov.ship.position.y + (hov.module.localPos.x * hovSin + hov.module.localPos.y * hovCos);
+            const hovDist = (meE.carrierId === hov.ship.id && meE.localPosition)
+              ? Math.hypot((meE.localPosition as any).x - hov.module.localPos.x, (meE.localPosition as any).y - hov.module.localPos.y)
+              : Math.hypot(meE.position.x - mwx, meE.position.y - mwy);
+            if (hovDist > 120) {
+              console.warn(`🪜 E: module out of range (dist=${hovDist.toFixed(0)})`);
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+              break;
+            }
+          }
+
+          const MOUNTABLE = new Set(['helm', 'cannon', 'mast', 'swivel']);
+
+          if (MOUNTABLE.has(hov.module.kind)) {
+            // ── Mount ──────────────────────────────────────────────────────────
+            // Player must be on the ship — can't mount a helm/cannon/mast from off-ship.
+            if (meE.carrierId !== hov.ship.id) {
+              console.warn(`🎮 E: can't mount ${hov.module.kind} — player is off-ship`);
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+              break;
+            }
+            this._interactKind = 'mount';
+            this._suppressLadderInteract = true;
+            this._ladderHoldWasMounted = false;
+            this._ladderHoldModuleId = hov.module.id;
+            this._ladderHoldShipId = hov.ship.id;
+            console.log(`🎮 E: mount ${hov.module.kind} ${hov.module.id}`);
+            this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
+            const mountKindLabel = hov.module.kind.charAt(0).toUpperCase() + hov.module.kind.slice(1);
+            this._ladderHoldTimer = setTimeout(() => {
+              this._ladderHoldTimer = null;
+              this.renderSystem.stopLadderHoldRing();
+              const mp = this.inputManager.getMouseScreenPosition();
+              this._radialMenu.open(mp.x, mp.y, [{ id: 'mount', label: `Mount ${mountKindLabel}` }]);
+            }, 300);
+            break;
+          }
+
+          if (hov.module.kind === 'ladder') {
+            // ── Ladder ─────────────────────────────────────────────────────────
+            this._interactKind = 'ladder';
+            this._suppressLadderInteract = true;
+            this._ladderHoldModuleId = hov.module.id;
+            this._ladderHoldShipId = hov.ship.id;
+            this._ladderHoldIsExtended = (hov.module.moduleData as any)?.extended !== false;
+            this._ladderHoldOnShip = meE.carrierId === hov.ship.id;
+            console.log(`🪜 E: ladder ${hov.module.id} onShip=${this._ladderHoldOnShip} extended=${this._ladderHoldIsExtended}`);
+            this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
+            const onShipAtPress = this._ladderHoldOnShip;
+            const extendedAtPress = this._ladderHoldIsExtended;
+            this._ladderHoldTimer = setTimeout(() => {
+              this._ladderHoldTimer = null;
+              this.renderSystem.stopLadderHoldRing();
+              const mp = this.inputManager.getMouseScreenPosition();
+              if (onShipAtPress) {
+                this._radialMenu.open(mp.x, mp.y, [
+                  extendedAtPress
+                    ? { id: 'retract', label: 'Retract' }
+                    : { id: 'extend',  label: 'Extend'  },
+                ]);
+              } else if (extendedAtPress) {
+                this._radialMenu.open(mp.x, mp.y, [
+                  { id: 'climb',   label: 'Climb'   },
+                  { id: 'retract', label: 'Retract' },
+                ]);
+              } else {
+                this._radialMenu.open(mp.x, mp.y, [
+                  { id: 'extend', label: 'Extend' },
+                ]);
+              }
+            }, 300);
+            break;
+          }
+
+          console.warn(`🪜 E: hovered module kind '${hov.module.kind}' has no interact handler`);
+          break;
+        }
         case ']':
           this.renderSystem.toggleHoverBoundaries();
           e.preventDefault();
           break;
       }
     });
-    
+
+    // L key — mass-toggle all company ladders, wired via InputManager.onToggleAllLadders
+    // so it fires correctly while moving (same pattern as build mode toggle).
+    this.inputManager.onToggleAllLadders = () => {
+      const ws = this.authoritativeWorldState || this.predictedWorldState;
+      const myId = this.networkManager.getAssignedPlayerId();
+      const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
+      if (!me || !ws) return;
+      const companyId = me.companyId ?? 0;
+      if (companyId === 0) { console.log('Neutral company — cannot mass-toggle ladders'); return; }
+      let ladderCount = 0;
+      for (const ship of ws.ships) {
+        if (ship.companyId !== companyId) continue;
+        for (const mod of ship.modules) {
+          if (mod.kind === 'ladder') { this.networkManager.sendToggleLadder(mod.id); ladderCount++; }
+        }
+      }
+      console.log(`🪜 [LADDER] Toggled ${ladderCount} ladder(s) on company ${companyId} ships`);
+    };
+
+    // E keyup: execute action based on how long E was held
+    window.addEventListener('keyup', (e) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key !== 'e' && e.key !== 'E') return;
+
+      const moduleId = this._ladderHoldModuleId;
+      const shipId   = this._ladderHoldShipId;
+      const interactKind = this._interactKind;
+      const wasMounted = this._ladderHoldWasMounted;
+      this._suppressLadderInteract = false;
+      this._ladderHoldModuleId = null;
+      this._ladderHoldShipId = null;
+      this._interactKind = null;
+      this._ladderHoldWasMounted = false;
+
+      // Range validation: re-check player ↔ module distance at confirmation time.
+      // The target was locked in at keydown (hover) so continued hover is NOT required,
+      // but the player must still be within interaction range so they can't reach across
+      // the ship to interact with a distant module.
+      // • Same ship  → local coords (server units), threshold matches onActionEvent (120 px)
+      // • Off-ship   → world coords, lenient threshold for boarding/ladder ops
+      // • Dismount   → always pass (player is physically AT the mounted module)
+      const CONFIRM_RANGE_LOCAL    = 150; // local/world px — slightly lenient of the 120 keydown hover
+      const CONFIRM_RANGE_OFFSHIP  = 300; // world px — lenient for off-ship ops
+      const isInRange = (): boolean => {
+        if (wasMounted) return true; // dismount: always at the module
+        if (moduleId === null || shipId === null) return false;
+        const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+        const myId = this.networkManager.getAssignedPlayerId();
+        const me = (myId !== null ? ws?.players.find(p => p.id === myId) : null) ?? ws?.players[0] ?? null;
+        if (!me || !ws) return true; // no state yet — allow it
+        const ship = ws.ships.find(s => s.id === shipId);
+        if (!ship) return false;
+        const mod = ship.modules.find(m => m.id === moduleId);
+        if (!mod) return false;
+        // Same ship + not a ladder: use local coords (server units, unaffected by
+        // ship motion) for range check.  Ladders always use world coords because an
+        // off-ship player may be boarding and carrierId can lag mid-transition.
+        if (interactKind !== 'ladder' && me.carrierId === shipId) {
+          if (!me.localPosition) {
+            // localPosition is temporarily null (e.g. first tick on ship).
+            // Player is confirmed on-ship so proximity at keydown was valid — allow it.
+            return true;
+          }
+          const localDist = Math.hypot(
+            (me.localPosition as any).x - mod.localPos.x,
+            (me.localPosition as any).y - mod.localPos.y
+          );
+          if (localDist > CONFIRM_RANGE_LOCAL) console.warn(`📏 range fail (local): dist=${localDist.toFixed(1)} > ${CONFIRM_RANGE_LOCAL} | playerLocal=(${(me.localPosition as any).x.toFixed(1)},${(me.localPosition as any).y.toFixed(1)}) modLocal=(${mod.localPos.x.toFixed(1)},${mod.localPos.y.toFixed(1)})`);
+          return localDist <= CONFIRM_RANGE_LOCAL;
+        }
+        // Off-ship or ladder: world distance.
+        // mod.localPos is already in client pixels (same space as ship.position).
+        const cos = Math.cos(ship.rotation);
+        const sin = Math.sin(ship.rotation);
+        const mwx = ship.position.x + (mod.localPos.x * cos - mod.localPos.y * sin);
+        const mwy = ship.position.y + (mod.localPos.x * sin + mod.localPos.y * cos);
+        const worldDist = Math.hypot(me.position.x - mwx, me.position.y - mwy);
+        if (worldDist > CONFIRM_RANGE_OFFSHIP) console.warn(`📏 range fail (world): dist=${worldDist.toFixed(1)} > ${CONFIRM_RANGE_OFFSHIP} | player=(${me.position.x.toFixed(1)},${me.position.y.toFixed(1)}) modWorld=(${mwx.toFixed(1)},${mwy.toFixed(1)}) carrierId=${me.carrierId} shipId=${shipId}`);
+        return worldDist <= CONFIRM_RANGE_OFFSHIP;
+      };
+
+      // ── STRUCTURE INTERACT (floor / workbench) ────────────────────────────
+      if (interactKind === 'structure') {
+        const structId   = this._hoveredStructureId;
+        const structType = this._hoveredStructureType;
+        this._hoveredStructureId   = null;
+        this._hoveredStructureType = null;
+
+        const doUse = () => {
+          if (structId === null) return;
+          this.networkManager.sendStructureInteract(structId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          console.log(`⚒ [STRUCTURE] Open workbench ${structId}`);
+        };
+        const doDemolish = () => {
+          if (structId === null) return;
+          this.networkManager.sendDemolishStructure(structId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          console.log(`🔨 [STRUCTURE] Demolish ${structType} ${structId}`);
+        };
+
+        if (this._ladderHoldTimer !== null) {
+          // Tap (released before radial opened)
+          clearTimeout(this._ladderHoldTimer);
+          this._ladderHoldTimer = null;
+          this.renderSystem.stopLadderHoldRing();
+          if (structType === 'workbench') {
+            // Tap E on workbench = primary action: open
+            doUse();
+          } else if (structType === 'door') {
+            // Tap E on door panel = toggle open/closed
+            doUse();
+          }
+          // Tap E on floor/wall/door_frame = nothing (user must hold to demolish)
+        } else if (this._radialMenu.isOpen) {
+          const selected = this._radialMenu.getHoveredId();
+          this._radialMenu.close();
+          if (selected === 'use')      doUse();
+          else if (selected === 'demolish') doDemolish();
+          else this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+        }
+        return;
+      }
+
+      // ── NPC INTERACT ─────────────────────────────────────────────────────────
+      if (interactKind === 'npc') {
+        const npcId = this._npcInteractId;
+        this._npcInteractId = null;
+
+        const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+        const myId = this.networkManager.getAssignedPlayerId();
+        const me = (myId !== null ? ws?.players.find(p => p.id === myId) : null) ?? ws?.players[0] ?? null;
+
+        const executeNpcAction = (actionId: string) => {
+          const npc = npcId != null ? ws?.npcs.find(n => n.id === npcId) : null;
+          if (!npc) { console.warn(`🤝 NPC ${npcId} not found in world state`); return; }
+          const myCompany = me?.companyId ?? 0;
+          if (actionId === 'recruit' && npc.companyId === 0) {
+            this.networkManager.sendNpcRecruit(npc.id);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`🤝 Recruiting NPC ${npc.id} (${npc.name})`);
+          } else if (actionId === 'move_aboard' && npc.companyId === myCompany) {
+            this.networkManager.sendNpcMoveAboard(npc.id);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`⚓ Moving NPC ${npc.id} (${npc.name}) aboard`);
+          } else if (actionId === 'crew_menu' && npc.companyId === myCompany) {
+            this.uiManager?.openCrewMenuForNpc(npc);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          }
+        };
+
+        const defaultNpcAction = () => {
+          const npc = npcId != null ? ws?.npcs.find(n => n.id === npcId) : null;
+          if (!npc) return;
+          const myCompany = me?.companyId ?? 0;
+          if (npc.companyId === 0) {
+            executeNpcAction('recruit');
+          } else if (npc.companyId === myCompany && npc.shipId !== me?.carrierId) {
+            executeNpcAction('move_aboard');
+          } else if (npc.companyId === myCompany) {
+            executeNpcAction('crew_menu');
+          }
+          // else: enemy company — no action
+        };
+
+        if (this._ladderHoldTimer !== null) {
+          // Tap (< 300 ms): execute default action without radial
+          clearTimeout(this._ladderHoldTimer);
+          this._ladderHoldTimer = null;
+          this.renderSystem.stopLadderHoldRing();
+          defaultNpcAction();
+        } else if (this._radialMenu.isOpen) {
+          // Hold released with radial open — execute selected option or cancel
+          const selected = this._radialMenu.getHoveredId();
+          this._radialMenu.close();
+          if (selected) { executeNpcAction(selected); }
+          else { this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition()); }
+        }
+        return;
+      }
+
+      // ── MOUNTABLE MODULES (helm / cannon / mast) — mount or dismount ────────
+      if (interactKind === 'mount') {
+        // Route to the correct network call based on whether the player was mounted.
+        const doMountAction = (): boolean => {
+          if (!isInRange()) {
+            console.warn('🎮 interact cancelled: moved out of range');
+            return false;
+          }
+          if (wasMounted) {
+            this.networkManager.sendAction('dismount');
+            console.log(`🎮 dismount (module ${moduleId})`);
+          } else if (moduleId !== null) {
+            this.networkManager.sendModuleInteract(moduleId);
+            console.log(`🎮 mount module ${moduleId}`);
+          } else {
+            return false;
+          }
+          return true;
+        };
+
+        if (this._ladderHoldTimer !== null) {
+          // Tap (< 300 ms) — execute immediately, no cancel possible
+          clearTimeout(this._ladderHoldTimer);
+          this._ladderHoldTimer = null;
+          this.renderSystem.stopLadderHoldRing();
+          if (doMountAction()) {
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          }
+        } else if (this._radialMenu.isOpen) {
+          // Hold — execute selected option or cancel if centre dead zone
+          const selected = this._radialMenu.getHoveredId();
+          this._radialMenu.close();
+          if (selected) {
+            if (doMountAction()) {
+              this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            } else {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            }
+          } else {
+            console.log('🎮 radial: cancelled (centre dead zone)');
+            this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+          }
+        }
+        return;
+      }
+
+      // ── LADDER ───────────────────────────────────────────────────────────
+      if (this._ladderHoldTimer !== null) {
+        clearTimeout(this._ladderHoldTimer);
+        this._ladderHoldTimer = null;
+        this.renderSystem.stopLadderHoldRing();
+
+        if (moduleId === null) return;
+
+        if (!isInRange()) {
+          console.warn('🪜 ladder interact cancelled: moved out of range');
+          this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+          return;
+        }
+
+        if (this._ladderHoldIsExtended) {
+          // Extended: tap = climb (any position) or retract (on ship)
+          this.networkManager.sendModuleInteract(moduleId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          console.log(`🪜 tap: ${this._ladderHoldOnShip ? 'retract' : 'climb'} ladder ${moduleId}`);
+        } else {
+          // Retracted: tap = extend (toggle_ladder, works on-ship and off)
+          this.networkManager.sendToggleLadder(moduleId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          console.log(`🪜 tap: extend ladder ${moduleId}`);
+        }
+      } else if (this._radialMenu.isOpen) {
+        // Radial was open — execute selected option or cancel if centre dead zone / out of range
+        const selected = this._radialMenu.getHoveredId();
+        this._radialMenu.close();
+
+        if (!selected || moduleId === null) {
+          this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+          return;
+        }
+
+        if (!isInRange()) {
+          console.warn('🪜 ladder radial cancelled: moved out of range');
+          this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+          return;
+        }
+
+        console.log(`🪜 radial: ${selected} ladder ${moduleId}`);
+
+        if (selected === 'climb' || selected === 'retract') {
+          // climb and retract both use module_interact (ladder must be extended)
+          this.networkManager.sendModuleInteract(moduleId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+        } else if (selected === 'extend') {
+          // extend always uses toggle_ladder — module_interact on retracted = climb attempt
+          this.networkManager.sendToggleLadder(moduleId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+        }
+      }
+    });
+
     console.log('⌨️ Debug keys initialized (] = toggle hover boundaries)');
   }
   
@@ -1968,19 +3169,7 @@ export class ClientApplication {
       this.currentFPS = Math.round((this.frameCount * 1000) / this.fpsTimer);
       const avgFrameTime = this.fpsTimer / this.frameCount;
       
-      // Log FPS and frame time for diagnostics
-      console.log(`📊 Render FPS: ${this.currentFPS} | Avg frame time: ${avgFrameTime.toFixed(2)}ms | Client tick: ${this.clientTickDuration.toFixed(2)}ms (${(1000/this.clientTickDuration).toFixed(0)}Hz)`);
-      
-      // Detect capping
-      if (this.currentFPS >= 59 && this.currentFPS <= 61) {
-        console.warn('⚠️ Rendering capped at 60 FPS (likely VSync or monitor refresh rate)');
-      } else if (this.currentFPS >= 119 && this.currentFPS <= 121) {
-        console.log('✅ Rendering at 120 FPS - excellent!');
-      } else if (this.currentFPS >= 143 && this.currentFPS <= 145) {
-        console.log('✅ Rendering at 144 FPS - excellent!');
-      } else if (this.currentFPS >= 29 && this.currentFPS <= 31) {
-        console.warn('⚠️ Low FPS (30) - performance bottleneck detected');
-      }
+
       
       this.frameCount = 0;
       this.fpsTimer = 0;
@@ -2048,6 +3237,7 @@ export class ClientApplication {
       infiniteAmmo: true,
       hullHealth: 100,
       companyId: 0,
+      shipType: 3,
       levelStats: {
         levels: [1, 8, 12, 3, 5], // demo: some points in resistance/damage
         xp: 350,
@@ -2103,6 +3293,9 @@ export class ClientApplication {
           onDeck: true,
           isMounted: false,
           companyId: 0,
+          health: 100,
+          maxHealth: 100,
+          onIslandId: 0,
           inventory: createEmptyInventory()
         }
       ],
@@ -2124,8 +3317,8 @@ export class ClientApplication {
     const playerId = this.networkManager.getAssignedPlayerId();
     if (playerId === null) return;
     
-    // Enable ship/cannon/mast controls
-    if (moduleKind.toUpperCase() === 'HELM' || moduleKind.toUpperCase() === 'CANNON' || moduleKind.toUpperCase() === 'MAST') {
+    // Enable ship/cannon/mast/swivel controls
+    if (moduleKind.toUpperCase() === 'HELM' || moduleKind.toUpperCase() === 'CANNON' || moduleKind.toUpperCase() === 'MAST' || moduleKind.toUpperCase() === 'SWIVEL') {
       let shipId: number | undefined;
       
       // Find the ship the player is on
