@@ -11777,7 +11777,6 @@ void websocket_server_tick(float dt) {
                                     ws_player->movement_state = PLAYER_STATE_SWIMMING;
                                     log_info("\U0001F30A Player %u left island", ws_player->player_id);
                             }
-                            }
                         }
                     }
                 } else {
