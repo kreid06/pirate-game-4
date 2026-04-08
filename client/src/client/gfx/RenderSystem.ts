@@ -3034,6 +3034,7 @@ export class RenderSystem {
     let wallOccupied = false;
     let noDoorFrame = false;
     let doorOccupied = false;
+    let blockedByStructure = false;  // workbench / door blocks the slot
     if (this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame') {
       wallOccupied = this.placedStructures.some(
         w => (w.type === 'wall' || w.type === 'door_frame') && Math.abs(w.x - mx) < 2 && Math.abs(w.y - my) < 2
@@ -3043,6 +3044,17 @@ export class RenderSystem {
         return (Math.abs(mx - s.x) < 3 && Math.abs(Math.abs(my - s.y) - 25) < 3) ||
                (Math.abs(my - s.y) < 3 && Math.abs(Math.abs(mx - s.x) - 25) < 3);
       });
+      // Check if a workbench or door panel occupies this slot's AABB
+      if (!wallOccupied && !noEdge) {
+        const isHoriz = this._wallGhostHorizontal;
+        const hw = isHoriz ? 25 : 5;
+        const hh = isHoriz ? 5  : 25;
+        const WB_R = 15;
+        blockedByStructure = this.placedStructures.some(s => {
+          if (s.type === 'wooden_floor' || s.type === 'wall' || s.type === 'door_frame') return false;
+          return Math.abs(s.x - mx) < hw + WB_R && Math.abs(s.y - my) < hh + WB_R;
+        });
+      }
     } else if (this.islandBuildKind === 'door') {
       noDoorFrame = !this.placedStructures.some(
         s => s.type === 'door_frame' && Math.abs(s.x - mx) < 2 && Math.abs(s.y - my) < 2
@@ -3067,7 +3079,7 @@ export class RenderSystem {
         s.companyId === myCompany
       );
 
-    const invalid = tooFar || inWater || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || noDoorFrame || doorOccupied;
+    const invalid = tooFar || inWater || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
@@ -3085,11 +3097,50 @@ export class RenderSystem {
     const ghostH = this.islandBuildKind === 'workbench' ? sz * 0.62
                  : isWallOrDoor ? (this._wallGhostHorizontal ? sz * WALL_THICK : sz)
                  : sz;
-    ctx.beginPath();
-    ctx.rect(msp.x - ghostW / 2, msp.y - ghostH / 2, ghostW, ghostH);
-    ctx.fill();
-    ctx.stroke();
-    ctx.setLineDash([]);
+
+    if (this.islandBuildKind === 'door_frame') {
+      // Ghost shaped like a door frame: two posts at ends, dashed span in the middle
+      const POST = sz * 0.14;
+      ctx.setLineDash([]);
+      if (this._wallGhostHorizontal) {
+        ctx.fillRect(msp.x - ghostW / 2, msp.y - POST / 2, POST, POST);
+        ctx.strokeRect(msp.x - ghostW / 2, msp.y - POST / 2, POST, POST);
+        ctx.fillRect(msp.x + ghostW / 2 - POST, msp.y - POST / 2, POST, POST);
+        ctx.strokeRect(msp.x + ghostW / 2 - POST, msp.y - POST / 2, POST, POST);
+        // dashed span lines top + bottom
+        ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
+        ctx.beginPath();
+        ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y - ghostH / 2);
+        ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y - ghostH / 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y + ghostH / 2);
+        ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y + ghostH / 2);
+        ctx.stroke();
+      } else {
+        ctx.fillRect(msp.x - POST / 2, msp.y - ghostH / 2, POST, POST);
+        ctx.strokeRect(msp.x - POST / 2, msp.y - ghostH / 2, POST, POST);
+        ctx.fillRect(msp.x - POST / 2, msp.y + ghostH / 2 - POST, POST, POST);
+        ctx.strokeRect(msp.x - POST / 2, msp.y + ghostH / 2 - POST, POST, POST);
+        // dashed span lines left + right
+        ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
+        ctx.beginPath();
+        ctx.moveTo(msp.x - ghostW / 2, msp.y - ghostH / 2 + POST);
+        ctx.lineTo(msp.x - ghostW / 2, msp.y + ghostH / 2 - POST);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(msp.x + ghostW / 2, msp.y - ghostH / 2 + POST);
+        ctx.lineTo(msp.x + ghostW / 2, msp.y + ghostH / 2 - POST);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    } else {
+      ctx.beginPath();
+      ctx.rect(msp.x - ghostW / 2, msp.y - ghostH / 2, ghostW, ghostH);
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
 
     // Label above the ghost
     const labelY = msp.y - ghostH / 2 - 6;
@@ -3106,6 +3157,9 @@ export class RenderSystem {
     } else if (blockedByTree) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('BLOCKED', msp.x, labelY);
+    } else if (blockedByStructure) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('BLOCKED BY STRUCTURE', msp.x, labelY);
     } else if (overlaps || wallOccupied || doorOccupied) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('OCCUPIED', msp.x, labelY);
