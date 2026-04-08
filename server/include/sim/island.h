@@ -132,45 +132,64 @@ static const IslandDef ISLAND_PRESETS[] = {
         },
     },
     {
-        /* ── Giant C-shaped island — opens east, width ~1800px ────────────
-         * Polygon vertices are offsets from centre (3500, 2500).
-         * The bay opens to the east; approach from the east to sail in.
+        /* ── Giant continental landmass ─────────────────────────────────────
+         * Roughly oval with a small southern bay.  ~6200 px wide × 6100 px
+         * tall, area ≈ 25,000,000 sq px (5000 × 5000 units).
+         * Centre at world (6000, 5000); polygon vertices are WORLD coords
+         * (absolute, not offsets) emitted to the client.
+         * Vertex offsets from centre traced clockwise from north.
          */
-        .id              = 2,
-        .x               = 3500.0f,
-        .y               = 2500.0f,
-        /* beach_radius_px / grass_radius_px unused — polygon mode */
-        .beach_radius_px = 0.0f,
-        .grass_radius_px = 0.0f,
-        .beach_bumps     = {0},
-        .grass_bumps     = {0},
-        .beach_max_bump  = 0.0f,
-        .grass_max_bump  = 0.0f,
-        .preset          = "continental",
-        /* 24-vertex coastline traced clockwise in screen coords */
-        .vertex_count    = 24,
-        .poly_bound_r    = 920.0f,
-        .grass_poly_scale = 0.78f,
-        .vx = {  650,  500,  200,    0, -300, -550, -700, -800,
-                -700, -550, -300,    0,  200,  500,  650,  500,
-                 350,  250,  200,  150,  200,  250,  350,  500 },
-        .vy = { -600, -700, -780, -800, -750, -550, -250,    0,
-                 250,  550,  750,  800,  780,  700,  600,  550,
-                 500,  350,  200,    0, -200, -350, -500, -550 },
-        .resource_count  = 12,
+        .id               = 2,
+        .x                = 6000.0f,
+        .y                = 5000.0f,
+        .beach_radius_px  = 0.0f,
+        .grass_radius_px  = 0.0f,
+        .beach_bumps      = {0},
+        .grass_bumps      = {0},
+        .beach_max_bump   = 0.0f,
+        .grass_max_bump   = 0.0f,
+        .preset           = "continental",
+        /* 28-vertex coastline.  C zero-fills remaining vx/vy slots. */
+        .vertex_count     = 28,
+        .poly_bound_r     = 3300.0f,
+        .grass_poly_scale = 0.82f,
+        /*            N      NNE    NE     ENE    E-NE   E-near  E      ESE  */
+        .vx = {     0,  800, 1600, 2300, 2750, 2950, 3100, 2900,
+        /*          SE     SSE    S-SE   S      S-bay  bay-in bay-fl bay-in */
+                 2550, 1950, 1250,  500,  250,  100,    0, -100,
+        /*         bay-ex SW-S   SW     WSW    W-SW   W-near W      WNW  */
+                 -350,-1050,-1850,-2450,-2850,-2950,-3100,-2900,
+        /*          NW     NNW    N-NW   N-near  */
+                -2550,-1950,-1250, -500 },
+        /*            N      NNE    NE     ENE    E-NE   E-near  E      ESE  */
+        .vy = {  -3000,-2850,-2650,-2250,-1450, -500,  400, 1200,
+        /*          SE     SSE    S-SE   S      S-bay  bay-in bay-fl bay-in */
+                  2050, 2600, 2900, 3050, 2450, 1850, 1650, 1850,
+        /*         bay-ex SW-S   SW     WSW    W-SW   W-near W      WNW  */
+                  2450, 2950, 2650, 2150, 1450,  500, -400,-1250,
+        /*          NW     NNW    N-NW   N-near  */
+                 -2050,-2550,-2800,-2950 },
+        .resource_count   = 16,
         .resources = {
-            { .ox = -500.0f, .oy =    0.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -400.0f, .oy = -350.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -400.0f, .oy =  350.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -600.0f, .oy = -150.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -600.0f, .oy =  150.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -300.0f, .oy = -600.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -300.0f, .oy =  600.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -500.0f, .oy = -400.0f, .type = ISLAND_RES_FIBER },
-            { .ox = -500.0f, .oy =  400.0f, .type = ISLAND_RES_FIBER },
-            { .ox = -350.0f, .oy =    0.0f, .type = ISLAND_RES_FIBER },
-            { .ox = -650.0f, .oy =    0.0f, .type = ISLAND_RES_ROCK  },
-            { .ox = -550.0f, .oy = -500.0f, .type = ISLAND_RES_ROCK  },
+            /* Wood — 8 forest clusters across the interior */
+            { .ox = -1500.0f, .oy = -1800.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =   500.0f, .oy = -2400.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =  1800.0f, .oy = -1800.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =  2200.0f, .oy =   300.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =  1600.0f, .oy =  1800.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -1200.0f, .oy =  1500.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -2100.0f, .oy =   800.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -2000.0f, .oy = -1200.0f, .type = ISLAND_RES_WOOD  },
+            /* Fiber — 4 meadow patches */
+            { .ox =  -800.0f, .oy = -1000.0f, .type = ISLAND_RES_FIBER },
+            { .ox =  1000.0f, .oy = -1000.0f, .type = ISLAND_RES_FIBER },
+            { .ox =  1200.0f, .oy =  1000.0f, .type = ISLAND_RES_FIBER },
+            { .ox = -1500.0f, .oy =  -400.0f, .type = ISLAND_RES_FIBER },
+            /* Rock — 4 mountain outcrops near the edges */
+            { .ox = -2500.0f, .oy = -1600.0f, .type = ISLAND_RES_ROCK  },
+            { .ox =  2500.0f, .oy = -1000.0f, .type = ISLAND_RES_ROCK  },
+            { .ox =  2400.0f, .oy =  1600.0f, .type = ISLAND_RES_ROCK  },
+            { .ox = -2500.0f, .oy =  1400.0f, .type = ISLAND_RES_ROCK  },
         },
     },
 };
