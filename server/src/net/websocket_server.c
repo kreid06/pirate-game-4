@@ -5041,6 +5041,7 @@ static void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketCli
     int best_ri = -1;
     for (int ri = 0; ri < isl->resource_count; ri++) {
         if (strcmp(isl->resources[ri].type, ISLAND_RES_WOOD) != 0) continue;
+        if (isl->resources[ri].health <= 0) continue; /* depleted */
         float wx = isl->x + isl->resources[ri].ox;
         float wy = isl->y + isl->resources[ri].oy;
         float dx = player->x - wx;
@@ -5170,6 +5171,7 @@ static void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient
         int   best_ri = -1;
         for (int ri = 0; ri < isl->resource_count; ri++) {
             if (strcmp(isl->resources[ri].type, ISLAND_RES_FIBER) != 0) continue;
+            if (isl->resources[ri].health <= 0) continue; /* depleted */
             float fx = isl->x + isl->resources[ri].ox;
             float fy = isl->y + isl->resources[ri].oy;
             float dx = player->x - fx;
@@ -5265,6 +5267,7 @@ static void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient*
         int   best_ri = -1;
         for (int ri = 0; ri < isl->resource_count; ri++) {
             if (strcmp(isl->resources[ri].type, ISLAND_RES_ROCK) != 0) continue;
+            if (isl->resources[ri].health <= 0) continue; /* depleted */
             float rx = isl->x + isl->resources[ri].ox;
             float ry = isl->y + isl->resources[ri].oy;
             float dx = player->x - rx;
@@ -11675,6 +11678,7 @@ void websocket_server_tick(float dt) {
                                     const float combined_r = PLAYER_R + TREE_TRUNK_R_PX;
                                     for (int ri = 0; ri < isl_mv->resource_count; ri++) {
                                         if (strcmp(isl_mv->resources[ri].type, ISLAND_RES_WOOD) != 0) continue;
+                                        if (isl_mv->resources[ri].health <= 0) continue; /* despawned */
                                         float tx = isl_mv->x + isl_mv->resources[ri].ox;
                                         float ty = isl_mv->y + isl_mv->resources[ri].oy;
                                         float dx = new_x - tx, dy = new_y - ty;

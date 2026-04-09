@@ -1168,7 +1168,7 @@ export class RenderSystem {
    */
   computeSnappedPos(wx: number, wy: number): { x: number; y: number } {
     const TILE   = 50;
-    const SNAP_R = TILE * 0.8; // 40 px — generous snap pull radius
+    const SNAP_R = TILE * 0.4; // 20 px — snap pull radius
     if (this.islandBuildKind !== 'wooden_floor' || this.placedStructures.length === 0) {
       return { x: wx, y: wy };
     }
@@ -2240,6 +2240,8 @@ export class RenderSystem {
       }> = [];
 
       for (const res of isl.resources) {
+        // Skip depleted resources
+        if (res.maxHp > 0 && res.hp <= 0) continue;
         const wx = isl.x + res.ox;
         const wy = isl.y + res.oy;
         const sp = camera.worldToScreen(Vec2.from(wx, wy));
@@ -3092,7 +3094,7 @@ export class RenderSystem {
     let mx = this.mouseWorldPos.x;
     let my = this.mouseWorldPos.y;
     if (this.islandBuildKind === 'wooden_floor' && this.placedStructures.length > 0) {
-      const SNAP_R  = TILE * 0.8; // 40 px — snap pull radius
+      const SNAP_R  = TILE * 0.4; // 20 px — snap pull radius
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
       const DIRS = [{ dx: TILE, dy: 0 }, { dx: -TILE, dy: 0 },
