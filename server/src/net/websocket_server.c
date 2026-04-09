@@ -5060,7 +5060,7 @@ static void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketCli
 
     /* Deduct health from the resource and broadcast damage */
     {
-        IslandResource *res = &ISLAND_PRESETS[0];
+        IslandResource *res = &ISLAND_PRESETS[0].resources[0];
         /* Find mutable island */
         for (int ii = 0; ii < ISLAND_COUNT; ii++) {
             if ((uint32_t)ISLAND_PRESETS[ii].id == player->on_island_id) {
