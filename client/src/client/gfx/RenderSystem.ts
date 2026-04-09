@@ -2215,14 +2215,24 @@ export class RenderSystem {
       })();
       const HARVEST_RANGE_SQ = 110 * 110;
       // Mouse hover radius for trees: hit-test against the canopy circle (17px * zoom)
-      const TREE_HOVER_SQ  = (Math.max(4, 17 * zoom)) * (Math.max(4, 17 * zoom));
-      const PLANT_HOVER_SQ = (Math.max(4, 14 * zoom)) * (Math.max(4, 14 * zoom));
-      const ROCK_HOVER_SQ  = (Math.max(4, 16 * zoom)) * (Math.max(4, 16 * zoom));
+      const TREE_HOVER_SQ  = (40 * zoom) * (40 * zoom);
+      const PLANT_HOVER_SQ = (14 * zoom) * (14 * zoom);
+      const ROCK_HOVER_SQ  = (12 * zoom) * (12 * zoom);
+      const cw = this.canvas.width;
+      const ch = this.canvas.height;
 
       for (const res of isl.resources) {
         const wx = isl.x + res.ox;
         const wy = isl.y + res.oy;
         const sp = camera.worldToScreen(Vec2.from(wx, wy));
+
+        // Per-resource screen-bounds cull
+        const maxR = 55 * zoom;
+        if (sp.x + maxR < 0 || sp.x - maxR > cw || sp.y + maxR < 0 || sp.y - maxR > ch) continue;
+
+        // Sub-pixel skip: if the canopy would be < 1px there's nothing meaningful to draw
+        if (maxR < 1) continue;
+
         if (res.type === 'wood') {
           // Hover detection (screen space)
           let isHovered = false;
@@ -2233,12 +2243,14 @@ export class RenderSystem {
             isHovered = (hdx * hdx + hdy * hdy) <= TREE_HOVER_SQ;
           }
           // Player-proximity for harvest
-          const inRange = axeEquipped && localPlayer
-            ? (() => { const dx = localPlayer.position.x - wx; const dy = localPlayer.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
-            : false;
+          const playerDxTree = localPlayer ? localPlayer.position.x - wx : Infinity;
+          const playerDyTree = localPlayer ? localPlayer.position.y - wy : Infinity;
+          const playerDistSqTree = playerDxTree * playerDxTree + playerDyTree * playerDyTree;
+          const inRange    = axeEquipped && localPlayer ? playerDistSqTree <= HARVEST_RANGE_SQ : false;
+          const playerNear = localPlayer  ? playerDistSqTree <= 60 * 60 : false;
 
           if (isHovered) this._hoveredTree = { wx, wy };
-          this.drawIslandTree(sp.x, sp.y, zoom, isHovered, inRange);
+          this.drawIslandTree(sp.x, sp.y, zoom, isHovered, inRange, playerNear, wx, wy);
           if (isHovered && axeEquipped) {
             this.drawHarvestPrompt(sp.x, sp.y, zoom, inRange);
           } else if (isHovered) {
@@ -2292,7 +2304,7 @@ export class RenderSystem {
   /** Draw a floating "[E] Chop" or "Too far" prompt above a tree. */
   private drawHarvestPrompt(sx: number, sy: number, zoom: number, inRange: boolean): void {
     const ctx = this.ctx;
-    const canopy    = Math.max(4, 17 * zoom);
+    const canopy    = 17 * zoom;
     const label     = inRange ? '[E] Chop' : 'Too far';
     const borderCol = inRange ? '#f0c040' : '#888888';
     const textCol   = inRange ? '#f0c040' : '#aaaaaa';
@@ -2323,13 +2335,53 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandTree(sx: number, sy: number, zoom: number, hovered = false, inRange = false): void {
-    const ctx    = this.ctx;
-    const trunk  = Math.max(2, 4 * zoom);
-    const canopy = Math.max(4, 17 * zoom);
+  private drawIslandTree(sx: number, sy: number, zoom: number, hovered = false, inRange = false, playerNear = false, seedX = 0, seedY = 0): void {
+    const ctx = this.ctx;
+
+    // ── Deterministic per-tree variation from world position ──────────────────
+    // Cheap integer hash — stable across all clients for the same tile.
+    const h = (Math.imul(seedX | 0, 2654435761) ^ Math.imul(seedY | 0, 1664525)) >>> 0;
+    const h2 = (Math.imul(h, 2246822519) ^ Math.imul(h >>> 13, 2654435761)) >>> 0;
+
+    // Canopy scale:  0.78 … 1.22  (wider spread = noticeably different sizes)
+    const canopyScale = 0.78 + ((h  & 0xFF) / 255) * 0.44;
+    // Lobe cluster rotation: -25°…+25° so the mass tilts left/right/up/down
+    const clusterRot  = (((h2 & 0xFF) / 255) - 0.5) * (Math.PI / 3.6);
+    // Trunk lean: small horizontal offset
+    const trunkLeanX  = (((h2 >>> 8 & 0xFF) / 255) - 0.5) * 0.18;
+    // Colour tint variant (4 variants)
+    const tintIdx = (h >>> 16) & 3;
+    // [shadow, base, highlight, glint]
+    const TINTS: [string, string, string, string][] = [
+      ['#1a3a0a', '#3a7320', '#52a030', '#6ecf42'],  // standard green
+      ['#1c3e08', '#3f7a18', '#5aae2e', '#74d93e'],  // slightly lighter / lime
+      ['#152f08', '#2e6318', '#456e22', '#5a9030'],  // darker / forest
+      ['#233a10', '#4a7c28', '#5fa035', '#72b845'],  // warm olive
+    ];
+    const [shadowCol, baseCol, hlCol, glintCol] = TINTS[tintIdx];
+
+    const trunk  = 4 * zoom;
+    const canopy = 40 * zoom * canopyScale;
+
+    // Rotate a lobe's offset vector by clusterRot
+    const rot = (dx: number, dy: number): [number, number] => {
+      const c = Math.cos(clusterRot), s = Math.sin(clusterRot);
+      return [dx * c - dy * s, dx * s + dy * c];
+    };
+
+    // 5 base lobe definitions [dx, dy, radius] in canopy-radius units
+    const BASE_L: [number, number, number][] = [
+      [  0.00, -0.22,  0.80 ],
+      [ -0.44,  0.00,  0.62 ],
+      [  0.46,  0.05,  0.58 ],
+      [ -0.20,  0.40,  0.50 ],
+      [  0.25,  0.38,  0.48 ],
+    ];
+    const L = BASE_L.map(([dx, dy, r]) => { const [rx, ry] = rot(dx, dy); return [rx, ry, r] as [number, number, number]; });
 
     ctx.save();
-    // Hover glow behind canopy
+
+    // ── Hover glow (always full opacity) ─────────────────────────────────────
     if (hovered) {
       const glowColor = inRange ? 'rgba(255,230,80,0.22)' : 'rgba(180,180,180,0.15)';
       const glowR     = inRange ? canopy * 1.25 : canopy * 1.15;
@@ -2338,32 +2390,54 @@ export class RenderSystem {
       ctx.fillStyle = glowColor;
       ctx.fill();
     }
-    // Trunk
-    ctx.fillStyle = '#5c3518';
+
+    // ── Trunk — revealed when player is nearby ────────────────────────────────
+    if (playerNear) {
+      ctx.globalAlpha = 1.0;
+      ctx.fillStyle = '#5c3518';
+      ctx.beginPath();
+      ctx.ellipse(sx + trunkLeanX * canopy, sy + canopy * 0.45, trunk, trunk * 1.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // ── Canopy — fades when player is underneath ──────────────────────────────
+    ctx.globalAlpha = playerNear ? 0.42 : 1.0;
+
+    // Pass 1: deep shadow — all lobes shifted SE
+    ctx.fillStyle = shadowCol;
+    for (const [dx, dy, r] of L) {
+      ctx.beginPath();
+      ctx.arc(sx + (dx + 0.13) * canopy, sy + (dy + 0.11) * canopy, r * canopy, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Pass 2: base colour — all lobes
+    ctx.fillStyle = baseCol;
+    for (const [dx, dy, r] of L) {
+      ctx.beginPath();
+      ctx.arc(sx + dx * canopy, sy + dy * canopy, r * canopy, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Pass 3: highlight — top 3 lobes shifted NW, smaller
+    ctx.fillStyle = hlCol;
+    for (const [dx, dy, r] of L.slice(0, 3)) {
+      ctx.beginPath();
+      ctx.arc(sx + (dx - 0.10) * canopy, sy + (dy - 0.15) * canopy, r * canopy * 0.62, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Pass 4: specular glint on crown apex
+    const [apexRx, apexRy] = rot(-0.09, -0.34);
+    ctx.fillStyle = glintCol;
     ctx.beginPath();
-    ctx.ellipse(sx, sy + canopy * 0.45, trunk, trunk * 1.6, 0, 0, Math.PI * 2);
+    ctx.arc(sx + apexRx * canopy, sy + apexRy * canopy, canopy * 0.25, 0, Math.PI * 2);
     ctx.fill();
-    // Dark shadow canopy
-    ctx.fillStyle = '#2a5214';
-    ctx.beginPath();
-    ctx.arc(sx + canopy * 0.1, sy + canopy * 0.08, canopy, 0, Math.PI * 2);
-    ctx.fill();
-    // Mid canopy
-    ctx.fillStyle = '#3e7a22';
-    ctx.beginPath();
-    ctx.arc(sx - canopy * 0.08, sy - canopy * 0.08, canopy * 0.84, 0, Math.PI * 2);
-    ctx.fill();
-    // Bright highlight
-    ctx.fillStyle = '#52a030';
-    ctx.beginPath();
-    ctx.arc(sx - canopy * 0.15, sy - canopy * 0.2, canopy * 0.52, 0, Math.PI * 2);
-    ctx.fill();
-    // Hover outline ring
+
+    // ── Hover outline ring (back to full opacity) ─────────────────────────────
+    ctx.globalAlpha = 1.0;
     if (hovered) {
       ctx.beginPath();
       ctx.arc(sx, sy, canopy * 1.08, 0, Math.PI * 2);
       ctx.strokeStyle = inRange ? '#f0c040' : '#888888';
-      ctx.lineWidth   = Math.max(1, 1.8 * zoom);
+      ctx.lineWidth   = 1.8 * zoom;
       ctx.stroke();
     }
     ctx.restore();
@@ -2371,7 +2445,7 @@ export class RenderSystem {
 
   private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false): void {
     const ctx        = this.ctx;
-    const h          = Math.max(5, 15 * zoom);
+    const h          = 15 * zoom;
     const bladeCount = 6;
 
     ctx.save();
@@ -2406,14 +2480,14 @@ export class RenderSystem {
 
   private drawIslandRock(sx: number, sy: number, zoom: number, hovered = false): void {
     const ctx = this.ctx;
-    const r   = Math.max(4, 12 * zoom);
+    const r   = 12 * zoom;
     ctx.save();
     // Main rock body
     ctx.beginPath();
     ctx.ellipse(sx, sy + r * 0.15, r, r * 0.7, 0, 0, Math.PI * 2);
     ctx.fillStyle   = hovered ? '#b0b0b4' : '#888890';
     ctx.strokeStyle = hovered ? '#ffe090' : '#555560';
-    ctx.lineWidth   = Math.max(1, hovered ? 2.5 * zoom : 1.5 * zoom);
+    ctx.lineWidth   = hovered ? 2.5 * zoom : 1.5 * zoom;
     ctx.fill();
     ctx.stroke();
     // Highlight fleck
@@ -2423,7 +2497,7 @@ export class RenderSystem {
     ctx.fill();
     // Crack lines
     ctx.strokeStyle = hovered ? '#888890' : '#666670';
-    ctx.lineWidth   = Math.max(0.5, zoom);
+    ctx.lineWidth   = zoom;
     ctx.beginPath();
     ctx.moveTo(sx - r * 0.1, sy - r * 0.2);
     ctx.lineTo(sx + r * 0.25, sy + r * 0.3);
@@ -2434,7 +2508,7 @@ export class RenderSystem {
   /** Draw a floating "[E] action" or "Too far" prompt above a resource node. */
   private drawGatherPrompt(sx: number, sy: number, zoom: number, inRange: boolean, actionLabel: string): void {
     const ctx = this.ctx;
-    const offsetY  = Math.max(4, 16 * zoom);
+    const offsetY  = 16 * zoom;
     const label     = inRange ? actionLabel : actionLabel.startsWith('(') ? actionLabel : 'Too far';
     const borderCol = inRange ? '#a0ff60' : '#888888';
     const textCol   = inRange ? '#c0ff80' : '#aaaaaa';
@@ -2518,6 +2592,9 @@ export class RenderSystem {
     for (const s of sorted) {
       const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
       const sz  = Math.max(4, 50 * zoom);
+      // Cull structures that are entirely off-screen
+      if (ssp.x + sz < 0 || ssp.x - sz > this.canvas.width ||
+          ssp.y + sz < 0 || ssp.y - sz > this.canvas.height) continue;
       const isHovered = this._hoveredStructure?.id === s.id;
 
       if (s.type === 'wooden_floor') {

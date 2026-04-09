@@ -6805,7 +6805,7 @@ void websocket_server_cleanup(void) {
  * ────────────────────────────────────────────────────────────────────────────*/
 #define PROJ_HIT_STRUCT_DAMAGE      25u     /* HP deducted per cannonball hit      */
 #define TREE_COLLISION_R_PX         22.0f   /* tree stop radius, client pixels     */
-#define TREE_TRUNK_R_PX             12.0f   /* tree trunk collision radius vs player */
+#define TREE_TRUNK_R_PX             18.0f   /* tree trunk collision radius vs player */
 #define STRUCT_FLOOR_HALF_EXT       25.0f   /* floor tile half-extent (50px tile)  */
 #define STRUCT_WB_HALF_W            22.0f   /* workbench half-width  (44px wide)   */
 #define STRUCT_WB_HALF_H            15.5f   /* workbench half-height (31px tall)   */
