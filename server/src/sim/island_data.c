@@ -165,7 +165,8 @@ static void init_static_resource_fields(void)
     }
 }
 
-
+void islands_generate_trees(void)
+{
     /* First pass: stamp size+health onto all statically declared resources. */
     init_static_resource_fields();
 
