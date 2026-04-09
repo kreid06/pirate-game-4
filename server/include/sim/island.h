@@ -165,3 +165,17 @@ extern IslandDef ISLAND_PRESETS[];
  * before any client connects.
  */
 void islands_generate_trees(void);
+
+/**
+ * Returns true if the resource at (rx, ry) is allowed to respawn.
+ * A resource is suppressed when any active structure lies within
+ * RESPAWN_SUPPRESS_R world-pixels of it — e.g. a player has built over
+ * the cleared stump.
+ *
+ * structs      : pointer to the PlacedStructure array (websocket_server.c)
+ * struct_count : number of entries (active + inactive)
+ */
+#include "net/websocket_server.h"  /* PlacedStructure */
+bool island_resource_can_respawn(float rx, float ry,
+                                 const PlacedStructure *structs,
+                                 uint32_t struct_count);

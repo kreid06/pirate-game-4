@@ -4596,6 +4596,7 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
             const IslandDef *isl = &ISLAND_PRESETS[ii];
             for (int ri = 0; ri < isl->resource_count && !blocked; ri++) {
                 if (strcmp(isl->resources[ri].type, ISLAND_RES_WOOD) != 0) continue;
+                if (isl->resources[ri].health <= 0) continue; /* depleted — no longer an obstacle */
                 float tx = isl->x + isl->resources[ri].ox;
                 float ty = isl->y + isl->resources[ri].oy;
                 /* Closest point on AABB [px-HALF, px+HALF] x [py-HALF, py+HALF] to tree */

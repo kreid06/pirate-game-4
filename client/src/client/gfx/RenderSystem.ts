@@ -258,17 +258,17 @@ export class RenderSystem {
   /** Live island list — replaced by server ISLANDS message when received. */
   private islands: Array<{
     id: number; x: number; y: number; preset: string;
-    resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number }>;
+    resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number }>;
     vertices?: { x: number; y: number }[];
   }> = [RenderSystem.DEFAULT_ISLAND];
 
   /** Called by ClientApplication when the server sends the ISLANDS message. */
-  setIslands(islands: Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number }>; vertices?: { x: number; y: number }[] }>): void {
+  setIslands(islands: Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number }>; vertices?: { x: number; y: number }[] }>): void {
     this.islands = islands;
   }
 
   /** Returns the live island list (for proximity checks in ClientApplication). */
-  getIslands(): Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number }>; vertices?: { x: number; y: number }[] }> {
+  getIslands(): Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number }>; vertices?: { x: number; y: number }[] }> {
     return this.islands;
   }
 
@@ -2152,15 +2152,17 @@ export class RenderSystem {
     const LEAF_FADE_OUTER = 420;
     const LEAF_FADE_INNER = 120;
     const MIN_LEAF_ALPHA  = 0.12;
+    const DEATH_FADE_MS   = 2000; // ms — how long a depleted resource fades out
+    const now = performance.now();
     const cw = this.canvas.width;
     const ch = this.canvas.height;
     const msp = this.mouseWorldPos ? camera.worldToScreen(this.mouseWorldPos) : null;
     // Collects visible resources from all islands; leaves+prompts drawn after structures.
     const allVisibleRes: Array<{
-      res: { ox: number; oy: number; type: string; size: number; hp: number; maxHp: number };
+      res: { ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number };
       wx: number; wy: number;
       sp: ReturnType<typeof camera.worldToScreen>;
-      isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number;
+      isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number; deathAlpha: number;
     }> = [];
 
     for (const isl of this.islands) {
@@ -2236,12 +2238,26 @@ export class RenderSystem {
         res: typeof isl.resources[0];
         wx: number; wy: number;
         sp: ReturnType<typeof camera.worldToScreen>;
-        isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number;
+        isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number; deathAlpha: number;
       }> = [];
 
       for (const res of isl.resources) {
-        // Skip depleted resources
-        if (res.maxHp > 0 && res.hp <= 0) continue;
+        // Depleted resources fade out over DEATH_FADE_MS, then disappear entirely.
+        // During the fade they cannot be hovered or interacted with.
+        let deathAlpha = 1.0;
+        if (res.maxHp > 0 && res.hp <= 0) {
+          if (!res.depletedAt) continue; // no timestamp yet — skip (shouldn't happen)
+          const elapsed = now - res.depletedAt;
+          if (elapsed >= DEATH_FADE_MS) continue; // fully faded, skip
+          deathAlpha = 1.0 - elapsed / DEATH_FADE_MS; // 1 → 0 over DEATH_FADE_MS
+          const wx2 = isl.x + res.ox, wy2 = isl.y + res.oy;
+          const sp2 = camera.worldToScreen(Vec2.from(wx2, wy2));
+          const maxR2 = 100 * zoom;
+          if (sp2.x + maxR2 < 0 || sp2.x - maxR2 > cw || sp2.y + maxR2 < 0 || sp2.y - maxR2 > ch) continue;
+          // No hover, no interaction while dying
+          visibleRes.push({ res, wx: wx2, wy: wy2, sp: sp2, isHovered: false, inRange: false, playerNear: false, leafAlpha: 1.0, deathAlpha });
+          continue;
+        }
         const wx = isl.x + res.ox;
         const wy = isl.y + res.oy;
         const sp = camera.worldToScreen(Vec2.from(wx, wy));
@@ -2284,23 +2300,23 @@ export class RenderSystem {
               return MIN_LEAF_ALPHA + t * (1.0 - MIN_LEAF_ALPHA);
             })()
           : 1.0;
-        visibleRes.push({ res, wx, wy, sp, isHovered, inRange, playerNear, leafAlpha });
+        visibleRes.push({ res, wx, wy, sp, isHovered, inRange, playerNear, leafAlpha, deathAlpha });
       }
 
       // Pass 1 – fiber plants (back-most layer)
       for (const e of visibleRes) {
         if (e.res.type !== 'fiber') continue;
-        this.drawIslandFiberPlant(e.sp.x, e.sp.y, zoom, e.isHovered);
+        this.drawIslandFiberPlant(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha);
       }
       // Pass 2 – rocks
       for (const e of visibleRes) {
         if (e.res.type !== 'rock') continue;
-        this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered);
+        this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha);
       }
       // Pass 3 – tree trunks
       for (const e of visibleRes) {
         if (e.res.type !== 'wood') continue;
-        this.drawIslandTreeTrunk(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.playerNear, e.res.size ?? 1.0);
+        this.drawIslandTreeTrunk(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.playerNear, e.res.size ?? 1.0, e.deathAlpha);
       }
 
       // Defer leaves + prompts until ALL trunks (across all islands) are done,
@@ -2314,7 +2330,7 @@ export class RenderSystem {
     // ── Pass 4 – tree leaves (all islands, above structures) ──────────────────
     for (const e of allVisibleRes) {
       if (e.res.type !== 'wood') continue;
-      this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0);
+      this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha);
     }
     // ── Pass 5 – hover prompts + health bars (always on top) ─────────────────
     for (const e of allVisibleRes) {
@@ -2392,7 +2408,7 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandTreeLeaves(sx: number, sy: number, zoom: number, hovered = false, inRange = false, leafAlpha = 1.0, seedX = 0, seedY = 0, size = 1.0): void {
+  private drawIslandTreeLeaves(sx: number, sy: number, zoom: number, hovered = false, inRange = false, leafAlpha = 1.0, seedX = 0, seedY = 0, size = 1.0, deathAlpha = 1.0): void {
     const ctx = this.ctx;
     const h  = (Math.imul(seedX | 0, 2654435761) ^ Math.imul(seedY | 0, 1664525)) >>> 0;
     const h2 = (Math.imul(h, 2246822519) ^ Math.imul(h >>> 13, 2654435761)) >>> 0;
@@ -2430,8 +2446,8 @@ export class RenderSystem {
       ctx.fillStyle = glowColor;
       ctx.fill();
     }
-    // Canopy — fades heavily when player is underneath
-    ctx.globalAlpha = leafAlpha;
+    // Canopy — fades when player is underneath (leafAlpha) AND when tree is dying (deathAlpha)
+    ctx.globalAlpha = leafAlpha * deathAlpha;
     // Pass 1: deep shadow
     ctx.fillStyle = shadowCol;
     for (const [dx, dy, r] of L) {
@@ -2460,7 +2476,7 @@ export class RenderSystem {
     ctx.arc(sx + apexRx * canopy, sy + apexRy * canopy, canopy * 0.25, 0, Math.PI * 2);
     ctx.fill();
     // Canopy hover ring
-    ctx.globalAlpha = 1.0;
+    ctx.globalAlpha = deathAlpha;
     if (hovered) {
       ctx.beginPath();
       ctx.arc(sx, sy, canopy * 1.08, 0, Math.PI * 2);
@@ -2471,11 +2487,11 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandTreeTrunk(sx: number, sy: number, zoom: number, hovered = false, inRange = false, playerNear = false, size = 1.0): void {
+  private drawIslandTreeTrunk(sx: number, sy: number, zoom: number, hovered = false, inRange = false, playerNear = false, size = 1.0, deathAlpha = 1.0): void {
     const ctx   = this.ctx;
     const trunk = 18 * zoom * size;
     ctx.save();
-    ctx.globalAlpha = 1.0;
+    ctx.globalAlpha = deathAlpha;
     // Shadow circle (offset SE)
     ctx.fillStyle = '#2e1a0a';
     ctx.beginPath();
@@ -2502,12 +2518,13 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false): void {
+  private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0): void {
     const ctx        = this.ctx;
     const h          = 15 * zoom;
     const bladeCount = 6;
 
     ctx.save();
+    ctx.globalAlpha = deathAlpha;
     ctx.lineCap = 'round';
     // Dark base blades
     ctx.strokeStyle = hovered ? '#7ac040' : '#5a9030';
@@ -2537,10 +2554,11 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandRock(sx: number, sy: number, zoom: number, hovered = false): void {
+  private drawIslandRock(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0): void {
     const ctx = this.ctx;
     const r   = 12 * zoom;
     ctx.save();
+    ctx.globalAlpha = deathAlpha;
     // Main rock body
     ctx.beginPath();
     ctx.ellipse(sx, sy + r * 0.15, r, r * 0.7, 0, 0, Math.PI * 2);

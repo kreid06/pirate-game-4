@@ -1282,7 +1282,10 @@ export class ClientApplication {
         const isl = this.renderSystem.getIslands().find(i => i.id === islandId);
         if (!isl) return;
         const res = isl.resources.find(r => Math.abs(r.ox - ox) < 0.5 && Math.abs(r.oy - oy) < 0.5);
-        if (res) { res.hp = hp; res.maxHp = maxHp; }
+        if (res) {
+          res.hp = hp; res.maxHp = maxHp;
+          if (hp <= 0 && !res.depletedAt) res.depletedAt = performance.now();
+        }
       };
 
       // Handle placed structures

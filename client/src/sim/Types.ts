@@ -262,6 +262,8 @@ export interface IslandResource {
   size: number;
   hp: number;
   maxHp: number;
+  /** Client-only: timestamp (performance.now()) when hp first reached 0. Used for fade-out. */
+  depletedAt?: number;
 }
 
 /**

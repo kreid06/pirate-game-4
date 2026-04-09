@@ -12,6 +12,7 @@
  */
 
 #include "sim/island.h"
+#include "net/websocket_server.h"  /* PlacedStructure — needed for island_resource_can_respawn */
 #include <string.h>
 #include <math.h>
 #include <stdbool.h>
@@ -215,4 +216,25 @@ void islands_generate_trees(void)
         /* Log how many trees were generated for this island. */
         (void)added; /* suppress unused-variable warning if logging is off */
     }
+}
+
+/**
+ * Returns true if the resource at world position (rx, ry) may respawn.
+ * Suppressed when any active structure is within RESPAWN_SUPPRESS_R px,
+ * i.e. a player has built over the depleted node's footprint.
+ */
+bool island_resource_can_respawn(float rx, float ry,
+                                 const PlacedStructure *structs,
+                                 uint32_t struct_count)
+{
+    /* Any structure type within this radius blocks respawn. */
+    const float RESPAWN_SUPPRESS_R = 60.0f;
+    for (uint32_t i = 0; i < struct_count; i++) {
+        if (!structs[i].active) continue;
+        float dx = structs[i].x - rx;
+        float dy = structs[i].y - ry;
+        if (dx*dx + dy*dy < RESPAWN_SUPPRESS_R * RESPAWN_SUPPRESS_R)
+            return false;
+    }
+    return true;
 }
