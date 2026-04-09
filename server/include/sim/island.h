@@ -20,7 +20,7 @@
  *   grass_max_bump  — max(abs(grass_bumps)); used as broad-phase margin
  */
 
-#define ISLAND_MAX_RESOURCES 16
+#define ISLAND_MAX_RESOURCES 64
 #define ISLAND_MAX_COUNT     16
 #define ISLAND_BUMP_COUNT    16
 #define ISLAND_MAX_VERTS     64
@@ -215,17 +215,49 @@ static const IslandDef ISLAND_PRESETS[] = {
                   2450, 2950, 2650, 2150, 1450,  500, -400,-1250,
         /*          NW     NNW    N-NW   N-near  */
                  -2050,-2550,-2800,-2950 },
-        .resource_count   = 16,
+        .resource_count   = 40,
         .resources = {
-            /* Wood — 8 forest clusters across the interior */
+            /* Wood — 8 forest clusters, 4 trees each (within ~100px radius) */
+            /* Cluster A: north-west interior */
             { .ox = -1500.0f, .oy = -1800.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -1580.0f, .oy = -1715.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -1430.0f, .oy = -1890.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -1510.0f, .oy = -1680.0f, .type = ISLAND_RES_WOOD  },
+            /* Cluster B: north centre */
             { .ox =   500.0f, .oy = -2400.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =   580.0f, .oy = -2320.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =   415.0f, .oy = -2475.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =   555.0f, .oy = -2455.0f, .type = ISLAND_RES_WOOD  },
+            /* Cluster C: north-east interior */
             { .ox =  1800.0f, .oy = -1800.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =  1885.0f, .oy = -1720.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =  1715.0f, .oy = -1875.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =  1840.0f, .oy = -1680.0f, .type = ISLAND_RES_WOOD  },
+            /* Cluster D: east coast */
             { .ox =  2200.0f, .oy =   300.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =  2275.0f, .oy =   375.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =  2115.0f, .oy =   245.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =  2255.0f, .oy =   210.0f, .type = ISLAND_RES_WOOD  },
+            /* Cluster E: south-east interior */
             { .ox =  1600.0f, .oy =  1800.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =  1680.0f, .oy =  1715.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =  1515.0f, .oy =  1885.0f, .type = ISLAND_RES_WOOD  },
+            { .ox =  1650.0f, .oy =  1700.0f, .type = ISLAND_RES_WOOD  },
+            /* Cluster F: south-west interior */
             { .ox = -1200.0f, .oy =  1500.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -1285.0f, .oy =  1415.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -1115.0f, .oy =  1580.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -1255.0f, .oy =  1435.0f, .type = ISLAND_RES_WOOD  },
+            /* Cluster G: west coast */
             { .ox = -2100.0f, .oy =   800.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -2185.0f, .oy =   720.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -2020.0f, .oy =   875.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -2150.0f, .oy =   705.0f, .type = ISLAND_RES_WOOD  },
+            /* Cluster H: west-north-west */
             { .ox = -2000.0f, .oy = -1200.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -2085.0f, .oy = -1120.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -1910.0f, .oy = -1280.0f, .type = ISLAND_RES_WOOD  },
+            { .ox = -2055.0f, .oy = -1105.0f, .type = ISLAND_RES_WOOD  },
             /* Fiber — 4 meadow patches */
             { .ox =  -800.0f, .oy = -1000.0f, .type = ISLAND_RES_FIBER },
             { .ox =  1000.0f, .oy = -1000.0f, .type = ISLAND_RES_FIBER },

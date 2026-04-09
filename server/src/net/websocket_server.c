@@ -6801,6 +6801,7 @@ void websocket_server_cleanup(void) {
  * ────────────────────────────────────────────────────────────────────────────*/
 #define PROJ_HIT_STRUCT_DAMAGE      25u     /* HP deducted per cannonball hit      */
 #define TREE_COLLISION_R_PX         22.0f   /* tree stop radius, client pixels     */
+#define TREE_TRUNK_R_PX             12.0f   /* tree trunk collision radius vs player */
 #define STRUCT_FLOOR_HALF_EXT       25.0f   /* floor tile half-extent (50px tile)  */
 #define STRUCT_WB_HALF_W            22.0f   /* workbench half-width  (44px wide)   */
 #define STRUCT_WB_HALF_H            15.5f   /* workbench half-height (31px tall)   */
@@ -11611,6 +11612,24 @@ void websocket_server_tick(float dt) {
                                             float pen  = PLAYER_R - dist;
                                             new_x += (dpx / dist) * pen;
                                             new_y += (dpy / dist) * pen;
+                                        }
+                                    }
+                                }
+                                /* Tree trunk collision — push player out of trunk radius */
+                                if (isl_mv) {
+                                    const float PLAYER_R = 8.0f;
+                                    const float combined_r = PLAYER_R + TREE_TRUNK_R_PX;
+                                    for (int ri = 0; ri < isl_mv->resource_count; ri++) {
+                                        if (strcmp(isl_mv->resources[ri].type, ISLAND_RES_WOOD) != 0) continue;
+                                        float tx = isl_mv->x + isl_mv->resources[ri].ox;
+                                        float ty = isl_mv->y + isl_mv->resources[ri].oy;
+                                        float dx = new_x - tx, dy = new_y - ty;
+                                        float dist_sq = dx * dx + dy * dy;
+                                        if (dist_sq < combined_r * combined_r && dist_sq > 0.0001f) {
+                                            float dist = sqrtf(dist_sq);
+                                            float pen  = combined_r - dist;
+                                            new_x += (dx / dist) * pen;
+                                            new_y += (dy / dist) * pen;
                                         }
                                     }
                                 }
