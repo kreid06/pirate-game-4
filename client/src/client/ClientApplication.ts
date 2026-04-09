@@ -1277,6 +1277,14 @@ export class ClientApplication {
         this.renderSystem.setIslands(islands);
       };
 
+      // Update a resource's HP when the server broadcasts resource_damaged
+      this.networkManager.onResourceDamaged = (islandId, ox, oy, hp, maxHp) => {
+        const isl = this.renderSystem.getIslands().find(i => i.id === islandId);
+        if (!isl) return;
+        const res = isl.resources.find(r => Math.abs(r.ox - ox) < 0.5 && Math.abs(r.oy - oy) < 0.5);
+        if (res) { res.hp = hp; res.maxHp = maxHp; }
+      };
+
       // Handle placed structures
       this.networkManager.onStructuresList = (structs) => {
         this.renderSystem.setPlacedStructures(structs);

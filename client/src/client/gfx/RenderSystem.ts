@@ -245,30 +245,30 @@ export class RenderSystem {
   private static readonly DEFAULT_ISLAND = {
     id: 0, x: 800, y: 600, preset: 'tropical' as const,
     resources: [
-      { ox: -65, oy: -55, type: 'wood'  as const },
-      { ox:  85, oy: -25, type: 'wood'  as const },
-      { ox:  15, oy:  80, type: 'wood'  as const },
-      { ox: -90, oy:  38, type: 'wood'  as const },
-      { ox:  45, oy: -78, type: 'fiber' as const },
-      { ox: -28, oy:  32, type: 'fiber' as const },
-      { ox:  70, oy:  50, type: 'fiber' as const },
+      { ox: -65, oy: -55, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
+      { ox:  85, oy: -25, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
+      { ox:  15, oy:  80, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
+      { ox: -90, oy:  38, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
+      { ox:  45, oy: -78, type: 'fiber' as const, size: 1.0, hp:  30, maxHp:  30 },
+      { ox: -28, oy:  32, type: 'fiber' as const, size: 1.0, hp:  30, maxHp:  30 },
+      { ox:  70, oy:  50, type: 'fiber' as const, size: 1.0, hp:  30, maxHp:  30 },
     ],
   };
 
   /** Live island list — replaced by server ISLANDS message when received. */
   private islands: Array<{
     id: number; x: number; y: number; preset: string;
-    resources: Array<{ ox: number; oy: number; type: string }>;
+    resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number }>;
     vertices?: { x: number; y: number }[];
   }> = [RenderSystem.DEFAULT_ISLAND];
 
   /** Called by ClientApplication when the server sends the ISLANDS message. */
-  setIslands(islands: Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string }>; vertices?: { x: number; y: number }[] }>): void {
+  setIslands(islands: Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number }>; vertices?: { x: number; y: number }[] }>): void {
     this.islands = islands;
   }
 
   /** Returns the live island list (for proximity checks in ClientApplication). */
-  getIslands(): Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string }>; vertices?: { x: number; y: number }[] }> {
+  getIslands(): Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number }>; vertices?: { x: number; y: number }[] }> {
     return this.islands;
   }
 
@@ -2214,86 +2214,105 @@ export class RenderSystem {
         return localPlayer.inventory?.slots[slot]?.item === 'pickaxe';
       })();
       const HARVEST_RANGE_SQ = 110 * 110;
-      // Mouse hover radius for trees: hit-test against the canopy circle (17px * zoom)
-      const TREE_HOVER_SQ  = (40 * zoom) * (40 * zoom);
+      // Tree hover radius is per-tree (scaled by res.size); plant/rock are fixed
       const PLANT_HOVER_SQ = (14 * zoom) * (14 * zoom);
       const ROCK_HOVER_SQ  = (12 * zoom) * (12 * zoom);
+      // Leaf transparency fade band (world units)
+      const LEAF_FADE_OUTER = 420; // start fading here
+      const LEAF_FADE_INNER = 120;  // fully faded here
+      const MIN_LEAF_ALPHA  = 0.12;
       const cw = this.canvas.width;
       const ch = this.canvas.height;
+
+      // ── Pre-pass: collect visible resources + hover/range states ───────────
+      const msp = this.mouseWorldPos ? camera.worldToScreen(this.mouseWorldPos) : null;
+      const visibleRes: Array<{
+        res: typeof isl.resources[0];
+        wx: number; wy: number;
+        sp: ReturnType<typeof camera.worldToScreen>;
+        isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number;
+      }> = [];
 
       for (const res of isl.resources) {
         const wx = isl.x + res.ox;
         const wy = isl.y + res.oy;
         const sp = camera.worldToScreen(Vec2.from(wx, wy));
-
-        // Per-resource screen-bounds cull
-        const maxR = 55 * zoom;
+        const maxR = 100 * zoom;
         if (sp.x + maxR < 0 || sp.x - maxR > cw || sp.y + maxR < 0 || sp.y - maxR > ch) continue;
-
-        // Sub-pixel skip: if the canopy would be < 1px there's nothing meaningful to draw
         if (maxR < 1) continue;
 
+        let isHovered = false;
+        let inRange   = false;
+        let playerNear = false;
+
         if (res.type === 'wood') {
-          // Hover detection (screen space)
-          let isHovered = false;
-          if (this.mouseWorldPos) {
-            const msp = camera.worldToScreen(this.mouseWorldPos);
-            const hdx = msp.x - sp.x;
-            const hdy = msp.y - sp.y;
-            isHovered = (hdx * hdx + hdy * hdy) <= TREE_HOVER_SQ;
-          }
-          // Player-proximity for harvest
-          const playerDxTree = localPlayer ? localPlayer.position.x - wx : Infinity;
-          const playerDyTree = localPlayer ? localPlayer.position.y - wy : Infinity;
-          const playerDistSqTree = playerDxTree * playerDxTree + playerDyTree * playerDyTree;
-          const inRange    = axeEquipped && localPlayer ? playerDistSqTree <= HARVEST_RANGE_SQ : false;
-          const playerNear = localPlayer  ? playerDistSqTree <= 60 * 60 : false;
-
+          const treeHoverR = 18 * (res.size ?? 1.0) * zoom;
+          if (msp) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= treeHoverR * treeHoverR; }
+          const pdx = localPlayer ? localPlayer.position.x - wx : Infinity;
+          const pdy = localPlayer ? localPlayer.position.y - wy : Infinity;
+          const pdSq = pdx * pdx + pdy * pdy;
+          const dist = Math.sqrt(pdSq);
+          inRange    = !!(axeEquipped && localPlayer && pdSq <= HARVEST_RANGE_SQ);
+          playerNear = !!(localPlayer && dist < LEAF_FADE_OUTER);
           if (isHovered) this._hoveredTree = { wx, wy };
-          this.drawIslandTree(sp.x, sp.y, zoom, isHovered, inRange, playerNear, wx, wy);
-          if (isHovered && axeEquipped) {
-            this.drawHarvestPrompt(sp.x, sp.y, zoom, inRange);
-          } else if (isHovered) {
-            this.drawGatherPrompt(sp.x, sp.y, zoom, false, '(need axe)');
-          }
         } else if (res.type === 'fiber') {
-          let isHovered = false;
-          if (this.mouseWorldPos) {
-            const msp = camera.worldToScreen(this.mouseWorldPos);
-            const hdx = msp.x - sp.x;
-            const hdy = msp.y - sp.y;
-            isHovered = (hdx * hdx + hdy * hdy) <= PLANT_HOVER_SQ;
-          }
-          const inRange = localPlayer && localPlayer.carrierId === 0
-            ? (() => { const dx = localPlayer.position.x - wx; const dy = localPlayer.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
+          if (msp) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= PLANT_HOVER_SQ; }
+          inRange = localPlayer && localPlayer.carrierId === 0
+            ? (() => { const dx = localPlayer!.position.x - wx; const dy = localPlayer!.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
             : false;
-
           if (isHovered) this._hoveredFiberPlant = { wx, wy };
-          this.drawIslandFiberPlant(sp.x, sp.y, zoom, isHovered);
-          if (isHovered) {
-            this.drawGatherPrompt(sp.x, sp.y, zoom, inRange, '[E] Gather Fiber');
-          }
         } else if (res.type === 'rock') {
-          let isHovered = false;
-          if (this.mouseWorldPos) {
-            const msp = camera.worldToScreen(this.mouseWorldPos);
-            const hdx = msp.x - sp.x;
-            const hdy = msp.y - sp.y;
-            isHovered = (hdx * hdx + hdy * hdy) <= ROCK_HOVER_SQ;
-          }
-          const inRange = pickaxeEquipped && localPlayer
-            ? (() => { const dx = localPlayer.position.x - wx; const dy = localPlayer.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
+          if (msp) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= ROCK_HOVER_SQ; }
+          inRange = pickaxeEquipped && localPlayer
+            ? (() => { const dx = localPlayer!.position.x - wx; const dy = localPlayer!.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
             : false;
-
           if (isHovered) this._hoveredRock = { wx, wy };
-          this.drawIslandRock(sp.x, sp.y, zoom, isHovered);
-          if (isHovered && pickaxeEquipped) {
-            this.drawGatherPrompt(sp.x, sp.y, zoom, inRange, '[E] Mine Rock');
-          } else if (isHovered) {
-            this.drawGatherPrompt(sp.x, sp.y, zoom, false, '(need pickaxe)');
-          }
         }
-        // 'food' nodes reserved for a future draw method
+        // Smooth leaf-fade alpha: 1.0 (far) → MIN_LEAF_ALPHA (inside LEAF_FADE_INNER)
+        const leafAlpha = res.type === 'wood' && localPlayer
+          ? (() => {
+              const dist = Math.sqrt((localPlayer.position.x - wx) ** 2 + (localPlayer.position.y - wy) ** 2);
+              const t = Math.max(0, Math.min(1, (dist - LEAF_FADE_INNER) / (LEAF_FADE_OUTER - LEAF_FADE_INNER)));
+              return MIN_LEAF_ALPHA + t * (1.0 - MIN_LEAF_ALPHA);
+            })()
+          : 1.0;
+        visibleRes.push({ res, wx, wy, sp, isHovered, inRange, playerNear, leafAlpha });
+      }
+
+      // Pass 1 – fiber plants (back-most layer)
+      for (const e of visibleRes) {
+        if (e.res.type !== 'fiber') continue;
+        this.drawIslandFiberPlant(e.sp.x, e.sp.y, zoom, e.isHovered);
+      }
+      // Pass 2 – rocks
+      for (const e of visibleRes) {
+        if (e.res.type !== 'rock') continue;
+        this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered);
+      }
+      // Pass 3 – tree trunks
+      for (const e of visibleRes) {
+        if (e.res.type !== 'wood') continue;
+        this.drawIslandTreeTrunk(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.playerNear, e.res.size ?? 1.0);
+      }
+      // Pass 4 – tree leaves (top-most layer, fades when player is near)
+      for (const e of visibleRes) {
+        if (e.res.type !== 'wood') continue;
+        this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0);
+      }
+      // Pass 5 – hover prompts + health bars (always on top)
+      for (const e of visibleRes) {
+        if (e.res.type === 'wood' && e.isHovered) {
+          if (axeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
+          else             this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
+          if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, (e.res.size ?? 1.0) * 40);
+        } else if (e.res.type === 'fiber' && e.isHovered) {
+          this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
+          if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 30);
+        } else if (e.res.type === 'rock' && e.isHovered) {
+          if (pickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Rock');
+          else                 this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
+          if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 28);
+        }
       }
     }
 
@@ -2301,7 +2320,7 @@ export class RenderSystem {
     // Done: _hoveredFiberPlant and _hoveredRock are set to null at frame start below
   }
 
-  /** Draw a floating "[E] Chop" or "Too far" prompt above a tree. */
+  /** Draw a floating "Too far" or "[E] Chop" prompt above a tree. */
   private drawHarvestPrompt(sx: number, sy: number, zoom: number, inRange: boolean): void {
     const ctx = this.ctx;
     const canopy    = 17 * zoom;
@@ -2335,41 +2354,50 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandTree(sx: number, sy: number, zoom: number, hovered = false, inRange = false, playerNear = false, seedX = 0, seedY = 0): void {
+  /** Draw a health bar below the resource prompt. barW is in world-units (scaled by zoom). */
+  private drawResourceHealthBar(sx: number, sy: number, zoom: number, hp: number, maxHp: number, barW: number): void {
+    if (maxHp <= 0) return;
+    const ctx  = this.ctx;
+    const pct  = Math.max(0, Math.min(1, hp / maxHp));
+    const bw   = barW * zoom;
+    const bh   = 5  * zoom;
+    const by   = sy + 14 * zoom; // just below the resource centre
+    ctx.save();
+    ctx.globalAlpha = 0.88;
+    // Background track
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.beginPath();
+    ctx.roundRect(sx - bw / 2, by, bw, bh, 2);
+    ctx.fill();
+    // Coloured fill
+    ctx.fillStyle = pct > 0.6 ? '#4cdd44' : pct > 0.3 ? '#ddcc22' : '#dd3322';
+    if (pct > 0) {
+      ctx.beginPath();
+      ctx.roundRect(sx - bw / 2, by, bw * pct, bh, 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  private drawIslandTreeLeaves(sx: number, sy: number, zoom: number, hovered = false, inRange = false, leafAlpha = 1.0, seedX = 0, seedY = 0, size = 1.0): void {
     const ctx = this.ctx;
-
-    // ── Deterministic per-tree variation from world position ──────────────────
-    // Cheap integer hash — stable across all clients for the same tile.
-    const h = (Math.imul(seedX | 0, 2654435761) ^ Math.imul(seedY | 0, 1664525)) >>> 0;
+    const h  = (Math.imul(seedX | 0, 2654435761) ^ Math.imul(seedY | 0, 1664525)) >>> 0;
     const h2 = (Math.imul(h, 2246822519) ^ Math.imul(h >>> 13, 2654435761)) >>> 0;
-
-    // Canopy scale:  0.78 … 1.22  (wider spread = noticeably different sizes)
-    const canopyScale = 0.78 + ((h  & 0xFF) / 255) * 0.44;
-    // Lobe cluster rotation: -25°…+25° so the mass tilts left/right/up/down
+    // size comes from server hash (range 0.5–1.8); only use local hash for rotation/tint
     const clusterRot  = (((h2 & 0xFF) / 255) - 0.5) * (Math.PI / 3.6);
-    // Trunk lean: small horizontal offset
-    const trunkLeanX  = (((h2 >>> 8 & 0xFF) / 255) - 0.5) * 0.18;
-    // Colour tint variant (4 variants)
     const tintIdx = (h >>> 16) & 3;
-    // [shadow, base, highlight, glint]
     const TINTS: [string, string, string, string][] = [
-      ['#1a3a0a', '#3a7320', '#52a030', '#6ecf42'],  // standard green
-      ['#1c3e08', '#3f7a18', '#5aae2e', '#74d93e'],  // slightly lighter / lime
-      ['#152f08', '#2e6318', '#456e22', '#5a9030'],  // darker / forest
-      ['#233a10', '#4a7c28', '#5fa035', '#72b845'],  // warm olive
+      ['#1a3a0a', '#3a7320', '#52a030', '#6ecf42'],
+      ['#1c3e08', '#3f7a18', '#5aae2e', '#74d93e'],
+      ['#152f08', '#2e6318', '#456e22', '#5a9030'],
+      ['#233a10', '#4a7c28', '#5fa035', '#72b845'],
     ];
     const [shadowCol, baseCol, hlCol, glintCol] = TINTS[tintIdx];
-
-    const trunk  = 4 * zoom;
-    const canopy = 40 * zoom * canopyScale;
-
-    // Rotate a lobe's offset vector by clusterRot
+    const canopy = 72 * zoom * size;
     const rot = (dx: number, dy: number): [number, number] => {
       const c = Math.cos(clusterRot), s = Math.sin(clusterRot);
       return [dx * c - dy * s, dx * s + dy * c];
     };
-
-    // 5 base lobe definitions [dx, dy, radius] in canopy-radius units
     const BASE_L: [number, number, number][] = [
       [  0.00, -0.22,  0.80 ],
       [ -0.44,  0.00,  0.62 ],
@@ -2380,8 +2408,7 @@ export class RenderSystem {
     const L = BASE_L.map(([dx, dy, r]) => { const [rx, ry] = rot(dx, dy); return [rx, ry, r] as [number, number, number]; });
 
     ctx.save();
-
-    // ── Hover glow (always full opacity) ─────────────────────────────────────
+    // Hover glow behind canopy
     if (hovered) {
       const glowColor = inRange ? 'rgba(255,230,80,0.22)' : 'rgba(180,180,180,0.15)';
       const glowR     = inRange ? canopy * 1.25 : canopy * 1.15;
@@ -2390,54 +2417,73 @@ export class RenderSystem {
       ctx.fillStyle = glowColor;
       ctx.fill();
     }
-
-    // ── Trunk — revealed when player is nearby ────────────────────────────────
-    if (playerNear) {
-      ctx.globalAlpha = 1.0;
-      ctx.fillStyle = '#5c3518';
-      ctx.beginPath();
-      ctx.ellipse(sx + trunkLeanX * canopy, sy + canopy * 0.45, trunk, trunk * 1.6, 0, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // ── Canopy — fades when player is underneath ──────────────────────────────
-    ctx.globalAlpha = playerNear ? 0.42 : 1.0;
-
-    // Pass 1: deep shadow — all lobes shifted SE
+    // Canopy — fades heavily when player is underneath
+    ctx.globalAlpha = leafAlpha;
+    // Pass 1: deep shadow
     ctx.fillStyle = shadowCol;
     for (const [dx, dy, r] of L) {
       ctx.beginPath();
       ctx.arc(sx + (dx + 0.13) * canopy, sy + (dy + 0.11) * canopy, r * canopy, 0, Math.PI * 2);
       ctx.fill();
     }
-    // Pass 2: base colour — all lobes
+    // Pass 2: base colour
     ctx.fillStyle = baseCol;
     for (const [dx, dy, r] of L) {
       ctx.beginPath();
       ctx.arc(sx + dx * canopy, sy + dy * canopy, r * canopy, 0, Math.PI * 2);
       ctx.fill();
     }
-    // Pass 3: highlight — top 3 lobes shifted NW, smaller
+    // Pass 3: highlight — top 3 lobes
     ctx.fillStyle = hlCol;
     for (const [dx, dy, r] of L.slice(0, 3)) {
       ctx.beginPath();
       ctx.arc(sx + (dx - 0.10) * canopy, sy + (dy - 0.15) * canopy, r * canopy * 0.62, 0, Math.PI * 2);
       ctx.fill();
     }
-    // Pass 4: specular glint on crown apex
+    // Pass 4: specular glint
     const [apexRx, apexRy] = rot(-0.09, -0.34);
     ctx.fillStyle = glintCol;
     ctx.beginPath();
     ctx.arc(sx + apexRx * canopy, sy + apexRy * canopy, canopy * 0.25, 0, Math.PI * 2);
     ctx.fill();
-
-    // ── Hover outline ring (back to full opacity) ─────────────────────────────
+    // Canopy hover ring
     ctx.globalAlpha = 1.0;
     if (hovered) {
       ctx.beginPath();
       ctx.arc(sx, sy, canopy * 1.08, 0, Math.PI * 2);
       ctx.strokeStyle = inRange ? '#f0c040' : '#888888';
       ctx.lineWidth   = 1.8 * zoom;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  private drawIslandTreeTrunk(sx: number, sy: number, zoom: number, hovered = false, inRange = false, playerNear = false, size = 1.0): void {
+    const ctx   = this.ctx;
+    const trunk = 18 * zoom * size;
+    ctx.save();
+    ctx.globalAlpha = 1.0;
+    // Shadow circle (offset SE)
+    ctx.fillStyle = '#2e1a0a';
+    ctx.beginPath();
+    ctx.arc(sx + trunk * 0.22, sy + trunk * 0.22, trunk, 0, Math.PI * 2);
+    ctx.fill();
+    // Body circle — matches server TREE_TRUNK_R_PX exactly
+    ctx.fillStyle = '#7a4820';
+    ctx.beginPath();
+    ctx.arc(sx, sy, trunk, 0, Math.PI * 2);
+    ctx.fill();
+    // Highlight crescent (small circle offset NW)
+    ctx.fillStyle = '#a0642e';
+    ctx.beginPath();
+    ctx.arc(sx - trunk * 0.28, sy - trunk * 0.22, trunk * 0.45, 0, Math.PI * 2);
+    ctx.fill();
+    // Hover ring when player is near
+    if (playerNear && hovered) {
+      ctx.strokeStyle = inRange ? '#f0c040' : '#cccccc';
+      ctx.lineWidth   = 1.5 * zoom;
+      ctx.beginPath();
+      ctx.arc(sx, sy, trunk + 2 * zoom, 0, Math.PI * 2);
       ctx.stroke();
     }
     ctx.restore();

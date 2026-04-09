@@ -35,6 +35,9 @@
 typedef struct {
     float ox, oy;       /* Offset from island centre (world px) */
     const char *type;   /* ISLAND_RES_WOOD / ISLAND_RES_FIBER / ISLAND_RES_FOOD */
+    float size;         /* Size scale: 0.5–1.8 (1.0 = default). Derived from hash of ox/oy. */
+    int   health;       /* Current health */
+    int   max_health;   /* Max health (set at init, depends on type) */
 } IslandResource;
 
 typedef struct {

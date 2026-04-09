@@ -258,6 +258,10 @@ export interface IslandResource {
   ox: number;
   oy: number;
   type: 'wood' | 'fiber' | 'food' | 'rock';
+  /** Deterministic size scale [0.5–1.8]. Derived server-side from hash of ox/oy. */
+  size: number;
+  hp: number;
+  maxHp: number;
 }
 
 /**

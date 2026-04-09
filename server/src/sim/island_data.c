@@ -131,8 +131,44 @@ static int inside_grass_poly(const IslandDef *isl, float px, float py)
     return inside;
 }
 
-void islands_generate_trees(void)
+/* ── Resource size hash ─────────────────────────────────────────────────────
+ * Derives a deterministic size scale [0.5, 1.8] from a resource's ox/oy.
+ * Matches the JavaScript hash used by the client for visual consistency.
+ */
+static float resource_size_from_offset(float ox, float oy)
 {
+    unsigned int h  = ((unsigned int)(int)ox * 2654435761u) ^ ((unsigned int)(int)oy * 1664525u);
+    unsigned int h2 = (h * 2246822519u) ^ ((h >> 13) * 2654435761u);
+    (void)h2;
+    return 0.5f + ((float)(h & 0xFFu) / 255.0f) * 1.3f;
+}
+
+static int resource_max_health(const char *type)
+{
+    if (strcmp(type, ISLAND_RES_WOOD)  == 0) return 100;
+    if (strcmp(type, ISLAND_RES_ROCK)  == 0) return  60;
+    if (strcmp(type, ISLAND_RES_FIBER) == 0) return  30;
+    return 50;
+}
+
+/* Apply size + health to every pre-defined resource in ISLAND_PRESETS[]. */
+static void init_static_resource_fields(void)
+{
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        IslandDef *isl = &ISLAND_PRESETS[ii];
+        for (int ri = 0; ri < isl->resource_count; ri++) {
+            IslandResource *r = &isl->resources[ri];
+            r->size       = resource_size_from_offset(r->ox, r->oy);
+            r->max_health = resource_max_health(r->type);
+            r->health     = r->max_health;
+        }
+    }
+}
+
+
+    /* First pass: stamp size+health onto all statically declared resources. */
+    init_static_resource_fields();
+
     for (int ii = 0; ii < ISLAND_COUNT; ii++) {
         IslandDef *isl = &ISLAND_PRESETS[ii];
 
@@ -164,9 +200,12 @@ void islands_generate_trees(void)
                 if (!inside_grass_poly(isl, tx, ty)) continue;
 
                 IslandResource *r = &isl->resources[isl->resource_count];
-                r->ox   = tx - isl->x;
-                r->oy   = ty - isl->y;
-                r->type = ISLAND_RES_WOOD;
+                r->ox         = tx - isl->x;
+                r->oy         = ty - isl->y;
+                r->type       = ISLAND_RES_WOOD;
+                r->size       = resource_size_from_offset(r->ox, r->oy);
+                r->max_health = resource_max_health(ISLAND_RES_WOOD);
+                r->health     = r->max_health;
                 isl->resource_count++;
                 added++;
             }

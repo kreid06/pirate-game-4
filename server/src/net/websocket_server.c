@@ -5038,6 +5038,7 @@ static void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketCli
     /* Find the nearest 'wood' resource node within range */
     float best_dist_sq = HARVEST_RANGE * HARVEST_RANGE;
     bool found = false;
+    int best_ri = -1;
     for (int ri = 0; ri < isl->resource_count; ri++) {
         if (strcmp(isl->resources[ri].type, ISLAND_RES_WOOD) != 0) continue;
         float wx = isl->x + isl->resources[ri].ox;
@@ -5047,6 +5048,7 @@ static void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketCli
         float d2 = dx * dx + dy * dy;
         if (d2 <= best_dist_sq) {
             best_dist_sq = d2;
+            best_ri = ri;
             found = true;
         }
     }
@@ -5054,6 +5056,26 @@ static void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketCli
         snprintf(response, sizeof(response),
                  "{\"type\":\"harvest_failure\",\"reason\":\"too_far\"}");
         goto send_and_ret;
+    }
+
+    /* Deduct health from the resource and broadcast damage */
+    {
+        IslandResource *res = &ISLAND_PRESETS[0];
+        /* Find mutable island */
+        for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+            if ((uint32_t)ISLAND_PRESETS[ii].id == player->on_island_id) {
+                res = &ISLAND_PRESETS[ii].resources[best_ri];
+                break;
+            }
+        }
+        const int WOOD_DAMAGE = 10;
+        res->health -= WOOD_DAMAGE;
+        if (res->health < 0) res->health = 0;
+        char dmsg[128];
+        snprintf(dmsg, sizeof(dmsg),
+                 "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
+                 player->on_island_id, res->ox, res->oy, res->health, res->max_health);
+        websocket_server_broadcast(dmsg);
     }
 
     /* Grant 2 planks — find an existing plank stack or a free slot */
@@ -5145,6 +5167,7 @@ static void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient
         /* Find nearest fiber node within range */
         float best_dist_sq = (float)(HARVEST_RANGE * HARVEST_RANGE);
         bool  found = false;
+        int   best_ri = -1;
         for (int ri = 0; ri < isl->resource_count; ri++) {
             if (strcmp(isl->resources[ri].type, ISLAND_RES_FIBER) != 0) continue;
             float fx = isl->x + isl->resources[ri].ox;
@@ -5154,6 +5177,7 @@ static void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient
             float dist_sq = dx * dx + dy * dy;
             if (dist_sq <= best_dist_sq) {
                 best_dist_sq = dist_sq;
+                best_ri = ri;
                 found = true;
             }
         }
@@ -5162,6 +5186,18 @@ static void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_fiber_failure\",\"reason\":\"too_far\"}");
             goto send_fiber_ret;
+        }
+
+        /* Deduct health and broadcast */
+        if (best_ri >= 0) {
+            IslandResource *res = &isl->resources[best_ri];
+            res->health -= 10;
+            if (res->health < 0) res->health = 0;
+            char dmsg[128];
+            snprintf(dmsg, sizeof(dmsg),
+                     "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
+                     player->on_island_id, res->ox, res->oy, res->health, res->max_health);
+            websocket_server_broadcast(dmsg);
         }
 
         /* Grant 5 fiber */
@@ -5226,6 +5262,7 @@ static void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient*
 
         float best_dist_sq = (float)(HARVEST_RANGE * HARVEST_RANGE);
         bool  found = false;
+        int   best_ri = -1;
         for (int ri = 0; ri < isl->resource_count; ri++) {
             if (strcmp(isl->resources[ri].type, ISLAND_RES_ROCK) != 0) continue;
             float rx = isl->x + isl->resources[ri].ox;
@@ -5235,6 +5272,7 @@ static void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient*
             float dist_sq = dx * dx + dy * dy;
             if (dist_sq <= best_dist_sq) {
                 best_dist_sq = dist_sq;
+                best_ri = ri;
                 found = true;
             }
         }
@@ -5243,6 +5281,18 @@ static void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient*
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_rock_failure\",\"reason\":\"too_far\"}");
             goto send_rock_ret;
+        }
+
+        /* Deduct health and broadcast */
+        if (best_ri >= 0) {
+            IslandResource *res = &isl->resources[best_ri];
+            res->health -= 10;
+            if (res->health < 0) res->health = 0;
+            char dmsg[128];
+            snprintf(dmsg, sizeof(dmsg),
+                     "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
+                     player->on_island_id, res->ox, res->oy, res->health, res->max_health);
+            websocket_server_broadcast(dmsg);
         }
 
         if (!craft_grant(player, ITEM_METAL, 3)) {
@@ -7363,9 +7413,9 @@ int websocket_server_update(struct Sim* sim) {
                                             for (int hri = 0; hri < isl->resource_count; hri++) {
                                                 const IslandResource *r = &isl->resources[hri];
                                                 hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
-                                                                    "%s{\"ox\":%.1f,\"oy\":%.1f,\"type\":\"%s\"}",
+                                                                    "%s{\"ox\":%.1f,\"oy\":%.1f,\"type\":\"%s\",\"size\":%.3f,\"hp\":%d,\"maxHp\":%d}",
                                                                     hri ? "," : "",
-                                                                    r->ox, r->oy, r->type);
+                                                                    r->ox, r->oy, r->type, r->size, r->health, r->max_health);
                                             }
                                             hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]}");
                                         }
@@ -9865,9 +9915,9 @@ int websocket_server_update(struct Sim* sim) {
                                         for (int ri = 0; ri < isl->resource_count; ri++) {
                                             const IslandResource *r = &isl->resources[ri];
                                             pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
-                                                            "%s{\"ox\":%.1f,\"oy\":%.1f,\"type\":\"%s\"}",
+                                                            "%s{\"ox\":%.1f,\"oy\":%.1f,\"type\":\"%s\",\"size\":%.3f,\"hp\":%d,\"maxHp\":%d}",
                                                             ri ? "," : "",
-                                                            r->ox, r->oy, r->type);
+                                                            r->ox, r->oy, r->type, r->size, r->health, r->max_health);
                                         }
                                         pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
                                     }
