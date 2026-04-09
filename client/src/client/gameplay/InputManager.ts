@@ -120,6 +120,7 @@ export class InputManager {
 
   // Explicit build mode (toggled with B key — independent of hotbar items)
   public explicitBuildMode: boolean = false;
+  public islandBuildMode: boolean = false;
   public onBuildModeToggle: (() => void) | null = null;
   public onToggleAllLadders: (() => void) | null = null;
   public onBuildRotate: ((deltaDeg: number) => void) | null = null;
@@ -965,12 +966,12 @@ export class InputManager {
         event.preventDefault();
         break;
       case 'KeyR':
-        // In explicit build mode OR plan mode (build menu open): rotate the placement ghost.
+        // In explicit build mode, plan mode, or island build mode: rotate the placement ghost.
         // Otherwise: repair sail fibers on the hovered damaged mast.
-        if ((this.explicitBuildMode || this.buildMenuOpen) && this.onBuildRotate) {
+        if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
           this.onBuildRotate(15);
           event.preventDefault();
-        } else if (!this.explicitBuildMode && !this.buildMenuOpen && this.onRepairSail) {
+        } else if (!this.explicitBuildMode && !this.buildMenuOpen && !this.islandBuildMode && this.onRepairSail) {
           this.onRepairSail();
           event.preventDefault();
         }
@@ -1046,9 +1047,16 @@ export class InputManager {
           event.preventDefault();
         }
         break;
-      case 'KeyQ':
+      case 'KeyF':
         if (this.onUnequip) this.onUnequip();
         event.preventDefault();
+        break;
+      case 'KeyQ':
+        // In build mode or island build mode: rotate ghost left; otherwise no-op
+        if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
+          this.onBuildRotate(-15);
+          event.preventDefault();
+        }
         break;
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':

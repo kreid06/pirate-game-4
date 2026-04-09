@@ -92,6 +92,9 @@ export class ClientApplication {
   private buildSelectedItem: 'cannon' | 'sail' | 'swivel' = 'cannon';
   private buildRotationDeg = 0;
 
+  // Island structure build mode (wooden_floor / workbench / wall while off-ship)
+  private islandBuildRotationDeg = 0;
+
   // Ghost placement system — B key opens build menu, player places planning markers
   private buildMenuOpen = false;
   private ghostPlacements: GhostPlacement[] = [];
@@ -868,7 +871,9 @@ export class ClientApplication {
               : kind === 'door'
               ? this.renderSystem.computeSnappedDoorPos(worldPos.x, worldPos.y)
               : { x: worldPos.x, y: worldPos.y };
-            this.networkManager.sendPlaceStructure(kind, pos.x, pos.y);
+            // Only floors and workbenches carry rotation; walls/doors snap by orientation
+            const rot = (kind === 'wooden_floor' || kind === 'workbench') ? this.islandBuildRotationDeg : 0;
+            this.networkManager.sendPlaceStructure(kind, pos.x, pos.y, rot);
           }
           return;
         }
@@ -952,10 +957,15 @@ export class ClientApplication {
         this.syncBuildModeState();
       };
 
-      // Build rotation (R key in explicit build mode or ghost placement)
+      // Build rotation (R/Q key in build modes)
       this.inputManager.onBuildRotate = (deltaDeg: number) => {
-        this.buildRotationDeg = (this.buildRotationDeg + deltaDeg + 360) % 360;
-        this.syncBuildModeState();
+        if (this.inputManager.islandBuildMode) {
+          this.islandBuildRotationDeg = (this.islandBuildRotationDeg + deltaDeg + 360) % 360;
+          this.renderSystem.setIslandBuildRotation(this.islandBuildRotationDeg);
+        } else {
+          this.buildRotationDeg = (this.buildRotationDeg + deltaDeg + 360) % 360;
+          this.syncBuildModeState();
+        }
       };
 
       // Right-click in build menu: cancel pending ghost or remove nearest placed ghost
@@ -2028,9 +2038,11 @@ export class ClientApplication {
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
     const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door');
     this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
+    this.inputManager.islandBuildMode = this.islandBuildMode;
     this.renderSystem.setIslandBuildItem(
       this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door') : null
     );
+    this.renderSystem.setIslandBuildRotation(this.islandBuildMode ? this.islandBuildRotationDeg : 0);
 
     // Track whether the active item changed while in explicit build mode
     if (this.explicitBuildMode) {
@@ -2045,6 +2057,7 @@ export class ClientApplication {
         // (but keep build menu open if it was open)
         this.explicitBuildMode = false;
         this.buildRotationDeg = 0;
+        this.islandBuildRotationDeg = 0;
         this.pendingGhostKind = null;
         this.syncBuildModeState();
         console.log('🔨 [BUILD MODE] EXITED (item changed)');
@@ -2582,8 +2595,7 @@ export class ClientApplication {
 
       switch (e.key) {
         case 'Escape':
-        case 'q':
-        case 'Q': {
+        case '`': { // backtick also closes/cancels
           // Cancel "Move To" targeting mode if active
           if (this._moveToNpcId !== null) {
             this._moveToNpcId = null;

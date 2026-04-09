@@ -4761,6 +4761,13 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         }
     }
 
+    /* Parse rotation (floors and workbenches only; ignored for walls/doors) */
+    float place_rotation = 0.0f;
+    {
+        char* rots = strstr(payload, "\"rotation\":");
+        if (rots) sscanf(rots + 11, "%f", &place_rotation);
+    }
+
     /* Space for more structures? */
     if (placed_structure_count >= MAX_PLACED_STRUCTURES) {
         snprintf(response, sizeof(response),
@@ -4792,6 +4799,8 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     placed_structures[placed_structure_count].placer_name[
         sizeof(placed_structures[placed_structure_count].placer_name) - 1] = '\0';
     placed_structures[placed_structure_count].open       = false;
+    placed_structures[placed_structure_count].rotation   =
+        (stype_enum == STRUCT_WOODEN_FLOOR || stype_enum == STRUCT_WORKBENCH) ? place_rotation : 0.0f;
     placed_structure_count++;
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
@@ -4800,12 +4809,15 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     /* Broadcast to all clients */
     char bcast[384];
     bool new_is_door = (stype_enum == STRUCT_DOOR);
+    float bcast_rot  = placed_structures[placed_structure_count - 1].rotation;
     snprintf(bcast, sizeof(bcast),
              "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-             "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"%s}",
+             "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
+             ",\"rotation\":%.2f%s}",
              new_id, stype, target_island_id, px, py,
              (unsigned)player->company_id, 100u, 100u, player->name,
+             bcast_rot,
              new_is_door ? ",\"open\":false" : "");
     websocket_server_broadcast(bcast);
     return; /* already sent via broadcast */
@@ -7468,7 +7480,8 @@ int websocket_server_update(struct Sim* sim) {
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
                                                           "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                           "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"%s}",
+                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
+                                                          ",\"rotation\":%.2f%s}",
                                                           hs_sfirst ? "" : ",",
                                                           placed_structures[si].id, hs_stype,
                                                           placed_structures[si].island_id,
@@ -7477,6 +7490,7 @@ int websocket_server_update(struct Sim* sim) {
                                                           (unsigned)placed_structures[si].hp,
                                                           (unsigned)placed_structures[si].max_hp,
                                                           placed_structures[si].placer_name,
+                                                          placed_structures[si].rotation,
                                                           hs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "");
                                             hs_sfirst = false;
                                         }
@@ -9970,7 +9984,8 @@ int websocket_server_update(struct Sim* sim) {
                                         spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                          "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                         "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"%s}",
+                                                         "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
+                                                         ",\"rotation\":%.2f%s}",
                                                          sfirst ? "" : ",",
                                                          placed_structures[si].id,
                                                          stype_str,
@@ -9981,6 +9996,7 @@ int websocket_server_update(struct Sim* sim) {
                                                          (unsigned)placed_structures[si].hp,
                                                          (unsigned)placed_structures[si].max_hp,
                                                          placed_structures[si].placer_name,
+                                                         placed_structures[si].rotation,
                                                          is_door_s ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "");
                                         sfirst = false;
                                     }

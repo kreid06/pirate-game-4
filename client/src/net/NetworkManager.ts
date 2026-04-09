@@ -1174,9 +1174,9 @@ export class NetworkManager {
    * The server validates that the player is on an island, has the item, and for
    * workbench that a floor tile is close enough.
    */
-  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door', x: number, y: number): void {
+  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door', x: number, y: number, rotationDeg = 0): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y });
+    this.sendMessage({ type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y, rotation: rotationDeg });
   }
 
   /**
@@ -2086,6 +2086,7 @@ export class NetworkManager {
           maxHp:     s.max_hp ?? 100,
           placerName: s.placer_name ?? '',
           doorOpen:  s.open ?? false,
+          rotation:  s.rotation ?? 0,
         }));
         this.onStructuresList?.(structs);
         break;
@@ -2107,6 +2108,7 @@ export class NetworkManager {
           maxHp:     message.max_hp ?? 100,
           placerName: message.placer_name ?? '',
           doorOpen:  message.open ?? false,
+          rotation:  message.rotation ?? 0,
         };
         this.onStructurePlaced?.(sp);
         break;

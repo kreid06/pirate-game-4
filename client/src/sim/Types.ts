@@ -127,6 +127,7 @@ export interface PlacedStructure {
   maxHp: number;       // maximum hit points
   placerName: string;  // display name of the player who built this
   doorOpen?: boolean;  // doors only: true = open (passable)
+  rotation?: number;   // rotation in degrees (default 0); applies to wooden_floor and workbench
 }
 
 // Company identifiers (mirror server COMPANY_* constants)

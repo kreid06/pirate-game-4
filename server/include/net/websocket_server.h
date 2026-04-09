@@ -258,6 +258,7 @@ typedef struct {
     PlacedStructureType type;
     uint32_t island_id;
     float    x, y;           /* world position */
+    float    rotation;       /* degrees — 0 = no rotation; only meaningful for floor/workbench */
     uint8_t  company_id;     /* COMPANY_* — faction that owns this structure */
     uint16_t hp;             /* current hit points */
     uint16_t max_hp;         /* maximum hit points */

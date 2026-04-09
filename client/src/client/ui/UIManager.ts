@@ -1381,8 +1381,8 @@ export class UIManager {
   }
   
   private onKeyDown(event: KeyboardEvent): void {
-    // Close any open modal on Escape first
-    if (event.code === 'Escape') {
+    // Close any open modal on Escape or backtick
+    if (event.code === 'Escape' || event.code === 'Backquote') {
       if (this.companyMenu.visible) { this.companyMenu.close(); event.preventDefault(); event.stopPropagation(); return; }
       if (this.playerMenu.visible)  { this.playerMenu.close();  event.preventDefault(); event.stopPropagation(); return; }
       if (this.shipMenu.visible)    { this.shipMenu.close();    event.preventDefault(); event.stopPropagation(); return; }
@@ -1414,7 +1414,7 @@ export class UIManager {
         }
         break;
 
-      case 'KeyF':
+      case 'KeyG':
         this.shipMenu.toggle();
         if (this.shipMenu.visible) { this.companyMenu.close(); this.playerMenu.close(); }
         if (this.shipMenu.visible) { event.preventDefault(); event.stopPropagation(); }

@@ -122,6 +122,8 @@ export class RenderSystem {
   private _hoveredRock: { wx: number; wy: number } | null = null;
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
   private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | null = null;
+  /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
+  private islandBuildRotationDeg = 0;
   private _wallGhostHorizontal: boolean = true; // true = runs along X axis (N/S edge)
   /** True when the placement ghost is beyond the server's max placement range (200 px). */
   private _islandGhostTooFar = false;
@@ -1160,6 +1162,11 @@ export class RenderSystem {
     this.islandBuildKind = kind;
   }
 
+  /** Set the rotation (degrees) for the island floor/workbench ghost. */
+  setIslandBuildRotation(deg: number): void {
+    this.islandBuildRotationDeg = deg;
+  }
+
   /**
    * Compute the snapped world position for a wooden_floor placement at (wx, wy).
    * If the point is within SNAP_R of an unoccupied cardinal neighbour slot of any
@@ -1169,7 +1176,8 @@ export class RenderSystem {
   computeSnappedPos(wx: number, wy: number): { x: number; y: number } {
     const TILE   = 50;
     const SNAP_R = TILE * 0.4; // 20 px — snap pull radius
-    if (this.islandBuildKind !== 'wooden_floor' || this.placedStructures.length === 0) {
+    if (this.islandBuildKind !== 'wooden_floor' || this.placedStructures.length === 0
+        || this.islandBuildRotationDeg !== 0) {
       return { x: wx, y: wy };
     }
     let bestDist2 = SNAP_R * SNAP_R;
@@ -2680,6 +2688,11 @@ export class RenderSystem {
         const dmgDarken = (1 - hpFrac) * 0.5;
         const baseColor = isHovered ? '#d09a3a' : '#b8832b';
         ctx.save();
+        if (s.rotation) {
+          ctx.translate(ssp.x, ssp.y);
+          ctx.rotate(s.rotation * Math.PI / 180);
+          ctx.translate(-ssp.x, -ssp.y);
+        }
         ctx.fillStyle   = baseColor;
         ctx.strokeStyle = '#7a5520';
         ctx.lineWidth   = Math.max(1, 2 * zoom);
@@ -2715,6 +2728,11 @@ export class RenderSystem {
         const bx = ssp.x - bw / 2;
         const by = ssp.y - bh / 2;
         ctx.save();
+        if (s.rotation) {
+          ctx.translate(ssp.x, ssp.y);
+          ctx.rotate(s.rotation * Math.PI / 180);
+          ctx.translate(-ssp.x, -ssp.y);
+        }
 
         // Outer frame (structural legs / frame seen from above)
         const frameColor  = isHovered ? '#5a3010' : '#4a2408';
@@ -3111,7 +3129,8 @@ export class RenderSystem {
     // slot of an existing floor, lock the ghost position there.
     let mx = this.mouseWorldPos.x;
     let my = this.mouseWorldPos.y;
-    if (this.islandBuildKind === 'wooden_floor' && this.placedStructures.length > 0) {
+    if (this.islandBuildKind === 'wooden_floor' && this.placedStructures.length > 0
+        && this.islandBuildRotationDeg === 0) {
       const SNAP_R  = TILE * 0.4; // 20 px — snap pull radius
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
@@ -3320,6 +3339,13 @@ export class RenderSystem {
 
     ctx.save();
     ctx.globalAlpha = 0.72 + 0.14 * Math.sin(performance.now() / 300);
+    // Apply rotation around ghost centre for floors/workbenches
+    if (this.islandBuildRotationDeg !== 0 &&
+        (this.islandBuildKind === 'wooden_floor' || this.islandBuildKind === 'workbench')) {
+      ctx.translate(msp.x, msp.y);
+      ctx.rotate(this.islandBuildRotationDeg * Math.PI / 180);
+      ctx.translate(-msp.x, -msp.y);
+    }
     ctx.fillStyle   = ghostColor;
     ctx.strokeStyle = borderColor;
     ctx.lineWidth   = Math.max(1, 2 * zoom);
