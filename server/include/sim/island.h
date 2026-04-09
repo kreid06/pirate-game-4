@@ -1,5 +1,6 @@
 #pragma once
 #include <math.h>
+#include <stdbool.h>
 /**
  * Island definitions — static world features.
  *
