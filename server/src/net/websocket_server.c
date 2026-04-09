@@ -4458,7 +4458,7 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
 static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
     char response[256];
 
-    /* Parse placement position first (needed for island boundary check) */
+    /* Parse placement position and structure type up front */
     float px = player->x, py = player->y;
     {
         char* pxs = strstr(payload, "\"x\":");
@@ -4467,8 +4467,20 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         if (pys) sscanf(pys + 4, "%f", &py);
     }
 
+    char stype[32] = {0};
+    {
+        char* st = strstr(payload, "\"structure_type\":\"");
+        if (st) {
+            st += 18;
+            int ti = 0;
+            while (ti < 31 && *st && *st != '"') stype[ti++] = *st++;
+        }
+    }
+
     /* Placement point (px,py) must lie within a valid island beach boundary.
-       This replaces the old on_island_id check and also prevents water placement. */
+       Only wooden floors are rejected for water placement — other structures
+       require a floor tile anyway, so the floor-edge/floor-centre checks
+       below are sufficient to keep them on land. */
     uint32_t target_island_id = 0;
     {
         for (int ii = 0; ii < ISLAND_COUNT; ii++) {
@@ -4491,19 +4503,10 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
             if (on_isl) { target_island_id = (uint32_t)isl->id; break; }
         }
     }
-    if (target_island_id == 0) {
+    if (target_island_id == 0 && strcmp(stype, "wooden_floor") == 0) {
         snprintf(response, sizeof(response),
                  "{\"type\":\"place_structure_fail\",\"reason\":\"in_water\"}");
         goto ps_send;
-    }
-
-    /* Parse structure_type */
-    char stype[32] = {0};
-    char* st = strstr(payload, "\"structure_type\":\"");
-    if (st) {
-        st += 18;
-        int ti = 0;
-        while (ti < 31 && *st && *st != '"') stype[ti++] = *st++;
     }
 
     PlacedStructureType stype_enum;
@@ -4808,6 +4811,19 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     return; /* already sent via broadcast */
 
 ps_send:;
+    /* Log any failure for debugging */
+    {
+        const char *reason_key = "\"reason\":\"";
+        const char *rp = strstr(response, reason_key);
+        if (rp) {
+            rp += strlen(reason_key);
+            char reason_buf[64] = {0};
+            int ri = 0;
+            while (ri < 63 && rp[ri] && rp[ri] != '"') { reason_buf[ri] = rp[ri]; ri++; }
+            log_debug("place_structure FAIL player=%u name='%s' pos=(%.1f,%.1f) reason=%s",
+                      player->player_id, player->name, px, py, reason_buf);
+        }
+    }
     char frame[512];
     size_t flen = websocket_create_frame(
         WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));

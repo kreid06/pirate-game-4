@@ -3241,6 +3241,7 @@ export class RenderSystem {
       for (const isl of this.islands) {
         for (const res of isl.resources) {
           if (res.type !== 'wood') continue;
+          if (res.hp <= 0) continue; // depleted — no longer an obstacle
           const tx = isl.x + res.ox, ty = isl.y + res.oy;
           // Closest point on floor AABB to tree centre
           const cx = Math.max(mx - half, Math.min(tx, mx + half));
@@ -3250,8 +3251,6 @@ export class RenderSystem {
         }
       }
     }
-
-    this._islandGhostTooFar = tooFar || inWater;
 
     // Workbench needs a floor tile whose AABB contains the cursor point
     let noFloor = false;
@@ -3312,7 +3311,10 @@ export class RenderSystem {
         s.companyId === myCompany
       );
 
-    const invalid = tooFar || inWater || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied;
+    // Only floors are rejected for water placement — other types need a floor tile anyway
+    const waterBlocked = inWater && this.islandBuildKind === 'wooden_floor';
+    this._islandGhostTooFar = tooFar || waterBlocked;
+    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
@@ -3381,7 +3383,7 @@ export class RenderSystem {
     ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'bottom';
-    if (inWater) {
+    if (waterBlocked) {
       ctx.fillStyle = '#4488ff';
       ctx.fillText('IN WATER', msp.x, labelY);
     } else if (enemyTerritory) {
