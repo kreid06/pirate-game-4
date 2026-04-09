@@ -385,7 +385,8 @@ export class InputManager {
    * Set current ship rotation (for ship-relative cannon aiming)
    */
   setCurrentShipRotation(rotation: number): void {
-    this.currentShipRotation = rotation;
+    // Guard against Infinity / -Infinity (|| 0 only catches NaN, not Infinity)
+    this.currentShipRotation = Number.isFinite(rotation) ? rotation : 0;
   }
   
   /**
@@ -602,10 +603,11 @@ export class InputManager {
     // Ship rotation is the direction the ship is facing
     // We want the angle relative to the ship's forward direction
     let aimAngleRelative = aimAngleWorld - this.currentShipRotation;
-    
-    // Normalize to [-π, π] range
-    while (aimAngleRelative > Math.PI) aimAngleRelative -= 2 * Math.PI;
-    while (aimAngleRelative < -Math.PI) aimAngleRelative += 2 * Math.PI;
+
+    // Normalize to [-π, π] — O(1), immune to ±Infinity / NaN
+    if (!Number.isFinite(aimAngleRelative)) return;
+    const TWO_PI = 2 * Math.PI;
+    aimAngleRelative -= TWO_PI * Math.floor((aimAngleRelative + Math.PI) / TWO_PI);
     
     // Only send if aim changed significantly (>1 degree)
     const ANGLE_THRESHOLD = 0.017; // ~1 degree in radians

@@ -1674,7 +1674,7 @@ export class NetworkManager {
               ...tmpl.ship,
               id: ship.id || 0,
               position: Vec2.from(ship.x || 0, ship.y || 0),
-              rotation: ship.rotation || 0,
+              rotation: Number.isFinite(ship.rotation) ? ship.rotation : 0,
               velocity: Vec2.from(ship.velocity_x || 0, ship.velocity_y || 0),
               angularVelocity: ship.angular_velocity || 0,
               

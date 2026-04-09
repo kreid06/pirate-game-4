@@ -285,6 +285,29 @@ void sim_update_projectiles(struct Sim* sim, q16_t dt) {
         uint32_t max_lifetime = (proj->lifetime > 0)
             ? (uint32_t)(Q16_TO_FLOAT(proj->lifetime) * 1000.0f)
             : 4000;
+        /* Halve effective lifetime when projectile is over land */
+        {
+            float px_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
+            float py_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
+            for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+                const IslandDef *isl = &ISLAND_PRESETS[ii];
+                float dx = px_cli - isl->x, dy = py_cli - isl->y;
+                float dist_sq = dx * dx + dy * dy;
+                bool over_land = false;
+                if (isl->vertex_count > 0) {
+                    over_land = (dist_sq < isl->poly_bound_r * isl->poly_bound_r)
+                             && island_poly_contains(isl, px_cli, py_cli);
+                } else {
+                    float broad_r = isl->beach_radius_px + isl->beach_max_bump;
+                    if (dist_sq < broad_r * broad_r) {
+                        float angle = atan2f(dy, dx);
+                        float r = island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle);
+                        over_land = (dist_sq < r * r);
+                    }
+                }
+                if (over_land) { max_lifetime /= 2; break; }
+            }
+        }
         if (lifetime_ms > max_lifetime) {
             // Remove expired projectile
             log_info("⏱️  Projectile %u expired after %ums (max=%ums) at (%.1f, %.1f)",
