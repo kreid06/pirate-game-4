@@ -1741,8 +1741,7 @@ export class RenderSystem {
     // Draw background elements
     this.drawWater(camera);
     this.drawGrid(camera);
-    this.drawIsland(camera);
-    this.drawPlacedStructures(camera);
+    this.drawIsland(camera); // drawPlacedStructures is called inside, between trunk and leaf passes
     this.drawIslandBuildGhost(camera);
     
     // Queue all game objects for layered rendering
@@ -2133,6 +2132,37 @@ export class RenderSystem {
     this._hoveredTree       = null;
     this._hoveredFiberPlant = null;
     this._hoveredRock       = null;
+
+    // Hoist frame-constants so they're available both inside the per-island loop
+    // and in the post-loop passes 4+5 that execute after structures are drawn.
+    const localPlayer = this._cachedLocalPlayer;
+    const axeEquipped = (() => {
+      if (!localPlayer || localPlayer.carrierId !== 0) return false;
+      const slot = localPlayer.inventory?.activeSlot ?? 0;
+      return localPlayer.inventory?.slots[slot]?.item === 'axe';
+    })();
+    const pickaxeEquipped = (() => {
+      if (!localPlayer || localPlayer.carrierId !== 0) return false;
+      const slot = localPlayer.inventory?.activeSlot ?? 0;
+      return localPlayer.inventory?.slots[slot]?.item === 'pickaxe';
+    })();
+    const HARVEST_RANGE_SQ = 110 * 110;
+    const PLANT_HOVER_SQ = (14 * zoom) * (14 * zoom);
+    const ROCK_HOVER_SQ  = (12 * zoom) * (12 * zoom);
+    const LEAF_FADE_OUTER = 420;
+    const LEAF_FADE_INNER = 120;
+    const MIN_LEAF_ALPHA  = 0.12;
+    const cw = this.canvas.width;
+    const ch = this.canvas.height;
+    const msp = this.mouseWorldPos ? camera.worldToScreen(this.mouseWorldPos) : null;
+    // Collects visible resources from all islands; leaves+prompts drawn after structures.
+    const allVisibleRes: Array<{
+      res: { ox: number; oy: number; type: string; size: number; hp: number; maxHp: number };
+      wx: number; wy: number;
+      sp: ReturnType<typeof camera.worldToScreen>;
+      isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number;
+    }> = [];
+
     for (const isl of this.islands) {
       const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
       // Visibility check: adapt radius to polygon bound or bump-circle
@@ -2201,31 +2231,7 @@ export class RenderSystem {
 
       ctx.restore();
 
-      // ── Resource nodes ───────────────────────────────────────────────────────
-      const localPlayer = this._cachedLocalPlayer;
-      const axeEquipped = (() => {
-        if (!localPlayer || localPlayer.carrierId !== 0) return false;
-        const slot = localPlayer.inventory?.activeSlot ?? 0;
-        return localPlayer.inventory?.slots[slot]?.item === 'axe';
-      })();
-      const pickaxeEquipped = (() => {
-        if (!localPlayer || localPlayer.carrierId !== 0) return false;
-        const slot = localPlayer.inventory?.activeSlot ?? 0;
-        return localPlayer.inventory?.slots[slot]?.item === 'pickaxe';
-      })();
-      const HARVEST_RANGE_SQ = 110 * 110;
-      // Tree hover radius is per-tree (scaled by res.size); plant/rock are fixed
-      const PLANT_HOVER_SQ = (14 * zoom) * (14 * zoom);
-      const ROCK_HOVER_SQ  = (12 * zoom) * (12 * zoom);
-      // Leaf transparency fade band (world units)
-      const LEAF_FADE_OUTER = 420; // start fading here
-      const LEAF_FADE_INNER = 120;  // fully faded here
-      const MIN_LEAF_ALPHA  = 0.12;
-      const cw = this.canvas.width;
-      const ch = this.canvas.height;
-
-      // ── Pre-pass: collect visible resources + hover/range states ───────────
-      const msp = this.mouseWorldPos ? camera.worldToScreen(this.mouseWorldPos) : null;
+      // ── Resource nodes — Passes 1-3 (drawn below structures) ────────────────
       const visibleRes: Array<{
         res: typeof isl.resources[0];
         wx: number; wy: number;
@@ -2294,30 +2300,35 @@ export class RenderSystem {
         if (e.res.type !== 'wood') continue;
         this.drawIslandTreeTrunk(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.playerNear, e.res.size ?? 1.0);
       }
-      // Pass 4 – tree leaves (top-most layer, fades when player is near)
-      for (const e of visibleRes) {
-        if (e.res.type !== 'wood') continue;
-        this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0);
-      }
-      // Pass 5 – hover prompts + health bars (always on top)
-      for (const e of visibleRes) {
-        if (e.res.type === 'wood' && e.isHovered) {
-          if (axeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
-          else             this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
-          if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, (e.res.size ?? 1.0) * 40);
-        } else if (e.res.type === 'fiber' && e.isHovered) {
-          this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
-          if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 30);
-        } else if (e.res.type === 'rock' && e.isHovered) {
-          if (pickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Rock');
-          else                 this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
-          if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 28);
-        }
-      }
+
+      // Defer leaves + prompts until ALL trunks (across all islands) are done,
+      // so that structures can slot in between the two layers.
+      for (const e of visibleRes) allVisibleRes.push(e);
     }
 
-    // Reset hovered nodes (re-set each frame in the loop above)
-    // Done: _hoveredFiberPlant and _hoveredRock are set to null at frame start below
+    // ── Structures: above trunks, below leaves ────────────────────────────────
+    this.drawPlacedStructures(camera);
+
+    // ── Pass 4 – tree leaves (all islands, above structures) ──────────────────
+    for (const e of allVisibleRes) {
+      if (e.res.type !== 'wood') continue;
+      this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0);
+    }
+    // ── Pass 5 – hover prompts + health bars (always on top) ─────────────────
+    for (const e of allVisibleRes) {
+      if (e.res.type === 'wood' && e.isHovered) {
+        if (axeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
+        else             this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, (e.res.size ?? 1.0) * 40);
+      } else if (e.res.type === 'fiber' && e.isHovered) {
+        this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 30);
+      } else if (e.res.type === 'rock' && e.isHovered) {
+        if (pickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Rock');
+        else                 this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 28);
+      }
+    }
   }
 
   /** Draw a floating "Too far" or "[E] Chop" prompt above a tree. */
