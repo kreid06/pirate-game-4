@@ -304,11 +304,67 @@ void sim_update_projectiles(struct Sim* sim, q16_t dt) {
 static void handle_island_collisions(struct Sim *sim) {
     for (int ii = 0; ii < ISLAND_COUNT; ii++) {
         const IslandDef *isl = &ISLAND_PRESETS[ii];
-        /* TODO: polygon-island ship collision not yet implemented.
-         * Polygon islands use point-in-polygon for player walking and
-         * structure placement; ship hull collision still needs a polygon
-         * push algorithm.  Skip until implemented. */
-        if (isl->vertex_count > 0) continue;
+
+        if (isl->vertex_count > 0) {
+            /* ── Polygon island ─────────────────────────────────────────────
+             * Vertices are in client-pixel offsets from (isl->x, isl->y).
+             * Convert ship hull vertices to client pixels for the polygon
+             * test, then convert the resulting push depth back to server
+             * units.                                                         */
+            float island_cx     = CLIENT_TO_SERVER(isl->x);
+            float island_cy     = CLIENT_TO_SERVER(isl->y);
+            float poly_broad_sv = CLIENT_TO_SERVER(isl->poly_bound_r);
+
+            for (uint16_t si = 0; si < sim->ship_count; si++) {
+                struct Ship *ship = &sim->ships[si];
+                float sx  = Q16_TO_FLOAT(ship->position.x);
+                float sy  = Q16_TO_FLOAT(ship->position.y);
+                float cdx = sx - island_cx, cdy = sy - island_cy;
+                float ship_r     = Q16_TO_FLOAT(ship->bounding_radius);
+                float broad_min  = poly_broad_sv + ship_r;
+                if (cdx*cdx + cdy*cdy >= broad_min*broad_min) continue;
+
+                float max_pen = 0.0f, push_nx = 0.0f, push_ny = 0.0f;
+                bool  hit     = false;
+
+                for (uint8_t vi = 0; vi < ship->hull_vertex_count; vi++) {
+                    Vec2Q16 wv = transform_hull_vertex(ship->hull_vertices[vi],
+                                                       ship->position,
+                                                       ship->rotation);
+                    float wx_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(wv.x));
+                    float wy_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(wv.y));
+                    if (!island_poly_contains(isl, wx_cli, wy_cli)) continue;
+
+                    float nx, ny, depth_cli;
+                    if (!island_poly_pushout(isl, wx_cli, wy_cli, &nx, &ny, &depth_cli)) continue;
+                    float depth_sv = CLIENT_TO_SERVER(depth_cli);
+                    if (depth_sv > max_pen) {
+                        max_pen  = depth_sv;
+                        push_nx  = nx;
+                        push_ny  = ny;
+                        hit      = true;
+                    }
+                }
+                if (!hit) continue;
+
+                ship->position.x += Q16_FROM_FLOAT(push_nx * max_pen);
+                ship->position.y += Q16_FROM_FLOAT(push_ny * max_pen);
+                float vx    = Q16_TO_FLOAT(ship->velocity.x);
+                float vy    = Q16_TO_FLOAT(ship->velocity.y);
+                float vdotn = vx * push_nx + vy * push_ny;
+                if (vdotn < 0.0f) {
+                    const float restitution = 0.15f;
+                    const float friction    = 0.75f;
+                    ship->velocity.x = Q16_FROM_FLOAT(
+                        (vx - (1.0f + restitution) * vdotn * push_nx) * friction);
+                    ship->velocity.y = Q16_FROM_FLOAT(
+                        (vy - (1.0f + restitution) * vdotn * push_ny) * friction);
+                }
+            }
+            continue;  /* done with this polygon island */
+        }
+
+        /* ── Bump-circle island ─────────────────────────────────────────────── */
         float island_cx = CLIENT_TO_SERVER(isl->x);
         float island_cy = CLIENT_TO_SERVER(isl->y);
         /* Broad-phase radius: island beach + max bump, per-ship bounding radius added below */

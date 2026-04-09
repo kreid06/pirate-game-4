@@ -101,6 +101,52 @@ static inline bool island_poly_contains(
     return inside;
 }
 
+/**
+ * For a point (px,py) KNOWN TO BE INSIDE the beach polygon, find the
+ * nearest exit — the edge with the shallowest penetration depth.
+ *
+ * Vertices are traced CLOCKWISE in screen-space (y-down).  The outward
+ * normal for edge i→j is therefore (ey/len, -ex/len).
+ *
+ * Returns true and writes *out_nx,*out_ny (unit outward normal) and
+ * *out_depth (penetration in client pixels).
+ * Returns false only if the polygon has no valid edges (shouldn't happen).
+ */
+static inline bool island_poly_pushout(
+    const IslandDef *isl, float px, float py,
+    float *out_nx, float *out_ny, float *out_depth)
+{
+    int   n      = isl->vertex_count;
+    float rx     = px - isl->x;   /* relative to island centre */
+    float ry     = py - isl->y;
+    float min_pen = 1e30f;
+    *out_nx = 1.0f; *out_ny = 0.0f; *out_depth = 0.0f;
+    bool found = false;
+
+    for (int i = 0; i < n; i++) {
+        int   j  = (i + 1) % n;
+        float ex = isl->vx[j] - isl->vx[i];
+        float ey = isl->vy[j] - isl->vy[i];
+        float len = sqrtf(ex*ex + ey*ey);
+        if (len < 0.001f) continue;
+        /* Outward normal for CW winding in y-down space */
+        float nx =  ey / len;
+        float ny = -ex / len;
+        /* Signed distance: positive = outside this edge */
+        float d = nx * (rx - isl->vx[i]) + ny * (ry - isl->vy[i]);
+        if (d >= 0.0f) continue;  /* concave inward edge or already outside — skip */
+        float pen = -d;
+        if (pen < min_pen) {
+            min_pen   = pen;
+            *out_nx   = nx;
+            *out_ny   = ny;
+            found     = true;
+        }
+    }
+    if (found) *out_depth = min_pen;
+    return found;
+}
+
 /* ── World island list (server-authoritative) ───────────────────────────── */
 
 static const IslandDef ISLAND_PRESETS[] = {
