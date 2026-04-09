@@ -110,6 +110,7 @@ struct Projectile {
     q16_t damage;           // Damage amount
     q16_t lifetime;         // Remaining lifetime in seconds
     uint32_t spawn_time;    // Server tick when created
+    uint32_t effective_age_ms; // Accumulated age: 1ms/ms at sea, 2ms/ms over land
     uint16_t flags;         // Projectile flags
     uint8_t type;           // Cannonball, grapeshot, etc
     uint8_t firing_company; // Company owning this projectile (0=unset; skip if == target ship company)

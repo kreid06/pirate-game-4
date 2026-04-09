@@ -280,20 +280,16 @@ void sim_update_projectiles(struct Sim* sim, q16_t dt) {
     for (uint16_t i = 0; i < sim->projectile_count; i++) {
         struct Projectile* proj = &sim->projectiles[i];
         
-        // Check lifetime — use proj->lifetime if set, otherwise fall back to 4s default
-        uint32_t lifetime_ms = sim->time_ms - proj->spawn_time;
-        uint32_t max_lifetime = (proj->lifetime > 0)
-            ? (uint32_t)(Q16_TO_FLOAT(proj->lifetime) * 1000.0f)
-            : 4000;
-        /* Halve effective lifetime when projectile is over land */
+        // Rate-based lifetime: 1ms/ms at sea, 2ms/ms over land
+        uint32_t dt_ms = (uint32_t)(Q16_TO_FLOAT(dt) * 1000.0f);
         {
             float px_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
             float py_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
-            for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+            bool over_land = false;
+            for (int ii = 0; ii < ISLAND_COUNT && !over_land; ii++) {
                 const IslandDef *isl = &ISLAND_PRESETS[ii];
                 float dx = px_cli - isl->x, dy = py_cli - isl->y;
                 float dist_sq = dx * dx + dy * dy;
-                bool over_land = false;
                 if (isl->vertex_count > 0) {
                     over_land = (dist_sq < isl->poly_bound_r * isl->poly_bound_r)
                              && island_poly_contains(isl, px_cli, py_cli);
@@ -305,13 +301,16 @@ void sim_update_projectiles(struct Sim* sim, q16_t dt) {
                         over_land = (dist_sq < r * r);
                     }
                 }
-                if (over_land) { max_lifetime /= 2; break; }
             }
+            proj->effective_age_ms += over_land ? dt_ms * 2 : dt_ms;
         }
-        if (lifetime_ms > max_lifetime) {
+        uint32_t max_lifetime = (proj->lifetime > 0)
+            ? (uint32_t)(Q16_TO_FLOAT(proj->lifetime) * 1000.0f)
+            : 4000;
+        if (proj->effective_age_ms > max_lifetime) {
             // Remove expired projectile
-            log_info("⏱️  Projectile %u expired after %ums (max=%ums) at (%.1f, %.1f)",
-                     proj->id, lifetime_ms, max_lifetime,
+            log_info("⏱️  Projectile %u expired after %ums effective age (max=%ums) at (%.1f, %.1f)",
+                     proj->id, proj->effective_age_ms, max_lifetime,
                      Q16_TO_FLOAT(proj->position.x), Q16_TO_FLOAT(proj->position.y));
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                    (sim->projectile_count - i - 1) * sizeof(struct Projectile));
