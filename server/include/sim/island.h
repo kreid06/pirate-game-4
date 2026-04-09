@@ -20,7 +20,7 @@
  *   grass_max_bump  — max(abs(grass_bumps)); used as broad-phase margin
  */
 
-#define ISLAND_MAX_RESOURCES 64
+#define ISLAND_MAX_RESOURCES 1024
 #define ISLAND_MAX_COUNT     16
 #define ISLAND_BUMP_COUNT    16
 #define ISLAND_MAX_VERTS     64
@@ -147,129 +147,17 @@ static inline bool island_poly_pushout(
     return found;
 }
 
-/* ── World island list (server-authoritative) ───────────────────────────── */
+/* ── World island list (server-authoritative) ───────────────────────────── *
+ * Defined in server/src/sim/island_data.c so that islands_generate_trees()  *
+ * can populate tree positions at startup without const restrictions.          */
 
-static const IslandDef ISLAND_PRESETS[] = {
-    {
-        .id              = 1,
-        .x               = 800.0f,
-        .y               = 600.0f,
-        .beach_radius_px = 185.0f,
-        .grass_radius_px = 148.0f,
-        /* Mirror of client RenderSystem.ISLAND_PRESETS['tropical'].beachBumps */
-        .beach_bumps     = { 0, 14, -9, 20,  6, -13, 16,  3, -7, 18, -5, 10, 12, -11,  7, -9 },
-        .beach_max_bump  = 20.0f,
-        /* Mirror of client RenderSystem.ISLAND_PRESETS['tropical'].grassBumps */
-        .grass_bumps     = { 0,  9, -6, 13,  4,  -9, 10,  2, -4, 11, -3,  7,  8,  -7,  5, -6 },
-        .grass_max_bump  = 13.0f,
-        .preset          = "tropical",
-        .resource_count  = 10,
-        .resources = {
-            { .ox = -65.0f, .oy = -55.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  85.0f, .oy = -25.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  15.0f, .oy =  80.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -90.0f, .oy =  38.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  45.0f, .oy = -78.0f, .type = ISLAND_RES_FIBER },
-            { .ox = -28.0f, .oy =  32.0f, .type = ISLAND_RES_FIBER },
-            { .ox =  70.0f, .oy =  50.0f, .type = ISLAND_RES_FIBER },
-            { .ox =  -5.0f, .oy = -90.0f, .type = ISLAND_RES_ROCK  },
-            { .ox =  60.0f, .oy =  75.0f, .type = ISLAND_RES_ROCK  },
-            { .ox = -75.0f, .oy = -15.0f, .type = ISLAND_RES_ROCK  },
-        },
-    },
-    {
-        /* ── Giant continental landmass ─────────────────────────────────────
-         * Roughly oval with a small southern bay.  ~6200 px wide × 6100 px
-         * tall, area ≈ 25,000,000 sq px (5000 × 5000 units).
-         * Centre at world (6000, 5000); polygon vertices are WORLD coords
-         * (absolute, not offsets) emitted to the client.
-         * Vertex offsets from centre traced clockwise from north.
-         */
-        .id               = 2,
-        .x                = 6000.0f,
-        .y                = 5000.0f,
-        .beach_radius_px  = 0.0f,
-        .grass_radius_px  = 0.0f,
-        .beach_bumps      = {0},
-        .grass_bumps      = {0},
-        .beach_max_bump   = 0.0f,
-        .grass_max_bump   = 0.0f,
-        .preset           = "continental",
-        /* 28-vertex coastline.  C zero-fills remaining vx/vy slots. */
-        .vertex_count     = 28,
-        .poly_bound_r     = 3300.0f,
-        .grass_poly_scale = 0.82f,
-        /*            N      NNE    NE     ENE    E-NE   E-near  E      ESE  */
-        .vx = {     0,  800, 1600, 2300, 2750, 2950, 3100, 2900,
-        /*          SE     SSE    S-SE   S      S-bay  bay-in bay-fl bay-in */
-                 2550, 1950, 1250,  500,  250,  100,    0, -100,
-        /*         bay-ex SW-S   SW     WSW    W-SW   W-near W      WNW  */
-                 -350,-1050,-1850,-2450,-2850,-2950,-3100,-2900,
-        /*          NW     NNW    N-NW   N-near  */
-                -2550,-1950,-1250, -500 },
-        /*            N      NNE    NE     ENE    E-NE   E-near  E      ESE  */
-        .vy = {  -3000,-2850,-2650,-2250,-1450, -500,  400, 1200,
-        /*          SE     SSE    S-SE   S      S-bay  bay-in bay-fl bay-in */
-                  2050, 2600, 2900, 3050, 2450, 1850, 1650, 1850,
-        /*         bay-ex SW-S   SW     WSW    W-SW   W-near W      WNW  */
-                  2450, 2950, 2650, 2150, 1450,  500, -400,-1250,
-        /*          NW     NNW    N-NW   N-near  */
-                 -2050,-2550,-2800,-2950 },
-        .resource_count   = 40,
-        .resources = {
-            /* Wood — 8 forest clusters, 4 trees each (within ~100px radius) */
-            /* Cluster A: north-west interior */
-            { .ox = -1500.0f, .oy = -1800.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -1580.0f, .oy = -1715.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -1430.0f, .oy = -1890.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -1510.0f, .oy = -1680.0f, .type = ISLAND_RES_WOOD  },
-            /* Cluster B: north centre */
-            { .ox =   500.0f, .oy = -2400.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =   580.0f, .oy = -2320.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =   415.0f, .oy = -2475.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =   555.0f, .oy = -2455.0f, .type = ISLAND_RES_WOOD  },
-            /* Cluster C: north-east interior */
-            { .ox =  1800.0f, .oy = -1800.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  1885.0f, .oy = -1720.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  1715.0f, .oy = -1875.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  1840.0f, .oy = -1680.0f, .type = ISLAND_RES_WOOD  },
-            /* Cluster D: east coast */
-            { .ox =  2200.0f, .oy =   300.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  2275.0f, .oy =   375.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  2115.0f, .oy =   245.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  2255.0f, .oy =   210.0f, .type = ISLAND_RES_WOOD  },
-            /* Cluster E: south-east interior */
-            { .ox =  1600.0f, .oy =  1800.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  1680.0f, .oy =  1715.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  1515.0f, .oy =  1885.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  1650.0f, .oy =  1700.0f, .type = ISLAND_RES_WOOD  },
-            /* Cluster F: south-west interior */
-            { .ox = -1200.0f, .oy =  1500.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -1285.0f, .oy =  1415.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -1115.0f, .oy =  1580.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -1255.0f, .oy =  1435.0f, .type = ISLAND_RES_WOOD  },
-            /* Cluster G: west coast */
-            { .ox = -2100.0f, .oy =   800.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -2185.0f, .oy =   720.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -2020.0f, .oy =   875.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -2150.0f, .oy =   705.0f, .type = ISLAND_RES_WOOD  },
-            /* Cluster H: west-north-west */
-            { .ox = -2000.0f, .oy = -1200.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -2085.0f, .oy = -1120.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -1910.0f, .oy = -1280.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -2055.0f, .oy = -1105.0f, .type = ISLAND_RES_WOOD  },
-            /* Fiber — 4 meadow patches */
-            { .ox =  -800.0f, .oy = -1000.0f, .type = ISLAND_RES_FIBER },
-            { .ox =  1000.0f, .oy = -1000.0f, .type = ISLAND_RES_FIBER },
-            { .ox =  1200.0f, .oy =  1000.0f, .type = ISLAND_RES_FIBER },
-            { .ox = -1500.0f, .oy =  -400.0f, .type = ISLAND_RES_FIBER },
-            /* Rock — 4 mountain outcrops near the edges */
-            { .ox = -2500.0f, .oy = -1600.0f, .type = ISLAND_RES_ROCK  },
-            { .ox =  2500.0f, .oy = -1000.0f, .type = ISLAND_RES_ROCK  },
-            { .ox =  2400.0f, .oy =  1600.0f, .type = ISLAND_RES_ROCK  },
-            { .ox = -2500.0f, .oy =  1400.0f, .type = ISLAND_RES_ROCK  },
-        },
-    },
-};
+#define ISLAND_COUNT 2
+extern IslandDef ISLAND_PRESETS[];
 
-#define ISLAND_COUNT ((int)(sizeof(ISLAND_PRESETS) / sizeof(ISLAND_PRESETS[0])))
+/**
+ * Procedurally generate tree (wood resource) positions for all polygon
+ * islands, filling their resource arrays with a grid+jitter pattern that
+ * covers the entire grass polygon interior.  Call once at server startup
+ * before any client connects.
+ */
+void islands_generate_trees(void);

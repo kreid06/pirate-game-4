@@ -37,6 +37,7 @@ set(CORE_SOURCES
 set(SIM_SOURCES
     src/sim/simulation.c
     src/sim/module_types.c
+    src/sim/island_data.c
 )
 
 set(NET_SOURCES

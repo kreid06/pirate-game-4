@@ -6647,6 +6647,10 @@ static void tick_ghost_ships(float dt) {
 }
 
 int websocket_server_init(uint16_t port) {
+    /* Generate procedural tree positions for all polygon islands. Must be
+     * called before any client connects so the ISLANDS message is complete. */
+    islands_generate_trees();
+
     memset(&ws_server, 0, sizeof(ws_server));
     ws_server.port = port;
     
@@ -7335,7 +7339,7 @@ int websocket_server_update(struct Sim* sim) {
 
                                     // Send ISLANDS so client can render island geometry
                                     {
-                                        static char hs_islands_buf[8192];
+                                        static char hs_islands_buf[65536];
                                         int hsi_pos = 0;
                                         hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
                                                             "{\"type\":\"ISLANDS\",\"islands\":[");
@@ -7366,7 +7370,7 @@ int websocket_server_update(struct Sim* sim) {
                                             hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]}");
                                         }
                                         hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]}");
-                                        char hs_isl_frame[8704];
+                                        static char hs_isl_frame[65600];
                                         size_t hs_isl_len = websocket_create_frame(
                                             WS_OPCODE_TEXT, hs_islands_buf, (size_t)hsi_pos,
                                             hs_isl_frame, sizeof(hs_isl_frame));
@@ -9837,7 +9841,7 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 // Send ISLANDS
                                 {
-                                    static char islands_buf[8192];
+                                    static char islands_buf[65536];
                                     int pos = 0;
                                     pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
                                                     "{\"type\":\"ISLANDS\",\"islands\":[");
@@ -9868,7 +9872,7 @@ int websocket_server_update(struct Sim* sim) {
                                         pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
                                     }
                                     pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
-                                    char isl_frame[8704];
+                                    static char isl_frame[65600];
                                     size_t isl_frame_len = websocket_create_frame(
                                         WS_OPCODE_TEXT, islands_buf, (size_t)pos,
                                         isl_frame, sizeof(isl_frame));
