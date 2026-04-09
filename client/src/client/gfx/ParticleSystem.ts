@@ -25,6 +25,7 @@ interface Particle {
  */
 export enum ParticleEffectType {
   WATER_SPLASH = 'water_splash',
+  DIRT_SPLASH = 'dirt_splash',
   CANNONBALL_SMOKE = 'cannonball_smoke',
   EXPLOSION = 'explosion',
   WATER_FOAM = 'water_foam',
@@ -183,7 +184,84 @@ export class ParticleSystem {
       particles,
     });
   }
-  
+
+  /**
+   * Create a dirt splash for cannonball impact / expiry over land.
+   * Three passes: central plume column, radial debris burst, dust mist.
+   */
+  createDirtSplash(position: Vec2, intensity: number = 1.0): void {
+    const q = this.qualityMultipliers[this.quality];
+    const particles: Particle[] = [];
+
+    const dirtColors = ['#8B6914', '#A0784A', '#C49A3C', '#7A5C28', '#B8965E'];
+    const dustColors = ['#C4A882', '#D4B896', '#B89060'];
+
+    // ── Pass 1: Central plume — upward dirt column ────────────────────────────
+    const plumeCount = Math.floor(22 * intensity * q);
+    for (let i = 0; i < plumeCount; i++) {
+      const spread = (Math.random() - 0.5) * 0.7; // wider spread than water
+      const angle  = -Math.PI / 2 + spread;
+      const speed  = 130 + Math.random() * 180;
+      particles.push({
+        position: position.add(Vec2.from((Math.random() - 0.5) * 14, 0)),
+        velocity: Vec2.from(Math.cos(angle) * speed, Math.sin(angle) * speed),
+        life: 0,
+        maxLife: 0.5 + Math.random() * 0.6,
+        size: 5 + Math.random() * 9,
+        color: dirtColors[Math.floor(Math.random() * dirtColors.length)],
+        alpha: 0.8 + Math.random() * 0.2,
+      });
+    }
+
+    // ── Pass 2: Radial debris — low-angle lateral scatter ─────────────────────
+    const debrisCount = Math.floor(28 * intensity * q);
+    for (let i = 0; i < debrisCount; i++) {
+      const angle = (i / debrisCount) * Math.PI * 2;
+      // Bias toward horizontal (low-angle debris)
+      const vertBias = (Math.random() - 0.7) * Math.PI * 0.4;
+      const finalAngle = angle + vertBias;
+      const speed = 100 + Math.random() * 160;
+      particles.push({
+        position: position.add(Vec2.from(
+          (Math.random() - 0.5) * 16,
+          (Math.random() - 0.5) * 8,
+        )),
+        velocity: Vec2.from(Math.cos(finalAngle) * speed, Math.sin(finalAngle) * speed - 40),
+        life: 0,
+        maxLife: 0.5 + Math.random() * 0.6,
+        size: 3 + Math.random() * 7,
+        color: dirtColors[Math.floor(Math.random() * dirtColors.length)],
+        alpha: 0.7 + Math.random() * 0.25,
+      });
+    }
+
+    // ── Pass 3: Dust cloud — slow lingering haze ──────────────────────────────
+    const dustCount = Math.floor(18 * intensity * q);
+    for (let i = 0; i < dustCount; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 25 + Math.random() * 60;
+      particles.push({
+        position: position.add(Vec2.from(
+          (Math.random() - 0.5) * 36,
+          (Math.random() - 0.5) * 16,
+        )),
+        velocity: Vec2.from(Math.cos(angle) * speed, Math.sin(angle) * speed - 15),
+        life: 0,
+        maxLife: 1.2 + Math.random() * 1.0,
+        size: 8 + Math.random() * 14,
+        color: dustColors[Math.floor(Math.random() * dustColors.length)],
+        alpha: 0.25 + Math.random() * 0.25,
+      });
+    }
+
+    this.effects.push({
+      position: position.clone(),
+      type: ParticleEffectType.DIRT_SPLASH,
+      intensity,
+      particles,
+    });
+  }
+
   /**
    * Create cannonball smoke trail
    */

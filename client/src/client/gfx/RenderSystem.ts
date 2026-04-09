@@ -3542,8 +3542,46 @@ export class RenderSystem {
             this.spawnDamageNumber(Vec2.from(last.x, last.y), 25, false);
           }
         } else if (!overShip && (last.ammoType === 0 || last.ammoType === 1)) {
-          console.log(`💦 SPLASH: cannonball ${id} expired over water at (${last.x.toFixed(1)}, ${last.y.toFixed(1)})`);
-          this.particleSystem.createWaterSplash(Vec2.from(last.x, last.y), 1.2);
+          // Check if over island land → dirt splash; otherwise water splash
+          let overLand = false;
+          for (const isl of this.islands) {
+            if (isl.vertices) {
+              let inside = false;
+              const verts = isl.vertices;
+              const n = verts.length;
+              for (let vi = 0, vj = n - 1; vi < n; vj = vi++) {
+                const xi = verts[vi].x, yi = verts[vi].y;
+                const xj = verts[vj].x, yj = verts[vj].y;
+                if ((yi > last.y) !== (yj > last.y) &&
+                    last.x < (xj - xi) * (last.y - yi) / (yj - yi) + xi)
+                  inside = !inside;
+              }
+              if (inside) { overLand = true; break; }
+            } else {
+              const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+              const dx = last.x - isl.x, dy = last.y - isl.y;
+              const distSq = dx * dx + dy * dy;
+              const broadR = preset.beachRadius + Math.max(...preset.beachBumps.map(Math.abs));
+              if (distSq < broadR * broadR) {
+                const angle = Math.atan2(dy, dx);
+                const TWO_PI = Math.PI * 2;
+                const bumps = preset.beachBumps;
+                let a = angle % TWO_PI; if (a < 0) a += TWO_PI;
+                const t = (a / TWO_PI) * bumps.length;
+                const i0 = Math.floor(t) % bumps.length;
+                const i1 = (i0 + 1) % bumps.length;
+                const narrowR = preset.beachRadius + bumps[i0] + (t - Math.floor(t)) * (bumps[i1] - bumps[i0]);
+                if (distSq < narrowR * narrowR) { overLand = true; break; }
+              }
+            }
+          }
+          if (overLand) {
+            console.log(`💨 DIRT: cannonball ${id} expired over land at (${last.x.toFixed(1)}, ${last.y.toFixed(1)})`);
+            this.particleSystem.createDirtSplash(Vec2.from(last.x, last.y), 1.2);
+          } else {
+            console.log(`💦 SPLASH: cannonball ${id} expired over water at (${last.x.toFixed(1)}, ${last.y.toFixed(1)})`);
+            this.particleSystem.createWaterSplash(Vec2.from(last.x, last.y), 1.2);
+          }
         } else if (overShip) {
           console.log(`💥 NO SPLASH: cannonball ${id} disappeared near ship at (${last.x.toFixed(1)}, ${last.y.toFixed(1)})`);
         }
