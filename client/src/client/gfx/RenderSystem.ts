@@ -2979,20 +2979,27 @@ export class RenderSystem {
         }
         ctx.restore();
       } else if (s.type === 'door') {
-        // Door: same shape as wall, but shows open/closed state
-        const isHoriz = this.placedStructures.some(f =>
-          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        // Door: derive rotation from nearest floor (same as wall/door_frame)
+        const nearDoorFloor = this.placedStructures.find(f =>
+          f.type === 'wooden_floor' && Math.hypot(f.x - s.x, f.y - s.y) < 30
         );
+        const doorRotRad = nearDoorFloor
+          ? Math.atan2(s.y - nearDoorFloor.y, s.x - nearDoorFloor.x) + Math.PI / 2
+          : 0;
+        // Always draw in horizontal local space; rotation is applied via ctx transform
         const THICK = 0.18;
-        const ww = isHoriz ? sz : sz * THICK;
-        const wh = isHoriz ? sz * THICK : sz;
+        const ww = sz;
+        const wh = sz * THICK;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = (1 - hpFrac) * 0.5;
         const isOpen = s.doorOpen === true;
 
         ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(doorRotRad);
+        ctx.translate(-ssp.x, -ssp.y);
         if (!isOpen) {
-          // Closed door: filled planks like wall but with a lighter color
+          // Closed door: filled planks
           ctx.fillStyle   = isHovered ? '#9a6040' : '#7a4820';
           ctx.strokeStyle = '#3e200c';
           ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
@@ -3000,31 +3007,20 @@ export class RenderSystem {
           ctx.rect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
           ctx.fill();
           ctx.stroke();
-          // Center door marker (vertical line or horizontal line)
+          // Center dividing line (vertical in local space = across the width)
           ctx.strokeStyle = 'rgba(30, 12, 4, 0.5)';
           ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-          if (isHoriz) {
-            ctx.beginPath(); ctx.moveTo(ssp.x, ssp.y - wh / 2); ctx.lineTo(ssp.x, ssp.y + wh / 2); ctx.stroke();
-          } else {
-            ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2, ssp.y); ctx.lineTo(ssp.x + ww / 2, ssp.y); ctx.stroke();
-          }
+          ctx.beginPath(); ctx.moveTo(ssp.x, ssp.y - wh / 2); ctx.lineTo(ssp.x, ssp.y + wh / 2); ctx.stroke();
         } else {
-          // Open door: just two short end-posts, gap in middle
+          // Open door: two short end-posts, gap in middle
           const postSz = sz * 0.15;
           ctx.fillStyle   = isHovered ? '#9a6040' : '#7a4820';
           ctx.strokeStyle = '#3e200c';
           ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
-          if (isHoriz) {
-            ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, postSz, wh);
-            ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, postSz, wh);
-            ctx.fillRect(ssp.x + ww / 2 - postSz, ssp.y - wh / 2, postSz, wh);
-            ctx.strokeRect(ssp.x + ww / 2 - postSz, ssp.y - wh / 2, postSz, wh);
-          } else {
-            ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, postSz);
-            ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, postSz);
-            ctx.fillRect(ssp.x - ww / 2, ssp.y + wh / 2 - postSz, ww, postSz);
-            ctx.strokeRect(ssp.x - ww / 2, ssp.y + wh / 2 - postSz, ww, postSz);
-          }
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, postSz, wh);
+          ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, postSz, wh);
+          ctx.fillRect(ssp.x + ww / 2 - postSz, ssp.y - wh / 2, postSz, wh);
+          ctx.strokeRect(ssp.x + ww / 2 - postSz, ssp.y - wh / 2, postSz, wh);
           // Dashed outline showing door extent
           ctx.strokeStyle = 'rgba(150, 100, 60, 0.35)';
           ctx.lineWidth   = Math.max(0.5, 1 * zoom);
@@ -3036,8 +3032,7 @@ export class RenderSystem {
         const doorCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
         const doorStripSz = Math.max(1, 2 * zoom);
         ctx.fillStyle = doorCompanyColor;
-        if (isHoriz) ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, doorStripSz);
-        else         ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, doorStripSz, wh);
+        ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, doorStripSz);
         // Damage darkening
         if (!isOpen && dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;

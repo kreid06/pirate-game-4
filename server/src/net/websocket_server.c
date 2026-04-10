@@ -7131,12 +7131,14 @@ static void check_projectile_static_collisions(struct Sim* sim) {
                                      wb->id, wb->x, wb->y);
                             websocket_server_broadcast(cwmsg);
                         }
-                    } else if (wb->type == STRUCT_WALL) {
-                        /* Is wall adjacent to the demolished floor? */
+                    } else if (wb->type == STRUCT_WALL || wb->type == STRUCT_DOOR_FRAME) {
+                        /* Is this wall/door_frame adjacent to the demolished floor? */
                         float _at_dx = wb->x - kx, _at_dy = wb->y - ky;
                         if (_at_dx*_at_dx + _at_dy*_at_dy > 30.0f * 30.0f) continue;
                         bool has_support = wall_has_support(wb->x, wb->y);
                         if (!has_support) {
+                            float dfx = wb->x, dfy = wb->y;
+                            bool is_frame = (wb->type == STRUCT_DOOR_FRAME);
                             wb->active = false;
                             char cwmsg[192];
                             snprintf(cwmsg, sizeof(cwmsg),
@@ -7144,8 +7146,22 @@ static void check_projectile_static_collisions(struct Sim* sim) {
                                      "\"structure_id\":%u,\"x\":%.1f,\"y\":%.1f}",
                                      wb->id, wb->x, wb->y);
                             websocket_server_broadcast(cwmsg);
+                            /* If a door_frame was lost, cascade any door sitting on it */
+                            if (is_frame) {
+                                for (uint32_t di = 0; di < placed_structure_count; di++) {
+                                    PlacedStructure* dp = &placed_structures[di];
+                                    if (!dp->active || dp->type != STRUCT_DOOR) continue;
+                                    if (fabsf(dp->x - dfx) >= 3.0f || fabsf(dp->y - dfy) >= 3.0f) continue;
+                                    dp->active = false;
+                                    char dmsg[128];
+                                    snprintf(dmsg, sizeof(dmsg),
+                                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}",
+                                             dp->id);
+                                    websocket_server_broadcast(dmsg);
+                                    break;
+                                }
+                            }
                         }
-                    }
                 }
             } else {
                 snprintf(msg, sizeof(msg),
@@ -7169,6 +7185,7 @@ static void check_projectile_static_collisions(struct Sim* sim) {
                 for (int ri = 0; ri < isl->resource_count && !removed; ri++) {
                     const IslandResource* res = &isl->resources[ri];
                     if (strcmp(res->type, ISLAND_RES_WOOD) != 0) continue;
+                    if (res->health <= 0) continue; /* tree is depleted/destroyed — no collision */
                     float tx = isl->x + res->ox;
                     float ty = isl->y + res->oy;
                     float dx = px - tx;

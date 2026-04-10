@@ -2617,6 +2617,12 @@ export class ClientApplication {
       switch (e.key) {
         case 'Escape':
         case '`': { // backtick also closes/cancels
+          // Close crafting menu if open
+          if (this.craftingMenu.visible) {
+            this.craftingMenu.close();
+            e.preventDefault();
+            break;
+          }
           // Cancel "Move To" targeting mode if active
           if (this._moveToNpcId !== null) {
             this._moveToNpcId = null;
