@@ -1172,6 +1172,32 @@ export class RenderSystem {
   }
 
   /**
+   * SAT OBB-OBB overlap test for two 50×50 floor tiles.
+   * Returns true if they share any interior space (touching edges = false).
+   */
+  private static floorsOverlap(
+    ax: number, ay: number, aRad: number,
+    bx: number, by: number, bRad: number
+  ): boolean {
+    const HALF = 25;
+    // Small epsilon to absorb floating-point rounding on touching-edge adjacency.
+    // Valid adjacent tiles are exactly TILE=50px apart; any genuine overlap is >> 0.01px.
+    const EPS = 0.01;
+    const cA = Math.cos(aRad), sA = Math.sin(aRad);
+    const cB = Math.cos(bRad), sB = Math.sin(bRad);
+    const dx = bx - ax, dy = by - ay;
+    // 4 SAT axes: local X and Y of each box
+    const axes: [number, number][] = [[cA, sA], [-sA, cA], [cB, sB], [-sB, cB]];
+    for (const [nx, ny] of axes) {
+      const d  = Math.abs(dx * nx + dy * ny);
+      const rA = HALF * Math.abs(cA * nx + sA * ny) + HALF * Math.abs(-sA * nx + cA * ny);
+      const rB = HALF * Math.abs(cB * nx + sB * ny) + HALF * Math.abs(-sB * nx + cB * ny);
+      if (d >= rA + rB - EPS) return false; // separating axis (or touching edge) — no overlap
+    }
+    return true; // no separating axis — tiles genuinely overlap
+  }
+
+  /**
    * Compute the snapped world position for a wooden_floor placement at (wx, wy).
    * If the point is within SNAP_R of an unoccupied cardinal neighbour slot of any
    * existing floor, snaps to that slot. Otherwise returns the input unchanged.
@@ -1200,8 +1226,11 @@ export class RenderSystem {
       ];
       for (const d of DIRS) {
         const nx = s.x + d.dx, ny = s.y + d.dy;
+        // Candidate slot rotation inherits source tile's rotation
+        const candidateRad = rad; // same angle as source
         const alreadyOccupied = this.placedStructures.some(
-          f => f.type === 'wooden_floor' && Math.abs(f.x - nx) < 2 && Math.abs(f.y - ny) < 2
+          f => f.type === 'wooden_floor' &&
+               RenderSystem.floorsOverlap(nx, ny, candidateRad, f.x, f.y, (f.rotation ?? 0) * Math.PI / 180)
         );
         if (alreadyOccupied) continue;
         const dist2 = (nx - wx) * (nx - wx) + (ny - wy) * (ny - wy);
@@ -2659,13 +2688,22 @@ export class RenderSystem {
       let floorHit: PlacedStructure | null = null;
       for (const s of this.placedStructures) {
         if (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') {
-          // Walls and door frames have priority over floors; door panels highest
-          const isHoriz = this.placedStructures.some(f =>
-            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
-          );
-          const hw = isHoriz ? 25 : 6;
-          const hh = isHoriz ? 6 : 25;
-          if (Math.abs(mx - s.x) <= hw && Math.abs(my - s.y) <= hh) {
+          // Derive wall orientation from nearest floor tile, then rotate mouse into local space
+          let nearFloor: PlacedStructure | null = null;
+          let nearDist2 = Infinity;
+          for (const f of this.placedStructures) {
+            if (f.type !== 'wooden_floor') continue;
+            const d2 = (f.x - s.x) * (f.x - s.x) + (f.y - s.y) * (f.y - s.y);
+            if (d2 < nearDist2) { nearDist2 = d2; nearFloor = f; }
+          }
+          const wRad = nearFloor
+            ? Math.atan2(s.y - nearFloor.y, s.x - nearFloor.x) + Math.PI / 2
+            : 0;
+          const wc = Math.cos(-wRad), ws = Math.sin(-wRad);
+          const ddx = mx - s.x, ddy = my - s.y;
+          const lx = ddx * wc - ddy * ws;
+          const ly = ddx * ws + ddy * wc;
+          if (Math.abs(lx) <= 25 && Math.abs(ly) <= 8) {
             floorHit = s; // walls/door frames/panels treated like floors — workbench still wins
           }
           continue;
@@ -3021,50 +3059,51 @@ export class RenderSystem {
       const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
       const sz  = Math.max(4, 50 * zoom);
 
+      // Derive rendering rotation for this structure.
+      // Floors/workbenches carry an explicit rotation field.
+      // Walls/door_frames/doors derive orientation from the nearest floor tile:
+      // the wall runs perpendicular to the floor-centre→wall-midpoint vector.
+      let rotRad = 0;
+      if (s.type === 'wooden_floor' || s.type === 'workbench') {
+        rotRad = (s.rotation ?? 0) * Math.PI / 180;
+      } else {
+        let nearFloor: PlacedStructure | null = null;
+        let nearDist2 = Infinity;
+        for (const f of this.placedStructures) {
+          if (f.type !== 'wooden_floor') continue;
+          const d2 = (f.x - s.x) * (f.x - s.x) + (f.y - s.y) * (f.y - s.y);
+          if (d2 < nearDist2) { nearDist2 = d2; nearFloor = f; }
+        }
+        if (nearFloor) rotRad = Math.atan2(s.y - nearFloor.y, s.x - nearFloor.x) + Math.PI / 2;
+      }
+
+      // Unrotated dimensions of the structure rect
+      const THICK  = 0.18;
+      const isWall = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
+      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : sz;
+      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : sz;
+
+      // Axis-aligned bounding box after rotation (used for bar/tooltip screen positioning)
+      const absC = Math.abs(Math.cos(rotRad)), absS = Math.abs(Math.sin(rotRad));
+      const bbW  = rawW * absC + rawH * absS;
+      const bbH  = rawW * absS + rawH * absC;
+
+      // Draw outline rect rotated to match structure orientation
       ctx.save();
       ctx.strokeStyle = '#ffe090';
       ctx.lineWidth   = Math.max(1, 3 * zoom);
-      if (s.type === 'wooden_floor') {
-        ctx.strokeRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
-      } else if (s.type === 'workbench') {
-        const bw = sz * 0.88;
-        const bh = sz * 0.62;
-        ctx.strokeRect(ssp.x - bw / 2, ssp.y - bh / 2, bw, bh);
-      } else if (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') {
-        const isHoriz = this.placedStructures.some(f =>
-          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
-        );
-        const THICK = 0.18;
-        const ww = isHoriz ? sz : sz * THICK;
-        const wh = isHoriz ? sz * THICK : sz;
-        ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
-      }
+      ctx.translate(ssp.x, ssp.y);
+      ctx.rotate(rotRad);
+      ctx.strokeRect(-rawW / 2, -rawH / 2, rawW, rawH);
       ctx.restore();
 
       // ── HP bar (hover only) ────────────────────────────────────────────
       {
-        const isHovWall = (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') && (() => {
-          const isHoriz = this.placedStructures.some(f =>
-            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
-          );
-          return isHoriz ? sz * 0.18 : sz; // hh
-        })();
-        const hpFrac  = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const barW    = s.type === 'workbench' ? sz * 0.88 : (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') ? (() => {
-          const isHoriz = this.placedStructures.some(f =>
-            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
-          );
-          return isHoriz ? sz : sz * 0.18;
-        })() : sz;
-        const barH    = Math.max(2, 3 * zoom);
-        const barX    = ssp.x - barW / 2;
-        const structH = s.type === 'workbench' ? sz * 0.62 : (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') ? (() => {
-          const isHoriz = this.placedStructures.some(f =>
-            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
-          );
-          return isHoriz ? sz * 0.18 : sz;
-        })() : sz;
-        const barY    = ssp.y + structH / 2 + Math.max(2, 2 * zoom);
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const barW   = bbW;
+        const barH   = Math.max(2, 3 * zoom);
+        const barX   = ssp.x - barW / 2;
+        const barY   = ssp.y + bbH / 2 + Math.max(2, 2 * zoom);
         ctx.save();
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
         ctx.fillRect(barX, barY, barW, barH);
@@ -3074,13 +3113,7 @@ export class RenderSystem {
       }
 
       // ── Tooltip ────────────────────────────────────────────────────────
-      const structH = s.type === 'workbench' ? sz * 0.62 : (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') ? (() => {
-        const isHoriz = this.placedStructures.some(f =>
-          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
-        );
-        return isHoriz ? sz * 0.18 : sz;
-      })() : sz;
-      const tipY = ssp.y - structH / 2 - 8;
+      const tipY = ssp.y - bbH / 2 - 8;
 
       const inRange = player && player.carrierId === 0 && (() => {
         const dx = s.x - player.position.x;
@@ -3179,9 +3212,10 @@ export class RenderSystem {
         ];
         for (const d of DIRS) {
           const nx = s.x + d.dx, ny = s.y + d.dy;
-          // Skip neighbour slots already occupied by another floor
+          // Skip neighbour slots already occupied by another floor (SAT check, candidate inherits source rotation)
           const occupied = this.placedStructures.some(
-            f => f.type === 'wooden_floor' && Math.abs(f.x - nx) < 2 && Math.abs(f.y - ny) < 2
+            f => f.type === 'wooden_floor' &&
+                 RenderSystem.floorsOverlap(nx, ny, rad, f.x, f.y, (f.rotation ?? 0) * Math.PI / 180)
           );
           if (occupied) continue;
           const dist2 = (nx - mx) * (nx - mx) + (ny - my) * (ny - my);
@@ -3289,13 +3323,13 @@ export class RenderSystem {
       tooFar = dx * dx + dy * dy > 200 * 200;
     }
 
-    // AABB overlap check: floor tile (50×50) must not overlap an existing floor tile
+    // OBB-OBB overlap check via SAT: ghost floor must not overlap any existing floor tile
     let overlaps = false;
     if (this.islandBuildKind === 'wooden_floor') {
+      const ghostRad = effectiveRotDeg * Math.PI / 180;
       overlaps = this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
-        const ddx = s.x - mx, ddy = s.y - my;
-        return ddx * ddx + ddy * ddy < 45 * 45;
+        return RenderSystem.floorsOverlap(mx, my, ghostRad, s.x, s.y, (s.rotation ?? 0) * Math.PI / 180);
       });
     }
 

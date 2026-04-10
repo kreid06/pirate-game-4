@@ -4464,6 +4464,9 @@ static bool floor_tiles_overlap(float ax, float ay, float a_rad,
                                 float bx, float by, float b_rad)
 {
     const float HALF = 25.0f;
+    /* Small epsilon — absorbs float rounding on exact touching-edge adjacency.
+       Valid adjacent tiles are exactly 50px apart; genuine overlap is >> 0.01px. */
+    const float EPS  = 0.01f;
     float cA = cosf(a_rad), sA = sinf(a_rad);
     float cB = cosf(b_rad), sB = sinf(b_rad);
     float dx = bx - ax, dy = by - ay;
@@ -4474,15 +4477,13 @@ static bool floor_tiles_overlap(float ax, float ay, float a_rad,
     };
     for (int i = 0; i < 4; i++) {
         float nx = axes[i][0], ny = axes[i][1];
-        /* Distance between centers projected onto this axis */
         float d = fabsf(dx * nx + dy * ny);
-        /* Each box's extent projected onto this axis */
         float rA = HALF * fabsf(cA*nx + sA*ny) + HALF * fabsf(-sA*nx + cA*ny);
         float rB = HALF * fabsf(cB*nx + sB*ny) + HALF * fabsf(-sB*nx + cB*ny);
-        /* Strict >=: touching (d == rA+rB) is allowed; only interior overlap is blocked */
-        if (d >= rA + rB) return false; /* separating axis found — no overlap */
+        /* Touching edge (d ≈ rA+rB) is allowed — only interior overlap rejected */
+        if (d >= rA + rB - EPS) return false;
     }
-    return true; /* no separating axis — tiles overlap */
+    return true;
 }
 
 static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {

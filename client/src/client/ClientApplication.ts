@@ -1326,6 +1326,24 @@ export class ClientApplication {
       this.networkManager.onStructurePlaced = (s) => {
         this.renderSystem.addPlacedStructure(s);
       };
+      this.networkManager.onPlacementFailed = (reason, _x, _y, structureType) => {
+        const REASONS: Record<string, string> = {
+          occupied:          'Space already occupied',
+          blocked_by_tree:   'Blocked by a tree',
+          needs_floor:       'Must be placed on a floor',
+          needs_floor_edge:  'Must snap to a floor edge',
+          needs_door_frame:  'Requires a door frame',
+          wrong_company:     'Belongs to another company',
+          enemy_territory:   'Enemy territory',
+          blocked_by_player: 'Blocked by a player',
+          too_far:           'Too far away',
+          in_water:          'Cannot place in water',
+          world_full:        'World structure limit reached',
+          missing_item:      'Missing required item',
+        };
+        const msg = REASONS[reason] ?? `Placement failed (${reason})`;
+        this.renderSystem.showAnnouncement(`\u{1F6A7} ${msg}`, 'info', 2.0);
+      };
       this.networkManager.onDoorToggled = (id, open) => {
         this.renderSystem.updateStructureDoorOpen(id, open);
       };

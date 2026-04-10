@@ -430,6 +430,7 @@ interface PlaceStructureMessage extends NetworkMessage {
   structure_type: string;
   x: number;
   y: number;
+  rotation?: number;
 }
 
 interface StructureInteractMessage extends NetworkMessage {
@@ -555,6 +556,8 @@ export class NetworkManager {
   public onCraftingOpen: ((structureId: number, structureType: string) => void) | null = null;
   /** Fired when the server responds to a craft_item request. */
   public onCraftResult: ((success: boolean, recipeId: string, reason?: string) => void) | null = null;
+  /** Fired when the server rejects a structure placement with a reason string. */
+  public onPlacementFailed: ((reason: string, x: number, y: number, structureType: string) => void) | null = null;
   /** Fired when a door is toggled open or closed by any player. */
   public onDoorToggled: ((id: number, open: boolean) => void) | null = null;
 
@@ -2220,6 +2223,16 @@ export class NetworkManager {
         this.onShipLevelUp?.(lvlShipId, lvlAttribute, lvlAttrLevel, lvlXp, lvlShipLevel, lvlTotalCap, lvlNextCost);
         break;
       }
+
+      case 'place_structure_fail':
+        console.warn(`[place_structure_fail] type=${message.structure_type ?? '?'} reason=${message.reason ?? '?'} pos=(${message.x ?? '?'}, ${message.y ?? '?'})`);
+        this.onPlacementFailed?.(
+          message.reason ?? 'unknown',
+          message.x ?? 0,
+          message.y ?? 0,
+          message.structure_type ?? '',
+        );
+        break;
 
       default:
         break;
