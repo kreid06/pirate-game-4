@@ -2889,17 +2889,23 @@ export class RenderSystem {
 
         ctx.restore();
       } else if (s.type === 'wall') {
-        // Determine orientation: if a floor shares X and is offset ±25 in Y → horizontal
-        const isHoriz = this.placedStructures.some(f =>
-          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        // Derive wall rotation from the nearest floor (floor-centre → wall-midpoint vector + 90°)
+        const nearWallFloor = this.placedStructures.find(f =>
+          f.type === 'wooden_floor' && Math.hypot(f.x - s.x, f.y - s.y) < 30
         );
+        const wallRotRad = nearWallFloor
+          ? Math.atan2(s.y - nearWallFloor.y, s.x - nearWallFloor.x) + Math.PI / 2
+          : 0;
         const THICK = 0.18; // ratio of tile (50px * 0.18 = 9px)
-        const ww = isHoriz ? sz : sz * THICK;
-        const wh = isHoriz ? sz * THICK : sz;
+        const ww = sz;          // long axis (rotated by wallRotRad)
+        const wh = sz * THICK;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = (1 - hpFrac) * 0.5;
 
         ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(wallRotRad);
+        ctx.translate(-ssp.x, -ssp.y);
         ctx.fillStyle   = isHovered ? '#7a5030' : '#5c3a1a';
         ctx.strokeStyle = '#2e1a08';
         ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
@@ -2907,26 +2913,18 @@ export class RenderSystem {
         ctx.rect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
         ctx.fill();
         ctx.stroke();
-        // Plank grain lines along the length
+        // Plank grain lines (verticals in wall-local space)
         ctx.strokeStyle = 'rgba(40, 20, 5, 0.4)';
         ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
-        if (isHoriz) {
-          for (let li = 1; li < 3; li++) {
-            const gx = ssp.x - ww / 2 + ww * (li / 3);
-            ctx.beginPath(); ctx.moveTo(gx, ssp.y - wh / 2); ctx.lineTo(gx, ssp.y + wh / 2); ctx.stroke();
-          }
-        } else {
-          for (let li = 1; li < 3; li++) {
-            const gy = ssp.y - wh / 2 + wh * (li / 3);
-            ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2, gy); ctx.lineTo(ssp.x + ww / 2, gy); ctx.stroke();
-          }
+        for (let li = 1; li < 3; li++) {
+          const gx = ssp.x - ww / 2 + ww * (li / 3);
+          ctx.beginPath(); ctx.moveTo(gx, ssp.y - wh / 2); ctx.lineTo(gx, ssp.y + wh / 2); ctx.stroke();
         }
         // Company color strip
         const wallCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
         const stripSz = Math.max(1, 2 * zoom);
         ctx.fillStyle = wallCompanyColor;
-        if (isHoriz) ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, stripSz);
-        else         ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, stripSz, wh);
+        ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, stripSz);
         // Damage darkening
         if (dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
@@ -2935,66 +2933,49 @@ export class RenderSystem {
         ctx.restore();
       } else if (s.type === 'door_frame') {
         // Door Frame: two posts at the ends with an open gap in the centre
-        const isHoriz = this.placedStructures.some(f =>
-          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        const nearDFFloor = this.placedStructures.find(f =>
+          f.type === 'wooden_floor' && Math.hypot(f.x - s.x, f.y - s.y) < 30
         );
+        const dfRotRad = nearDFFloor
+          ? Math.atan2(s.y - nearDFFloor.y, s.x - nearDFFloor.x) + Math.PI / 2
+          : 0;
         const THICK = 0.18;
-        const ww = isHoriz ? sz : sz * THICK;
-        const wh = isHoriz ? sz * THICK : sz;
+        const ww = sz;          // long axis
+        const wh = sz * THICK;
         const POST = sz * 0.14; // post square size
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = (1 - hpFrac) * 0.5;
 
         ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(dfRotRad);
+        ctx.translate(-ssp.x, -ssp.y);
         ctx.fillStyle   = isHovered ? '#9a6040' : '#7a4820';
         ctx.strokeStyle = '#3e200c';
         ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
-        if (isHoriz) {
-          // Two posts at left and right ends
-          ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
-          ctx.strokeRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
-          ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
-          ctx.strokeRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
-          // Dashed lintel lines to suggest the frame
-          ctx.strokeStyle = 'rgba(120, 70, 30, 0.45)';
-          ctx.lineWidth = Math.max(0.5, 1 * zoom);
-          ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
-          ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2 + POST, ssp.y - wh / 2);
-          ctx.lineTo(ssp.x + ww / 2 - POST, ssp.y - wh / 2); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2 + POST, ssp.y + wh / 2);
-          ctx.lineTo(ssp.x + ww / 2 - POST, ssp.y + wh / 2); ctx.stroke();
-          ctx.setLineDash([]);
-        } else {
-          // Two posts at top and bottom ends
-          ctx.fillRect(ssp.x - POST / 2, ssp.y - wh / 2, POST, POST);
-          ctx.strokeRect(ssp.x - POST / 2, ssp.y - wh / 2, POST, POST);
-          ctx.fillRect(ssp.x - POST / 2, ssp.y + wh / 2 - POST, POST, POST);
-          ctx.strokeRect(ssp.x - POST / 2, ssp.y + wh / 2 - POST, POST, POST);
-          // Dashed side lines
-          ctx.strokeStyle = 'rgba(120, 70, 30, 0.45)';
-          ctx.lineWidth = Math.max(0.5, 1 * zoom);
-          ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
-          ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2, ssp.y - wh / 2 + POST);
-          ctx.lineTo(ssp.x - ww / 2, ssp.y + wh / 2 - POST); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(ssp.x + ww / 2, ssp.y - wh / 2 + POST);
-          ctx.lineTo(ssp.x + ww / 2, ssp.y + wh / 2 - POST); ctx.stroke();
-          ctx.setLineDash([]);
-        }
+        // Two posts at left and right ends (in wall-local horizontal space)
+        ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
+        ctx.strokeRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
+        ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
+        ctx.strokeRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
+        // Dashed lintel lines
+        ctx.strokeStyle = 'rgba(120, 70, 30, 0.45)';
+        ctx.lineWidth = Math.max(0.5, 1 * zoom);
+        ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
+        ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2 + POST, ssp.y - wh / 2);
+        ctx.lineTo(ssp.x + ww / 2 - POST, ssp.y - wh / 2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2 + POST, ssp.y + wh / 2);
+        ctx.lineTo(ssp.x + ww / 2 - POST, ssp.y + wh / 2); ctx.stroke();
+        ctx.setLineDash([]);
         // Company color strip
         const dfCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
         const dfStripSz = Math.max(1, 2 * zoom);
         ctx.fillStyle = dfCompanyColor;
-        if (isHoriz) ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, dfStripSz);
-        else         ctx.fillRect(ssp.x - POST / 2, ssp.y - wh / 2, dfStripSz, POST);
+        ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, dfStripSz);
         if (dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          if (isHoriz) {
-            ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
-            ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
-          } else {
-            ctx.fillRect(ssp.x - POST / 2, ssp.y - wh / 2, POST, POST);
-            ctx.fillRect(ssp.x - POST / 2, ssp.y + wh / 2 - POST, POST, POST);
-          }
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
+          ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
         }
         ctx.restore();
       } else if (s.type === 'door') {
@@ -3244,7 +3225,8 @@ export class RenderSystem {
       mx = bestX; my = bestY;
       this._snappedBuildRotation = bestSnapRot;
     } else if ((this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame') && this.placedStructures.length > 0) {
-      // Snap to unoccupied edge midpoints of floor tiles, respecting each tile's rotation
+      // Reset rotation so stale value never persists when no snap is found
+      this._wallGhostRotRad = 0;
       const HALF = TILE / 2; // 25 px
       const SNAP_R = TILE * 0.6;
       let bestDist2 = SNAP_R * SNAP_R;

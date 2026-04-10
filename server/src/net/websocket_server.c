@@ -341,18 +341,43 @@ static float module_collision_radius(ModuleTypeId type) {
  * by scanning for a floor tile whose north or south edge midpoint matches (wx,wy).
  * Returns false (vertical) if no horizontal floor edge is found.
  */
-static bool wall_is_horizontal(float wx, float wy) {
-    const float TOL = 4.0f;
+/* Return the rotation (radians) of a wall/door at (wx,wy) by finding the nearest
+   floor tile and computing atan2(wall - floor) + pi/2 (wall runs perpendicular
+   to the floor-centre -> edge-midpoint vector, same formula used by the client). */
+static float wall_get_rad(float wx, float wy) {
+    float best_dist2 = 35.0f * 35.0f;
+    float best_rad   = 0.0f;
     for (uint32_t fi = 0; fi < placed_structure_count; fi++) {
         if (!placed_structures[fi].active) continue;
         if (placed_structures[fi].type != STRUCT_WOODEN_FLOOR) continue;
-        float fx = placed_structures[fi].x;
-        float fy = placed_structures[fi].y;
-        if (fabsf(wx - fx) < TOL &&
-            (fabsf(wy - (fy - 25.0f)) < TOL || fabsf(wy - (fy + 25.0f)) < TOL))
-            return true;
+        float dx = wx - placed_structures[fi].x;
+        float dy = wy - placed_structures[fi].y;
+        float d2 = dx * dx + dy * dy;
+        if (d2 < best_dist2) { best_dist2 = d2; best_rad = atan2f(dy, dx) + (float)M_PI / 2.0f; }
     }
-    return false; /* assume vertical */
+    return best_rad;
+}
+
+/* Check whether any active floor tile has a wall/door at one of its rotated edge midpoints. */
+static bool wall_has_support(float wx, float wy) {
+    const float EDGE_TOL = 4.0f, HALF = 25.0f;
+    for (uint32_t fi = 0; fi < placed_structure_count; fi++) {
+        PlacedStructure *f = &placed_structures[fi];
+        if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+        float rad = f->rotation * (float)M_PI / 180.0f;
+        float c = cosf(rad), sn = sinf(rad);
+        /* Rotated edge midpoints: N(0,-H), S(0,+H), W(-H,0), E(+H,0) in local space */
+        float edges[4][2] = {
+            { f->x + HALF*sn,  f->y - HALF*c  }, /* N */
+            { f->x - HALF*sn,  f->y + HALF*c  }, /* S */
+            { f->x - HALF*c,   f->y - HALF*sn }, /* W */
+            { f->x + HALF*c,   f->y + HALF*sn }, /* E */
+        };
+        for (int i = 0; i < 4; i++)
+            if (fabsf(wx - edges[i][0]) < EDGE_TOL && fabsf(wy - edges[i][1]) < EDGE_TOL)
+                return true;
+    }
+    return false;
 }
 
 /**
@@ -6991,20 +7016,13 @@ static void check_projectile_static_collisions(struct Sim* sim) {
         for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
             PlacedStructure* s = &placed_structures[si];
             if (!s->active || s->type != STRUCT_WALL) continue;
-            /* Determine wall orientation by checking for a supporting floor */
-            bool is_horizontal = false;
-            for (uint32_t fi = 0; fi < placed_structure_count; fi++) {
-                PlacedStructure* f = &placed_structures[fi];
-                if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
-                if (fabsf(f->x - s->x) < 3.0f && fabsf(fabsf(f->y - s->y) - 25.0f) < 3.0f) {
-                    is_horizontal = true; break;
-                }
-            }
-            float half_w = is_horizontal ? 25.0f : 5.0f;
-            float half_h = is_horizontal ? 5.0f  : 25.0f;
-            float dx = px - s->x;
-            float dy = py - s->y;
-            if (!(dx >= -half_w && dx <= half_w && dy >= -half_h && dy <= half_h)) continue;
+            /* OBB test in wall-local space */
+            float wrad = wall_get_rad(s->x, s->y);
+            float wc = cosf(-wrad), wsn = sinf(-wrad);
+            float dx = px - s->x, dy = py - s->y;
+            float lx = dx * wc - dy * wsn;
+            float ly = dx * wsn + dy * wc;
+            if (fabsf(lx) > 25.0f || fabsf(ly) > 5.0f) continue;
             /* Hit wall */
             uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
             s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
@@ -7114,19 +7132,10 @@ static void check_projectile_static_collisions(struct Sim* sim) {
                             websocket_server_broadcast(cwmsg);
                         }
                     } else if (wb->type == STRUCT_WALL) {
-                        bool at_edge =
-                            (fabsf(wb->x - kx) < 3.0f && fabsf(fabsf(wb->y - ky) - 25.0f) < 3.0f) ||
-                            (fabsf(wb->y - ky) < 3.0f && fabsf(fabsf(wb->x - kx) - 25.0f) < 3.0f);
-                        if (!at_edge) continue;
-                        bool has_support = false;
-                        for (uint32_t fi = 0; fi < placed_structure_count && !has_support; fi++) {
-                            PlacedStructure* f = &placed_structures[fi];
-                            if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
-                            bool supports =
-                                (fabsf(wb->x - f->x) < 3.0f && fabsf(fabsf(wb->y - f->y) - 25.0f) < 3.0f) ||
-                                (fabsf(wb->y - f->y) < 3.0f && fabsf(fabsf(wb->x - f->x) - 25.0f) < 3.0f);
-                            if (supports) has_support = true;
-                        }
+                        /* Is wall adjacent to the demolished floor? */
+                        float _at_dx = wb->x - kx, _at_dy = wb->y - ky;
+                        if (_at_dx*_at_dx + _at_dy*_at_dy > 30.0f * 30.0f) continue;
+                        bool has_support = wall_has_support(wb->x, wb->y);
                         if (!has_support) {
                             wb->active = false;
                             char cwmsg[192];
@@ -11756,21 +11765,26 @@ void websocket_server_tick(float dt) {
                                         bool is_wall = (ws->type == STRUCT_WALL);
                                         bool is_door = (ws->type == STRUCT_DOOR && !ws->open);
                                         if (!is_wall && !is_door) continue;
-                                        bool horiz = wall_is_horizontal(ws->x, ws->y);
-                                        float hw = horiz ? 25.0f : 5.0f;
-                                        float hh = horiz ? 5.0f  : 25.0f;
+                                        /* OBB collision: rotate player into wall-local space */
+                                        float wrad = wall_get_rad(ws->x, ws->y);
+                                        float wc  = cosf(-wrad), wsn = sinf(-wrad);
                                         float cpx = new_x - ws->x;
                                         float cpy = new_y - ws->y;
-                                        float clamp_x = cpx < -hw ? -hw : (cpx > hw ? hw : cpx);
-                                        float clamp_y = cpy < -hh ? -hh : (cpy > hh ? hh : cpy);
-                                        float dpx = cpx - clamp_x;
-                                        float dpy = cpy - clamp_y;
-                                        float dist_sq = dpx*dpx + dpy*dpy;
+                                        float lx = cpx * wc  - cpy * wsn;
+                                        float ly = cpx * wsn + cpy * wc;
+                                        float clamp_x = lx < -25.0f ? -25.0f : (lx > 25.0f ? 25.0f : lx);
+                                        float clamp_y = ly < -5.0f  ? -5.0f  : (ly > 5.0f  ? 5.0f  : ly);
+                                        float dlx = lx - clamp_x, dly = ly - clamp_y;
+                                        float dist_sq = dlx*dlx + dly*dly;
                                         if (dist_sq < PLAYER_R * PLAYER_R && dist_sq > 0.0001f) {
                                             float dist = sqrtf(dist_sq);
                                             float pen  = PLAYER_R - dist;
-                                            new_x += (dpx / dist) * pen;
-                                            new_y += (dpy / dist) * pen;
+                                            /* Push in local space, rotate back to world space */
+                                            float push_lx = (dlx / dist) * pen;
+                                            float push_ly = (dly / dist) * pen;
+                                            float wc_b = cosf(wrad), wsn_b = sinf(wrad);
+                                            new_x += push_lx * wc_b - push_ly * wsn_b;
+                                            new_y += push_lx * wsn_b + push_ly * wc_b;
                                         }
                                     }
                                 }
