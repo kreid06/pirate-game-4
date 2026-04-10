@@ -6397,9 +6397,10 @@ size_t websocket_create_frame(uint8_t opcode, const char* payload, size_t payloa
         frame[frame_len++] = (payload_len >> 8) & 0xFF;
         frame[frame_len++] = payload_len & 0xFF;
     } else {
-        // We don't handle large payloads for simplicity
-        log_error("Payload too large for WebSocket frame: %zu bytes", payload_len);
-        return 0;
+        // 8-byte extended payload length (for payloads >= 64 KB, e.g. ISLANDS)
+        frame[frame_len++] = 127;
+        for (int shift = 56; shift >= 0; shift -= 8)
+            frame[frame_len++] = (payload_len >> shift) & 0xFF;
     }
     
     // Payload
@@ -10382,7 +10383,7 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 // Send ISLANDS
                                 {
-                                    static char islands_buf[65536];
+                                    static char islands_buf[131072];
                                     int pos = 0;
                                     pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
                                                     "{\"type\":\"ISLANDS\",\"islands\":[");
@@ -10413,7 +10414,7 @@ int websocket_server_update(struct Sim* sim) {
                                         pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
                                     }
                                     pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
-                                    static char isl_frame[65600];
+                                    static char isl_frame[131100];
                                     size_t isl_frame_len = websocket_create_frame(
                                         WS_OPCODE_TEXT, islands_buf, (size_t)pos,
                                         isl_frame, sizeof(isl_frame));
