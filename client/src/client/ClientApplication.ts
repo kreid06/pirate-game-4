@@ -872,7 +872,9 @@ export class ClientApplication {
               ? this.renderSystem.computeSnappedDoorPos(worldPos.x, worldPos.y)
               : { x: worldPos.x, y: worldPos.y };
             // Only floors and workbenches carry rotation; walls/doors snap by orientation
-            const rot = (kind === 'wooden_floor' || kind === 'workbench') ? this.islandBuildRotationDeg : 0;
+            const rot = kind === 'wooden_floor'
+              ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
+              : kind === 'workbench' ? this.islandBuildRotationDeg : 0;
             this.networkManager.sendPlaceStructure(kind, pos.x, pos.y, rot);
           }
           return;

@@ -4455,6 +4455,36 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
 #define STRUCT_FLOOR_REQ_R   55.0f  /* workbench centre must be within this of a floor tile */
 #define STRUCT_INTERACT_R   110.0f  /* E-key range to open workbench */
 
+/*
+ * SAT (Separating Axis Theorem) overlap test for two 50×50 square tiles.
+ * Returns true if the two OBBs share any interior point (touching edges allowed).
+ * a_rad / b_rad are the tiles' rotations in radians.
+ */
+static bool floor_tiles_overlap(float ax, float ay, float a_rad,
+                                float bx, float by, float b_rad)
+{
+    const float HALF = 25.0f;
+    float cA = cosf(a_rad), sA = sinf(a_rad);
+    float cB = cosf(b_rad), sB = sinf(b_rad);
+    float dx = bx - ax, dy = by - ay;
+    /* 4 SAT axes: local X and Y axes of each box */
+    float axes[4][2] = {
+        {  cA,  sA }, { -sA, cA },
+        {  cB,  sB }, { -sB, cB },
+    };
+    for (int i = 0; i < 4; i++) {
+        float nx = axes[i][0], ny = axes[i][1];
+        /* Distance between centers projected onto this axis */
+        float d = fabsf(dx * nx + dy * ny);
+        /* Each box's extent projected onto this axis */
+        float rA = HALF * fabsf(cA*nx + sA*ny) + HALF * fabsf(-sA*nx + cA*ny);
+        float rB = HALF * fabsf(cB*nx + sB*ny) + HALF * fabsf(-sB*nx + cB*ny);
+        /* Strict >=: touching (d == rA+rB) is allowed; only interior overlap is blocked */
+        if (d >= rA + rB) return false; /* separating axis found — no overlap */
+    }
+    return true; /* no separating axis — tiles overlap */
+}
+
 static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
     char response[256];
 
@@ -4574,17 +4604,23 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         }
     }
 
-    /* Wooden floor: same-position check — tiles are 50×50 px, no two may share the same centre.
-       Using Euclidean distance < 45 px (valid adjacent tiles are always exactly 50 px apart
-       regardless of rotation, so this correctly handles all rotation angles). */
+    /* Parse rotation early so all subsequent checks can use it */
+    float place_rotation_deg = 0.0f;
+    {
+        const char* rots = strstr(payload, "\"rotation\":");
+        if (rots) sscanf(rots + 11, "%f", &place_rotation_deg);
+    }
+    const float place_rad = place_rotation_deg * (float)M_PI / 180.0f;
+
+    /* Wooden floor: OBB-OBB overlap check via SAT.
+       No two floor tiles may share interior space regardless of their rotation angles. */
     if (stype_enum == STRUCT_WOODEN_FLOOR) {
-        const float TILE_OVERLAP_THRESH2 = 45.0f * 45.0f; /* < TILE*TILE = 2500 */
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             if (!placed_structures[si].active) continue;
             if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
-            float ddx = placed_structures[si].x - px;
-            float ddy = placed_structures[si].y - py;
-            if (ddx*ddx + ddy*ddy < TILE_OVERLAP_THRESH2) {
+            float exist_rad = placed_structures[si].rotation * (float)M_PI / 180.0f;
+            if (floor_tiles_overlap(px, py, place_rad,
+                                    placed_structures[si].x, placed_structures[si].y, exist_rad)) {
                 snprintf(response, sizeof(response),
                          "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
                 goto ps_send;
@@ -4597,17 +4633,7 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     if (stype_enum == STRUCT_WOODEN_FLOOR) {
         const float TREE_R  = 20.0f;
         const float HALF    = 25.0f; /* half tile */
-        /* parse rotation early so we can use it here */
-        float floor_rot_rad = 0.0f;
-        {
-            char* rots = strstr(payload, "\"rotation\":");
-            if (rots) {
-                float r = 0.0f;
-                sscanf(rots + 11, "%f", &r);
-                floor_rot_rad = r * (float)M_PI / 180.0f;
-            }
-        }
-        float rc = cosf(-floor_rot_rad), rs = sinf(-floor_rot_rad);
+        float rc = cosf(-place_rad), rs = sinf(-place_rad);
         bool blocked = false;
         for (int ii = 0; ii < ISLAND_COUNT && !blocked; ii++) {
             const IslandDef *isl = &ISLAND_PRESETS[ii];
@@ -4796,11 +4822,7 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     }
 
     /* Parse rotation (floors and workbenches only; ignored for walls/doors) */
-    float place_rotation = 0.0f;
-    {
-        char* rots = strstr(payload, "\"rotation\":");
-        if (rots) sscanf(rots + 11, "%f", &place_rotation);
-    }
+    float place_rotation = place_rotation_deg; /* already parsed above */
 
     /* Space for more structures? */
     if (placed_structure_count >= MAX_PLACED_STRUCTURES) {

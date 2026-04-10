@@ -129,11 +129,15 @@ export class RenderSystem {
   private _islandGhostTooFar = false;
   /** Last snapped placement position (may differ from raw cursor when snap-to-grid is active). */
   private _snappedBuildPos: { x: number; y: number } | null = null;
+  /** Rotation (degrees) of the source tile that generated the current snap, or null if freely placing. */
+  private _snappedBuildRotation: number | null = null;
 
   /** Returns whether the last-rendered island build ghost was out of placement range. */
   getIslandBuildTooFar(): boolean { return this._islandGhostTooFar; }
   /** Returns the current snapped placement position (or null when no ghost is active). */
   getSnappedBuildPos(): { x: number; y: number } | null { return this._snappedBuildPos; }
+  /** Returns the rotation (deg) inherited from the snap source tile, or null if freely placing. */
+  getSnappedBuildRotation(): number | null { return this._snappedBuildRotation; }
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
   public playerAimAngleRelative: number = 0;
   /** Currently selected ammo type (0 = cannonball, 1 = bar shot), set each frame by ClientApplication. */
@@ -1177,10 +1181,12 @@ export class RenderSystem {
     const TILE   = 50;
     const SNAP_R = TILE * 0.4; // 20 px — snap pull radius
     if (this.islandBuildKind !== 'wooden_floor' || this.placedStructures.length === 0) {
+      this._snappedBuildRotation = null;
       return { x: wx, y: wy };
     }
     let bestDist2 = SNAP_R * SNAP_R;
     let bestX = wx, bestY = wy;
+    let bestRot: number | null = null;
     for (const s of this.placedStructures) {
       if (s.type !== 'wooden_floor') continue;
       // Derive the 4 neighbour slots using this tile's own rotation
@@ -1195,13 +1201,14 @@ export class RenderSystem {
       for (const d of DIRS) {
         const nx = s.x + d.dx, ny = s.y + d.dy;
         const alreadyOccupied = this.placedStructures.some(
-          f => f.type === 'wooden_floor' && Math.abs(f.x - nx) < 1 && Math.abs(f.y - ny) < 1
+          f => f.type === 'wooden_floor' && Math.abs(f.x - nx) < 2 && Math.abs(f.y - ny) < 2
         );
         if (alreadyOccupied) continue;
         const dist2 = (nx - wx) * (nx - wx) + (ny - wy) * (ny - wy);
-        if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; }
+        if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; bestRot = s.rotation ?? 0; }
       }
     }
+    this._snappedBuildRotation = bestRot;
     return { x: bestX, y: bestY };
   }
 
@@ -3129,8 +3136,9 @@ export class RenderSystem {
 
   /** Draw the island structure placement ghost at the cursor position (drawn once, after all islands). */
   private drawIslandBuildGhost(camera: Camera): void {
-    this._islandGhostTooFar = false;
-    this._snappedBuildPos   = null;
+    this._islandGhostTooFar    = false;
+    this._snappedBuildPos      = null;
+    this._snappedBuildRotation = null;
     if (!this.islandBuildKind || !this.mouseWorldPos) return;
     const zoom = camera.getState().zoom;
     const ctx  = this.ctx;
@@ -3157,6 +3165,7 @@ export class RenderSystem {
       const SNAP_R  = TILE * 0.4; // 20 px — snap pull radius
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
+      let bestSnapRot: number | null = null;
       for (const s of this.placedStructures) {
         if (s.type !== 'wooden_floor') continue;
         // Derive the 4 neighbour slots using this tile's own rotation
@@ -3172,14 +3181,15 @@ export class RenderSystem {
           const nx = s.x + d.dx, ny = s.y + d.dy;
           // Skip neighbour slots already occupied by another floor
           const occupied = this.placedStructures.some(
-            f => f.type === 'wooden_floor' && Math.abs(f.x - nx) < 1 && Math.abs(f.y - ny) < 1
+            f => f.type === 'wooden_floor' && Math.abs(f.x - nx) < 2 && Math.abs(f.y - ny) < 2
           );
           if (occupied) continue;
           const dist2 = (nx - mx) * (nx - mx) + (ny - my) * (ny - my);
-          if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; }
+          if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; bestSnapRot = s.rotation ?? 0; }
         }
       }
       mx = bestX; my = bestY;
+      this._snappedBuildRotation = bestSnapRot;
     } else if ((this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame') && this.placedStructures.length > 0) {
       // Snap to unoccupied edge midpoints of floor tiles, respecting each tile's rotation
       const HALF = TILE / 2; // 25 px
@@ -3234,6 +3244,9 @@ export class RenderSystem {
       mx = bestX; my = bestY;
     }
     this._snappedBuildPos = { x: mx, y: my };
+    // Effective rotation: snapped tile inherits source floor's rotation; free-placing uses user setting
+    const effectiveRotDeg = this._snappedBuildRotation !== null
+      ? this._snappedBuildRotation : this.islandBuildRotationDeg;
 
     // Recalculate screen position after potential snap
     const msp = camera.worldToScreen(Vec2.from(mx, my));
@@ -3281,25 +3294,30 @@ export class RenderSystem {
     if (this.islandBuildKind === 'wooden_floor') {
       overlaps = this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
-        return Math.abs(s.x - mx) < TILE && Math.abs(s.y - my) < TILE;
+        const ddx = s.x - mx, ddy = s.y - my;
+        return ddx * ddx + ddy * ddy < 45 * 45;
       });
     }
 
-    // Tree obstacle: circle-AABB intersection — trees (wood resources) block floor placement
+    // Tree obstacle: circle-OBB intersection — trees (wood resources) block floor placement
     const TREE_R = 20; // world px — obstacle exclusion radius around tree trunk+canopy
     let blockedByTree = false;
     if (this.islandBuildKind === 'wooden_floor') {
       const half = TILE / 2;
+      const treeRad = effectiveRotDeg * Math.PI / 180;
+      const trc = Math.cos(-treeRad), trs = Math.sin(-treeRad);
       outer:
       for (const isl of this.islands) {
         for (const res of isl.resources) {
           if (res.type !== 'wood') continue;
           if (res.hp <= 0) continue; // depleted — no longer an obstacle
           const tx = isl.x + res.ox, ty = isl.y + res.oy;
-          // Closest point on floor AABB to tree centre
-          const cx = Math.max(mx - half, Math.min(tx, mx + half));
-          const cy = Math.max(my - half, Math.min(ty, my + half));
-          const cdx = tx - cx, cdy = ty - cy;
+          // Rotate tree into floor's local space, then closest-point on local AABB
+          const lx = (tx - mx) * trc - (ty - my) * trs;
+          const ly = (tx - mx) * trs + (ty - my) * trc;
+          const cx = Math.max(-half, Math.min(lx, half));
+          const cy = Math.max(-half, Math.min(ly, half));
+          const cdx = lx - cx, cdy = ly - cy;
           if (cdx * cdx + cdy * cdy < TREE_R * TREE_R) { blockedByTree = true; break outer; }
         }
       }
@@ -3310,7 +3328,11 @@ export class RenderSystem {
     if (this.islandBuildKind === 'workbench') {
       noFloor = !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
-        return Math.abs(s.x - mx) <= 25 && Math.abs(s.y - my) <= 25;
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const rc = Math.cos(-rad), rs = Math.sin(-rad);
+        const lx = (mx - s.x) * rc - (my - s.y) * rs;
+        const ly = (mx - s.x) * rs + (my - s.y) * rc;
+        return Math.abs(lx) <= 25 && Math.abs(ly) <= 25;
       });
     }
 
@@ -3326,8 +3348,17 @@ export class RenderSystem {
       );
       noEdge = !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
-        return (Math.abs(mx - s.x) < 3 && Math.abs(Math.abs(my - s.y) - 25) < 3) ||
-               (Math.abs(my - s.y) < 3 && Math.abs(Math.abs(mx - s.x) - 25) < 3);
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const rc = Math.cos(rad), rs = Math.sin(rad);
+        const HALF_E = 25;
+        return [
+          { ldx: 0, ldy: -HALF_E }, { ldx: 0, ldy: HALF_E },
+          { ldx: -HALF_E, ldy: 0 }, { ldx: HALF_E, ldy: 0 },
+        ].some(e => {
+          const ex = s.x + e.ldx * rc - e.ldy * rs;
+          const ey = s.y + e.ldx * rs + e.ldy * rc;
+          return Math.abs(mx - ex) < 3 && Math.abs(my - ey) < 3;
+        });
       });
       // Check if a workbench or door panel occupies this slot's AABB
       if (!wallOccupied && !noEdge) {
@@ -3358,11 +3389,14 @@ export class RenderSystem {
 
     // Workbench on enemy floor: a floor exists under cursor but belongs to a different company
     const wrongCompany = this.islandBuildKind === 'workbench' && !noFloor &&
-      !this.placedStructures.some(s =>
-        s.type === 'wooden_floor' &&
-        Math.abs(s.x - mx) <= 25 && Math.abs(s.y - my) <= 25 &&
-        s.companyId === myCompany
-      );
+      !this.placedStructures.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const rc = Math.cos(-rad), rs = Math.sin(-rad);
+        const lx = (mx - s.x) * rc - (my - s.y) * rs;
+        const ly = (mx - s.x) * rs + (my - s.y) * rc;
+        return Math.abs(lx) <= 25 && Math.abs(ly) <= 25 && s.companyId === myCompany;
+      });
 
     // Only floors are rejected for water placement — other types need a floor tile anyway
     const waterBlocked = inWater && this.islandBuildKind === 'wooden_floor';
@@ -3374,10 +3408,10 @@ export class RenderSystem {
     ctx.save();
     ctx.globalAlpha = 0.72 + 0.14 * Math.sin(performance.now() / 300);
     // Apply rotation around ghost centre for floors/workbenches
-    if (this.islandBuildRotationDeg !== 0 &&
+    if (effectiveRotDeg !== 0 &&
         (this.islandBuildKind === 'wooden_floor' || this.islandBuildKind === 'workbench')) {
       ctx.translate(msp.x, msp.y);
-      ctx.rotate(this.islandBuildRotationDeg * Math.PI / 180);
+      ctx.rotate(effectiveRotDeg * Math.PI / 180);
       ctx.translate(-msp.x, -msp.y);
     }
     ctx.fillStyle   = ghostColor;
