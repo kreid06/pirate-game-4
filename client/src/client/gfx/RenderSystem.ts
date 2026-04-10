@@ -3657,6 +3657,35 @@ export class RenderSystem {
     if (this.islandBuildKind === 'shipyard') {
       const SHALLOW_SCALE_G = 0.375; // must match server SHALLOW_WATER_SCALE
       const playerG = this._cachedLocalPlayer;
+
+      // Helper: check if a world point is in water (not inside any island land mass)
+      const isPointInWater = (px: number, py: number): boolean => {
+        for (const isl of this.islands) {
+          if (isl.vertices) {
+            let inside = false;
+            const verts = isl.vertices;
+            const n = verts.length;
+            for (let i = 0, j = n - 1; i < n; j = i++) {
+              const xi = verts[i].x, yi = verts[i].y;
+              const xj = verts[j].x, yj = verts[j].y;
+              if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+                inside = !inside;
+            }
+            if (inside) return false;
+          } else {
+            const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+            const ddx = px - isl.x, ddy = py - isl.y;
+            const dSq = ddx * ddx + ddy * ddy;
+            const broadR = preset.beachRadius + Math.max(...preset.beachBumps.map(Math.abs));
+            if (dSq >= broadR * broadR) continue;
+            const ang = Math.atan2(ddy, ddx);
+            const nR = sampleBoundary(preset.beachRadius, preset.beachBumps, ang);
+            if (dSq < nR * nR) return false;
+          }
+        }
+        return true;
+      };
+
       let inShallowZone = false;
       if (inWater) {
         for (const isl of this.islands) {
@@ -3675,14 +3704,27 @@ export class RenderSystem {
           }
         }
       }
+
+      // Check that the dock mouth leads to open water for ship release.
+      // Mouth is 445 world units from center in the local +y direction.
+      const HH_WORLD = 445;
+      const rotRad = effectiveRotDeg * Math.PI / 180;
+      const mouthX = mx - HH_WORLD * Math.sin(rotRad);
+      const mouthY = my + HH_WORLD * Math.cos(rotRad);
+      // Also check a point 600 units out (clear path for the ship)
+      const releaseX = mx - 600 * Math.sin(rotRad);
+      const releaseY = my + 600 * Math.cos(rotRad);
+      const mouthClear = isPointInWater(mouthX, mouthY) && isPointInWater(releaseX, releaseY);
+
+      // Allow placing from shore — 700 px matches the server shipyard placement range
       const syPlayerFar = playerG ? (() => {
         const dx = mx - playerG.position.x; const dy = my - playerG.position.y;
-        return dx * dx + dy * dy > 250 * 250;
+        return dx * dx + dy * dy > 700 * 700;
       })() : false;
       const syOccupied = this.placedStructures.some(s =>
         s.type === 'shipyard' && Math.hypot(s.x - mx, s.y - my) < 700
       );
-      const syInvalid = !inWater || !inShallowZone || syPlayerFar || syOccupied;
+      const syInvalid = !inWater || !inShallowZone || syPlayerFar || syOccupied || !mouthClear;
       this._islandGhostTooFar = syInvalid;
       // Ghost uses same proportions as rendered shipyard (bracketized to brigantine scale)
       const GA_T = TILE * 1.00 * zoom;
@@ -3726,6 +3768,8 @@ export class RenderSystem {
         ctx.fillStyle = '#ff6644'; ctx.fillText('ON LAND', msp.x, syLabelY);
       } else if (!inShallowZone) {
         ctx.fillStyle = '#4488ff'; ctx.fillText('PLACE IN SHALLOW WATER', msp.x, syLabelY);
+      } else if (!mouthClear) {
+        ctx.fillStyle = '#ff6644'; ctx.fillText('SHIP EXIT BLOCKED BY LAND', msp.x, syLabelY);
       } else if (syOccupied) {
         ctx.fillStyle = '#ff6644'; ctx.fillText('TOO CLOSE TO SHIPYARD', msp.x, syLabelY);
       } else if (syPlayerFar) {

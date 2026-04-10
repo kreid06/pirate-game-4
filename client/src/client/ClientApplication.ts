@@ -664,8 +664,8 @@ export class ClientApplication {
               return;
             }
             const hovered = this.renderSystem.getHoveredStructure();
-            if (hovered?.type === 'workbench') {
-              console.log(`⚒ [INTERACT] Sending structure_interact for workbench ${hovered.id}`);
+            if (hovered?.type === 'workbench' || hovered?.type === 'shipyard') {
+              console.log(`⚒ [INTERACT] Sending structure_interact for ${hovered.type} ${hovered.id}`);
               this.networkManager.sendStructureInteract(hovered.id);
               return;
             }

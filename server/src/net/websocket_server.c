@@ -4639,7 +4639,9 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     /* Player must be reasonably close to placement point */
     {
         float dx = player->x - px, dy = player->y - py;
-        if (dx*dx + dy*dy > STRUCT_PLACE_RANGE * STRUCT_PLACE_RANGE) {
+        /* Shipyards extend far into water — allow placing from land (700 px) */
+        float place_range = (strcmp(stype, "shipyard") == 0) ? 700.0f : STRUCT_PLACE_RANGE;
+        if (dx*dx + dy*dy > place_range * place_range) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"place_structure_fail\",\"reason\":\"too_far\"}");
             goto ps_send;
