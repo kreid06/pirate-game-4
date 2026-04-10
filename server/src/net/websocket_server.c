@@ -7181,9 +7181,9 @@ static void check_projectile_static_collisions(struct Sim* sim) {
         /* ── Test vs. island trees ───────────────────────────────────────── */
         if (!removed) {
             for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {
-                const IslandDef* isl = &ISLAND_PRESETS[ii];
+                IslandDef* isl = &ISLAND_PRESETS[ii];
                 for (int ri = 0; ri < isl->resource_count && !removed; ri++) {
-                    const IslandResource* res = &isl->resources[ri];
+                    IslandResource* res = &isl->resources[ri];
                     if (strcmp(res->type, ISLAND_RES_WOOD) != 0) continue;
                     if (res->health <= 0) continue; /* tree is depleted/destroyed — no collision */
                     float tx = isl->x + res->ox;
@@ -7191,12 +7191,23 @@ static void check_projectile_static_collisions(struct Sim* sim) {
                     float dx = px - tx;
                     float dy = py - ty;
                     if (dx * dx + dy * dy <= TREE_COLLISION_R_PX * TREE_COLLISION_R_PX) {
-                        /* Trees are indestructible — broadcast hit so client shows explosion */
-                        char tmsg[96];
+                        /* Cannonball damages the tree */
+                        const int CANNON_TREE_DMG = 30;
+                        res->health -= CANNON_TREE_DMG;
+                        if (res->health < 0) res->health = 0;
+                        /* Broadcast HP update so clients update the tree health bar */
+                        char tmsg[160];
                         snprintf(tmsg, sizeof(tmsg),
+                                 "{\"type\":\"resource_damaged\",\"island_id\":%u"
+                                 ",\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
+                                 (unsigned)isl->id, res->ox, res->oy, res->health, res->max_health);
+                        websocket_server_broadcast(tmsg);
+                        /* Also send hit event so client plays explosion at tree position */
+                        char htmsg[96];
+                        snprintf(htmsg, sizeof(htmsg),
                                  "{\"type\":\"tree_cannonball_hit\",\"x\":%.1f,\"y\":%.1f}",
                                  tx, ty);
-                        websocket_server_broadcast(tmsg);
+                        websocket_server_broadcast(htmsg);
                         memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                                 ((size_t)sim->projectile_count - (size_t)i - 1u)
                                 * sizeof(struct Projectile));
