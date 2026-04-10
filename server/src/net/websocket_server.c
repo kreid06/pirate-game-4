@@ -4927,7 +4927,8 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         sizeof(placed_structures[placed_structure_count].placer_name) - 1] = '\0';
     placed_structures[placed_structure_count].open       = false;
     placed_structures[placed_structure_count].rotation   =
-        (stype_enum == STRUCT_WOODEN_FLOOR || stype_enum == STRUCT_WORKBENCH) ? place_rotation : 0.0f;
+        (stype_enum == STRUCT_WOODEN_FLOOR || stype_enum == STRUCT_WORKBENCH ||
+         stype_enum == STRUCT_SHIPYARD) ? place_rotation : 0.0f;
     placed_structure_count++;
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",

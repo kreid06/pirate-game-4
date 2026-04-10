@@ -1347,9 +1347,21 @@ export class RenderSystem {
     if (!this._hoveredStructure) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
-    const dx = this._hoveredStructure.x - player.position.x;
-    const dy = this._hoveredStructure.y - player.position.y;
-    return dx * dx + dy * dy <= range * range ? this._hoveredStructure : null;
+    const s = this._hoveredStructure;
+    if (s.type === 'shipyard') {
+      // OBB check: rotate player position into shipyard local frame and test against half-extents
+      const rot = (s.rotation ?? 0) * Math.PI / 180;
+      const dx = player.position.x - s.x;
+      const dy = player.position.y - s.y;
+      const c = Math.cos(-rot), sn = Math.sin(-rot);
+      const lx = dx * c - dy * sn;
+      const ly = dx * sn + dy * c;
+      // hw=170, hh=445 are world-unit half-extents; +100 interaction margin
+      return Math.abs(lx) <= 270 && Math.abs(ly) <= 545 ? s : null;
+    }
+    const dx = s.x - player.position.x;
+    const dy = s.y - player.position.y;
+    return dx * dx + dy * dy <= range * range ? s : null;
   }
 
   /** Return hovered tree world pos if player is in range and off-ship, else null. */
@@ -3367,7 +3379,7 @@ export class RenderSystem {
       // Walls/door_frames/doors derive orientation from the nearest floor tile:
       // the wall runs perpendicular to the floor-centre→wall-midpoint vector.
       let rotRad = 0;
-      if (s.type === 'wooden_floor' || s.type === 'workbench') {
+      if (s.type === 'wooden_floor' || s.type === 'workbench' || s.type === 'shipyard') {
         rotRad = (s.rotation ?? 0) * Math.PI / 180;
       } else {
         let nearFloor: PlacedStructure | null = null;
@@ -3419,6 +3431,16 @@ export class RenderSystem {
       const tipY = ssp.y - bbH / 2 - 8;
 
       const inRange = player && player.carrierId === 0 && (() => {
+        if (s.type === 'shipyard') {
+          // OBB check: rotate player into shipyard local frame
+          const rot = (s.rotation ?? 0) * Math.PI / 180;
+          const dx = player.position.x - s.x;
+          const dy = player.position.y - s.y;
+          const c = Math.cos(-rot), sn = Math.sin(-rot);
+          const lx = dx * c - dy * sn;
+          const ly = dx * sn + dy * c;
+          return Math.abs(lx) <= 270 && Math.abs(ly) <= 545;
+        }
         const dx = s.x - player.position.x;
         const dy = s.y - player.position.y;
         return dx * dx + dy * dy <= 110 * 110;
