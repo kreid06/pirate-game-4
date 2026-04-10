@@ -4631,7 +4631,8 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
                           sqrtf((px - placed_structures[si].x) * (px - placed_structures[si].x) +
                                 (py - placed_structures[si].y) * (py - placed_structures[si].y)));
                 snprintf(response, sizeof(response),
-                         "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\",\"blocker_id\":%u}",
+                         placed_structures[si].id);
                 goto ps_send;
             }
         }

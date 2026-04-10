@@ -114,6 +114,10 @@ export class RenderSystem {
   private placedStructures: PlacedStructure[] = [];
   /** Structure currently under the cursor (within hover range of the local player). */
   private _hoveredStructure: PlacedStructure | null = null;
+  /** ID of the structure that blocked the last placement attempt (shown in red during build mode). */
+  private _blockerStructureId: number | null = null;
+  /** Timestamp when the blocker highlight should expire (ms). */
+  private _blockerExpiry = 0;
   /** Tree node currently under cursor (world coords) — updated each frame in drawIsland. */
   private _hoveredTree: { wx: number; wy: number } | null = null;
   /** Fiber plant currently under cursor (world coords) — updated each frame in drawIsland. */
@@ -1159,6 +1163,12 @@ export class RenderSystem {
   updateStructureDoorOpen(id: number, open: boolean): void {
     const s = this.placedStructures.find(p => p.id === id);
     if (s && s.type === 'door') s.doorOpen = open;
+  }
+
+  /** Set (or clear) the structure that should be highlighted red as a placement blocker. */
+  setBlockerStructure(id: number | null, durationMs = 2000): void {
+    this._blockerStructureId = id;
+    this._blockerExpiry = id !== null ? performance.now() + durationMs : 0;
   }
 
   /** Activate island placement ghost for wooden_floor, workbench, wall, or door, or clear it. */
@@ -2750,13 +2760,14 @@ export class RenderSystem {
       // Cull structures that are entirely off-screen
       if (ssp.x + sz < 0 || ssp.x - sz > this.canvas.width ||
           ssp.y + sz < 0 || ssp.y - sz > this.canvas.height) continue;
-      const isHovered = this._hoveredStructure?.id === s.id;
+      const isHovered  = this._hoveredStructure?.id === s.id;
+      const isBlocker  = this._blockerStructureId === s.id && performance.now() < this._blockerExpiry;
 
       if (s.type === 'wooden_floor') {
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         // Darken the fill as hp drops (up to 50% darker at 0 hp)
         const dmgDarken = (1 - hpFrac) * 0.5;
-        const baseColor = isHovered ? '#d09a3a' : '#b8832b';
+        const baseColor = isBlocker ? '#cc3322' : isHovered ? '#d09a3a' : '#b8832b';
         ctx.save();
         if (s.rotation) {
           ctx.translate(ssp.x, ssp.y);

@@ -1326,7 +1326,7 @@ export class ClientApplication {
       this.networkManager.onStructurePlaced = (s) => {
         this.renderSystem.addPlacedStructure(s);
       };
-      this.networkManager.onPlacementFailed = (reason, _x, _y, structureType) => {
+      this.networkManager.onPlacementFailed = (reason, _x, _y, _structureType, blockerId) => {
         const REASONS: Record<string, string> = {
           occupied:          'Space already occupied',
           blocked_by_tree:   'Blocked by a tree',
@@ -1343,6 +1343,7 @@ export class ClientApplication {
         };
         const msg = REASONS[reason] ?? `Placement failed (${reason})`;
         this.renderSystem.showAnnouncement(`\u{1F6A7} ${msg}`, 'info', 2.0);
+        this.renderSystem.setBlockerStructure(blockerId ?? null, 2000);
       };
       this.networkManager.onDoorToggled = (id, open) => {
         this.renderSystem.updateStructureDoorOpen(id, open);

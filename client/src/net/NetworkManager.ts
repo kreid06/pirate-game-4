@@ -557,7 +557,7 @@ export class NetworkManager {
   /** Fired when the server responds to a craft_item request. */
   public onCraftResult: ((success: boolean, recipeId: string, reason?: string) => void) | null = null;
   /** Fired when the server rejects a structure placement with a reason string. */
-  public onPlacementFailed: ((reason: string, x: number, y: number, structureType: string) => void) | null = null;
+  public onPlacementFailed: ((reason: string, x: number, y: number, structureType: string, blockerId: number | null) => void) | null = null;
   /** Fired when a door is toggled open or closed by any player. */
   public onDoorToggled: ((id: number, open: boolean) => void) | null = null;
 
@@ -2225,12 +2225,13 @@ export class NetworkManager {
       }
 
       case 'place_structure_fail':
-        console.warn(`[place_structure_fail] type=${message.structure_type ?? '?'} reason=${message.reason ?? '?'} pos=(${message.x ?? '?'}, ${message.y ?? '?'})`);
+        console.warn(`[place_structure_fail] type=${message.structure_type ?? '?'} reason=${message.reason ?? '?'} pos=(${message.x ?? '?'}, ${message.y ?? '?'})${message.blocker_id != null ? ` blocker_id=${message.blocker_id}` : ''}`);
         this.onPlacementFailed?.(
           message.reason ?? 'unknown',
           message.x ?? 0,
           message.y ?? 0,
           message.structure_type ?? '',
+          message.blocker_id != null ? (message.blocker_id as number) : null,
         );
         break;
 
