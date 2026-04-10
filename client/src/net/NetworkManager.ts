@@ -11,6 +11,7 @@ import { Vec2 } from '../common/Vec2.js';
 import { createShipAtPosition } from '../sim/ShipUtils.js';
 import { ShipModule, ModuleKind, MODULE_TYPE_MAP } from '../sim/modules.js';
 import { parseInventoryFromServer, createEmptyInventory } from '../sim/Inventory.js';
+import { PlayerActions } from '../sim/Physics.js';
 
 /**
  * Network connection states
@@ -152,6 +153,7 @@ interface InputMessage extends NetworkMessage {
     y: number;
   };
   actions: number;
+  is_sprinting?: boolean;
 }
 
 /**
@@ -165,6 +167,7 @@ interface MovementStateMessage extends NetworkMessage {
     y: number;
   };
   is_moving: boolean;
+  is_sprinting: boolean;
 }
 
 /**
@@ -855,7 +858,8 @@ export class NetworkManager {
           x: inputFrame.movement.x,
           y: inputFrame.movement.y
         },
-        actions: inputFrame.actions
+        actions: inputFrame.actions,
+        is_sprinting: (inputFrame.actions & PlayerActions.SPRINT) !== 0
       };
       
       this.sendMessage(message);
@@ -866,7 +870,7 @@ export class NetworkManager {
    * Send movement state change (HYBRID PROTOCOL)
    * Only send when movement keys change, not every frame
    */
-  sendMovementState(movement: Vec2, isMoving: boolean): void {
+  sendMovementState(movement: Vec2, isMoving: boolean, isSprinting: boolean = false): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
       return;
     }
@@ -878,7 +882,8 @@ export class NetworkManager {
         x: movement.x,
         y: movement.y
       },
-      is_moving: isMoving
+      is_moving: isMoving,
+      is_sprinting: isSprinting
     };
 
     this.sendMessage(message);

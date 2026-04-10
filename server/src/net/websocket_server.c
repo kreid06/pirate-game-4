@@ -6110,14 +6110,21 @@ static void debug_player_state(void) {
 // HYBRID APPROACH: Apply player movement state every tick (called from server loop)
 __attribute__((unused))
 static void apply_player_movement_state(WebSocketPlayer* player, float dt) {
-    const float WALK_SPEED = 30.0f;   // m/s when walking on deck (10x faster)
-    const float SWIM_SPEED = 15.0f;   // m/s when swimming (10x faster)
-    const float FRICTION = 0.85f;
+    const float WALK_SPEED  = 30.0f;   // m/s when walking on deck / island
+    const float SWIM_SPEED  = 15.0f;   // m/s when swimming
+    const float SPRINT_MULT = 1.6f;    // multiplier when sprinting (deck / island only)
+    const float FRICTION    = 0.85f;
     
     // Use stored movement direction from state
     float movement_x = player->movement_direction_x;
     float movement_y = player->movement_direction_y;
     bool is_moving = player->is_moving;
+    
+    // Sprint is only valid when not swimming
+    bool is_swimming = (player->parent_ship_id == 0) && (player->on_island_id == 0);
+    bool sprint_active = player->is_sprinting && !is_swimming;
+    
+    float deck_speed = sprint_active ? WALK_SPEED * SPRINT_MULT : WALK_SPEED;
     
     // Calculate magnitude of movement vector
     float magnitude = sqrtf(movement_x * movement_x + movement_y * movement_y);
@@ -6131,9 +6138,9 @@ static void apply_player_movement_state(WebSocketPlayer* player, float dt) {
                 movement_x /= magnitude;
                 movement_y /= magnitude;
                 
-                // Calculate new local position
-                float new_local_x = player->local_x + movement_x * WALK_SPEED * dt;
-                float new_local_y = player->local_y + movement_y * WALK_SPEED * dt;
+                // Calculate new local position (sprint-aware)
+                float new_local_x = player->local_x + movement_x * deck_speed * dt;
+                float new_local_y = player->local_y + movement_y * deck_speed * dt;
                 
                 // Resolve collisions with ship modules (helm, mast, cannon)
                 resolve_player_module_collisions(ship,
@@ -6182,15 +6189,16 @@ static void apply_player_movement_state(WebSocketPlayer* player, float dt) {
             player->movement_state = PLAYER_STATE_SWIMMING;
         }
     } else {
-        // Player is swimming in water - move in world coordinates
+        // Player is not on a ship — swimming or walking on an island
+        float land_speed = sprint_active ? WALK_SPEED * SPRINT_MULT : WALK_SPEED;
+        float move_speed = is_swimming ? SWIM_SPEED : land_speed;
         if (is_moving && magnitude > 0.01f) {
             // Normalize movement vector
             movement_x /= magnitude;
             movement_y /= magnitude;
             
-            // Direct world-space movement (slower in water)
-            player->velocity_x = movement_x * SWIM_SPEED;
-            player->velocity_y = movement_y * SWIM_SPEED;
+            player->velocity_x = movement_x * move_speed;
+            player->velocity_y = movement_y * move_speed;
         } else {
             // Apply friction when not moving
             player->velocity_x *= FRICTION;
@@ -7995,6 +8003,7 @@ int websocket_server_update(struct Sim* sim) {
                                         player->movement_direction_x = x;
                                         player->movement_direction_y = y;
                                         player->is_moving = (x != 0.0f || y != 0.0f);
+                                        player->is_sprinting = (strstr(payload, "\"is_sprinting\":true") != NULL);
                                         player->rotation = rotation;
                                         player->last_input_time = get_time_ms();
                                         
@@ -8058,6 +8067,7 @@ int websocket_server_update(struct Sim* sim) {
                                     player->movement_direction_x = x;
                                     player->movement_direction_y = y;
                                     player->is_moving = is_moving;
+                                    player->is_sprinting = (strstr(payload, "\"is_sprinting\":true") != NULL);
                                     player->last_input_time = get_time_ms();
                                     
                                     // Log movement state change (silenced for debugging)

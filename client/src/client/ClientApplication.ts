@@ -457,8 +457,8 @@ export class ClientApplication {
       this.inputManager.onInputFrame = this.onInputFrame.bind(this);
       
       // HYBRID PROTOCOL: Wire up state change callbacks
-      this.inputManager.onMovementStateChange = (movement, isMoving) => {
-        this.networkManager.sendMovementState(movement, isMoving);
+      this.inputManager.onMovementStateChange = (movement, isMoving, isSprinting) => {
+        this.networkManager.sendMovementState(movement, isMoving, isSprinting);
       };
       this.inputManager.onRotationUpdate = (rotation) => {
         this.networkManager.sendRotationUpdate(rotation);

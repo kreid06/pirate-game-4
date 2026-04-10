@@ -18,6 +18,7 @@ export const PlayerActions = {
   INTERACT: 1 << 1,      // Interact with modules
   DISMOUNT: 1 << 2,      // Dismount from modules
   DESTROY_PLANK: 1 << 3, // Destroy nearby planks
+  SPRINT: 1 << 4,        // Sprint (Shift+W, land/deck only)
   // Add more actions as needed
 } as const;
 
@@ -311,7 +312,9 @@ function updatePlayerOnDeck(player: Player, ship: Ship, inputFrame: InputFrame, 
   const carriedPosition = ship.position.add(rotatedRelativePos);
   
   // Step 3: Apply player input (keep in world coordinates - this was working correctly!)
-  const inputLocal = inputFrame.movement.mul(PhysicsConfig.PLAYER_WALK_SPEED);
+  const isSprinting = (inputFrame.actions & PlayerActions.SPRINT) !== 0;
+  const walkSpeed = isSprinting ? PhysicsConfig.PLAYER_WALK_SPEED * PhysicsConfig.PLAYER_SPRINT_MULT : PhysicsConfig.PLAYER_WALK_SPEED;
+  const inputLocal = inputFrame.movement.mul(walkSpeed);
   // Input is already in world coordinates due to camera transformation - don't "enhance" what works!
   const inputWorld = inputLocal;
   

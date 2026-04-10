@@ -326,6 +326,7 @@ typedef struct WebSocketPlayer {
     float movement_direction_x;  // -1.0 to 1.0 (normalized)
     float movement_direction_y;  // -1.0 to 1.0 (normalized)
     bool is_moving;              // true if actively moving
+    bool is_sprinting;           // true if Shift+W sprint is active (land/deck only)
     
     // Rotation tracking for interpolation
     float last_rotation;         // Previous rotation value

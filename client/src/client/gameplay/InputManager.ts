@@ -73,7 +73,7 @@ export class InputManager {
   public onInputFrame: ((inputFrame: InputFrame) => void) | null = null;
   
   // HYBRID PROTOCOL: Callbacks for state changes
-  public onMovementStateChange: ((movement: Vec2, isMoving: boolean) => void) | null = null;
+  public onMovementStateChange: ((movement: Vec2, isMoving: boolean, isSprinting: boolean) => void) | null = null;
   public onRotationUpdate: ((rotation: number) => void) | null = null;
   public onActionEvent: ((action: string, target?: Vec2) => void) | null = null;
   
@@ -138,6 +138,7 @@ export class InputManager {
   
   // HYBRID PROTOCOL: State tracking for change detection
   private previousMovementState: Vec2 = Vec2.zero();
+  private previousSprintState: boolean = false;
   private lastSentRotation: number = 0;
   private readonly ROTATION_THRESHOLD = 0.0524; // 3 degrees in radians
   
@@ -301,13 +302,17 @@ export class InputManager {
     
     // HYBRID PROTOCOL: Detect movement state changes
     const currentMovement = this.currentInputFrame.movement;
-    if (!currentMovement.equals(this.previousMovementState)) {
+    const isSprinting = this.isShiftHeld() && this.isActionActive('move_forward');
+    const movementChanged = !currentMovement.equals(this.previousMovementState);
+    const sprintChanged = isSprinting !== this.previousSprintState;
+    if (movementChanged || sprintChanged) {
       const isMoving = currentMovement.lengthSq() > 0.01;
       if (this.onMovementStateChange) {
-        this.onMovementStateChange(currentMovement, isMoving);
+        this.onMovementStateChange(currentMovement, isMoving, isSprinting);
         this.lastStopSentTime = Date.now();
       }
       this.previousMovementState = currentMovement.clone();
+      this.previousSprintState = isSprinting;
     }
     
     // HYBRID PROTOCOL: Detect if player released keys but is still moving (server-side friction)
@@ -319,7 +324,7 @@ export class InputManager {
     if (noInput && stillMoving && timeSinceLastStop > this.STOP_RESEND_INTERVAL) {
       // Player released keys but server hasn't stopped them yet - resend stop
       if (this.onMovementStateChange) {
-        this.onMovementStateChange(Vec2.zero(), false);
+        this.onMovementStateChange(Vec2.zero(), false, false);
         this.lastStopSentTime = Date.now();
       }
     }
@@ -894,6 +899,11 @@ export class InputManager {
     // Destroy plank action
     if (this.isActionActive('destroy_plank')) {
       actions |= PlayerActions.DESTROY_PLANK;
+    }
+    
+    // Sprint action (Shift + forward key)
+    if (this.isShiftHeld() && this.isActionActive('move_forward')) {
+      actions |= PlayerActions.SPRINT;
     }
     
     return actions;
