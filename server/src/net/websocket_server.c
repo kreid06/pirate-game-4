@@ -4616,7 +4616,7 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         }
     }
 
-    /* Workbench: centre point must fall inside the AABB of a wooden_floor tile (50x50 px)
+    /* Workbench: centre point must fall inside the rotated floor tile (50x50 px)
        AND that floor tile must belong to the same company as the placing player. */
     if (stype_enum == STRUCT_WORKBENCH) {
         bool has_floor     = false;
@@ -4625,9 +4625,14 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             if (!placed_structures[si].active) continue;
             if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
-            float dx = fabsf(placed_structures[si].x - px);
-            float dy = fabsf(placed_structures[si].y - py);
-            if (dx <= HALF_TILE && dy <= HALF_TILE) {
+            /* Rotate placement point into floor's local space */
+            float rad = placed_structures[si].rotation * (float)M_PI / 180.0f;
+            float c   = cosf(-rad), s = sinf(-rad);
+            float ddx = px - placed_structures[si].x;
+            float ddy = py - placed_structures[si].y;
+            float lx  = ddx * c - ddy * s;
+            float ly  = ddx * s + ddy * c;
+            if (fabsf(lx) <= HALF_TILE && fabsf(ly) <= HALF_TILE) {
                 if (placed_structures[si].company_id != (uint8_t)player->company_id)
                     wrong_company = true;
                 else
@@ -4667,22 +4672,34 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
                      "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
             goto ps_send;
         }
-        /* Validate floor-edge alignment and determine orientation */
+        /* Validate floor-edge alignment and determine orientation.
+           Each floor may be rotated, so compute the 4 edge-midpoint positions
+           by rotating the canonical ±HALF_TILE offsets by that floor's angle. */
         for (uint32_t si = 0; si < placed_structure_count && !has_edge; si++) {
             if (!placed_structures[si].active) continue;
             if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
-            float fx = placed_structures[si].x;
-            float fy = placed_structures[si].y;
-            bool n_edge = fabsf(px - fx) < EDGE_TOL && fabsf(py - (fy - HALF_TILE)) < EDGE_TOL;
-            bool s_edge = fabsf(px - fx) < EDGE_TOL && fabsf(py - (fy + HALF_TILE)) < EDGE_TOL;
-            bool w_edge = fabsf(py - fy) < EDGE_TOL && fabsf(px - (fx - HALF_TILE)) < EDGE_TOL;
-            bool e_edge = fabsf(py - fy) < EDGE_TOL && fabsf(px - (fx + HALF_TILE)) < EDGE_TOL;
-            if (n_edge || s_edge || w_edge || e_edge) {
-                if (placed_structures[si].company_id != (uint8_t)player->company_id)
-                    wrong_company = true;
-                else {
-                    has_edge   = true;
-                    wall_horiz = (n_edge || s_edge); /* N/S edge → horizontal */
+            float fx  = placed_structures[si].x;
+            float fy  = placed_structures[si].y;
+            float rad = placed_structures[si].rotation * (float)M_PI / 180.0f;
+            float c   = cosf(rad), s = sinf(rad);
+            /* 4 local-space offsets: N(0,-H), S(0,+H), W(-H,0), E(+H,0) */
+            /* horiz = true for N/S edges (wall runs along X in local space) */
+            const struct { float ldx; float ldy; bool horiz; } edges[4] = {
+                {  0.0f,        -HALF_TILE,  true  }, /* N */
+                {  0.0f,         HALF_TILE,  true  }, /* S */
+                { -HALF_TILE,    0.0f,        false }, /* W */
+                {  HALF_TILE,    0.0f,        false }, /* E */
+            };
+            for (int ei = 0; ei < 4 && !has_edge; ei++) {
+                float ex = fx + edges[ei].ldx * c - edges[ei].ldy * s;
+                float ey = fy + edges[ei].ldx * s + edges[ei].ldy * c;
+                if (fabsf(px - ex) < EDGE_TOL && fabsf(py - ey) < EDGE_TOL) {
+                    if (placed_structures[si].company_id != (uint8_t)player->company_id)
+                        wrong_company = true;
+                    else {
+                        has_edge   = true;
+                        wall_horiz = edges[ei].horiz;
+                    }
                 }
             }
         }

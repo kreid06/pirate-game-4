@@ -1176,16 +1176,22 @@ export class RenderSystem {
   computeSnappedPos(wx: number, wy: number): { x: number; y: number } {
     const TILE   = 50;
     const SNAP_R = TILE * 0.4; // 20 px — snap pull radius
-    if (this.islandBuildKind !== 'wooden_floor' || this.placedStructures.length === 0
-        || this.islandBuildRotationDeg !== 0) {
+    if (this.islandBuildKind !== 'wooden_floor' || this.placedStructures.length === 0) {
       return { x: wx, y: wy };
     }
     let bestDist2 = SNAP_R * SNAP_R;
     let bestX = wx, bestY = wy;
-    const DIRS = [{ dx: TILE, dy: 0 }, { dx: -TILE, dy: 0 },
-                  { dx: 0, dy: TILE  }, { dx: 0, dy: -TILE  }];
     for (const s of this.placedStructures) {
       if (s.type !== 'wooden_floor') continue;
+      // Derive the 4 neighbour slots using this tile's own rotation
+      const rad = (s.rotation ?? 0) * Math.PI / 180;
+      const c = Math.cos(rad), sn = Math.sin(rad);
+      const DIRS = [
+        {  dx:  TILE * c,  dy:  TILE * sn },
+        {  dx: -TILE * c,  dy: -TILE * sn },
+        {  dx: -TILE * sn, dy:  TILE * c  },
+        {  dx:  TILE * sn, dy: -TILE * c  },
+      ];
       for (const d of DIRS) {
         const nx = s.x + d.dx, ny = s.y + d.dy;
         const alreadyOccupied = this.placedStructures.some(
@@ -1209,14 +1215,21 @@ export class RenderSystem {
     if (this.placedStructures.length === 0) return { x: wx, y: wy };
     let bestDist2 = SNAP_R * SNAP_R;
     let bestX = wx, bestY = wy;
-    const EDGES = [
-      { dx: 0, dy: -HALF }, { dx: 0, dy: HALF },
-      { dx: -HALF, dy: 0 }, { dx: HALF, dy: 0 },
-    ];
     for (const s of this.placedStructures) {
       if (s.type !== 'wooden_floor') continue;
+      // Rotate the 4 canonical edge-midpoint offsets by this floor's rotation
+      const rad = (s.rotation ?? 0) * Math.PI / 180;
+      const c = Math.cos(rad), sn = Math.sin(rad);
+      // Local-space edges: (0,±HALF) → N/S (horizontal wall), (±HALF,0) → E/W (vertical wall)
+      const EDGES = [
+        { ldx:  0,    ldy: -HALF }, // N
+        { ldx:  0,    ldy:  HALF }, // S
+        { ldx: -HALF, ldy:  0    }, // W
+        { ldx:  HALF, ldy:  0    }, // E
+      ];
       for (const e of EDGES) {
-        const nx = s.x + e.dx, ny = s.y + e.dy;
+        const nx = s.x + e.ldx * c - e.ldy * sn;
+        const ny = s.y + e.ldx * sn + e.ldy * c;
         const occ = this.placedStructures.some(
           w => (w.type === 'wall' || w.type === 'door_frame') && Math.abs(w.x - nx) < 2 && Math.abs(w.y - ny) < 2
         );
@@ -2650,9 +2663,20 @@ export class RenderSystem {
           }
           continue;
         }
+        // Rotate mouse into this structure's local space to handle rotation
+        const rot = (s.rotation ?? 0) * Math.PI / 180;
+        let lx: number, ly: number;
+        if (rot === 0) {
+          lx = mx - s.x; ly = my - s.y;
+        } else {
+          const c = Math.cos(-rot), sn = Math.sin(-rot);
+          const dx = mx - s.x, dy = my - s.y;
+          lx = dx * c - dy * sn;
+          ly = dx * sn + dy * c;
+        }
         const hw = s.type === 'workbench' ? 25 * 0.88 : half;
         const hh = s.type === 'workbench' ? 25 * 0.62 : half;
-        if (Math.abs(mx - s.x) <= hw && Math.abs(my - s.y) <= hh) {
+        if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) {
           if (s.type === 'workbench') {
             // Workbench always wins — stop searching
             this._hoveredStructure = s;
@@ -3129,15 +3153,21 @@ export class RenderSystem {
     // slot of an existing floor, lock the ghost position there.
     let mx = this.mouseWorldPos.x;
     let my = this.mouseWorldPos.y;
-    if (this.islandBuildKind === 'wooden_floor' && this.placedStructures.length > 0
-        && this.islandBuildRotationDeg === 0) {
+    if (this.islandBuildKind === 'wooden_floor' && this.placedStructures.length > 0) {
       const SNAP_R  = TILE * 0.4; // 20 px — snap pull radius
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
-      const DIRS = [{ dx: TILE, dy: 0 }, { dx: -TILE, dy: 0 },
-                    { dx: 0, dy:  TILE }, { dx: 0, dy: -TILE }];
       for (const s of this.placedStructures) {
         if (s.type !== 'wooden_floor') continue;
+        // Derive the 4 neighbour slots using this tile's own rotation
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const c = Math.cos(rad), sn = Math.sin(rad);
+        const DIRS = [
+          {  dx:  TILE * c,  dy:  TILE * sn },
+          {  dx: -TILE * c,  dy: -TILE * sn },
+          {  dx: -TILE * sn, dy:  TILE * c  },
+          {  dx:  TILE * sn, dy: -TILE * c  },
+        ];
         for (const d of DIRS) {
           const nx = s.x + d.dx, ny = s.y + d.dy;
           // Skip neighbour slots already occupied by another floor
@@ -3151,21 +3181,25 @@ export class RenderSystem {
       }
       mx = bestX; my = bestY;
     } else if ((this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame') && this.placedStructures.length > 0) {
-      // Snap to unoccupied edge midpoints of floor tiles
+      // Snap to unoccupied edge midpoints of floor tiles, respecting each tile's rotation
       const HALF = TILE / 2; // 25 px
       const SNAP_R = TILE * 0.6;
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
-      const EDGES = [
-        { dx: 0, dy: -HALF }, // N edge → horizontal
-        { dx: 0, dy:  HALF }, // S edge → horizontal
-        { dx: -HALF, dy: 0 }, // W edge → vertical
-        { dx:  HALF, dy: 0 }, // E edge → vertical
-      ];
       for (const s of this.placedStructures) {
         if (s.type !== 'wooden_floor') continue;
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const c = Math.cos(rad), sn = Math.sin(rad);
+        // (ldx, ldy) in local tile space; isHoriz tracks whether it's a N/S edge
+        const EDGES = [
+          { ldx:  0,    ldy: -HALF, horiz: true  }, // N
+          { ldx:  0,    ldy:  HALF, horiz: true  }, // S
+          { ldx: -HALF, ldy:  0,    horiz: false }, // W
+          { ldx:  HALF, ldy:  0,    horiz: false }, // E
+        ];
         for (const e of EDGES) {
-          const nx = s.x + e.dx, ny = s.y + e.dy;
+          const nx = s.x + e.ldx * c - e.ldy * sn;
+          const ny = s.y + e.ldx * sn + e.ldy * c;
           const occ = this.placedStructures.some(
             w => (w.type === 'wall' || w.type === 'door_frame') && Math.abs(w.x - nx) < 2 && Math.abs(w.y - ny) < 2
           );
@@ -3173,7 +3207,7 @@ export class RenderSystem {
           const dist2 = (nx - mx) * (nx - mx) + (ny - my) * (ny - my);
           if (dist2 < bestDist2) {
             bestDist2 = dist2; bestX = nx; bestY = ny;
-            this._wallGhostHorizontal = (e.dy !== 0);
+            this._wallGhostHorizontal = e.horiz;
           }
         }
       }
