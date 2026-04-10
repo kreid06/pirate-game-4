@@ -1226,10 +1226,11 @@ export class RenderSystem {
       ];
       for (const d of DIRS) {
         const nx = s.x + d.dx, ny = s.y + d.dy;
-        // Candidate slot rotation inherits source tile's rotation
-        const candidateRad = rad; // same angle as source
+        // candidateRad inherits source tile's rotation.
+        // Exclude source tile (s) itself — candidate is by construction adjacent/touching it.
+        const candidateRad = rad;
         const alreadyOccupied = this.placedStructures.some(
-          f => f.type === 'wooden_floor' &&
+          f => f.type === 'wooden_floor' && f.id !== s.id &&
                RenderSystem.floorsOverlap(nx, ny, candidateRad, f.x, f.y, (f.rotation ?? 0) * Math.PI / 180)
         );
         if (alreadyOccupied) continue;
@@ -3212,12 +3213,19 @@ export class RenderSystem {
         ];
         for (const d of DIRS) {
           const nx = s.x + d.dx, ny = s.y + d.dy;
-          // Skip neighbour slots already occupied by another floor (SAT check, candidate inherits source rotation)
-          const occupied = this.placedStructures.some(
-            f => f.type === 'wooden_floor' &&
+          // Skip neighbour slots occupied by a *different* floor.
+          // Source tile (s) is excluded by id — candidate is adjacent/touching it by construction.
+          const blocker = this.placedStructures.find(
+            f => f.type === 'wooden_floor' && f.id !== s.id &&
                  RenderSystem.floorsOverlap(nx, ny, rad, f.x, f.y, (f.rotation ?? 0) * Math.PI / 180)
           );
-          if (occupied) continue;
+          if (blocker) {
+            if (import.meta.env.DEV) console.debug(
+              `[snap] candidate (${nx.toFixed(1)},${ny.toFixed(1)}) blocked by floor id=${blocker.id}` +
+              ` at (${blocker.x.toFixed(1)},${blocker.y.toFixed(1)}) rot=${blocker.rotation ?? 0}°`
+            );
+            continue;
+          }
           const dist2 = (nx - mx) * (nx - mx) + (ny - my) * (ny - my);
           if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; bestSnapRot = s.rotation ?? 0; }
         }

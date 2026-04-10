@@ -4622,6 +4622,14 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
             float exist_rad = placed_structures[si].rotation * (float)M_PI / 180.0f;
             if (floor_tiles_overlap(px, py, place_rad,
                                     placed_structures[si].x, placed_structures[si].y, exist_rad)) {
+                log_debug("place_structure FAIL occupied: new floor at (%.2f,%.2f) rot=%.2f"
+                          " blocked by floor id=%u at (%.2f,%.2f) rot=%.2f (dist=%.2f)",
+                          px, py, place_rotation_deg,
+                          placed_structures[si].id,
+                          placed_structures[si].x, placed_structures[si].y,
+                          placed_structures[si].rotation,
+                          sqrtf((px - placed_structures[si].x) * (px - placed_structures[si].x) +
+                                (py - placed_structures[si].y) * (py - placed_structures[si].y)));
                 snprintf(response, sizeof(response),
                          "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
                 goto ps_send;
