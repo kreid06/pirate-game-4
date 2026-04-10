@@ -128,7 +128,7 @@ export class RenderSystem {
   private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
   private islandBuildRotationDeg = 0;
-  private _wallGhostHorizontal: boolean = true; // true = runs along X axis (N/S edge)
+  private _wallGhostRotRad: number = 0; // rotation (radians) of wall/door ghost, inherited from floor edge
   /** True when the placement ghost is beyond the server's max placement range (200 px). */
   private _islandGhostTooFar = false;
   /** Last snapped placement position (may differ from raw cursor when snap-to-grid is active). */
@@ -3270,7 +3270,8 @@ export class RenderSystem {
           const dist2 = (nx - mx) * (nx - mx) + (ny - my) * (ny - my);
           if (dist2 < bestDist2) {
             bestDist2 = dist2; bestX = nx; bestY = ny;
-            this._wallGhostHorizontal = e.horiz;
+            const floorRad = (s.rotation ?? 0) * Math.PI / 180;
+            this._wallGhostRotRad = e.horiz ? floorRad : floorRad + Math.PI / 2;
           }
         }
       }
@@ -3289,9 +3290,12 @@ export class RenderSystem {
         const dist2 = (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my);
         if (dist2 < bestDist2) {
           bestDist2 = dist2; bestX = s.x; bestY = s.y;
-          this._wallGhostHorizontal = this.placedStructures.some(f =>
-            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+          const nearFloorDoor = this.placedStructures.find(f =>
+            f.type === 'wooden_floor' && Math.hypot(f.x - s.x, f.y - s.y) < 30
           );
+          this._wallGhostRotRad = nearFloorDoor
+            ? Math.atan2(s.y - nearFloorDoor.y, s.x - nearFloorDoor.x) + Math.PI / 2
+            : 0;
         }
       }
       mx = bestX; my = bestY;
@@ -3413,15 +3417,11 @@ export class RenderSystem {
           return Math.abs(mx - ex) < 3 && Math.abs(my - ey) < 3;
         });
       });
-      // Check if a workbench or door panel occupies this slot's AABB
+      // Check if a workbench or door panel occupies this slot
       if (!wallOccupied && !noEdge) {
-        const isHoriz = this._wallGhostHorizontal;
-        const hw = isHoriz ? 25 : 5;
-        const hh = isHoriz ? 5  : 25;
-        const WB_R = 15;
         blockedByStructure = this.placedStructures.some(s => {
           if (s.type === 'wooden_floor' || s.type === 'wall' || s.type === 'door_frame') return false;
-          return Math.abs(s.x - mx) < hw + WB_R && Math.abs(s.y - my) < hh + WB_R;
+          return Math.hypot(s.x - mx, s.y - my) < 35;
         });
       }
     } else if (this.islandBuildKind === 'door') {
@@ -3460,61 +3460,47 @@ export class RenderSystem {
 
     ctx.save();
     ctx.globalAlpha = 0.72 + 0.14 * Math.sin(performance.now() / 300);
-    // Apply rotation around ghost centre for floors/workbenches
-    if (effectiveRotDeg !== 0 &&
-        (this.islandBuildKind === 'wooden_floor' || this.islandBuildKind === 'workbench')) {
+    // Apply rotation around ghost centre
+    const WALL_THICK = 0.18;
+    const isWallOrDoor = this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame' || this.islandBuildKind === 'door';
+    const ghostRotRad = isWallOrDoor ? this._wallGhostRotRad
+      : (this.islandBuildKind === 'wooden_floor' || this.islandBuildKind === 'workbench')
+          ? effectiveRotDeg * Math.PI / 180 : 0;
+    if (ghostRotRad !== 0) {
       ctx.translate(msp.x, msp.y);
-      ctx.rotate(effectiveRotDeg * Math.PI / 180);
+      ctx.rotate(ghostRotRad);
       ctx.translate(-msp.x, -msp.y);
     }
     ctx.fillStyle   = ghostColor;
     ctx.strokeStyle = borderColor;
     ctx.lineWidth   = Math.max(1, 2 * zoom);
     ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
-    const WALL_THICK = 0.18;
-    const isWallOrDoor = this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame' || this.islandBuildKind === 'door';
     const ghostW = this.islandBuildKind === 'workbench' ? sz * 0.88
-                 : isWallOrDoor ? (this._wallGhostHorizontal ? sz : sz * WALL_THICK)
+                 : isWallOrDoor ? sz
                  : sz;
     const ghostH = this.islandBuildKind === 'workbench' ? sz * 0.62
-                 : isWallOrDoor ? (this._wallGhostHorizontal ? sz * WALL_THICK : sz)
+                 : isWallOrDoor ? sz * WALL_THICK
                  : sz;
 
     if (this.islandBuildKind === 'door_frame') {
       // Ghost shaped like a door frame: two posts at ends, dashed span in the middle
+      // Rotation is already applied via ctx.rotate(ghostRotRad); always draw horizontal shape.
       const POST = sz * 0.14;
       ctx.setLineDash([]);
-      if (this._wallGhostHorizontal) {
-        ctx.fillRect(msp.x - ghostW / 2, msp.y - POST / 2, POST, POST);
-        ctx.strokeRect(msp.x - ghostW / 2, msp.y - POST / 2, POST, POST);
-        ctx.fillRect(msp.x + ghostW / 2 - POST, msp.y - POST / 2, POST, POST);
-        ctx.strokeRect(msp.x + ghostW / 2 - POST, msp.y - POST / 2, POST, POST);
-        // dashed span lines top + bottom
-        ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
-        ctx.beginPath();
-        ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y - ghostH / 2);
-        ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y - ghostH / 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y + ghostH / 2);
-        ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y + ghostH / 2);
-        ctx.stroke();
-      } else {
-        ctx.fillRect(msp.x - POST / 2, msp.y - ghostH / 2, POST, POST);
-        ctx.strokeRect(msp.x - POST / 2, msp.y - ghostH / 2, POST, POST);
-        ctx.fillRect(msp.x - POST / 2, msp.y + ghostH / 2 - POST, POST, POST);
-        ctx.strokeRect(msp.x - POST / 2, msp.y + ghostH / 2 - POST, POST, POST);
-        // dashed span lines left + right
-        ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
-        ctx.beginPath();
-        ctx.moveTo(msp.x - ghostW / 2, msp.y - ghostH / 2 + POST);
-        ctx.lineTo(msp.x - ghostW / 2, msp.y + ghostH / 2 - POST);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(msp.x + ghostW / 2, msp.y - ghostH / 2 + POST);
-        ctx.lineTo(msp.x + ghostW / 2, msp.y + ghostH / 2 - POST);
-        ctx.stroke();
-      }
+      ctx.fillRect(msp.x - ghostW / 2, msp.y - POST / 2, POST, POST);
+      ctx.strokeRect(msp.x - ghostW / 2, msp.y - POST / 2, POST, POST);
+      ctx.fillRect(msp.x + ghostW / 2 - POST, msp.y - POST / 2, POST, POST);
+      ctx.strokeRect(msp.x + ghostW / 2 - POST, msp.y - POST / 2, POST, POST);
+      // dashed span lines top + bottom
+      ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
+      ctx.beginPath();
+      ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y - ghostH / 2);
+      ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y - ghostH / 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y + ghostH / 2);
+      ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y + ghostH / 2);
+      ctx.stroke();
       ctx.setLineDash([]);
     } else {
       ctx.beginPath();

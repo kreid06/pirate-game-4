@@ -4709,7 +4709,7 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         bool has_edge     = false;
         bool wrong_company = false;
         bool wall_occupied = false;
-        bool wall_horiz   = false;  /* set during edge validation */
+        float wall_rad    = 0.0f;  /* actual wall orientation in world space */
         /* First: overlap check — no two walls/doors at same position */
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             if (!placed_structures[si].active) continue;
@@ -4751,7 +4751,9 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
                         wrong_company = true;
                     else {
                         has_edge   = true;
-                        wall_horiz = edges[ei].horiz;
+                        /* N/S edges → wall runs along floor local-X (floor_rad + 0)
+                           E/W edges → wall runs along floor local-Y (floor_rad + π/2) */
+                        wall_rad = rad + (edges[ei].horiz ? 0.0f : (float)M_PI / 2.0f);
                     }
                 }
             }
@@ -4765,16 +4767,19 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         /* Check if any player is occupying the wall/door space */
         {
             const float PLAYER_R = 8.0f;
-            float hw = wall_horiz ? 25.0f : 5.0f;
-            float hh = wall_horiz ? 5.0f  : 25.0f;
+            const float HW = 25.0f, HH = 5.0f;  /* half-extents in wall local space */
+            float wc = cosf(-wall_rad), ws = sinf(-wall_rad);
             bool player_in_way = false;
             for (int pi2 = 0; pi2 < MAX_PLAYERS && !player_in_way; pi2++) {
                 if (!players[pi2].active) continue;
                 float cpx = players[pi2].x - px;
                 float cpy = players[pi2].y - py;
-                float clamp_cpx = cpx < -hw ? -hw : (cpx > hw ? hw : cpx);
-                float clamp_cpy = cpy < -hh ? -hh : (cpy > hh ? hh : cpy);
-                float dpx = cpx - clamp_cpx, dpy = cpy - clamp_cpy;
+                /* Rotate into wall local space */
+                float lx = cpx * wc - cpy * ws;
+                float ly = cpx * ws + cpy * wc;
+                float clx = lx < -HW ? -HW : (lx > HW ? HW : lx);
+                float cly = ly < -HH ? -HH : (ly > HH ? HH : ly);
+                float dpx = lx - clx, dpy = ly - cly;
                 if (dpx*dpx + dpy*dpy < PLAYER_R * PLAYER_R) player_in_way = true;
             }
             if (player_in_way) {
@@ -4785,9 +4790,7 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         }
         /* Check if any non-floor structure (workbench/door) blocks this space */
         {
-            float hw = wall_horiz ? 25.0f : 5.0f;
-            float hh = wall_horiz ? 5.0f  : 25.0f;
-            const float WB_R = 15.0f; /* conservative workbench interaction radius */
+            const float BLOCK_R = 35.0f;
             bool struct_in_way = false;
             for (uint32_t si = 0; si < placed_structure_count && !struct_in_way; si++) {
                 if (!placed_structures[si].active) continue;
@@ -4795,9 +4798,9 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
                 if (placed_structures[si].type == STRUCT_WALL) continue;
                 if (placed_structures[si].type == STRUCT_DOOR_FRAME) continue;
                 if (placed_structures[si].type == STRUCT_DOOR) continue;
-                float dpx = fabsf(placed_structures[si].x - px);
-                float dpy = fabsf(placed_structures[si].y - py);
-                if (dpx < hw + WB_R && dpy < hh + WB_R) struct_in_way = true;
+                float dpx = placed_structures[si].x - px;
+                float dpy = placed_structures[si].y - py;
+                if (dpx*dpx + dpy*dpy < BLOCK_R * BLOCK_R) struct_in_way = true;
             }
             if (struct_in_way) {
                 snprintf(response, sizeof(response),
