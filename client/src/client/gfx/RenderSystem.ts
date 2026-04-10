@@ -2245,37 +2245,73 @@ export class RenderSystem {
 
       // ── Shallow water ring (drawn before island body) ────────────────────
       {
-        const SHALLOW_DEPTH = 100; // world px — must match server SHALLOW_WATER_DEPTH_PX
+        // ── Shallow water ring — follows the island's actual shape ────────────
+        // Depth scales with island radius (SHALLOW_WATER_SCALE, matches server).
+        // Uses even-odd fill: outer expanded shape minus inner beach shape = ring.
+        const SHALLOW_SCALE = 0.375; // must match server SHALLOW_WATER_SCALE
+        const SEG = 64;
+        const TWO_PI = Math.PI * 2;
         ctx.save();
         if (isl.vertices) {
-          // Polygon island: draw an expanded polygon then clip out the island interior
-          const polyBoundR = Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
-          const outerR = polyBoundR + SHALLOW_DEPTH;
-          // Outer circle approximation for the shallow-water boundary
+          const verts = isl.vertices;
+          const polyBoundR = Math.max(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+          const polyMinR   = Math.min(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+          const SHALLOW_DEPTH = polyBoundR * SHALLOW_SCALE;
+          // Outer subpath: expand each vertex outward by SHALLOW_DEPTH
+          const expanded = verts.map(v => {
+            const dx = v.x - isl.x, dy = v.y - isl.y;
+            const d  = Math.hypot(dx, dy);
+            const scale = d > 0 ? (d + SHALLOW_DEPTH) / d : 1;
+            return camera.worldToScreen(Vec2.from(isl.x + dx * scale, isl.y + dy * scale));
+          });
           ctx.beginPath();
-          ctx.arc(sc.x, sc.y, outerR * zoom, 0, Math.PI * 2);
-          // Cut out the island polygon (even-odd fills the ring)
-          this.traceIslandPolygon(camera, isl.vertices);
+          expanded.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
           ctx.closePath();
-          const shallowGrad = ctx.createRadialGradient(sc.x, sc.y, polyBoundR * zoom * 0.9, sc.x, sc.y, outerR * zoom);
-          shallowGrad.addColorStop(0.0, 'rgba(80, 190, 220, 0.0)');
-          shallowGrad.addColorStop(0.5, 'rgba(80, 190, 220, 0.25)');
-          shallowGrad.addColorStop(1.0, 'rgba(80, 190, 220, 0.0)');
-          ctx.fillStyle = shallowGrad;
+          // Inner subpath: original polygon boundary (cut out via even-odd)
+          verts.forEach((v, i) => {
+            const sp = camera.worldToScreen(Vec2.from(v.x, v.y));
+            i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
+          });
+          ctx.closePath();
+          const sg = ctx.createRadialGradient(sc.x, sc.y, polyMinR * zoom * 0.85, sc.x, sc.y, (polyBoundR + SHALLOW_DEPTH) * zoom);
+          sg.addColorStop(0.0,  'rgba(220, 195, 130, 0.95)');
+          sg.addColorStop(0.30, 'rgba(130, 210, 200, 0.75)');
+          sg.addColorStop(0.65, 'rgba(70, 185, 215, 0.35)');
+          sg.addColorStop(1.0,  'rgba(60, 170, 205, 0.0)');
+          ctx.fillStyle = sg;
           ctx.fill('evenodd');
         } else {
-          const maxBump = Math.max(0, ...preset.beachBumps.map(Math.abs));
-          const innerR  = preset.beachRadius - maxBump; // conservative inner edge
-          const outerR  = preset.beachRadius + maxBump + SHALLOW_DEPTH;
+          const SHALLOW_DEPTH = preset.beachRadius * SHALLOW_SCALE;
+          const n    = preset.beachBumps.length;
+          const outerBase = preset.beachRadius + SHALLOW_DEPTH;
+          // Outer subpath: expanded blob (beachRadius + SHALLOW_DEPTH + same bumps)
           ctx.beginPath();
-          ctx.arc(sc.x, sc.y, outerR * zoom, 0, Math.PI * 2);
-          this.traceIslandBlob(camera, isl.x, isl.y, preset.beachRadius, preset.beachBumps);
+          for (let i = 0; i <= SEG; i++) {
+            const angle = (i / SEG) * TWO_PI;
+            const t  = (angle / TWO_PI) * n;
+            const i0 = Math.floor(t) % n, i1 = (i0 + 1) % n;
+            const r  = outerBase + preset.beachBumps[i0] + (t - Math.floor(t)) * (preset.beachBumps[i1] - preset.beachBumps[i0]);
+            const sp = camera.worldToScreen(Vec2.from(isl.x + Math.cos(angle) * r, isl.y + Math.sin(angle) * r));
+            i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
+          }
           ctx.closePath();
-          const shallowGrad = ctx.createRadialGradient(sc.x, sc.y, innerR * zoom, sc.x, sc.y, outerR * zoom);
-          shallowGrad.addColorStop(0.0, 'rgba(80, 190, 220, 0.0)');
-          shallowGrad.addColorStop(0.45, 'rgba(80, 190, 220, 0.30)');
-          shallowGrad.addColorStop(1.0, 'rgba(80, 190, 220, 0.0)');
-          ctx.fillStyle = shallowGrad;
+          // Inner subpath: beach boundary (cuts out island via even-odd)
+          for (let i = 0; i <= SEG; i++) {
+            const angle = (i / SEG) * TWO_PI;
+            const t  = (angle / TWO_PI) * n;
+            const i0 = Math.floor(t) % n, i1 = (i0 + 1) % n;
+            const r  = preset.beachRadius + preset.beachBumps[i0] + (t - Math.floor(t)) * (preset.beachBumps[i1] - preset.beachBumps[i0]);
+            const sp = camera.worldToScreen(Vec2.from(isl.x + Math.cos(angle) * r, isl.y + Math.sin(angle) * r));
+            i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
+          }
+          ctx.closePath();
+          const maxBump = Math.max(0, ...preset.beachBumps.map(Math.abs));
+          const sg = ctx.createRadialGradient(sc.x, sc.y, (preset.beachRadius - maxBump) * zoom, sc.x, sc.y, (outerBase + maxBump) * zoom);
+          sg.addColorStop(0.0,  'rgba(220, 195, 130, 0.95)');
+          sg.addColorStop(0.30, 'rgba(130, 210, 200, 0.75)');
+          sg.addColorStop(0.65, 'rgba(70, 185, 215, 0.35)');
+          sg.addColorStop(1.0,  'rgba(60, 170, 205, 0.0)');
+          ctx.fillStyle = sg;
           ctx.fill('evenodd');
         }
         ctx.restore();
@@ -2768,8 +2804,8 @@ export class RenderSystem {
           lx = dx * c - dy * sn;
           ly = dx * sn + dy * c;
         }
-        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'shipyard' ? 75 : half;
-        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'shipyard' ? 25 : half;
+        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'shipyard' ? 65 : half;
+        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'shipyard' ? 100 : half;
         if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) {
           if (s.type === 'workbench' || s.type === 'shipyard') {
             // Workbench/shipyard always wins — stop searching
@@ -3078,54 +3114,126 @@ export class RenderSystem {
         }
         ctx.restore();
       } else if (s.type === 'shipyard') {
-        // Top-down dock: wide rectangular platform (~150×50 world units scaled to tile)
-        const dockW = sz * 3.0;  // ~150px at default zoom
-        const dockH = sz * 1.0;  // ~50px
+        // ── U-shaped dry dock: two side arms + back wall, mouth opens toward rotation direction ──
+        const ARM_T  = sz * 0.50;   // arm / wall thickness
+        const INT_W  = sz * 1.60;   // interior bay width (fits brigantine beam)
+        const ARM_L  = sz * 3.50;   // arm length — bay depth
+        const BACK_T = sz * 0.50;   // back wall thickness
+        const totalW = ARM_T + INT_W + ARM_T;   // sz * 2.6
+        const totalH = BACK_T + ARM_L;          // sz * 4.0
+        const hw = totalW / 2, hh = totalH / 2;
+        const cx = ssp.x, cy = ssp.y;
         const hpFrac    = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = (1 - hpFrac) * 0.5;
         ctx.save();
-        ctx.translate(ssp.x, ssp.y);
+        ctx.translate(cx, cy);
         ctx.rotate((s.rotation ?? 0) * Math.PI / 180);
-        ctx.translate(-ssp.x, -ssp.y);
-
-        // Dock body
-        ctx.fillStyle   = isHovered ? '#4a7090' : '#2a5070';
-        ctx.strokeStyle = '#0e2a40';
+        ctx.translate(-cx, -cy);
+        // U-path: clockwise outer polygon with gap at +y (mouth / open end)
+        const uPath = () => {
+          ctx.beginPath();
+          ctx.moveTo(cx - hw,         cy - hh);
+          ctx.lineTo(cx + hw,         cy - hh);
+          ctx.lineTo(cx + hw,         cy + hh);
+          ctx.lineTo(cx + hw - ARM_T, cy + hh);
+          ctx.lineTo(cx + hw - ARM_T, cy - hh + BACK_T);
+          ctx.lineTo(cx - hw + ARM_T, cy - hh + BACK_T);
+          ctx.lineTo(cx - hw + ARM_T, cy + hh);
+          ctx.lineTo(cx - hw,         cy + hh);
+          ctx.closePath();
+        };
+        // ── Dock body (weathered timber) ──────────────────────────────────────
+        ctx.fillStyle   = isHovered ? '#4a6852' : '#2e4a36';
+        ctx.strokeStyle = '#1a2a1e';
         ctx.lineWidth   = Math.max(1, 2 * zoom);
-        ctx.beginPath();
-        ctx.rect(ssp.x - dockW / 2, ssp.y - dockH / 2, dockW, dockH);
+        uPath();
         ctx.fill();
         ctx.stroke();
-
-        // Plank lines (horizontal, along dock length)
-        ctx.strokeStyle = 'rgba(10, 30, 50, 0.45)';
-        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-        const planks = 4;
-        for (let li = 1; li < planks; li++) {
-          const py = ssp.y - dockH / 2 + dockH * (li / planks);
-          ctx.beginPath();
-          ctx.moveTo(ssp.x - dockW / 2, py);
-          ctx.lineTo(ssp.x + dockW / 2, py);
-          ctx.stroke();
+        // ── Plank grain on arms and back wall ─────────────────────────────────
+        ctx.strokeStyle = 'rgba(10, 20, 10, 0.28)';
+        ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
+        const plankStep = ARM_T / 2.5;
+        for (let p = plankStep; p < totalH; p += plankStep) {
+          const py = cy - hh + p;
+          ctx.beginPath(); ctx.moveTo(cx - hw,         py); ctx.lineTo(cx - hw + ARM_T, py); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx + hw - ARM_T, py); ctx.lineTo(cx + hw,         py); ctx.stroke();
+        }
+        for (let p = plankStep; p < INT_W; p += plankStep) {
+          const px = cx - hw + ARM_T + p;
+          ctx.beginPath(); ctx.moveTo(px, cy - hh); ctx.lineTo(px, cy - hh + BACK_T); ctx.stroke();
         }
 
-        // Anchor icon in centre
-        ctx.font         = `bold ${Math.max(10, Math.round(14 * zoom))}px monospace`;
-        ctx.textAlign    = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle    = 'rgba(180, 210, 240, 0.85)';
-        ctx.fillText('\u2693', ssp.x, ssp.y);
-
-        // Company color strip along the top edge
-        const syCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        // ── Dark seafloor inside the bay ──────────────────────────────────────
+        ctx.fillStyle = 'rgba(10, 40, 65, 0.72)';
+        ctx.fillRect(cx - hw + ARM_T, cy - hh + BACK_T, INT_W, ARM_L);
+        // ── Brigantine hull silhouette ─────────────────────────────────────────
+        const shpHW  = INT_W * 0.36;
+        const shpTop = cy - hh + BACK_T + ARM_L * 0.05;
+        const shpBot = cy + hh          - ARM_L * 0.05;
+        const shpLen = shpBot - shpTop;
+        ctx.fillStyle   = 'rgba(68, 46, 20, 0.30)';
+        ctx.strokeStyle = 'rgba(155, 115, 60, 0.55)';
+        ctx.lineWidth   = Math.max(1, 1.5 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(cx, shpTop);
+        ctx.bezierCurveTo(cx + shpHW * 0.5, shpTop + shpLen * 0.07,
+                          cx + shpHW,       shpTop + shpLen * 0.22,
+                          cx + shpHW,       shpTop + shpLen * 0.65);
+        ctx.bezierCurveTo(cx + shpHW,       shpTop + shpLen * 0.85,
+                          cx + shpHW * 0.5, shpBot,
+                          cx,               shpBot);
+        ctx.bezierCurveTo(cx - shpHW * 0.5, shpBot,
+                          cx - shpHW,       shpTop + shpLen * 0.85,
+                          cx - shpHW,       shpTop + shpLen * 0.65);
+        ctx.bezierCurveTo(cx - shpHW,       shpTop + shpLen * 0.22,
+                          cx - shpHW * 0.5, shpTop + shpLen * 0.07,
+                          cx,               shpTop);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        // Mast yard-arm crosses (fore + main)
+        ctx.strokeStyle = 'rgba(155, 115, 60, 0.65)';
+        ctx.lineWidth   = Math.max(1, 2 * zoom);
+        for (const mf of [0.28, 0.60]) {
+          const mpy = shpTop + shpLen * mf;
+          ctx.beginPath(); ctx.moveTo(cx,               mpy - ARM_T * 0.25); ctx.lineTo(cx,               mpy + ARM_T * 0.25); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx - shpHW * 0.4, mpy);               ctx.lineTo(cx + shpHW * 0.4, mpy);               ctx.stroke();
+        }
+        // ── Scaffolding cross-beams and diagonal arm bracing ──────────────────
+        ctx.strokeStyle = 'rgba(190, 150, 85, 0.85)';
+        ctx.lineWidth   = Math.max(1, 1.8 * zoom);
+        for (const frac of [0.25, 0.50, 0.75]) {
+          const bpy = cy - hh + BACK_T + ARM_L * frac;
+          ctx.beginPath(); ctx.moveTo(cx - hw + ARM_T, bpy); ctx.lineTo(cx + hw - ARM_T, bpy); ctx.stroke();
+          const pLen = ARM_T * 0.30;
+          ctx.beginPath(); ctx.moveTo(cx - hw + ARM_T, bpy - pLen); ctx.lineTo(cx - hw + ARM_T, bpy + pLen); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx + hw - ARM_T, bpy - pLen); ctx.lineTo(cx + hw - ARM_T, bpy + pLen); ctx.stroke();
+        }
+        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+        ctx.strokeStyle = 'rgba(160, 120, 60, 0.45)';
+        const bFracs = [0, 0.25, 0.50, 0.75, 1.0];
+        for (let bi = 0; bi < bFracs.length - 1; bi++) {
+          const y0 = cy - hh + BACK_T + ARM_L * bFracs[bi];
+          const y1 = cy - hh + BACK_T + ARM_L * bFracs[bi + 1];
+          ctx.beginPath(); ctx.moveTo(cx - hw,         y0); ctx.lineTo(cx - hw + ARM_T, y1); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx - hw + ARM_T, y0); ctx.lineTo(cx - hw,         y1); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx + hw - ARM_T, y0); ctx.lineTo(cx + hw,         y1); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx + hw,         y0); ctx.lineTo(cx + hw - ARM_T, y1); ctx.stroke();
+        }
+        // ── Mooring bollards at the mouth ──────────────────────────────────────
+        ctx.fillStyle = 'rgba(190, 150, 85, 0.95)';
+        const bollardR = Math.max(2, 3.5 * zoom);
+        ctx.beginPath(); ctx.arc(cx - hw + ARM_T * 0.5, cy + hh - ARM_T * 0.4, bollardR, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx + hw - ARM_T * 0.5, cy + hh - ARM_T * 0.4, bollardR, 0, Math.PI * 2); ctx.fill();
+        // ── Company color strip along back wall ────────────────────────────────
         const syStripH = Math.max(2, 3 * zoom);
-        ctx.fillStyle = syCompanyColor;
-        ctx.fillRect(ssp.x - dockW / 2, ssp.y - dockH / 2, dockW, syStripH);
-
-        // Damage darkening overlay
+        ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
+        ctx.fillRect(cx - hw, cy - hh, totalW, syStripH);
+        // ── Damage darkening overlay ────────────────────────────────────────────
         if (dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          ctx.fillRect(ssp.x - dockW / 2, ssp.y - dockH / 2, dockW, dockH);
+          uPath();
+          ctx.fill();
         }
         ctx.restore();
       }
@@ -3157,8 +3265,8 @@ export class RenderSystem {
       // Unrotated dimensions of the structure rect
       const THICK  = 0.18;
       const isWall = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
-      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'shipyard' ? sz * 3.0 : sz;
-      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'shipyard' ? sz * 1.0 : sz;
+      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'shipyard' ? sz * 2.6 : sz;
+      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'shipyard' ? sz * 4.0 : sz;
 
       // Axis-aligned bounding box after rotation (used for bar/tooltip screen positioning)
       const absC = Math.abs(Math.cos(rotRad)), absS = Math.abs(Math.sin(rotRad));
@@ -3407,19 +3515,21 @@ export class RenderSystem {
 
     // ── Shipyard ghost — unique placement logic ──────────────────────────
     if (this.islandBuildKind === 'shipyard') {
-      const SHALLOW_DEPTH_G = 100; // world px
+      const SHALLOW_SCALE_G = 0.375; // must match server SHALLOW_WATER_SCALE
       const playerG = this._cachedLocalPlayer;
       let inShallowZone = false;
       if (inWater) {
         for (const isl of this.islands) {
           if (isl.vertices) {
             const polyBoundR = Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+            const shallowDepth = polyBoundR * SHALLOW_SCALE_G;
             const d = Math.hypot(mx - isl.x, my - isl.y);
-            if (d <= polyBoundR + SHALLOW_DEPTH_G) { inShallowZone = true; break; }
+            if (d <= polyBoundR + shallowDepth) { inShallowZone = true; break; }
           } else {
             const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
             const maxBump = Math.max(...preset.beachBumps.map(Math.abs));
-            const outerR  = preset.beachRadius + maxBump + SHALLOW_DEPTH_G;
+            const shallowDepth = preset.beachRadius * SHALLOW_SCALE_G;
+            const outerR  = preset.beachRadius + maxBump + shallowDepth;
             const dx = mx - isl.x, dy = my - isl.y;
             if (dx * dx + dy * dy <= outerR * outerR) { inShallowZone = true; break; }
           }
@@ -3430,12 +3540,18 @@ export class RenderSystem {
         return dx * dx + dy * dy > 250 * 250;
       })() : false;
       const syOccupied = this.placedStructures.some(s =>
-        s.type === 'shipyard' && Math.hypot(s.x - mx, s.y - my) < 120
+        s.type === 'shipyard' && Math.hypot(s.x - mx, s.y - my) < 200
       );
       const syInvalid = !inWater || !inShallowZone || syPlayerFar || syOccupied;
       this._islandGhostTooFar = syInvalid;
-      const dockW = Math.max(4, TILE * 3.0 * zoom);
-      const dockH = Math.max(4, TILE * 1.0 * zoom);
+      // Ghost uses same proportions as rendered shipyard (ARM_T/INT_W/ARM_L/BACK_T × TILE × zoom)
+      const GA_T = TILE * 0.50 * zoom;
+      const GI_W = TILE * 1.60 * zoom;
+      const GA_L = TILE * 3.50 * zoom;
+      const GB_T = TILE * 0.50 * zoom;
+      const gtW  = Math.max(4, GA_T + GI_W + GA_T);
+      const gtH  = Math.max(4, GB_T + GA_L);
+      const gHW = gtW / 2, gHH = gtH / 2;
       ctx.save();
       ctx.globalAlpha = 0.72 + 0.14 * Math.sin(performance.now() / 300);
       ctx.fillStyle   = syInvalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 180, 255, 0.45)';
@@ -3443,11 +3559,19 @@ export class RenderSystem {
       ctx.lineWidth   = Math.max(1, 2 * zoom);
       ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
       ctx.beginPath();
-      ctx.rect(msp.x - dockW / 2, msp.y - dockH / 2, dockW, dockH);
+      ctx.moveTo(msp.x - gHW,         msp.y - gHH);
+      ctx.lineTo(msp.x + gHW,         msp.y - gHH);
+      ctx.lineTo(msp.x + gHW,         msp.y + gHH);
+      ctx.lineTo(msp.x + gHW - GA_T,  msp.y + gHH);
+      ctx.lineTo(msp.x + gHW - GA_T,  msp.y - gHH + GB_T);
+      ctx.lineTo(msp.x - gHW + GA_T,  msp.y - gHH + GB_T);
+      ctx.lineTo(msp.x - gHW + GA_T,  msp.y + gHH);
+      ctx.lineTo(msp.x - gHW,         msp.y + gHH);
+      ctx.closePath();
       ctx.fill();
       ctx.stroke();
       ctx.setLineDash([]);
-      const syLabelY = msp.y - dockH / 2 - 6;
+      const syLabelY = msp.y - gHH - 6;
       ctx.globalAlpha = 1;
       ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
       ctx.textAlign    = 'center';
