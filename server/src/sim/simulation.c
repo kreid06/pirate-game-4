@@ -131,6 +131,22 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
         struct Ship* ship = &sim->ships[i];
         update_ship_physics(ship, dt);
 
+        /* Shallow-water drag — extra friction when ship hull centre is in
+         * the shallow-water ring around any island.  Applied AFTER the base
+         * friction inside update_ship_physics so it multiplies on top.     */
+        {
+            float ship_cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
+            float ship_cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y));
+            for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+                if (island_in_shallow_water(&ISLAND_PRESETS[ii], ship_cx, ship_cy)) {
+                    const q16_t shallow_drag = Q16_FROM_FLOAT(0.90f);
+                    ship->velocity = vec2_mul_scalar(ship->velocity, shallow_drag);
+                    ship->angular_velocity = q16_mul(ship->angular_velocity, shallow_drag);
+                    break;
+                }
+            }
+        }
+
         // Update per-module state (reload timers, etc.)
         for (uint8_t m = 0; m < ship->module_count; m++) {
             module_update(&ship->modules[m], dt);

@@ -125,6 +125,18 @@ const RECIPES: Recipe[] = [
       { label: 'Wood', count: 4 },
     ],
   },
+  {
+    id: 'craft_shipyard',
+    outputName: 'Shipyard',
+    outputCount: 1,
+    symbol: '⚓',
+    color: '#2a5f8a',
+    borderColor: '#14304a',
+    ingredients: [
+      { label: 'Wood',  count: 30 },
+      { label: 'Plank', count: 10 },
+    ],
+  },
 ];
 
 // ── Layout ─────────────────────────────────────────────────────────────────

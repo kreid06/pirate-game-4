@@ -158,6 +158,34 @@ static inline bool island_poly_pushout(
 #define ISLAND_COUNT 2
 extern IslandDef ISLAND_PRESETS[];
 
+/** Width of the shallow-water ring that surrounds each island (client pixels). */
+#define SHALLOW_WATER_DEPTH_PX 100.0f
+
+/**
+ * Returns true if (px, py) is in the shallow-water zone of the given island:
+ *   - outside the island's beach boundary, AND
+ *   - within SHALLOW_WATER_DEPTH_PX of that boundary.
+ * px, py are world coordinates in CLIENT pixels.
+ */
+static inline bool island_in_shallow_water(const IslandDef *isl, float px, float py) {
+    float dx = px - isl->x, dy = py - isl->y;
+    float dist_sq = dx * dx + dy * dy;
+
+    if (isl->vertex_count > 0) {
+        float outer_r = isl->poly_bound_r + SHALLOW_WATER_DEPTH_PX;
+        if (dist_sq > outer_r * outer_r) return false;
+        /* Must be outside the polygon (in water) */
+        return !island_poly_contains(isl, px, py);
+    } else {
+        float broad_outer = isl->beach_radius_px + isl->beach_max_bump + SHALLOW_WATER_DEPTH_PX;
+        if (dist_sq > broad_outer * broad_outer) return false;
+        float angle   = atan2f(dy, dx);
+        float beach_r = island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle);
+        float dist    = sqrtf(dist_sq);
+        return (dist > beach_r) && (dist < beach_r + SHALLOW_WATER_DEPTH_PX);
+    }
+}
+
 /**
  * Procedurally generate tree (wood resource) positions for all polygon
  * islands, filling their resource arrays with a grid+jitter pattern that

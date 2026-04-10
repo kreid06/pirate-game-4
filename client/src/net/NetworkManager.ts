@@ -1177,7 +1177,7 @@ export class NetworkManager {
    * The server validates that the player is on an island, has the item, and for
    * workbench that a floor tile is close enough.
    */
-  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door', x: number, y: number, rotationDeg = 0): void {
+  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard', x: number, y: number, rotationDeg = 0): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y, rotation: rotationDeg });
   }
@@ -2080,6 +2080,7 @@ export class NetworkManager {
                    : s.structure_type === 'wall'       ? 'wall'
                    : s.structure_type === 'door_frame' ? 'door_frame'
                    : s.structure_type === 'door'       ? 'door'
+                   : s.structure_type === 'shipyard'   ? 'shipyard'
                    : 'wooden_floor',
           islandId:  s.island_id ?? 0,
           x:         s.x ?? 0,
@@ -2102,6 +2103,7 @@ export class NetworkManager {
                    : message.structure_type === 'wall'       ? 'wall'
                    : message.structure_type === 'door_frame' ? 'door_frame'
                    : message.structure_type === 'door'       ? 'door'
+                   : message.structure_type === 'shipyard'   ? 'shipyard'
                    : 'wooden_floor',
           islandId:  message.island_id ?? 0,
           x:         message.x ?? 0,

@@ -1386,6 +1386,7 @@ export class UIManager {
       if (this.companyMenu.visible) { this.companyMenu.close(); event.preventDefault(); event.stopPropagation(); return; }
       if (this.playerMenu.visible)  { this.playerMenu.close();  event.preventDefault(); event.stopPropagation(); return; }
       if (this.shipMenu.visible)    { this.shipMenu.close();    event.preventDefault(); event.stopPropagation(); return; }
+      if (this.crewMenu.visible)    { this.crewMenu.close();    event.preventDefault(); event.stopPropagation(); return; }
       return;
     }
 

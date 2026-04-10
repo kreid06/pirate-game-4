@@ -125,7 +125,7 @@ export class RenderSystem {
   /** Rock node currently under cursor (world coords) — updated each frame in drawIsland. */
   private _hoveredRock: { wx: number; wy: number } | null = null;
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | null = null;
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
   private islandBuildRotationDeg = 0;
   private _wallGhostRotRad: number = 0; // rotation (radians) of wall/door ghost, inherited from floor edge
@@ -1171,8 +1171,8 @@ export class RenderSystem {
     this._blockerExpiry = id !== null ? performance.now() + durationMs : 0;
   }
 
-  /** Activate island placement ghost for wooden_floor, workbench, wall, or door, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | null): void {
+  /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, or clear it. */
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | null): void {
     this.islandBuildKind = kind;
   }
 
@@ -2243,6 +2243,44 @@ export class RenderSystem {
       const sc  = camera.worldToScreen(Vec2.from(isl.x, isl.y));
       const ctx = this.ctx;
 
+      // ── Shallow water ring (drawn before island body) ────────────────────
+      {
+        const SHALLOW_DEPTH = 100; // world px — must match server SHALLOW_WATER_DEPTH_PX
+        ctx.save();
+        if (isl.vertices) {
+          // Polygon island: draw an expanded polygon then clip out the island interior
+          const polyBoundR = Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+          const outerR = polyBoundR + SHALLOW_DEPTH;
+          // Outer circle approximation for the shallow-water boundary
+          ctx.beginPath();
+          ctx.arc(sc.x, sc.y, outerR * zoom, 0, Math.PI * 2);
+          // Cut out the island polygon (even-odd fills the ring)
+          this.traceIslandPolygon(camera, isl.vertices);
+          ctx.closePath();
+          const shallowGrad = ctx.createRadialGradient(sc.x, sc.y, polyBoundR * zoom * 0.9, sc.x, sc.y, outerR * zoom);
+          shallowGrad.addColorStop(0.0, 'rgba(80, 190, 220, 0.0)');
+          shallowGrad.addColorStop(0.5, 'rgba(80, 190, 220, 0.25)');
+          shallowGrad.addColorStop(1.0, 'rgba(80, 190, 220, 0.0)');
+          ctx.fillStyle = shallowGrad;
+          ctx.fill('evenodd');
+        } else {
+          const maxBump = Math.max(0, ...preset.beachBumps.map(Math.abs));
+          const innerR  = preset.beachRadius - maxBump; // conservative inner edge
+          const outerR  = preset.beachRadius + maxBump + SHALLOW_DEPTH;
+          ctx.beginPath();
+          ctx.arc(sc.x, sc.y, outerR * zoom, 0, Math.PI * 2);
+          this.traceIslandBlob(camera, isl.x, isl.y, preset.beachRadius, preset.beachBumps);
+          ctx.closePath();
+          const shallowGrad = ctx.createRadialGradient(sc.x, sc.y, innerR * zoom, sc.x, sc.y, outerR * zoom);
+          shallowGrad.addColorStop(0.0, 'rgba(80, 190, 220, 0.0)');
+          shallowGrad.addColorStop(0.45, 'rgba(80, 190, 220, 0.30)');
+          shallowGrad.addColorStop(1.0, 'rgba(80, 190, 220, 0.0)');
+          ctx.fillStyle = shallowGrad;
+          ctx.fill('evenodd');
+        }
+        ctx.restore();
+      }
+
       ctx.save();
 
       if (isl.vertices) {
@@ -2730,11 +2768,11 @@ export class RenderSystem {
           lx = dx * c - dy * sn;
           ly = dx * sn + dy * c;
         }
-        const hw = s.type === 'workbench' ? 25 * 0.88 : half;
-        const hh = s.type === 'workbench' ? 25 * 0.62 : half;
+        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'shipyard' ? 75 : half;
+        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'shipyard' ? 25 : half;
         if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) {
-          if (s.type === 'workbench') {
-            // Workbench always wins — stop searching
+          if (s.type === 'workbench' || s.type === 'shipyard') {
+            // Workbench/shipyard always wins — stop searching
             this._hoveredStructure = s;
             floorHit = null;
             break;
@@ -2747,10 +2785,10 @@ export class RenderSystem {
       if (this._hoveredStructure === null) this._hoveredStructure = floorHit;
     }
 
-    // Floors first, then walls/doors, then workbenches
+    // Floors first, then walls/doors, then workbenches/shipyards
     const sorted = [...this.placedStructures].sort((a, b) => {
       const order = (t: PlacedStructure['type']) =>
-        t === 'wooden_floor' ? 0 : (t === 'wall' || t === 'door_frame') ? 1 : t === 'door' ? 1.5 : 2;
+        t === 'wooden_floor' ? 0 : (t === 'wall' || t === 'door_frame') ? 1 : t === 'door' ? 1.5 : t === 'shipyard' ? 1.8 : 2;
       return order(a.type) - order(b.type);
     });
 
@@ -3039,6 +3077,57 @@ export class RenderSystem {
           ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
         }
         ctx.restore();
+      } else if (s.type === 'shipyard') {
+        // Top-down dock: wide rectangular platform (~150×50 world units scaled to tile)
+        const dockW = sz * 3.0;  // ~150px at default zoom
+        const dockH = sz * 1.0;  // ~50px
+        const hpFrac    = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const dmgDarken = (1 - hpFrac) * 0.5;
+        ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        ctx.rotate((s.rotation ?? 0) * Math.PI / 180);
+        ctx.translate(-ssp.x, -ssp.y);
+
+        // Dock body
+        ctx.fillStyle   = isHovered ? '#4a7090' : '#2a5070';
+        ctx.strokeStyle = '#0e2a40';
+        ctx.lineWidth   = Math.max(1, 2 * zoom);
+        ctx.beginPath();
+        ctx.rect(ssp.x - dockW / 2, ssp.y - dockH / 2, dockW, dockH);
+        ctx.fill();
+        ctx.stroke();
+
+        // Plank lines (horizontal, along dock length)
+        ctx.strokeStyle = 'rgba(10, 30, 50, 0.45)';
+        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+        const planks = 4;
+        for (let li = 1; li < planks; li++) {
+          const py = ssp.y - dockH / 2 + dockH * (li / planks);
+          ctx.beginPath();
+          ctx.moveTo(ssp.x - dockW / 2, py);
+          ctx.lineTo(ssp.x + dockW / 2, py);
+          ctx.stroke();
+        }
+
+        // Anchor icon in centre
+        ctx.font         = `bold ${Math.max(10, Math.round(14 * zoom))}px monospace`;
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = 'rgba(180, 210, 240, 0.85)';
+        ctx.fillText('\u2693', ssp.x, ssp.y);
+
+        // Company color strip along the top edge
+        const syCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        const syStripH = Math.max(2, 3 * zoom);
+        ctx.fillStyle = syCompanyColor;
+        ctx.fillRect(ssp.x - dockW / 2, ssp.y - dockH / 2, dockW, syStripH);
+
+        // Damage darkening overlay
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          ctx.fillRect(ssp.x - dockW / 2, ssp.y - dockH / 2, dockW, dockH);
+        }
+        ctx.restore();
       }
     } // end for sorted
 
@@ -3068,8 +3157,8 @@ export class RenderSystem {
       // Unrotated dimensions of the structure rect
       const THICK  = 0.18;
       const isWall = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
-      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : sz;
-      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : sz;
+      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'shipyard' ? sz * 3.0 : sz;
+      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'shipyard' ? sz * 1.0 : sz;
 
       // Axis-aligned bounding box after rotation (used for bar/tooltip screen positioning)
       const absC = Math.abs(Math.cos(rotRad)), absS = Math.abs(Math.sin(rotRad));
@@ -3113,6 +3202,7 @@ export class RenderSystem {
                  : s.type === 'wall' ? 'Wall'
                  : s.type === 'door_frame' ? 'Door Frame'
                  : s.type === 'door' ? (s.doorOpen ? 'Door (Open)' : 'Door (Closed)')
+                 : s.type === 'shipyard' ? 'Shipyard'
                  : 'Workbench';
 
       // Determine ownership line text + color
@@ -3145,6 +3235,7 @@ export class RenderSystem {
         ctx.fillStyle = 'rgba(200, 255, 180, 0.95)';
         const interactHint = s.type === 'door' ? 'Tap [E] to open/close'
                            : s.type === 'door_frame' ? 'Hold [E] to demolish'
+                           : s.type === 'shipyard' ? 'Hold [E] to build ships'
                            : 'Hold [E] to interact';
         ctx.fillText(interactHint, ssp.x, tipY - lineH * 2);
       } else {
@@ -3312,6 +3403,68 @@ export class RenderSystem {
         const narrowR = sampleBoundary(preset.beachRadius, preset.beachBumps, angle);
         if (distSq < narrowR * narrowR) { inWater = false; break; }
       }
+    }
+
+    // ── Shipyard ghost — unique placement logic ──────────────────────────
+    if (this.islandBuildKind === 'shipyard') {
+      const SHALLOW_DEPTH_G = 100; // world px
+      const playerG = this._cachedLocalPlayer;
+      let inShallowZone = false;
+      if (inWater) {
+        for (const isl of this.islands) {
+          if (isl.vertices) {
+            const polyBoundR = Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+            const d = Math.hypot(mx - isl.x, my - isl.y);
+            if (d <= polyBoundR + SHALLOW_DEPTH_G) { inShallowZone = true; break; }
+          } else {
+            const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+            const maxBump = Math.max(...preset.beachBumps.map(Math.abs));
+            const outerR  = preset.beachRadius + maxBump + SHALLOW_DEPTH_G;
+            const dx = mx - isl.x, dy = my - isl.y;
+            if (dx * dx + dy * dy <= outerR * outerR) { inShallowZone = true; break; }
+          }
+        }
+      }
+      const syPlayerFar = playerG ? (() => {
+        const dx = mx - playerG.position.x; const dy = my - playerG.position.y;
+        return dx * dx + dy * dy > 250 * 250;
+      })() : false;
+      const syOccupied = this.placedStructures.some(s =>
+        s.type === 'shipyard' && Math.hypot(s.x - mx, s.y - my) < 120
+      );
+      const syInvalid = !inWater || !inShallowZone || syPlayerFar || syOccupied;
+      this._islandGhostTooFar = syInvalid;
+      const dockW = Math.max(4, TILE * 3.0 * zoom);
+      const dockH = Math.max(4, TILE * 1.0 * zoom);
+      ctx.save();
+      ctx.globalAlpha = 0.72 + 0.14 * Math.sin(performance.now() / 300);
+      ctx.fillStyle   = syInvalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 180, 255, 0.45)';
+      ctx.strokeStyle = syInvalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 200, 255, 0.75)';
+      ctx.lineWidth   = Math.max(1, 2 * zoom);
+      ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+      ctx.beginPath();
+      ctx.rect(msp.x - dockW / 2, msp.y - dockH / 2, dockW, dockH);
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const syLabelY = msp.y - dockH / 2 - 6;
+      ctx.globalAlpha = 1;
+      ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'bottom';
+      if (!inWater) {
+        ctx.fillStyle = '#ff6644'; ctx.fillText('ON LAND', msp.x, syLabelY);
+      } else if (!inShallowZone) {
+        ctx.fillStyle = '#4488ff'; ctx.fillText('PLACE IN SHALLOW WATER', msp.x, syLabelY);
+      } else if (syOccupied) {
+        ctx.fillStyle = '#ff6644'; ctx.fillText('TOO CLOSE TO SHIPYARD', msp.x, syLabelY);
+      } else if (syPlayerFar) {
+        ctx.fillStyle = '#ff6644'; ctx.fillText('TOO FAR', msp.x, syLabelY);
+      } else {
+        ctx.fillStyle = '#aadeff'; ctx.fillText('Shipyard', msp.x, syLabelY);
+      }
+      ctx.restore();
+      return;
     }
 
     // Distance check: player must be within 200 px (world space) of placement point

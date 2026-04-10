@@ -241,6 +241,7 @@ typedef enum {
     ITEM_FIBER         = 23,
     ITEM_METAL         = 24,
     ITEM_PICKAXE       = 25,
+    ITEM_SHIPYARD      = 26,
 } ItemKind;
 
 /* ── Island structures ────────────────────────────────────────────────────── */
@@ -250,6 +251,7 @@ typedef enum {
     STRUCT_WALL         = 2,
     STRUCT_DOOR_FRAME   = 3,  /* posts with open centre, always passable */
     STRUCT_DOOR         = 4,  /* panel that snaps onto a door frame */
+    STRUCT_SHIPYARD     = 5,  /* placed in shallow water near island — used to build ships */
 } PlacedStructureType;
 
 typedef struct {

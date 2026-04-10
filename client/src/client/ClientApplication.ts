@@ -136,7 +136,7 @@ export class ClientApplication {
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
   /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
-  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | null = null;
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
@@ -862,7 +862,7 @@ export class ClientApplication {
           const pid = this.networkManager.getAssignedPlayerId();
           const p   = ws?.players.find(pl => pl.id === pid);
           const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
-          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door') {
+          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard') {
             // Compute snap at click time (not from stale render state)
             const pos = kind === 'wooden_floor'
               ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
@@ -2057,11 +2057,11 @@ export class ClientApplication {
     const inDeckBuildMode   = activeItem === 'deck';
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
-    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door');
+    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard');
     this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
     this.inputManager.islandBuildMode = this.islandBuildMode;
     this.renderSystem.setIslandBuildItem(
-      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door') : null
+      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard') : null
     );
     this.renderSystem.setIslandBuildRotation(this.islandBuildMode ? this.islandBuildRotationDeg : 0);
 
@@ -2623,6 +2623,25 @@ export class ClientApplication {
             e.preventDefault();
             break;
           }
+          // Exit any active build mode (ship or island)
+          if (this.buildMenuOpen || this.explicitBuildMode || this.pendingGhostKind !== null || this.islandBuildMode) {
+            this.exitAllBuildModes();
+            // For island build mode (hotbar-driven), also unequip so the ghost preview is dismissed
+            if (this.islandBuildMode) {
+              this.pendingActiveSlot = 255;
+              const playerId = this.networkManager.getAssignedPlayerId();
+              if (playerId !== null) {
+                for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+                  const p = ws?.players.find(pl => pl.id === playerId);
+                  if (p) p.inventory.activeSlot = 255;
+                }
+              }
+              this.networkManager.sendUnequip();
+              this.checkBuildMode();
+            }
+            e.preventDefault();
+            break;
+          }
           // Cancel "Move To" targeting mode if active
           if (this._moveToNpcId !== null) {
             this._moveToNpcId = null;
@@ -2783,8 +2802,13 @@ export class ClientApplication {
                   if (isOwnCompany) doorOpts.push({ id: 'demolish', label: 'Demolish' });
                   this._radialMenu.open(mp2.x, mp2.y, doorOpts);
                 }, 400);
+              } else if (struct.type === 'shipyard') {
+                // Shipyard: tap/hold E = open ship building menu
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                }, 600);
               } else {
-                // Floor: hold E = radial with only Demolish (only reachable if isOwnCompany)
                 this._ladderHoldTimer = setTimeout(() => {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
@@ -3004,8 +3028,8 @@ export class ClientApplication {
           clearTimeout(this._ladderHoldTimer);
           this._ladderHoldTimer = null;
           this.renderSystem.stopLadderHoldRing();
-          if (structType === 'workbench') {
-            // Tap E on workbench = primary action: open
+          if (structType === 'workbench' || structType === 'shipyard') {
+            // Tap E on workbench/shipyard = primary action: open
             doUse();
           } else if (structType === 'door') {
             // Tap E on door panel = toggle open/closed

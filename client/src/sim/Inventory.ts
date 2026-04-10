@@ -37,7 +37,8 @@ export type ItemKind =
   | 'wood'
   | 'fiber'
   | 'metal'
-  | 'pickaxe';
+  | 'pickaxe'
+  | 'shipyard';
 
 // ── Category groups ─────────────────────────────────────────────────────────
 export type ItemCategory = 'none' | 'building' | 'repair' | 'ammo' | 'weapon' | 'tool' | 'armor' | 'shield';
@@ -86,6 +87,7 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   fiber:         { kind: 'fiber',         name: 'Fiber',         category: 'none',     maxStack: 99, color: '#c8a46e', borderColor: '#8a6030', symbol: 'Fi', description: 'Plant fiber from island vegetation. Used to craft sails.' },
   metal:         { kind: 'metal',         name: 'Metal',         category: 'none',     maxStack: 99, color: '#8a8a8c', borderColor: '#555558', symbol: 'Fe', description: 'Metal ingots. Used to craft weapons and cannons.' },
   pickaxe:       { kind: 'pickaxe',       name: 'Pickaxe',       category: 'tool',     maxStack: 1,  color: '#7a7a7c', borderColor: '#555558', symbol: '\u26cf', description: 'Mine rock outcroppings on islands to gather metal.' },
+  shipyard:      { kind: 'shipyard',      name: 'Shipyard',      category: 'building', maxStack: 1,  color: '#2a5f8a', borderColor: '#14304a', symbol: '\u2693', description: 'Place in shallow water next to an island to build ships.' },
 };
 
 /**
@@ -106,7 +108,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   10: 'cloth_armor',
   11: 'leather_armor',
   12: 'iron_armor',
-  20: 'wooden_shield',
+  // Note: server ID 20 collision — ITEM_DOOR wins (ITEM_WOODEN_SHIELD pre-existing duplicate bug)
   21: 'iron_shield',
   13: 'deck',
   14: 'swivel',
@@ -120,6 +122,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   23: 'fiber',
   24: 'metal',
   25: 'pickaxe',
+  26: 'shipyard',
 };
 
 /**

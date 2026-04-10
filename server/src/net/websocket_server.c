@@ -4565,6 +4565,35 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         goto ps_send;
     }
 
+    /* Shipyard: must be placed in shallow water — outside the island beach
+       boundary but within SHALLOW_WATER_DEPTH_PX of it. */
+    if (strcmp(stype, "shipyard") == 0) {
+        bool in_shallow = false;
+        for (int ii = 0; ii < ISLAND_COUNT && !in_shallow; ii++) {
+            if (island_in_shallow_water(&ISLAND_PRESETS[ii], px, py)) {
+                in_shallow = true;
+                target_island_id = (uint32_t)ISLAND_PRESETS[ii].id;
+            }
+        }
+        if (!in_shallow) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"needs_shallow_water\"}");
+            goto ps_send;
+        }
+        /* Prevent stacking multiple shipyards too close together */
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_SHIPYARD) continue;
+            float ddx = placed_structures[si].x - px;
+            float ddy = placed_structures[si].y - py;
+            if (ddx*ddx + ddy*ddy < 120.0f * 120.0f) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
+                goto ps_send;
+            }
+        }
+    }
+
     PlacedStructureType stype_enum;
     ItemKind required_item;
     if (strcmp(stype, "wooden_floor") == 0) {
@@ -4582,6 +4611,9 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     } else if (strcmp(stype, "door") == 0) {
         stype_enum    = STRUCT_DOOR;
         required_item = ITEM_DOOR;
+    } else if (strcmp(stype, "shipyard") == 0) {
+        stype_enum    = STRUCT_SHIPYARD;
+        required_item = ITEM_SHIPYARD;
     } else {
         snprintf(response, sizeof(response),
                  "{\"type\":\"place_structure_fail\",\"reason\":\"unknown_type\"}");
@@ -4965,6 +4997,12 @@ static void handle_structure_interact(WebSocketPlayer* player, struct WebSocketC
         if (placed_structures[i].type == STRUCT_WORKBENCH) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"crafting_open\",\"structure_id\":%u,\"structure_type\":\"workbench\"}",
+                     sid);
+            goto si_send;
+        }
+        if (placed_structures[i].type == STRUCT_SHIPYARD) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"crafting_open\",\"structure_id\":%u,\"structure_type\":\"shipyard\"}",
                      sid);
             goto si_send;
         }
@@ -5532,9 +5570,10 @@ static void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* c
         { "craft_cannon", ITEM_CANNON, 1, { {ITEM_WOOD,  8}, {ITEM_METAL, 20} }, 2 },
         { "craft_swivel", ITEM_SWIVEL, 1, { {ITEM_WOOD,  5}, {ITEM_METAL,  8} }, 2 },
         { "craft_sword",  ITEM_SWORD,  1, { {ITEM_WOOD,  2}, {ITEM_METAL,  5} }, 2 },
-        { "craft_wall",   ITEM_WALL,   4, { {ITEM_WOOD,  6}, {0,0} }, 1 },
-        { "craft_door_frame", ITEM_DOOR_FRAME, 1, { {ITEM_WOOD, 4}, {0,0} }, 1 },
-        { "craft_door",       ITEM_DOOR,       1, { {ITEM_WOOD, 4}, {0,0} }, 1 },
+        { "craft_wall",        ITEM_WALL,      4, { {ITEM_WOOD,  6}, {0,0}           }, 1 },
+        { "craft_door_frame",  ITEM_DOOR_FRAME, 1, { {ITEM_WOOD,  4}, {0,0}           }, 1 },
+        { "craft_door",        ITEM_DOOR,       1, { {ITEM_WOOD,  4}, {0,0}           }, 1 },
+        { "craft_shipyard",    ITEM_SHIPYARD,   1, { {ITEM_WOOD, 30}, {ITEM_PLANK, 10} }, 2 },
     };
     const int num_recipes = (int)(sizeof(recipes) / sizeof(recipes[0]));
 
