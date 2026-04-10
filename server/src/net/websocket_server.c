@@ -7162,6 +7162,7 @@ static void check_projectile_static_collisions(struct Sim* sim) {
                                 }
                             }
                         }
+                    }
                 }
             } else {
                 snprintf(msg, sizeof(msg),
