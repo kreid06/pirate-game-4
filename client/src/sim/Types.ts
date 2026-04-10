@@ -114,6 +114,20 @@ export interface Cannonball {
 }
 
 /**
+ * Ship construction state tracked inside a Shipyard structure.
+ */
+export type ConstructionPhase = 'empty' | 'building';
+
+export interface ShipConstruction {
+  phase: ConstructionPhase;
+  /**
+   * Module IDs installed so far.
+   * Possible values: 'hull_left' | 'hull_right' | 'deck' | 'mast' | 'cannon_port' | 'cannon_stbd'
+   */
+  modulesPlaced: string[];
+}
+
+/**
  * A structure placed on an island by a player.
  */
 export interface PlacedStructure {
@@ -128,6 +142,8 @@ export interface PlacedStructure {
   placerName: string;  // display name of the player who built this
   doorOpen?: boolean;  // doors only: true = open (passable)
   rotation?: number;   // rotation in degrees (default 0); applies to wooden_floor and workbench
+  /** Shipyard only — current ship under construction. Absent when empty. */
+  construction?: ShipConstruction;
 }
 
 // Company identifiers (mirror server COMPANY_* constants)

@@ -24,6 +24,7 @@ import { PhysicsConfig } from '../sim/Types.js';
 import { UIManager } from './ui/UIManager.js';
 import { RadialMenu } from './ui/RadialMenu.js';
 import { CraftingMenu } from './ui/CraftingMenu.js';
+import { ShipyardMenu } from './ui/ShipyardMenu.js';
 
 // Audio System
 import { AudioManager } from './audio/AudioManager.js';
@@ -151,6 +152,8 @@ export class ClientApplication {
   private _radialMenu = new RadialMenu();
   /** Crafting panel opened when the player presses E near a workbench. */
   private craftingMenu = new CraftingMenu();
+  /** Ship construction panel opened when the player presses E at a shipyard. */
+  private shipyardMenu = new ShipyardMenu();
   /** True when the player's active slot is wooden_floor or workbench on an island. */
   private islandBuildMode = false;
   private accumulator = 0;
@@ -656,6 +659,10 @@ export class ClientApplication {
               this.craftingMenu.close();
               return;
             }
+            if (this.shipyardMenu.visible) {
+              this.shipyardMenu.close();
+              return;
+            }
             const hovered = this.renderSystem.getHoveredStructure();
             if (hovered?.type === 'workbench') {
               console.log(`⚒ [INTERACT] Sending structure_interact for workbench ${hovered.id}`);
@@ -874,7 +881,7 @@ export class ClientApplication {
             // Only floors and workbenches carry rotation; walls/doors snap by orientation
             const rot = kind === 'wooden_floor'
               ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
-              : kind === 'workbench' ? this.islandBuildRotationDeg : 0;
+              : (kind === 'workbench' || kind === 'shipyard') ? this.islandBuildRotationDeg : 0;
             this.networkManager.sendPlaceStructure(kind, pos.x, pos.y, rot);
           }
           return;
@@ -991,6 +998,7 @@ export class ClientApplication {
 
       // Let UI panels (e.g. manning priority panel) consume clicks before game logic
       this.inputManager.onUIClick = (x, y) => {
+        if (this.shipyardMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
         if (this.craftingMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
         if (this.uiManager?.handleClick(x, y)) return true;
         return false;
@@ -1348,8 +1356,30 @@ export class ClientApplication {
       this.networkManager.onDoorToggled = (id, open) => {
         this.renderSystem.updateStructureDoorOpen(id, open);
       };
-      this.networkManager.onCraftingOpen = (structureId, _structureType) => {
-        this.craftingMenu.open(structureId);
+      this.networkManager.onCraftingOpen = (structureId, structureType) => {
+        if (structureType === 'shipyard') {
+          // Fallback if server still sends crafting_open for shipyard (pre-update)
+          this.shipyardMenu.open(structureId, 'empty', []);
+        } else {
+          this.craftingMenu.open(structureId);
+        }
+      };
+
+      this.networkManager.onShipyardState = (structureId, phase, modulesPlaced, shipSpawned) => {
+        this.renderSystem.updateShipyardConstruction(structureId, phase, modulesPlaced);
+        if (this.shipyardMenu.visible && this.shipyardMenu.structureId === structureId) {
+          this.shipyardMenu.updateState(phase, modulesPlaced);
+        } else {
+          this.shipyardMenu.open(structureId, phase, modulesPlaced);
+        }
+        if (shipSpawned) {
+          this.renderSystem.showAnnouncement('⚓ Ship launched!', 'info', 3.5);
+        }
+      };
+
+      this.shipyardMenu.onAction = (action, module) => {
+        if (this.shipyardMenu.structureId == null) return;
+        this.networkManager.sendShipyardAction(this.shipyardMenu.structureId, action, module);
       };
 
       this.craftingMenu.onCraft = (recipeId) => {
@@ -1808,6 +1838,14 @@ export class ClientApplication {
       // Crafting menu (rendered on top of all other UI)
       if (this.craftingMenu.visible) {
         this.craftingMenu.render(
+          this.renderSystem.getContext(),
+          this.canvas.width,
+          this.canvas.height,
+        );
+      }
+      // Shipyard construction menu
+      if (this.shipyardMenu.visible) {
+        this.shipyardMenu.render(
           this.renderSystem.getContext(),
           this.canvas.width,
           this.canvas.height,
@@ -2617,12 +2655,9 @@ export class ClientApplication {
       switch (e.key) {
         case 'Escape':
         case '`': { // backtick also closes/cancels
-          // Close crafting menu if open
-          if (this.craftingMenu.visible) {
-            this.craftingMenu.close();
-            e.preventDefault();
-            break;
-          }
+          // Close crafting/shipyard menus if open
+          if (this.craftingMenu.visible) { this.craftingMenu.close(); e.preventDefault(); break; }
+          if (this.shipyardMenu.visible) { this.shipyardMenu.close(); e.preventDefault(); break; }
           // Exit any active build mode (ship or island)
           if (this.buildMenuOpen || this.explicitBuildMode || this.pendingGhostKind !== null || this.islandBuildMode) {
             this.exitAllBuildModes();

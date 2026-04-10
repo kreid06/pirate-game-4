@@ -6,7 +6,7 @@
  */
 
 import { NetworkConfig } from '../client/ClientConfig.js';
-import { WorldState, InputFrame, Npc, Ship, IslandDef, IslandResource, IslandPreset, PlacedStructure } from '../sim/Types.js';
+import { WorldState, InputFrame, Npc, Ship, IslandDef, IslandResource, IslandPreset, PlacedStructure, ConstructionPhase } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { createShipAtPosition } from '../sim/ShipUtils.js';
 import { ShipModule, ModuleKind, MODULE_TYPE_MAP } from '../sim/modules.js';
@@ -554,8 +554,10 @@ export class NetworkManager {
   public onStructuresList: ((structures: PlacedStructure[]) => void) | null = null;
   /** Fired when the server confirms a workbench can be opened (E-key interact). */
   public onCraftingOpen: ((structureId: number, structureType: string) => void) | null = null;
-  /** Fired when the server responds to a craft_item request. */
+  /** Fired when the server confirms a craft_item request. */
   public onCraftResult: ((success: boolean, recipeId: string, reason?: string) => void) | null = null;
+  /** Fired when the server sends updated ship-construction state for a shipyard. */
+  public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number) => void) | null = null;
   /** Fired when the server rejects a structure placement with a reason string. */
   public onPlacementFailed: ((reason: string, x: number, y: number, structureType: string, blockerId: number | null) => void) | null = null;
   /** Fired when a door is toggled open or closed by any player. */
@@ -1180,6 +1182,14 @@ export class NetworkManager {
   sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard', x: number, y: number, rotationDeg = 0): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y, rotation: rotationDeg });
+  }
+
+  /** Send a ship-construction action to the server. */
+  sendShipyardAction(shipyardId: number, action: string, module?: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    const msg: Record<string, unknown> = { type: 'shipyard_action', shipyard_id: shipyardId, action };
+    if (module) msg['module'] = module;
+    this.socket.send(JSON.stringify(msg));
   }
 
   /**
@@ -2091,6 +2101,10 @@ export class NetworkManager {
           placerName: s.placer_name ?? '',
           doorOpen:  s.open ?? false,
           rotation:  s.rotation ?? 0,
+          construction: s.structure_type === 'shipyard' ? {
+            phase: (s.construction_phase === 'building' ? 'building' : 'empty') as ConstructionPhase,
+            modulesPlaced: Array.isArray(s.modules_placed) ? s.modules_placed : [],
+          } : undefined,
         }));
         this.onStructuresList?.(structs);
         break;
@@ -2159,6 +2173,17 @@ export class NetworkManager {
 
       case 'crafting_open':
         this.onCraftingOpen?.(message.structure_id ?? 0, message.structure_type ?? 'workbench');
+        break;
+
+      case 'shipyard_state': {
+        const phase = message.phase === 'building' ? 'building' : 'empty' as const;
+        const modules: string[] = Array.isArray(message.modules_placed) ? message.modules_placed : [];
+        this.onShipyardState?.(message.structure_id ?? 0, phase, modules, message.ship_spawned);
+        break;
+      }
+
+      case 'shipyard_action_fail':
+        // Surface failure reason as a general announcement if needed (handled in ClientApplication)
         break;
 
       case 'FLAME_CONE_FIRE': // legacy — ignore

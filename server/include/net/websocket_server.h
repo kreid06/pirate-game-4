@@ -254,6 +254,24 @@ typedef enum {
     STRUCT_SHIPYARD     = 5,  /* placed in shallow water near island — used to build ships */
 } PlacedStructureType;
 
+/** Shallow-water ring width as a multiple of the island's own radius.
+ *  e.g. 1.5 → a 185 px beach island gets ~278 px of shallow water. */
+
+typedef enum {
+    CONSTRUCTION_EMPTY    = 0,  /* no ship under construction */
+    CONSTRUCTION_BUILDING = 1,  /* skeleton laid; modules can be installed */
+} ShipConstructionPhase;
+
+/* Bitmask values for PlacedStructure.modules_placed */
+#define MODULE_HULL_LEFT   (1u << 0)
+#define MODULE_HULL_RIGHT  (1u << 1)
+#define MODULE_DECK        (1u << 2)
+#define MODULE_MAST        (1u << 3)
+#define MODULE_CANNON_PORT (1u << 4)
+#define MODULE_CANNON_STBD (1u << 5)
+/** All three required modules to allow launch */
+#define MODULES_REQUIRED   (MODULE_HULL_LEFT | MODULE_HULL_RIGHT | MODULE_DECK)
+
 typedef struct {
     bool     active;
     uint32_t id;
@@ -267,6 +285,10 @@ typedef struct {
     uint32_t placer_id;      /* player_id who built this — used for company promotion */
     char     placer_name[64]; /* display name of the player who built this */
     bool     open;           /* doors only: true = open (passable) */
+    /* Shipyard-only construction state — zero-initialised for all other types */
+    ShipConstructionPhase construction_phase;
+    uint8_t  modules_placed;   /* bitmask of MODULE_* bits */
+    uint8_t  construction_company; /* company that owns the ship being built */
 } PlacedStructure;
 
 #define MAX_PLACED_STRUCTURES 512

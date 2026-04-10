@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
@@ -1163,6 +1163,13 @@ export class RenderSystem {
   updateStructureDoorOpen(id: number, open: boolean): void {
     const s = this.placedStructures.find(p => p.id === id);
     if (s && s.type === 'door') s.doorOpen = open;
+  }
+
+  /** Update ship construction state after a shipyard_state broadcast. */
+  updateShipyardConstruction(id: number, phase: ConstructionPhase, modulesPlaced: string[]): void {
+    const s = this.placedStructures.find(p => p.id === id);
+    if (!s || s.type !== 'shipyard') return;
+    s.construction = phase === 'empty' ? undefined : { phase, modulesPlaced };
   }
 
   /** Set (or clear) the structure that should be highlighted red as a placement blocker. */
@@ -2804,8 +2811,8 @@ export class RenderSystem {
           lx = dx * c - dy * sn;
           ly = dx * sn + dy * c;
         }
-        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'shipyard' ? 65 : half;
-        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'shipyard' ? 100 : half;
+        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'shipyard' ? 170 : half;
+        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'shipyard' ? 445 : half;
         if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) {
           if (s.type === 'workbench' || s.type === 'shipyard') {
             // Workbench/shipyard always wins — stop searching
@@ -3114,13 +3121,13 @@ export class RenderSystem {
         }
         ctx.restore();
       } else if (s.type === 'shipyard') {
-        // ── U-shaped dry dock: two side arms + back wall, mouth opens toward rotation direction ──
-        const ARM_T  = sz * 0.50;   // arm / wall thickness
-        const INT_W  = sz * 1.60;   // interior bay width (fits brigantine beam)
-        const ARM_L  = sz * 3.50;   // arm length — bay depth
-        const BACK_T = sz * 0.50;   // back wall thickness
-        const totalW = ARM_T + INT_W + ARM_T;   // sz * 2.6
-        const totalH = BACK_T + ARM_L;          // sz * 4.0
+        // ── U-shaped dry dock sized to fit the Brigantine (760×180 world px) ──
+        const ARM_T  = sz * 1.00;   // pier arm thickness
+        const INT_W  = sz * 4.80;   // interior bay width  (brigantine beam 180 + margins)
+        const ARM_L  = sz * 16.80;  // arm length / bay depth (brigantine length 760 + margins)
+        const BACK_T = sz * 1.00;   // back wall thickness
+        const totalW = ARM_T + INT_W + ARM_T;   // sz * 6.8
+        const totalH = BACK_T + ARM_L;          // sz * 17.8
         const hw = totalW / 2, hh = totalH / 2;
         const cx = ssp.x, cy = ssp.y;
         const hpFrac    = s.maxHp > 0 ? s.hp / s.maxHp : 1;
@@ -3166,38 +3173,149 @@ export class RenderSystem {
         // ── Dark seafloor inside the bay ──────────────────────────────────────
         ctx.fillStyle = 'rgba(10, 40, 65, 0.72)';
         ctx.fillRect(cx - hw + ARM_T, cy - hh + BACK_T, INT_W, ARM_L);
-        // ── Brigantine hull silhouette ─────────────────────────────────────────
-        const shpHW  = INT_W * 0.36;
-        const shpTop = cy - hh + BACK_T + ARM_L * 0.05;
-        const shpBot = cy + hh          - ARM_L * 0.05;
-        const shpLen = shpBot - shpTop;
-        ctx.fillStyle   = 'rgba(68, 46, 20, 0.30)';
-        ctx.strokeStyle = 'rgba(155, 115, 60, 0.55)';
-        ctx.lineWidth   = Math.max(1, 1.5 * zoom);
-        ctx.beginPath();
-        ctx.moveTo(cx, shpTop);
-        ctx.bezierCurveTo(cx + shpHW * 0.5, shpTop + shpLen * 0.07,
-                          cx + shpHW,       shpTop + shpLen * 0.22,
-                          cx + shpHW,       shpTop + shpLen * 0.65);
-        ctx.bezierCurveTo(cx + shpHW,       shpTop + shpLen * 0.85,
-                          cx + shpHW * 0.5, shpBot,
-                          cx,               shpBot);
-        ctx.bezierCurveTo(cx - shpHW * 0.5, shpBot,
-                          cx - shpHW,       shpTop + shpLen * 0.85,
-                          cx - shpHW,       shpTop + shpLen * 0.65);
-        ctx.bezierCurveTo(cx - shpHW,       shpTop + shpLen * 0.22,
-                          cx - shpHW * 0.5, shpTop + shpLen * 0.07,
-                          cx,               shpTop);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
+        // ── Brigantine hull silhouette (empty dock — ghost/placeholder) ────────
+        {
+          const shpHW  = INT_W * 0.36;
+          const shpTop = cy - hh + BACK_T + ARM_L * 0.05;
+          const shpBot = cy + hh          - ARM_L * 0.05;
+          const shpLen = shpBot - shpTop;
+          ctx.fillStyle   = 'rgba(68, 46, 20, 0.30)';
+          ctx.strokeStyle = 'rgba(155, 115, 60, 0.55)';
+          ctx.lineWidth   = Math.max(1, 1.5 * zoom);
+          ctx.beginPath();
+          ctx.moveTo(cx, shpTop);
+          ctx.bezierCurveTo(cx + shpHW * 0.5, shpTop + shpLen * 0.07,
+                            cx + shpHW,       shpTop + shpLen * 0.22,
+                            cx + shpHW,       shpTop + shpLen * 0.65);
+          ctx.bezierCurveTo(cx + shpHW,       shpTop + shpLen * 0.85,
+                            cx + shpHW * 0.5, shpBot,
+                            cx,               shpBot);
+          ctx.bezierCurveTo(cx - shpHW * 0.5, shpBot,
+                            cx - shpHW,       shpTop + shpLen * 0.85,
+                            cx - shpHW,       shpTop + shpLen * 0.65);
+          ctx.bezierCurveTo(cx - shpHW,       shpTop + shpLen * 0.22,
+                            cx - shpHW * 0.5, shpTop + shpLen * 0.07,
+                            cx,               shpTop);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
+        // ── Ship under construction (building phase) ───────────────────────────
+        if (s.construction?.phase === 'building') {
+          const mp    = s.construction.modulesPlaced;
+          const bHW   = INT_W * 0.44;   // brigantine half-beam in screen units
+          const bTop  = cy - hh + BACK_T + ARM_L * 0.02;  // bow tip
+          const bBot  = cy + hh          - ARM_L * 0.02;  // stern
+          const bLen  = bBot - bTop;
+
+          // Hull bezier path helper
+          const hullPath = () => {
+            ctx.beginPath();
+            ctx.moveTo(cx, bTop);
+            ctx.bezierCurveTo(cx + bHW * 0.5, bTop + bLen * 0.07,
+                              cx + bHW,       bTop + bLen * 0.22,
+                              cx + bHW,       bTop + bLen * 0.65);
+            ctx.bezierCurveTo(cx + bHW,       bTop + bLen * 0.85,
+                              cx + bHW * 0.5, bBot,
+                              cx,             bBot);
+            ctx.bezierCurveTo(cx - bHW * 0.5, bBot,
+                              cx - bHW,       bTop + bLen * 0.85,
+                              cx - bHW,       bTop + bLen * 0.65);
+            ctx.bezierCurveTo(cx - bHW,       bTop + bLen * 0.22,
+                              cx - bHW * 0.5, bTop + bLen * 0.07,
+                              cx,             bTop);
+            ctx.closePath();
+          };
+
+          // Keel / skeleton (always shown in building phase)
+          ctx.strokeStyle = 'rgba(200, 155, 80, 0.90)';
+          ctx.lineWidth   = Math.max(1.5, 3 * zoom);
+          ctx.setLineDash([Math.max(3, 6 * zoom), Math.max(2, 4 * zoom)]);
+          hullPath(); ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Port hull planks
+          if (mp.includes('hull_left')) {
+            ctx.strokeStyle = 'rgba(120, 80, 35, 0.95)';
+            ctx.lineWidth   = Math.max(2, 4 * zoom);
+            ctx.beginPath();
+            ctx.moveTo(cx - bHW, bTop + bLen * 0.65);
+            ctx.bezierCurveTo(cx - bHW, bTop + bLen * 0.85, cx - bHW * 0.5, bBot, cx, bBot);
+            ctx.moveTo(cx, bTop);
+            ctx.bezierCurveTo(cx - bHW * 0.5, bTop + bLen * 0.07, cx - bHW, bTop + bLen * 0.22, cx - bHW, bTop + bLen * 0.65);
+            ctx.stroke();
+          }
+          // Stbd hull planks
+          if (mp.includes('hull_right')) {
+            ctx.strokeStyle = 'rgba(120, 80, 35, 0.95)';
+            ctx.lineWidth   = Math.max(2, 4 * zoom);
+            ctx.beginPath();
+            ctx.moveTo(cx + bHW, bTop + bLen * 0.65);
+            ctx.bezierCurveTo(cx + bHW, bTop + bLen * 0.85, cx + bHW * 0.5, bBot, cx, bBot);
+            ctx.moveTo(cx, bTop);
+            ctx.bezierCurveTo(cx + bHW * 0.5, bTop + bLen * 0.07, cx + bHW, bTop + bLen * 0.22, cx + bHW, bTop + bLen * 0.65);
+            ctx.stroke();
+          }
+          // Deck
+          if (mp.includes('deck')) {
+            ctx.fillStyle = 'rgba(140, 100, 50, 0.35)';
+            hullPath(); ctx.fill();
+            ctx.strokeStyle = 'rgba(100, 72, 30, 0.40)';
+            ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+            const planks2 = 8;
+            for (let pi = 1; pi < planks2; pi++) {
+              const py2 = bTop + bLen * (pi / planks2);
+              ctx.beginPath(); ctx.moveTo(cx - bHW * 0.9, py2); ctx.lineTo(cx + bHW * 0.9, py2); ctx.stroke();
+            }
+          }
+          // Mast
+          if (mp.includes('mast')) {
+            const mastY = bTop + bLen * 0.30;
+            ctx.strokeStyle = 'rgba(180, 140, 70, 0.95)';
+            ctx.lineWidth   = Math.max(2, 3.5 * zoom);
+            ctx.beginPath(); ctx.moveTo(cx, bTop + bLen * 0.05); ctx.lineTo(cx, bTop + bLen * 0.55); ctx.stroke();
+            ctx.lineWidth   = Math.max(1.5, 2.5 * zoom);
+            ctx.beginPath(); ctx.moveTo(cx - bHW * 0.45, mastY); ctx.lineTo(cx + bHW * 0.45, mastY); ctx.stroke();
+          }
+          // Port cannon
+          if (mp.includes('cannon_port')) {
+            const canY = bTop + bLen * 0.45;
+            ctx.fillStyle = 'rgba(60, 60, 60, 0.90)';
+            ctx.beginPath(); ctx.arc(cx - bHW * 0.78, canY, Math.max(3, 5 * zoom), 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
+            const cbl = Math.max(4, 10 * zoom);
+            ctx.beginPath(); ctx.moveTo(cx - bHW * 0.78 - cbl, canY); ctx.lineTo(cx - bHW * 0.78 + cbl * 0.3, canY); ctx.stroke();
+          }
+          // Stbd cannon
+          if (mp.includes('cannon_stbd')) {
+            const canY = bTop + bLen * 0.45;
+            ctx.fillStyle = 'rgba(60, 60, 60, 0.90)';
+            ctx.beginPath(); ctx.arc(cx + bHW * 0.78, canY, Math.max(3, 5 * zoom), 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
+            const cbl = Math.max(4, 10 * zoom);
+            ctx.beginPath(); ctx.moveTo(cx + bHW * 0.78 + cbl, canY); ctx.lineTo(cx + bHW * 0.78 - cbl * 0.3, canY); ctx.stroke();
+          }
+          // Progress label
+          const required  = ['hull_left', 'hull_right', 'deck'];
+          const doneCnt   = required.filter(id => mp.includes(id)).length;
+          const allDone   = doneCnt === required.length;
+          ctx.font         = `bold ${Math.max(9, Math.round(11 * zoom))}px Consolas, monospace`;
+          ctx.textAlign    = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle    = allDone ? 'rgba(80, 200, 120, 0.90)' : 'rgba(220, 180, 80, 0.90)';
+          ctx.fillText(
+            allDone ? '⚓ Ready to Launch' : `Building… ${doneCnt}/${required.length} required`,
+            cx, cy - hh + BACK_T + ARM_L * 0.50
+          );
+        }
         // Mast yard-arm crosses (fore + main)
         ctx.strokeStyle = 'rgba(155, 115, 60, 0.65)';
         ctx.lineWidth   = Math.max(1, 2 * zoom);
         for (const mf of [0.28, 0.60]) {
-          const mpy = shpTop + shpLen * mf;
-          ctx.beginPath(); ctx.moveTo(cx,               mpy - ARM_T * 0.25); ctx.lineTo(cx,               mpy + ARM_T * 0.25); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(cx - shpHW * 0.4, mpy);               ctx.lineTo(cx + shpHW * 0.4, mpy);               ctx.stroke();
+          const mpy = cy - hh + BACK_T + ARM_L * mf;
+          const mhw = INT_W * 0.36;
+          ctx.beginPath(); ctx.moveTo(cx,             mpy - ARM_T * 0.25); ctx.lineTo(cx,             mpy + ARM_T * 0.25); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx - mhw * 0.4, mpy);               ctx.lineTo(cx + mhw * 0.4, mpy);               ctx.stroke();
         }
         // ── Scaffolding cross-beams and diagonal arm bracing ──────────────────
         ctx.strokeStyle = 'rgba(190, 150, 85, 0.85)';
@@ -3265,8 +3383,8 @@ export class RenderSystem {
       // Unrotated dimensions of the structure rect
       const THICK  = 0.18;
       const isWall = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
-      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'shipyard' ? sz * 2.6 : sz;
-      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'shipyard' ? sz * 4.0 : sz;
+      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'shipyard' ? sz * 6.8  : sz;
+      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'shipyard' ? sz * 17.8 : sz;
 
       // Axis-aligned bounding box after rotation (used for bar/tooltip screen positioning)
       const absC = Math.abs(Math.cos(rotRad)), absS = Math.abs(Math.sin(rotRad));
@@ -3540,20 +3658,26 @@ export class RenderSystem {
         return dx * dx + dy * dy > 250 * 250;
       })() : false;
       const syOccupied = this.placedStructures.some(s =>
-        s.type === 'shipyard' && Math.hypot(s.x - mx, s.y - my) < 200
+        s.type === 'shipyard' && Math.hypot(s.x - mx, s.y - my) < 700
       );
       const syInvalid = !inWater || !inShallowZone || syPlayerFar || syOccupied;
       this._islandGhostTooFar = syInvalid;
-      // Ghost uses same proportions as rendered shipyard (ARM_T/INT_W/ARM_L/BACK_T × TILE × zoom)
-      const GA_T = TILE * 0.50 * zoom;
-      const GI_W = TILE * 1.60 * zoom;
-      const GA_L = TILE * 3.50 * zoom;
-      const GB_T = TILE * 0.50 * zoom;
+      // Ghost uses same proportions as rendered shipyard (bracketized to brigantine scale)
+      const GA_T = TILE * 1.00 * zoom;
+      const GI_W = TILE * 4.80 * zoom;
+      const GA_L = TILE * 16.80 * zoom;
+      const GB_T = TILE * 1.00 * zoom;
       const gtW  = Math.max(4, GA_T + GI_W + GA_T);
       const gtH  = Math.max(4, GB_T + GA_L);
       const gHW = gtW / 2, gHH = gtH / 2;
       ctx.save();
       ctx.globalAlpha = 0.72 + 0.14 * Math.sin(performance.now() / 300);
+      // Apply rotation — same effectiveRotDeg used by floor/workbench ghost
+      if (effectiveRotDeg !== 0) {
+        ctx.translate(msp.x, msp.y);
+        ctx.rotate(effectiveRotDeg * Math.PI / 180);
+        ctx.translate(-msp.x, -msp.y);
+      }
       ctx.fillStyle   = syInvalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 180, 255, 0.45)';
       ctx.strokeStyle = syInvalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 200, 255, 0.75)';
       ctx.lineWidth   = Math.max(1, 2 * zoom);
@@ -3717,9 +3841,10 @@ export class RenderSystem {
     // Apply rotation around ghost centre
     const WALL_THICK = 0.18;
     const isWallOrDoor = this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame' || this.islandBuildKind === 'door';
-    const ghostRotRad = isWallOrDoor ? this._wallGhostRotRad
-      : (this.islandBuildKind === 'wooden_floor' || this.islandBuildKind === 'workbench')
-          ? effectiveRotDeg * Math.PI / 180 : 0;
+    const buildKind    = this.islandBuildKind as string;
+    const isRotatable  = buildKind === 'wooden_floor' || buildKind === 'workbench' || buildKind === 'shipyard';
+    const ghostRotRad  = isWallOrDoor ? this._wallGhostRotRad
+                       : isRotatable ? effectiveRotDeg * Math.PI / 180 : 0;
     if (ghostRotRad !== 0) {
       ctx.translate(msp.x, msp.y);
       ctx.rotate(ghostRotRad);

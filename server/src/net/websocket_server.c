@@ -4479,6 +4479,7 @@ static void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t a
 #define STRUCT_PLACE_RANGE  200.0f  /* player must be within this range of placement point */
 #define STRUCT_FLOOR_REQ_R   55.0f  /* workbench centre must be within this of a floor tile */
 #define STRUCT_INTERACT_R   110.0f  /* E-key range to open workbench */
+#define SHIPYARD_INTERACT_R 700.0f  /* larger range for the big shipyard structure */
 
 /*
  * SAT (Separating Axis Theorem) overlap test for two 50×50 square tiles.
@@ -4989,7 +4990,9 @@ static void handle_structure_interact(WebSocketPlayer* player, struct WebSocketC
         if (!placed_structures[i].active || placed_structures[i].id != sid) continue;
         float dx = player->x - placed_structures[i].x;
         float dy = player->y - placed_structures[i].y;
-        if (dx*dx + dy*dy > STRUCT_INTERACT_R * STRUCT_INTERACT_R) {
+        float max_ir = (placed_structures[i].type == STRUCT_SHIPYARD)
+                       ? SHIPYARD_INTERACT_R : STRUCT_INTERACT_R;
+        if (dx*dx + dy*dy > max_ir * max_ir) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"structure_interact_fail\",\"reason\":\"too_far\"}");
             goto si_send;
@@ -5001,9 +5004,28 @@ static void handle_structure_interact(WebSocketPlayer* player, struct WebSocketC
             goto si_send;
         }
         if (placed_structures[i].type == STRUCT_SHIPYARD) {
+            /* Build modules_placed JSON array */
+            char mod_json[256] = "[]";
+            if (placed_structures[i].modules_placed) {
+                int mp2 = 0;
+                mod_json[mp2++] = '[';
+                const char* mnames[6] = {"hull_left","hull_right","deck","mast","cannon_port","cannon_stbd"};
+                bool mfirst = true;
+                for (int b = 0; b < 6; b++) {
+                    if (placed_structures[i].modules_placed & (1u << b)) {
+                        if (!mfirst) mod_json[mp2++] = ',';
+                        mp2 += snprintf(mod_json + mp2, (int)sizeof(mod_json) - mp2, "\"%s\"", mnames[b]);
+                        mfirst = false;
+                    }
+                }
+                mod_json[mp2++] = ']';
+                mod_json[mp2]   = '\0';
+            }
+            const char* phase_str = placed_structures[i].construction_phase == CONSTRUCTION_BUILDING
+                                    ? "building" : "empty";
             snprintf(response, sizeof(response),
-                     "{\"type\":\"crafting_open\",\"structure_id\":%u,\"structure_type\":\"shipyard\"}",
-                     sid);
+                     "{\"type\":\"shipyard_state\",\"structure_id\":%u,\"phase\":\"%s\",\"modules_placed\":%s}",
+                     sid, phase_str, mod_json);
             goto si_send;
         }
         if (placed_structures[i].type == STRUCT_DOOR) {
@@ -5029,6 +5051,230 @@ si_send:;
     size_t flen = websocket_create_frame(
         WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
     if (flen > 0 && flen < sizeof(frame)) send(client->fd, frame, flen, 0);
+}
+
+/* ── Helper: build shipyard_state JSON into buf (caller provides space) ── */
+static void build_shipyard_state_json(char* buf, size_t bufsz,
+                                      const PlacedStructure* sy,
+                                      uint32_t ship_spawned) {
+    char mod_json[256] = "[]";
+    if (sy->modules_placed) {
+        int pos = 0;
+        mod_json[pos++] = '[';
+        const char* mnames[6] = {"hull_left","hull_right","deck","mast","cannon_port","cannon_stbd"};
+        bool mfirst = true;
+        for (int b = 0; b < 6; b++) {
+            if (sy->modules_placed & (1u << b)) {
+                if (!mfirst) mod_json[pos++] = ',';
+                pos += snprintf(mod_json + pos, (int)sizeof(mod_json) - pos,
+                                "\"%s\"", mnames[b]);
+                mfirst = false;
+            }
+        }
+        mod_json[pos++] = ']';
+        mod_json[pos]   = '\0';
+    }
+    const char* phase_str = sy->construction_phase == CONSTRUCTION_BUILDING ? "building" : "empty";
+    if (ship_spawned) {
+        snprintf(buf, bufsz,
+                 "{\"type\":\"shipyard_state\",\"structure_id\":%u,"
+                 "\"phase\":\"%s\",\"modules_placed\":%s,\"ship_spawned\":%u}",
+                 sy->id, phase_str, mod_json, ship_spawned);
+    } else {
+        snprintf(buf, bufsz,
+                 "{\"type\":\"shipyard_state\",\"structure_id\":%u,"
+                 "\"phase\":\"%s\",\"modules_placed\":%s}",
+                 sy->id, phase_str, mod_json);
+    }
+}
+
+/*
+ * shipyard_action: player interacts with shipyard construction system.
+ * Actions: "craft_skeleton", "add_module" (with "module" field), "release_ship".
+ */
+static void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[512];
+
+    /* Parse fields */
+    uint32_t sid = 0;
+    char action[32]  = "";
+    char module[32]  = "";
+    const char* f;
+    if ((f = strstr(payload, "\"shipyard_id\":"))) sscanf(f + 14, "%u", &sid);
+    if ((f = strstr(payload, "\"action\":\""))) {
+        f += 10; int n = 0;
+        while (f[n] && f[n] != '"' && n < 31) { action[n] = f[n]; n++; } action[n] = 0;
+    }
+    if ((f = strstr(payload, "\"module\":\""))) {
+        f += 10; int n = 0;
+        while (f[n] && f[n] != '"' && n < 31) { module[n] = f[n]; n++; } module[n] = 0;
+    }
+
+    /* Find shipyard */
+    PlacedStructure* sy = NULL;
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        if (placed_structures[i].active && placed_structures[i].id == sid
+            && placed_structures[i].type == STRUCT_SHIPYARD) {
+            sy = &placed_structures[i]; break;
+        }
+    }
+    if (!sy) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"shipyard_action_fail\",\"reason\":\"not_found\"}");
+        goto sya_send;
+    }
+    /* Distance check (generous radius for large structure) */
+    {
+        float ddx = player->x - sy->x, ddy = player->y - sy->y;
+        if (ddx*ddx + ddy*ddy > SHIPYARD_INTERACT_R * SHIPYARD_INTERACT_R) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"too_far\"}");
+            goto sya_send;
+        }
+    }
+
+    if (strcmp(action, "craft_skeleton") == 0) {
+        /* ── Lay keel: 20 Wood + 10 Fiber ───────────────────────────────── */
+        if (sy->construction_phase != CONSTRUCTION_EMPTY) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"already_building\"}");
+            goto sya_send;
+        }
+        /* Count totals (may span multiple slots) */
+        int wood_total = 0, fiber_total = 0;
+        for (int s2 = 0; s2 < INVENTORY_SLOTS; s2++) {
+            if (player->inventory.slots[s2].item == ITEM_WOOD)  wood_total  += player->inventory.slots[s2].quantity;
+            if (player->inventory.slots[s2].item == ITEM_FIBER) fiber_total += player->inventory.slots[s2].quantity;
+        }
+        if (wood_total < 20 || fiber_total < 10) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"missing_materials\"}");
+            goto sya_send;
+        }
+        /* Consume */
+        int need_wood = 20, need_fiber = 10;
+        for (int s2 = 0; s2 < INVENTORY_SLOTS && (need_wood > 0 || need_fiber > 0); s2++) {
+            if (need_wood > 0 && player->inventory.slots[s2].item == ITEM_WOOD) {
+                int take = player->inventory.slots[s2].quantity < need_wood
+                           ? player->inventory.slots[s2].quantity : need_wood;
+                player->inventory.slots[s2].quantity -= (uint8_t)take;
+                if (player->inventory.slots[s2].quantity == 0)
+                    player->inventory.slots[s2].item = ITEM_NONE;
+                need_wood -= take;
+            }
+            if (need_fiber > 0 && player->inventory.slots[s2].item == ITEM_FIBER) {
+                int take = player->inventory.slots[s2].quantity < need_fiber
+                           ? player->inventory.slots[s2].quantity : need_fiber;
+                player->inventory.slots[s2].quantity -= (uint8_t)take;
+                if (player->inventory.slots[s2].quantity == 0)
+                    player->inventory.slots[s2].item = ITEM_NONE;
+                need_fiber -= take;
+            }
+        }
+        sy->construction_phase   = CONSTRUCTION_BUILDING;
+        sy->modules_placed       = 0;
+        sy->construction_company = player->company_id;
+
+    } else if (strcmp(action, "add_module") == 0) {
+        /* ── Install a module ───────────────────────────────────────────── */
+        if (sy->construction_phase != CONSTRUCTION_BUILDING) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"no_skeleton\"}");
+            goto sya_send;
+        }
+        uint8_t bit = 0xFF;
+        ItemKind cost_item = ITEM_NONE; int cost_qty = 0;
+        ItemKind cost_item2 = ITEM_NONE; int cost_qty2 = 0;
+        if      (!strcmp(module,"hull_left"))   { bit=0; cost_item=ITEM_PLANK; cost_qty=15; }
+        else if (!strcmp(module,"hull_right"))  { bit=1; cost_item=ITEM_PLANK; cost_qty=15; }
+        else if (!strcmp(module,"deck"))        { bit=2; cost_item=ITEM_PLANK; cost_qty=10; }
+        else if (!strcmp(module,"mast"))        { bit=3; cost_item=ITEM_WOOD;  cost_qty=10;
+                                                          cost_item2=ITEM_FIBER; cost_qty2=5; }
+        else if (!strcmp(module,"cannon_port")) { bit=4; cost_item=ITEM_CANNON; cost_qty=1; }
+        else if (!strcmp(module,"cannon_stbd")) { bit=5; cost_item=ITEM_CANNON; cost_qty=1; }
+        else {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"unknown_module\"}");
+            goto sya_send;
+        }
+        if (sy->modules_placed & (1u << bit)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"already_placed\"}");
+            goto sya_send;
+        }
+        /* Check totals */
+        int total1 = 0, total2 = 0;
+        for (int s2 = 0; s2 < INVENTORY_SLOTS; s2++) {
+            if (player->inventory.slots[s2].item == cost_item)  total1 += player->inventory.slots[s2].quantity;
+            if (cost_item2 && player->inventory.slots[s2].item == cost_item2) total2 += player->inventory.slots[s2].quantity;
+        }
+        if (total1 < cost_qty || (cost_item2 != ITEM_NONE && total2 < cost_qty2)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"missing_materials\"}");
+            goto sya_send;
+        }
+        /* Consume */
+        int need1 = cost_qty, need2 = cost_qty2;
+        for (int s2 = 0; s2 < INVENTORY_SLOTS && (need1 > 0 || need2 > 0); s2++) {
+            if (need1 > 0 && player->inventory.slots[s2].item == cost_item) {
+                int take = player->inventory.slots[s2].quantity < need1
+                           ? player->inventory.slots[s2].quantity : need1;
+                player->inventory.slots[s2].quantity -= (uint8_t)take;
+                if (!player->inventory.slots[s2].quantity) player->inventory.slots[s2].item = ITEM_NONE;
+                need1 -= take;
+            }
+            if (need2 > 0 && cost_item2 != ITEM_NONE && player->inventory.slots[s2].item == cost_item2) {
+                int take = player->inventory.slots[s2].quantity < need2
+                           ? player->inventory.slots[s2].quantity : need2;
+                player->inventory.slots[s2].quantity -= (uint8_t)take;
+                if (!player->inventory.slots[s2].quantity) player->inventory.slots[s2].item = ITEM_NONE;
+                need2 -= take;
+            }
+        }
+        sy->modules_placed |= (1u << bit);
+
+    } else if (strcmp(action, "release_ship") == 0) {
+        /* ── Launch the completed ship ──────────────────────────────────── */
+        if (sy->construction_phase != CONSTRUCTION_BUILDING) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"no_ship\"}");
+            goto sya_send;
+        }
+        if ((sy->modules_placed & MODULES_REQUIRED) != MODULES_REQUIRED) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"missing_required_modules\"}");
+            goto sya_send;
+        }
+        uint8_t company = sy->construction_company;
+        uint32_t new_ship_id = websocket_server_create_ship(sy->x, sy->y + 450.0f, company);
+        sy->construction_phase = CONSTRUCTION_EMPTY;
+        sy->modules_placed     = 0;
+        char bcast[512];
+        build_shipyard_state_json(bcast, sizeof(bcast), sy, new_ship_id);
+        websocket_server_broadcast(bcast);
+        return; /* broadcast sent */
+
+    } else {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"shipyard_action_fail\",\"reason\":\"unknown_action\"}");
+        goto sya_send;
+    }
+
+    /* Broadcast updated state to all clients */
+    {
+        char bcast[512];
+        build_shipyard_state_json(bcast, sizeof(bcast), sy, 0);
+        websocket_server_broadcast(bcast);
+    }
+    return;
+
+sya_send:;
+    {
+        char frame[600];
+        size_t flen = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response),
+                                             frame, sizeof(frame));
+        if (flen > 0 && flen < sizeof(frame)) send(client->fd, frame, flen, 0);
+    }
 }
 
 /*
@@ -5061,6 +5307,23 @@ static void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketC
         PlacedStructureType demolished_type = placed_structures[i].type;
         float fx = placed_structures[i].x;
         float fy = placed_structures[i].y;
+        /* Shipyard: auto-release any ship under construction before demolishing */
+        if (demolished_type == STRUCT_SHIPYARD
+            && placed_structures[i].construction_phase == CONSTRUCTION_BUILDING) {
+            if ((placed_structures[i].modules_placed & MODULES_REQUIRED) == MODULES_REQUIRED) {
+                /* Has required modules — spawn the ship at the mouth */
+                uint8_t bco = placed_structures[i].construction_company;
+                uint32_t new_sid = websocket_server_create_ship(fx, fy + 450.0f, bco);
+                char abcast[256];
+                snprintf(abcast, sizeof(abcast),
+                         "{\"type\":\"ship_auto_released\",\"ship_id\":%u}", new_sid);
+                websocket_server_broadcast(abcast);
+                log_info("⚓ Shipyard %u demolished — auto-released ship %u", sid, new_sid);
+            }
+            /* Either way, clear construction state before array compact */
+            placed_structures[i].construction_phase = CONSTRUCTION_EMPTY;
+            placed_structures[i].modules_placed     = 0;
+        }
         /* Shift subsequent entries down to keep the array dense */
         for (uint32_t j = i; j + 1 < placed_structure_count; j++)
             placed_structures[j] = placed_structures[j + 1];
@@ -7621,13 +7884,39 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_WORKBENCH    ? "workbench" :
                                             placed_structures[si].type == STRUCT_WALL         ? "wall" :
                                             placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
-                                            placed_structures[si].type == STRUCT_DOOR         ? "door" : "unknown";
+                                            placed_structures[si].type == STRUCT_DOOR         ? "door" :
+                                            placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" : "unknown";
                                         bool hs_is_door = (placed_structures[si].type == STRUCT_DOOR);
+                                        bool hs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
+                                        /* Build extra fields for shipyard construction state */
+                                        char hs_sy_extra[256] = "";
+                                        if (hs_is_sy) {
+                                            char hs_mj[128] = "[]";
+                                            if (placed_structures[si].modules_placed) {
+                                                int hm = 0;
+                                                hs_mj[hm++] = '[';
+                                                const char* hmn[6] = {"hull_left","hull_right","deck","mast","cannon_port","cannon_stbd"};
+                                                bool hmf = true;
+                                                for (int b = 0; b < 6; b++) {
+                                                    if (placed_structures[si].modules_placed & (1u << b)) {
+                                                        if (!hmf) hs_mj[hm++] = ',';
+                                                        hm += snprintf(hs_mj + hm, (int)sizeof(hs_mj) - hm, "\"%s\"", hmn[b]);
+                                                        hmf = false;
+                                                    }
+                                                }
+                                                hs_mj[hm++] = ']';
+                                                hs_mj[hm]   = '\0';
+                                            }
+                                            const char* hs_phase = placed_structures[si].construction_phase == CONSTRUCTION_BUILDING ? "building" : "empty";
+                                            snprintf(hs_sy_extra, sizeof(hs_sy_extra),
+                                                     ",\"construction_phase\":\"%s\",\"modules_placed\":%s",
+                                                     hs_phase, hs_mj);
+                                        }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
                                                           "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                           "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                           "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-                                                          ",\"rotation\":%.2f%s}",
+                                                          ",\"rotation\":%.2f%s%s}",
                                                           hs_sfirst ? "" : ",",
                                                           placed_structures[si].id, hs_stype,
                                                           placed_structures[si].island_id,
@@ -7637,7 +7926,8 @@ int websocket_server_update(struct Sim* sim) {
                                                           (unsigned)placed_structures[si].max_hp,
                                                           placed_structures[si].placer_name,
                                                           placed_structures[si].rotation,
-                                                          hs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "");
+                                                          hs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
+                                                          hs_sy_extra);
                                             hs_sfirst = false;
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp, "]}");
@@ -7913,6 +8203,14 @@ int websocket_server_update(struct Sim* sim) {
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) handle_demolish_structure(player, client, payload);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "shipyard_action") == 0) {
+                            // Ship construction: craft_skeleton / add_module / release_ship
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_shipyard_action(player, client, payload);
                             }
                             handled = true;
 
@@ -10125,13 +10423,38 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_WORKBENCH    ? "workbench" :
                                             placed_structures[si].type == STRUCT_WALL         ? "wall" :
                                             placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
-                                            placed_structures[si].type == STRUCT_DOOR         ? "door" : "unknown";
+                                            placed_structures[si].type == STRUCT_DOOR         ? "door" :
+                                            placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" : "unknown";
                                         bool is_door_s = (placed_structures[si].type == STRUCT_DOOR);
+                                        bool is_sy_s   = (placed_structures[si].type == STRUCT_SHIPYARD);
+                                        char sy_extra_s[256] = "";
+                                        if (is_sy_s) {
+                                            char smj[128] = "[]";
+                                            if (placed_structures[si].modules_placed) {
+                                                int smp = 0;
+                                                smj[smp++] = '[';
+                                                const char* smn[6] = {"hull_left","hull_right","deck","mast","cannon_port","cannon_stbd"};
+                                                bool smf = true;
+                                                for (int b = 0; b < 6; b++) {
+                                                    if (placed_structures[si].modules_placed & (1u << b)) {
+                                                        if (!smf) smj[smp++] = ',';
+                                                        smp += snprintf(smj + smp, (int)sizeof(smj) - smp, "\"%s\"", smn[b]);
+                                                        smf = false;
+                                                    }
+                                                }
+                                                smj[smp++] = ']';
+                                                smj[smp]   = '\0';
+                                            }
+                                            const char* sphase = placed_structures[si].construction_phase == CONSTRUCTION_BUILDING ? "building" : "empty";
+                                            snprintf(sy_extra_s, sizeof(sy_extra_s),
+                                                     ",\"construction_phase\":\"%s\",\"modules_placed\":%s",
+                                                     sphase, smj);
+                                        }
                                         spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                          "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-                                                         ",\"rotation\":%.2f%s}",
+                                                         ",\"rotation\":%.2f%s%s}",
                                                          sfirst ? "" : ",",
                                                          placed_structures[si].id,
                                                          stype_str,
@@ -10143,7 +10466,8 @@ int websocket_server_update(struct Sim* sim) {
                                                          (unsigned)placed_structures[si].max_hp,
                                                          placed_structures[si].placer_name,
                                                          placed_structures[si].rotation,
-                                                         is_door_s ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "");
+                                                         is_door_s ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
+                                                         sy_extra_s);
                                         sfirst = false;
                                     }
                                     spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos, "]}");
@@ -10166,12 +10490,43 @@ int websocket_server_update(struct Sim* sim) {
                                 bool gfirst = true;
                                 for (uint32_t si = 0; si < placed_structure_count; si++) {
                                     if (!placed_structures[si].active) continue;
-                                    const char* gs_type = placed_structures[si].type == STRUCT_WOODEN_FLOOR
-                                                          ? "wooden_floor" : "workbench";
+                                    const char* gs_type =
+                                        placed_structures[si].type == STRUCT_WOODEN_FLOOR ? "wooden_floor" :
+                                        placed_structures[si].type == STRUCT_WORKBENCH    ? "workbench" :
+                                        placed_structures[si].type == STRUCT_WALL         ? "wall" :
+                                        placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
+                                        placed_structures[si].type == STRUCT_DOOR         ? "door" :
+                                        placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" : "unknown";
+                                    bool gs_is_door = (placed_structures[si].type == STRUCT_DOOR);
+                                    bool gs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
+                                    char gs_sy_extra[256] = "";
+                                    if (gs_is_sy) {
+                                        char gmj[128] = "[]";
+                                        if (placed_structures[si].modules_placed) {
+                                            int gmp = 0;
+                                            gmj[gmp++] = '[';
+                                            const char* gmn[6] = {"hull_left","hull_right","deck","mast","cannon_port","cannon_stbd"};
+                                            bool gmf = true;
+                                            for (int b = 0; b < 6; b++) {
+                                                if (placed_structures[si].modules_placed & (1u << b)) {
+                                                    if (!gmf) gmj[gmp++] = ',';
+                                                    gmp += snprintf(gmj + gmp, (int)sizeof(gmj) - gmp, "\"%s\"", gmn[b]);
+                                                    gmf = false;
+                                                }
+                                            }
+                                            gmj[gmp++] = ']';
+                                            gmj[gmp]   = '\0';
+                                        }
+                                        const char* gphase = placed_structures[si].construction_phase == CONSTRUCTION_BUILDING ? "building" : "empty";
+                                        snprintf(gs_sy_extra, sizeof(gs_sy_extra),
+                                                 ",\"construction_phase\":\"%s\",\"modules_placed\":%s",
+                                                 gphase, gmj);
+                                    }
                                     gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
                                                    "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                    "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                   "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\"}",
+                                                   "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
+                                                   ",\"rotation\":%.2f%s%s}",
                                                    gfirst ? "" : ",",
                                                    placed_structures[si].id, gs_type,
                                                    placed_structures[si].island_id,
@@ -10179,7 +10534,10 @@ int websocket_server_update(struct Sim* sim) {
                                                    (unsigned)placed_structures[si].company_id,
                                                    (unsigned)placed_structures[si].hp,
                                                    (unsigned)placed_structures[si].max_hp,
-                                                   placed_structures[si].placer_name);
+                                                   placed_structures[si].placer_name,
+                                                   placed_structures[si].rotation,
+                                                   gs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
+                                                   gs_sy_extra);
                                     gfirst = false;
                                 }
                                 gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp, "]}");
