@@ -4574,14 +4574,17 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
         }
     }
 
-    /* Wooden floor: AABB overlap check — tiles are 50×50 px, no two may share space */
+    /* Wooden floor: same-position check — tiles are 50×50 px, no two may share the same centre.
+       Using Euclidean distance < 45 px (valid adjacent tiles are always exactly 50 px apart
+       regardless of rotation, so this correctly handles all rotation angles). */
     if (stype_enum == STRUCT_WOODEN_FLOOR) {
+        const float TILE_OVERLAP_THRESH2 = 45.0f * 45.0f; /* < TILE*TILE = 2500 */
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             if (!placed_structures[si].active) continue;
             if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
-            float dx = fabsf(placed_structures[si].x - px);
-            float dy = fabsf(placed_structures[si].y - py);
-            if (dx < 50.0f && dy < 50.0f) {
+            float ddx = placed_structures[si].x - px;
+            float ddy = placed_structures[si].y - py;
+            if (ddx*ddx + ddy*ddy < TILE_OVERLAP_THRESH2) {
                 snprintf(response, sizeof(response),
                          "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
                 goto ps_send;
@@ -4590,10 +4593,21 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     }
 
     /* Wooden floor: must not intersect a tree (wood resource) on any island.
-       Obstacle radius TREE_R=20 px; test via circle-AABB closest-point. */
+       Obstacle radius TREE_R=20 px; test via circle-OBB closest-point in the floor's local space. */
     if (stype_enum == STRUCT_WOODEN_FLOOR) {
         const float TREE_R  = 20.0f;
         const float HALF    = 25.0f; /* half tile */
+        /* parse rotation early so we can use it here */
+        float floor_rot_rad = 0.0f;
+        {
+            char* rots = strstr(payload, "\"rotation\":");
+            if (rots) {
+                float r = 0.0f;
+                sscanf(rots + 11, "%f", &r);
+                floor_rot_rad = r * (float)M_PI / 180.0f;
+            }
+        }
+        float rc = cosf(-floor_rot_rad), rs = sinf(-floor_rot_rad);
         bool blocked = false;
         for (int ii = 0; ii < ISLAND_COUNT && !blocked; ii++) {
             const IslandDef *isl = &ISLAND_PRESETS[ii];
@@ -4602,10 +4616,13 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
                 if (isl->resources[ri].health <= 0) continue; /* depleted — no longer an obstacle */
                 float tx = isl->x + isl->resources[ri].ox;
                 float ty = isl->y + isl->resources[ri].oy;
-                /* Closest point on AABB [px-HALF, px+HALF] x [py-HALF, py+HALF] to tree */
-                float cx = tx < px - HALF ? px - HALF : (tx > px + HALF ? px + HALF : tx);
-                float cy = ty < py - HALF ? py - HALF : (ty > py + HALF ? py + HALF : ty);
-                float cdx = tx - cx, cdy = ty - cy;
+                /* Rotate tree into floor's local space */
+                float lx = (tx - px) * rc - (ty - py) * rs;
+                float ly = (tx - px) * rs + (ty - py) * rc;
+                /* Closest point on local AABB [-HALF, HALF] x [-HALF, HALF] */
+                float cx = lx < -HALF ? -HALF : (lx > HALF ? HALF : lx);
+                float cy = ly < -HALF ? -HALF : (ly > HALF ? HALF : ly);
+                float cdx = lx - cx, cdy = ly - cy;
                 if (cdx*cdx + cdy*cdy < TREE_R * TREE_R) blocked = true;
             }
         }
