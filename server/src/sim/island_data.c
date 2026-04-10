@@ -103,10 +103,17 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
 
 /* ── Tree generation ─────────────────────────────────────────────────────── */
 
-/* Grid spacing between trees (client pixels). */
+/* Grid spacing between fiber plants (client pixels). */
 #define TREE_GRID_SPACING 160.0f
 /* Half-amplitude of per-tree random jitter (client pixels). */
 #define TREE_JITTER       40.0f
+
+/* Fiber-plant procedural density settings. */
+#define FIBER_GRID_SPACING 280.0f
+#define FIBER_JITTER        80.0f
+/* Fiber is scattered over a slightly smaller polygon fraction to keep it
+   interior and away from the rocky/treed edges. */
+#define FIBER_POLY_SCALE    0.70f
 
 /**
  * Returns non-zero if world point (px, py) lies inside the scaled grass
@@ -120,6 +127,26 @@ static int inside_grass_poly(const IslandDef *isl, float px, float py)
 
     for (int i = 0, j = n - 1; i < n; j = i++) {
         /* Grass polygon vertex = island centre + offset × scale */
+        float xi = isl->x + isl->vx[i] * scale;
+        float yi = isl->y + isl->vy[i] * scale;
+        float xj = isl->x + isl->vx[j] * scale;
+        float yj = isl->y + isl->vy[j] * scale;
+
+        if ((yi > py) != (yj > py) &&
+            px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+            inside = !inside;
+    }
+    return inside;
+}
+
+/* Variant of inside_grass_poly that uses an explicit polygon scale factor
+   instead of the island's grass_poly_scale.  Used for fiber placement. */
+static int inside_grass_poly_scaled(const IslandDef *isl, float px, float py, float scale)
+{
+    int n      = isl->vertex_count;
+    int inside = 0;
+
+    for (int i = 0, j = n - 1; i < n; j = i++) {
         float xi = isl->x + isl->vx[i] * scale;
         float yi = isl->y + isl->vy[i] * scale;
         float xj = isl->x + isl->vx[j] * scale;
@@ -179,7 +206,8 @@ void islands_generate_trees(void)
 
         float half_bound = isl->poly_bound_r * isl->grass_poly_scale;
 
-        /* Deterministic LCG seeded per island — no stdlib rand dependency. */
+        /* One deterministic seed per island — the fiber pass derives its own
+         * stream from the same formula XOR'd with a golden-ratio constant. */
         unsigned int seed = (unsigned int)((unsigned int)isl->id * 1664525u + 1013904223u);
 
         float x0 = isl->x - half_bound;
@@ -215,6 +243,58 @@ void islands_generate_trees(void)
 
         /* Log how many trees were generated for this island. */
         (void)added; /* suppress unused-variable warning if logging is off */
+    }
+
+    /* ── Second pass: procedural fiber (tall-grass) for polygon islands ── */
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        IslandDef *isl = &ISLAND_PRESETS[ii];
+
+        if (isl->vertex_count == 0 || isl->grass_poly_scale <= 0.0f) continue;
+
+        /* Derive fiber seed from the same island seed formula as the tree pass,
+         * XOR'd with a golden-ratio constant to give an independent jitter stream
+         * from the same world identity — no separate magic seed constant needed. */
+        unsigned int island_seed = (unsigned int)((unsigned int)isl->id * 1664525u + 1013904223u);
+        unsigned int seed = island_seed ^ 0x9E3779B9u;
+
+        /* Use a reduced polygon scale so fiber stays well inside the island. */
+        float fiber_scale = isl->grass_poly_scale * FIBER_POLY_SCALE;
+        float half_bound  = isl->poly_bound_r * fiber_scale;
+
+        /* Shift fiber grid origin by half a cell in both axes — this is the
+         * primary guarantee that fiber can never land on a tree grid point
+         * even if the jitter RNG produced identical values. */
+        float x0 = isl->x - half_bound + FIBER_GRID_SPACING * 0.5f;
+        float x1 = isl->x + half_bound;
+        float y0 = isl->y - half_bound + FIBER_GRID_SPACING * 0.5f;
+        float y1 = isl->y + half_bound;
+
+        int added_fiber = 0;
+        for (float gx = x0; gx <= x1 && isl->resource_count < ISLAND_MAX_RESOURCES; gx += FIBER_GRID_SPACING) {
+            for (float gy = y0; gy <= y1 && isl->resource_count < ISLAND_MAX_RESOURCES; gy += FIBER_GRID_SPACING) {
+                seed = seed * 1664525u + 1013904223u;
+                float jx = ((float)(seed & 0xFFFFu) / 65535.0f - 0.5f) * (2.0f * FIBER_JITTER);
+                seed = seed * 1664525u + 1013904223u;
+                float jy = ((float)(seed & 0xFFFFu) / 65535.0f - 0.5f) * (2.0f * FIBER_JITTER);
+
+                float fx = gx + jx;
+                float fy = gy + jy;
+
+                /* Must be inside the reduced grass polygon. */
+                if (!inside_grass_poly_scaled(isl, fx, fy, fiber_scale)) continue;
+
+                IslandResource *r = &isl->resources[isl->resource_count];
+                r->ox         = fx - isl->x;
+                r->oy         = fy - isl->y;
+                r->type       = ISLAND_RES_FIBER;
+                r->size       = resource_size_from_offset(r->ox, r->oy);
+                r->max_health = resource_max_health(ISLAND_RES_FIBER);
+                r->health     = r->max_health;
+                isl->resource_count++;
+                added_fiber++;
+            }
+        }
+        (void)added_fiber;
     }
 }
 
