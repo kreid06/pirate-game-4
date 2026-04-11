@@ -12095,6 +12095,7 @@ void websocket_server_tick(float dt) {
                             // Apply movement in local coordinates (direct velocity, not acceleration)
                             // Note: local_x/y are stored in CLIENT coordinates, so convert speed back to client
                             float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED);
+                            if (ws_player->is_sprinting) walk_speed_client *= 1.6f;
                             float new_local_x = ws_player->local_x + local_move_x * walk_speed_client * dt;
                             float new_local_y = ws_player->local_y + local_move_y * walk_speed_client * dt;
                             
@@ -12156,6 +12157,7 @@ void websocket_server_tick(float dt) {
                         } else if (ws_player->on_island_id != 0) {
                             // ===== ISLAND WALKING (WORLD COORDINATES) =====
                             float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED);
+                            if (ws_player->is_sprinting) walk_speed_client *= 1.6f;
                             float new_x = ws_player->x + movement_x * walk_speed_client * dt;
                             float new_y = ws_player->y + movement_y * walk_speed_client * dt;
                             /* Walk freely on beach + grass. Step off the beach → swim. */
