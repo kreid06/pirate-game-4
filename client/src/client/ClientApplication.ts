@@ -669,6 +669,19 @@ export class ClientApplication {
               this.networkManager.sendStructureInteract(hovered.id);
               return;
             }
+
+            // Shipyard construction: click on skeleton with materials → install module
+            if (target && (activeItem === 'plank' || activeItem === 'wood' || activeItem === 'cannon')) {
+              const slot = this.renderSystem.getConstructionModuleSlot(
+                target.x, target.y, activeItem, player.position.x, player.position.y
+              );
+              if (slot) {
+                console.log(`🔨 [SHIPYARD] Installing ${slot.moduleId} on shipyard ${slot.shipyard.id}`);
+                this.networkManager.sendShipyardAction(slot.shipyard.id, 'add_module', slot.moduleId);
+                this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+                return;
+              }
+            }
           }
 
           // Module interaction takes priority over NPC menu
@@ -1369,10 +1382,11 @@ export class ClientApplication {
         this.renderSystem.updateShipyardConstruction(structureId, phase, modulesPlaced);
         if (this.shipyardMenu.visible && this.shipyardMenu.structureId === structureId) {
           this.shipyardMenu.updateState(phase, modulesPlaced);
-        } else {
-          this.shipyardMenu.open(structureId, phase, modulesPlaced);
         }
+        // Don't auto-open the menu on broadcast — player opens it with E or
+        // installs modules by clicking on the skeleton directly.
         if (shipSpawned) {
+          this.shipyardMenu.close();
           this.renderSystem.showAnnouncement('⚓ Ship launched!', 'info', 3.5);
         }
       };
@@ -2838,11 +2852,22 @@ export class ClientApplication {
                   this._radialMenu.open(mp2.x, mp2.y, doorOpts);
                 }, 400);
               } else if (struct.type === 'shipyard') {
-                // Shipyard: tap/hold E = open ship building menu
+                // Shipyard: hold E → radial with Release Ship / Demolish
                 this._ladderHoldTimer = setTimeout(() => {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
-                }, 600);
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  const opts: { id: string; label: string }[] = [];
+                  if (struct.construction?.phase === 'building') {
+                    const mp = struct.construction.modulesPlaced;
+                    const canLaunch = ['hull_left', 'hull_right', 'deck'].every(id => mp.includes(id));
+                    if (canLaunch) opts.push({ id: 'release', label: '⚓ Release Ship' });
+                  }
+                  if (isOwnCompany) opts.push({ id: 'demolish', label: 'Demolish Shipyard' });
+                  if (opts.length > 0) {
+                    this._radialMenu.open(mp2.x, mp2.y, opts);
+                  }
+                }, 500);
               } else {
                 this._ladderHoldTimer = setTimeout(() => {
                   this._ladderHoldTimer = null;
@@ -3063,8 +3088,14 @@ export class ClientApplication {
           clearTimeout(this._ladderHoldTimer);
           this._ladderHoldTimer = null;
           this.renderSystem.stopLadderHoldRing();
-          if (structType === 'workbench' || structType === 'shipyard') {
-            // Tap E on workbench/shipyard = primary action: open
+          if (structType === 'workbench') {
+            // Tap E on workbench = open crafting menu
+            doUse();
+          } else if (structType === 'shipyard' && structId !== null) {
+            // Tap E on shipyard = open menu with current local state
+            const cst = this.renderSystem.getShipyardConstruction(structId);
+            this.shipyardMenu.open(structId, cst?.phase ?? 'empty', cst?.modulesPlaced ?? []);
+            // Also request latest state from server to keep in sync
             doUse();
           } else if (structType === 'door') {
             // Tap E on door panel = toggle open/closed
@@ -3074,8 +3105,13 @@ export class ClientApplication {
         } else if (this._radialMenu.isOpen) {
           const selected = this._radialMenu.getHoveredId();
           this._radialMenu.close();
-          if (selected === 'use')      doUse();
+          if (selected === 'use')           doUse();
           else if (selected === 'demolish') doDemolish();
+          else if (selected === 'release' && structId !== null) {
+            this.networkManager.sendShipyardAction(structId, 'release_ship');
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`⚓ [SHIPYARD] Release ship from shipyard ${structId}`);
+          }
           else this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
         }
         return;

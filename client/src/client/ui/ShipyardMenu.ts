@@ -4,14 +4,15 @@
  * Canvas-drawn ship construction panel opened when a player presses [E] at a shipyard.
  *
  *  Phase empty    — one button: "Lay Keel (Brigantine)"
- *  Phase building — six module install buttons + Launch Ship row at bottom
+ *  Phase building — read-only progress display (modules installed via direct click
+ *                   on the skeleton; hold [E] for radial to release)
  */
 
 export type ConstructionPhase = 'empty' | 'building';
 
-// ── Module definitions ────────────────────────────────────────────────────
+// ── Module definitions (used for progress display) ────────────────────────
 
-interface ModuleDef {
+export interface ModuleDef {
   id: string;
   label: string;
   cost: string;
@@ -21,7 +22,7 @@ interface ModuleDef {
   border: string;
 }
 
-const MODULE_DEFS: ModuleDef[] = [
+export const MODULE_DEFS: ModuleDef[] = [
   { id: 'hull_left',   label: 'Hull Planks (Port)',  cost: '15× Plank',           required: true,  symbol: '⊟', color: '#7a5028', border: '#4a2c10' },
   { id: 'hull_right',  label: 'Hull Planks (Stbd)',  cost: '15× Plank',           required: true,  symbol: '⊟', color: '#7a5028', border: '#4a2c10' },
   { id: 'deck',        label: 'Deck',                cost: '10× Plank',           required: true,  symbol: '▭', color: '#9c7240', border: '#6c4c20' },
@@ -30,7 +31,7 @@ const MODULE_DEFS: ModuleDef[] = [
   { id: 'cannon_stbd', label: 'Cannon (Stbd)',        cost: '1× Cannon',           required: false, symbol: '⚫', color: '#3a3a3a', border: '#1a1a1a' },
 ];
 
-const REQUIRED_IDS = new Set(['hull_left', 'hull_right', 'deck']);
+export const REQUIRED_IDS = new Set(['hull_left', 'hull_right', 'deck']);
 
 // ── Panel layout constants ────────────────────────────────────────────────
 
@@ -40,14 +41,16 @@ const ROW_H   = 60;
 const ROW_GAP = 5;
 const PAD_TOP = 12;
 const PAD_BOT = 40;
+const INFO_ROW_H = 28;
+const INFO_GAP   = 3;
 
 function panelH(phase: ConstructionPhase): number {
   if (phase === 'empty') {
     return HDR_H + PAD_TOP + ROW_H + PAD_BOT;
   }
-  // building: module rows + launch row
-  const rows = MODULE_DEFS.length + 1; // +1 for launch
-  return HDR_H + PAD_TOP + rows * ROW_H + (rows - 1) * ROW_GAP + PAD_BOT;
+  // building: compact progress rows + hint text
+  const rows = MODULE_DEFS.length;
+  return HDR_H + PAD_TOP + rows * INFO_ROW_H + (rows - 1) * INFO_GAP + 50 + PAD_BOT;
 }
 
 // ── Colours ───────────────────────────────────────────────────────────────
@@ -216,94 +219,45 @@ export class ShipyardMenu {
   private _drawModuleRows(ctx: CanvasRenderingContext2D, px: number, bodyY: number): void {
     const canLaunch = [...REQUIRED_IDS].every(id => this.modulesPlaced.includes(id));
 
+    // Compact read-only progress rows
     for (let i = 0; i < MODULE_DEFS.length; i++) {
       const m    = MODULE_DEFS[i];
-      const ry   = bodyY + i * (ROW_H + ROW_GAP);
+      const ry   = bodyY + i * (INFO_ROW_H + INFO_GAP);
       const done = this.modulesPlaced.includes(m.id);
 
-      ctx.globalAlpha = done ? 0.40 : 1.0;
-
       // Row bg
-      ctx.fillStyle   = done ? 'rgba(12, 30, 18, 0.5)' : 'rgba(16, 44, 24, 0.8)';
-      ctx.strokeStyle = done ? 'rgba(30, 70, 40, 0.25)' : BORDER;
-      ctx.lineWidth   = 1;
+      ctx.fillStyle   = done ? 'rgba(20, 50, 30, 0.6)' : 'rgba(16, 30, 20, 0.4)';
       ctx.beginPath();
-      ctx.roundRect(px + 8, ry, PANEL_W - 16, ROW_H, 4);
+      ctx.roundRect(px + 8, ry, PANEL_W - 16, INFO_ROW_H, 3);
       ctx.fill();
-      ctx.stroke();
 
-      // Icon
-      const ic = 42, icy = ry + (ROW_H - ic) / 2, icx = px + 14;
-      ctx.fillStyle   = done ? '#1a2e1a' : m.color;
-      ctx.strokeStyle = m.border;
-      ctx.lineWidth   = 2;
-      ctx.beginPath();
-      ctx.roundRect(icx, icy, ic, ic, 4);
-      ctx.fill();
-      ctx.stroke();
-      ctx.font         = 'bold 16px Consolas, monospace';
-      ctx.textAlign    = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle    = done ? '#507850' : '#fff';
-      ctx.fillText(done ? '✓' : m.symbol, icx + ic / 2, icy + ic / 2);
-
-      // Labels
-      const tx = icx + ic + 8;
+      // Status icon + label
+      ctx.font         = '12px Consolas, monospace';
       ctx.textAlign    = 'left';
-      ctx.textBaseline = 'top';
-      ctx.font         = 'bold 13px Consolas, monospace';
-      ctx.fillStyle    = done ? '#3a5a3a' : (m.required ? TEXT_REQ : TEXT_HEAD);
-      ctx.fillText(m.label, tx, ry + 8);
-      ctx.font      = '11px Consolas, monospace';
-      ctx.fillStyle = done ? '#2e4830' : TEXT_DIM;
-      ctx.fillText(done ? 'Installed' : m.cost, tx, ry + 28);
-      if (m.required && !done) {
-        ctx.font         = 'bold 10px Consolas, monospace';
-        ctx.fillStyle    = TEXT_REQ;
-        ctx.fillText('● Required', tx, ry + 46);
-      }
+      ctx.textBaseline = 'middle';
+      const midY = ry + INFO_ROW_H / 2;
+      ctx.fillStyle = done ? '#60c880' : (m.required ? TEXT_REQ : TEXT_DIM);
+      ctx.fillText(done ? '✓' : '○', px + 16, midY);
+      ctx.fillStyle = done ? '#80b890' : (m.required ? '#c8b860' : TEXT_DIM);
+      ctx.fillText(m.label, px + 34, midY);
 
-      // Install button (hidden when placed)
+      // Cost hint (right-aligned)
       if (!done) {
-        const bw = 74, bh = 26, bx = px + PANEL_W - 16 - bw, by = ry + (ROW_H - bh) / 2;
-        ctx.fillStyle   = 'rgba(50, 100, 62, 0.9)';
-        ctx.strokeStyle = '#40b860';
-        ctx.lineWidth   = 1;
-        ctx.beginPath();
-        ctx.roundRect(bx, by, bw, bh, 4);
-        ctx.fill();
-        ctx.stroke();
-        ctx.font         = 'bold 12px Consolas, monospace';
-        ctx.textAlign    = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle    = '#beffcc';
-        ctx.fillText('Install', bx + bw / 2, by + bh / 2);
+        ctx.textAlign = 'right';
+        ctx.fillStyle = TEXT_DIM;
+        ctx.font      = '10px Consolas, monospace';
+        ctx.fillText(m.cost, px + PANEL_W - 16, midY);
       }
-
-      ctx.globalAlpha = 1.0;
     }
 
-    // ── Launch Ship row ────────────────────────────────────────────────
-    const ly = bodyY + MODULE_DEFS.length * (ROW_H + ROW_GAP);
-    ctx.globalAlpha = canLaunch ? 1.0 : 0.38;
-    ctx.fillStyle   = canLaunch ? 'rgba(14, 50, 100, 0.95)' : 'rgba(14, 22, 44, 0.7)';
-    ctx.strokeStyle = canLaunch ? '#5090ee' : '#1e3060';
-    ctx.lineWidth   = 2;
-    ctx.beginPath();
-    ctx.roundRect(px + 8, ly, PANEL_W - 16, ROW_H, 4);
-    ctx.fill();
-    ctx.stroke();
-    ctx.font         = 'bold 16px Consolas, monospace';
+    // Hint text
+    const hintY = bodyY + MODULE_DEFS.length * (INFO_ROW_H + INFO_GAP) + 12;
+    ctx.font         = '11px Consolas, monospace';
     ctx.textAlign    = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle    = canLaunch ? '#aaceff' : '#3a5070';
-    ctx.fillText('⚓  Launch Ship', px + PANEL_W / 2, ly + ROW_H / 2 + (canLaunch ? 0 : -8));
-    if (!canLaunch) {
-      ctx.font      = '11px Consolas, monospace';
-      ctx.fillStyle = '#305060';
-      ctx.fillText('Install all required modules first', px + PANEL_W / 2, ly + ROW_H / 2 + 12);
-    }
-    ctx.globalAlpha = 1.0;
+    ctx.textBaseline = 'top';
+    ctx.fillStyle    = TEXT_DIM;
+    ctx.fillText('Click the skeleton with materials to install modules', px + PANEL_W / 2, hintY);
+    ctx.fillText(canLaunch ? 'Hold [E] on shipyard → Release Ship' : 'Install required modules to launch', px + PANEL_W / 2, hintY + 16);
   }
 
   // ── Input handling ──────────────────────────────────────────────────────
@@ -339,26 +293,7 @@ export class ShipyardMenu {
       return true;
     }
 
-    // Module install buttons
-    for (let i = 0; i < MODULE_DEFS.length; i++) {
-      const m = MODULE_DEFS[i];
-      if (this.modulesPlaced.includes(m.id)) continue;
-      const ry = bodyY + i * (ROW_H + ROW_GAP);
-      const bw = 74, bh = 26, bx = px + PANEL_W - 16 - bw, by = ry + (ROW_H - bh) / 2;
-      if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) {
-        this.onAction?.('add_module', m.id);
-        return true;
-      }
-    }
-
-    // Launch button
-    const canLaunch = [...REQUIRED_IDS].every(id => this.modulesPlaced.includes(id));
-    if (canLaunch) {
-      const ly = bodyY + MODULE_DEFS.length * (ROW_H + ROW_GAP);
-      if (x >= px + 8 && x <= px + PANEL_W - 8 && y >= ly && y <= ly + ROW_H) {
-        this.onAction?.('release_ship');
-      }
-    }
+    // Building phase: panel is informational only — no clickable actions
     return true; // consumed (inside panel)
   }
 }

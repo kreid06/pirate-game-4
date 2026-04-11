@@ -262,15 +262,7 @@ typedef enum {
     CONSTRUCTION_BUILDING = 1,  /* skeleton laid; modules can be installed */
 } ShipConstructionPhase;
 
-/* Bitmask values for PlacedStructure.modules_placed */
-#define MODULE_HULL_LEFT   (1u << 0)
-#define MODULE_HULL_RIGHT  (1u << 1)
-#define MODULE_DECK        (1u << 2)
-#define MODULE_MAST        (1u << 3)
-#define MODULE_CANNON_PORT (1u << 4)
-#define MODULE_CANNON_STBD (1u << 5)
-/** All three required modules to allow launch */
-#define MODULES_REQUIRED   (MODULE_HULL_LEFT | MODULE_HULL_RIGHT | MODULE_DECK)
+/* Bitmask values for PlacedStructure.modules_placed — defined in sim/types.h */
 
 typedef struct {
     bool     active;
@@ -398,7 +390,7 @@ void websocket_server_set_simulation(struct Sim* sim);
  * @param company_id  COMPANY_* constant (COMPANY_PIRATES, COMPANY_NAVY, etc.)
  * @return Entity ID of the new ship, or 0 on failure
  */
-uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id);
+uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id, uint8_t modules_placed);
 
 /**
  * Spawn a ghost ship at the given world position (client pixels).

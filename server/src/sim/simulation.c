@@ -496,7 +496,7 @@ void sim_handle_collisions(struct Sim* sim) {
 }
 
 // Entity creation functions
-entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
+entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation, uint8_t modules_placed) {
     if (!sim || sim->ship_count >= MAX_SHIPS) {
         return INVALID_ENTITY_ID;
     }
@@ -608,6 +608,7 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
     );
     
     // Port side cannons (3) — local_rot = -PI/2 (barrel faces port/left)
+    if (modules_placed & MODULE_CANNON_PORT) {
     ship->modules[ship->module_count++] = module_create(
         module_id++, MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
@@ -623,8 +624,10 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
         Q16_FROM_FLOAT(3.1415927f)
     );
+    } else { module_id += 3; }
     
     // Starboard side cannons (3) — local_rot = PI/2 (barrel faces starboard/right)
+    if (modules_placed & MODULE_CANNON_STBD) {
     ship->modules[ship->module_count++] = module_create(
         module_id++, MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
@@ -640,8 +643,10 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
         Q16_FROM_FLOAT(0.0f)
     );
+    } else { module_id += 3; }
     
     // Three masts (front, middle, back)
+    if (modules_placed & MODULE_MAST) {
     ship->modules[ship->module_count++] = module_create(
         module_id++, MODULE_TYPE_MAST,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(165.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
@@ -657,6 +662,7 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-235.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
+    } else { module_id += 3; }
     
     // Add ladder at specified position (-305, 0 in client coords)
     ship->modules[ship->module_count++] = module_create(

@@ -1172,6 +1172,13 @@ export class RenderSystem {
     s.construction = phase === 'empty' ? undefined : { phase, modulesPlaced };
   }
 
+  /** Get the construction state of a shipyard by structure id. */
+  getShipyardConstruction(id: number): { phase: ConstructionPhase; modulesPlaced: string[] } | null {
+    const s = this.placedStructures.find(p => p.id === id && p.type === 'shipyard');
+    if (!s || !s.construction) return null;
+    return { phase: s.construction.phase, modulesPlaced: [...s.construction.modulesPlaced] };
+  }
+
   /** Set (or clear) the structure that should be highlighted red as a placement blocker. */
   setBlockerStructure(id: number | null, durationMs = 2000): void {
     this._blockerStructureId = id;
@@ -1362,6 +1369,87 @@ export class RenderSystem {
     const dx = s.x - player.position.x;
     const dy = s.y - player.position.y;
     return dx * dx + dy * dy <= range * range ? s : null;
+  }
+
+  /**
+   * Given a world-space click position, find the nearest unplaced module slot
+   * on a shipyard construction in building phase.  Returns the shipyard structure
+   * and the module id to install, or null if no match.
+   * The held item name is used to filter to compatible modules.
+   */
+  getConstructionModuleSlot(
+    worldX: number, worldY: number, heldItem: string, playerX: number, playerY: number,
+  ): { shipyard: PlacedStructure; moduleId: string } | null {
+    // World-space dimensions of the shipyard (matches rendering constants scaled by base size 50)
+    const BASE    = 50;
+    const INT_W   = BASE * 4.80;
+    const ARM_L   = BASE * 16.80;
+    const BACK_T  = BASE * 1.00;
+    const ARM_T   = BASE * 1.00;
+    const totalH  = BACK_T + ARM_L;
+    const bHW     = INT_W * 0.44;      // hull half-beam
+    const bLen    = ARM_L * 0.96;       // hull length (top 2% to bottom 2%)
+    const bTopOff = -totalH / 2 + BACK_T + ARM_L * 0.02; // bow tip offset from center
+
+    for (const s of this.placedStructures) {
+      if (s.type !== 'shipyard' || s.construction?.phase !== 'building') continue;
+      const mp = s.construction.modulesPlaced;
+
+      // Player distance check (same generous OBB as getHoveredStructure)
+      const rot = (s.rotation ?? 0) * Math.PI / 180;
+      const pdx = playerX - s.x, pdy = playerY - s.y;
+      const c = Math.cos(-rot), sn = Math.sin(-rot);
+      const plx = pdx * c - pdy * sn, ply = pdx * sn + pdy * c;
+      if (Math.abs(plx) > 270 || Math.abs(ply) > 545) continue;
+
+      // Transform click into shipyard-local frame (y-axis = bow-to-stern)
+      const cdx = worldX - s.x, cdy = worldY - s.y;
+      const lx = cdx * c - cdy * sn;
+      const ly = cdx * sn + cdy * c;
+
+      // Check if click is inside the construction area
+      if (Math.abs(lx) > bHW + 30 || ly < bTopOff - 20 || ly > bTopOff + bLen + 20) continue;
+
+      // Determine best module based on held item and click position
+      const relY = (ly - bTopOff) / bLen; // 0=bow, 1=stern
+
+      let bestModule: string | null = null;
+
+      if (heldItem === 'plank') {
+        // Planks → hull_left, hull_right, or deck based on click side
+        if (lx < -10) {
+          // Left / port side
+          if (!mp.includes('hull_left')) bestModule = 'hull_left';
+          else if (!mp.includes('deck')) bestModule = 'deck';
+          else if (!mp.includes('hull_right')) bestModule = 'hull_right';
+        } else if (lx > 10) {
+          // Right / starboard side
+          if (!mp.includes('hull_right')) bestModule = 'hull_right';
+          else if (!mp.includes('deck')) bestModule = 'deck';
+          else if (!mp.includes('hull_left')) bestModule = 'hull_left';
+        } else {
+          // Center
+          if (!mp.includes('deck')) bestModule = 'deck';
+          else if (!mp.includes('hull_left')) bestModule = 'hull_left';
+          else if (!mp.includes('hull_right')) bestModule = 'hull_right';
+        }
+      } else if (heldItem === 'wood') {
+        // Wood + fiber → mast
+        if (!mp.includes('mast')) bestModule = 'mast';
+      } else if (heldItem === 'cannon') {
+        // Cannon → port or starboard based on click side
+        if (lx <= 0) {
+          if (!mp.includes('cannon_port')) bestModule = 'cannon_port';
+          else if (!mp.includes('cannon_stbd')) bestModule = 'cannon_stbd';
+        } else {
+          if (!mp.includes('cannon_stbd')) bestModule = 'cannon_stbd';
+          else if (!mp.includes('cannon_port')) bestModule = 'cannon_port';
+        }
+      }
+
+      if (bestModule) return { shipyard: s, moduleId: bestModule };
+    }
+    return null;
   }
 
   /** Return hovered tree world pos if player is in range and off-ship, else null. */
@@ -3306,6 +3394,79 @@ export class RenderSystem {
             ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
             const cbl = Math.max(4, 10 * zoom);
             ctx.beginPath(); ctx.moveTo(cx + bHW * 0.78 + cbl, canY); ctx.lineTo(cx + bHW * 0.78 - cbl * 0.3, canY); ctx.stroke();
+          }
+
+          // ── Ghost slots for unplaced modules (pulsing dashed outlines) ──────
+          {
+            const pulse = 0.4 + 0.3 * Math.sin(performance.now() * 0.003);
+            const dashLen = Math.max(2, 4 * zoom);
+            ctx.setLineDash([dashLen, dashLen]);
+            // Port hull ghost
+            if (!mp.includes('hull_left')) {
+              ctx.strokeStyle = `rgba(200, 155, 80, ${pulse.toFixed(2)})`;
+              ctx.lineWidth   = Math.max(1, 2 * zoom);
+              ctx.beginPath();
+              ctx.moveTo(cx - bHW, bTop + bLen * 0.65);
+              ctx.bezierCurveTo(cx - bHW, bTop + bLen * 0.85, cx - bHW * 0.5, bBot, cx, bBot);
+              ctx.moveTo(cx, bTop);
+              ctx.bezierCurveTo(cx - bHW * 0.5, bTop + bLen * 0.07, cx - bHW, bTop + bLen * 0.22, cx - bHW, bTop + bLen * 0.65);
+              ctx.stroke();
+              ctx.font = `${Math.max(7, Math.round(9 * zoom))}px Consolas, monospace`;
+              ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+              ctx.fillStyle = `rgba(220, 180, 80, ${pulse.toFixed(2)})`;
+              ctx.fillText('⊟ Hull (Port)', cx - bHW * 0.55, bTop + bLen * 0.45);
+            }
+            // Stbd hull ghost
+            if (!mp.includes('hull_right')) {
+              ctx.strokeStyle = `rgba(200, 155, 80, ${pulse.toFixed(2)})`;
+              ctx.lineWidth   = Math.max(1, 2 * zoom);
+              ctx.beginPath();
+              ctx.moveTo(cx + bHW, bTop + bLen * 0.65);
+              ctx.bezierCurveTo(cx + bHW, bTop + bLen * 0.85, cx + bHW * 0.5, bBot, cx, bBot);
+              ctx.moveTo(cx, bTop);
+              ctx.bezierCurveTo(cx + bHW * 0.5, bTop + bLen * 0.07, cx + bHW, bTop + bLen * 0.22, cx + bHW, bTop + bLen * 0.65);
+              ctx.stroke();
+              ctx.font = `${Math.max(7, Math.round(9 * zoom))}px Consolas, monospace`;
+              ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+              ctx.fillStyle = `rgba(220, 180, 80, ${pulse.toFixed(2)})`;
+              ctx.fillText('⊟ Hull (Stbd)', cx + bHW * 0.55, bTop + bLen * 0.45);
+            }
+            // Deck ghost
+            if (!mp.includes('deck')) {
+              ctx.strokeStyle = `rgba(180, 130, 50, ${(pulse * 0.6).toFixed(2)})`;
+              ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+              hullPath(); ctx.stroke();
+              ctx.font = `${Math.max(7, Math.round(9 * zoom))}px Consolas, monospace`;
+              ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+              ctx.fillStyle = `rgba(220, 180, 80, ${pulse.toFixed(2)})`;
+              ctx.fillText('▭ Deck', cx, bTop + bLen * 0.50);
+            }
+            // Mast ghost
+            if (!mp.includes('mast')) {
+              const mastY = bTop + bLen * 0.30;
+              ctx.strokeStyle = `rgba(180, 140, 70, ${pulse.toFixed(2)})`;
+              ctx.lineWidth   = Math.max(1, 2 * zoom);
+              ctx.beginPath(); ctx.moveTo(cx, bTop + bLen * 0.05); ctx.lineTo(cx, bTop + bLen * 0.55); ctx.stroke();
+              ctx.font = `${Math.max(7, Math.round(9 * zoom))}px Consolas, monospace`;
+              ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+              ctx.fillStyle = `rgba(180, 140, 70, ${pulse.toFixed(2)})`;
+              ctx.fillText('| Mast', cx, mastY - Math.max(6, 10 * zoom));
+            }
+            // Port cannon ghost
+            if (!mp.includes('cannon_port')) {
+              const canY = bTop + bLen * 0.45;
+              ctx.strokeStyle = `rgba(100, 100, 100, ${pulse.toFixed(2)})`;
+              ctx.lineWidth   = Math.max(1, 1.5 * zoom);
+              ctx.beginPath(); ctx.arc(cx - bHW * 0.78, canY, Math.max(3, 5 * zoom), 0, Math.PI * 2); ctx.stroke();
+            }
+            // Stbd cannon ghost
+            if (!mp.includes('cannon_stbd')) {
+              const canY = bTop + bLen * 0.45;
+              ctx.strokeStyle = `rgba(100, 100, 100, ${pulse.toFixed(2)})`;
+              ctx.lineWidth   = Math.max(1, 1.5 * zoom);
+              ctx.beginPath(); ctx.arc(cx + bHW * 0.78, canY, Math.max(3, 5 * zoom), 0, Math.PI * 2); ctx.stroke();
+            }
+            ctx.setLineDash([]);
           }
           // Progress label
           const required  = ['hull_left', 'hull_right', 'deck'];

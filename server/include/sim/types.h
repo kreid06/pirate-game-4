@@ -8,6 +8,16 @@
 #include "sim/module_types.h"
 #include "sim/ship_level.h"
 
+/* ── Shipyard construction module bitmasks ──────────────────────────────── */
+#define MODULE_HULL_LEFT   (1u << 0)
+#define MODULE_HULL_RIGHT  (1u << 1)
+#define MODULE_DECK        (1u << 2)
+#define MODULE_MAST        (1u << 3)
+#define MODULE_CANNON_PORT (1u << 4)
+#define MODULE_CANNON_STBD (1u << 5)
+/** All three required modules to allow launch */
+#define MODULES_REQUIRED   (MODULE_HULL_LEFT | MODULE_HULL_RIGHT | MODULE_DECK)
+
 // Maximum entity counts
 #define MAX_SHIPS 50
 #define MAX_PLAYERS 100

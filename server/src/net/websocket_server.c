@@ -5249,7 +5249,8 @@ static void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClie
             goto sya_send;
         }
         uint8_t company = sy->construction_company;
-        uint32_t new_ship_id = websocket_server_create_ship(sy->x, sy->y + 450.0f, company);
+        uint8_t placed  = sy->modules_placed;
+        uint32_t new_ship_id = websocket_server_create_ship(sy->x, sy->y + 450.0f, company, placed);
         sy->construction_phase = CONSTRUCTION_EMPTY;
         sy->modules_placed     = 0;
         char bcast[512];
@@ -5316,7 +5317,8 @@ static void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketC
             if ((placed_structures[i].modules_placed & MODULES_REQUIRED) == MODULES_REQUIRED) {
                 /* Has required modules — spawn the ship at the mouth */
                 uint8_t bco = placed_structures[i].construction_company;
-                uint32_t new_sid = websocket_server_create_ship(fx, fy + 450.0f, bco);
+                uint8_t bmp = placed_structures[i].modules_placed;
+                uint32_t new_sid = websocket_server_create_ship(fx, fy + 450.0f, bco, bmp);
                 char abcast[256];
                 snprintf(abcast, sizeof(abcast),
                          "{\"type\":\"ship_auto_released\",\"ship_id\":%u}", new_sid);
@@ -6522,8 +6524,10 @@ static void ship_init_default_weapon_groups(SimpleShip* ship) {
              MAX_COMPANIES);
 }
 
-// Initialize a brigantine ship at the given slot index, world position (client pixels), module ID base, and company
-static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t module_id_base, uint8_t company_id) {
+// Initialize a brigantine ship at the given slot index, world position (client pixels), module ID base, and company.
+// modules_placed: bitmask of MODULE_HULL_LEFT..MODULE_CANNON_STBD (0xFF = all modules present).
+// Optional modules (mast, cannons) are only added when their bit is set.
+static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t module_id_base, uint8_t company_id, uint8_t modules_placed) {
     SimpleShip* s = &ships[idx];
     memset(s, 0, sizeof(SimpleShip));
 
@@ -6566,25 +6570,35 @@ static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t
     s->module_count++;
 
     // 6 cannons — BROADSIDE loadout (x=fore/aft, y=port/starboard)
-    float cannon_xs[3] = { -35.0f, 65.0f, -135.0f };
-    for (int i = 0; i < 6; i++) {
-        float cx  = cannon_xs[i % 3];
-        float cy  = (i < 3) ? 75.0f : -75.0f;
-        float rot = (i < 3) ? (float)M_PI : 0.0f;
-        s->modules[s->module_count].id          = mid++;
-        s->modules[s->module_count].type_id     = MODULE_TYPE_CANNON;
-        s->modules[s->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cx));
-        s->modules[s->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cy));
-        s->modules[s->module_count].local_rot   = Q16_FROM_FLOAT(rot);
-        s->modules[s->module_count].state_bits  = MODULE_STATE_ACTIVE;
-        s->modules[s->module_count].data.cannon.aim_direction  = Q16_FROM_FLOAT(0.0f);
-        s->modules[s->module_count].data.cannon.ammunition     = 10;
-        s->modules[s->module_count].data.cannon.reload_time    = CANNON_RELOAD_TIME_MS;
-        s->modules[s->module_count].data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
-        s->module_count++;
+    // Port cannons (i=0..2, cy=+75) only if MODULE_CANNON_PORT was placed
+    // Stbd cannons (i=3..5, cy=-75) only if MODULE_CANNON_STBD was placed
+    {
+        float cannon_xs[3] = { -35.0f, 65.0f, -135.0f };
+        bool has_port = (modules_placed & MODULE_CANNON_PORT) != 0;
+        bool has_stbd = (modules_placed & MODULE_CANNON_STBD) != 0;
+        for (int i = 0; i < 6; i++) {
+            bool is_port = (i < 3);
+            if (is_port && !has_port) { mid++; continue; }
+            if (!is_port && !has_stbd) { mid++; continue; }
+            float cx  = cannon_xs[i % 3];
+            float cy  = is_port ? 75.0f : -75.0f;
+            float rot = is_port ? (float)M_PI : 0.0f;
+            s->modules[s->module_count].id          = mid++;
+            s->modules[s->module_count].type_id     = MODULE_TYPE_CANNON;
+            s->modules[s->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cx));
+            s->modules[s->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cy));
+            s->modules[s->module_count].local_rot   = Q16_FROM_FLOAT(rot);
+            s->modules[s->module_count].state_bits  = MODULE_STATE_ACTIVE;
+            s->modules[s->module_count].data.cannon.aim_direction  = Q16_FROM_FLOAT(0.0f);
+            s->modules[s->module_count].data.cannon.ammunition     = 10;
+            s->modules[s->module_count].data.cannon.reload_time    = CANNON_RELOAD_TIME_MS;
+            s->modules[s->module_count].data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS;
+            s->module_count++;
+        }
     }
 
-    // 3 masts — front x=165, middle x=-35, back x=-235
+    // 3 masts — only if MODULE_MAST was placed during shipyard construction
+    if (modules_placed & MODULE_MAST) {
     float mast_xs[3] = { 165.0f, -35.0f, -235.0f };
     for (int i = 0; i < 3; i++) {
         s->modules[s->module_count].id          = mid++;
@@ -6598,6 +6612,7 @@ static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t
         s->modules[s->module_count].data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
         s->module_count++;
     }
+    } /* end if MODULE_MAST */
 
     // Ladder at stern
     s->modules[s->module_count].id          = mid++;
@@ -6637,7 +6652,7 @@ static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t
     log_info("🔧 Ship slot %d (ID %u): %d modules, pos=(%.0f,%.0f)", idx, s->ship_id, s->module_count, world_x, world_y);
 }
 
-uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
+uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id, uint8_t modules_placed) {
     if (!global_sim) {
         log_warn("websocket_server_create_ship: no simulation linked");
         return 0;
@@ -6652,14 +6667,14 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id) {
     next_mid_base += 1000u;
 
     // Build the SimpleShip layout (uses next_ship_id internally — we override below)
-    init_brigantine_ship(ship_count, x, y, mid_base, company_id);
+    init_brigantine_ship(ship_count, x, y, mid_base, company_id, modules_placed);
 
     // Create the authoritative physics counterpart and use its entity ID
     Vec2Q16 sim_pos = {
         Q16_FROM_FLOAT(CLIENT_TO_SERVER(x)),
         Q16_FROM_FLOAT(CLIENT_TO_SERVER(y))
     };
-    entity_id sim_id = sim_create_ship(global_sim, sim_pos, Q16_FROM_INT(0));
+    entity_id sim_id = sim_create_ship(global_sim, sim_pos, Q16_FROM_INT(0), modules_placed);
     if (sim_id == INVALID_ENTITY_ID) {
         log_warn("websocket_server_create_ship: sim_create_ship failed");
         ships[ship_count].active = false;
@@ -6788,7 +6803,7 @@ static void ghost_aim_cannon(SimpleShip* ship, ShipModule* cannon,
  * out in the hit-event processing loop.
  * ========================================================================= */
 uint32_t websocket_server_create_ghost_ship(float x, float y) {
-    uint32_t ship_id = websocket_server_create_ship(x, y, COMPANY_GHOST);
+    uint32_t ship_id = websocket_server_create_ship(x, y, COMPANY_GHOST, 0xFF);
     if (ship_id == 0) return 0;
 
     SimpleShip* ship = find_ship(ship_id);
@@ -7188,8 +7203,8 @@ int websocket_server_init(uint16_t port) {
     log_info("WebSocket server initialized on port %u", port);
     
     // Spawn two brigantine ships: ship 1 at (100, 100), ship 2 at (100, 700) — 600px south
-    init_brigantine_ship(0, 100.0f, 100.0f,  1000, COMPANY_PIRATES);
-    init_brigantine_ship(1, 100.0f, 700.0f,  2000, COMPANY_NAVY);
+    init_brigantine_ship(0, 100.0f, 100.0f,  1000, COMPANY_PIRATES, 0xFF);
+    init_brigantine_ship(1, 100.0f, 700.0f,  2000, COMPANY_NAVY, 0xFF);
     ship_count = 2;
     
     log_info("🚢 Ship 1 (ID: %u) — company: %s", ships[0].ship_id, company_name(ships[0].company_id));
