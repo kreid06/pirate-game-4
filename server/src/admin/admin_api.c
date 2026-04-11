@@ -681,7 +681,7 @@ int admin_api_input_tiers(struct HttpResponse* resp) {
 int admin_api_create_ship(struct HttpResponse* resp, float x, float y, uint8_t company) {
     if (!resp) return -1;
 
-    uint32_t new_id = websocket_server_create_ship(x, y, company);
+    uint32_t new_id = websocket_server_create_ship(x, y, company, 0xFF);
 
     int len;
     if (new_id == 0) {
