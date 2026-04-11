@@ -112,6 +112,8 @@ export class RenderSystem {
   private _cachedLocalPlayer: Player | null = null;
   /** Placed island structures — updated via addPlacedStructure / setPlacedStructures. */
   private placedStructures: PlacedStructure[] = [];
+  /** Maps scaffolded ship entity IDs to the shipyard structure that owns them. */
+  private _scaffoldedShips: Map<number, PlacedStructure> = new Map();
   /** Structure currently under the cursor (within hover range of the local player). */
   private _hoveredStructure: PlacedStructure | null = null;
   /** ID of the structure that blocked the last placement attempt (shown in red during build mode). */
@@ -1870,6 +1872,14 @@ export class RenderSystem {
       : null;
     this._localCompanyId = this._cachedLocalPlayer?.companyId ?? 0;
 
+    // Rebuild scaffolded ship lookup: maps ship entity ID → owning shipyard structure
+    this._scaffoldedShips.clear();
+    for (const s of this.placedStructures) {
+      if (s.type === 'shipyard' && s.construction?.phase === 'building' && s.construction.scaffoldedShipId) {
+        this._scaffoldedShips.set(s.construction.scaffoldedShipId, s);
+      }
+    }
+
     // Detect hovered module
     this.detectHoveredModule(worldState);
     this.detectHoveredNpc(worldState);
@@ -1919,11 +1929,31 @@ export class RenderSystem {
     this.drawIsland(camera); // drawPlacedStructures is called inside, between trunk and leaf passes
     this.drawIslandBuildGhost(camera);
     
+    // ── Snap scaffolded ships into their shipyard docks ───────────────────────
+    // Temporarily override position/rotation so every draw call renders the ship
+    // inside the dock.  Originals are restored after the render queue executes.
+    const scaffoldOverrides: { ship: Ship; origPos: Vec2; origRot: number }[] = [];
+    for (const ship of worldState.ships) {
+      const scaffold = this._scaffoldedShips.get(ship.id);
+      if (scaffold) {
+        scaffoldOverrides.push({ ship, origPos: ship.position, origRot: ship.rotation });
+        const syRot = (scaffold.rotation ?? 0) * Math.PI / 180;
+        ship.position = Vec2.from(scaffold.x, scaffold.y);
+        ship.rotation = syRot + Math.PI / 2; // align ship +X (bow) with dock +Y (mouth)
+      }
+    }
+
     // Queue all game objects for layered rendering
     this.queueWorldObjects(worldState, camera, interpolationAlpha);
     
     // Execute render queue in layer order
     this.executeRenderQueue();
+
+    // Restore scaffolded ship positions so game logic is unaffected
+    for (const o of scaffoldOverrides) {
+      o.ship.position = o.origPos;
+      o.ship.rotation = o.origRot;
+    }
 
     // Draw explicit B-key build mode ghost (always on top of world objects)
     if (this.explicitBuildState) {
@@ -4276,6 +4306,11 @@ export class RenderSystem {
       if (ship.shipType === SHIP_TYPE_GHOST) {
         this.queueRenderItem(1, `ghost-fog-${ship.id}`, () => this.drawGhostFogAura(ship, camera), -1);
       }
+      // Scaffolding clamps & ropes for ships under construction in a shipyard
+      const scaffold = this._scaffoldedShips.get(ship.id);
+      if (scaffold) {
+        this.queueRenderItem(1, `scaffold-vis-${ship.id}`, () => this.drawScaffoldingVisuals(ship, scaffold, camera), 1);
+      }
     }
     
     // Queue players (layer 2)
@@ -4672,6 +4707,101 @@ export class RenderSystem {
     
     this.ctx.restore();
   }
+
+  /**
+   * Draw scaffolding clamps and rope ties that visually attach a scaffolded ship
+   * to the surrounding shipyard dock walls.
+   */
+  private drawScaffoldingVisuals(ship: Ship, scaffold: PlacedStructure, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+
+    const ctx = this.ctx;
+    const cameraState = camera.getState();
+    const zoom = cameraState.zoom;
+    const screenPos = camera.worldToScreen(ship.position);
+
+    ctx.save();
+    ctx.translate(screenPos.x, screenPos.y);
+    ctx.scale(zoom, zoom);
+    ctx.rotate(ship.rotation - cameraState.rotation);
+
+    // Shipyard dock dimensions in world units (BASE = 50)
+    const BASE  = 50;
+    const INT_W = BASE * 4.80; // 240  — interior bay width
+    const ARM_T = BASE * 1.00; // 50   — pier arm thickness
+    const dockHW = (INT_W + ARM_T * 2) / 2; // 170 — half total dock width
+
+    // Ship hull half-beam (approximate brigantine beam / 2)
+    const hullHB = 90;
+
+    // Clamp positions along the ship's local X-axis (fore-aft)
+    const clampPositions = [-280, -140, 0, 140, 280];
+    const pulse = 0.6 + 0.2 * Math.sin(performance.now() * 0.002);
+
+    for (const lx of clampPositions) {
+      // ── Port side (local +Y) ──
+      const portHull = hullHB;
+      const portDock = dockHW - ARM_T * 0.3; // inner edge of dock wall
+      // Rope line from hull edge to dock wall
+      ctx.strokeStyle = `rgba(160, 120, 60, ${(0.75 * pulse).toFixed(2)})`;
+      ctx.lineWidth = Math.max(1.5, 2.5 / zoom);
+      ctx.setLineDash([Math.max(3, 5 / zoom), Math.max(2, 3 / zoom)]);
+      ctx.beginPath();
+      ctx.moveTo(lx, portHull);
+      ctx.lineTo(lx, portDock);
+      ctx.stroke();
+      // Clamp bracket at hull edge
+      ctx.setLineDash([]);
+      ctx.strokeStyle = `rgba(120, 90, 40, ${(0.9 * pulse).toFixed(2)})`;
+      ctx.lineWidth = Math.max(2, 3 / zoom);
+      const bw = 12; // bracket half-width along hull
+      ctx.beginPath();
+      ctx.moveTo(lx - bw, portHull - 4);
+      ctx.lineTo(lx - bw, portHull + 6);
+      ctx.lineTo(lx + bw, portHull + 6);
+      ctx.lineTo(lx + bw, portHull - 4);
+      ctx.stroke();
+      // Bollard dot at dock wall end
+      ctx.fillStyle = `rgba(190, 150, 85, ${(0.85 * pulse).toFixed(2)})`;
+      ctx.beginPath();
+      ctx.arc(lx, portDock, Math.max(2, 3.5 / zoom), 0, Math.PI * 2);
+      ctx.fill();
+
+      // ── Starboard side (local -Y) ──
+      const stbdHull = -hullHB;
+      const stbdDock = -(dockHW - ARM_T * 0.3);
+      ctx.strokeStyle = `rgba(160, 120, 60, ${(0.75 * pulse).toFixed(2)})`;
+      ctx.lineWidth = Math.max(1.5, 2.5 / zoom);
+      ctx.setLineDash([Math.max(3, 5 / zoom), Math.max(2, 3 / zoom)]);
+      ctx.beginPath();
+      ctx.moveTo(lx, stbdHull);
+      ctx.lineTo(lx, stbdDock);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.strokeStyle = `rgba(120, 90, 40, ${(0.9 * pulse).toFixed(2)})`;
+      ctx.lineWidth = Math.max(2, 3 / zoom);
+      ctx.beginPath();
+      ctx.moveTo(lx - bw, stbdHull + 4);
+      ctx.lineTo(lx - bw, stbdHull - 6);
+      ctx.lineTo(lx + bw, stbdHull - 6);
+      ctx.lineTo(lx + bw, stbdHull + 4);
+      ctx.stroke();
+      ctx.fillStyle = `rgba(190, 150, 85, ${(0.85 * pulse).toFixed(2)})`;
+      ctx.beginPath();
+      ctx.arc(lx, stbdDock, Math.max(2, 3.5 / zoom), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // ── "Under Construction" label ──
+    ctx.rotate(-(ship.rotation - cameraState.rotation)); // undo ship rotation for text
+    ctx.font = `bold ${Math.max(10, Math.round(12 / zoom))}px Consolas, monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = `rgba(220, 180, 80, ${(0.85 * pulse).toFixed(2)})`;
+    ctx.fillText('⚒ Under Construction', 0, 0);
+
+    ctx.restore();
+  }
   
   private drawShipPlanks(ship: Ship, camera: Camera): void {
     // Check if ship is visible
@@ -4813,6 +4943,9 @@ export class RenderSystem {
    */
   private drawMissingPlankGhosts(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    // Scaffolded ships under construction — suppress plank build ghosts
+    if (this._scaffoldedShips.has(ship.id)) return;
 
     // Build set of present plank slot keys
     const presentKeys = new Set<string>();
@@ -5136,6 +5269,9 @@ export class RenderSystem {
    */
   private drawPlankStatusIcons(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    // Scaffolded ships under construction — suppress plank status icons
+    if (this._scaffoldedShips.has(ship.id)) return;
 
     // Only show for own company or neutral ships — hide from enemies
     const isEnemy = this._localCompanyId !== 0 && ship.companyId !== 0

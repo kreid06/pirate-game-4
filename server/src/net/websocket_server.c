@@ -208,6 +208,31 @@ static void sync_simple_ships_from_simulation(void) {
             g_sim_ship_by_id[sid] = &global_sim->ships[ci];
     }
 
+    // ── Pin scaffolded ships to their shipyard before syncing ──────────────
+    // For every active shipyard that has a scaffolded_ship_id, snap the sim
+    // ship's position/rotation to the dock center and zero its velocities so
+    // it never drifts away during construction.
+    for (int pi = 0; pi < MAX_PLACED_STRUCTURES; pi++) {
+        PlacedStructure* sy = &placed_structures[pi];
+        if (!sy->active) continue;
+        if (sy->type != STRUCT_SHIPYARD) continue;
+        if (sy->scaffolded_ship_id == 0) continue;
+
+        struct Ship* sim_ship = find_sim_ship(sy->scaffolded_ship_id);
+        if (!sim_ship) continue;
+
+        // Dock rotation: degrees → radians; add π/2 so the ship bow (+X) faces
+        // the dock mouth (+Y direction in the dock's local frame).
+        float dock_rot_rad = sy->rotation * (float)M_PI / 180.0f + (float)(M_PI / 2.0);
+
+        sim_ship->position.x     = Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy->x));
+        sim_ship->position.y     = Q16_FROM_FLOAT(CLIENT_TO_SERVER(sy->y));
+        sim_ship->rotation       = Q16_FROM_FLOAT(dock_rot_rad);
+        sim_ship->velocity.x     = 0;
+        sim_ship->velocity.y     = 0;
+        sim_ship->angular_velocity = 0;
+    }
+
     for (int s = 0; s < ship_count; s++) {
         if (!ships[s].active) continue;
         struct Ship* sim_ship = find_sim_ship(ships[s].ship_id);
