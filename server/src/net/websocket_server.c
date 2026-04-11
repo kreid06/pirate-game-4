@@ -457,12 +457,16 @@ static bool dock_obb_pushout(float cx, float cy, float hx, float hy,
 static bool dock_point_on_surface(float lx, float ly, bool has_scaffolding) {
     const float P  = 10.0f;                      /* padding ~ player radius */
     const float ai = DOCK_HW - DOCK_ARM_T;       /* arm inner edge = 120   */
+    /* Left arm top surface */
     if (lx >= -(DOCK_HW + P) && lx <= -(ai - P) && fabsf(ly) <= DOCK_HH + P) return true;
+    /* Right arm top surface */
     if (lx >=  (ai - P)      && lx <=  (DOCK_HW + P) && fabsf(ly) <= DOCK_HH + P) return true;
+    /* Back wall top surface */
     if (fabsf(lx) <= DOCK_HW + P &&
         ly >= -(DOCK_HH + P) && ly <= -(DOCK_HH - DOCK_BACK_T - P)) return true;
+    /* Interior bay — fully walkable when scaffolding is up */
     if (has_scaffolding && fabsf(lx) <= ai + P &&
-        ly >= (DOCK_HH - DOCK_BACK_T - P) && ly <= DOCK_HH + P) return true;
+        ly >= -(DOCK_HH - DOCK_BACK_T - P) && ly <= DOCK_HH + P) return true;
     return false;
 }
 
@@ -12463,15 +12467,35 @@ void websocket_server_tick(float dt) {
                                 sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->x));
                                 sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->y));
                                 
-                                // Dismount player
-                                dismount_player_from_ship(ws_player, "walked_off_deck");
-                                
-                                // Continue movement in water (set velocity to swim at max speed in movement direction)
-                                ws_player->velocity_x = movement_x * SWIM_MAX_SPEED;
-                                ws_player->velocity_y = movement_y * SWIM_MAX_SPEED;
-                                
-                                // Clear simulation ship_id (now swimming)
-                                sim_player->ship_id = INVALID_ENTITY_ID;
+                                // Dismount player — try dock first
+                                {
+                                    bool _onto_dock = false;
+                                    for (int _dki = 0; _dki < (int)placed_structure_count && !_onto_dock; _dki++) {
+                                        PlacedStructure *_dks = &placed_structures[_dki];
+                                        if (!_dks->active || _dks->type != STRUCT_SHIPYARD) continue;
+                                        if (_dks->scaffolded_ship_id != (uint32_t)player_ship->ship_id) continue;
+                                        bool _dkhs = (_dks->construction_phase == CONSTRUCTION_BUILDING);
+                                        float _dklx, _dkly;
+                                        dock_world_to_local(_dks, ws_player->x, ws_player->y, &_dklx, &_dkly);
+                                        if (dock_point_on_surface(_dklx, _dkly, _dkhs)) {
+                                            _onto_dock = true;
+                                            dismount_player_from_ship(ws_player, "onto_dock");
+                                            ws_player->on_dock_id = _dks->id;
+                                            ws_player->movement_state = PLAYER_STATE_WALKING;
+                                            sim_player->ship_id = INVALID_ENTITY_ID;
+                                            sim_player->velocity.x = 0;
+                                            sim_player->velocity.y = 0;
+                                        }
+                                    }
+                                    if (!_onto_dock) {
+                                        dismount_player_from_ship(ws_player, "walked_off_deck");
+                                        // Continue movement in water (set velocity to swim at max speed in movement direction)
+                                        ws_player->velocity_x = movement_x * SWIM_MAX_SPEED;
+                                        ws_player->velocity_y = movement_y * SWIM_MAX_SPEED;
+                                        // Clear simulation ship_id (now swimming)
+                                        sim_player->ship_id = INVALID_ENTITY_ID;
+                                    }
+                                }
                             } else {
                                 // Normal movement on deck
                                 ws_player->local_x = new_local_x;
@@ -12637,6 +12661,23 @@ void websocket_server_tick(float dt) {
                                 ws_player->y = new_y;
                                 sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_x));
                                 sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_y));
+                                /* Board scaffolded ship if player steps onto the deck */
+                                if (ws_player->on_dock_id != 0 && _hs &&
+                                    dock_sy->scaffolded_ship_id != 0) {
+                                    SimpleShip *_ssp = find_ship(dock_sy->scaffolded_ship_id);
+                                    if (_ssp) {
+                                        float _slx, _sly;
+                                        ship_world_to_local(_ssp, ws_player->x, ws_player->y,
+                                                            &_slx, &_sly);
+                                        if (!is_outside_deck(_ssp->ship_id, _slx, _sly)) {
+                                            ws_player->on_dock_id = 0;
+                                            board_player_on_ship(ws_player, _ssp, _slx, _sly);
+                                            struct Player *_dsp = sim_get_player(
+                                                global_sim, ws_player->sim_entity_id);
+                                            if (_dsp) _dsp->ship_id = _ssp->ship_id;
+                                        }
+                                    }
+                                }
                             }
                         } else {
                             // ===== SWIMMING MOVEMENT (WORLD COORDINATES) =====

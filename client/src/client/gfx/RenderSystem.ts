@@ -3511,59 +3511,64 @@ export class RenderSystem {
             cx, cy - hh + BACK_T + ARM_L * 0.50
           );
 
-          // ── Scaffolding walkway planks across the dock mouth ─────────────
-          // A wooden plank bridge connecting the two arms at the open (+Y) end,
-          // giving players a walkable surface between the dock and the ship.
+          // ── Scaffolding planks filling the entire interior bay ───────────
+          // Wooden decking surrounds the ship on all sides during construction.
           {
-            const walkY0 = cy + hh - ARM_T;     // plank strip top edge (inside dock bay)
-            const walkY1 = cy + hh;             // plank strip bottom edge (mouth)
-            const walkX0 = cx - hw + ARM_T;     // left arm inner face
-            const walkX1 = cx + hw - ARM_T;     // right arm inner face
-            const walkW  = walkX1 - walkX0;
-            const walkH  = walkY1 - walkY0;
-            // Plank fill
-            ctx.fillStyle = 'rgba(120, 82, 34, 0.80)';
-            ctx.fillRect(walkX0, walkY0, walkW, walkH);
-            // Plank board lines (horizontal)
-            ctx.strokeStyle = 'rgba(70, 46, 18, 0.65)';
-            ctx.lineWidth   = Math.max(0.5, 1.2 * zoom);
-            const nBoards = 4;
-            for (let b = 1; b < nBoards; b++) {
-              const py = walkY0 + walkH * (b / nBoards);
-              ctx.beginPath(); ctx.moveTo(walkX0, py); ctx.lineTo(walkX1, py); ctx.stroke();
+            const bayX0 = cx - hw + ARM_T;   // left arm inner face
+            const bayX1 = cx + hw - ARM_T;   // right arm inner face
+            const bayY0 = cy - hh + BACK_T;  // back wall inner face
+            const bayY1 = cy + hh;           // dock mouth (open end)
+            const bayW  = bayX1 - bayX0;     // INT_W
+            const bayH  = bayY1 - bayY0;     // ARM_L
+            // Plank floor fill (warm weathered timber, semi-transparent)
+            ctx.fillStyle = 'rgba(110, 75, 30, 0.72)';
+            ctx.fillRect(bayX0, bayY0, bayW, bayH);
+            // Horizontal plank board lines running across the bay width
+            ctx.strokeStyle = 'rgba(65, 42, 14, 0.50)';
+            ctx.lineWidth   = Math.max(0.4, 0.9 * zoom);
+            const boardSpacing = ARM_T * 0.55;
+            for (let oy = boardSpacing; oy < bayH; oy += boardSpacing) {
+              const py = bayY0 + oy;
+              ctx.beginPath(); ctx.moveTo(bayX0, py); ctx.lineTo(bayX1, py); ctx.stroke();
             }
-            // Outer border
-            ctx.strokeStyle = 'rgba(155, 115, 60, 0.85)';
-            ctx.lineWidth   = Math.max(1, 1.5 * zoom);
-            ctx.strokeRect(walkX0, walkY0, walkW, walkH);
-            // Guard-rail posts at each end and centre
+            // Vertical grain lines (plank length direction)
+            ctx.strokeStyle = 'rgba(75, 50, 18, 0.28)';
+            const grainCount = 4;
+            const grainSpacing = bayW / (grainCount + 1);
+            for (let gi = 1; gi <= grainCount; gi++) {
+              const px = bayX0 + grainSpacing * gi;
+              ctx.beginPath(); ctx.moveTo(px, bayY0); ctx.lineTo(px, bayY1); ctx.stroke();
+            }
+            // Bay border
+            ctx.strokeStyle = 'rgba(145, 105, 50, 0.70)';
+            ctx.lineWidth   = Math.max(0.8, 1.2 * zoom);
+            ctx.strokeRect(bayX0, bayY0, bayW, bayH);
+            // Guard-rail posts and rope at the dock mouth edge only
+            const postHeight = ARM_T * 1.4;
+            const postY0     = bayY1 - ARM_T;
             ctx.strokeStyle = 'rgba(190, 150, 85, 0.90)';
             ctx.lineWidth   = Math.max(1.5, 2.5 * zoom);
-            const postHeight = walkH * 1.4;
-            for (const px of [walkX0, cx, walkX1]) {
+            for (const px of [bayX0, cx, bayX1]) {
               ctx.beginPath();
-              ctx.moveTo(px, walkY0 + walkH * 0.1);
-              ctx.lineTo(px, walkY0 - postHeight * 0.4);
+              ctx.moveTo(px, postY0 + ARM_T * 0.1);
+              ctx.lineTo(px, postY0 - postHeight * 0.4);
               ctx.stroke();
             }
-            // Guard-rail top rope
             ctx.strokeStyle = 'rgba(200, 160, 80, 0.70)';
             ctx.lineWidth   = Math.max(0.8, 1.2 * zoom);
             ctx.setLineDash([Math.max(3, 5 * zoom), Math.max(2, 3 * zoom)]);
             ctx.beginPath();
-            ctx.moveTo(walkX0, walkY0 - postHeight * 0.4);
-            ctx.lineTo(walkX1, walkY0 - postHeight * 0.4);
+            ctx.moveTo(bayX0, postY0 - postHeight * 0.4);
+            ctx.lineTo(bayX1, postY0 - postHeight * 0.4);
             ctx.stroke();
             ctx.setLineDash([]);
-
             // Stair indicator arrows on the outer faces of each arm (mouth end)
-            // Pulse to draw attention
             const stairPulse = 0.5 + 0.3 * Math.sin(performance.now() * 0.002);
             ctx.fillStyle = `rgba(220, 200, 100, ${stairPulse.toFixed(2)})`;
             ctx.font = `bold ${Math.max(8, Math.round(10 * zoom))}px Consolas, monospace`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            const stairLabelY = cy + hh - ARM_T * 0.5;
+            const stairLabelY = bayY1 - ARM_T * 0.5;
             ctx.fillText('▲', cx - hw + ARM_T * 0.5, stairLabelY); // left stair
             ctx.fillText('▲', cx + hw - ARM_T * 0.5, stairLabelY); // right stair
           }
