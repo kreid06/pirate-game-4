@@ -12225,7 +12225,123 @@ void websocket_server_tick(float dt) {
                         movement_x /= magnitude;
                         movement_y /= magnitude;
                         
-                        if (on_ship && player_ship) {
+                        // ===== SHIPYARD ZONE DETECTION =====
+                        // When on a scaffolded dock OR on a scaffolded ship, use unified
+                        // ship-local movement so dock↔ship transitions are seamless flag updates.
+                        // Both player->local_x/y AND player->x/y are kept in sync at all times.
+                        PlacedStructure *_zdock = NULL;
+                        SimpleShip      *_zship = NULL;
+                        if (ws_player->on_dock_id != 0) {
+                            for (int _zdi = 0; _zdi < (int)placed_structure_count; _zdi++) {
+                                PlacedStructure *_zd = &placed_structures[_zdi];
+                                if (_zd->active && _zd->id == ws_player->on_dock_id &&
+                                    _zd->type == STRUCT_SHIPYARD && _zd->scaffolded_ship_id != 0) {
+                                    _zdock = _zd;
+                                    _zship = find_ship(_zd->scaffolded_ship_id);
+                                    break;
+                                }
+                            }
+                        } else if (on_ship && player_ship) {
+                            for (int _zdi = 0; _zdi < (int)placed_structure_count; _zdi++) {
+                                PlacedStructure *_zd = &placed_structures[_zdi];
+                                if (_zd->active && _zd->type == STRUCT_SHIPYARD &&
+                                    _zd->scaffolded_ship_id == (uint32_t)ws_player->parent_ship_id) {
+                                    _zdock = _zd;
+                                    _zship = player_ship;
+                                    break;
+                                }
+                            }
+                        }
+                        if (_zdock && _zship) {
+                            // ===== SHIPYARD ZONE MOVEMENT (ship-local coords) =====
+                            // When on the dock side, sync local_x/y from current world pos.
+                            if (ws_player->parent_ship_id == 0) {
+                                ship_world_to_local(_zship, ws_player->x, ws_player->y,
+                                                    &ws_player->local_x, &ws_player->local_y);
+                            }
+                            float _zwalk = SERVER_TO_CLIENT(WALK_MAX_SPEED);
+                            if (ws_player->is_sprinting) _zwalk *= 1.6f;
+                            /* Convert world-space input direction to ship-local space */
+                            float _zcr =  cosf(_zship->rotation), _zsr = sinf(_zship->rotation);
+                            float _zldx =  movement_x * _zcr + movement_y * _zsr;
+                            float _zldy = -movement_x * _zsr + movement_y * _zcr;
+                            float _znlx = ws_player->local_x + _zldx * _zwalk * dt;
+                            float _znly = ws_player->local_y + _zldy * _zwalk * dt;
+                            /* Module / NPC collision (only matters on-deck, harmless off it) */
+                            resolve_player_module_collisions(_zship,
+                                ws_player->is_mounted ? ws_player->mounted_module_id : 0,
+                                &_znlx, &_znly);
+                            resolve_player_npc_collisions(_zship, &_znlx, &_znly);
+                            /* Derive world position */
+                            float _znwx, _znwy;
+                            ship_local_to_world(_zship, _znlx, _znly, &_znwx, &_znwy);
+                            /* Check both surfaces */
+                            bool _z_in_deck = !is_outside_deck(_zship->ship_id, _znlx, _znly);
+                            float _zd_lx, _zd_ly;
+                            dock_world_to_local(_zdock, _znwx, _znwy, &_zd_lx, &_zd_ly);
+                            bool _z_on_dock = dock_point_on_surface(_zd_lx, _zd_ly, true);
+                            if (_z_in_deck || _z_on_dock) {
+                                /* Commit position — both coord systems stay in sync */
+                                ws_player->local_x = _znlx;
+                                ws_player->local_y = _znly;
+                                ws_player->x       = _znwx;
+                                ws_player->y       = _znwy;
+                                sim_player->position.x     = Q16_FROM_FLOAT(CLIENT_TO_SERVER(_znwx));
+                                sim_player->position.y     = Q16_FROM_FLOAT(CLIENT_TO_SERVER(_znwy));
+                                sim_player->relative_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(_znlx));
+                                sim_player->relative_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(_znly));
+                                sim_player->velocity.x     = 0;
+                                sim_player->velocity.y     = 0;
+                                if (_z_in_deck) {
+                                    /* On ship deck — flag as on-ship */
+                                    if (ws_player->parent_ship_id == 0) {
+                                        ws_player->parent_ship_id = _zship->ship_id;
+                                        ws_player->on_dock_id     = 0;
+                                        ws_player->velocity_x     = 0.0f;
+                                        ws_player->velocity_y     = 0.0f;
+                                        sim_player->ship_id       = _zship->ship_id;
+                                        log_info("⚓ P%u boarded scaffolded ship %u from scaffold",
+                                                 ws_player->player_id, _zship->ship_id);
+                                    }
+                                } else {
+                                    /* On scaffold (outside hull) — flag as on-dock */
+                                    if (ws_player->parent_ship_id != 0) {
+                                        if (ws_player->is_mounted) {
+                                            ws_player->is_mounted          = false;
+                                            ws_player->mounted_module_id   = 0;
+                                            ws_player->controlling_ship_id = 0;
+                                        }
+                                        ws_player->parent_ship_id = 0;
+                                        ws_player->on_dock_id     = _zdock->id;
+                                        ws_player->velocity_x     = 0.0f;
+                                        ws_player->velocity_y     = 0.0f;
+                                        sim_player->ship_id       = INVALID_ENTITY_ID;
+                                        log_info("🛖 P%u stepped from scaffolded ship %u onto scaffold",
+                                                 ws_player->player_id, _zship->ship_id);
+                                    }
+                                }
+                            } else {
+                                /* Left combined surface — fall to water */
+                                ws_player->x = _znwx;
+                                ws_player->y = _znwy;
+                                sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(_znwx));
+                                sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(_znwy));
+                                if (ws_player->is_mounted) {
+                                    ws_player->is_mounted          = false;
+                                    ws_player->mounted_module_id   = 0;
+                                    ws_player->controlling_ship_id = 0;
+                                }
+                                ws_player->parent_ship_id  = 0;
+                                ws_player->on_dock_id      = 0;
+                                ws_player->movement_state  = PLAYER_STATE_SWIMMING;
+                                sim_player->ship_id        = INVALID_ENTITY_ID;
+                                sim_player->relative_pos.x = 0;
+                                sim_player->relative_pos.y = 0;
+                                sim_player->velocity.x     = Q16_FROM_FLOAT(CLIENT_TO_SERVER(movement_x * _zwalk));
+                                sim_player->velocity.y     = Q16_FROM_FLOAT(CLIENT_TO_SERVER(movement_y * _zwalk));
+                                log_info("🌊 P%u left shipyard zone into water", ws_player->player_id);
+                            }
+                        } else if (on_ship && player_ship) {
                             // ===== ON-SHIP MOVEMENT (LOCAL COORDINATES) =====
                             // Movement is in world space, need to convert to ship-local space
                             float ship_cos = cosf(player_ship->rotation);
@@ -12525,9 +12641,22 @@ void websocket_server_tick(float dt) {
                         sim_player->velocity.x = 0;
                         sim_player->velocity.y = 0;
                     } else if (!on_ship && ws_player->on_dock_id != 0) {
-                        /* On dock and stopped — zero velocity */
+                        /* On dock and stopped — zero velocity; keep local_x/y synced
+                         * for dock players in the shipyard zone (scaffold on pinned ship). */
                         sim_player->velocity.x = 0;
                         sim_player->velocity.y = 0;
+                        for (int _zdi = 0; _zdi < (int)placed_structure_count; _zdi++) {
+                            PlacedStructure *_zd = &placed_structures[_zdi];
+                            if (_zd->active && _zd->id == ws_player->on_dock_id &&
+                                _zd->type == STRUCT_SHIPYARD && _zd->scaffolded_ship_id != 0) {
+                                SimpleShip *_zs = find_ship(_zd->scaffolded_ship_id);
+                                if (_zs) {
+                                    ship_world_to_local(_zs, ws_player->x, ws_player->y,
+                                                        &ws_player->local_x, &ws_player->local_y);
+                                }
+                                break;
+                            }
+                        }
                     } else if (!on_ship) {
                         // Only apply deceleration for swimming players
                         float current_vx = Q16_TO_FLOAT(sim_player->velocity.x);
