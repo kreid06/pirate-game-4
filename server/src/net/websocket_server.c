@@ -12480,9 +12480,14 @@ void websocket_server_tick(float dt) {
                                         if (dock_point_on_surface(_dklx, _dkly, _dkhs)) {
                                             _onto_dock = true;
                                             dismount_player_from_ship(ws_player, "onto_dock");
+                                            /* Zero residual ship velocity — dock surface is stationary */
+                                            ws_player->velocity_x = 0.0f;
+                                            ws_player->velocity_y = 0.0f;
                                             ws_player->on_dock_id = _dks->id;
                                             ws_player->movement_state = PLAYER_STATE_WALKING;
                                             sim_player->ship_id = INVALID_ENTITY_ID;
+                                            sim_player->relative_pos.x = 0;
+                                            sim_player->relative_pos.y = 0;
                                             sim_player->velocity.x = 0;
                                             sim_player->velocity.y = 0;
                                         }
