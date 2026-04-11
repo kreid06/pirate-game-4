@@ -23,12 +23,12 @@ export interface ModuleDef {
 }
 
 export const MODULE_DEFS: ModuleDef[] = [
-  { id: 'hull_left',   label: 'Hull Planks (Port)',  cost: '15× Plank',           required: true,  symbol: '⊟', color: '#7a5028', border: '#4a2c10' },
-  { id: 'hull_right',  label: 'Hull Planks (Stbd)',  cost: '15× Plank',           required: true,  symbol: '⊟', color: '#7a5028', border: '#4a2c10' },
-  { id: 'deck',        label: 'Deck',                cost: '10× Plank',           required: true,  symbol: '▭', color: '#9c7240', border: '#6c4c20' },
-  { id: 'mast',        label: 'Mast',                cost: '10× Wood  5× Fiber',  required: false, symbol: '|', color: '#5a4020', border: '#3a2810' },
-  { id: 'cannon_port', label: 'Cannon (Port)',        cost: '1× Cannon',           required: false, symbol: '⚫', color: '#3a3a3a', border: '#1a1a1a' },
-  { id: 'cannon_stbd', label: 'Cannon (Stbd)',        cost: '1× Cannon',           required: false, symbol: '⚫', color: '#3a3a3a', border: '#1a1a1a' },
+  { id: 'hull_left',   label: 'Hull Planks (Port)',  cost: '5× Plank',            required: false, symbol: '⊟', color: '#7a5028', border: '#4a2c10' },
+  { id: 'hull_right',  label: 'Hull Planks (Stbd)',  cost: '5× Plank',            required: false, symbol: '⊟', color: '#7a5028', border: '#4a2c10' },
+  { id: 'deck',        label: 'Deck + Helm + Ladder',cost: '10× Plank',           required: false, symbol: '▭', color: '#9c7240', border: '#6c4c20' },
+  { id: 'mast',        label: 'Masts (×3)',          cost: '10× Wood  5× Fiber',  required: false, symbol: '|', color: '#5a4020', border: '#3a2810' },
+  { id: 'cannon_port', label: 'Cannons (Port ×3)',   cost: '1× Cannon',           required: false, symbol: '⚫', color: '#3a3a3a', border: '#1a1a1a' },
+  { id: 'cannon_stbd', label: 'Cannons (Stbd ×3)',   cost: '1× Cannon',           required: false, symbol: '⚫', color: '#3a3a3a', border: '#1a1a1a' },
 ];
 
 export const REQUIRED_IDS = new Set(['hull_left', 'hull_right', 'deck']);
@@ -217,8 +217,6 @@ export class ShipyardMenu {
   }
 
   private _drawModuleRows(ctx: CanvasRenderingContext2D, px: number, bodyY: number): void {
-    const canLaunch = [...REQUIRED_IDS].every(id => this.modulesPlaced.includes(id));
-
     // Compact read-only progress rows
     for (let i = 0; i < MODULE_DEFS.length; i++) {
       const m    = MODULE_DEFS[i];
@@ -257,7 +255,7 @@ export class ShipyardMenu {
     ctx.textBaseline = 'top';
     ctx.fillStyle    = TEXT_DIM;
     ctx.fillText('Click the skeleton with materials to install modules', px + PANEL_W / 2, hintY);
-    ctx.fillText(canLaunch ? 'Hold [E] on shipyard → Release Ship' : 'Install required modules to launch', px + PANEL_W / 2, hintY + 16);
+    ctx.fillText('Hold [E] on shipyard → Release Ship', px + PANEL_W / 2, hintY + 16);
   }
 
   // ── Input handling ──────────────────────────────────────────────────────

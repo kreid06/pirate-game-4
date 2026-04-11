@@ -125,6 +125,8 @@ export interface ShipConstruction {
    * Possible values: 'hull_left' | 'hull_right' | 'deck' | 'mast' | 'cannon_port' | 'cannon_stbd'
    */
   modulesPlaced: string[];
+  /** Entity ID of the real ship entity scaffolded at this shipyard. */
+  scaffoldedShipId?: number;
 }
 
 /**

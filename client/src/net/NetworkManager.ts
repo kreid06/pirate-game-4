@@ -560,7 +560,7 @@ export class NetworkManager {
   /** Fired when the server confirms a craft_item request. */
   public onCraftResult: ((success: boolean, recipeId: string, reason?: string) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
-  public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number) => void) | null = null;
+  public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number) => void) | null = null;
   /** Fired when the server rejects a structure placement with a reason string. */
   public onPlacementFailed: ((reason: string, x: number, y: number, structureType: string, blockerId: number | null) => void) | null = null;
   /** Fired when a door is toggled open or closed by any player. */
@@ -2183,7 +2183,7 @@ export class NetworkManager {
       case 'shipyard_state': {
         const phase = message.phase === 'building' ? 'building' : 'empty' as const;
         const modules: string[] = Array.isArray(message.modules_placed) ? message.modules_placed : [];
-        this.onShipyardState?.(message.structure_id ?? 0, phase, modules, message.ship_spawned);
+        this.onShipyardState?.(message.structure_id ?? 0, phase, modules, message.ship_spawned, message.scaffolded_ship_id);
         break;
       }
 

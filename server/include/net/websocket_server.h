@@ -279,8 +279,9 @@ typedef struct {
     bool     open;           /* doors only: true = open (passable) */
     /* Shipyard-only construction state — zero-initialised for all other types */
     ShipConstructionPhase construction_phase;
-    uint8_t  modules_placed;   /* bitmask of MODULE_* bits */
+    uint8_t  modules_placed;   /* bitmask of MODULE_* bits (legacy — tracks what was added) */
     uint8_t  construction_company; /* company that owns the ship being built */
+    uint32_t scaffolded_ship_id;   /* entity ID of the real ship attached to this shipyard (0 = none) */
 } PlacedStructure;
 
 #define MAX_PLACED_STRUCTURES 512

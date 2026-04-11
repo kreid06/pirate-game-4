@@ -222,8 +222,9 @@ struct SimConfig {
 #define PLAYER_ACTION_LEAVE        (1 << 7)  // Leave current ship
 
 // Ship flags
-#define SHIP_FLAG_SINKING   (1 << 0)
-#define SHIP_FLAG_BURNING   (1 << 1)
+#define SHIP_FLAG_SINKING    (1 << 0)
+#define SHIP_FLAG_BURNING    (1 << 1)
+#define SHIP_FLAG_SCAFFOLDED (1 << 2)  // Attached to shipyard — immune to plank-drain sinking
 
 // Player flags  
 #define PLAYER_FLAG_IN_WATER    (1 << 0)

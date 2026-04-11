@@ -1378,8 +1378,8 @@ export class ClientApplication {
         }
       };
 
-      this.networkManager.onShipyardState = (structureId, phase, modulesPlaced, shipSpawned) => {
-        this.renderSystem.updateShipyardConstruction(structureId, phase, modulesPlaced);
+      this.networkManager.onShipyardState = (structureId, phase, modulesPlaced, shipSpawned, scaffoldedShipId) => {
+        this.renderSystem.updateShipyardConstruction(structureId, phase, modulesPlaced, scaffoldedShipId);
         if (this.shipyardMenu.visible && this.shipyardMenu.structureId === structureId) {
           this.shipyardMenu.updateState(phase, modulesPlaced);
         }
@@ -1387,7 +1387,7 @@ export class ClientApplication {
         // installs modules by clicking on the skeleton directly.
         if (shipSpawned) {
           this.shipyardMenu.close();
-          this.renderSystem.showAnnouncement('⚓ Ship launched!', 'info', 3.5);
+          this.renderSystem.showAnnouncement('⚓ Ship released!', 'info', 3.5);
         }
       };
 
@@ -2859,9 +2859,8 @@ export class ClientApplication {
                   const mp2 = this.inputManager.getMouseScreenPosition();
                   const opts: { id: string; label: string }[] = [];
                   if (struct.construction?.phase === 'building') {
-                    const mp = struct.construction.modulesPlaced;
-                    const canLaunch = ['hull_left', 'hull_right', 'deck'].every(id => mp.includes(id));
-                    if (canLaunch) opts.push({ id: 'release', label: '⚓ Release Ship' });
+                    // Ship can be released at any time — it's a real entity
+                    opts.push({ id: 'release', label: '⚓ Release Ship' });
                   }
                   if (isOwnCompany) opts.push({ id: 'demolish', label: 'Demolish Shipyard' });
                   if (opts.length > 0) {

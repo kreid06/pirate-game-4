@@ -1166,10 +1166,10 @@ export class RenderSystem {
   }
 
   /** Update ship construction state after a shipyard_state broadcast. */
-  updateShipyardConstruction(id: number, phase: ConstructionPhase, modulesPlaced: string[]): void {
+  updateShipyardConstruction(id: number, phase: ConstructionPhase, modulesPlaced: string[], scaffoldedShipId?: number): void {
     const s = this.placedStructures.find(p => p.id === id);
     if (!s || s.type !== 'shipyard') return;
-    s.construction = phase === 'empty' ? undefined : { phase, modulesPlaced };
+    s.construction = phase === 'empty' ? undefined : { phase, modulesPlaced, scaffoldedShipId };
   }
 
   /** Get the construction state of a shipyard by structure id. */

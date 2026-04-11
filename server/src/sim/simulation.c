@@ -153,6 +153,12 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
         }
 
         // ---- Sinking / water mechanic ----
+        // Ships scaffolded in a shipyard are immune to plank-drain sinking
+        if (ship->flags & SHIP_FLAG_SCAFFOLDED) {
+            // Keep hull_health at 100 while scaffolded
+            ship->hull_health = Q16_FROM_INT(100);
+            continue;  // skip entire drain/heal block for this ship
+        }
         // Count remaining planks and detect leaks (< 30% HP).
         // Leaking planks do NOT self-damage — they stay at their current HP but
         // contribute to the hull drain rate at half the missing-plank rate.
@@ -598,6 +604,16 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation, uin
     // Module IDs are based on ship entity ID so two ships have distinct IDs
     // (ship 1 → 1000-1010, ship 2 → 2000-2010, etc.)
     ship->module_count = 0;
+    
+    /* Bare skeleton — hull polygon only, no modules at all.
+     * initial_plank_count stays 0 so the drain formula sees missing=0. */
+    if (modules_placed == 0) {
+        ship->initial_plank_count = 0;
+        log_info("⚓ Created skeleton ship %u with 0 modules (bare hull)", id);
+        sim->ship_count++;
+        return id;
+    }
+
     uint16_t module_id = (uint16_t)(ship->id * 1000);
     
     // Helm
