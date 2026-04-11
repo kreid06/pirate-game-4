@@ -168,6 +168,7 @@ static SimpleShip* find_ship(uint32_t ship_id) {
 }
 
 // Coordinate conversion helpers
+static void handle_ship_dock_collisions(void); /* forward declaration */
 static void ship_local_to_world(const SimpleShip* ship, float local_x, float local_y, float* world_x, float* world_y) {
     float cos_r = cosf(ship->rotation);
     float sin_r = sinf(ship->rotation);
