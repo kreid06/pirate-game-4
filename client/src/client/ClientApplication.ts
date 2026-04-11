@@ -669,19 +669,6 @@ export class ClientApplication {
               this.networkManager.sendStructureInteract(hovered.id);
               return;
             }
-
-            // Shipyard construction: click on skeleton with materials → install module
-            if (target && (activeItem === 'plank' || activeItem === 'wood' || activeItem === 'cannon')) {
-              const slot = this.renderSystem.getConstructionModuleSlot(
-                target.x, target.y, activeItem, player.position.x, player.position.y
-              );
-              if (slot) {
-                console.log(`🔨 [SHIPYARD] Installing ${slot.moduleId} on shipyard ${slot.shipyard.id}`);
-                this.networkManager.sendShipyardAction(slot.shipyard.id, 'add_module', slot.moduleId);
-                this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
-                return;
-              }
-            }
           }
 
           // Module interaction takes priority over NPC menu

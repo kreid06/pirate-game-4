@@ -5179,28 +5179,13 @@ static void handle_structure_interact(WebSocketPlayer* player, struct WebSocketC
             goto si_send;
         }
         if (placed_structures[i].type == STRUCT_SHIPYARD) {
-            /* Build modules_placed JSON array */
-            char mod_json[256] = "[]";
-            if (placed_structures[i].modules_placed) {
-                int mp2 = 0;
-                mod_json[mp2++] = '[';
-                const char* mnames[6] = {"hull_left","hull_right","deck","mast","cannon_port","cannon_stbd"};
-                bool mfirst = true;
-                for (int b = 0; b < 6; b++) {
-                    if (placed_structures[i].modules_placed & (1u << b)) {
-                        if (!mfirst) mod_json[mp2++] = ',';
-                        mp2 += snprintf(mod_json + mp2, (int)sizeof(mod_json) - mp2, "\"%s\"", mnames[b]);
-                        mfirst = false;
-                    }
-                }
-                mod_json[mp2++] = ']';
-                mod_json[mp2]   = '\0';
-            }
             const char* phase_str = placed_structures[i].construction_phase == CONSTRUCTION_BUILDING
                                     ? "building" : "empty";
             snprintf(response, sizeof(response),
-                     "{\"type\":\"shipyard_state\",\"structure_id\":%u,\"phase\":\"%s\",\"modules_placed\":%s}",
-                     sid, phase_str, mod_json);
+                     "{\"type\":\"shipyard_state\",\"structure_id\":%u,"
+                     "\"phase\":\"%s\",\"modules_placed\":[],"
+                     "\"scaffolded_ship_id\":%u}",
+                     sid, phase_str, placed_structures[i].scaffolded_ship_id);
             goto si_send;
         }
         if (placed_structures[i].type == STRUCT_DOOR) {
@@ -5232,38 +5217,19 @@ si_send:;
 static void build_shipyard_state_json(char* buf, size_t bufsz,
                                       const PlacedStructure* sy,
                                       uint32_t ship_spawned) {
-    char mod_json[256] = "[]";
-    if (sy->modules_placed) {
-        int pos = 0;
-        mod_json[pos++] = '[';
-        const char* mnames[6] = {"hull_left","hull_right","deck","mast","cannon_port","cannon_stbd"};
-        bool mfirst = true;
-        for (int b = 0; b < 6; b++) {
-            if (sy->modules_placed & (1u << b)) {
-                if (!mfirst) mod_json[pos++] = ',';
-                pos += snprintf(mod_json + pos, (int)sizeof(mod_json) - pos,
-                                "\"%s\"", mnames[b]);
-                mfirst = false;
-            }
-        }
-        mod_json[pos++] = ']';
-        mod_json[pos]   = '\0';
-    }
     const char* phase_str = sy->construction_phase == CONSTRUCTION_BUILDING ? "building" : "empty";
     if (ship_spawned) {
         snprintf(buf, bufsz,
                  "{\"type\":\"shipyard_state\",\"structure_id\":%u,"
-                 "\"phase\":\"%s\",\"modules_placed\":%s,\"ship_spawned\":%u,"
-                 "\"scaffolded_ship_id\":%u}",
-                 sy->id, phase_str, mod_json, ship_spawned,
-                 sy->scaffolded_ship_id);
+                 "\"phase\":\"%s\",\"modules_placed\":[],"
+                 "\"ship_spawned\":%u,\"scaffolded_ship_id\":%u}",
+                 sy->id, phase_str, ship_spawned, sy->scaffolded_ship_id);
     } else {
         snprintf(buf, bufsz,
                  "{\"type\":\"shipyard_state\",\"structure_id\":%u,"
-                 "\"phase\":\"%s\",\"modules_placed\":%s,"
+                 "\"phase\":\"%s\",\"modules_placed\":[],"
                  "\"scaffolded_ship_id\":%u}",
-                 sy->id, phase_str, mod_json,
-                 sy->scaffolded_ship_id);
+                 sy->id, phase_str, sy->scaffolded_ship_id);
     }
 }
 
@@ -5367,182 +5333,16 @@ static void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClie
             }
         }
         sy->construction_phase   = CONSTRUCTION_BUILDING;
-        sy->modules_placed       = 0;
         sy->construction_company = player->company_id;
         sy->scaffolded_ship_id   = new_ship_id;
         log_info("⚓ Shipyard %u: skeleton spawned as ship %u", sid, new_ship_id);
 
     } else if (strcmp(action, "add_module") == 0) {
-        /* ── Install a module onto the scaffolded ship entity ───────── */
-        if (sy->construction_phase != CONSTRUCTION_BUILDING || sy->scaffolded_ship_id == 0) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"no_skeleton\"}");
-            goto sya_send;
-        }
-        /* Find the sim ship and SimpleShip */
-        struct Ship* sim_ship = NULL;
-        SimpleShip*  ss       = find_ship(sy->scaffolded_ship_id);
-        if (global_sim) {
-            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                if (global_sim->ships[si].id == sy->scaffolded_ship_id) {
-                    sim_ship = &global_sim->ships[si]; break;
-                }
-            }
-        }
-        if (!sim_ship || !ss) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"ship_missing\"}");
-            goto sya_send;
-        }
-
-        /* Determine what to create and what it costs */
-        uint8_t bit = 0xFF;
-        ItemKind cost_item = ITEM_NONE; int cost_qty = 0;
-        ItemKind cost_item2 = ITEM_NONE; int cost_qty2 = 0;
-        if      (!strcmp(module,"hull_left"))   { bit=0; cost_item=ITEM_PLANK; cost_qty=5; }
-        else if (!strcmp(module,"hull_right"))  { bit=1; cost_item=ITEM_PLANK; cost_qty=5; }
-        else if (!strcmp(module,"deck"))        { bit=2; cost_item=ITEM_PLANK; cost_qty=10; }
-        else if (!strcmp(module,"mast"))        { bit=3; cost_item=ITEM_WOOD;  cost_qty=10;
-                                                          cost_item2=ITEM_FIBER; cost_qty2=5; }
-        else if (!strcmp(module,"cannon_port")) { bit=4; cost_item=ITEM_CANNON; cost_qty=1; }
-        else if (!strcmp(module,"cannon_stbd")) { bit=5; cost_item=ITEM_CANNON; cost_qty=1; }
-        else {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"unknown_module\"}");
-            goto sya_send;
-        }
-        if (sy->modules_placed & (1u << bit)) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"already_placed\"}");
-            goto sya_send;
-        }
-        /* Check material totals */
-        int total1 = 0, total2 = 0;
-        for (int s2 = 0; s2 < INVENTORY_SLOTS; s2++) {
-            if (player->inventory.slots[s2].item == cost_item)  total1 += player->inventory.slots[s2].quantity;
-            if (cost_item2 && player->inventory.slots[s2].item == cost_item2) total2 += player->inventory.slots[s2].quantity;
-        }
-        if (total1 < cost_qty || (cost_item2 != ITEM_NONE && total2 < cost_qty2)) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"shipyard_action_fail\",\"reason\":\"missing_materials\"}");
-            goto sya_send;
-        }
-        /* Consume materials */
-        int need1 = cost_qty, need2 = cost_qty2;
-        for (int s2 = 0; s2 < INVENTORY_SLOTS && (need1 > 0 || need2 > 0); s2++) {
-            if (need1 > 0 && player->inventory.slots[s2].item == cost_item) {
-                int take = player->inventory.slots[s2].quantity < need1
-                           ? player->inventory.slots[s2].quantity : need1;
-                player->inventory.slots[s2].quantity -= (uint8_t)take;
-                if (!player->inventory.slots[s2].quantity) player->inventory.slots[s2].item = ITEM_NONE;
-                need1 -= take;
-            }
-            if (need2 > 0 && cost_item2 != ITEM_NONE && player->inventory.slots[s2].item == cost_item2) {
-                int take = player->inventory.slots[s2].quantity < need2
-                           ? player->inventory.slots[s2].quantity : need2;
-                player->inventory.slots[s2].quantity -= (uint8_t)take;
-                if (!player->inventory.slots[s2].quantity) player->inventory.slots[s2].item = ITEM_NONE;
-                need2 -= take;
-            }
-        }
-
-        /* ── Actually create the modules on the ship ── */
-        uint16_t mid_base = ss->module_id_base;
-        if (bit == 0) {
-            /* hull_left → 5 port-side planks (indices 0,6,7,8,9 → IDs 100,106,107,108,109) */
-            static const int port_idx[5] = {0, 6, 7, 8, 9};
-            static const float pcx[10] = {246.25f,246.25f,115.0f,-35.0f,-185.0f,-281.25f,-281.25f,-185.0f,-35.0f,115.0f};
-            static const float pcy[10] = {45.0f,-45.0f,-90.0f,-90.0f,-90.0f,-45.0f,45.0f,90.0f,90.0f,90.0f};
-            for (int k = 0; k < 5; k++) {
-                int pi = port_idx[k];
-                Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(pcx[pi])),
-                                Q16_FROM_FLOAT(CLIENT_TO_SERVER(pcy[pi])) };
-                ShipModule plank = module_create((uint16_t)(100 + pi), MODULE_TYPE_PLANK, pos, 0);
-                if (sim_ship->module_count < MAX_MODULES_PER_SHIP) sim_ship->modules[sim_ship->module_count++] = plank;
-                if (ss->module_count < MAX_MODULES_PER_SHIP) ss->modules[ss->module_count++] = plank;
-            }
-        } else if (bit == 1) {
-            /* hull_right → 5 starboard-side planks (indices 1,2,3,4,5 → IDs 101-105) */
-            static const int stbd_idx[5] = {1, 2, 3, 4, 5};
-            static const float pcx[10] = {246.25f,246.25f,115.0f,-35.0f,-185.0f,-281.25f,-281.25f,-185.0f,-35.0f,115.0f};
-            static const float pcy[10] = {45.0f,-45.0f,-90.0f,-90.0f,-90.0f,-45.0f,45.0f,90.0f,90.0f,90.0f};
-            for (int k = 0; k < 5; k++) {
-                int pi = stbd_idx[k];
-                Vec2Q16 pos = { Q16_FROM_FLOAT(CLIENT_TO_SERVER(pcx[pi])),
-                                Q16_FROM_FLOAT(CLIENT_TO_SERVER(pcy[pi])) };
-                ShipModule plank = module_create((uint16_t)(100 + pi), MODULE_TYPE_PLANK, pos, 0);
-                if (sim_ship->module_count < MAX_MODULES_PER_SHIP) sim_ship->modules[sim_ship->module_count++] = plank;
-                if (ss->module_count < MAX_MODULES_PER_SHIP) ss->modules[ss->module_count++] = plank;
-            }
-        } else if (bit == 2) {
-            /* deck → deck (ID 200) + helm + ladder */
-            ShipModule deck_mod = module_create(200, MODULE_TYPE_DECK, (Vec2Q16){0, 0}, 0);
-            if (sim_ship->module_count < MAX_MODULES_PER_SHIP) sim_ship->modules[sim_ship->module_count++] = deck_mod;
-            if (ss->module_count < MAX_MODULES_PER_SHIP) ss->modules[ss->module_count++] = deck_mod;
-
-            /* Helm — use mid_base + 0 (same ID as init_brigantine_ship) */
-            {
-                ShipModule helm = module_create(mid_base, MODULE_TYPE_HELM,
-                    (Vec2Q16){ Q16_FROM_FLOAT(CLIENT_TO_SERVER(-90.0f)),
-                               Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f)) }, 0);
-                if (sim_ship->module_count < MAX_MODULES_PER_SHIP) sim_ship->modules[sim_ship->module_count++] = helm;
-                if (ss->module_count < MAX_MODULES_PER_SHIP) ss->modules[ss->module_count++] = helm;
-            }
-            /* Ladder — use mid_base + 7 (after helm=0, 6 cannons=1-6) */
-            {
-                ShipModule ladder = module_create((uint16_t)(mid_base + 7), MODULE_TYPE_LADDER,
-                    (Vec2Q16){ Q16_FROM_FLOAT(CLIENT_TO_SERVER(-305.0f)),
-                               Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f)) }, 0);
-                if (sim_ship->module_count < MAX_MODULES_PER_SHIP) sim_ship->modules[sim_ship->module_count++] = ladder;
-                if (ss->module_count < MAX_MODULES_PER_SHIP) ss->modules[ss->module_count++] = ladder;
-            }
-        } else if (bit == 3) {
-            /* mast → 3 masts (mid_base+8, +9, +10 — after helm(0), cannons(1-6), ladder(7)) */
-            static const float mast_xs[3] = { 165.0f, -35.0f, -235.0f };
-            for (int k = 0; k < 3; k++) {
-                ShipModule mast = module_create((uint16_t)(mid_base + 8 + k), MODULE_TYPE_MAST,
-                    (Vec2Q16){ Q16_FROM_FLOAT(CLIENT_TO_SERVER(mast_xs[k])),
-                               Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f)) }, 0);
-                mast.state_bits |= MODULE_STATE_DEPLOYED;
-                mast.data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
-                mast.data.mast.fiber_health = Q16_FROM_FLOAT(15000.0f);
-                mast.data.mast.fiber_max_health = Q16_FROM_FLOAT(15000.0f);
-                if (sim_ship->module_count < MAX_MODULES_PER_SHIP) sim_ship->modules[sim_ship->module_count++] = mast;
-                if (ss->module_count < MAX_MODULES_PER_SHIP) ss->modules[ss->module_count++] = mast;
-            }
-        } else if (bit == 4) {
-            /* cannon_port → 3 port cannons (mid_base+1, +2, +3) */
-            static const float cx[3] = { -35.0f, 65.0f, -135.0f };
-            for (int k = 0; k < 3; k++) {
-                ShipModule cannon = module_create((uint16_t)(mid_base + 1 + k), MODULE_TYPE_CANNON,
-                    (Vec2Q16){ Q16_FROM_FLOAT(CLIENT_TO_SERVER(cx[k])),
-                               Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f)) },
-                    Q16_FROM_FLOAT((float)M_PI));
-                cannon.data.cannon.ammunition = 10;
-                cannon.data.cannon.reload_time = CANNON_RELOAD_TIME_MS;
-                cannon.data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS;
-                if (sim_ship->module_count < MAX_MODULES_PER_SHIP) sim_ship->modules[sim_ship->module_count++] = cannon;
-                if (ss->module_count < MAX_MODULES_PER_SHIP) ss->modules[ss->module_count++] = cannon;
-            }
-        } else if (bit == 5) {
-            /* cannon_stbd → 3 starboard cannons (mid_base+4, +5, +6) */
-            static const float cx[3] = { -35.0f, 65.0f, -135.0f };
-            for (int k = 0; k < 3; k++) {
-                ShipModule cannon = module_create((uint16_t)(mid_base + 4 + k), MODULE_TYPE_CANNON,
-                    (Vec2Q16){ Q16_FROM_FLOAT(CLIENT_TO_SERVER(cx[k])),
-                               Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f)) },
-                    Q16_FROM_FLOAT(0.0f));
-                cannon.data.cannon.ammunition = 10;
-                cannon.data.cannon.reload_time = CANNON_RELOAD_TIME_MS;
-                cannon.data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS;
-                if (sim_ship->module_count < MAX_MODULES_PER_SHIP) sim_ship->modules[sim_ship->module_count++] = cannon;
-                if (ss->module_count < MAX_MODULES_PER_SHIP) ss->modules[ss->module_count++] = cannon;
-            }
-        }
-        sy->modules_placed |= (1u << bit);
-        ship_init_default_weapon_groups(ss);
-        log_info("⚓ Shipyard %u: added module '%s' to ship %u (now %d modules)",
-                 sid, module, sy->scaffolded_ship_id, sim_ship->module_count);
+        /* add_module is no longer handled by the dock — modules are placed
+         * directly on the ship using the ship's own build mode. */
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"shipyard_action_fail\",\"reason\":\"use_build_mode\"}");
+        goto sya_send;
 
     } else if (strcmp(action, "release_ship") == 0) {
         /* ── Release the ship from scaffolding ──────────────────────────── */

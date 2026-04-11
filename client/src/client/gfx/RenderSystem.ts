@@ -1373,87 +1373,6 @@ export class RenderSystem {
     return dx * dx + dy * dy <= range * range ? s : null;
   }
 
-  /**
-   * Given a world-space click position, find the nearest unplaced module slot
-   * on a shipyard construction in building phase.  Returns the shipyard structure
-   * and the module id to install, or null if no match.
-   * The held item name is used to filter to compatible modules.
-   */
-  getConstructionModuleSlot(
-    worldX: number, worldY: number, heldItem: string, playerX: number, playerY: number,
-  ): { shipyard: PlacedStructure; moduleId: string } | null {
-    // World-space dimensions of the shipyard (matches rendering constants scaled by base size 50)
-    const BASE    = 50;
-    const INT_W   = BASE * 4.80;
-    const ARM_L   = BASE * 16.80;
-    const BACK_T  = BASE * 1.00;
-    const ARM_T   = BASE * 1.00;
-    const totalH  = BACK_T + ARM_L;
-    const bHW     = INT_W * 0.44;      // hull half-beam
-    const bLen    = ARM_L * 0.96;       // hull length (top 2% to bottom 2%)
-    const bTopOff = -totalH / 2 + BACK_T + ARM_L * 0.02; // bow tip offset from center
-
-    for (const s of this.placedStructures) {
-      if (s.type !== 'shipyard' || s.construction?.phase !== 'building') continue;
-      const mp = s.construction.modulesPlaced;
-
-      // Player distance check (same generous OBB as getHoveredStructure)
-      const rot = (s.rotation ?? 0) * Math.PI / 180;
-      const pdx = playerX - s.x, pdy = playerY - s.y;
-      const c = Math.cos(-rot), sn = Math.sin(-rot);
-      const plx = pdx * c - pdy * sn, ply = pdx * sn + pdy * c;
-      if (Math.abs(plx) > 270 || Math.abs(ply) > 545) continue;
-
-      // Transform click into shipyard-local frame (y-axis = bow-to-stern)
-      const cdx = worldX - s.x, cdy = worldY - s.y;
-      const lx = cdx * c - cdy * sn;
-      const ly = cdx * sn + cdy * c;
-
-      // Check if click is inside the construction area
-      if (Math.abs(lx) > bHW + 30 || ly < bTopOff - 20 || ly > bTopOff + bLen + 20) continue;
-
-      // Determine best module based on held item and click position
-      const relY = (ly - bTopOff) / bLen; // 0=bow, 1=stern
-
-      let bestModule: string | null = null;
-
-      if (heldItem === 'plank') {
-        // Planks → hull_left, hull_right, or deck based on click side
-        if (lx < -10) {
-          // Left / port side
-          if (!mp.includes('hull_left')) bestModule = 'hull_left';
-          else if (!mp.includes('deck')) bestModule = 'deck';
-          else if (!mp.includes('hull_right')) bestModule = 'hull_right';
-        } else if (lx > 10) {
-          // Right / starboard side
-          if (!mp.includes('hull_right')) bestModule = 'hull_right';
-          else if (!mp.includes('deck')) bestModule = 'deck';
-          else if (!mp.includes('hull_left')) bestModule = 'hull_left';
-        } else {
-          // Center
-          if (!mp.includes('deck')) bestModule = 'deck';
-          else if (!mp.includes('hull_left')) bestModule = 'hull_left';
-          else if (!mp.includes('hull_right')) bestModule = 'hull_right';
-        }
-      } else if (heldItem === 'wood') {
-        // Wood + fiber → mast
-        if (!mp.includes('mast')) bestModule = 'mast';
-      } else if (heldItem === 'cannon') {
-        // Cannon → port or starboard based on click side
-        if (lx <= 0) {
-          if (!mp.includes('cannon_port')) bestModule = 'cannon_port';
-          else if (!mp.includes('cannon_stbd')) bestModule = 'cannon_stbd';
-        } else {
-          if (!mp.includes('cannon_stbd')) bestModule = 'cannon_stbd';
-          else if (!mp.includes('cannon_port')) bestModule = 'cannon_port';
-        }
-      }
-
-      if (bestModule) return { shipyard: s, moduleId: bestModule };
-    }
-    return null;
-  }
-
   /** Return hovered tree world pos if player is in range and off-ship, else null. */
   getHoveredTree(range: number = 110): { wx: number; wy: number } | null {
     if (!this._hoveredTree) return null;
@@ -3330,248 +3249,59 @@ export class RenderSystem {
           ctx.fill();
           ctx.stroke();
         }
-        // ── Ship under construction (building phase) ───────────────────────────
+        // ── Scaffolding bay planks (shown while a ship is under construction) ─
         if (s.construction?.phase === 'building') {
-          const mp    = s.construction.modulesPlaced;
-          const bHW   = INT_W * 0.44;   // brigantine half-beam in screen units
-          const bTop  = cy - hh + BACK_T + ARM_L * 0.02;  // bow tip
-          const bBot  = cy + hh          - ARM_L * 0.02;  // stern
-          const bLen  = bBot - bTop;
-
-          // Hull bezier path helper
-          const hullPath = () => {
+          const bayX0 = cx - hw + ARM_T;
+          const bayX1 = cx + hw - ARM_T;
+          const bayY0 = cy - hh + BACK_T;
+          const bayY1 = cy + hh;
+          const bayW  = bayX1 - bayX0;
+          const bayH  = bayY1 - bayY0;
+          ctx.fillStyle = 'rgba(110, 75, 30, 0.72)';
+          ctx.fillRect(bayX0, bayY0, bayW, bayH);
+          ctx.strokeStyle = 'rgba(65, 42, 14, 0.50)';
+          ctx.lineWidth   = Math.max(0.4, 0.9 * zoom);
+          const boardSpacing = ARM_T * 0.55;
+          for (let oy = boardSpacing; oy < bayH; oy += boardSpacing) {
+            const py = bayY0 + oy;
+            ctx.beginPath(); ctx.moveTo(bayX0, py); ctx.lineTo(bayX1, py); ctx.stroke();
+          }
+          ctx.strokeStyle = 'rgba(75, 50, 18, 0.28)';
+          const grainCount = 4;
+          const grainSpacing = bayW / (grainCount + 1);
+          for (let gi = 1; gi <= grainCount; gi++) {
+            const px = bayX0 + grainSpacing * gi;
+            ctx.beginPath(); ctx.moveTo(px, bayY0); ctx.lineTo(px, bayY1); ctx.stroke();
+          }
+          ctx.strokeStyle = 'rgba(145, 105, 50, 0.70)';
+          ctx.lineWidth   = Math.max(0.8, 1.2 * zoom);
+          ctx.strokeRect(bayX0, bayY0, bayW, bayH);
+          // Guard-rail posts and rope at the dock mouth edge only
+          const postHeight = ARM_T * 1.4;
+          const postY0     = bayY1 - ARM_T;
+          ctx.strokeStyle = 'rgba(190, 150, 85, 0.90)';
+          ctx.lineWidth   = Math.max(1.5, 2.5 * zoom);
+          for (const px of [bayX0, cx, bayX1]) {
             ctx.beginPath();
-            ctx.moveTo(cx, bTop);
-            ctx.bezierCurveTo(cx + bHW * 0.5, bTop + bLen * 0.07,
-                              cx + bHW,       bTop + bLen * 0.22,
-                              cx + bHW,       bTop + bLen * 0.65);
-            ctx.bezierCurveTo(cx + bHW,       bTop + bLen * 0.85,
-                              cx + bHW * 0.5, bBot,
-                              cx,             bBot);
-            ctx.bezierCurveTo(cx - bHW * 0.5, bBot,
-                              cx - bHW,       bTop + bLen * 0.85,
-                              cx - bHW,       bTop + bLen * 0.65);
-            ctx.bezierCurveTo(cx - bHW,       bTop + bLen * 0.22,
-                              cx - bHW * 0.5, bTop + bLen * 0.07,
-                              cx,             bTop);
-            ctx.closePath();
-          };
-
-          // Keel / skeleton (always shown in building phase)
-          ctx.strokeStyle = 'rgba(200, 155, 80, 0.90)';
-          ctx.lineWidth   = Math.max(1.5, 3 * zoom);
-          ctx.setLineDash([Math.max(3, 6 * zoom), Math.max(2, 4 * zoom)]);
-          hullPath(); ctx.stroke();
+            ctx.moveTo(px, postY0 + ARM_T * 0.1);
+            ctx.lineTo(px, postY0 - postHeight * 0.4);
+            ctx.stroke();
+          }
+          ctx.strokeStyle = 'rgba(200, 160, 80, 0.70)';
+          ctx.lineWidth   = Math.max(0.8, 1.2 * zoom);
+          ctx.setLineDash([Math.max(3, 5 * zoom), Math.max(2, 3 * zoom)]);
+          ctx.beginPath();
+          ctx.moveTo(bayX0, postY0 - postHeight * 0.4);
+          ctx.lineTo(bayX1, postY0 - postHeight * 0.4);
+          ctx.stroke();
           ctx.setLineDash([]);
-
-          // Port hull planks
-          if (mp.includes('hull_left')) {
-            ctx.strokeStyle = 'rgba(120, 80, 35, 0.95)';
-            ctx.lineWidth   = Math.max(2, 4 * zoom);
-            ctx.beginPath();
-            ctx.moveTo(cx - bHW, bTop + bLen * 0.65);
-            ctx.bezierCurveTo(cx - bHW, bTop + bLen * 0.85, cx - bHW * 0.5, bBot, cx, bBot);
-            ctx.moveTo(cx, bTop);
-            ctx.bezierCurveTo(cx - bHW * 0.5, bTop + bLen * 0.07, cx - bHW, bTop + bLen * 0.22, cx - bHW, bTop + bLen * 0.65);
-            ctx.stroke();
-          }
-          // Stbd hull planks
-          if (mp.includes('hull_right')) {
-            ctx.strokeStyle = 'rgba(120, 80, 35, 0.95)';
-            ctx.lineWidth   = Math.max(2, 4 * zoom);
-            ctx.beginPath();
-            ctx.moveTo(cx + bHW, bTop + bLen * 0.65);
-            ctx.bezierCurveTo(cx + bHW, bTop + bLen * 0.85, cx + bHW * 0.5, bBot, cx, bBot);
-            ctx.moveTo(cx, bTop);
-            ctx.bezierCurveTo(cx + bHW * 0.5, bTop + bLen * 0.07, cx + bHW, bTop + bLen * 0.22, cx + bHW, bTop + bLen * 0.65);
-            ctx.stroke();
-          }
-          // Deck
-          if (mp.includes('deck')) {
-            ctx.fillStyle = 'rgba(140, 100, 50, 0.35)';
-            hullPath(); ctx.fill();
-            ctx.strokeStyle = 'rgba(100, 72, 30, 0.40)';
-            ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-            const planks2 = 8;
-            for (let pi = 1; pi < planks2; pi++) {
-              const py2 = bTop + bLen * (pi / planks2);
-              ctx.beginPath(); ctx.moveTo(cx - bHW * 0.9, py2); ctx.lineTo(cx + bHW * 0.9, py2); ctx.stroke();
-            }
-          }
-          // Mast
-          if (mp.includes('mast')) {
-            const mastY = bTop + bLen * 0.30;
-            ctx.strokeStyle = 'rgba(180, 140, 70, 0.95)';
-            ctx.lineWidth   = Math.max(2, 3.5 * zoom);
-            ctx.beginPath(); ctx.moveTo(cx, bTop + bLen * 0.05); ctx.lineTo(cx, bTop + bLen * 0.55); ctx.stroke();
-            ctx.lineWidth   = Math.max(1.5, 2.5 * zoom);
-            ctx.beginPath(); ctx.moveTo(cx - bHW * 0.45, mastY); ctx.lineTo(cx + bHW * 0.45, mastY); ctx.stroke();
-          }
-          // Port cannon
-          if (mp.includes('cannon_port')) {
-            const canY = bTop + bLen * 0.45;
-            ctx.fillStyle = 'rgba(60, 60, 60, 0.90)';
-            ctx.beginPath(); ctx.arc(cx - bHW * 0.78, canY, Math.max(3, 5 * zoom), 0, Math.PI * 2); ctx.fill();
-            ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
-            const cbl = Math.max(4, 10 * zoom);
-            ctx.beginPath(); ctx.moveTo(cx - bHW * 0.78 - cbl, canY); ctx.lineTo(cx - bHW * 0.78 + cbl * 0.3, canY); ctx.stroke();
-          }
-          // Stbd cannon
-          if (mp.includes('cannon_stbd')) {
-            const canY = bTop + bLen * 0.45;
-            ctx.fillStyle = 'rgba(60, 60, 60, 0.90)';
-            ctx.beginPath(); ctx.arc(cx + bHW * 0.78, canY, Math.max(3, 5 * zoom), 0, Math.PI * 2); ctx.fill();
-            ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
-            const cbl = Math.max(4, 10 * zoom);
-            ctx.beginPath(); ctx.moveTo(cx + bHW * 0.78 + cbl, canY); ctx.lineTo(cx + bHW * 0.78 - cbl * 0.3, canY); ctx.stroke();
-          }
-
-          // ── Ghost slots for unplaced modules (pulsing dashed outlines) ──────
-          {
-            const pulse = 0.4 + 0.3 * Math.sin(performance.now() * 0.003);
-            const dashLen = Math.max(2, 4 * zoom);
-            ctx.setLineDash([dashLen, dashLen]);
-            // Port hull ghost
-            if (!mp.includes('hull_left')) {
-              ctx.strokeStyle = `rgba(200, 155, 80, ${pulse.toFixed(2)})`;
-              ctx.lineWidth   = Math.max(1, 2 * zoom);
-              ctx.beginPath();
-              ctx.moveTo(cx - bHW, bTop + bLen * 0.65);
-              ctx.bezierCurveTo(cx - bHW, bTop + bLen * 0.85, cx - bHW * 0.5, bBot, cx, bBot);
-              ctx.moveTo(cx, bTop);
-              ctx.bezierCurveTo(cx - bHW * 0.5, bTop + bLen * 0.07, cx - bHW, bTop + bLen * 0.22, cx - bHW, bTop + bLen * 0.65);
-              ctx.stroke();
-              ctx.font = `${Math.max(7, Math.round(9 * zoom))}px Consolas, monospace`;
-              ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-              ctx.fillStyle = `rgba(220, 180, 80, ${pulse.toFixed(2)})`;
-              ctx.fillText('⊟ Hull (Port)', cx - bHW * 0.55, bTop + bLen * 0.45);
-            }
-            // Stbd hull ghost
-            if (!mp.includes('hull_right')) {
-              ctx.strokeStyle = `rgba(200, 155, 80, ${pulse.toFixed(2)})`;
-              ctx.lineWidth   = Math.max(1, 2 * zoom);
-              ctx.beginPath();
-              ctx.moveTo(cx + bHW, bTop + bLen * 0.65);
-              ctx.bezierCurveTo(cx + bHW, bTop + bLen * 0.85, cx + bHW * 0.5, bBot, cx, bBot);
-              ctx.moveTo(cx, bTop);
-              ctx.bezierCurveTo(cx + bHW * 0.5, bTop + bLen * 0.07, cx + bHW, bTop + bLen * 0.22, cx + bHW, bTop + bLen * 0.65);
-              ctx.stroke();
-              ctx.font = `${Math.max(7, Math.round(9 * zoom))}px Consolas, monospace`;
-              ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-              ctx.fillStyle = `rgba(220, 180, 80, ${pulse.toFixed(2)})`;
-              ctx.fillText('⊟ Hull (Stbd)', cx + bHW * 0.55, bTop + bLen * 0.45);
-            }
-            // Deck ghost
-            if (!mp.includes('deck')) {
-              ctx.strokeStyle = `rgba(180, 130, 50, ${(pulse * 0.6).toFixed(2)})`;
-              ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-              hullPath(); ctx.stroke();
-              ctx.font = `${Math.max(7, Math.round(9 * zoom))}px Consolas, monospace`;
-              ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-              ctx.fillStyle = `rgba(220, 180, 80, ${pulse.toFixed(2)})`;
-              ctx.fillText('▭ Deck', cx, bTop + bLen * 0.50);
-            }
-            // Mast ghost
-            if (!mp.includes('mast')) {
-              const mastY = bTop + bLen * 0.30;
-              ctx.strokeStyle = `rgba(180, 140, 70, ${pulse.toFixed(2)})`;
-              ctx.lineWidth   = Math.max(1, 2 * zoom);
-              ctx.beginPath(); ctx.moveTo(cx, bTop + bLen * 0.05); ctx.lineTo(cx, bTop + bLen * 0.55); ctx.stroke();
-              ctx.font = `${Math.max(7, Math.round(9 * zoom))}px Consolas, monospace`;
-              ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-              ctx.fillStyle = `rgba(180, 140, 70, ${pulse.toFixed(2)})`;
-              ctx.fillText('| Mast', cx, mastY - Math.max(6, 10 * zoom));
-            }
-            // Port cannon ghost
-            if (!mp.includes('cannon_port')) {
-              const canY = bTop + bLen * 0.45;
-              ctx.strokeStyle = `rgba(100, 100, 100, ${pulse.toFixed(2)})`;
-              ctx.lineWidth   = Math.max(1, 1.5 * zoom);
-              ctx.beginPath(); ctx.arc(cx - bHW * 0.78, canY, Math.max(3, 5 * zoom), 0, Math.PI * 2); ctx.stroke();
-            }
-            // Stbd cannon ghost
-            if (!mp.includes('cannon_stbd')) {
-              const canY = bTop + bLen * 0.45;
-              ctx.strokeStyle = `rgba(100, 100, 100, ${pulse.toFixed(2)})`;
-              ctx.lineWidth   = Math.max(1, 1.5 * zoom);
-              ctx.beginPath(); ctx.arc(cx + bHW * 0.78, canY, Math.max(3, 5 * zoom), 0, Math.PI * 2); ctx.stroke();
-            }
-            ctx.setLineDash([]);
-          }
-          // Progress label
-          const required  = ['hull_left', 'hull_right', 'deck'];
-          const doneCnt   = required.filter(id => mp.includes(id)).length;
-          const allDone   = doneCnt === required.length;
-          ctx.font         = `bold ${Math.max(9, Math.round(11 * zoom))}px Consolas, monospace`;
-          ctx.textAlign    = 'center';
+          const stairPulse = 0.5 + 0.3 * Math.sin(performance.now() * 0.002);
+          ctx.fillStyle = `rgba(220, 200, 100, ${stairPulse.toFixed(2)})`;
+          ctx.font = `bold ${Math.max(8, Math.round(10 * zoom))}px Consolas, monospace`;
+          ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillStyle    = allDone ? 'rgba(80, 200, 120, 0.90)' : 'rgba(220, 180, 80, 0.90)';
-          ctx.fillText(
-            allDone ? '⚓ Ready to Launch' : `Building… ${doneCnt}/${required.length} required`,
-            cx, cy - hh + BACK_T + ARM_L * 0.50
-          );
-
-          // ── Scaffolding planks filling the entire interior bay ───────────
-          // Wooden decking surrounds the ship on all sides during construction.
-          {
-            const bayX0 = cx - hw + ARM_T;   // left arm inner face
-            const bayX1 = cx + hw - ARM_T;   // right arm inner face
-            const bayY0 = cy - hh + BACK_T;  // back wall inner face
-            const bayY1 = cy + hh;           // dock mouth (open end)
-            const bayW  = bayX1 - bayX0;     // INT_W
-            const bayH  = bayY1 - bayY0;     // ARM_L
-            // Plank floor fill (warm weathered timber, semi-transparent)
-            ctx.fillStyle = 'rgba(110, 75, 30, 0.72)';
-            ctx.fillRect(bayX0, bayY0, bayW, bayH);
-            // Horizontal plank board lines running across the bay width
-            ctx.strokeStyle = 'rgba(65, 42, 14, 0.50)';
-            ctx.lineWidth   = Math.max(0.4, 0.9 * zoom);
-            const boardSpacing = ARM_T * 0.55;
-            for (let oy = boardSpacing; oy < bayH; oy += boardSpacing) {
-              const py = bayY0 + oy;
-              ctx.beginPath(); ctx.moveTo(bayX0, py); ctx.lineTo(bayX1, py); ctx.stroke();
-            }
-            // Vertical grain lines (plank length direction)
-            ctx.strokeStyle = 'rgba(75, 50, 18, 0.28)';
-            const grainCount = 4;
-            const grainSpacing = bayW / (grainCount + 1);
-            for (let gi = 1; gi <= grainCount; gi++) {
-              const px = bayX0 + grainSpacing * gi;
-              ctx.beginPath(); ctx.moveTo(px, bayY0); ctx.lineTo(px, bayY1); ctx.stroke();
-            }
-            // Bay border
-            ctx.strokeStyle = 'rgba(145, 105, 50, 0.70)';
-            ctx.lineWidth   = Math.max(0.8, 1.2 * zoom);
-            ctx.strokeRect(bayX0, bayY0, bayW, bayH);
-            // Guard-rail posts and rope at the dock mouth edge only
-            const postHeight = ARM_T * 1.4;
-            const postY0     = bayY1 - ARM_T;
-            ctx.strokeStyle = 'rgba(190, 150, 85, 0.90)';
-            ctx.lineWidth   = Math.max(1.5, 2.5 * zoom);
-            for (const px of [bayX0, cx, bayX1]) {
-              ctx.beginPath();
-              ctx.moveTo(px, postY0 + ARM_T * 0.1);
-              ctx.lineTo(px, postY0 - postHeight * 0.4);
-              ctx.stroke();
-            }
-            ctx.strokeStyle = 'rgba(200, 160, 80, 0.70)';
-            ctx.lineWidth   = Math.max(0.8, 1.2 * zoom);
-            ctx.setLineDash([Math.max(3, 5 * zoom), Math.max(2, 3 * zoom)]);
-            ctx.beginPath();
-            ctx.moveTo(bayX0, postY0 - postHeight * 0.4);
-            ctx.lineTo(bayX1, postY0 - postHeight * 0.4);
-            ctx.stroke();
-            ctx.setLineDash([]);
-            // Stair indicator arrows on the outer faces of each arm (mouth end)
-            const stairPulse = 0.5 + 0.3 * Math.sin(performance.now() * 0.002);
-            ctx.fillStyle = `rgba(220, 200, 100, ${stairPulse.toFixed(2)})`;
-            ctx.font = `bold ${Math.max(8, Math.round(10 * zoom))}px Consolas, monospace`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            const stairLabelY = bayY1 - ARM_T * 0.5;
-            ctx.fillText('▲', cx - hw + ARM_T * 0.5, stairLabelY); // left stair
-            ctx.fillText('▲', cx + hw - ARM_T * 0.5, stairLabelY); // right stair
-          }
+          ctx.fillText('▲', cx - hw + ARM_T * 0.5, bayY1 - ARM_T * 0.5);
+          ctx.fillText('▲', cx + hw - ARM_T * 0.5, bayY1 - ARM_T * 0.5);
         }
         // Mast yard-arm crosses (fore + main)
         ctx.strokeStyle = 'rgba(155, 115, 60, 0.65)';

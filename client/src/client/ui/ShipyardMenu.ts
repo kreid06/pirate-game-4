@@ -4,53 +4,22 @@
  * Canvas-drawn ship construction panel opened when a player presses [E] at a shipyard.
  *
  *  Phase empty    — one button: "Lay Keel (Brigantine)"
- *  Phase building — read-only progress display (modules installed via direct click
- *                   on the skeleton; hold [E] for radial to release)
+ *  Phase building — "Release Ship" button; modules are built via the ship's own build mode
  */
 
 export type ConstructionPhase = 'empty' | 'building';
-
-// ── Module definitions (used for progress display) ────────────────────────
-
-export interface ModuleDef {
-  id: string;
-  label: string;
-  cost: string;
-  required: boolean;
-  symbol: string;
-  color: string;
-  border: string;
-}
-
-export const MODULE_DEFS: ModuleDef[] = [
-  { id: 'hull_left',   label: 'Hull Planks (Port)',  cost: '5× Plank',            required: false, symbol: '⊟', color: '#7a5028', border: '#4a2c10' },
-  { id: 'hull_right',  label: 'Hull Planks (Stbd)',  cost: '5× Plank',            required: false, symbol: '⊟', color: '#7a5028', border: '#4a2c10' },
-  { id: 'deck',        label: 'Deck + Helm + Ladder',cost: '10× Plank',           required: false, symbol: '▭', color: '#9c7240', border: '#6c4c20' },
-  { id: 'mast',        label: 'Masts (×3)',          cost: '10× Wood  5× Fiber',  required: false, symbol: '|', color: '#5a4020', border: '#3a2810' },
-  { id: 'cannon_port', label: 'Cannons (Port ×3)',   cost: '1× Cannon',           required: false, symbol: '⚫', color: '#3a3a3a', border: '#1a1a1a' },
-  { id: 'cannon_stbd', label: 'Cannons (Stbd ×3)',   cost: '1× Cannon',           required: false, symbol: '⚫', color: '#3a3a3a', border: '#1a1a1a' },
-];
-
-export const REQUIRED_IDS = new Set(['hull_left', 'hull_right', 'deck']);
 
 // ── Panel layout constants ────────────────────────────────────────────────
 
 const PANEL_W = 490;
 const HDR_H   = 48;
 const ROW_H   = 60;
-const ROW_GAP = 5;
 const PAD_TOP = 12;
 const PAD_BOT = 40;
-const INFO_ROW_H = 28;
-const INFO_GAP   = 3;
 
-function panelH(phase: ConstructionPhase): number {
-  if (phase === 'empty') {
-    return HDR_H + PAD_TOP + ROW_H + PAD_BOT;
-  }
-  // building: compact progress rows + hint text
-  const rows = MODULE_DEFS.length;
-  return HDR_H + PAD_TOP + rows * INFO_ROW_H + (rows - 1) * INFO_GAP + 50 + PAD_BOT;
+function panelH(_phase: ConstructionPhase): number {
+  // Both phases use the same single-row layout
+  return HDR_H + PAD_TOP + ROW_H + PAD_BOT;
 }
 
 // ── Colours ───────────────────────────────────────────────────────────────
@@ -58,8 +27,6 @@ const BG_PANEL  = 'rgba(8, 16, 12, 0.97)';
 const BORDER    = '#2a6040';
 const TEXT_HEAD = '#88e8a8';
 const TEXT_DIM  = '#507868';
-const TEXT_MID  = '#90b898';
-const TEXT_REQ  = '#e8d070';
 
 // ── Class ─────────────────────────────────────────────────────────────────
 
@@ -67,14 +34,10 @@ export class ShipyardMenu {
   public visible    = false;
   public structureId: number | null = null;
   public phase: ConstructionPhase = 'empty';
+  /** Kept for protocol compatibility — no longer used for rendering. */
   public modulesPlaced: string[] = [];
 
-  /**
-   * Fired when the player confirms an action.
-   *  action = 'craft_skeleton'              — lay the keel
-   *  action = 'add_module', module = id     — install a module
-   *  action = 'release_ship'               — launch finished ship
-   */
+  /** Fired when the player confirms an action. */
   public onAction: ((action: string, module?: string) => void) | null = null;
 
   // ── Public API ─────────────────────────────────────────────────────────
@@ -151,7 +114,7 @@ export class ShipyardMenu {
     if (this.phase === 'empty') {
       this._drawKeelRow(ctx, px, bodyY);
     } else {
-      this._drawModuleRows(ctx, px, bodyY);
+      this._drawReleaseRow(ctx, px, bodyY);
     }
 
     // ── Footer ──────────────────────────────────────────────────────────
@@ -197,7 +160,7 @@ export class ShipyardMenu {
     ctx.fillStyle    = TEXT_HEAD;
     ctx.fillText('Lay Keel  (Brigantine)', tx, ry + 9);
     ctx.font      = '12px Consolas, monospace';
-    ctx.fillStyle = TEXT_REQ;
+    ctx.fillStyle = '#e8d070';
     ctx.fillText('20× Wood  +  10× Fiber', tx, ry + 31);
 
     // Build button
@@ -216,46 +179,56 @@ export class ShipyardMenu {
     ctx.fillText('Build', bx + bw / 2, by + bh / 2);
   }
 
-  private _drawModuleRows(ctx: CanvasRenderingContext2D, px: number, bodyY: number): void {
-    // Compact read-only progress rows
-    for (let i = 0; i < MODULE_DEFS.length; i++) {
-      const m    = MODULE_DEFS[i];
-      const ry   = bodyY + i * (INFO_ROW_H + INFO_GAP);
-      const done = this.modulesPlaced.includes(m.id);
+  private _drawReleaseRow(ctx: CanvasRenderingContext2D, px: number, ry: number): void {
+    // Row bg
+    ctx.fillStyle   = 'rgba(16, 52, 32, 0.75)';
+    ctx.strokeStyle = BORDER;
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.roundRect(px + 8, ry, PANEL_W - 16, ROW_H, 4);
+    ctx.fill();
+    ctx.stroke();
 
-      // Row bg
-      ctx.fillStyle   = done ? 'rgba(20, 50, 30, 0.6)' : 'rgba(16, 30, 20, 0.4)';
-      ctx.beginPath();
-      ctx.roundRect(px + 8, ry, PANEL_W - 16, INFO_ROW_H, 3);
-      ctx.fill();
-
-      // Status icon + label
-      ctx.font         = '12px Consolas, monospace';
-      ctx.textAlign    = 'left';
-      ctx.textBaseline = 'middle';
-      const midY = ry + INFO_ROW_H / 2;
-      ctx.fillStyle = done ? '#60c880' : (m.required ? TEXT_REQ : TEXT_DIM);
-      ctx.fillText(done ? '✓' : '○', px + 16, midY);
-      ctx.fillStyle = done ? '#80b890' : (m.required ? '#c8b860' : TEXT_DIM);
-      ctx.fillText(m.label, px + 34, midY);
-
-      // Cost hint (right-aligned)
-      if (!done) {
-        ctx.textAlign = 'right';
-        ctx.fillStyle = TEXT_DIM;
-        ctx.font      = '10px Consolas, monospace';
-        ctx.fillText(m.cost, px + PANEL_W - 16, midY);
-      }
-    }
-
-    // Hint text
-    const hintY = bodyY + MODULE_DEFS.length * (INFO_ROW_H + INFO_GAP) + 12;
-    ctx.font         = '11px Consolas, monospace';
+    // Icon
+    const ic = 44, icy = ry + (ROW_H - ic) / 2, icx = px + 14;
+    ctx.fillStyle   = '#3a6030';
+    ctx.strokeStyle = '#1a3a18';
+    ctx.lineWidth   = 2;
+    ctx.beginPath();
+    ctx.roundRect(icx, icy, ic, ic, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.font         = 'bold 20px Consolas, monospace';
     ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle    = '#80ffaa';
+    ctx.fillText('⚓', icx + ic / 2, icy + ic / 2);
+
+    // Labels
+    const tx = icx + ic + 10;
+    ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
-    ctx.fillStyle    = TEXT_DIM;
-    ctx.fillText('Click the skeleton with materials to install modules', px + PANEL_W / 2, hintY);
-    ctx.fillText('Hold [E] on shipyard → Release Ship', px + PANEL_W / 2, hintY + 16);
+    ctx.font         = 'bold 14px Consolas, monospace';
+    ctx.fillStyle    = TEXT_HEAD;
+    ctx.fillText('Ship Under Construction', tx, ry + 9);
+    ctx.font      = '12px Consolas, monospace';
+    ctx.fillStyle = TEXT_DIM;
+    ctx.fillText('Use build mode [B] to add planks & modules', tx, ry + 31);
+
+    // Release button
+    const bw = 100, bh = 28, bx = px + PANEL_W - 16 - bw, by = ry + (ROW_H - bh) / 2;
+    ctx.fillStyle   = 'rgba(24, 100, 130, 0.9)';
+    ctx.strokeStyle = '#40c8e0';
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.font         = 'bold 13px Consolas, monospace';
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle    = '#ccf4ff';
+    ctx.fillText('Release', bx + bw / 2, by + bh / 2);
   }
 
   // ── Input handling ──────────────────────────────────────────────────────
@@ -291,7 +264,12 @@ export class ShipyardMenu {
       return true;
     }
 
-    // Building phase: panel is informational only — no clickable actions
-    return true; // consumed (inside panel)
+    // Building phase: Release button
+    const bw = 100, bh = 28, bx = px + PANEL_W - 16 - bw, by = bodyY + (ROW_H - bh) / 2;
+    if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) {
+      this.onAction?.('release_ship');
+      this.close();
+    }
+    return true; // always consumed (inside panel)
   }
 }
