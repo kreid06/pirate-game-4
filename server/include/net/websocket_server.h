@@ -357,6 +357,8 @@ typedef struct WebSocketPlayer {
 
     /* Island walking — 0 = in water, >0 = on island with that id */
     uint32_t on_island_id;
+    /* Dock walking — 0 = not on shipyard dock, >0 = structure id of the dock */
+    uint32_t on_dock_id;
 } WebSocketPlayer;
 
 struct WebSocketStats {

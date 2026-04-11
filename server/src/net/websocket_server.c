@@ -251,6 +251,9 @@ static void sync_simple_ships_from_simulation(void) {
         // Update mounted players' world positions with new ship transform
         update_mounted_players_on_ship(ships[s].ship_id);
     }
+
+    /* Push non-scaffolded ships out of dock U-walls */
+    handle_ship_dock_collisions();
 }
 
 __attribute__((unused))
@@ -403,6 +406,145 @@ static bool wall_has_support(float wx, float wy) {
                 return true;
     }
     return false;
+}
+
+/* ─── Shipyard (dry dock) geometry helpers ───────────────────────────────────
+ * Dock-local coordinate system:
+ *   +Y = dock length axis (mouth/open end); +X = dock width axis
+ * Sizes in client pixels (rendering BASE = 50):
+ *   ARM_T=50  INT_W=240  ARM_L=840  BACK_T=50  hw=170  hh=445            */
+#define DOCK_HW       170.0f
+#define DOCK_HH       445.0f
+#define DOCK_ARM_T     50.0f
+#define DOCK_BACK_T    50.0f
+#define DOCK_STAIR_H   50.0f   /* stair opening at each end of each arm */
+
+static void dock_world_to_local(const PlacedStructure *sy,
+                                float wx, float wy, float *lx, float *ly) {
+    float rad = sy->rotation * (float)M_PI / 180.0f;
+    float c = cosf(-rad), s = sinf(-rad);
+    float dx = wx - sy->x, dy = wy - sy->y;
+    *lx = dx * c - dy * s;
+    *ly = dx * s + dy * c;
+}
+
+static void dock_local_to_world(const PlacedStructure *sy,
+                                float lx, float ly, float *wx, float *wy) {
+    float rad = sy->rotation * (float)M_PI / 180.0f;
+    float c = cosf(rad), s = sinf(rad);
+    *wx = sy->x + lx * c - ly * s;
+    *wy = sy->y + lx * s + ly * c;
+}
+
+/* OBB pushout in dock-local space.  Returns true if a pushout occurred. */
+static bool dock_obb_pushout(float cx, float cy, float hx, float hy,
+                             float r, float *lx, float *ly) {
+    float dx = *lx - cx, dy = *ly - cy;
+    float cl_x = dx < -hx ? -hx : (dx > hx ? hx : dx);
+    float cl_y = dy < -hy ? -hy : (dy > hy ? hy : dy);
+    float px = dx - cl_x, py = dy - cl_y;
+    float d2 = px * px + py * py;
+    if (d2 < r * r && d2 > 0.0001f) {
+        float d = sqrtf(d2), pen = r - d;
+        *lx += (px / d) * pen;
+        *ly += (py / d) * pen;
+        return true;
+    }
+    return false;
+}
+
+/* True if dock-local point (lx,ly) is on a walkable dock surface. */
+static bool dock_point_on_surface(float lx, float ly, bool has_scaffolding) {
+    const float P  = 10.0f;                      /* padding ~ player radius */
+    const float ai = DOCK_HW - DOCK_ARM_T;       /* arm inner edge = 120   */
+    if (lx >= -(DOCK_HW + P) && lx <= -(ai - P) && fabsf(ly) <= DOCK_HH + P) return true;
+    if (lx >=  (ai - P)      && lx <=  (DOCK_HW + P) && fabsf(ly) <= DOCK_HH + P) return true;
+    if (fabsf(lx) <= DOCK_HW + P &&
+        ly >= -(DOCK_HH + P) && ly <= -(DOCK_HH - DOCK_BACK_T - P)) return true;
+    if (has_scaffolding && fabsf(lx) <= ai + P &&
+        ly >= (DOCK_HH - DOCK_BACK_T - P) && ly <= DOCK_HH + P) return true;
+    return false;
+}
+
+/* Apply dock U-wall OBB pushout (world space).
+ * Arms have DOCK_STAIR_H stair openings at each end.
+ * Back wall and scaffolding walkway (construction) are full-width OBBs. */
+static void dock_apply_player_collision(const PlacedStructure *sy, float player_r,
+                                        bool has_scaffolding, float *wx, float *wy) {
+    float lx, ly;
+    dock_world_to_local(sy, *wx, *wy, &lx, &ly);
+
+    float ai         = DOCK_HW - DOCK_ARM_T;              /* 120  */
+    float arm_cx_l   = -(DOCK_HW - DOCK_ARM_T / 2.0f);   /* -145 */
+    float arm_cx_r   =  (DOCK_HW - DOCK_ARM_T / 2.0f);   /* +145 */
+    float arm_half_y =  DOCK_HH - DOCK_STAIR_H;          /* 395  */
+    float back_cy    = -(DOCK_HH - DOCK_BACK_T / 2.0f);  /* -420 */
+
+    dock_obb_pushout(arm_cx_l, 0.0f, DOCK_ARM_T / 2.0f, arm_half_y, player_r, &lx, &ly);
+    dock_obb_pushout(arm_cx_r, 0.0f, DOCK_ARM_T / 2.0f, arm_half_y, player_r, &lx, &ly);
+    dock_obb_pushout(0.0f,  back_cy, DOCK_HW, DOCK_BACK_T / 2.0f,   player_r, &lx, &ly);
+    if (has_scaffolding) {
+        float wcy = DOCK_HH - DOCK_BACK_T / 2.0f;        /* +420 */
+        dock_obb_pushout(0.0f, wcy, ai, DOCK_BACK_T / 2.0f, player_r, &lx, &ly);
+    }
+
+    dock_local_to_world(sy, lx, ly, wx, wy);
+}
+
+/* Push non-scaffolded sim ships out of dock U-walls.
+ * Called once per tick after scaffold pin and position sync. */
+static void handle_ship_dock_collisions(void) {
+    if (!global_sim) return;
+    for (int di = 0; di < (int)placed_structure_count; di++) {
+        PlacedStructure *sy = &placed_structures[di];
+        if (!sy->active || sy->type != STRUCT_SHIPYARD) continue;
+
+        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+            struct Ship *ship = &global_sim->ships[si];
+            if ((uint32_t)ship->id == sy->scaffolded_ship_id) continue;
+
+            float sx = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
+            float sy_w = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y));
+            float brad = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->bounding_radius));
+            float ddx = sx - sy->x, ddy = sy_w - sy->y;
+            float broad = brad + DOCK_HH + DOCK_HW;
+            if (ddx * ddx + ddy * ddy > broad * broad) continue;
+
+            float lx, ly;
+            dock_world_to_local(sy, sx, sy_w, &lx, &ly);
+            float old_lx = lx, old_ly = ly;
+
+            dock_obb_pushout(-(DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
+                             DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_STAIR_H, brad, &lx, &ly);
+            dock_obb_pushout( (DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
+                             DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_STAIR_H, brad, &lx, &ly);
+            dock_obb_pushout(0.0f, -(DOCK_HH - DOCK_BACK_T / 2.0f),
+                             DOCK_HW, DOCK_BACK_T / 2.0f, brad, &lx, &ly);
+
+            if (lx == old_lx && ly == old_ly) continue;
+
+            float new_wx, new_wy;
+            dock_local_to_world(sy, lx, ly, &new_wx, &new_wy);
+            ship->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_wx));
+            ship->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_wy));
+
+            float vx = Q16_TO_FLOAT(ship->velocity.x);
+            float vy = Q16_TO_FLOAT(ship->velocity.y);
+            float pnx = lx - old_lx, pny = ly - old_ly;
+            float pmag = sqrtf(pnx * pnx + pny * pny);
+            if (pmag > 0.0001f) {
+                float nx2 = pnx / pmag, ny2 = pny / pmag;
+                float rad = sy->rotation * (float)M_PI / 180.0f;
+                float c = cosf(rad), s = sinf(rad);
+                float wnx = nx2 * c - ny2 * s, wny = nx2 * s + ny2 * c;
+                float dot = vx * wnx + vy * wny;
+                if (dot < 0.0f) {
+                    ship->velocity.x = Q16_FROM_FLOAT(vx - dot * wnx * 1.3f);
+                    ship->velocity.y = Q16_FROM_FLOAT(vy - dot * wny * 1.3f);
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -12459,6 +12601,43 @@ void websocket_server_tick(float dt) {
                                 sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_x));
                                 sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_y));
                             }
+                        } else if (ws_player->on_dock_id != 0) {
+                            // ===== DOCK WALKING (WORLD COORDINATES) =====
+                            PlacedStructure *dock_sy = NULL;
+                            for (int _di = 0; _di < (int)placed_structure_count; _di++) {
+                                if (placed_structures[_di].active &&
+                                    placed_structures[_di].id == ws_player->on_dock_id) {
+                                    dock_sy = &placed_structures[_di]; break;
+                                }
+                            }
+                            if (!dock_sy || dock_sy->type != STRUCT_SHIPYARD) {
+                                ws_player->on_dock_id = 0;
+                                ws_player->movement_state = PLAYER_STATE_SWIMMING;
+                            } else {
+                                float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED);
+                                if (ws_player->is_sprinting) walk_speed_client *= 1.6f;
+                                float new_x = ws_player->x + movement_x * walk_speed_client * dt;
+                                float new_y = ws_player->y + movement_y * walk_speed_client * dt;
+                                bool _hs = (dock_sy->construction_phase == CONSTRUCTION_BUILDING);
+                                float _dlx, _dly;
+                                dock_world_to_local(dock_sy, new_x, new_y, &_dlx, &_dly);
+                                if (!dock_point_on_surface(_dlx, _dly, _hs)) {
+                                    ws_player->on_dock_id = 0;
+                                    ws_player->movement_state = PLAYER_STATE_SWIMMING;
+                                    sim_player->velocity.x = Q16_FROM_FLOAT(
+                                        CLIENT_TO_SERVER(movement_x * walk_speed_client));
+                                    sim_player->velocity.y = Q16_FROM_FLOAT(
+                                        CLIENT_TO_SERVER(movement_y * walk_speed_client));
+                                } else {
+                                    dock_apply_player_collision(dock_sy, 8.0f, _hs, &new_x, &new_y);
+                                    sim_player->velocity.x = 0;
+                                    sim_player->velocity.y = 0;
+                                }
+                                ws_player->x = new_x;
+                                ws_player->y = new_y;
+                                sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_x));
+                                sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_y));
+                            }
                         } else {
                             // ===== SWIMMING MOVEMENT (WORLD COORDINATES) =====
                             // Apply acceleration in movement direction
@@ -12496,6 +12675,10 @@ void websocket_server_tick(float dt) {
                     // (player position is fixed relative to ship, ship velocity handles world movement)
                     if (!on_ship && ws_player->on_island_id != 0) {
                         /* On island and stopped — zero velocity, no deceleration needed */
+                        sim_player->velocity.x = 0;
+                        sim_player->velocity.y = 0;
+                    } else if (!on_ship && ws_player->on_dock_id != 0) {
+                        /* On dock and stopped — zero velocity */
                         sim_player->velocity.x = 0;
                         sim_player->velocity.y = 0;
                     } else if (!on_ship) {
@@ -12607,6 +12790,78 @@ void websocket_server_tick(float dt) {
                                     ws_player->on_island_id = 0;
                                     ws_player->movement_state = PLAYER_STATE_SWIMMING;
                                     log_info("\U0001F30A Player %u left island", ws_player->player_id);
+                            }
+                        }
+                    }
+                    /* ── Dock enter/exit detection (non-ship players) ─────────────── */
+                    if (ws_player->on_dock_id == 0) {
+                        /* Try to step onto a dock surface (through stair gaps) */
+                        if (ws_player->on_island_id == 0) {
+                            for (int _di = 0; _di < (int)placed_structure_count; _di++) {
+                                PlacedStructure *_dk = &placed_structures[_di];
+                                if (!_dk->active || _dk->type != STRUCT_SHIPYARD) continue;
+                                float _dlx, _dly;
+                                dock_world_to_local(_dk, wx, wy, &_dlx, &_dly);
+                                bool _hs = (_dk->construction_phase == CONSTRUCTION_BUILDING);
+                                if (dock_point_on_surface(_dlx, _dly, _hs)) {
+                                    ws_player->on_dock_id = _dk->id;
+                                    ws_player->movement_state = PLAYER_STATE_WALKING;
+                                    sim_player->velocity.x = 0;
+                                    sim_player->velocity.y = 0;
+                                    log_info("🛖 Player %u stepped onto dock %u",
+                                             ws_player->player_id, _dk->id);
+                                    break;
+                                }
+                            }
+                        }
+                        /* OBB pushout: keep swimming players outside dock walls */
+                        if (ws_player->on_dock_id == 0 && ws_player->on_island_id == 0) {
+                            for (int _di = 0; _di < (int)placed_structure_count; _di++) {
+                                PlacedStructure *_dk = &placed_structures[_di];
+                                if (!_dk->active || _dk->type != STRUCT_SHIPYARD) continue;
+                                bool _hs = (_dk->construction_phase == CONSTRUCTION_BUILDING);
+                                float _ox = ws_player->x, _oy = ws_player->y;
+                                float _nx = _ox, _ny = _oy;
+                                dock_apply_player_collision(_dk, 8.0f, _hs, &_nx, &_ny);
+                                float _pdx = _nx - _ox, _pdy = _ny - _oy;
+                                float _pmag2 = _pdx * _pdx + _pdy * _pdy;
+                                if (_pmag2 > 0.0001f) {
+                                    ws_player->x = _nx; ws_player->y = _ny;
+                                    sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(_nx));
+                                    sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(_ny));
+                                    float _pmag = sqrtf(_pmag2);
+                                    float _pnx = _pdx / _pmag, _pny = _pdy / _pmag;
+                                    float _vx = Q16_TO_FLOAT(sim_player->velocity.x);
+                                    float _vy = Q16_TO_FLOAT(sim_player->velocity.y);
+                                    float _dot = _vx * _pnx + _vy * _pny;
+                                    if (_dot < 0.0f) {
+                                        sim_player->velocity.x = Q16_FROM_FLOAT(_vx - _dot * _pnx);
+                                        sim_player->velocity.y = Q16_FROM_FLOAT(_vy - _dot * _pny);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        /* On dock — verify still on surface each tick */
+                        PlacedStructure *_dk = NULL;
+                        for (int _di = 0; _di < (int)placed_structure_count; _di++) {
+                            if (placed_structures[_di].active &&
+                                placed_structures[_di].id == ws_player->on_dock_id) {
+                                _dk = &placed_structures[_di]; break;
+                            }
+                        }
+                        if (!_dk || _dk->type != STRUCT_SHIPYARD) {
+                            ws_player->on_dock_id = 0;
+                            ws_player->movement_state = PLAYER_STATE_SWIMMING;
+                        } else {
+                            float _dlx, _dly;
+                            dock_world_to_local(_dk, wx, wy, &_dlx, &_dly);
+                            bool _hs = (_dk->construction_phase == CONSTRUCTION_BUILDING);
+                            if (!dock_point_on_surface(_dlx, _dly, _hs)) {
+                                uint32_t _did = ws_player->on_dock_id;
+                                ws_player->on_dock_id = 0;
+                                ws_player->movement_state = PLAYER_STATE_SWIMMING;
+                                log_info("🌊 Player %u left dock %u", ws_player->player_id, _did);
                             }
                         }
                     }
