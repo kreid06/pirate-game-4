@@ -519,10 +519,17 @@ static void handle_ship_dock_collisions(void) {
             dock_world_to_local(sy, sx, sy_w, &lx, &ly);
             float old_lx = lx, old_ly = ly;
 
-            dock_obb_pushout(-(DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
-                             DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_STAIR_H, brad, &lx, &ly);
-            dock_obb_pushout( (DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
-                             DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_STAIR_H, brad, &lx, &ly);
+            /* Ships whose centre is inside the bay band (|lx| < ai) are
+             * between the arm inner faces — they can exit freely through the
+             * open mouth (+Y).  Only the solid back wall applies to them.
+             * This lets a released ship sail out without any teleport. */
+            float ai = DOCK_HW - DOCK_ARM_T;   /* inner arm edge = 120 px */
+            if (fabsf(lx) >= ai) {
+                dock_obb_pushout(-(DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
+                                 DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_STAIR_H, brad, &lx, &ly);
+                dock_obb_pushout( (DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
+                                 DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_STAIR_H, brad, &lx, &ly);
+            }
             dock_obb_pushout(0.0f, -(DOCK_HH - DOCK_BACK_T / 2.0f),
                              DOCK_HW, DOCK_BACK_T / 2.0f, brad, &lx, &ly);
 
