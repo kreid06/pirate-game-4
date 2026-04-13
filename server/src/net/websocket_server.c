@@ -427,21 +427,25 @@ static bool wall_has_support(float wx, float wy) {
 #define DOCK_BACK_T    50.0f
 #define DOCK_STAIR_H   50.0f   /* stair opening at each end of each arm */
 
+/* Coordinate convention: rotation is CLOCKWISE-positive (canvas/screen Y-down),
+ * matching ctx.rotate() used by the visual renderer.
+ * Clockwise rotation matrix (Y-down):  wx = lx*c + ly*s,  wy = -lx*s + ly*c
+ * Inverse (world-to-local):            lx = dx*c - dy*s,  ly =  dx*s + dy*c  (negate rad) */
 static void dock_world_to_local(const PlacedStructure *sy,
                                 float wx, float wy, float *lx, float *ly) {
     float rad = sy->rotation * (float)M_PI / 180.0f;
-    float c = cosf(-rad), s = sinf(-rad);
+    float c = cosf(rad), s = sinf(rad);
     float dx = wx - sy->x, dy = wy - sy->y;
-    *lx = dx * c - dy * s;
-    *ly = dx * s + dy * c;
+    *lx =  dx * c + dy * s;
+    *ly = -dx * s + dy * c;
 }
 
 static void dock_local_to_world(const PlacedStructure *sy,
                                 float lx, float ly, float *wx, float *wy) {
     float rad = sy->rotation * (float)M_PI / 180.0f;
     float c = cosf(rad), s = sinf(rad);
-    *wx = sy->x + lx * c - ly * s;
-    *wy = sy->y + lx * s + ly * c;
+    *wx = sy->x + lx * c + ly * s;
+    *wy = sy->y - lx * s + ly * c;
 }
 
 /* OBB pushout in dock-local space.  Returns true if a pushout occurred. */

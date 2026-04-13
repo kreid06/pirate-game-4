@@ -8599,6 +8599,7 @@ export class RenderSystem {
       [0,                               -(DOCK_HH_D - DOCK_BACK_T_D / 2), DOCK_HW_D,    DOCK_BACK_T_D / 2, 'back',  'rgba(0,200,130,0.85)'],
     ];
 
+    // Clockwise Y-down rotation: wx = ox + lx*c + ly*s, wy = oy - lx*s + ly*c
     const drawOBBWorld = (
       originX: number, originY: number, rotDeg: number,
       cx: number, cy: number, hx: number, hy: number,
@@ -8610,8 +8611,8 @@ export class RenderSystem {
       const pts = corners.map(([ox, oy]) => {
         const lx = cx + ox, ly = cy + oy;
         return camera.worldToScreen(Vec2.from(
-          originX + lx * cosR - ly * sinR,
-          originY + lx * sinR + ly * cosR,
+          originX + lx * cosR + ly * sinR,
+          originY - lx * sinR + ly * cosR,
         ));
       });
       ctx.save();
@@ -8623,8 +8624,8 @@ export class RenderSystem {
       ctx.closePath();
       ctx.stroke();
       const csc = camera.worldToScreen(Vec2.from(
-        originX + cx * cosR - cy * sinR,
-        originY + cx * sinR + cy * cosR,
+        originX + cx * cosR + cy * sinR,
+        originY - cx * sinR + cy * cosR,
       ));
       ctx.fillStyle = color;
       ctx.font = '10px monospace';
