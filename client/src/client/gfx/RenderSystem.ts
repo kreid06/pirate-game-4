@@ -8592,10 +8592,11 @@ export class RenderSystem {
     const DOCK_STAIR_D  = 50;  // stair gap at arm tips
 
     // [local-cx, local-cy, half-x, half-y, label, color]
+    // Arms span the full dock height Y ∈ [−DOCK_HH_D, +DOCK_HH_D] → centre 0, half DOCK_HH_D
     const DOCK_OBBS: [number, number, number, number, string, string][] = [
-      [-(DOCK_HW_D - DOCK_ARM_T_D / 2), 0,                            DOCK_ARM_T_D / 2, DOCK_HH_D - DOCK_STAIR_D, 'arm-L', 'rgba(0,160,255,0.85)'],
-      [ (DOCK_HW_D - DOCK_ARM_T_D / 2), 0,                            DOCK_ARM_T_D / 2, DOCK_HH_D - DOCK_STAIR_D, 'arm-R', 'rgba(0,160,255,0.85)'],
-      [0,                               -(DOCK_HH_D - DOCK_BACK_T_D / 2), DOCK_HW_D,    DOCK_BACK_T_D / 2,        'back',  'rgba(0,200,130,0.85)'],
+      [-(DOCK_HW_D - DOCK_ARM_T_D / 2), 0,                            DOCK_ARM_T_D / 2, DOCK_HH_D,         'arm-L', 'rgba(0,160,255,0.85)'],
+      [ (DOCK_HW_D - DOCK_ARM_T_D / 2), 0,                            DOCK_ARM_T_D / 2, DOCK_HH_D,         'arm-R', 'rgba(0,160,255,0.85)'],
+      [0,                               -(DOCK_HH_D - DOCK_BACK_T_D / 2), DOCK_HW_D,    DOCK_BACK_T_D / 2, 'back',  'rgba(0,200,130,0.85)'],
     ];
 
     const drawOBBWorld = (
