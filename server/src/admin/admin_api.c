@@ -491,7 +491,7 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
     resp->content_type = "application/json";
     resp->body = json_buffer;
     resp->body_length = offset;
-    resp->cache_control = true;
+    resp->cache_control = false;  /* always fresh — map data changes every tick */
     
     return 0;
 }
