@@ -479,7 +479,8 @@ static bool dock_point_on_surface(float lx, float ly, bool has_scaffolding) {
 }
 
 /* Apply dock U-wall OBB pushout (world space).
- * Arms have DOCK_STAIR_H stair openings at each end.
+ * Arms span from back-wall junction (ly=-395) to mouth tip (ly=+445);
+ * centre at ly=+25, half-height=420 — exact match to the visual U-shape.
  * Back wall and scaffolding walkway (construction) are full-width OBBs. */
 static void dock_apply_player_collision(const PlacedStructure *sy, float player_r,
                                         bool has_scaffolding, float *wx, float *wy) {
@@ -489,11 +490,12 @@ static void dock_apply_player_collision(const PlacedStructure *sy, float player_
     float ai         = DOCK_HW - DOCK_ARM_T;              /* 120  */
     float arm_cx_l   = -(DOCK_HW - DOCK_ARM_T / 2.0f);   /* -145 */
     float arm_cx_r   =  (DOCK_HW - DOCK_ARM_T / 2.0f);   /* +145 */
-    float arm_half_y =  DOCK_HH - DOCK_STAIR_H;          /* 395  */
+    float arm_cy     =  DOCK_BACK_T / 2.0f;               /* +25  — centre between back junction and mouth */
+    float arm_half_y =  DOCK_HH - DOCK_BACK_T / 2.0f;    /* 420  — spans -395 to +445 */
     float back_cy    = -(DOCK_HH - DOCK_BACK_T / 2.0f);  /* -420 */
 
-    dock_obb_pushout(arm_cx_l, 0.0f, DOCK_ARM_T / 2.0f, arm_half_y, player_r, &lx, &ly);
-    dock_obb_pushout(arm_cx_r, 0.0f, DOCK_ARM_T / 2.0f, arm_half_y, player_r, &lx, &ly);
+    dock_obb_pushout(arm_cx_l, arm_cy, DOCK_ARM_T / 2.0f, arm_half_y, player_r, &lx, &ly);
+    dock_obb_pushout(arm_cx_r, arm_cy, DOCK_ARM_T / 2.0f, arm_half_y, player_r, &lx, &ly);
     dock_obb_pushout(0.0f,  back_cy, DOCK_HW, DOCK_BACK_T / 2.0f,   player_r, &lx, &ly);
     if (has_scaffolding) {
         float wcy = DOCK_HH - DOCK_BACK_T / 2.0f;        /* +420 */
@@ -538,12 +540,13 @@ static void handle_ship_dock_collisions(void) {
 
             /* Arms: hull beam radius — a centred ship (lx=0) extends ±90 px,
              * arm inner face at ±120 px, so no pushout while in the bay.
-             * Ships outside the bay are correctly pushed off the arm faces. */
-            dock_obb_pushout(-(DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
-                             DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_STAIR_H,
+             * Arms span ly=-395 to ly=+445 (centre +25, half 420) to match
+             * the visual U-shape all the way to the mouth tip. */
+            dock_obb_pushout(-(DOCK_HW - DOCK_ARM_T / 2.0f), DOCK_BACK_T / 2.0f,
+                             DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_BACK_T / 2.0f,
                              HULL_HALF_BEAM, &lx, &ly);
-            dock_obb_pushout( (DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
-                             DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_STAIR_H,
+            dock_obb_pushout( (DOCK_HW - DOCK_ARM_T / 2.0f), DOCK_BACK_T / 2.0f,
+                             DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_BACK_T / 2.0f,
                              HULL_HALF_BEAM, &lx, &ly);
             /* Back wall: stern half-length so the stern stops at the back wall face. */
             dock_obb_pushout(0.0f, -(DOCK_HH - DOCK_BACK_T / 2.0f),
