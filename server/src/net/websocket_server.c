@@ -512,15 +512,64 @@ static void dock_apply_player_collision(const PlacedStructure *sy, float player_
 /* Push non-scaffolded sim ships out of dock U-walls.
  * Called once per tick after scaffold pin and position sync.
  *
- * Hull collision radii (brigantine, client px):
- *   HULL_HALF_BEAM  = 90   — beam 180 px → half 90 px (port/starboard extent)
- *   HULL_STERN_HALF = 345  — stern tip at −345 px from ship origin (for-aft extent)
- * Using hull radii instead of bounding_radius (435 px) means a ship centred in
- * the 240 px wide bay (arm inner edges at ±120 px) extends only ±90 px and is
- * never pushed by the arm OBBs — it can sail through the open mouth freely. */
+ * Brigantine hull OBB (ship-local, client px, post-scale):
+ *   bow  +X: 415*1.02 = 423   stern -X: 345*1.02 = 352   beam ±Y: 90*1.10 = 99
+ * OBB half-length = (423+352)/2 = 387.5  half-beam = 99  fwd-offset = (423-352)/2 = 35.5
+ * Using the actual ship OBB (not a uniform circle) so that rotation is handled correctly. */
+
+/* 2-D OBB–OBB SAT pushout in dock-local space.
+ * The dock wall OBB is axis-aligned: center (dcx,dcy), half-extents (dhx,dhy).
+ * The ship hull OBB has rotation rel (C=cos(rel),S=sin(rel)) relative to dock:
+ *   center (ocx,ocy), half-extents (shl,shw).
+ * If the two OBBs overlap, adjusts (ocx,ocy) by the minimum-penetration pushout.
+ * Returns true if a pushout was applied. */
+static bool ship_dock_obb_sat(float dcx, float dcy, float dhx, float dhy,
+                               float shl, float shw, float C, float S,
+                               float *ocx, float *ocy) {
+    float aC = fabsf(C), aS = fabsf(S);
+    float dx = *ocx - dcx, dy = *ocy - dcy;
+
+    /* Test 4 SAT axes — any positive separation means no overlap. */
+    /* Axis 1: dock local X = (1,0) */
+    float sep1 = fabsf(dx) - (dhx + shl * aC + shw * aS);
+    if (sep1 > 0.0f) return false;
+    /* Axis 2: dock local Y = (0,1) */
+    float sep2 = fabsf(dy) - (dhy + shl * aS + shw * aC);
+    if (sep2 > 0.0f) return false;
+    /* Axis 3: ship fwd = (C, S) */
+    float p3   = dx * C + dy * S;
+    float sep3 = fabsf(p3) - (shl + dhx * aC + dhy * aS);
+    if (sep3 > 0.0f) return false;
+    /* Axis 4: ship side = (-S, C) */
+    float p4   = -dx * S + dy * C;
+    float sep4 = fabsf(p4) - (shw + dhx * aS + dhy * aC);
+    if (sep4 > 0.0f) return false;
+
+    /* Overlapping on all axes — push out along minimum-penetration axis. */
+    float pen1 = -sep1, pen2 = -sep2, pen3 = -sep3, pen4 = -sep4;
+    int   best = 1; float pen = pen1;
+    if (pen2 < pen) { pen = pen2; best = 2; }
+    if (pen3 < pen) { pen = pen3; best = 3; }
+    if (pen4 < pen) { pen = pen4; best = 4; }
+    switch (best) {
+        case 1: *ocx += (dx >= 0.0f ? 1.0f : -1.0f) * pen; break;
+        case 2: *ocy += (dy >= 0.0f ? 1.0f : -1.0f) * pen; break;
+        case 3: { float sg = (p3 >= 0.0f ? 1.0f : -1.0f);
+                  *ocx +=  C * sg * pen; *ocy +=  S * sg * pen; break; }
+        case 4: { float sg = (p4 >= 0.0f ? 1.0f : -1.0f);
+                  *ocx += -S * sg * pen; *ocy +=  C * sg * pen; break; }
+    }
+    return true;
+}
+
 static void handle_ship_dock_collisions(void) {
-    static const float HULL_HALF_BEAM  = 90.0f;   /* brigantine half-beam      */
-    static const float HULL_STERN_HALF = 345.0f;  /* origin-to-stern-tip dist  */
+    /* Brigantine hull OBB in ship-local coords (client px, post hull-curve scaling):
+     *   bow  +X: 415 * 1.02 = 423 px      stern -X: 345 * 1.02 = 352 px
+     *   beam ±Y:  90 * 1.10 =  99 px
+     * OBB half-length = (423+352)/2 = 387.5,  forward-offset = (423-352)/2 = 35.5 */
+    static const float SH_HL  = 387.5f;   /* half-length along ship +X axis */
+    static const float SH_HW  =  99.0f;   /* half-beam  along ship ±Y axis  */
+    static const float SH_FWD =  35.5f;   /* OBB center offset toward bow    */
 
     if (!global_sim) return;
     for (int di = 0; di < (int)placed_structure_count; di++) {
@@ -531,47 +580,58 @@ static void handle_ship_dock_collisions(void) {
             struct Ship *ship = &global_sim->ships[si];
             if ((uint32_t)ship->id == sy->scaffolded_ship_id) continue;
 
-            float sx  = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
-            float sy_w = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y));
+            float sxc  = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
+            float syc  = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y));
             float brad = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->bounding_radius));
-            float ddx = sx - sy->x, ddy = sy_w - sy->y;
+            float ddx  = sxc - sy->x, ddy = syc - sy->y;
             float broad = brad + DOCK_HH + DOCK_HW;
             if (ddx * ddx + ddy * ddy > broad * broad) continue;
 
+            /* Ship origin in dock-local */
             float lx, ly;
-            dock_world_to_local(sy, sx, sy_w, &lx, &ly);
-            float old_lx = lx, old_ly = ly;
+            dock_world_to_local(sy, sxc, syc, &lx, &ly);
 
-            /* Arms: full dock height (Y ∈ [-445,+445], centre 0, half DOCK_HH).
-             * Hull beam radius 90 px < inner face at ±120 px → no pushout for
-             * a ship centred in the bay; ships outside are pushed off the face. */
-            dock_obb_pushout(-(DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
-                             DOCK_ARM_T / 2.0f, DOCK_HH,
-                             HULL_HALF_BEAM, &lx, &ly);
-            dock_obb_pushout( (DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
-                             DOCK_ARM_T / 2.0f, DOCK_HH,
-                             HULL_HALF_BEAM, &lx, &ly);
-            /* Back wall: stern half-length so the stern stops at the back wall face. */
-            dock_obb_pushout(0.0f, -(DOCK_HH - DOCK_BACK_T / 2.0f),
-                             DOCK_HW, DOCK_BACK_T / 2.0f,
-                             HULL_STERN_HALF, &lx, &ly);
+            /* Relative rotation: ship.rotation (Q16 radians) vs dock (degrees → radians) */
+            float dock_rad = sy->rotation * (float)M_PI / 180.0f;
+            float ship_rad = Q16_TO_FLOAT(ship->rotation);   /* Q16 → float radians */
+            float rel = ship_rad - dock_rad;
+            float C = cosf(rel), S = sinf(rel);
 
-            if (lx == old_lx && ly == old_ly) continue;
+            /* Ship hull OBB center in dock-local (shifted forward by SH_FWD along ship axis) */
+            float oc_x = lx + SH_FWD * C;
+            float oc_y = ly + SH_FWD * S;
+            float old_oc_x = oc_x, old_oc_y = oc_y;
 
+            /* OBB–OBB SAT: ship hull vs each dock wall (dock walls are axis-aligned) */
+            ship_dock_obb_sat(-(DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
+                               DOCK_ARM_T / 2.0f, DOCK_HH,
+                               SH_HL, SH_HW, C, S, &oc_x, &oc_y);
+            ship_dock_obb_sat( (DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
+                               DOCK_ARM_T / 2.0f, DOCK_HH,
+                               SH_HL, SH_HW, C, S, &oc_x, &oc_y);
+            ship_dock_obb_sat(0.0f, -(DOCK_HH - DOCK_BACK_T / 2.0f),
+                               DOCK_HW, DOCK_BACK_T / 2.0f,
+                               SH_HL, SH_HW, C, S, &oc_x, &oc_y);
+
+            float dpx = oc_x - old_oc_x, dpy = oc_y - old_oc_y;
+            if (dpx * dpx + dpy * dpy < 0.0001f) continue;
+
+            /* Apply same delta to ship origin (rigid-body translation) */
+            lx += dpx; ly += dpy;
             float new_wx, new_wy;
             dock_local_to_world(sy, lx, ly, &new_wx, &new_wy);
             ship->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_wx));
             ship->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_wy));
 
+            /* Reflect velocity along the world-space pushout normal */
             float vx = Q16_TO_FLOAT(ship->velocity.x);
             float vy = Q16_TO_FLOAT(ship->velocity.y);
-            float pnx = lx - old_lx, pny = ly - old_ly;
-            float pmag = sqrtf(pnx * pnx + pny * pny);
-            if (pmag > 0.0001f) {
-                float nx2 = pnx / pmag, ny2 = pny / pmag;
-                float rad = sy->rotation * (float)M_PI / 180.0f;
-                float c = cosf(rad), s = sinf(rad);
-                float wnx = nx2 * c - ny2 * s, wny = nx2 * s + ny2 * c;
+            float c2 = cosf(dock_rad), s2 = sinf(dock_rad);
+            float wnx = dpx * c2 - dpy * s2;
+            float wny = dpx * s2 + dpy * c2;
+            float wmag = sqrtf(wnx * wnx + wny * wny);
+            if (wmag > 0.0001f) {
+                wnx /= wmag; wny /= wmag;
                 float dot = vx * wnx + vy * wny;
                 if (dot < 0.0f) {
                     ship->velocity.x = Q16_FROM_FLOAT(vx - dot * wnx * 1.3f);
