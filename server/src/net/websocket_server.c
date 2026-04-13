@@ -9064,9 +9064,63 @@ int websocket_server_update(struct Sim* sim) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                             } else {
                                 WebSocketPlayer* player = find_player(client->player_id);
-                                if (!player || player->parent_ship_id == 0) {
+                                /* Accept both on-deck (parent_ship_id) and on-scaffold (on_dock_id) */
+                                uint32_t target_ship_id = player ? player->parent_ship_id : 0;
+                                if (player && target_ship_id == 0 && player->on_dock_id != 0) {
+                                    for (int _pdi = 0; _pdi < (int)placed_structure_count; _pdi++) {
+                                        if (placed_structures[_pdi].active &&
+                                            placed_structures[_pdi].id == player->on_dock_id) {
+                                            target_ship_id = placed_structures[_pdi].scaffolded_ship_id;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (!player || target_ship_id == 0) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 } else {
+                                    /* Parse sectionName and segmentIndex from the JSON payload.
+                                     * Lookup table mirrors createCompleteHullSegments() order in client. */
+                                    typedef struct { const char* section; int seg; } PlankKey;
+                                    static const PlankKey PLANK_KEYS[10] = {
+                                        { "bow_port",        0 }, /* ID 100 */
+                                        { "bow_starboard",   1 }, /* ID 101 */
+                                        { "starboard_side",  0 }, /* ID 102 */
+                                        { "starboard_side",  1 }, /* ID 103 */
+                                        { "starboard_side",  2 }, /* ID 104 */
+                                        { "stern_starboard", 4 }, /* ID 105 */
+                                        { "stern_port",      5 }, /* ID 106 */
+                                        { "port_side",       0 }, /* ID 107 */
+                                        { "port_side",       1 }, /* ID 108 */
+                                        { "port_side",       2 }, /* ID 109 */
+                                    };
+                                    char section_name[48] = {0};
+                                    int  seg_index = -1;
+                                    {
+                                        char* sn = strstr(payload, "\"sectionName\":\"");
+                                        if (sn) {
+                                            sn += 15;
+                                            int _si = 0;
+                                            while (_si < 47 && sn[_si] != '"' && sn[_si] != '\0')
+                                                { section_name[_si] = sn[_si]; _si++; }
+                                            section_name[_si] = '\0';
+                                        }
+                                        char* ix = strstr(payload, "\"segmentIndex\":");
+                                        if (ix) seg_index = atoi(ix + 15);
+                                    }
+                                    /* Map sectionName+segmentIndex → plank slot 0-9 */
+                                    int plank_slot_idx = -1;
+                                    for (int k = 0; k < 10; k++) {
+                                        if (strcmp(section_name, PLANK_KEYS[k].section) == 0 &&
+                                            seg_index == PLANK_KEYS[k].seg) {
+                                            plank_slot_idx = k;
+                                            break;
+                                        }
+                                    }
+                                    if (plank_slot_idx < 0) {
+                                        /* Unknown slot — fall back to first missing */
+                                        log_warn("place_plank: unknown slot '%s'[%d], using first missing",
+                                                 section_name, seg_index);
+                                    }
                                     // Find a plank in inventory
                                     int plank_slot = -1;
                                     for (int s = 0; s < INVENTORY_SLOTS; s++) {
@@ -9080,10 +9134,10 @@ int websocket_server_update(struct Sim* sim) {
                                     } else if (!global_sim) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                     } else {
-                                        // Find player's sim ship
+                                        // Find the sim ship (accept both on-deck and on-scaffold)
                                         struct Ship* sim_ship = NULL;
                                         for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                                            if (global_sim->ships[si].id == player->parent_ship_id) {
+                                            if (global_sim->ships[si].id == target_ship_id) {
                                                 sim_ship = &global_sim->ships[si]; break;
                                             }
                                         }
@@ -9096,16 +9150,24 @@ int websocket_server_update(struct Sim* sim) {
                                                 uint16_t mid = sim_ship->modules[m].id;
                                                 if (mid >= 100 && mid <= 109) present[mid - 100] = true;
                                             }
-                                            // Find first missing plank
-                                            int missing_idx = -1;
-                                            for (int k = 0; k < 10; k++) {
-                                                if (!present[k]) { missing_idx = k; break; }
+                                            /* Use the client-requested slot; fall back to first missing */
+                                            int missing_idx = plank_slot_idx >= 0 ? plank_slot_idx : -1;
+                                            if (missing_idx >= 0 && present[missing_idx]) {
+                                                /* Requested slot already has a plank */
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"plank_already_present\"}");
+                                                missing_idx = -2; /* skip placement */
+                                            }
+                                            if (missing_idx == -1) {
+                                                /* Fallback: first missing */
+                                                for (int k = 0; k < 10; k++) {
+                                                    if (!present[k]) { missing_idx = k; break; }
+                                                }
                                             }
                                             if (missing_idx < 0) {
                                                 strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_missing_planks\"}");
-                                            } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
+                                            } else if (missing_idx != -2 && sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
                                                 strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
-                                            } else {
+                                            } else if (missing_idx >= 0) {
                                                 uint16_t plank_id = 100 + (uint16_t)missing_idx;
                                                 static const float pp_cx[10] = {
                                                      246.25f,  246.25f,  115.0f,  -35.0f, -185.0f,

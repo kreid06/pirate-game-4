@@ -4736,9 +4736,6 @@ export class RenderSystem {
   private drawMissingPlankGhosts(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
-    // Scaffolded ships under construction — suppress plank build ghosts
-    if (this._scaffoldedShips.has(ship.id)) return;
-
     // Build set of present plank slot keys
     const presentKeys = new Set<string>();
     for (const mod of ship.modules) {
