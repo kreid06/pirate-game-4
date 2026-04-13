@@ -497,8 +497,18 @@ static void dock_apply_player_collision(const PlacedStructure *sy, float player_
 }
 
 /* Push non-scaffolded sim ships out of dock U-walls.
- * Called once per tick after scaffold pin and position sync. */
+ * Called once per tick after scaffold pin and position sync.
+ *
+ * Hull collision radii (brigantine, client px):
+ *   HULL_HALF_BEAM  = 90   — beam 180 px → half 90 px (port/starboard extent)
+ *   HULL_STERN_HALF = 345  — stern tip at −345 px from ship origin (for-aft extent)
+ * Using hull radii instead of bounding_radius (435 px) means a ship centred in
+ * the 240 px wide bay (arm inner edges at ±120 px) extends only ±90 px and is
+ * never pushed by the arm OBBs — it can sail through the open mouth freely. */
 static void handle_ship_dock_collisions(void) {
+    static const float HULL_HALF_BEAM  = 90.0f;   /* brigantine half-beam      */
+    static const float HULL_STERN_HALF = 345.0f;  /* origin-to-stern-tip dist  */
+
     if (!global_sim) return;
     for (int di = 0; di < (int)placed_structure_count; di++) {
         PlacedStructure *sy = &placed_structures[di];
@@ -508,7 +518,7 @@ static void handle_ship_dock_collisions(void) {
             struct Ship *ship = &global_sim->ships[si];
             if ((uint32_t)ship->id == sy->scaffolded_ship_id) continue;
 
-            float sx = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
+            float sx  = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
             float sy_w = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y));
             float brad = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->bounding_radius));
             float ddx = sx - sy->x, ddy = sy_w - sy->y;
@@ -519,19 +529,19 @@ static void handle_ship_dock_collisions(void) {
             dock_world_to_local(sy, sx, sy_w, &lx, &ly);
             float old_lx = lx, old_ly = ly;
 
-            /* Ships whose centre is inside the bay band (|lx| < ai) are
-             * between the arm inner faces — they can exit freely through the
-             * open mouth (+Y).  Only the solid back wall applies to them.
-             * This lets a released ship sail out without any teleport. */
-            float ai = DOCK_HW - DOCK_ARM_T;   /* inner arm edge = 120 px */
-            if (fabsf(lx) >= ai) {
-                dock_obb_pushout(-(DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
-                                 DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_STAIR_H, brad, &lx, &ly);
-                dock_obb_pushout( (DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
-                                 DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_STAIR_H, brad, &lx, &ly);
-            }
+            /* Arms: hull beam radius — a centred ship (lx=0) extends ±90 px,
+             * arm inner face at ±120 px, so no pushout while in the bay.
+             * Ships outside the bay are correctly pushed off the arm faces. */
+            dock_obb_pushout(-(DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
+                             DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_STAIR_H,
+                             HULL_HALF_BEAM, &lx, &ly);
+            dock_obb_pushout( (DOCK_HW - DOCK_ARM_T / 2.0f), 0.0f,
+                             DOCK_ARM_T / 2.0f, DOCK_HH - DOCK_STAIR_H,
+                             HULL_HALF_BEAM, &lx, &ly);
+            /* Back wall: stern half-length so the stern stops at the back wall face. */
             dock_obb_pushout(0.0f, -(DOCK_HH - DOCK_BACK_T / 2.0f),
-                             DOCK_HW, DOCK_BACK_T / 2.0f, brad, &lx, &ly);
+                             DOCK_HW, DOCK_BACK_T / 2.0f,
+                             HULL_STERN_HALF, &lx, &ly);
 
             if (lx == old_lx && ly == old_ly) continue;
 
@@ -962,7 +972,9 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].inventory.slots[4].quantity = 10;
             players[i].inventory.slots[5].item     = ITEM_WORKBENCH;
             players[i].inventory.slots[5].quantity = 2;
-            // slots 6-9 remain empty (zeroed by memset)
+            players[i].inventory.slots[6].item     = ITEM_SHIPYARD;
+            players[i].inventory.slots[6].quantity = 1;
+            // slots 7-9 remain empty (zeroed by memset)
 
             return &players[i];
         }
