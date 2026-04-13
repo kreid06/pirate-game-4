@@ -447,7 +447,10 @@ static void dock_local_to_world(const PlacedStructure *sy,
     *wy = sy->y + lx * s + ly * c;
 }
 
-/* OBB pushout in dock-local space.  Returns true if a pushout occurred. */
+/* OBB pushout in dock-local space.  Returns true if a pushout occurred.
+ * Only fires when the player circle overlaps the OBB from OUTSIDE (d2 > 0).
+ * When d2 == 0 the player centre is inside the OBB — that means they are
+ * standing ON the walkable surface, so no push is applied. */
 static bool dock_obb_pushout(float cx, float cy, float hx, float hy,
                              float r, float *lx, float *ly) {
     float dx = *lx - cx, dy = *ly - cy;
