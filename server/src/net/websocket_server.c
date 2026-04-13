@@ -563,13 +563,19 @@ static bool ship_dock_obb_sat(float dcx, float dcy, float dhx, float dhy,
 }
 
 static void handle_ship_dock_collisions(void) {
-    /* Brigantine hull OBB in ship-local coords (client px, post hull-curve scaling):
-     *   bow  +X: 415 * 1.02 = 423 px      stern -X: 345 * 1.02 = 352 px
-     *   beam ±Y:  90 * 1.10 =  99 px
-     * OBB half-length = (423+352)/2 = 387.5,  forward-offset = (423-352)/2 = 35.5 */
-    static const float SH_HL  = 387.5f;   /* half-length along ship +X axis */
-    static const float SH_HW  =  99.0f;   /* half-beam  along ship ±Y axis  */
-    static const float SH_FWD =  35.5f;   /* OBB center offset toward bow    */
+    /* Brigantine hull OBB in ship-local coords (client px, post hull-curve scaling).
+     *
+     * The bow/stern are quadratic beziers.  The actual peak X is at t=0.5:
+     *   Bow  P0=(190,90) P1=(415,0) P2=(190,-90) → X(0.5) = 302.5 × 1.02 = 308.6
+     *   Stern P0=(-260,-90) P1=(-345,0) P2=(-260,90) → X(0.5) = -302.5 × 1.02 = -308.6
+     * The hull is symmetric about the ship origin → forward offset = 0.
+     * Beam: straight sides at y=±90, scaled 1.1× → ±99 px.
+     *
+     * Note: bounding_radius=435 in simulation.c uses control-point extents for
+     * conservative broad-phase culling — correct there, NOT for narrow-phase. */
+    static const float SH_HL  = 309.0f;   /* half-length: 302.5 * 1.02, rounded up */
+    static const float SH_HW  =  99.0f;   /* half-beam:    90   * 1.10              */
+    static const float SH_FWD =   0.0f;   /* hull is symmetric → OBB centred on origin */
 
     if (!global_sim) return;
     for (int di = 0; di < (int)placed_structure_count; di++) {
