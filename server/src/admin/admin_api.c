@@ -11,7 +11,7 @@
 #include <string.h>
 
 // Static buffer for JSON responses (to avoid dynamic allocation)
-static char json_buffer[8192];
+static char json_buffer[32768];
 
 int admin_api_status(struct HttpResponse* resp, const struct Sim* sim,
                     const struct NetworkManager* net_mgr) {
@@ -423,7 +423,7 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
         "  ],\n  \"islands\": [\n");
 
     // Islands (static world data from ISLAND_PRESETS)
-    for (int ii = 0; ii < ISLAND_COUNT && offset < (int)sizeof(json_buffer) - 400; ii++) {
+    for (int ii = 0; ii < ISLAND_COUNT && offset < (int)sizeof(json_buffer) - 2048; ii++) {
         const IslandDef *isl = &ISLAND_PRESETS[ii];
         if (ii > 0)
             offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, ",\n");
@@ -432,7 +432,7 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
             ",\"beachRadius\":%.2f,\"grassRadius\":%.2f"
             ",\"beachMaxBump\":%.2f,\"grassMaxBump\":%.2f"
             ",\"beachBumps\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]"
-            ",\"grassBumps\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]}",
+            ",\"grassBumps\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
             isl->id, isl->x, isl->y,
             isl->beach_radius_px, isl->grass_radius_px,
             isl->beach_max_bump, isl->grass_max_bump,
@@ -445,8 +445,45 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
             isl->grass_bumps[8],  isl->grass_bumps[9],  isl->grass_bumps[10], isl->grass_bumps[11],
             isl->grass_bumps[12], isl->grass_bumps[13], isl->grass_bumps[14], isl->grass_bumps[15]
         );
+        /* Polygon islands: append vertices array */
+        if (isl->vertex_count > 0) {
+            offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, ",\"vertices\":[");
+            for (int vi = 0; vi < isl->vertex_count && offset < (int)sizeof(json_buffer) - 64; vi++) {
+                offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+                    "%s{\"x\":%.1f,\"y\":%.1f}",
+                    vi ? "," : "",
+                    isl->x + isl->vx[vi], isl->y + isl->vy[vi]);
+            }
+            offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, "]");
+        }
+        offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, "}");
     }
 
+    /* Placed structures (shipyards etc.) */
+    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+        "\n  ],\n  \"structures\": [\n");
+    {
+        PlacedStructure *ps = NULL;
+        uint32_t ps_count = 0;
+        bool ps_first = true;
+        if (websocket_server_get_placed_structures(&ps, &ps_count) == 0) {
+            for (uint32_t si = 0; si < ps_count && offset < (int)sizeof(json_buffer) - 256; si++) {
+                if (!ps[si].active) continue;
+                const char *stype =
+                    ps[si].type == STRUCT_WOODEN_FLOOR ? "wooden_floor" :
+                    ps[si].type == STRUCT_WORKBENCH    ? "workbench" :
+                    ps[si].type == STRUCT_WALL         ? "wall" :
+                    ps[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
+                    ps[si].type == STRUCT_DOOR         ? "door" :
+                    ps[si].type == STRUCT_SHIPYARD     ? "shipyard" : "unknown";
+                offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+                    "%s    {\"id\":%u,\"type\":\"%s\",\"x\":%.2f,\"y\":%.2f,\"rotation\":%.2f}",
+                    ps_first ? "" : ",\n",
+                    ps[si].id, stype, ps[si].x, ps[si].y, ps[si].rotation);
+                ps_first = false;
+            }
+        }
+    }
     offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
         "\n  ]\n}\n");
 

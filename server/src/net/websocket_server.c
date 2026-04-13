@@ -145,6 +145,13 @@ static PlacedStructure placed_structures[MAX_PLACED_STRUCTURES];
 static uint32_t placed_structure_count = 0;
 static uint32_t next_structure_id = 1;
 
+int websocket_server_get_placed_structures(PlacedStructure **out_structs, uint32_t *out_count) {
+    if (!out_structs || !out_count) return -1;
+    *out_structs = placed_structures;
+    *out_count   = placed_structure_count;
+    return 0;
+}
+
 // ── O(1) ship lookup ────────────────────────────────────────────────────────
 // Ship IDs are small sequential integers starting at 1 (next_ship_id begins
 // at 1, MAX_SIMPLE_SHIPS=50, so IDs stay well below 512).  The array is

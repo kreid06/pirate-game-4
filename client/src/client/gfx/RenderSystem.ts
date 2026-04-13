@@ -8450,6 +8450,76 @@ export class RenderSystem {
     };
 
     for (const isl of this.islands) {
+      // ── Polygon island (e.g. continental) — draw actual vertex polygon ──────
+      if (isl.vertices && isl.vertices.length >= 3) {
+        const icx = isl.x, icy = isl.y;
+        const isc = camera.worldToScreen(Vec2.from(icx, icy));
+
+        // Broad-phase: max vertex distance + buffer
+        let pBroadR = 0;
+        for (const v of isl.vertices) {
+          const dd = Math.hypot(v.x - icx, v.y - icy);
+          if (dd > pBroadR) pBroadR = dd;
+        }
+        pBroadR += 50;
+
+        // Broad-phase circle (dashed yellow)
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,220,0,0.35)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.arc(isc.x, isc.y, pBroadR * zoom, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+
+        // Beach polygon (red-orange) — ship collision boundary
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,80,0,0.85)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        isl.vertices.forEach((v, vi) => {
+          const vs = camera.worldToScreen(Vec2.from(v.x, v.y));
+          vi === 0 ? ctx.moveTo(vs.x, vs.y) : ctx.lineTo(vs.x, vs.y);
+        });
+        ctx.closePath();
+        ctx.stroke();
+        ctx.restore();
+
+        // Grass polygon (green, 0.82 scale from centre) — player walkable zone
+        const GRASS_POLY_SCALE = 0.82;
+        ctx.save();
+        ctx.strokeStyle = 'rgba(80,220,80,0.85)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        isl.vertices.forEach((v, vi) => {
+          const gx = icx + (v.x - icx) * GRASS_POLY_SCALE;
+          const gy = icy + (v.y - icy) * GRASS_POLY_SCALE;
+          const gs = camera.worldToScreen(Vec2.from(gx, gy));
+          vi === 0 ? ctx.moveTo(gs.x, gs.y) : ctx.lineTo(gs.x, gs.y);
+        });
+        ctx.closePath();
+        ctx.stroke();
+        ctx.restore();
+
+        // Centre cross + label
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(isc.x - 10, isc.y); ctx.lineTo(isc.x + 10, isc.y);
+        ctx.moveTo(isc.x, isc.y - 10); ctx.lineTo(isc.x, isc.y + 10);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.font = '11px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(`island#${isl.id} (${isl.preset}) verts:${isl.vertices.length}`, isc.x, isc.y - pBroadR * zoom - 4);
+        ctx.restore();
+        continue;
+      }
+
       const preset  = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
       const { beachRadius, grassRadius, beachBumps, grassBumps } = preset;
       const beachMaxBump = Math.max(...beachBumps.map(Math.abs));
@@ -8511,6 +8581,82 @@ export class RenderSystem {
         sc.x, sc.y - (beachRadius + beachMaxBump) * zoom - 4,
       );
       ctx.restore();
+    }
+
+    // ── Shipyard physics bodies (U-shape: left arm, right arm, back wall) ───
+    // Constants mirror server websocket_server.c DOCK_* (all in client px)
+    const DOCK_HW_D    = 170;  // half total width
+    const DOCK_HH_D    = 445;  // half total height
+    const DOCK_ARM_T_D =  50;  // arm thickness
+    const DOCK_BACK_T_D = 50;  // back wall thickness
+    const DOCK_STAIR_D  = 50;  // stair gap at arm tips
+
+    // [local-cx, local-cy, half-x, half-y, label, color]
+    const DOCK_OBBS: [number, number, number, number, string, string][] = [
+      [-(DOCK_HW_D - DOCK_ARM_T_D / 2), 0,                            DOCK_ARM_T_D / 2, DOCK_HH_D - DOCK_STAIR_D, 'arm-L', 'rgba(0,160,255,0.85)'],
+      [ (DOCK_HW_D - DOCK_ARM_T_D / 2), 0,                            DOCK_ARM_T_D / 2, DOCK_HH_D - DOCK_STAIR_D, 'arm-R', 'rgba(0,160,255,0.85)'],
+      [0,                               -(DOCK_HH_D - DOCK_BACK_T_D / 2), DOCK_HW_D,    DOCK_BACK_T_D / 2,        'back',  'rgba(0,200,130,0.85)'],
+    ];
+
+    const drawOBBWorld = (
+      originX: number, originY: number, rotDeg: number,
+      cx: number, cy: number, hx: number, hy: number,
+      color: string, label: string,
+    ) => {
+      const rad = rotDeg * Math.PI / 180;
+      const cosR = Math.cos(rad), sinR = Math.sin(rad);
+      const corners: [number, number][] = [[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]];
+      const pts = corners.map(([ox, oy]) => {
+        const lx = cx + ox, ly = cy + oy;
+        return camera.worldToScreen(Vec2.from(
+          originX + lx * cosR - ly * sinR,
+          originY + lx * sinR + ly * cosR,
+        ));
+      });
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.closePath();
+      ctx.stroke();
+      const csc = camera.worldToScreen(Vec2.from(
+        originX + cx * cosR - cy * sinR,
+        originY + cx * sinR + cy * cosR,
+      ));
+      ctx.fillStyle = color;
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, csc.x, csc.y);
+      ctx.restore();
+    };
+
+    for (const sy of this.placedStructures) {
+      if (sy.type !== 'shipyard') continue;
+      const rot = sy.rotation ?? 0;
+      const sc  = camera.worldToScreen(Vec2.from(sy.x, sy.y));
+
+      // Centre cross + label
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,200,0,0.9)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(sc.x - 10, sc.y); ctx.lineTo(sc.x + 10, sc.y);
+      ctx.moveTo(sc.x, sc.y - 10); ctx.lineTo(sc.x, sc.y + 10);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255,200,0,0.9)';
+      ctx.font = '11px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(`shipyard#${sy.id} rot=${rot}°`, sc.x, sc.y - 12);
+      ctx.restore();
+
+      // Draw the 3 OBBs
+      for (const [ocx, ocy, ohx, ohy, lbl, col] of DOCK_OBBS) {
+        drawOBBWorld(sy.x, sy.y, rot, ocx, ocy, ohx, ohy, col, lbl);
+      }
     }
   }
   
