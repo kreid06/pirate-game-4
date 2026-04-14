@@ -717,6 +717,22 @@ static void handle_ship_dock_collisions(void) {
             /* dt in seconds (for Baumgarte bias = β/dt * max(pen-slop, 0)) */
             float dt_s = 1.0f / (float)TICK_RATE_HZ;
 
+            /* Predictive torque bias: the impulse solver only cancels the
+             * CURRENT approach velocity at the contact.  But the player's
+             * input torque will add more angular velocity next tick, so the
+             * ship slowly grinds into the wall.
+             *
+             * Fix: assume the ship will receive at least as much angular
+             * acceleration next tick as it got this tick.  We estimate that
+             * from the current angular velocity (which already includes this
+             * tick's integrated torque).  At each contact, if the angular
+             * component (ω · rxn) is pushing into the wall, we add it as
+             * extra velocity bias to the impulse formula.  This makes J
+             * large enough to pre-cancel the expected next-tick rotation.
+             *
+             *   predicted_approach = cur_w · (r × n̂)   [if negative → approaching]
+             *   torque_bias = |predicted_approach|       [added to bias term]       */
+
             for (int iter = 0; iter < N_ITER; iter++) {
                 for (int wi = 0; wi < 3; wi++) {
                     float pen, nx, ny, cx, cy;
@@ -752,6 +768,15 @@ static void handle_ship_dock_collisions(void) {
                     /* bias = β/dt * max(pen - slop, 0): drains residual positional
                      * error that Baumgarte pos-correction didn't fully remove. */
                     float bias = (BAUMGARTE / dt_s) * fmaxf(pen - SLOP, 0.0f);
+
+                    /* Predictive angular bias: if the angular velocity component at
+                     * this contact is pushing INTO the wall, add it as extra bias
+                     * so the impulse pre-cancels the next tick's continued rotation.
+                     * Without this, J only zeroes vc_n but ω rebuilds each tick. */
+                    float w_approach = cur_w * rxn;  /* angular approach at contact */
+                    if (w_approach < 0.0f) {
+                        bias += -w_approach;  /* add magnitude as extra correction */
+                    }
 
                     /* Impulse increment (clamped: normal impulse can only push, never pull) */
                     float dP = (-(1.0f + RESTITUTION) * vc_n + bias) / denom;
