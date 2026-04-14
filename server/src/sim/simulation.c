@@ -840,19 +840,16 @@ void sim_process_input(struct Sim* sim, const struct InputCmd* cmd) {
     if (player->ship_id != 0) {
         struct Ship* ship = sim_get_ship(sim, player->ship_id);
         if (ship) {
-            // Apply thrust in ship's forward direction
+            /* Accumulate thrust force — integrated in update_ship_physics this tick.
+             * F = thrust_scalar * forward_unit * 5000 N */
             Vec2Q16 forward = {q16_cos(ship->rotation), q16_sin(ship->rotation)};
             Vec2Q16 thrust_force = vec2_mul_scalar(forward, q16_mul(thrust, Q16_FROM_FLOAT(5000.0f)));
-            
-            // Apply force (F = ma, so a = F/m)
-            Vec2Q16 acceleration = vec2_mul_scalar(thrust_force, q16_div(Q16_ONE, ship->mass));
-            ship->velocity = vec2_add(ship->velocity, vec2_mul_scalar(acceleration, FIXED_DT_Q16));
-            
-            // Apply turn torque
-            q16_t torque = q16_mul(turn, Q16_FROM_FLOAT(10000.0f)); // N⋅m
-            q16_t angular_acc = q16_div(torque, ship->moment_inertia);
-            ship->angular_velocity = q16_add_sat(ship->angular_velocity, 
-                                                q16_mul(angular_acc, FIXED_DT_Q16));
+            ship->net_force = vec2_add(ship->net_force, thrust_force);
+
+            /* Accumulate turn torque — integrated in update_ship_physics this tick.
+             * τ = turn_scalar * 10000 N⋅m */
+            q16_t torque = q16_mul(turn, Q16_FROM_FLOAT(10000.0f));
+            ship->net_torque = q16_add_sat(ship->net_torque, torque);
         }
     }
     
@@ -901,18 +898,39 @@ void sim_process_input(struct Sim* sim, const struct InputCmd* cmd) {
 // Physics implementation
 static void update_ship_physics(struct Ship* ship, q16_t dt) {
     if (!ship) return;
-    
-    // Apply water friction to velocity
-    q16_t friction = Q16_FROM_FLOAT(0.95f);
-    ship->velocity = vec2_mul_scalar(ship->velocity, friction);
-    
-    // Apply angular friction
-    ship->angular_velocity = q16_mul(ship->angular_velocity, friction);
-    
-    // Integrate position and rotation
+
+    /* ── Integrate accumulated forces ──────────────────────────────────────
+     * All per-tick forces (thrust, sail, currents, etc.) were added to
+     * net_force / net_torque during input processing and sail updates.
+     * We integrate them here once and then reset for next tick.
+     *
+     *   a = F / m          →  v += a * dt
+     *   α = τ / I          →  ω += α * dt                                */
+    Vec2Q16 lin_accel = vec2_mul_scalar(ship->net_force, q16_div(Q16_ONE, ship->mass));
+    ship->velocity    = vec2_add(ship->velocity, vec2_mul_scalar(lin_accel, dt));
+
+    q16_t ang_accel       = q16_div(ship->net_torque, ship->moment_inertia);
+    ship->angular_velocity = q16_add_sat(ship->angular_velocity, q16_mul(ang_accel, dt));
+
+    /* Reset — collisions (impulse-based) write velocity directly and are
+     * processed after physics, so they don't need to go through here. */
+    ship->net_force  = VEC2_ZERO;
+    ship->net_torque = 0;
+
+    /* ── Water drag ─────────────────────────────────────────────────────────
+     * Applied as a velocity-decay multiplier to avoid Q16 overflow of large
+     * drag-force values.  Equivalent to F_drag = -c*v with
+     * c = 0.05 * mass / dt ≈ 1500 N⋅s/m at 30 Hz.
+     * Any system wanting to counter drag (e.g. sails at full) should add an
+     * opposing force to net_force BEFORE this function runs.              */
+    const q16_t WATER_DRAG = Q16_FROM_FLOAT(0.95f);
+    ship->velocity         = vec2_mul_scalar(ship->velocity, WATER_DRAG);
+    ship->angular_velocity = q16_mul(ship->angular_velocity, WATER_DRAG);
+
+    /* ── Integrate state ───────────────────────────────────────────────── */
     Vec2Q16 displacement = vec2_mul_scalar(ship->velocity, dt);
     ship->position = vec2_add(ship->position, displacement);
-    
+
     ship->rotation = q16_add_sat(ship->rotation, q16_mul(ship->angular_velocity, dt));
     
     // Normalize rotation to [0, 2π]
@@ -940,10 +958,15 @@ static void update_player_physics(struct Player* player, struct Sim* sim, q16_t 
     } else {
         // Player in water - swimming physics
         player->flags |= PLAYER_FLAG_IN_WATER;
-        
-        // Note: Velocity is controlled by WebSocket server (acceleration/deceleration)
-        // No friction applied here - deceleration is handled when player stops moving
-        
+
+        /* Water drag — same 0.95/tick as ships.  This causes players to
+         * decelerate naturally when no input is applied rather than sliding
+         * forever at constant speed.  The websocket server accumulates swim
+         * acceleration into velocity; drag here opposes it each tick. */
+        const q16_t SWIM_DRAG = Q16_FROM_FLOAT(0.95f);
+        player->velocity.x = q16_mul(player->velocity.x, SWIM_DRAG);
+        player->velocity.y = q16_mul(player->velocity.y, SWIM_DRAG);
+
         // Integrate position
         Vec2Q16 displacement = vec2_mul_scalar(player->velocity, dt);
         player->position = vec2_add(player->position, displacement);

@@ -606,7 +606,12 @@ static void handle_ship_dock_collisions(void) {
         {  (DOCK_HW - DOCK_ARM_T/2.0f), 0.0f,      DOCK_ARM_T/2.0f,  DOCK_HH          },
         {  0.0f, -(DOCK_HH - DOCK_BACK_T/2.0f),    DOCK_HW,          DOCK_BACK_T/2.0f },
     };
-    static const float RESTITUTION = 0.18f;
+    static const float RESTITUTION  = 0.18f;
+    /* Coulomb friction coefficient at wall contact.
+     * μ=0 → frictionless (hull slides/spins freely against wall).
+     * μ=1 → physically correct (tangential impulse capped at J_normal).
+     * Values above 1 overdamp; useful to quickly kill wall-spinning. */
+    static const float WALL_FRICTION = 0.6f;
 
     for (int di = 0; di < (int)placed_structure_count; di++) {
         PlacedStructure *sy = &placed_structures[di];
@@ -675,11 +680,12 @@ static void handle_ship_dock_collisions(void) {
                 total_push_x += nx * pen; total_push_y += ny * pen;
 
                 /* Velocity at contact point (pre-impulse): v_cm + ω×r */
-                float vc_n = (vx_dl + omega * (-ry)) * nx
-                           + (vy_dl + omega * ( rx)) * ny;
+                float vc_x = vx_dl + omega * (-ry);
+                float vc_y = vy_dl + omega * ( rx);
+                float vc_n = vc_x * nx + vc_y * ny;
                 if (vc_n >= 0.0f) continue;  /* already separating */
 
-                /* Single rigid-body impulse at this contact point */
+                /* ── Normal impulse ── */
                 float rxn   = rx * ny - ry * nx;
                 float denom = inv_mass + rxn * rxn * inv_inertia;
                 if (denom < 1e-10f) continue;
@@ -687,6 +693,30 @@ static void handle_ship_dock_collisions(void) {
                 dv_x   += J * nx * inv_mass;
                 dv_y   += J * ny * inv_mass;
                 domega += (rx * (J * ny) - ry * (J * nx)) * inv_inertia;
+
+                /* ── Coulomb friction impulse (tangential) ──
+                 * Opposes the sliding/spinning velocity at the contact point.
+                 * This acts as a counter-force to any turn torque pressing the
+                 * hull against the wall: J_f = -(v_t · t) / denom_t, capped at μ*J.
+                 * denom_t uses the TANGENT's cross-product with r, not the normal's. */
+                float vt_x = vc_x - vc_n * nx;
+                float vt_y = vc_y - vc_n * ny;
+                float vt_len = sqrtf(vt_x * vt_x + vt_y * vt_y);
+                if (vt_len > 0.001f) {
+                    float tx = vt_x / vt_len, ty = vt_y / vt_len;
+                    float rxt = rx * ty - ry * tx;   /* r × t */
+                    float denom_t = inv_mass + rxt * rxt * inv_inertia;
+                    if (denom_t > 1e-10f) {
+                        float Jf = -vt_len / denom_t;
+                        /* Coulomb clamp: |J_f| ≤ μ * J_normal */
+                        float Jf_max = WALL_FRICTION * J;
+                        if (Jf < -Jf_max) Jf = -Jf_max;
+                        if (Jf >  Jf_max) Jf =  Jf_max;
+                        dv_x   += Jf * tx * inv_mass;
+                        dv_y   += Jf * ty * inv_mass;
+                        domega += (rx * (Jf * ty) - ry * (Jf * tx)) * inv_inertia;
+                    }
+                }
             }
 
             /* Write back position */

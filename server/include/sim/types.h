@@ -50,6 +50,14 @@ struct Ship {
     q16_t angular_velocity;  // Angular velocity (rad/s)
     q16_t mass;             // Ship mass (kg)
     q16_t moment_inertia;   // Rotational inertia (kg⋅m²)
+
+    /* Force accumulators — cleared to zero after each physics integration step.
+     * All systems (input, sail, current, etc.) add to these; update_ship_physics
+     * integrates them once per tick and resets them.  Collisions use impulses
+     * (direct velocity edits) and do NOT write here. */
+    Vec2Q16 net_force;   // Accumulated force this tick (N)
+    q16_t   net_torque;  // Accumulated torque this tick (N⋅m)
+
     q16_t hull_health;      // Hull integrity
     
     // Hull collision shape (local coordinates)
