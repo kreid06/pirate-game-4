@@ -607,11 +607,18 @@ static void handle_ship_dock_collisions(void) {
         {  0.0f, -(DOCK_HH - DOCK_BACK_T/2.0f),    DOCK_HW,          DOCK_BACK_T/2.0f },
     };
     static const float RESTITUTION  = 0.18f;
-    /* Coulomb friction coefficient at wall contact.
-     * μ=0 → frictionless (hull slides/spins freely against wall).
-     * μ=1 → physically correct (tangential impulse capped at J_normal).
-     * Values above 1 overdamp; useful to quickly kill wall-spinning. */
+    /* Coulomb friction coefficient at wall contact. */
     static const float WALL_FRICTION = 0.6f;
+    /* Baumgarte bias: fraction of remaining penetration converted to a
+     * corrective velocity per tick.  0.3 → error halves every ~2 ticks. */
+    static const float BAUMGARTE     = 0.3f;
+    /* Penetration depth (client px) below which no Baumgarte bias is applied.
+     * Prevents micro-jitter from tiny resting contacts. */
+    static const float SLOP          = 0.5f;
+    /* Solver iterations per tick.  Each pass re-tests all 3 walls against the
+     * most recently corrected hull geometry and accumulated velocity, allowing
+     * impulses from wall A to inform the response at wall B. */
+    static const int   N_ITER        = 3;
 
     for (int di = 0; di < (int)placed_structure_count; di++) {
         PlacedStructure *sy = &placed_structures[di];
@@ -660,64 +667,93 @@ static void handle_ship_dock_collisions(void) {
             float inv_inertia = (inertia_f > 0.0f) ? 1.0f / inertia_f : 0.0f;
 
             float total_push_x = 0.0f, total_push_y = 0.0f;
-            float dv_x = 0.0f, dv_y = 0.0f, domega = 0.0f;
 
-            for (int wi = 0; wi < 3; wi++) {
-                float pen, nx, ny, cx, cy;
-                if (!dock_wall_sat(hdx, hdy, N,
-                                   WALLS[wi].cx, WALLS[wi].cy,
-                                   WALLS[wi].hx, WALLS[wi].hy,
-                                   lx, ly,
-                                   &pen, &nx, &ny, &cx, &cy)) continue;
+            /* Per-wall accumulated impulse (normal + friction).
+             * Clamped across iterations so Coulomb friction is bounded by the
+             * total normal impulse applied so far, not just this iteration's. */
+            float P_n[3] = {0.0f, 0.0f, 0.0f};
+            float P_f[3] = {0.0f, 0.0f, 0.0f};
 
-                /* Lever arm (invariant to the uniform hull+origin translation below) */
-                float rx = cx - lx, ry = cy - ly;
+            /* Working velocity — updated after every wall within every iteration
+             * so wall B in iteration 2 sees the corrected state from wall A. */
+            float cur_vx = vx_dl, cur_vy = vy_dl, cur_w = omega;
 
-                /* Sequential positional correction: update hull+origin so next wall
-                 * sees the post-correction geometry (prevents double-penetration). */
-                lx += nx * pen; ly += ny * pen;
-                for (int vi = 0; vi < N; vi++) { hdx[vi] += nx * pen; hdy[vi] += ny * pen; }
-                total_push_x += nx * pen; total_push_y += ny * pen;
+            /* dt in seconds (for Baumgarte bias = β/dt * max(pen-slop, 0)) */
+            float dt_s = 1.0f / (float)TICK_RATE_HZ;
 
-                /* Velocity at contact point (pre-impulse): v_cm + ω×r */
-                float vc_x = vx_dl + omega * (-ry);
-                float vc_y = vy_dl + omega * ( rx);
-                float vc_n = vc_x * nx + vc_y * ny;
-                if (vc_n >= 0.0f) continue;  /* already separating */
+            for (int iter = 0; iter < N_ITER; iter++) {
+                for (int wi = 0; wi < 3; wi++) {
+                    float pen, nx, ny, cx, cy;
+                    if (!dock_wall_sat(hdx, hdy, N,
+                                       WALLS[wi].cx, WALLS[wi].cy,
+                                       WALLS[wi].hx, WALLS[wi].hy,
+                                       lx, ly,
+                                       &pen, &nx, &ny, &cx, &cy)) continue;
 
-                /* ── Normal impulse ── */
-                float rxn   = rx * ny - ry * nx;
-                float denom = inv_mass + rxn * rxn * inv_inertia;
-                if (denom < 1e-10f) continue;
-                float J = -(1.0f + RESTITUTION) * vc_n / denom;
-                dv_x   += J * nx * inv_mass;
-                dv_y   += J * ny * inv_mass;
-                domega += (rx * (J * ny) - ry * (J * nx)) * inv_inertia;
+                    /* Positional correction: apply fraction of remaining penetration
+                     * each iteration (Baumgarte-style spreading).  Subsequent
+                     * iterations re-detect the reduced penetration automatically. */
+                    float corr = BAUMGARTE * fmaxf(pen - SLOP, 0.0f);
+                    if (corr > 0.0f) {
+                        lx += nx * corr; ly += ny * corr;
+                        for (int vi = 0; vi < N; vi++) { hdx[vi] += nx * corr; hdy[vi] += ny * corr; }
+                        total_push_x += nx * corr; total_push_y += ny * corr;
+                    }
 
-                /* ── Coulomb friction impulse (tangential) ──
-                 * Opposes the sliding/spinning velocity at the contact point.
-                 * This acts as a counter-force to any turn torque pressing the
-                 * hull against the wall: J_f = -(v_t · t) / denom_t, capped at μ*J.
-                 * denom_t uses the TANGENT's cross-product with r, not the normal's. */
-                float vt_x = vc_x - vc_n * nx;
-                float vt_y = vc_y - vc_n * ny;
-                float vt_len = sqrtf(vt_x * vt_x + vt_y * vt_y);
-                if (vt_len > 0.001f) {
-                    float tx = vt_x / vt_len, ty = vt_y / vt_len;
-                    float rxt = rx * ty - ry * tx;   /* r × t */
-                    float denom_t = inv_mass + rxt * rxt * inv_inertia;
-                    if (denom_t > 1e-10f) {
-                        float Jf = -vt_len / denom_t;
-                        /* Coulomb clamp: |J_f| ≤ μ * J_normal */
-                        float Jf_max = WALL_FRICTION * J;
-                        if (Jf < -Jf_max) Jf = -Jf_max;
-                        if (Jf >  Jf_max) Jf =  Jf_max;
-                        dv_x   += Jf * tx * inv_mass;
-                        dv_y   += Jf * ty * inv_mass;
-                        domega += (rx * (Jf * ty) - ry * (Jf * tx)) * inv_inertia;
+                    /* Lever arm from ship origin to contact point */
+                    float rx = cx - lx, ry = cy - ly;
+
+                    /* Velocity at contact: v_cm + ω×r */
+                    float vc_x = cur_vx + cur_w * (-ry);
+                    float vc_y = cur_vy + cur_w * ( rx);
+                    float vc_n = vc_x * nx + vc_y * ny;
+
+                    /* ── Normal impulse with Baumgarte velocity bias ── */
+                    float rxn   = rx * ny - ry * nx;
+                    float denom = inv_mass + rxn * rxn * inv_inertia;
+                    if (denom < 1e-10f) continue;
+
+                    /* bias = β/dt * max(pen - slop, 0): drains residual positional
+                     * error that Baumgarte pos-correction didn't fully remove. */
+                    float bias = (BAUMGARTE / dt_s) * fmaxf(pen - SLOP, 0.0f);
+
+                    /* Impulse increment (clamped: normal impulse can only push, never pull) */
+                    float dP = (-(1.0f + RESTITUTION) * vc_n + bias) / denom;
+                    float P_n_new = fmaxf(P_n[wi] + dP, 0.0f);
+                    float J = P_n_new - P_n[wi];
+                    P_n[wi] = P_n_new;
+
+                    cur_vx += J * nx * inv_mass;
+                    cur_vy += J * ny * inv_mass;
+                    cur_w  += (rx * (J * ny) - ry * (J * nx)) * inv_inertia;
+
+                    /* ── Friction impulse (Coulomb, clamped against accumulated P_n) ── */
+                    /* Re-sample velocity after normal impulse for correct tangential v */
+                    float vc_x2 = cur_vx + cur_w * (-ry);
+                    float vc_y2 = cur_vy + cur_w * ( rx);
+                    float vc_n2 = vc_x2 * nx + vc_y2 * ny;
+                    float vt_x  = vc_x2 - vc_n2 * nx;
+                    float vt_y  = vc_y2 - vc_n2 * ny;
+                    float vt_len = sqrtf(vt_x * vt_x + vt_y * vt_y);
+                    if (vt_len > 0.001f) {
+                        float tx = vt_x / vt_len, ty = vt_y / vt_len;
+                        float rxt   = rx * ty - ry * tx;
+                        float denom_t = inv_mass + rxt * rxt * inv_inertia;
+                        if (denom_t > 1e-10f) {
+                            float dPf    = -vt_len / denom_t;
+                            float Pf_max = WALL_FRICTION * P_n[wi]; /* clamp against TOTAL accumulated normal */
+                            float Pf_new = P_f[wi] + dPf;
+                            if (Pf_new >  Pf_max) Pf_new =  Pf_max;
+                            if (Pf_new < -Pf_max) Pf_new = -Pf_max;
+                            float Jf = Pf_new - P_f[wi];
+                            P_f[wi] = Pf_new;
+                            cur_vx += Jf * tx * inv_mass;
+                            cur_vy += Jf * ty * inv_mass;
+                            cur_w  += (rx * (Jf * ty) - ry * (Jf * tx)) * inv_inertia;
+                        }
                     }
                 }
-            }
+            } /* end N_ITER */
 
             /* Write back position */
             if (total_push_x * total_push_x + total_push_y * total_push_y > 0.0001f) {
@@ -727,7 +763,9 @@ static void handle_ship_dock_collisions(void) {
                 ship->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_wy));
             }
 
-            /* Write back velocity (rotate dock-local delta → world) */
+            /* Write back velocity: apply the total velocity delta to the ship.
+             * cur_v* - initial v* = accumulated effect of all iterations. */
+            float dv_x = cur_vx - vx_dl, dv_y = cur_vy - vy_dl, domega = cur_w - omega;
             if (dv_x * dv_x + dv_y * dv_y > 1e-8f || fabsf(domega) > 1e-8f) {
                 float dvw_x = dv_x * dc - dv_y * ds;
                 float dvw_y = dv_x * ds + dv_y * dc;

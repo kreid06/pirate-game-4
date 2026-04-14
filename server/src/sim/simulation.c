@@ -1105,6 +1105,13 @@ static bool point_in_polygon(Vec2Q16 point, const struct Ship* ship);
 #define SHIP_RESTITUTION  0.3f
 /* Moment of inertia in server-unit²·kg.  Tunable: larger = less spin on hit. */
 #define SHIP_INERTIA      8000.0f
+/* Baumgarte position-correction factor [0,1].  Applied as a velocity bias that
+ * drives remaining penetration to zero over ~1/β ticks without teleporting.
+ * 0.4 → ~60% of residual error corrected each tick; feels smooth but firm. */
+#define SHIP_BAUMGARTE    0.4f
+/* Minimum penetration ignored by the Baumgarte bias (server units, ~0.5 px).
+ * Prevents micro-jitter when hulls are in near-resting light contact. */
+#define SHIP_SLOP         0.05f
 
 static void handle_ship_collisions(struct Sim* sim) {
     if (!sim || sim->ship_count < 2) return;
@@ -1125,10 +1132,18 @@ static void handle_ship_collisions(struct Sim* sim) {
             q16_t overlap_depth;
             if (!check_polygon_collision(ship1, ship2, &collision_normal, &overlap_depth)) continue;
 
-            /* ── Positional separation: push ships apart equally ── */
-            Vec2Q16 sep = vec2_mul_scalar(collision_normal, q16_div(overlap_depth, Q16_FROM_INT(2)));
-            ship1->position = vec2_sub(ship1->position, sep);
-            ship2->position = vec2_add(ship2->position, sep);
+            /* ── Positional separation: Baumgarte-style ──────────────────────────
+             * Instead of teleporting the full penetration away in one tick, apply
+             * a fraction β of the error that exceeds SLOP.  The velocity bias below
+             * drives out residual error over subsequent ticks.  This prevents the
+             * harsh pop of full-correction while still converging quickly. */
+            {
+                float pen     = Q16_TO_FLOAT(overlap_depth);
+                float corr    = SHIP_BAUMGARTE * fmaxf(pen - SHIP_SLOP, 0.0f) * 0.5f;
+                Vec2Q16 sep   = vec2_mul_scalar(collision_normal, Q16_FROM_FLOAT(corr));
+                ship1->position = vec2_sub(ship1->position, sep);
+                ship2->position = vec2_add(ship2->position, sep);
+            }
 
             /* ── Build contact manifold ── */
             /* After separation the hulls are just touching; penetrating vertices
@@ -1212,7 +1227,13 @@ static void handle_ship_collisions(struct Sim* sim) {
                 float r2xn = r2x*ny - r2y*nx;
                 float denom = 1.0f/m1 + 1.0f/m2 + (r1xn*r1xn + r2xn*r2xn)/I;
                 if (denom < 1e-10f) continue;
-                float J = -(1.0f + SHIP_RESTITUTION) * vrel_n / denom;
+                /* Baumgarte velocity bias: adds a small corrective velocity to
+                 * drain residual position error that the positional push left
+                 * behind.  bias = β/dt * max(pen - slop, 0). */
+                float dt_f  = Q16_TO_FLOAT(FIXED_DT_Q16);
+                float pen_f = Q16_TO_FLOAT(overlap_depth);
+                float bias  = (SHIP_BAUMGARTE / dt_f) * fmaxf(pen_f - SHIP_SLOP, 0.0f);
+                float J = (-(1.0f + SHIP_RESTITUTION) * vrel_n + bias) / denom;
                 dv1x += J*nx/m1;   dv1y += J*ny/m1;   dw1 += J*r1xn/I;
                 dv2x -= J*nx/m2;   dv2y -= J*ny/m2;   dw2 -= J*r2xn/I;
             }
@@ -2108,113 +2129,91 @@ void handle_projectile_collisions(struct Sim* sim) {
 }
 
 /**
- * Handle player-to-player collisions with physics-based push
+ * Handle player-to-player collisions — hybrid Baumgarte impulse solver.
+ *
+ * Uses float arithmetic throughout to avoid Q16 fixed-point overflow.
+ * Impulse is applied only to the normal (separating) component so tangential
+ * (sliding) velocity is preserved — players slide past each other naturally.
+ *
+ * Position correction is spread over multiple frames (Baumgarte) so there
+ * are no jarring teleports when players overlap slightly.
  */
 static void handle_player_player_collisions(struct Sim* sim) {
-    // Early exit if not enough players
     if (sim->player_count < 2) return;
-    
-    // Log that we're checking collisions
-    static uint32_t check_count = 0;
-    if (check_count++ % 100 == 0) {
-        log_info("🔍 Checking player collisions: %u players", sim->player_count);
-    }
-    
-    // Check all pairs of players for collisions
+
+    /* Tune these constants to feel right in-game:
+     *   RESTITUTION — bounciness on impact (0 = sticky, 1 = fully elastic)
+     *   BAUMGARTE   — fraction of positional error corrected per frame
+     *   SLOP_SU     — ignored penetration (prevents vibration from float error)
+     *   INV_DT      — 1 / timestep (30 Hz → 30) */
+    static const float RESTITUTION = 0.25f;
+    static const float BAUMGARTE   = 0.4f;
+    static const float SLOP_SU     = 0.02f;
+    static const float INV_DT      = 30.0f;
+
     for (uint16_t i = 0; i < sim->player_count; i++) {
         for (uint16_t j = i + 1; j < sim->player_count; j++) {
             struct Player* p1 = &sim->players[i];
             struct Player* p2 = &sim->players[j];
-            
-            // Calculate distance between players using distance squared for efficiency
-            q16_t dx = q16_sub_sat(p2->position.x, p1->position.x);
-            q16_t dy = q16_sub_sat(p2->position.y, p1->position.y);
-            q16_t dist_sq = q16_add_sat(q16_mul(dx, dx), q16_mul(dy, dy));
-            
-            // Calculate minimum distance (sum of radii) for collision check
-            q16_t min_dist = q16_add_sat(p1->radius, p2->radius);
-            
-            // Broad phase: Check if players are close enough to potentially collide
-            // Add a small buffer zone (1.5x radius) to catch fast-moving players
-            q16_t check_dist = q16_mul(min_dist, Q16_FROM_FLOAT(1.5f));
-            q16_t check_dist_sq = q16_mul(check_dist, check_dist);
-            
-            // Skip if players are too far apart
-            if (dist_sq >= check_dist_sq) continue;
-            
-            // Log when players are within check distance
-            log_info("⚠️ Players nearby: P%u <-> P%u (dist²: %d, check²: %d)",
-                p1->id, p2->id, Q16_TO_INT(dist_sq), Q16_TO_INT(check_dist_sq));
-            
-            // Calculate actual distance for precise collision check
-            Vec2Q16 delta = {dx, dy};
-            q16_t dist = vec2_length(delta);
-            
-            // Skip if exactly on top of each other (avoid division by zero)
-            if (dist < Q16_FROM_FLOAT(0.01f)) {
-                log_info("💥 Players on same position! P%u <-> P%u - pushing apart", p1->id, p2->id);
-                // Push them apart in a random direction if overlapping perfectly
-                p1->position.x -= Q16_FROM_FLOAT(0.5f);
-                p2->position.x += Q16_FROM_FLOAT(0.5f);
+
+            float dx = Q16_TO_FLOAT(p2->position.x) - Q16_TO_FLOAT(p1->position.x);
+            float dy = Q16_TO_FLOAT(p2->position.y) - Q16_TO_FLOAT(p1->position.y);
+            float dist_sq = dx * dx + dy * dy;
+
+            float r1       = Q16_TO_FLOAT(p1->radius);
+            float r2       = Q16_TO_FLOAT(p2->radius);
+            float min_dist = r1 + r2;
+
+            if (dist_sq >= min_dist * min_dist) continue;   /* no overlap — skip */
+
+            float dist = sqrtf(dist_sq);
+
+            /* Degenerate: perfectly stacked — nudge apart and skip impulse */
+            if (dist < 0.001f) {
+                p1->position.x -= Q16_FROM_FLOAT(0.05f);
+                p2->position.x += Q16_FROM_FLOAT(0.05f);
                 continue;
             }
-            
-            // Check if players are actually overlapping
-            if (dist < min_dist) {
-                q16_t overlap = q16_sub_sat(min_dist, dist);
-                
-                // Log collision for debugging
-                log_info("💥 Player collision: P%u <-> P%u (overlap: %d.%02d units, dist: %d.%02d, min: %d.%02d)",
-                    p1->id, p2->id, 
-                    Q16_TO_INT(overlap), (int)((Q16_TO_FLOAT(overlap) * 100) - (Q16_TO_INT(overlap) * 100)),
-                    Q16_TO_INT(dist), (int)((Q16_TO_FLOAT(dist) * 100) - (Q16_TO_INT(dist) * 100)),
-                    Q16_TO_INT(min_dist), (int)((Q16_TO_FLOAT(min_dist) * 100) - (Q16_TO_INT(min_dist) * 100)));
-                
-                // Calculate collision normal (direction from p1 to p2)
-                q16_t normal_x = q16_div(dx, dist);
-                q16_t normal_y = q16_div(dy, dist);
-                
-                // ALWAYS separate overlapping players first (regardless of velocity)
-                q16_t separation = q16_mul(overlap, Q16_FROM_FLOAT(0.5f));
-                q16_t sep_x = q16_mul(normal_x, separation);
-                q16_t sep_y = q16_mul(normal_y, separation);
-                
-                p1->position.x = q16_sub_sat(p1->position.x, sep_x);
-                p1->position.y = q16_sub_sat(p1->position.y, sep_y);
-                p2->position.x = q16_add_sat(p2->position.x, sep_x);
-                p2->position.y = q16_add_sat(p2->position.y, sep_y);
-                
-                // Calculate relative velocity for impulse
-                q16_t rel_vel_x = q16_sub_sat(p2->velocity.x, p1->velocity.x);
-                q16_t rel_vel_y = q16_sub_sat(p2->velocity.y, p1->velocity.y);
-                q16_t vel_along_normal = q16_add_sat(q16_mul(rel_vel_x, normal_x), q16_mul(rel_vel_y, normal_y));
-                
-                // Apply velocity changes only if players are moving toward each other
-                if (vel_along_normal < 0) {
-                    // Velocity correction with restitution and dampening
-                    q16_t restitution = Q16_FROM_FLOAT(0.3f);  // Bounciness
-                    q16_t dampening = Q16_FROM_FLOAT(0.7f);    // Energy loss
-                    
-                    // Calculate impulse (equal mass assumption)
-                    q16_t impulse = q16_mul(-(Q16_ONE + restitution), vel_along_normal);
-                    impulse = q16_div(impulse, Q16_FROM_INT(2)); // Divide by 2 for equal mass
-                    
-                    q16_t impulse_x = q16_mul(normal_x, impulse);
-                    q16_t impulse_y = q16_mul(normal_y, impulse);
-                    
-                    // Apply impulse to both players
-                    p1->velocity.x = q16_mul(q16_sub_sat(p1->velocity.x, impulse_x), dampening);
-                    p1->velocity.y = q16_mul(q16_sub_sat(p1->velocity.y, impulse_y), dampening);
-                    p2->velocity.x = q16_mul(q16_add_sat(p2->velocity.x, impulse_x), dampening);
-                    p2->velocity.y = q16_mul(q16_add_sat(p2->velocity.y, impulse_y), dampening);
-                    
-                    // Apply friction
-                    q16_t friction = Q16_FROM_FLOAT(0.95f);
-                    p1->velocity.x = q16_mul(p1->velocity.x, friction);
-                    p1->velocity.y = q16_mul(p1->velocity.y, friction);
-                    p2->velocity.x = q16_mul(p2->velocity.x, friction);
-                    p2->velocity.y = q16_mul(p2->velocity.y, friction);
-                }
+
+            /* Collision normal pointing from p1 toward p2 */
+            float nx  = dx / dist;
+            float ny  = dy / dist;
+            float pen = min_dist - dist;    /* penetration depth (> 0 when overlapping) */
+
+            /* ── Baumgarte positional correction ──
+             * Move each player β/2 * max(pen − slop, 0) along the normal.
+             * Spreading the correction prevents teleport artifacts while the
+             * velocity impulse below prevents re-penetration next frame. */
+            float corr = BAUMGARTE * fmaxf(pen - SLOP_SU, 0.0f) * 0.5f;
+            p1->position.x = Q16_FROM_FLOAT(Q16_TO_FLOAT(p1->position.x) - corr * nx);
+            p1->position.y = Q16_FROM_FLOAT(Q16_TO_FLOAT(p1->position.y) - corr * ny);
+            p2->position.x = Q16_FROM_FLOAT(Q16_TO_FLOAT(p2->position.x) + corr * nx);
+            p2->position.y = Q16_FROM_FLOAT(Q16_TO_FLOAT(p2->position.y) + corr * ny);
+
+            /* ── Velocity impulse ──
+             * Relative velocity of p2 w.r.t. p1 along the collision normal. */
+            float v1x = Q16_TO_FLOAT(p1->velocity.x);
+            float v1y = Q16_TO_FLOAT(p1->velocity.y);
+            float v2x = Q16_TO_FLOAT(p2->velocity.x);
+            float v2y = Q16_TO_FLOAT(p2->velocity.y);
+            float vn  = (v2x - v1x) * nx + (v2y - v1y) * ny;
+
+            /* Only resolve if players are approaching */
+            if (vn < 0.0f) {
+                /* Baumgarte velocity bias — adds a small "push apart" velocity
+                 * proportional to remaining penetration to resist re-penetration. */
+                float bias = BAUMGARTE * INV_DT * fmaxf(pen - SLOP_SU, 0.0f);
+
+                /* Equal-mass impulse: J = (-(1+e)*vn + bias) / (1/m1 + 1/m2)
+                 * With unit masses denominator = 2, so multiply by 0.5. */
+                float J = (-(1.0f + RESTITUTION) * vn + bias) * 0.5f;
+
+                /* Apply impulse strictly along the normal — tangential (sliding)
+                 * velocity is left intact so players don't lose lateral momentum. */
+                p1->velocity.x = Q16_FROM_FLOAT(v1x - J * nx);
+                p1->velocity.y = Q16_FROM_FLOAT(v1y - J * ny);
+                p2->velocity.x = Q16_FROM_FLOAT(v2x + J * nx);
+                p2->velocity.y = Q16_FROM_FLOAT(v2y + J * ny);
             }
         }
     }
@@ -2366,9 +2365,26 @@ void handle_player_ship_collisions(struct Sim* sim) {
                     }
                 }
 
-                // Push player to just outside the hull edge
-                q16_t target_distance = q16_add_sat(player->radius, Q16_FROM_FLOAT(0.1f));
-                player->position = vec2_add(closest_hull_point, vec2_mul_scalar(normal, target_distance));
+                /* ── Baumgarte positional correction ──
+                 * Compute signed penetration along the outward edge normal and
+                 * spread the correction over a couple of frames (β = 0.5) to
+                 * avoid jarring teleports.  The velocity impulse below prevents
+                 * re-penetration on the next frame. */
+                {
+                    float pnx = Q16_TO_FLOAT(normal.x), pny = Q16_TO_FLOAT(normal.y);
+                    float ppx = Q16_TO_FLOAT(player->position.x);
+                    float ppy = Q16_TO_FLOAT(player->position.y);
+                    float hpx = Q16_TO_FLOAT(closest_hull_point.x);
+                    float hpy = Q16_TO_FLOAT(closest_hull_point.y);
+                    /* Signed distance of player centre along outward normal from
+                     * the hull edge (negative → player is inside the hull). */
+                    float d_n    = (ppx - hpx) * pnx + (ppy - hpy) * pny;
+                    float pen_ps = Q16_TO_FLOAT(player->radius) - d_n; /* > 0 when penetrating */
+                    static const float PSHIP_BETA = 0.5f;
+                    float corr_ps = PSHIP_BETA * fmaxf(pen_ps, 0.0f);
+                    player->position.x = Q16_FROM_FLOAT(ppx + corr_ps * pnx);
+                    player->position.y = Q16_FROM_FLOAT(ppy + corr_ps * pny);
+                }
 
                 /* ── Dynamic collision response (float to avoid Q16 overflow) ──
                  *
@@ -2408,12 +2424,19 @@ void handle_player_ship_collisions(struct Sim* sim) {
                 if (vn < 0.0f) {
                     /* Low restitution — player sticks against the hull rather
                      * than rocketing away; increase for a bouncier feel. */
-                    static const float RESTITUTION = 0.15f;
+                    static const float RESTITUTION  = 0.15f;
                     /* Low kinetic friction — player slides smoothly along hull;
                      * increase (max ~1.0) to make them stick/slow down more. */
-                    static const float FRICTION     = 0.12f;
+                    static const float FRICTION      = 0.12f;
+                    /* Baumgarte velocity bias — computed from the pre-impulse
+                     * penetration to push the player away from the hull surface. */
+                    float pnx2 = Q16_TO_FLOAT(normal.x), pny2 = Q16_TO_FLOAT(normal.y);
+                    float d_n2 = (Q16_TO_FLOAT(player->position.x) - Q16_TO_FLOAT(closest_hull_point.x)) * pnx2
+                               + (Q16_TO_FLOAT(player->position.y) - Q16_TO_FLOAT(closest_hull_point.y)) * pny2;
+                    float pen_vb = Q16_TO_FLOAT(player->radius) - d_n2;
+                    float bias_ps = (0.4f * 30.0f) * fmaxf(pen_vb - 0.01f, 0.0f);
 
-                    float J = -(1.0f + RESTITUTION) * vn;
+                    float J = -(1.0f + RESTITUTION) * vn + bias_ps;
 
                     /* Normal impulse (in relative space) */
                     float new_pvx = pvx + J * nx;
@@ -2433,8 +2456,12 @@ void handle_player_ship_collisions(struct Sim* sim) {
                     player->velocity.y = Q16_FROM_FLOAT(new_pvy);
                 }
 
-                log_info("🚫 Player %u collided with ship %u hull (surf_v=%.2f,%.2f omega=%.3f)",
-                         player->id, ship->id, surf_vx, surf_vy, omega);
+                /* Rate-limited collision log — uncomment for debugging:
+                static uint32_t pship_log_count = 0;
+                if (pship_log_count++ % 60 == 0)
+                    log_info("🚫 Player %u hit ship %u hull (surf_v=%.2f,%.2f omega=%.3f)",
+                             player->id, ship->id, surf_vx, surf_vy, omega);
+                */
             }
         }
     }
