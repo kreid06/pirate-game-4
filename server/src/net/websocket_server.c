@@ -514,87 +514,88 @@ static void dock_apply_player_collision(const PlacedStructure *sy, float player_
  * Uses the actual brigantine hull polygon (same vertices as ship-ship SAT)
  * transformed to dock-local space, tested via polygon-vs-AABB SAT. */
 
-/* Ship-vs-dock-wall multipoint collision response (dock is static / infinite mass).
+/* Per-wall SAT: returns true if hull polygon (dock-local px) overlaps wall AABB.
+ * Outputs penetration depth, outward normal (wall→ship), and a single contact
+ * point suitable for torque calculation.
  *
- * For every hull vertex that penetrates the wall AABB, we treat it as a contact
- * point and accumulate positional correction + a physically correct impulse that
- * includes angular (torque) response using the ship's moment of inertia.
+ * Contact point strategy:
+ *   - If hull vertices are inside the AABB: centroid of those vertices
+ *   - Otherwise (edge-crossing, no vertex inside): SAT support vertex — the hull
+ *     vertex furthest into the wall along -normal.  This handles the rotation
+ *     case where edges sweep through the wall without any vertex entering it.
  *
- * Physics (2-D rigid body hitting static surface, per contact point c_i):
- *
- *   r_i   = c_i − ship_origin            (lever arm, dock-local)
- *   v_c   = v_cm + ω × r_i              (velocity at contact, 2-D cross: ω*(−ry, rx))
- *   v_n   = v_c · n                      (normal component)
- *   denom = 1/m + (r_i × n)² / I        (effective inverse mass)
- *   J_i   = −(1 + e) * v_n / denom      (impulse magnitude, applied only if v_n < 0)
- *   Δv_cm += J_i * n / m
- *   Δω    += (r_i × (J_i * n)) / I
- *
- * All quantities in dock-local space (client px for position, server units for vel).
- * Position correction (positional push) is split equally between contact points. */
-static void ship_dock_wall_contacts(
-        const float *hdx, const float *hdy, int N,   /* hull in dock-local px */
-        float dcx, float dcy, float dhx, float dhy,  /* wall AABB             */
-        float origin_lx, float origin_ly,            /* ship origin dock-local */
-        float vx_dl, float vy_dl,                    /* ship vel in dock-local px/s */
-        float omega,                                  /* angular velocity rad/s  */
-        float inv_mass_cl,                            /* 1/mass in client-px units */
-        float inv_inertia_cl,                         /* 1/I   in client-px units */
-        float restitution,
-        float *out_push_x, float *out_push_y,        /* positional correction   */
-        float *out_dv_x,   float *out_dv_y,          /* velocity delta dock-local */
-        float *out_domega)                            /* angular velocity delta  */
+ * Normal is oriented so it points from the wall center toward the ship origin. */
+static bool dock_wall_sat(const float *hdx, const float *hdy, int N,
+                          float dcx, float dcy, float dhx, float dhy,
+                          float origin_lx, float origin_ly,
+                          float *out_pen, float *out_nx, float *out_ny,
+                          float *out_cx, float *out_cy)
 {
-    *out_push_x = *out_push_y = 0.0f;
-    *out_dv_x   = *out_dv_y  = 0.0f;
-    *out_domega = 0.0f;
+    float min_pen = 1e30f, best_nx = 1.0f, best_ny = 0.0f;
 
-    int n_contacts = 0;
-    float sum_push_x = 0.0f, sum_push_y = 0.0f;
+    /* ── AABB axis X ── */
+    float hmn = hdx[0], hmx = hdx[0];
+    for (int i = 1; i < N; i++) { if (hdx[i] < hmn) hmn = hdx[i]; if (hdx[i] > hmx) hmx = hdx[i]; }
+    if (hmx < dcx - dhx || hmn > dcx + dhx) return false;
+    { float a = hmx - (dcx - dhx), b = (dcx + dhx) - hmn;
+      if (a < b) { if (a < min_pen) { min_pen = a; best_nx =  1.0f; best_ny = 0.0f; } }
+      else       { if (b < min_pen) { min_pen = b; best_nx = -1.0f; best_ny = 0.0f; } } }
 
+    /* ── AABB axis Y ── */
+    hmn = hdy[0]; hmx = hdy[0];
+    for (int i = 1; i < N; i++) { if (hdy[i] < hmn) hmn = hdy[i]; if (hdy[i] > hmx) hmx = hdy[i]; }
+    if (hmx < dcy - dhy || hmn > dcy + dhy) return false;
+    { float a = hmx - (dcy - dhy), b = (dcy + dhy) - hmn;
+      if (a < b) { if (a < min_pen) { min_pen = a; best_nx = 0.0f; best_ny =  1.0f; } }
+      else       { if (b < min_pen) { min_pen = b; best_nx = 0.0f; best_ny = -1.0f; } } }
+
+    /* ── Hull edge normals ── */
     for (int i = 0; i < N; i++) {
-        float px = hdx[i], py = hdy[i];
-        /* Is vertex inside the wall AABB? */
-        float ox = px - dcx, oy = py - dcy;
-        if (fabsf(ox) > dhx || fabsf(oy) > dhy) continue;
-
-        /* Penetration depth: minimum push to exit along each axis */
-        float pen_x = dhx - fabsf(ox);   /* depth along x */
-        float pen_y = dhy - fabsf(oy);   /* depth along y */
-        float nx, ny, pen;
-        if (pen_x < pen_y) { nx = (ox >= 0.0f ? 1.0f : -1.0f); ny = 0.0f; pen = pen_x; }
-        else               { nx = 0.0f; ny = (oy >= 0.0f ? 1.0f : -1.0f); pen = pen_y; }
-
-        /* Accumulate positional correction */
-        sum_push_x += nx * pen;
-        sum_push_y += ny * pen;
-        n_contacts++;
-
-        /* Lever arm from ship origin to contact point (dock-local) */
-        float rx = px - origin_lx, ry = py - origin_ly;
-
-        /* Velocity at contact point: v_cm + ω × r  (2-D: ω*(−ry, rx)) */
-        float vc_x = vx_dl + omega * (-ry);
-        float vc_y = vy_dl + omega * ( rx);
-        float vn = vc_x * nx + vc_y * ny;
-        if (vn >= 0.0f) continue;  /* separating — no impulse needed */
-
-        /* 2-D scalar cross product r × n */
-        float rxn = rx * ny - ry * nx;
-        float denom = inv_mass_cl + rxn * rxn * inv_inertia_cl;
-        if (denom < 1e-10f) continue;
-
-        float J = -(1.0f + restitution) * vn / denom;
-        *out_dv_x   += J * nx * inv_mass_cl;
-        *out_dv_y   += J * ny * inv_mass_cl;
-        *out_domega += (rx * (J * ny) - ry * (J * nx)) * inv_inertia_cl;
+        int j = (i + 1) % N;
+        float ex = hdx[j] - hdx[i], ey = hdy[j] - hdy[i];
+        float len = sqrtf(ex * ex + ey * ey); if (len < 0.5f) continue;
+        float nx = -ey / len, ny = ex / len;
+        float ph_min = 1e30f, ph_max = -1e30f;
+        for (int k = 0; k < N; k++) {
+            float p = hdx[k] * nx + hdy[k] * ny;
+            if (p < ph_min) ph_min = p; if (p > ph_max) ph_max = p;
+        }
+        float ap[4] = { (dcx-dhx)*nx+(dcy-dhy)*ny, (dcx+dhx)*nx+(dcy-dhy)*ny,
+                        (dcx-dhx)*nx+(dcy+dhy)*ny, (dcx+dhx)*nx+(dcy+dhy)*ny };
+        float aw_min = ap[0], aw_max = ap[0];
+        for (int k = 1; k < 4; k++) { if (ap[k] < aw_min) aw_min = ap[k]; if (ap[k] > aw_max) aw_max = ap[k]; }
+        if (ph_max < aw_min || ph_min > aw_max) return false;
+        float a = ph_max - aw_min, b = aw_max - ph_min;
+        if (a < b) { if (a < min_pen) { min_pen = a; best_nx =  nx; best_ny =  ny; } }
+        else       { if (b < min_pen) { min_pen = b; best_nx = -nx; best_ny = -ny; } }
     }
 
-    if (n_contacts > 0) {
-        float inv_n = 1.0f / (float)n_contacts;
-        *out_push_x = sum_push_x * inv_n;
-        *out_push_y = sum_push_y * inv_n;
+    /* Orient normal: wall → ship origin */
+    if ((origin_lx - dcx) * best_nx + (origin_ly - dcy) * best_ny < 0.0f) {
+        best_nx = -best_nx; best_ny = -best_ny;
     }
+    *out_pen = min_pen; *out_nx = best_nx; *out_ny = best_ny;
+
+    /* ── Contact point ── */
+    float sum_cx = 0.0f, sum_cy = 0.0f; int n_in = 0;
+    for (int i = 0; i < N; i++) {
+        if (hdx[i] >= dcx - dhx && hdx[i] <= dcx + dhx &&
+            hdy[i] >= dcy - dhy && hdy[i] <= dcy + dhy) {
+            sum_cx += hdx[i]; sum_cy += hdy[i]; n_in++;
+        }
+    }
+    if (n_in > 0) {
+        *out_cx = sum_cx / (float)n_in;
+        *out_cy = sum_cy / (float)n_in;
+    } else {
+        /* Edge-crossing case: use the support vertex (most penetrating along -n) */
+        float best_p = 1e30f; *out_cx = hdx[0]; *out_cy = hdy[0];
+        for (int i = 0; i < N; i++) {
+            float p = hdx[i] * best_nx + hdy[i] * best_ny;
+            if (p < best_p) { best_p = p; *out_cx = hdx[i]; *out_cy = hdy[i]; }
+        }
+    }
+    return true;
 }
 
 static void handle_ship_dock_collisions(void) {
@@ -605,7 +606,7 @@ static void handle_ship_dock_collisions(void) {
         {  (DOCK_HW - DOCK_ARM_T/2.0f), 0.0f,      DOCK_ARM_T/2.0f,  DOCK_HH          },
         {  0.0f, -(DOCK_HH - DOCK_BACK_T/2.0f),    DOCK_HW,          DOCK_BACK_T/2.0f },
     };
-    static const float RESTITUTION = 0.18f;  /* slightly bouncy but not wild */
+    static const float RESTITUTION = 0.18f;
 
     for (int di = 0; di < (int)placed_structure_count; di++) {
         PlacedStructure *sy = &placed_structures[di];
@@ -615,6 +616,7 @@ static void handle_ship_dock_collisions(void) {
             struct Ship *ship = &global_sim->ships[si];
             if ((uint32_t)ship->id == sy->scaffolded_ship_id) continue;
 
+            /* Broad phase */
             float sxc  = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
             float syc  = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y));
             float brad = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->bounding_radius));
@@ -622,9 +624,8 @@ static void handle_ship_dock_collisions(void) {
             float broad = brad + DOCK_HH + DOCK_HW;
             if (ddx * ddx + ddy * ddy > broad * broad) continue;
 
-            /* Transform hull vertices to dock-local space (client px). */
-            int N = (int)ship->hull_vertex_count;
-            if (N < 3) continue;
+            /* Build hull in dock-local px */
+            int N = (int)ship->hull_vertex_count; if (N < 3) continue;
             float ship_rad = Q16_TO_FLOAT(ship->rotation);
             float cs = cosf(ship_rad), ss = sinf(ship_rad);
             float hdx[64], hdy[64];
@@ -635,58 +636,57 @@ static void handle_ship_dock_collisions(void) {
                 float wy  = syc + lhx * ss + lhy * cs;
                 dock_world_to_local(sy, wx, wy, &hdx[vi], &hdy[vi]);
             }
-
             float lx, ly;
             dock_world_to_local(sy, sxc, syc, &lx, &ly);
 
-            /* Rotate ship velocity into dock-local space. */
+            /* Ship velocity in dock-local px/s */
             float dock_rad = sy->rotation * (float)M_PI / 180.0f;
             float dc = cosf(dock_rad), ds = sinf(dock_rad);
             float vx_w = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->velocity.x));
             float vy_w = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->velocity.y));
-            /* world → dock-local: same formula as dock_world_to_local but for a vector */
             float vx_dl =  vx_w * dc + vy_w * ds;
             float vy_dl = -vx_w * ds + vy_w * dc;
             float omega  = Q16_TO_FLOAT(ship->angular_velocity);
 
-            /* Physics constants in client-px space.
-             * mass/inertia on the server are in kg/kg⋅m² (server units).
-             * We work in client-px space, so scale accordingly:
-             *   1 server unit = 10 client px (SERVER_TO_CLIENT factor)
-             *   inv_mass_cl  = 1 / (mass_kg * (px/m)²)  — but since we only
-             *   need the impulse ratio J/m we keep it simple: treat mass as the
-             *   same number but note velocity is already in client px/s. */
-            float mass_f = Q16_TO_FLOAT(ship->mass);
-            float inertia_f = Q16_TO_FLOAT(ship->moment_inertia);
-            /* Scale inertia to client-px space: I_px = I_m * (10)^2 */
-            float inertia_px = inertia_f * 100.0f;
+            /* Physics in client-px space: I_px = I_server * (WORLD_SCALE_FACTOR)^2 */
+            float mass_f    = Q16_TO_FLOAT(ship->mass);
+            float inertia_f = Q16_TO_FLOAT(ship->moment_inertia) * 100.0f;
             float inv_mass    = (mass_f    > 0.0f) ? 1.0f / mass_f    : 0.0f;
-            float inv_inertia = (inertia_px > 0.0f) ? 1.0f / inertia_px : 0.0f;
+            float inv_inertia = (inertia_f > 0.0f) ? 1.0f / inertia_f : 0.0f;
 
             float total_push_x = 0.0f, total_push_y = 0.0f;
-            float total_dv_x   = 0.0f, total_dv_y   = 0.0f;
-            float total_domega = 0.0f;
+            float dv_x = 0.0f, dv_y = 0.0f, domega = 0.0f;
 
             for (int wi = 0; wi < 3; wi++) {
-                float push_x, push_y, dv_x, dv_y, domega;
-                ship_dock_wall_contacts(hdx, hdy, N,
-                                        WALLS[wi].cx, WALLS[wi].cy,
-                                        WALLS[wi].hx, WALLS[wi].hy,
-                                        lx, ly,
-                                        vx_dl, vy_dl, omega,
-                                        inv_mass, inv_inertia,
-                                        RESTITUTION,
-                                        &push_x, &push_y, &dv_x, &dv_y, &domega);
-                /* Apply positional correction immediately so subsequent walls
-                 * see the updated vertex positions. */
-                if (push_x * push_x + push_y * push_y > 0.0001f) {
-                    lx += push_x; ly += push_y;
-                    for (int vi = 0; vi < N; vi++) { hdx[vi] += push_x; hdy[vi] += push_y; }
-                    total_push_x += push_x; total_push_y += push_y;
-                }
-                total_dv_x   += dv_x;
-                total_dv_y   += dv_y;
-                total_domega += domega;
+                float pen, nx, ny, cx, cy;
+                if (!dock_wall_sat(hdx, hdy, N,
+                                   WALLS[wi].cx, WALLS[wi].cy,
+                                   WALLS[wi].hx, WALLS[wi].hy,
+                                   lx, ly,
+                                   &pen, &nx, &ny, &cx, &cy)) continue;
+
+                /* Lever arm (invariant to the uniform hull+origin translation below) */
+                float rx = cx - lx, ry = cy - ly;
+
+                /* Sequential positional correction: update hull+origin so next wall
+                 * sees the post-correction geometry (prevents double-penetration). */
+                lx += nx * pen; ly += ny * pen;
+                for (int vi = 0; vi < N; vi++) { hdx[vi] += nx * pen; hdy[vi] += ny * pen; }
+                total_push_x += nx * pen; total_push_y += ny * pen;
+
+                /* Velocity at contact point (pre-impulse): v_cm + ω×r */
+                float vc_n = (vx_dl + omega * (-ry)) * nx
+                           + (vy_dl + omega * ( rx)) * ny;
+                if (vc_n >= 0.0f) continue;  /* already separating */
+
+                /* Single rigid-body impulse at this contact point */
+                float rxn   = rx * ny - ry * nx;
+                float denom = inv_mass + rxn * rxn * inv_inertia;
+                if (denom < 1e-10f) continue;
+                float J = -(1.0f + RESTITUTION) * vc_n / denom;
+                dv_x   += J * nx * inv_mass;
+                dv_y   += J * ny * inv_mass;
+                domega += (rx * (J * ny) - ry * (J * nx)) * inv_inertia;
             }
 
             /* Write back position */
@@ -697,17 +697,13 @@ static void handle_ship_dock_collisions(void) {
                 ship->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_wy));
             }
 
-            /* Write back velocity: rotate dock-local delta back to world space. */
-            if (total_dv_x * total_dv_x + total_dv_y * total_dv_y > 1e-8f
-                    || fabsf(total_domega) > 1e-8f) {
-                float dvw_x = total_dv_x * dc - total_dv_y * ds;
-                float dvw_y = total_dv_x * ds + total_dv_y * dc;
-                float cur_vx = Q16_TO_FLOAT(ship->velocity.x);
-                float cur_vy = Q16_TO_FLOAT(ship->velocity.y);
-                ship->velocity.x = Q16_FROM_FLOAT(cur_vx + CLIENT_TO_SERVER(dvw_x));
-                ship->velocity.y = Q16_FROM_FLOAT(cur_vy + CLIENT_TO_SERVER(dvw_y));
-                float cur_w = Q16_TO_FLOAT(ship->angular_velocity);
-                ship->angular_velocity = Q16_FROM_FLOAT(cur_w + total_domega);
+            /* Write back velocity (rotate dock-local delta → world) */
+            if (dv_x * dv_x + dv_y * dv_y > 1e-8f || fabsf(domega) > 1e-8f) {
+                float dvw_x = dv_x * dc - dv_y * ds;
+                float dvw_y = dv_x * ds + dv_y * dc;
+                ship->velocity.x = Q16_FROM_FLOAT(Q16_TO_FLOAT(ship->velocity.x) + CLIENT_TO_SERVER(dvw_x));
+                ship->velocity.y = Q16_FROM_FLOAT(Q16_TO_FLOAT(ship->velocity.y) + CLIENT_TO_SERVER(dvw_y));
+                ship->angular_velocity = Q16_FROM_FLOAT(Q16_TO_FLOAT(ship->angular_velocity) + domega);
             }
         }
     }
