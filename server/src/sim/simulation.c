@@ -569,6 +569,7 @@ static void handle_island_collisions(struct Sim *sim) {
                 if (cdx*cdx + cdy*cdy >= broad_min*broad_min) continue;
 
                 float max_pen = 0.0f, push_nx = 0.0f, push_ny = 0.0f;
+                float cp_wx = 0.0f, cp_wy = 0.0f; /* contact point world (server units) */
                 bool  hit     = false;
 
                 for (uint8_t vi = 0; vi < ship->hull_vertex_count; vi++) {
@@ -586,6 +587,8 @@ static void handle_island_collisions(struct Sim *sim) {
                         max_pen  = depth_sv;
                         push_nx  = nx;
                         push_ny  = ny;
+                        cp_wx    = Q16_TO_FLOAT(wv.x);
+                        cp_wy    = Q16_TO_FLOAT(wv.y);
                         hit      = true;
                     }
                 }
@@ -593,16 +596,59 @@ static void handle_island_collisions(struct Sim *sim) {
 
                 ship->position.x += Q16_FROM_FLOAT(push_nx * max_pen);
                 ship->position.y += Q16_FROM_FLOAT(push_ny * max_pen);
+
+                /* Rigid-body impulse with lever arm (island = infinite mass) */
                 float vx    = Q16_TO_FLOAT(ship->velocity.x);
                 float vy    = Q16_TO_FLOAT(ship->velocity.y);
-                float vdotn = vx * push_nx + vy * push_ny;
-                if (vdotn < 0.0f) {
+                float omega = Q16_TO_FLOAT(ship->angular_velocity);
+                float rx    = cp_wx - Q16_TO_FLOAT(ship->position.x);
+                float ry    = cp_wy - Q16_TO_FLOAT(ship->position.y);
+                float vc_x  = vx + omega * (-ry);
+                float vc_y  = vy + omega * ( rx);
+                float vc_n  = vc_x * push_nx + vc_y * push_ny;
+                if (vc_n < 0.0f) {
                     const float restitution = 0.15f;
-                    const float friction    = 0.75f;
-                    ship->velocity.x = Q16_FROM_FLOAT(
-                        (vx - (1.0f + restitution) * vdotn * push_nx) * friction);
-                    ship->velocity.y = Q16_FROM_FLOAT(
-                        (vy - (1.0f + restitution) * vdotn * push_ny) * friction);
+                    const float isl_friction = 0.75f;
+                    float mass_f    = Q16_TO_FLOAT(ship->mass);
+                    float inertia_f = Q16_TO_FLOAT(ship->moment_inertia);
+                    float inv_m = (mass_f    > 0.0f) ? 1.0f / mass_f    : 0.0f;
+                    float inv_I = (inertia_f > 0.0f) ? 1.0f / inertia_f : 0.0f;
+
+                    /* Normal impulse */
+                    float rxn   = rx * push_ny - ry * push_nx;
+                    float denom = inv_m + rxn * rxn * inv_I;
+                    if (denom > 1e-10f) {
+                        float Jn = -(1.0f + restitution) * vc_n / denom;
+                        if (Jn < 0.0f) Jn = 0.0f;
+                        vx    += Jn * push_nx * inv_m;
+                        vy    += Jn * push_ny * inv_m;
+                        omega += rxn * Jn * inv_I;
+
+                        /* Friction impulse (Coulomb) */
+                        float vc_x2 = vx + omega * (-ry);
+                        float vc_y2 = vy + omega * ( rx);
+                        float vc_n2 = vc_x2 * push_nx + vc_y2 * push_ny;
+                        float vt_x  = vc_x2 - vc_n2 * push_nx;
+                        float vt_y  = vc_y2 - vc_n2 * push_ny;
+                        float vt_len = sqrtf(vt_x * vt_x + vt_y * vt_y);
+                        if (vt_len > 0.001f) {
+                            float tx = vt_x / vt_len, ty = vt_y / vt_len;
+                            float rxt    = rx * ty - ry * tx;
+                            float denom_t = inv_m + rxt * rxt * inv_I;
+                            if (denom_t > 1e-10f) {
+                                float Jf = -vt_len / denom_t;
+                                float Jf_max = isl_friction * Jn;
+                                if (Jf < -Jf_max) Jf = -Jf_max;
+                                if (Jf >  Jf_max) Jf =  Jf_max;
+                                vx    += Jf * tx * inv_m;
+                                vy    += Jf * ty * inv_m;
+                                omega += rxt * Jf * inv_I;
+                            }
+                        }
+                    }
+                    ship->velocity.x = Q16_FROM_FLOAT(vx);
+                    ship->velocity.y = Q16_FROM_FLOAT(vy);
+                    ship->angular_velocity = Q16_FROM_FLOAT(omega);
                 }
             }
             continue;  /* done with this polygon island */
@@ -633,6 +679,7 @@ static void handle_island_collisions(struct Sim *sim) {
              * compare it against the bumpy island boundary at that angle.     */
             float max_penetration = 0.0f;
             float push_nx = 0.0f, push_ny = 0.0f;
+            float cp_wx = 0.0f, cp_wy = 0.0f; /* contact point world (server units) */
             bool  hit = false;
 
             for (uint8_t vi = 0; vi < ship->hull_vertex_count; vi++) {
@@ -658,6 +705,8 @@ static void handle_island_collisions(struct Sim *sim) {
                     /* push direction: outward from island at this vertex */
                     push_nx = vdx / vdist;
                     push_ny = vdy / vdist;
+                    cp_wx   = wx;
+                    cp_wy   = wy;
                     hit = true;
                 }
             }
@@ -668,17 +717,58 @@ static void handle_island_collisions(struct Sim *sim) {
             ship->position.x += Q16_FROM_FLOAT(push_nx * max_penetration);
             ship->position.y += Q16_FROM_FLOAT(push_ny * max_penetration);
 
-            /* Reflect velocity along push normal: low restitution + friction */
+            /* Rigid-body impulse with lever arm (island = infinite mass) */
             float vx    = Q16_TO_FLOAT(ship->velocity.x);
             float vy    = Q16_TO_FLOAT(ship->velocity.y);
-            float vdotn = vx * push_nx + vy * push_ny;
-            if (vdotn < 0.0f) {
+            float omega = Q16_TO_FLOAT(ship->angular_velocity);
+            float rx    = cp_wx - Q16_TO_FLOAT(ship->position.x);
+            float ry    = cp_wy - Q16_TO_FLOAT(ship->position.y);
+            float vc_x  = vx + omega * (-ry);
+            float vc_y  = vy + omega * ( rx);
+            float vc_n  = vc_x * push_nx + vc_y * push_ny;
+            if (vc_n < 0.0f) {
                 const float restitution = 0.15f;
-                const float friction    = 0.75f;
-                ship->velocity.x = Q16_FROM_FLOAT(
-                    (vx - (1.0f + restitution) * vdotn * push_nx) * friction);
-                ship->velocity.y = Q16_FROM_FLOAT(
-                    (vy - (1.0f + restitution) * vdotn * push_ny) * friction);
+                const float isl_friction = 0.75f;
+                float mass_f    = Q16_TO_FLOAT(ship->mass);
+                float inertia_f = Q16_TO_FLOAT(ship->moment_inertia);
+                float inv_m = (mass_f    > 0.0f) ? 1.0f / mass_f    : 0.0f;
+                float inv_I = (inertia_f > 0.0f) ? 1.0f / inertia_f : 0.0f;
+
+                /* Normal impulse */
+                float rxn   = rx * push_ny - ry * push_nx;
+                float denom = inv_m + rxn * rxn * inv_I;
+                if (denom > 1e-10f) {
+                    float Jn = -(1.0f + restitution) * vc_n / denom;
+                    if (Jn < 0.0f) Jn = 0.0f;
+                    vx    += Jn * push_nx * inv_m;
+                    vy    += Jn * push_ny * inv_m;
+                    omega += rxn * Jn * inv_I;
+
+                    /* Friction impulse (Coulomb) */
+                    float vc_x2 = vx + omega * (-ry);
+                    float vc_y2 = vy + omega * ( rx);
+                    float vc_n2 = vc_x2 * push_nx + vc_y2 * push_ny;
+                    float vt_x  = vc_x2 - vc_n2 * push_nx;
+                    float vt_y  = vc_y2 - vc_n2 * push_ny;
+                    float vt_len = sqrtf(vt_x * vt_x + vt_y * vt_y);
+                    if (vt_len > 0.001f) {
+                        float tx = vt_x / vt_len, ty = vt_y / vt_len;
+                        float rxt    = rx * ty - ry * tx;
+                        float denom_t = inv_m + rxt * rxt * inv_I;
+                        if (denom_t > 1e-10f) {
+                            float Jf = -vt_len / denom_t;
+                            float Jf_max = isl_friction * Jn;
+                            if (Jf < -Jf_max) Jf = -Jf_max;
+                            if (Jf >  Jf_max) Jf =  Jf_max;
+                            vx    += Jf * tx * inv_m;
+                            vy    += Jf * ty * inv_m;
+                            omega += rxt * Jf * inv_I;
+                        }
+                    }
+                }
+                ship->velocity.x = Q16_FROM_FLOAT(vx);
+                ship->velocity.y = Q16_FROM_FLOAT(vy);
+                ship->angular_velocity = Q16_FROM_FLOAT(omega);
             }
         }
     }

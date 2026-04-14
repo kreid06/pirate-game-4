@@ -791,6 +791,63 @@ static void handle_ship_dock_collisions(void) {
                 }
             } /* end N_ITER */
 
+            /* ── Angular velocity constraint ──────────────────────────────
+             *
+             * The impulse solver zeroes out the contact-point approach speed
+             * for THIS tick, but the player's turn input re-adds torque next
+             * tick.  With a large moment of inertia (5 M kg·px²), the per-
+             * tick impulse barely wins against the per-tick input torque
+             * (10 000 N·m / 50 000 I → +0.0067 rad/s each tick).
+             *
+             * Fix: after the solver, for every wall that has accumulated
+             * normal impulse (active contact), check whether cur_w would
+             * drive the contact point INTO that wall.  If so, compute the
+             * maximum safe ω that keeps vc_n ≥ 0 at ALL active contacts
+             * and clamp cur_w.  This is a direct velocity-level constraint
+             * that prevents the ship from rotating further into the wall
+             * regardless of input torque.                                  */
+            {
+                for (int wi = 0; wi < 3; wi++) {
+                    if (P_n[wi] <= 0.0f) continue;  /* no active contact on this wall */
+
+                    float pen, nx, ny, cx, cy;
+                    if (!dock_wall_sat(hdx, hdy, N,
+                                       WALLS[wi].cx, WALLS[wi].cy,
+                                       WALLS[wi].hx, WALLS[wi].hy,
+                                       lx, ly,
+                                       &pen, &nx, &ny, &cx, &cy)) continue;
+
+                    float rx = cx - lx, ry = cy - ly;
+
+                    /* Contact velocity from angular component only:
+                     *   vc_angular = ω × r · n̂ = ω · (rx·ny - ry·nx)
+                     * The linear component is already handled by the solver.
+                     * We want vc_total · n̂ ≥ 0 (not approaching).
+                     *
+                     * vc_n = (cur_vx + ω·(-ry))·nx + (cur_vy + ω·rx)·ny
+                     *       = (cur_vx·nx + cur_vy·ny) + ω·(rx·ny - ry·nx)
+                     *       = v_lin_n + ω · rxn
+                     *
+                     * We want v_lin_n + ω·rxn ≥ 0.
+                     * If rxn ≠ 0:  ω_max = -v_lin_n / rxn  (when rxn > 0, ω ≤ ω_max)
+                     */
+                    float rxn = rx * ny - ry * nx;
+                    float v_lin_n = cur_vx * nx + cur_vy * ny;
+                    float vc_n = v_lin_n + cur_w * rxn;
+
+                    if (vc_n < 0.0f && fabsf(rxn) > 0.01f) {
+                        /* Solve for ω that makes vc_n = 0 */
+                        float w_safe = -v_lin_n / rxn;
+                        /* Only clamp toward zero, never away from zero */
+                        if (cur_w > 0.0f && w_safe < cur_w) {
+                            cur_w = fmaxf(w_safe, 0.0f);
+                        } else if (cur_w < 0.0f && w_safe > cur_w) {
+                            cur_w = fminf(w_safe, 0.0f);
+                        }
+                    }
+                }
+            }
+
             /* Store accumulated impulse into contact cache for next tick */
             {
                 struct ContactEntry* ce_dock = contact_cache_upsert(
