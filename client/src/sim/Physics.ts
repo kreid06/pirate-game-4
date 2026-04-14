@@ -121,13 +121,9 @@ function updateShipPhysics(ship: Ship, dt: number): void {
   // Apply steering force with speed-dependent effectiveness
   const baseAngularAcceleration = 1.5; // Base turning force
   const effectiveSteeringForce = steeringInput * turningEffectiveness;
-  const angularDamping = 0.92; // Damping factor
   
-  // Apply steering force
+  // Apply steering force (drag is handled below in the hydrodynamic section)
   ship.angularVelocity += effectiveSteeringForce * baseAngularAcceleration * dt;
-  
-  // Apply angular damping
-  ship.angularVelocity *= angularDamping;
   
   // Update rotation
   ship.rotation = AngleUtils.wrap(ship.rotation + ship.angularVelocity * dt);
@@ -161,22 +157,30 @@ function updateShipPhysics(ship: Ship, dt: number): void {
   // Apply acceleration to velocity
   ship.velocity = ship.velocity.add(acceleration.mul(dt));
   
-  // Apply water drag (server physics property, typically 0.98)
-  // This must be applied BEFORE integration as per server guide
-  ship.velocity = ship.velocity.mul(ship.waterDrag);
-  
-  // Clamp linear speed to maxSpeed (server physics property)
-  // This must be applied AFTER integration as per server guide
-  const speed = ship.velocity.length();
-  if (speed > ship.maxSpeed) {
-    ship.velocity = ship.velocity.mul(ship.maxSpeed / speed);
+  // ── Hydrodynamic drag (linear + quadratic) ──────────────────────────
+  // Linear term: low-speed hull friction.
+  // Quadratic term: wave-making resistance — dominates at speed and
+  // naturally caps velocity without a hard clamp.
+  //
+  //   drag_factor = 1 − (c_lin + c_quad · |v|)
+  //
+  // At equilibrium, thrust_accel·dt = |v|·(c_lin + c_quad·|v|), giving
+  // a natural top speed the ship can never exceed.
+  {
+    const C_LIN_V  = 0.012;   // base linear drag (~1.2 % per frame)
+    const C_QUAD_V = 0.0006;  // quadratic coefficient (stronger at high speed)
+    const C_LIN_W  = 0.03;    // angular linear drag
+    const C_QUAD_W = 0.10;    // angular quadratic drag
+    const MIN_DRAG = 0.60;    // safety floor
+
+    const spd = ship.velocity.length();
+    const dragV = Math.max(1 - (C_LIN_V + C_QUAD_V * spd), MIN_DRAG);
+    ship.velocity = ship.velocity.mul(dragV);
+
+    const absW = Math.abs(ship.angularVelocity);
+    const dragW = Math.max(1 - (C_LIN_W + C_QUAD_W * absW), MIN_DRAG);
+    ship.angularVelocity *= dragW;
   }
-  
-  // Apply angular drag to rotation velocity (server physics property, typically 0.95)
-  ship.angularVelocity *= ship.angularDrag;
-  
-  // Clamp angular velocity to turnRate (server physics property)
-  ship.angularVelocity = Math.max(-ship.turnRate, Math.min(ship.turnRate, ship.angularVelocity));
   
   // Note: Position integration is now handled separately in the collision loop
 }

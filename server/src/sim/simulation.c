@@ -840,16 +840,40 @@ void sim_process_input(struct Sim* sim, const struct InputCmd* cmd) {
     if (player->ship_id != 0) {
         struct Ship* ship = sim_get_ship(sim, player->ship_id);
         if (ship) {
-            /* Accumulate thrust force — integrated in update_ship_physics this tick.
-             * F = thrust_scalar * forward_unit * 5000 N */
+            /* ── Thrust force (clamped to MAX_THRUST_FORCE) ───────────────
+             * F = thrust_scalar * forward_unit * 5000 N
+             * Clamped so multiple inputs or exploits can't exceed the cap. */
+            static const float MAX_THRUST_FORCE = 5000.0f;  /* Newtons         */
+            static const float MAX_TURN_TORQUE  = 10000.0f; /* Newton⋅metres   */
+
             Vec2Q16 forward = {q16_cos(ship->rotation), q16_sin(ship->rotation)};
-            Vec2Q16 thrust_force = vec2_mul_scalar(forward, q16_mul(thrust, Q16_FROM_FLOAT(5000.0f)));
+            Vec2Q16 thrust_force = vec2_mul_scalar(forward,
+                                      q16_mul(thrust, Q16_FROM_FLOAT(MAX_THRUST_FORCE)));
             ship->net_force = vec2_add(ship->net_force, thrust_force);
 
-            /* Accumulate turn torque — integrated in update_ship_physics this tick.
+            /* Clamp accumulated force magnitude so it never exceeds cap */
+            {
+                float fx = Q16_TO_FLOAT(ship->net_force.x);
+                float fy = Q16_TO_FLOAT(ship->net_force.y);
+                float fmag = sqrtf(fx * fx + fy * fy);
+                if (fmag > MAX_THRUST_FORCE) {
+                    float scale = MAX_THRUST_FORCE / fmag;
+                    ship->net_force.x = Q16_FROM_FLOAT(fx * scale);
+                    ship->net_force.y = Q16_FROM_FLOAT(fy * scale);
+                }
+            }
+
+            /* ── Turn torque (clamped to MAX_TURN_TORQUE) ────────────────
              * τ = turn_scalar * 10000 N⋅m */
-            q16_t torque = q16_mul(turn, Q16_FROM_FLOAT(10000.0f));
+            q16_t torque = q16_mul(turn, Q16_FROM_FLOAT(MAX_TURN_TORQUE));
             ship->net_torque = q16_add_sat(ship->net_torque, torque);
+
+            /* Clamp accumulated torque */
+            {
+                float t_val = Q16_TO_FLOAT(ship->net_torque);
+                if (t_val >  MAX_TURN_TORQUE) ship->net_torque = Q16_FROM_FLOAT(MAX_TURN_TORQUE);
+                if (t_val < -MAX_TURN_TORQUE) ship->net_torque = Q16_FROM_FLOAT(-MAX_TURN_TORQUE);
+            }
         }
     }
     
@@ -917,15 +941,40 @@ static void update_ship_physics(struct Ship* ship, q16_t dt) {
     ship->net_force  = VEC2_ZERO;
     ship->net_torque = 0;
 
-    /* ── Water drag ─────────────────────────────────────────────────────────
-     * Applied as a velocity-decay multiplier to avoid Q16 overflow of large
-     * drag-force values.  Equivalent to F_drag = -c*v with
-     * c = 0.05 * mass / dt ≈ 1500 N⋅s/m at 30 Hz.
-     * Any system wanting to counter drag (e.g. sails at full) should add an
-     * opposing force to net_force BEFORE this function runs.              */
-    const q16_t WATER_DRAG = Q16_FROM_FLOAT(0.95f);
-    ship->velocity         = vec2_mul_scalar(ship->velocity, WATER_DRAG);
-    ship->angular_velocity = q16_mul(ship->angular_velocity, WATER_DRAG);
+    /* ── Hydrodynamic drag (linear + quadratic) ─────────────────────────────
+     *
+     * drag_factor = 1 − (c_lin + c_quad · |v|)
+     *
+     * Linear term (c_lin): low-speed hull friction — dominates at rest.
+     * Quadratic term (c_quad · |v|): wave-making resistance — dominates at
+     * speed and naturally caps velocity without a hard clamp.
+     *
+     * At equilibrium, thrust_accel * dt = |v| * (c_lin + c_quad * |v|),
+     * yielding a natural top speed that can't be exceeded.  With the
+     * values below and max thrust 5000 N / mass 1000 kg:
+     *   top speed ≈ 3.2 server units/s  (≈ 32 client px/s)
+     *   top ω     ≈ 0.45 rad/s
+     *
+     * Sails, currents, or other forces that push harder will raise the
+     * equilibrium, but drag always wins eventually.                       */
+    {
+        static const float C_LIN_V  = 0.02f;   /* 2 % base linear drag     */
+        static const float C_QUAD_V = 0.008f;   /* quadratic drag coeff     */
+        static const float C_LIN_W  = 0.03f;   /* angular linear drag      */
+        static const float C_QUAD_W = 0.06f;    /* angular quadratic coeff  */
+        static const float MIN_DRAG = 0.60f;    /* safety floor             */
+
+        float spd = Q16_TO_FLOAT(vec2_length(ship->velocity));
+        float drag_v = 1.0f - (C_LIN_V + C_QUAD_V * spd);
+        if (drag_v < MIN_DRAG) drag_v = MIN_DRAG;
+        ship->velocity = vec2_mul_scalar(ship->velocity, Q16_FROM_FLOAT(drag_v));
+
+        float w = Q16_TO_FLOAT(ship->angular_velocity);
+        float abs_w = w < 0 ? -w : w;
+        float drag_w = 1.0f - (C_LIN_W + C_QUAD_W * abs_w);
+        if (drag_w < MIN_DRAG) drag_w = MIN_DRAG;
+        ship->angular_velocity = q16_mul(ship->angular_velocity, Q16_FROM_FLOAT(drag_w));
+    }
 
     /* ── Integrate state ───────────────────────────────────────────────── */
     Vec2Q16 displacement = vec2_mul_scalar(ship->velocity, dt);
