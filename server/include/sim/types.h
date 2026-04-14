@@ -177,6 +177,36 @@ struct HitEvent {
     entity_id shooter_ship_id;  // Ship that fired the projectile (for XP award)
 };
 
+/* ── Contact cache for warm-starting collision solvers ─────────────────────
+ *
+ * Stores the accumulated normal impulse (P_n) from the previous tick for each
+ * actively-colliding entity pair.  At the start of the next tick's solve the
+ * cached impulse is applied as a warm-start guess so the solver converges
+ * faster and produces less jitter at rest.
+ *
+ * Keyed by an order-independent pair of entity IDs:
+ *   key = (min(a,b) << 16) | max(a,b)
+ *
+ * Entries are aged out after MAX_CONTACT_AGE ticks with no collision.       */
+
+#define CONTACT_CACHE_SIZE 256   /* power-of-two; open-addressing hash map */
+#define MAX_CONTACT_AGE    3     /* ticks without collision before eviction */
+#define MAX_CONTACT_POINTS 4     /* max cached contact points per pair     */
+
+struct ContactEntry {
+    uint32_t key;                               /* 0 = empty slot              */
+    uint32_t last_tick;                         /* sim->tick of last update    */
+    float    P_n[MAX_CONTACT_POINTS];           /* accumulated normal impulse  */
+    float    P_f[MAX_CONTACT_POINTS];           /* accumulated friction impulse*/
+    float    cx[MAX_CONTACT_POINTS];            /* contact point x (world)     */
+    float    cy[MAX_CONTACT_POINTS];            /* contact point y (world)     */
+    uint8_t  n_contacts;                        /* how many contacts last tick */
+};
+
+struct ContactCache {
+    struct ContactEntry entries[CONTACT_CACHE_SIZE];
+};
+
 // Complete simulation state
 struct Sim {
     uint32_t tick;               // Current simulation tick
@@ -241,35 +271,5 @@ struct SimConfig {
 #define PLAYER_FLAG_IN_WATER    (1 << 0)
 #define PLAYER_FLAG_CLIMBING    (1 << 1)
 #define PLAYER_FLAG_DEAD        (1 << 2)
-
-/* ── Contact cache for warm-starting collision solvers ─────────────────────
- *
- * Stores the accumulated normal impulse (P_n) from the previous tick for each
- * actively-colliding entity pair.  At the start of the next tick's solve the
- * cached impulse is applied as a warm-start guess so the solver converges
- * faster and produces less jitter at rest.
- *
- * Keyed by an order-independent pair of entity IDs:
- *   key = (min(a,b) << 16) | max(a,b)
- *
- * Entries are aged out after MAX_CONTACT_AGE ticks with no collision.       */
-
-#define CONTACT_CACHE_SIZE 256   /* power-of-two; open-addressing hash map */
-#define MAX_CONTACT_AGE    3     /* ticks without collision before eviction */
-#define MAX_CONTACT_POINTS 4     /* max cached contact points per pair     */
-
-struct ContactEntry {
-    uint32_t key;                               /* 0 = empty slot              */
-    uint32_t last_tick;                         /* sim->tick of last update    */
-    float    P_n[MAX_CONTACT_POINTS];           /* accumulated normal impulse  */
-    float    P_f[MAX_CONTACT_POINTS];           /* accumulated friction impulse*/
-    float    cx[MAX_CONTACT_POINTS];            /* contact point x (world)     */
-    float    cy[MAX_CONTACT_POINTS];            /* contact point y (world)     */
-    uint8_t  n_contacts;                        /* how many contacts last tick */
-};
-
-struct ContactCache {
-    struct ContactEntry entries[CONTACT_CACHE_SIZE];
-};
 
 #endif /* SIM_TYPES_H */

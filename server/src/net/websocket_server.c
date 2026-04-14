@@ -674,6 +674,10 @@ static void handle_ship_dock_collisions(void) {
             float P_n[3] = {0.0f, 0.0f, 0.0f};
             float P_f[3] = {0.0f, 0.0f, 0.0f};
 
+            /* Working velocity — updated after every wall within every iteration
+             * so wall B in iteration 2 sees the corrected state from wall A. */
+            float cur_vx = vx_dl, cur_vy = vy_dl, cur_w = omega;
+
             /* Warm start from contact cache: seed P_n/P_f with 80% of last
              * tick's accumulated impulse so the solver starts near the
              * converged answer instead of building up from zero.
@@ -709,10 +713,6 @@ static void handle_ship_dock_collisions(void) {
                     cur_w  += (wrx * (P_f[wi] * vt_y2) - wry * (P_f[wi] * vt_x2)) * inv_inertia;
                 }
             }
-
-            /* Working velocity — updated after every wall within every iteration
-             * so wall B in iteration 2 sees the corrected state from wall A. */
-            float cur_vx = vx_dl, cur_vy = vy_dl, cur_w = omega;
 
             /* dt in seconds (for Baumgarte bias = β/dt * max(pen-slop, 0)) */
             float dt_s = 1.0f / (float)TICK_RATE_HZ;
