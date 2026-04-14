@@ -717,22 +717,6 @@ static void handle_ship_dock_collisions(void) {
             /* dt in seconds (for Baumgarte bias = β/dt * max(pen-slop, 0)) */
             float dt_s = 1.0f / (float)TICK_RATE_HZ;
 
-            /* Predictive torque bias: the impulse solver only cancels the
-             * CURRENT approach velocity at the contact.  But the player's
-             * input torque will add more angular velocity next tick, so the
-             * ship slowly grinds into the wall.
-             *
-             * Fix: assume the ship will receive at least as much angular
-             * acceleration next tick as it got this tick.  We estimate that
-             * from the current angular velocity (which already includes this
-             * tick's integrated torque).  At each contact, if the angular
-             * component (ω · rxn) is pushing into the wall, we add it as
-             * extra velocity bias to the impulse formula.  This makes J
-             * large enough to pre-cancel the expected next-tick rotation.
-             *
-             *   predicted_approach = cur_w · (r × n̂)   [if negative → approaching]
-             *   torque_bias = |predicted_approach|       [added to bias term]       */
-
             for (int iter = 0; iter < N_ITER; iter++) {
                 for (int wi = 0; wi < 3; wi++) {
                     float pen, nx, ny, cx, cy;
@@ -768,15 +752,6 @@ static void handle_ship_dock_collisions(void) {
                     /* bias = β/dt * max(pen - slop, 0): drains residual positional
                      * error that Baumgarte pos-correction didn't fully remove. */
                     float bias = (BAUMGARTE / dt_s) * fmaxf(pen - SLOP, 0.0f);
-
-                    /* Predictive angular bias: if the angular velocity component at
-                     * this contact is pushing INTO the wall, add it as extra bias
-                     * so the impulse pre-cancels the next tick's continued rotation.
-                     * Without this, J only zeroes vc_n but ω rebuilds each tick. */
-                    float w_approach = cur_w * rxn;  /* angular approach at contact */
-                    if (w_approach < 0.0f) {
-                        bias += -w_approach;  /* add magnitude as extra correction */
-                    }
 
                     /* Impulse increment (clamped: normal impulse can only push, never pull) */
                     float dP = (-(1.0f + RESTITUTION) * vc_n + bias) / denom;
@@ -816,60 +791,37 @@ static void handle_ship_dock_collisions(void) {
                 }
             } /* end N_ITER */
 
-            /* ── Angular velocity constraint ──────────────────────────────
+            /* ── Equal-and-opposite reaction pass ─────────────────────────
              *
-             * The impulse solver zeroes out the contact-point approach speed
-             * for THIS tick, but the player's turn input re-adds torque next
-             * tick.  With a large moment of inertia (5 M kg·px²), the per-
-             * tick impulse barely wins against the per-tick input torque
-             * (10 000 N·m / 50 000 I → +0.0067 rad/s each tick).
-             *
-             * Fix: after the solver, for every wall that has accumulated
-             * normal impulse (active contact), check whether cur_w would
-             * drive the contact point INTO that wall.  If so, compute the
-             * maximum safe ω that keeps vc_n ≥ 0 at ALL active contacts
-             * and clamp cur_w.  This is a direct velocity-level constraint
-             * that prevents the ship from rotating further into the wall
-             * regardless of input torque.                                  */
-            {
-                for (int wi = 0; wi < 3; wi++) {
-                    if (P_n[wi] <= 0.0f) continue;  /* no active contact on this wall */
+             * Simple idea: for each active wall contact, measure the
+             * residual approach velocity (linear + angular).  If the
+             * contact point is still moving into the wall, apply the
+             * exact impulse to zero it out.  The wall provides whatever
+             * reaction is needed — no prediction, no clamps. */
+            for (int wi = 0; wi < 3; wi++) {
+                if (P_n[wi] <= 0.0f) continue;
 
-                    float pen, nx, ny, cx, cy;
-                    if (!dock_wall_sat(hdx, hdy, N,
-                                       WALLS[wi].cx, WALLS[wi].cy,
-                                       WALLS[wi].hx, WALLS[wi].hy,
-                                       lx, ly,
-                                       &pen, &nx, &ny, &cx, &cy)) continue;
+                float pen, nx, ny, cx, cy;
+                if (!dock_wall_sat(hdx, hdy, N,
+                                   WALLS[wi].cx, WALLS[wi].cy,
+                                   WALLS[wi].hx, WALLS[wi].hy,
+                                   lx, ly,
+                                   &pen, &nx, &ny, &cx, &cy)) continue;
 
-                    float rx = cx - lx, ry = cy - ly;
+                float rx = cx - lx, ry = cy - ly;
+                float vc_x = cur_vx + cur_w * (-ry);
+                float vc_y = cur_vy + cur_w * ( rx);
+                float vc_n = vc_x * nx + vc_y * ny;
 
-                    /* Contact velocity from angular component only:
-                     *   vc_angular = ω × r · n̂ = ω · (rx·ny - ry·nx)
-                     * The linear component is already handled by the solver.
-                     * We want vc_total · n̂ ≥ 0 (not approaching).
-                     *
-                     * vc_n = (cur_vx + ω·(-ry))·nx + (cur_vy + ω·rx)·ny
-                     *       = (cur_vx·nx + cur_vy·ny) + ω·(rx·ny - ry·nx)
-                     *       = v_lin_n + ω · rxn
-                     *
-                     * We want v_lin_n + ω·rxn ≥ 0.
-                     * If rxn ≠ 0:  ω_max = -v_lin_n / rxn  (when rxn > 0, ω ≤ ω_max)
-                     */
-                    float rxn = rx * ny - ry * nx;
-                    float v_lin_n = cur_vx * nx + cur_vy * ny;
-                    float vc_n = v_lin_n + cur_w * rxn;
-
-                    if (vc_n < 0.0f && fabsf(rxn) > 0.01f) {
-                        /* Solve for ω that makes vc_n = 0 */
-                        float w_safe = -v_lin_n / rxn;
-                        /* Only clamp toward zero, never away from zero */
-                        if (cur_w > 0.0f && w_safe < cur_w) {
-                            cur_w = fmaxf(w_safe, 0.0f);
-                        } else if (cur_w < 0.0f && w_safe > cur_w) {
-                            cur_w = fminf(w_safe, 0.0f);
-                        }
-                    }
+                if (vc_n < 0.0f) {
+                    float rxn   = rx * ny - ry * nx;
+                    float denom = inv_mass + rxn * rxn * inv_inertia;
+                    if (denom < 1e-10f) continue;
+                    float J = -vc_n / denom;
+                    cur_vx += J * nx * inv_mass;
+                    cur_vy += J * ny * inv_mass;
+                    cur_w  += rxn * J * inv_inertia;
+                    P_n[wi] += J;
                 }
             }
 
