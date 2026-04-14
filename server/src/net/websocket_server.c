@@ -674,6 +674,42 @@ static void handle_ship_dock_collisions(void) {
             float P_n[3] = {0.0f, 0.0f, 0.0f};
             float P_f[3] = {0.0f, 0.0f, 0.0f};
 
+            /* Warm start from contact cache: seed P_n/P_f with 80% of last
+             * tick's accumulated impulse so the solver starts near the
+             * converged answer instead of building up from zero.
+             * Dock entity ID is encoded as 0xFF00 | dock_index so it never
+             * collides with real entity IDs (which start from 1). */
+            entity_id dock_pseudo_id = (entity_id)(0xFF00u | (uint16_t)di);
+            struct ContactEntry* dock_ce = contact_cache_find(
+                &global_sim->contact_cache, ship->id, dock_pseudo_id);
+            if (dock_ce && dock_ce->n_contacts == 3) {
+                for (int wi = 0; wi < 3; wi++) {
+                    P_n[wi] = dock_ce->P_n[wi] * 0.8f;
+                    P_f[wi] = dock_ce->P_f[wi] * 0.8f;
+                }
+                /* Apply warm-start impulse to working velocity */
+                for (int wi = 0; wi < 3; wi++) {
+                    if (P_n[wi] <= 0.0f) continue;
+                    float pen, wnx, wny, wcx, wcy;
+                    if (!dock_wall_sat(hdx, hdy, N,
+                                       WALLS[wi].cx, WALLS[wi].cy,
+                                       WALLS[wi].hx, WALLS[wi].hy,
+                                       lx, ly,
+                                       &pen, &wnx, &wny, &wcx, &wcy)) {
+                        P_n[wi] = 0; P_f[wi] = 0; continue;
+                    }
+                    float wrx = wcx - lx, wry = wcy - ly;
+                    cur_vx += P_n[wi] * wnx * inv_mass;
+                    cur_vy += P_n[wi] * wny * inv_mass;
+                    cur_w  += (wrx * (P_n[wi] * wny) - wry * (P_n[wi] * wnx)) * inv_inertia;
+                    /* Friction warm-start */
+                    float vt_x2 = -wny, vt_y2 = wnx; /* tangent direction */
+                    cur_vx += P_f[wi] * vt_x2 * inv_mass;
+                    cur_vy += P_f[wi] * vt_y2 * inv_mass;
+                    cur_w  += (wrx * (P_f[wi] * vt_y2) - wry * (P_f[wi] * vt_x2)) * inv_inertia;
+                }
+            }
+
             /* Working velocity — updated after every wall within every iteration
              * so wall B in iteration 2 sees the corrected state from wall A. */
             float cur_vx = vx_dl, cur_vy = vy_dl, cur_w = omega;
@@ -754,6 +790,18 @@ static void handle_ship_dock_collisions(void) {
                     }
                 }
             } /* end N_ITER */
+
+            /* Store accumulated impulse into contact cache for next tick */
+            {
+                struct ContactEntry* ce_dock = contact_cache_upsert(
+                    &global_sim->contact_cache, ship->id, dock_pseudo_id);
+                ce_dock->last_tick = global_sim->tick;
+                ce_dock->n_contacts = 3;
+                for (int wi = 0; wi < 3; wi++) {
+                    ce_dock->P_n[wi] = P_n[wi];
+                    ce_dock->P_f[wi] = P_f[wi];
+                }
+            }
 
             /* Write back position */
             if (total_push_x * total_push_x + total_push_y * total_push_y > 0.0001f) {

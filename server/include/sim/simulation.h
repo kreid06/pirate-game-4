@@ -57,4 +57,9 @@ void spatial_hash_add_projectile(struct Sim* sim, struct Projectile* projectile)
 void handle_projectile_collisions(struct Sim* sim);
 void handle_player_ship_collisions(struct Sim* sim);
 
+// Contact cache API (warm starting)
+struct ContactEntry* contact_cache_find(struct ContactCache* cc, entity_id a, entity_id b);
+struct ContactEntry* contact_cache_upsert(struct ContactCache* cc, entity_id a, entity_id b);
+void contact_cache_age(struct ContactCache* cc, uint32_t current_tick);
+
 #endif /* SIM_SIMULATION_H */

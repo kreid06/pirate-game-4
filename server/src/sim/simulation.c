@@ -13,6 +13,206 @@
 // Include hash function implementation
 extern uint64_t hash_sim_state(const struct Sim* sim);
 
+/* ══════════════════════════════════════════════════════════════════════════
+ *  Contact cache — warm-starting helpers
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+static inline uint32_t contact_key(entity_id a, entity_id b) {
+    entity_id lo = a < b ? a : b;
+    entity_id hi = a < b ? b : a;
+    return ((uint32_t)lo << 16) | (uint32_t)hi;
+}
+
+/* Look up a pair; returns NULL if not cached. */
+struct ContactEntry* contact_cache_find(struct ContactCache* cc, entity_id a, entity_id b) {
+    uint32_t k = contact_key(a, b);
+    uint32_t idx = k & (CONTACT_CACHE_SIZE - 1);
+    for (uint32_t probe = 0; probe < CONTACT_CACHE_SIZE; probe++) {
+        uint32_t i = (idx + probe) & (CONTACT_CACHE_SIZE - 1);
+        if (cc->entries[i].key == k) return &cc->entries[i];
+        if (cc->entries[i].key == 0) return NULL;  /* empty → miss */
+    }
+    return NULL;
+}
+
+/* Insert or update a pair's entry; returns the slot (never NULL). */
+struct ContactEntry* contact_cache_upsert(struct ContactCache* cc, entity_id a, entity_id b) {
+    uint32_t k = contact_key(a, b);
+    uint32_t idx = k & (CONTACT_CACHE_SIZE - 1);
+    struct ContactEntry* first_empty = NULL;
+    for (uint32_t probe = 0; probe < CONTACT_CACHE_SIZE; probe++) {
+        uint32_t i = (idx + probe) & (CONTACT_CACHE_SIZE - 1);
+        if (cc->entries[i].key == k) return &cc->entries[i];  /* existing */
+        if (cc->entries[i].key == 0) {
+            if (!first_empty) first_empty = &cc->entries[i];
+            break;
+        }
+    }
+    if (first_empty) {
+        memset(first_empty, 0, sizeof(*first_empty));
+        first_empty->key = k;
+        return first_empty;
+    }
+    /* Table full — evict oldest entry at initial slot */
+    struct ContactEntry* victim = &cc->entries[idx];
+    memset(victim, 0, sizeof(*victim));
+    victim->key = k;
+    return victim;
+}
+
+/* Age out stale entries after all collision handlers have run this tick. */
+void contact_cache_age(struct ContactCache* cc, uint32_t current_tick) {
+    for (uint32_t i = 0; i < CONTACT_CACHE_SIZE; i++) {
+        if (cc->entries[i].key != 0 &&
+            current_tick - cc->entries[i].last_tick > MAX_CONTACT_AGE) {
+            cc->entries[i].key = 0;  /* mark empty */
+        }
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  CCD — Continuous Collision Detection helpers
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Swept circle vs. static line segment: given a circle of radius r moving
+ * from A to B, find the earliest time-of-impact t ∈ [0,1] with the segment
+ * P0-P1.  Returns false if no hit.
+ *
+ * Used for fast-moving entities (projectiles, ships at high speed) against
+ * polygon edges to prevent tunnelling.                                     */
+
+static bool ccd_swept_circle_segment(
+    float ax, float ay, float bx, float by, float radius,
+    float p0x, float p0y, float p1x, float p1y,
+    float* out_t, float* out_nx, float* out_ny)
+{
+    /* Direction of motion */
+    float dx = bx - ax, dy = by - ay;
+    float move_len_sq = dx * dx + dy * dy;
+    if (move_len_sq < 1e-12f) return false;  /* stationary */
+
+    /* Edge vector and outward normal (left-hand normal for CCW winding) */
+    float ex = p1x - p0x, ey = p1y - p0y;
+    float edge_len = sqrtf(ex * ex + ey * ey);
+    if (edge_len < 1e-6f) return false;
+    float enx = -ey / edge_len, eny = ex / edge_len;  /* edge normal */
+
+    /* Signed distance of start/end from the infinite edge line */
+    float d0 = (ax - p0x) * enx + (ay - p0y) * eny;
+    float d1 = (bx - p0x) * enx + (by - p0y) * eny;
+
+    /* We want d == ±radius (circle surface touches the line).
+     * Solve d0 + t*(d1-d0) = ±radius for the face closest to approach. */
+    float dd = d1 - d0;
+    if (fabsf(dd) < 1e-10f) return false;  /* parallel motion */
+
+    /* Pick the face we're approaching */
+    float target_d = (d0 > 0) ? radius : -radius;
+    float t = (target_d - d0) / dd;
+    if (t < 0.0f || t > 1.0f) return false;  /* out of sweep range */
+
+    /* Contact point on the edge line at time t */
+    float cx = ax + dx * t;
+    float cy = ay + dy * t;
+
+    /* Project onto edge to check we're within segment bounds */
+    float proj = ((cx - p0x) * ex + (cy - p0y) * ey) / (edge_len * edge_len);
+    if (proj < 0.0f || proj > 1.0f) {
+        /* Missed the segment — check endpoint capsule collisions.
+         * Swept circle vs point: |A + t*D - P|² = r² */
+        float best_t = 2.0f;
+        float best_nx = 0, best_ny = 0;
+        for (int ep = 0; ep < 2; ep++) {
+            float ppx = ep == 0 ? p0x : p1x;
+            float ppy = ep == 0 ? p0y : p1y;
+            float ox = ax - ppx, oy = ay - ppy;
+            float a_coef = move_len_sq;
+            float b_coef = 2.0f * (ox * dx + oy * dy);
+            float c_coef = ox * ox + oy * oy - radius * radius;
+            float disc = b_coef * b_coef - 4.0f * a_coef * c_coef;
+            if (disc < 0.0f) continue;
+            float sq = sqrtf(disc);
+            float t_ep = (-b_coef - sq) / (2.0f * a_coef);
+            if (t_ep >= 0.0f && t_ep <= 1.0f && t_ep < best_t) {
+                best_t = t_ep;
+                float hx = ax + dx * t_ep - ppx;
+                float hy = ay + dy * t_ep - ppy;
+                float hl = sqrtf(hx * hx + hy * hy);
+                if (hl > 1e-6f) { best_nx = hx / hl; best_ny = hy / hl; }
+            }
+        }
+        if (best_t <= 1.0f) {
+            *out_t = best_t; *out_nx = best_nx; *out_ny = best_ny;
+            return true;
+        }
+        return false;
+    }
+
+    /* Hit the edge face */
+    *out_t = t;
+    *out_nx = (d0 > 0) ? enx : -enx;
+    *out_ny = (d0 > 0) ? eny : -eny;
+    return true;
+}
+
+/* Swept circle vs. convex polygon (world-space vertices).
+ * Tests against every edge; returns the earliest t ∈ [0,1].
+ * out_nx/ny is the collision normal pointing away from the polygon. */
+static bool ccd_swept_circle_polygon(
+    float ax, float ay, float bx, float by, float radius,
+    const float* vx, const float* vy, int n_verts,
+    float* out_t, float* out_nx, float* out_ny)
+{
+    float best_t = 2.0f;
+    float best_nx = 0, best_ny = 0;
+    for (int i = 0; i < n_verts; i++) {
+        int j = (i + 1) % n_verts;
+        float t, nx, ny;
+        if (ccd_swept_circle_segment(ax, ay, bx, by, radius,
+                                     vx[i], vy[i], vx[j], vy[j],
+                                     &t, &nx, &ny)) {
+            if (t < best_t) { best_t = t; best_nx = nx; best_ny = ny; }
+        }
+    }
+    if (best_t <= 1.0f) {
+        *out_t = best_t; *out_nx = best_nx; *out_ny = best_ny;
+        return true;
+    }
+    return false;
+}
+
+/* Swept circle vs. circle (two moving entities).
+ * Relative motion: A moves from (ax,ay) to (bx,by), B is static at (sx,sy).
+ * Caller should pre-subtract B's motion from A's to handle both moving. */
+static bool ccd_swept_circle_circle(
+    float ax, float ay, float bx, float by, float ra,
+    float sx, float sy, float rb,
+    float* out_t, float* out_nx, float* out_ny)
+{
+    float R = ra + rb;
+    float ox = ax - sx, oy = ay - sy;
+    float dx = bx - ax, dy = by - ay;
+    float a = dx * dx + dy * dy;
+    if (a < 1e-12f) return false;
+    float b = 2.0f * (ox * dx + oy * dy);
+    float c = ox * ox + oy * oy - R * R;
+    if (c < 0.0f) { /* already overlapping — t=0 */
+        float len = sqrtf(ox * ox + oy * oy);
+        if (len < 1e-6f) { *out_t = 0; *out_nx = 1; *out_ny = 0; return true; }
+        *out_t = 0; *out_nx = ox / len; *out_ny = oy / len; return true;
+    }
+    float disc = b * b - 4.0f * a * c;
+    if (disc < 0.0f) return false;
+    float sq = sqrtf(disc);
+    float t = (-b - sq) / (2.0f * a);
+    if (t < 0.0f || t > 1.0f) return false;
+    float hx = ox + dx * t, hy = oy + dy * t;
+    float hl = sqrtf(hx * hx + hy * hy);
+    if (hl < 1e-6f) { *out_t = t; *out_nx = 1; *out_ny = 0; return true; }
+    *out_t = t; *out_nx = hx / hl; *out_ny = hy / hl;
+    return true;
+}
+
 // Forward declarations
 static void update_ship_physics(struct Ship* ship, q16_t dt);
 static void update_player_physics(struct Player* player, struct Sim* sim, q16_t dt);
@@ -485,6 +685,130 @@ static void handle_island_collisions(struct Sim *sim) {
 }
 
 void sim_handle_collisions(struct Sim* sim) {
+    /* ── CCD pre-pass: prevent tunnelling for fast-moving entities ──────
+     *
+     * For every ship moving faster than CCD_SPEED_THRESHOLD (server units/tick),
+     * sweep its bounding circle forward along this tick's displacement and test
+     * against every other ship's hull polygon.  If a time-of-impact t ∈ [0,1)
+     * is found, rewind the ship to position(t) and reflect velocity.
+     *
+     * Same logic is applied to swimming players vs ship hulls.
+     *
+     * This runs BEFORE the discrete collision handlers so the discrete phase
+     * sees the already-rewound positions and can fine-tune with SAT + impulse. */
+    {
+        /* Speed threshold: only bother with CCD if the entity moves more than
+         * half its bounding radius this tick — below that, discrete is fine. */
+        static const float CCD_MIN_DISP_SQ = 0.5f * 0.5f;  /* server units² */
+
+        /* ── Ship vs Ship CCD ── */
+        for (uint16_t i = 0; i < sim->ship_count; i++) {
+            struct Ship* s = &sim->ships[i];
+            float dt_f = Q16_TO_FLOAT(FIXED_DT_Q16);
+            float s_vx = Q16_TO_FLOAT(s->velocity.x);
+            float s_vy = Q16_TO_FLOAT(s->velocity.y);
+            float disp_x = s_vx * dt_f, disp_y = s_vy * dt_f;
+            if (disp_x * disp_x + disp_y * disp_y < CCD_MIN_DISP_SQ) continue;
+
+            float sx = Q16_TO_FLOAT(s->position.x);
+            float sy = Q16_TO_FLOAT(s->position.y);
+            float sr = Q16_TO_FLOAT(s->bounding_radius);
+            /* Sweep end-point = current pos (already integrated by update_ship_physics).
+             * Start = pos - displacement. */
+            float ax = sx - disp_x, ay = sy - disp_y;
+
+            for (uint16_t j = 0; j < sim->ship_count; j++) {
+                if (i == j) continue;
+                struct Ship* other = &sim->ships[j];
+
+                /* Quick bounding-circle distance check for the sweep */
+                float or2 = Q16_TO_FLOAT(other->bounding_radius);
+                float odx = Q16_TO_FLOAT(other->position.x) - (ax + sx) * 0.5f;
+                float ody = Q16_TO_FLOAT(other->position.y) - (ay + sy) * 0.5f;
+                float sweep_r = sr + or2 + sqrtf(disp_x*disp_x + disp_y*disp_y) * 0.5f;
+                if (odx*odx + ody*ody > sweep_r*sweep_r) continue;
+
+                /* Build other ship's world-space hull */
+                float hvx[64], hvy[64];
+                int nv = (int)other->hull_vertex_count;
+                for (int vi = 0; vi < nv; vi++) {
+                    Vec2Q16 wv = transform_hull_vertex(other->hull_vertices[vi],
+                                                       other->position, other->rotation);
+                    hvx[vi] = Q16_TO_FLOAT(wv.x);
+                    hvy[vi] = Q16_TO_FLOAT(wv.y);
+                }
+
+                float t, cnx, cny;
+                if (ccd_swept_circle_polygon(ax, ay, sx, sy, sr, hvx, hvy, nv,
+                                             &t, &cnx, &cny)) {
+                    /* Rewind to time-of-impact + small epsilon */
+                    float safe_t = fmaxf(t - 0.01f, 0.0f);
+                    float new_x = ax + disp_x * safe_t;
+                    float new_y = ay + disp_y * safe_t;
+                    s->position.x = Q16_FROM_FLOAT(new_x);
+                    s->position.y = Q16_FROM_FLOAT(new_y);
+
+                    /* Reflect velocity along collision normal (e = 0.3) */
+                    float vn = s_vx * cnx + s_vy * cny;
+                    if (vn < 0.0f) {
+                        s->velocity.x = Q16_FROM_FLOAT(s_vx - 1.3f * vn * cnx);
+                        s->velocity.y = Q16_FROM_FLOAT(s_vy - 1.3f * vn * cny);
+                    }
+                    break;  /* one CCD hit per ship per tick is enough */
+                }
+            }
+        }
+
+        /* ── Player vs Ship hull CCD (swimming players only) ── */
+        for (uint16_t pi = 0; pi < sim->player_count; pi++) {
+            struct Player* p = &sim->players[pi];
+            if (p->ship_id != INVALID_ENTITY_ID) continue;  /* on a ship — skip */
+
+            float dt_f = Q16_TO_FLOAT(FIXED_DT_Q16);
+            float pvx = Q16_TO_FLOAT(p->velocity.x);
+            float pvy = Q16_TO_FLOAT(p->velocity.y);
+            float dx = pvx * dt_f, dy = pvy * dt_f;
+            if (dx*dx + dy*dy < CCD_MIN_DISP_SQ) continue;
+
+            float px = Q16_TO_FLOAT(p->position.x);
+            float py = Q16_TO_FLOAT(p->position.y);
+            float pr = Q16_TO_FLOAT(p->radius);
+            float pax = px - dx, pay = py - dy;
+
+            for (uint16_t si = 0; si < sim->ship_count; si++) {
+                struct Ship* ship = &sim->ships[si];
+                float br = Q16_TO_FLOAT(ship->bounding_radius);
+                float sdx = Q16_TO_FLOAT(ship->position.x) - (pax + px) * 0.5f;
+                float sdy = Q16_TO_FLOAT(ship->position.y) - (pay + py) * 0.5f;
+                float sweep_r = pr + br + sqrtf(dx*dx + dy*dy) * 0.5f;
+                if (sdx*sdx + sdy*sdy > sweep_r*sweep_r) continue;
+
+                float hvx[64], hvy[64];
+                int nv = (int)ship->hull_vertex_count;
+                for (int vi = 0; vi < nv; vi++) {
+                    Vec2Q16 wv = transform_hull_vertex(ship->hull_vertices[vi],
+                                                       ship->position, ship->rotation);
+                    hvx[vi] = Q16_TO_FLOAT(wv.x);
+                    hvy[vi] = Q16_TO_FLOAT(wv.y);
+                }
+
+                float t, cnx, cny;
+                if (ccd_swept_circle_polygon(pax, pay, px, py, pr, hvx, hvy, nv,
+                                             &t, &cnx, &cny)) {
+                    float safe_t = fmaxf(t - 0.01f, 0.0f);
+                    p->position.x = Q16_FROM_FLOAT(pax + dx * safe_t);
+                    p->position.y = Q16_FROM_FLOAT(pay + dy * safe_t);
+                    float vn = pvx * cnx + pvy * cny;
+                    if (vn < 0.0f) {
+                        p->velocity.x = Q16_FROM_FLOAT(pvx - 1.15f * vn * cnx);
+                        p->velocity.y = Q16_FROM_FLOAT(pvy - 1.15f * vn * cny);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     // Handle ship-to-ship collisions
     handle_ship_collisions(sim);
     
@@ -499,6 +823,9 @@ void sim_handle_collisions(struct Sim* sim) {
     
     // Handle player-ship collisions (boarding, falling off)
     handle_player_ship_collisions(sim);
+
+    /* Age out stale contact cache entries that weren't touched this tick */
+    contact_cache_age(&sim->contact_cache, sim->tick);
 }
 
 // Entity creation functions
@@ -1248,7 +1575,7 @@ static void handle_ship_collisions(struct Sim* sim) {
                 n_contacts = 1;
             }
 
-            /* ── Multipoint impulse (simultaneous, pre-impulse velocities) ── */
+            /* ── Multipoint impulse with warm starting ── */
             float nx = Q16_TO_FLOAT(collision_normal.x);
             float ny = Q16_TO_FLOAT(collision_normal.y);
             float p1x = Q16_TO_FLOAT(ship1->position.x), p1y = Q16_TO_FLOAT(ship1->position.y);
@@ -1260,29 +1587,60 @@ static void handle_ship_collisions(struct Sim* sim) {
             float m1  = Q16_TO_FLOAT(ship1->mass), m2 = Q16_TO_FLOAT(ship2->mass);
             float I   = SHIP_INERTIA;
 
+            /* Limit manifold to MAX_CONTACT_POINTS for cache coherence */
+            if (n_contacts > MAX_CONTACT_POINTS) n_contacts = MAX_CONTACT_POINTS;
+
+            /* Look up warm-start data from previous tick */
+            struct ContactEntry* ce = contact_cache_find(&sim->contact_cache, ship1->id, ship2->id);
+
             float dv1x = 0, dv1y = 0, dw1 = 0;
             float dv2x = 0, dv2y = 0, dw2 = 0;
+
+            /* Warm start: apply cached impulse from last tick as initial guess.
+             * This lets the solver start near the correct answer instead of
+             * building up from zero, dramatically reducing jitter at rest. */
+            if (ce && ce->n_contacts > 0) {
+                for (int ci = 0; ci < n_contacts && ci < (int)ce->n_contacts; ci++) {
+                    float Jw = ce->P_n[ci] * 0.8f;  /* 80% of last tick's impulse */
+                    if (Jw <= 0.0f) continue;
+                    float r1x = cpx[ci] - p1x, r1y = cpy[ci] - p1y;
+                    float r2x = cpx[ci] - p2x, r2y = cpy[ci] - p2y;
+                    float r1xn = r1x*ny - r1y*nx;
+                    float r2xn = r2x*ny - r2y*nx;
+                    dv1x += Jw*nx/m1;   dv1y += Jw*ny/m1;   dw1 += Jw*r1xn/I;
+                    dv2x -= Jw*nx/m2;   dv2y -= Jw*ny/m2;   dw2 -= Jw*r2xn/I;
+                }
+                /* Apply warm-start to working velocities */
+                v1x += dv1x; v1y += dv1y; w1 += dw1;
+                v2x += dv2x; v2y += dv2y; w2 += dw2;
+            }
+
+            /* Accumulated impulse per contact this tick (for cache storage) */
+            float P_n_acc[MAX_CONTACT_POINTS];
+            memset(P_n_acc, 0, sizeof(P_n_acc));
+
+            /* Reset deltas for the iterative solve (warm-start already applied) */
+            dv1x = 0; dv1y = 0; dw1 = 0;
+            dv2x = 0; dv2y = 0; dw2 = 0;
 
             for (int ci = 0; ci < n_contacts; ci++) {
                 float r1x = cpx[ci] - p1x, r1y = cpy[ci] - p1y;
                 float r2x = cpx[ci] - p2x, r2y = cpy[ci] - p2y;
-                /* Velocity at contact point for each ship */
+                /* Velocity at contact point (includes warm-start) */
                 float vc1x = v1x + w1*(-r1y),  vc1y = v1y + w1*r1x;
                 float vc2x = v2x + w2*(-r2y),  vc2y = v2y + w2*r2x;
                 float vrel_n = (vc1x - vc2x)*nx + (vc1y - vc2y)*ny;
                 if (vrel_n >= 0.0f) continue;  /* separating at this point */
-                /* 2-D scalar cross products: r × n */
                 float r1xn = r1x*ny - r1y*nx;
                 float r2xn = r2x*ny - r2y*nx;
                 float denom = 1.0f/m1 + 1.0f/m2 + (r1xn*r1xn + r2xn*r2xn)/I;
                 if (denom < 1e-10f) continue;
-                /* Baumgarte velocity bias: adds a small corrective velocity to
-                 * drain residual position error that the positional push left
-                 * behind.  bias = β/dt * max(pen - slop, 0). */
                 float dt_f  = Q16_TO_FLOAT(FIXED_DT_Q16);
                 float pen_f = Q16_TO_FLOAT(overlap_depth);
                 float bias  = (SHIP_BAUMGARTE / dt_f) * fmaxf(pen_f - SHIP_SLOP, 0.0f);
                 float J = (-(1.0f + SHIP_RESTITUTION) * vrel_n + bias) / denom;
+                if (J < 0.0f) J = 0.0f;  /* normal impulse can only push */
+                P_n_acc[ci] = J;
                 dv1x += J*nx/m1;   dv1y += J*ny/m1;   dw1 += J*r1xn/I;
                 dv2x -= J*nx/m2;   dv2y -= J*ny/m2;   dw2 -= J*r2xn/I;
             }
@@ -1294,8 +1652,21 @@ static void handle_ship_collisions(struct Sim* sim) {
             ship1->angular_velocity = Q16_FROM_FLOAT(w1 + dw1);
             ship2->angular_velocity = Q16_FROM_FLOAT(w2 + dw2);
 
-            log_info("⚓ Ship hull collision: %u <-> %u (overlap: %.2f, contacts: %d, normal: (%.2f, %.2f))",
-                     ship1->id, ship2->id, Q16_TO_FLOAT(overlap_depth), n_contacts, nx, ny);
+            /* Store this tick's impulse into the contact cache */
+            {
+                struct ContactEntry* ce_w = contact_cache_upsert(&sim->contact_cache, ship1->id, ship2->id);
+                ce_w->last_tick = sim->tick;
+                ce_w->n_contacts = (uint8_t)n_contacts;
+                for (int ci = 0; ci < n_contacts; ci++) {
+                    ce_w->P_n[ci] = P_n_acc[ci];
+                    ce_w->cx[ci]  = cpx[ci];
+                    ce_w->cy[ci]  = cpy[ci];
+                }
+            }
+
+            log_info("⚓ Ship hull collision: %u <-> %u (overlap: %.2f, contacts: %d, warm: %s)",
+                     ship1->id, ship2->id, Q16_TO_FLOAT(overlap_depth), n_contacts,
+                     ce ? "yes" : "no");
         }
     }
 }
@@ -2239,14 +2610,30 @@ static void handle_player_player_collisions(struct Sim* sim) {
             p2->position.x = Q16_FROM_FLOAT(Q16_TO_FLOAT(p2->position.x) + corr * nx);
             p2->position.y = Q16_FROM_FLOAT(Q16_TO_FLOAT(p2->position.y) + corr * ny);
 
-            /* ── Velocity impulse ──
+            /* ── Velocity impulse with warm starting ──
              * Relative velocity of p2 w.r.t. p1 along the collision normal. */
             float v1x = Q16_TO_FLOAT(p1->velocity.x);
             float v1y = Q16_TO_FLOAT(p1->velocity.y);
             float v2x = Q16_TO_FLOAT(p2->velocity.x);
             float v2y = Q16_TO_FLOAT(p2->velocity.y);
+
+            /* Look up warm-start from previous tick */
+            struct ContactEntry* pp_ce = contact_cache_find(&sim->contact_cache, p1->id, p2->id);
+            float P_n_warm = 0.0f;
+            if (pp_ce && pp_ce->n_contacts > 0) {
+                P_n_warm = pp_ce->P_n[0] * 0.8f;   /* 80% of last tick */
+                if (P_n_warm > 0.0f) {
+                    /* Apply warm-start: push apart along normal */
+                    v1x -= P_n_warm * 0.5f * nx;
+                    v1y -= P_n_warm * 0.5f * ny;
+                    v2x += P_n_warm * 0.5f * nx;
+                    v2y += P_n_warm * 0.5f * ny;
+                }
+            }
+
             float vn  = (v2x - v1x) * nx + (v2y - v1y) * ny;
 
+            float J = 0.0f;
             /* Only resolve if players are approaching */
             if (vn < 0.0f) {
                 /* Baumgarte velocity bias — adds a small "push apart" velocity
@@ -2255,7 +2642,8 @@ static void handle_player_player_collisions(struct Sim* sim) {
 
                 /* Equal-mass impulse: J = (-(1+e)*vn + bias) / (1/m1 + 1/m2)
                  * With unit masses denominator = 2, so multiply by 0.5. */
-                float J = (-(1.0f + RESTITUTION) * vn + bias) * 0.5f;
+                J = (-(1.0f + RESTITUTION) * vn + bias) * 0.5f;
+                if (J < 0.0f) J = 0.0f;
 
                 /* Apply impulse strictly along the normal — tangential (sliding)
                  * velocity is left intact so players don't lose lateral momentum. */
@@ -2263,6 +2651,14 @@ static void handle_player_player_collisions(struct Sim* sim) {
                 p1->velocity.y = Q16_FROM_FLOAT(v1y - J * ny);
                 p2->velocity.x = Q16_FROM_FLOAT(v2x + J * nx);
                 p2->velocity.y = Q16_FROM_FLOAT(v2y + J * ny);
+            }
+
+            /* Store into contact cache for next tick's warm start */
+            {
+                struct ContactEntry* pp_ce_w = contact_cache_upsert(&sim->contact_cache, p1->id, p2->id);
+                pp_ce_w->last_tick = sim->tick;
+                pp_ce_w->n_contacts = 1;
+                pp_ce_w->P_n[0] = J;
             }
         }
     }
