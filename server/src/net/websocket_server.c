@@ -811,107 +811,183 @@ static void handle_ship_dock_collisions(void) {
                 ship->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_wy));
             }
 
-            /* ── Post-solve containment guard ──────────────────────────────
+            /* ── Rotational CCD ───────────────────────────────────────────
              *
-             * Prevents rotational tunnelling: if the ship is spinning fast
-             * enough that hull vertices would sweep past the 50 px dock
-             * walls in one tick, the impulse solver can't keep up.
+             * Each hull vertex traces a circular arc as the ship rotates by
+             * dθ = cur_w · dt over one tick.  We test every arc against every
+             * dock wall segment.  If any intersection is found, we rewind cur_w
+             * to the earliest safe angle and apply a bounce impulse.
              *
-             * Strategy:
-             * 1. Predict each hull vertex position NEXT tick using cur_w.
-             * 2. If any predicted vertex escapes the dock interior AABB,
-             *    binary-search for the maximum safe angular velocity.
-             * 3. Hard-clamp cur_w to that safe value.
+             * Arc–line-segment intersection:
+             *   Vertex at angle θ in dock-local space:
+             *     Vx(θ) = ox + R·cos(α + θ)
+             *     Vy(θ) = oy + R·sin(α + θ)
+             *   where (ox,oy) = ship center in dock-local, R = distance from
+             *   center to vertex, α = initial angle of vertex from center.
              *
-             * The dock interior in local space is the open U:
-             *   x ∈ [-inner_arm, +inner_arm],  y ∈ [back_inner, +DOCK_HH]
-             * where inner_arm = DOCK_HW - DOCK_ARM_T = 120,
-             *       back_inner = -(DOCK_HH - DOCK_BACK_T) = -395.           */
+             *   Each wall is 4 line segments (edges of the AABB).  For a segment
+             *   from P to Q, the arc crosses that line when the signed distance
+             *   from V(θ) to the line changes sign.  We sample the arc at
+             *   N_ARC_SAMPLES points and detect zero-crossings, then refine
+             *   with bisection.
+             *
+             * Dock walls (3 AABBs → up to 12 segments, but only inner-facing
+             * edges matter):
+             *   Left arm inner:  x = -(DOCK_HW - DOCK_ARM_T) = -120, y ∈ [-445, +445]
+             *   Right arm inner: x = +(DOCK_HW - DOCK_ARM_T) = +120, y ∈ [-445, +445]
+             *   Back wall inner: y = -(DOCK_HH - DOCK_BACK_T) = -395, x ∈ [-120, +120]
+             */
             {
-                const float inner_x = DOCK_HW - DOCK_ARM_T;  /* 120 px */
-                const float inner_y_min = -(DOCK_HH - DOCK_BACK_T); /* -395 px */
-                const float inner_y_max = DOCK_HH;            /* +445 px */
-                /* Shrink bounds by a safety margin so vertices stay clear */
-                const float MARGIN = 2.0f;
-                const float bx_lo = -(inner_x - MARGIN);
-                const float bx_hi =  (inner_x - MARGIN);
-                const float by_lo = inner_y_min + MARGIN;
-                const float by_hi = inner_y_max - MARGIN;
-
                 float dt_tick = 1.0f / (float)TICK_RATE_HZ;
+                float dtheta = cur_w * dt_tick;
 
-                /* Check: would ANY hull vertex leave the interior at cur_w? */
-                bool escaped = false;
-                float predicted_rot = ship_rad + cur_w * dt_tick;
-                float pc = cosf(predicted_rot), ps = sinf(predicted_rot);
-                for (int vi = 0; vi < N && !escaped; vi++) {
-                    float lhx = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->hull_vertices[vi].x));
-                    float lhy = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->hull_vertices[vi].y));
-                    float wx2 = sxc + lhx * pc - lhy * ps;
-                    float wy2 = syc + lhx * ps + lhy * pc;
-                    float plx, ply;
-                    dock_world_to_local(sy, wx2, wy2, &plx, &ply);
-                    if (plx < bx_lo || plx > bx_hi || ply < by_lo || ply > by_hi)
-                        escaped = true;
-                }
+                /* Skip if angular displacement is negligible */
+                if (fabsf(dtheta) > 1e-5f) {
+                    /* Inner-facing wall segments in dock-local coords.
+                     * Only the edges facing the interior can be hit by rotation. */
+                    const float arm_inner = DOCK_HW - DOCK_ARM_T;  /* 120 */
+                    const float back_inner = -(DOCK_HH - DOCK_BACK_T); /* -395 */
+                    struct { float x0, y0, x1, y1; float nx, ny; } segs[] = {
+                        /* Left arm inner edge (faces +x) */
+                        { -arm_inner, -DOCK_HH, -arm_inner, +DOCK_HH,  1.0f, 0.0f },
+                        /* Right arm inner edge (faces -x) */
+                        {  arm_inner, -DOCK_HH,  arm_inner, +DOCK_HH, -1.0f, 0.0f },
+                        /* Back wall inner edge (faces +y) */
+                        { -arm_inner, back_inner, arm_inner, back_inner, 0.0f, 1.0f },
+                    };
+                    const int N_SEGS = 3;
 
-                if (escaped) {
-                    /* Binary search for max safe |ω| (8 iterations → 1/256 precision) */
-                    float w_lo = 0.0f, w_hi = fabsf(cur_w);
-                    float w_sign = (cur_w >= 0.0f) ? 1.0f : -1.0f;
-                    for (int bs = 0; bs < 8; bs++) {
-                        float w_mid = (w_lo + w_hi) * 0.5f;
-                        float test_rot = ship_rad + w_sign * w_mid * dt_tick;
-                        float tc = cosf(test_rot), ts = sinf(test_rot);
-                        bool ok = true;
-                        for (int vi = 0; vi < N && ok; vi++) {
-                            float lhx2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->hull_vertices[vi].x));
-                            float lhy2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->hull_vertices[vi].y));
-                            float wx3 = sxc + lhx2 * tc - lhy2 * ts;
-                            float wy3 = syc + lhx2 * ts + lhy2 * tc;
-                            float plx2, ply2;
-                            dock_world_to_local(sy, wx3, wy3, &plx2, &ply2);
-                            if (plx2 < bx_lo || plx2 > bx_hi || ply2 < by_lo || ply2 > by_hi)
-                                ok = false;
+                    /* Pre-compute per-vertex polar coords relative to ship center
+                     * in dock-local space. */
+                    float vR[64], vAlpha[64];
+                    for (int vi = 0; vi < N; vi++) {
+                        float vdx = hdx[vi] - lx, vdy = hdy[vi] - ly;
+                        vR[vi] = sqrtf(vdx * vdx + vdy * vdy);
+                        vAlpha[vi] = atan2f(vdy, vdx);
+                    }
+
+                    /* Current ship rotation in dock-local frame.
+                     * ship_rad is in world; subtract dock rotation to get dock-local. */
+                    float dock_rad = sy->rotation * (float)M_PI / 180.0f;
+                    float local_rot_base = ship_rad - dock_rad;
+
+                    /* Find earliest TOI across all vertices × all wall segments.
+                     *
+                     * For each vertex, its dock-local position at fractional time t ∈ [0,1]:
+                     *   θ(t) = local_rot_base + dtheta·t   (but vertex angle is baked into vAlpha)
+                     *   Vx(t) = lx + R·cos(vAlpha + dtheta·t)
+                     *   Vy(t) = ly + R·sin(vAlpha + dtheta·t)
+                     *
+                     * For axis-aligned wall segments, intersection reduces to:
+                     *   Vertical wall (x = wx): cos(vAlpha + dtheta·t) = (wx - lx) / R
+                     *   Horizontal wall (y = wy): sin(vAlpha + dtheta·t) = (wy - ly) / R
+                     * These have closed-form acos/asin solutions. */
+
+                    float best_t = 2.0f;  /* >1 means no hit */
+                    float best_nx = 0.0f, best_ny = 0.0f;
+
+                    for (int vi = 0; vi < N; vi++) {
+                        if (vR[vi] < 0.5f) continue;  /* vertex at center, can't reach wall */
+
+                        for (int si = 0; si < N_SEGS; si++) {
+                            float wnx = segs[si].nx, wny = segs[si].ny;
+
+                            if (fabsf(wnx) > 0.5f) {
+                                /* Vertical wall: x = segs[si].x0 */
+                                float wx = segs[si].x0;
+                                float y_lo = fminf(segs[si].y0, segs[si].y1);
+                                float y_hi = fmaxf(segs[si].y0, segs[si].y1);
+
+                                /* cos(vAlpha + dtheta·t) = (wx - lx) / R */
+                                float cosval = (wx - lx) / vR[vi];
+                                if (cosval < -1.0f || cosval > 1.0f) continue;
+
+                                float target_angle = acosf(cosval);
+                                /* Two solution branches: +(target) and -(target) */
+                                float solutions[2] = { target_angle, -target_angle };
+
+                                for (int sb = 0; sb < 2; sb++) {
+                                    /* Solve: vAlpha[vi] + dtheta·t ≡ solutions[sb] (mod 2π)
+                                     * t = (solutions[sb] - vAlpha[vi] + 2πk) / dtheta */
+                                    float base_angle = solutions[sb] - vAlpha[vi];
+
+                                    /* Try multiple wraps to find t ∈ (0, 1] */
+                                    for (int k = -2; k <= 2; k++) {
+                                        float angle = base_angle + (float)k * 2.0f * (float)M_PI;
+                                        float t = angle / dtheta;
+                                        if (t <= 1e-4f || t > 1.0f) continue;
+                                        if (t >= best_t) continue;
+
+                                        /* Check y is within segment bounds */
+                                        float vy_at_t = ly + vR[vi] * sinf(vAlpha[vi] + dtheta * t);
+                                        if (vy_at_t < y_lo || vy_at_t > y_hi) continue;
+
+                                        best_t = t;
+                                        best_nx = wnx;
+                                        best_ny = wny;
+                                    }
+                                }
+                            } else {
+                                /* Horizontal wall: y = segs[si].y0 */
+                                float wy = segs[si].y0;
+                                float x_lo = fminf(segs[si].x0, segs[si].x1);
+                                float x_hi = fmaxf(segs[si].x0, segs[si].x1);
+
+                                /* sin(vAlpha + dtheta·t) = (wy - ly) / R */
+                                float sinval = (wy - ly) / vR[vi];
+                                if (sinval < -1.0f || sinval > 1.0f) continue;
+
+                                float target_angle = asinf(sinval);
+                                /* Two solution branches: target and π - target */
+                                float solutions[2] = { target_angle, (float)M_PI - target_angle };
+
+                                for (int sb = 0; sb < 2; sb++) {
+                                    float base_angle = solutions[sb] - vAlpha[vi];
+
+                                    for (int k = -2; k <= 2; k++) {
+                                        float angle = base_angle + (float)k * 2.0f * (float)M_PI;
+                                        float t = angle / dtheta;
+                                        if (t <= 1e-4f || t > 1.0f) continue;
+                                        if (t >= best_t) continue;
+
+                                        /* Check x is within segment bounds */
+                                        float vx_at_t = lx + vR[vi] * cosf(vAlpha[vi] + dtheta * t);
+                                        if (vx_at_t < x_lo || vx_at_t > x_hi) continue;
+
+                                        best_t = t;
+                                        best_nx = wnx;
+                                        best_ny = wny;
+                                    }
+                                }
+                            }
                         }
-                        if (ok) w_lo = w_mid; else w_hi = w_mid;
                     }
-                    cur_w = w_sign * w_lo;
-                }
 
-                /* Also hard-clamp any hull vertex that's CURRENTLY outside
-                 * (can happen if solver iterations weren't enough).
-                 * Push ship center so the worst offender is back inside. */
-                float worst_esc = 0.0f;
-                float push_nx = 0.0f, push_ny = 0.0f;
-                for (int vi = 0; vi < N; vi++) {
-                    float vx2 = hdx[vi], vy2 = hdy[vi]; /* already dock-local */
-                    float esc;
-                    if (vx2 < bx_lo && (esc = bx_lo - vx2) > worst_esc) {
-                        worst_esc = esc; push_nx = 1.0f; push_ny = 0.0f;
-                    }
-                    if (vx2 > bx_hi && (esc = vx2 - bx_hi) > worst_esc) {
-                        worst_esc = esc; push_nx = -1.0f; push_ny = 0.0f;
-                    }
-                    if (vy2 < by_lo && (esc = by_lo - vy2) > worst_esc) {
-                        worst_esc = esc; push_nx = 0.0f; push_ny = 1.0f;
-                    }
-                    if (vy2 > by_hi && (esc = vy2 - by_hi) > worst_esc) {
-                        worst_esc = esc; push_nx = 0.0f; push_ny = -1.0f;
-                    }
-                }
-                if (worst_esc > 0.0f) {
-                    lx += push_nx * worst_esc;
-                    ly += push_ny * worst_esc;
-                    float cw_x, cw_y;
-                    dock_local_to_world(sy, lx, ly, &cw_x, &cw_y);
-                    ship->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cw_x));
-                    ship->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cw_y));
-                    /* Kill velocity component into the wall */
-                    float vn_esc = cur_vx * (-push_nx) + cur_vy * (-push_ny);
-                    if (vn_esc > 0.0f) {
-                        cur_vx -= vn_esc * (-push_nx);
-                        cur_vy -= vn_esc * (-push_ny);
+                    if (best_t <= 1.0f) {
+                        /* Rewind angular velocity to just before impact */
+                        float safe_t = fmaxf(best_t - 0.02f, 0.0f);
+                        float safe_dtheta = dtheta * safe_t;
+                        cur_w = safe_dtheta / dt_tick;
+
+                        /* Apply angular bounce: reflect ω with restitution.
+                         * For a vertex hitting a wall, the angular impulse is:
+                         *   Δω = -(1+e) · (ω·r_perp · n̂) / (I/m + r_perp²)
+                         * where r_perp is the lever arm component perpendicular
+                         * to the wall normal.  Simplified: just reverse and damp. */
+                        cur_w *= -RESTITUTION;
+
+                        /* Also push the ship center slightly away from the wall
+                         * to prevent resting vertex from just touching the edge. */
+                        lx += best_nx * 1.5f;
+                        ly += best_ny * 1.5f;
+                        for (int vi2 = 0; vi2 < N; vi2++) {
+                            hdx[vi2] += best_nx * 1.5f;
+                            hdy[vi2] += best_ny * 1.5f;
+                        }
+                        float cw_x, cw_y;
+                        dock_local_to_world(sy, lx, ly, &cw_x, &cw_y);
+                        ship->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cw_x));
+                        ship->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cw_y));
                     }
                 }
             }
