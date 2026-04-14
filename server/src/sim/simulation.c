@@ -1055,6 +1055,9 @@ static bool check_polygon_collision(const struct Ship* ship1, const struct Ship*
     return true;
 }
 
+/* Forward declaration */
+static bool point_in_polygon(Vec2Q16 point, const struct Ship* ship);
+
 /* Ship-ship multipoint rigid-body collision response.
  *
  * Contact manifold: all vertices of each ship that lie inside the other ship's
