@@ -811,6 +811,111 @@ static void handle_ship_dock_collisions(void) {
                 ship->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_wy));
             }
 
+            /* ── Post-solve containment guard ──────────────────────────────
+             *
+             * Prevents rotational tunnelling: if the ship is spinning fast
+             * enough that hull vertices would sweep past the 50 px dock
+             * walls in one tick, the impulse solver can't keep up.
+             *
+             * Strategy:
+             * 1. Predict each hull vertex position NEXT tick using cur_w.
+             * 2. If any predicted vertex escapes the dock interior AABB,
+             *    binary-search for the maximum safe angular velocity.
+             * 3. Hard-clamp cur_w to that safe value.
+             *
+             * The dock interior in local space is the open U:
+             *   x ∈ [-inner_arm, +inner_arm],  y ∈ [back_inner, +DOCK_HH]
+             * where inner_arm = DOCK_HW - DOCK_ARM_T = 120,
+             *       back_inner = -(DOCK_HH - DOCK_BACK_T) = -395.           */
+            {
+                const float inner_x = DOCK_HW - DOCK_ARM_T;  /* 120 px */
+                const float inner_y_min = -(DOCK_HH - DOCK_BACK_T); /* -395 px */
+                const float inner_y_max = DOCK_HH;            /* +445 px */
+                /* Shrink bounds by a safety margin so vertices stay clear */
+                const float MARGIN = 2.0f;
+                const float bx_lo = -(inner_x - MARGIN);
+                const float bx_hi =  (inner_x - MARGIN);
+                const float by_lo = inner_y_min + MARGIN;
+                const float by_hi = inner_y_max - MARGIN;
+
+                float dt_tick = 1.0f / (float)TICK_RATE_HZ;
+
+                /* Check: would ANY hull vertex leave the interior at cur_w? */
+                bool escaped = false;
+                float predicted_rot = ship_rad + cur_w * dt_tick;
+                float pc = cosf(predicted_rot), ps = sinf(predicted_rot);
+                for (int vi = 0; vi < N && !escaped; vi++) {
+                    float lhx = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->hull_vertices[vi].x));
+                    float lhy = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->hull_vertices[vi].y));
+                    float wx2 = sxc + lhx * pc - lhy * ps;
+                    float wy2 = syc + lhx * ps + lhy * pc;
+                    float plx, ply;
+                    dock_world_to_local(sy, wx2, wy2, &plx, &ply);
+                    if (plx < bx_lo || plx > bx_hi || ply < by_lo || ply > by_hi)
+                        escaped = true;
+                }
+
+                if (escaped) {
+                    /* Binary search for max safe |ω| (8 iterations → 1/256 precision) */
+                    float w_lo = 0.0f, w_hi = fabsf(cur_w);
+                    float w_sign = (cur_w >= 0.0f) ? 1.0f : -1.0f;
+                    for (int bs = 0; bs < 8; bs++) {
+                        float w_mid = (w_lo + w_hi) * 0.5f;
+                        float test_rot = ship_rad + w_sign * w_mid * dt_tick;
+                        float tc = cosf(test_rot), ts = sinf(test_rot);
+                        bool ok = true;
+                        for (int vi = 0; vi < N && ok; vi++) {
+                            float lhx2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->hull_vertices[vi].x));
+                            float lhy2 = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->hull_vertices[vi].y));
+                            float wx3 = sxc + lhx2 * tc - lhy2 * ts;
+                            float wy3 = syc + lhx2 * ts + lhy2 * tc;
+                            float plx2, ply2;
+                            dock_world_to_local(sy, wx3, wy3, &plx2, &ply2);
+                            if (plx2 < bx_lo || plx2 > bx_hi || ply2 < by_lo || ply2 > by_hi)
+                                ok = false;
+                        }
+                        if (ok) w_lo = w_mid; else w_hi = w_mid;
+                    }
+                    cur_w = w_sign * w_lo;
+                }
+
+                /* Also hard-clamp any hull vertex that's CURRENTLY outside
+                 * (can happen if solver iterations weren't enough).
+                 * Push ship center so the worst offender is back inside. */
+                float worst_esc = 0.0f;
+                float push_nx = 0.0f, push_ny = 0.0f;
+                for (int vi = 0; vi < N; vi++) {
+                    float vx2 = hdx[vi], vy2 = hdy[vi]; /* already dock-local */
+                    float esc;
+                    if (vx2 < bx_lo && (esc = bx_lo - vx2) > worst_esc) {
+                        worst_esc = esc; push_nx = 1.0f; push_ny = 0.0f;
+                    }
+                    if (vx2 > bx_hi && (esc = vx2 - bx_hi) > worst_esc) {
+                        worst_esc = esc; push_nx = -1.0f; push_ny = 0.0f;
+                    }
+                    if (vy2 < by_lo && (esc = by_lo - vy2) > worst_esc) {
+                        worst_esc = esc; push_nx = 0.0f; push_ny = 1.0f;
+                    }
+                    if (vy2 > by_hi && (esc = vy2 - by_hi) > worst_esc) {
+                        worst_esc = esc; push_nx = 0.0f; push_ny = -1.0f;
+                    }
+                }
+                if (worst_esc > 0.0f) {
+                    lx += push_nx * worst_esc;
+                    ly += push_ny * worst_esc;
+                    float cw_x, cw_y;
+                    dock_local_to_world(sy, lx, ly, &cw_x, &cw_y);
+                    ship->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cw_x));
+                    ship->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(cw_y));
+                    /* Kill velocity component into the wall */
+                    float vn_esc = cur_vx * (-push_nx) + cur_vy * (-push_ny);
+                    if (vn_esc > 0.0f) {
+                        cur_vx -= vn_esc * (-push_nx);
+                        cur_vy -= vn_esc * (-push_ny);
+                    }
+                }
+            }
+
             /* Write back velocity: apply the total velocity delta to the ship.
              * cur_v* - initial v* = accumulated effect of all iterations. */
             float dv_x = cur_vx - vx_dl, dv_y = cur_vy - vy_dl, domega = cur_w - omega;
