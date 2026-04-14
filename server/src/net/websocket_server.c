@@ -885,6 +885,7 @@ static void handle_ship_dock_collisions(void) {
 
                     float best_t = 2.0f;  /* >1 means no hit */
                     float best_nx = 0.0f, best_ny = 0.0f;
+                    int best_vi = -1;  /* which vertex hit */
 
                     for (int vi = 0; vi < N; vi++) {
                         if (vR[vi] < 0.5f) continue;  /* vertex at center, can't reach wall */
@@ -925,6 +926,7 @@ static void handle_ship_dock_collisions(void) {
                                         best_t = t;
                                         best_nx = wnx;
                                         best_ny = wny;
+                                        best_vi = vi;
                                     }
                                 }
                             } else {
@@ -957,27 +959,75 @@ static void handle_ship_dock_collisions(void) {
                                         best_t = t;
                                         best_nx = wnx;
                                         best_ny = wny;
+                                        best_vi = vi;
                                     }
                                 }
                             }
                         }
                     }
 
-                    if (best_t <= 1.0f) {
+                    if (best_t <= 1.0f && best_vi >= 0) {
                         /* Rewind angular velocity to just before impact */
                         float safe_t = fmaxf(best_t - 0.02f, 0.0f);
                         float safe_dtheta = dtheta * safe_t;
                         cur_w = safe_dtheta / dt_tick;
 
-                        /* Apply angular bounce: reflect ω with restitution.
-                         * For a vertex hitting a wall, the angular impulse is:
-                         *   Δω = -(1+e) · (ω·r_perp · n̂) / (I/m + r_perp²)
-                         * where r_perp is the lever arm component perpendicular
-                         * to the wall normal.  Simplified: just reverse and damp. */
-                        cur_w *= -RESTITUTION;
+                        /* ── Proper rigid-body impulse at the CCD contact ──
+                         *
+                         * Compute the contact point (vertex position at TOI),
+                         * lever arm, and contact velocity.  Then apply the same
+                         * normal + friction impulse formulas used in the SAT
+                         * solver, so rotation is damped physically. */
 
-                        /* Also push the ship center slightly away from the wall
-                         * to prevent resting vertex from just touching the edge. */
+                        /* Contact point: vertex position at safe_t */
+                        float cp_x = lx + vR[best_vi] * cosf(vAlpha[best_vi] + dtheta * safe_t);
+                        float cp_y = ly + vR[best_vi] * sinf(vAlpha[best_vi] + dtheta * safe_t);
+
+                        /* Lever arm from ship center to contact */
+                        float rx = cp_x - lx, ry = cp_y - ly;
+
+                        /* Contact velocity: v_cm + ω × r */
+                        float vc_x = cur_vx + cur_w * (-ry);
+                        float vc_y = cur_vy + cur_w * ( rx);
+                        float vc_n = vc_x * best_nx + vc_y * best_ny;
+
+                        /* ── Normal impulse ── */
+                        float rxn = rx * best_ny - ry * best_nx;
+                        float denom_n = inv_mass + rxn * rxn * inv_inertia;
+                        if (denom_n > 1e-10f && vc_n < 0.0f) {
+                            float Jn = -(1.0f + RESTITUTION) * vc_n / denom_n;
+                            if (Jn < 0.0f) Jn = 0.0f;  /* only push, never pull */
+
+                            cur_vx += Jn * best_nx * inv_mass;
+                            cur_vy += Jn * best_ny * inv_mass;
+                            cur_w  += rxn * Jn * inv_inertia;
+
+                            /* ── Friction impulse (Coulomb) ── */
+                            /* Re-sample velocity after normal impulse */
+                            float vc_x2 = cur_vx + cur_w * (-ry);
+                            float vc_y2 = cur_vy + cur_w * ( rx);
+                            float vc_n2 = vc_x2 * best_nx + vc_y2 * best_ny;
+                            float vt_x = vc_x2 - vc_n2 * best_nx;
+                            float vt_y = vc_y2 - vc_n2 * best_ny;
+                            float vt_len = sqrtf(vt_x * vt_x + vt_y * vt_y);
+                            if (vt_len > 0.001f) {
+                                float tx = vt_x / vt_len, ty = vt_y / vt_len;
+                                float rxt = rx * ty - ry * tx;
+                                float denom_t = inv_mass + rxt * rxt * inv_inertia;
+                                if (denom_t > 1e-10f) {
+                                    float Jf = -vt_len / denom_t;
+                                    float Jf_max = WALL_FRICTION * Jn;
+                                    if (Jf < -Jf_max) Jf = -Jf_max;
+                                    if (Jf >  Jf_max) Jf =  Jf_max;
+                                    cur_vx += Jf * tx * inv_mass;
+                                    cur_vy += Jf * ty * inv_mass;
+                                    cur_w  += rxt * Jf * inv_inertia;
+                                }
+                            }
+                        }
+
+                        /* Push the ship center slightly away from the wall
+                         * to prevent resting vertex from sitting on the edge. */
                         lx += best_nx * 1.5f;
                         ly += best_ny * 1.5f;
                         for (int vi2 = 0; vi2 < N; vi2++) {
