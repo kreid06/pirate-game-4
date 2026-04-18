@@ -14394,7 +14394,7 @@ void websocket_server_tick(float dt) {
             {
                 SimpleShip* ws_ship = find_ship(ship->id);
                 if (ws_ship && ws_ship->reverse_thrust) {
-                    const float REVERSE_SPEED    = BASE_WIND_SPEED * 0.15f;
+                    const float REVERSE_SPEED    = BASE_WIND_SPEED * 0.0375f;
                     const float REVERSE_ACCEL    = 0.8f; /* time-constant in seconds */
                     float rev_blen = 1.0f - expf(-dt / REVERSE_ACCEL);
                     float rev_vx = -cosf(ship_rot) * REVERSE_SPEED;
