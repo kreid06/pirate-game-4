@@ -545,6 +545,69 @@ void sim_update_projectiles(struct Sim* sim, q16_t dt) {
     }
 }
 
+/* ── Shared rigid-body impulse response: ship vs infinite-mass island ─────
+ * Called after the ship has already been position-corrected (pushed out).
+ * push_nx/push_ny: outward contact normal (unit vector).
+ * cp_wx/cp_wy:     contact point in server world units.               */
+static void apply_island_impulse(struct Ship *ship,
+                                  float push_nx, float push_ny,
+                                  float cp_wx,   float cp_wy)
+{
+    static const float restitution  = 0.15f;
+    static const float isl_friction = 0.75f;
+
+    float vx    = Q16_TO_FLOAT(ship->velocity.x);
+    float vy    = Q16_TO_FLOAT(ship->velocity.y);
+    float omega = Q16_TO_FLOAT(ship->angular_velocity);
+    float rx    = cp_wx - Q16_TO_FLOAT(ship->position.x);
+    float ry    = cp_wy - Q16_TO_FLOAT(ship->position.y);
+    float vc_x  = vx + omega * (-ry);
+    float vc_y  = vy + omega * ( rx);
+    float vc_n  = vc_x * push_nx + vc_y * push_ny;
+    if (vc_n >= 0.0f) return;  /* already separating */
+
+    float mass_f    = Q16_TO_FLOAT(ship->mass);
+    float inertia_f = Q16_TO_FLOAT(ship->moment_inertia);
+    float inv_m = (mass_f    > 0.0f) ? 1.0f / mass_f    : 0.0f;
+    float inv_I = (inertia_f > 0.0f) ? 1.0f / inertia_f : 0.0f;
+
+    /* Normal impulse */
+    float rxn   = rx * push_ny - ry * push_nx;
+    float denom = inv_m + rxn * rxn * inv_I;
+    if (denom <= 1e-10f) return;
+
+    float Jn = -(1.0f + restitution) * vc_n / denom;
+    if (Jn < 0.0f) Jn = 0.0f;
+    vx    += Jn * push_nx * inv_m;
+    vy    += Jn * push_ny * inv_m;
+    omega += rxn * Jn * inv_I;
+
+    /* Friction impulse (Coulomb) */
+    float vc_x2  = vx + omega * (-ry);
+    float vc_y2  = vy + omega * ( rx);
+    float vc_n2  = vc_x2 * push_nx + vc_y2 * push_ny;
+    float vt_x   = vc_x2 - vc_n2 * push_nx;
+    float vt_y   = vc_y2 - vc_n2 * push_ny;
+    float vt_len = sqrtf(vt_x * vt_x + vt_y * vt_y);
+    if (vt_len > 0.001f) {
+        float tx = vt_x / vt_len, ty = vt_y / vt_len;
+        float rxt     = rx * ty - ry * tx;
+        float denom_t = inv_m + rxt * rxt * inv_I;
+        if (denom_t > 1e-10f) {
+            float Jf     = -vt_len / denom_t;
+            float Jf_max =  isl_friction * Jn;
+            if (Jf < -Jf_max) Jf = -Jf_max;
+            if (Jf >  Jf_max) Jf =  Jf_max;
+            vx    += Jf * tx * inv_m;
+            vy    += Jf * ty * inv_m;
+            omega += rxt * Jf * inv_I;
+        }
+    }
+    ship->velocity.x       = Q16_FROM_FLOAT(vx);
+    ship->velocity.y       = Q16_FROM_FLOAT(vy);
+    ship->angular_velocity = Q16_FROM_FLOAT(omega);
+}
+
 static void handle_island_collisions(struct Sim *sim) {
     for (int ii = 0; ii < ISLAND_COUNT; ii++) {
         const IslandDef *isl = &ISLAND_PRESETS[ii];
@@ -597,59 +660,7 @@ static void handle_island_collisions(struct Sim *sim) {
                 ship->position.x += Q16_FROM_FLOAT(push_nx * max_pen);
                 ship->position.y += Q16_FROM_FLOAT(push_ny * max_pen);
 
-                /* Rigid-body impulse with lever arm (island = infinite mass) */
-                float vx    = Q16_TO_FLOAT(ship->velocity.x);
-                float vy    = Q16_TO_FLOAT(ship->velocity.y);
-                float omega = Q16_TO_FLOAT(ship->angular_velocity);
-                float rx    = cp_wx - Q16_TO_FLOAT(ship->position.x);
-                float ry    = cp_wy - Q16_TO_FLOAT(ship->position.y);
-                float vc_x  = vx + omega * (-ry);
-                float vc_y  = vy + omega * ( rx);
-                float vc_n  = vc_x * push_nx + vc_y * push_ny;
-                if (vc_n < 0.0f) {
-                    const float restitution = 0.15f;
-                    const float isl_friction = 0.75f;
-                    float mass_f    = Q16_TO_FLOAT(ship->mass);
-                    float inertia_f = Q16_TO_FLOAT(ship->moment_inertia);
-                    float inv_m = (mass_f    > 0.0f) ? 1.0f / mass_f    : 0.0f;
-                    float inv_I = (inertia_f > 0.0f) ? 1.0f / inertia_f : 0.0f;
-
-                    /* Normal impulse */
-                    float rxn   = rx * push_ny - ry * push_nx;
-                    float denom = inv_m + rxn * rxn * inv_I;
-                    if (denom > 1e-10f) {
-                        float Jn = -(1.0f + restitution) * vc_n / denom;
-                        if (Jn < 0.0f) Jn = 0.0f;
-                        vx    += Jn * push_nx * inv_m;
-                        vy    += Jn * push_ny * inv_m;
-                        omega += rxn * Jn * inv_I;
-
-                        /* Friction impulse (Coulomb) */
-                        float vc_x2 = vx + omega * (-ry);
-                        float vc_y2 = vy + omega * ( rx);
-                        float vc_n2 = vc_x2 * push_nx + vc_y2 * push_ny;
-                        float vt_x  = vc_x2 - vc_n2 * push_nx;
-                        float vt_y  = vc_y2 - vc_n2 * push_ny;
-                        float vt_len = sqrtf(vt_x * vt_x + vt_y * vt_y);
-                        if (vt_len > 0.001f) {
-                            float tx = vt_x / vt_len, ty = vt_y / vt_len;
-                            float rxt    = rx * ty - ry * tx;
-                            float denom_t = inv_m + rxt * rxt * inv_I;
-                            if (denom_t > 1e-10f) {
-                                float Jf = -vt_len / denom_t;
-                                float Jf_max = isl_friction * Jn;
-                                if (Jf < -Jf_max) Jf = -Jf_max;
-                                if (Jf >  Jf_max) Jf =  Jf_max;
-                                vx    += Jf * tx * inv_m;
-                                vy    += Jf * ty * inv_m;
-                                omega += rxt * Jf * inv_I;
-                            }
-                        }
-                    }
-                    ship->velocity.x = Q16_FROM_FLOAT(vx);
-                    ship->velocity.y = Q16_FROM_FLOAT(vy);
-                    ship->angular_velocity = Q16_FROM_FLOAT(omega);
-                }
+                apply_island_impulse(ship, push_nx, push_ny, cp_wx, cp_wy);
             }
             continue;  /* done with this polygon island */
         }
@@ -717,59 +728,7 @@ static void handle_island_collisions(struct Sim *sim) {
             ship->position.x += Q16_FROM_FLOAT(push_nx * max_penetration);
             ship->position.y += Q16_FROM_FLOAT(push_ny * max_penetration);
 
-            /* Rigid-body impulse with lever arm (island = infinite mass) */
-            float vx    = Q16_TO_FLOAT(ship->velocity.x);
-            float vy    = Q16_TO_FLOAT(ship->velocity.y);
-            float omega = Q16_TO_FLOAT(ship->angular_velocity);
-            float rx    = cp_wx - Q16_TO_FLOAT(ship->position.x);
-            float ry    = cp_wy - Q16_TO_FLOAT(ship->position.y);
-            float vc_x  = vx + omega * (-ry);
-            float vc_y  = vy + omega * ( rx);
-            float vc_n  = vc_x * push_nx + vc_y * push_ny;
-            if (vc_n < 0.0f) {
-                const float restitution = 0.15f;
-                const float isl_friction = 0.75f;
-                float mass_f    = Q16_TO_FLOAT(ship->mass);
-                float inertia_f = Q16_TO_FLOAT(ship->moment_inertia);
-                float inv_m = (mass_f    > 0.0f) ? 1.0f / mass_f    : 0.0f;
-                float inv_I = (inertia_f > 0.0f) ? 1.0f / inertia_f : 0.0f;
-
-                /* Normal impulse */
-                float rxn   = rx * push_ny - ry * push_nx;
-                float denom = inv_m + rxn * rxn * inv_I;
-                if (denom > 1e-10f) {
-                    float Jn = -(1.0f + restitution) * vc_n / denom;
-                    if (Jn < 0.0f) Jn = 0.0f;
-                    vx    += Jn * push_nx * inv_m;
-                    vy    += Jn * push_ny * inv_m;
-                    omega += rxn * Jn * inv_I;
-
-                    /* Friction impulse (Coulomb) */
-                    float vc_x2 = vx + omega * (-ry);
-                    float vc_y2 = vy + omega * ( rx);
-                    float vc_n2 = vc_x2 * push_nx + vc_y2 * push_ny;
-                    float vt_x  = vc_x2 - vc_n2 * push_nx;
-                    float vt_y  = vc_y2 - vc_n2 * push_ny;
-                    float vt_len = sqrtf(vt_x * vt_x + vt_y * vt_y);
-                    if (vt_len > 0.001f) {
-                        float tx = vt_x / vt_len, ty = vt_y / vt_len;
-                        float rxt    = rx * ty - ry * tx;
-                        float denom_t = inv_m + rxt * rxt * inv_I;
-                        if (denom_t > 1e-10f) {
-                            float Jf = -vt_len / denom_t;
-                            float Jf_max = isl_friction * Jn;
-                            if (Jf < -Jf_max) Jf = -Jf_max;
-                            if (Jf >  Jf_max) Jf =  Jf_max;
-                            vx    += Jf * tx * inv_m;
-                            vy    += Jf * ty * inv_m;
-                            omega += rxt * Jf * inv_I;
-                        }
-                    }
-                }
-                ship->velocity.x = Q16_FROM_FLOAT(vx);
-                ship->velocity.y = Q16_FROM_FLOAT(vy);
-                ship->angular_velocity = Q16_FROM_FLOAT(omega);
-            }
+            apply_island_impulse(ship, push_nx, push_ny, cp_wx, cp_wy);
         }
     }
 }
@@ -2963,11 +2922,11 @@ void handle_player_ship_collisions(struct Sim* sim) {
                     /* Low kinetic friction — player slides smoothly along hull;
                      * increase (max ~1.0) to make them stick/slow down more. */
                     static const float FRICTION      = 0.12f;
-                    /* Baumgarte velocity bias — computed from the pre-impulse
-                     * penetration to push the player away from the hull surface. */
-                    float pnx2 = Q16_TO_FLOAT(normal.x), pny2 = Q16_TO_FLOAT(normal.y);
-                    float d_n2 = (Q16_TO_FLOAT(player->position.x) - Q16_TO_FLOAT(closest_hull_point.x)) * pnx2
-                               + (Q16_TO_FLOAT(player->position.y) - Q16_TO_FLOAT(closest_hull_point.y)) * pny2;
+                    /* Baumgarte velocity bias: post-positional-correction distance
+                     * is ~half the original penetration (β=0.5 was applied above),
+                     * so this fires whenever the player is meaningfully inside the hull. */
+                    float d_n2   = (Q16_TO_FLOAT(player->position.x) - Q16_TO_FLOAT(closest_hull_point.x)) * nx
+                                 + (Q16_TO_FLOAT(player->position.y) - Q16_TO_FLOAT(closest_hull_point.y)) * ny;
                     float pen_vb = Q16_TO_FLOAT(player->radius) - d_n2;
                     float bias_ps = (0.4f * 30.0f) * fmaxf(pen_vb - 0.01f, 0.0f);
 

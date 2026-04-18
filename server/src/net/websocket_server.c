@@ -14408,16 +14408,11 @@ void websocket_server_tick(float dt) {
             float rudder_factor = ship->rudder_angle / 50.0f; // -1 to +1
             float turn_rate = rudder_factor * MAX_TURN_RATE * speed_factor;
             
-            // Apply angular velocity
+            // Set angular velocity — sim_step / update_ship_physics will integrate
+            // rotation and position each tick.  Do NOT integrate here; doing so
+            // would double-count every tick (websocket block + sim_step both advance
+            // position/rotation by v*dt, shipping the ship 2× the intended distance).
             ship->angular_velocity = Q16_FROM_FLOAT(turn_rate);
-            
-            // Apply rotation from angular velocity
-            float new_rotation = ship_rot + (turn_rate * dt);
-            ship->rotation = Q16_FROM_FLOAT(new_rotation);
-            
-            // Apply velocity to position
-            ship->position.x += Q16_FROM_FLOAT(vx * dt);
-            ship->position.y += Q16_FROM_FLOAT(vy * dt);
         }
     }
 
