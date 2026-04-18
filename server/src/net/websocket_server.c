@@ -931,6 +931,78 @@ static void handle_ship_dock_collisions(void) {
                 }
             }
 
+            /* ── Dock angular velocity cap ────────────────────────────────
+             *
+             * The friction impulse in the N_ITER loop only resists rotation
+             * when one or more hull vertices are actively touching a wall.
+             * When the ship is centred in the dock it can freely spin up via
+             * rudder input until a vertex eventually hits a wall.  By then the
+             * angular momentum is so large that even the rotational CCD (below)
+             * has to deliver a harsh bounce impulse.
+             *
+             * Instead, continuously limit cur_w to the angular velocity at
+             * which the fastest-moving hull vertex would reach the nearest
+             * inner wall within one tick:
+             *
+             *   For vertex i at distance R_i from the ship centre:
+             *     dx_i(ω) = R_i * |ω| * dt   (arc length, linear approx)
+             *
+             *   Clearance to each inner wall face:
+             *     left_clear  = hdx[i] - (-ai)  = hdx[i] + ai
+             *     right_clear = ai - hdx[i]
+             *     back_clear  = hdy[i] - (-bi)  = hdy[i] + bi
+             *
+             *   If dx_i(ω) > min_clearance_i → vertex would hit.
+             *   ω_max_i = min_clearance_i / (R_i * dt)
+             *
+             *   ω_max = min over all vertices of ω_max_i, with a floor of
+             *   DOCK_OMEGA_FLOOR so the ship can still make slow progress.  */
+            {
+                static const float DOCK_OMEGA_FLOOR = 0.04f; /* rad/s min */
+                static const float DOCK_ANGULAR_EXTRA_DRAG = 0.80f; /* extra drag multiplier inside dock */
+                float dt_tick = 1.0f / (float)TICK_RATE_HZ;
+                float ai_cap  = DOCK_HW - DOCK_ARM_T;   /* 120 px inner half-width */
+                float bi_cap  = DOCK_HH - DOCK_BACK_T;  /* 395 px inner half-height */
+
+                float omega_max = 1e10f;
+
+                for (int vi = 0; vi < N; vi++) {
+                    float vx_l = hdx[vi], vy_l = hdy[vi];
+
+                    /* Distance from ship centre to this vertex */
+                    float dvx = vx_l - lx, dvy = vy_l - ly;
+                    float R = sqrtf(dvx * dvx + dvy * dvy);
+                    if (R < 0.5f) continue;      /* vertex too close to pivot */
+
+                    /* Clearance to each inner wall face (negative = already through) */
+                    float cl_left  = vx_l - (-ai_cap);   /* to left arm inner  */
+                    float cl_right = ai_cap  - vx_l;     /* to right arm inner */
+                    float cl_back  = vy_l - (-bi_cap);   /* to back wall inner */
+
+                    /* Only constrain if vertex is actually inside the dock channel */
+                    float min_cl = 1e10f;
+                    if (vx_l > -ai_cap)            min_cl = fminf(min_cl, cl_left);
+                    if (vx_l <  ai_cap)            min_cl = fminf(min_cl, cl_right);
+                    if (vy_l > -bi_cap && fabsf(vx_l) < ai_cap)
+                                                   min_cl = fminf(min_cl, cl_back);
+
+                    if (min_cl < 0.0f) min_cl = 0.0f;   /* already penetrating */
+
+                    /* Max ω so arc < clearance in one tick */
+                    float w_lim = min_cl / (R * dt_tick);
+                    if (w_lim < omega_max) omega_max = w_lim;
+                }
+
+                /* Apply floor */
+                if (omega_max < DOCK_OMEGA_FLOOR) omega_max = DOCK_OMEGA_FLOOR;
+
+                /* Clamp and also apply extra drag so accumulated angular momentum
+                 * bleeds off quickly while inside the dock */
+                cur_w *= DOCK_ANGULAR_EXTRA_DRAG;
+                if (cur_w >  omega_max) cur_w =  omega_max;
+                if (cur_w < -omega_max) cur_w = -omega_max;
+            }
+
             /* Store accumulated impulse into contact cache for next tick */
             {
                 struct ContactEntry* ce_dock = contact_cache_upsert(
