@@ -259,9 +259,9 @@ static void sync_simple_ships_from_simulation(void) {
         // Update mounted players' world positions with new ship transform
         update_mounted_players_on_ship(ships[s].ship_id);
     }
-
-    /* Push non-scaffolded ships out of dock U-walls */
-    handle_ship_dock_collisions();
+    /* NOTE: handle_ship_dock_collisions() is intentionally NOT called here.
+     * It must run AFTER the wind/rudder block in websocket_server_tick so the
+     * dock angular-velocity constraint is not overwritten by the rudder setter. */
 }
 
 __attribute__((unused))
@@ -14420,6 +14420,12 @@ void websocket_server_tick(float dt) {
             ship->position.y += Q16_FROM_FLOAT(vy * dt);
         }
     }
-    
+
+    /* Push non-scaffolded ships out of dock U-walls.
+     * Must run HERE — after the rudder/wind block sets angular_velocity —
+     * so the dock constraint is the last thing to write angular_velocity
+     * before sim_step integrates it into position. */
+    handle_ship_dock_collisions();
+
     // Tick processing complete
 }
