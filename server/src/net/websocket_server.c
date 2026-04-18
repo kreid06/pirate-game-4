@@ -2459,7 +2459,7 @@ static void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketCl
  * Handle rudder control from helm-mounted player
  * Sets target rudder angle - actual angle will gradually adjust in tick
  */
-static void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, bool turning_left, bool turning_right) {
+static void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, bool turning_left, bool turning_right, bool moving_backward) {
     const char* direction = "STRAIGHT";
     float target_angle = 0.0f;
     
@@ -2474,14 +2474,12 @@ static void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocket
         target_angle = 0.0f;    // Center rudder
     }
     
-    // log_info("🚢 Player %u rudder control on ship %u: %s (target: %.1f°)", 
-    //          player->player_id, ship->ship_id, direction, target_angle);
-    
-    // Update simulation ship target rudder angle
+    // Update simulation ship target rudder angle and reverse flag
     {
         struct Ship* _ss = find_sim_ship(ship->ship_id);
         if (_ss) _ss->target_rudder_angle = target_angle;
     }
+    ship->reverse_thrust = moving_backward;
     
     // Send acknowledgment
     char response[256];
@@ -9423,8 +9421,9 @@ int websocket_server_update(struct Sim* sim) {
                                         // Parse turning_left and turning_right
                                         bool turning_left = strstr(payload, "\"turning_left\":true") != NULL;
                                         bool turning_right = strstr(payload, "\"turning_right\":true") != NULL;
+                                        bool moving_backward = strstr(payload, "\"moving_backward\":true") != NULL;
                                         
-                                        handle_ship_rudder_control(player, client, ship, turning_left, turning_right);
+                                        handle_ship_rudder_control(player, client, ship, turning_left, turning_right, moving_backward);
                                     } else {
                                         log_warn("Player %u controlling non-existent ship %u", player->player_id, player->controlling_ship_id);
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
@@ -14387,7 +14386,24 @@ void websocket_server_tick(float dt) {
             
             vx += (target_vx - vx) * blend_factor;
             vy += (target_vy - vy) * blend_factor;
-            
+
+            /* ===== REVERSE THRUST (S key) =====
+             * When the helmsman holds S, override the wind target with a slow
+             * backward velocity — 15% of BASE_WIND_SPEED in the stern direction.
+             * Uses a faster blend (0.8s) so the ship brakes and reverses quickly. */
+            {
+                SimpleShip* ws_ship = find_ship(ship->id);
+                if (ws_ship && ws_ship->reverse_thrust) {
+                    const float REVERSE_SPEED    = BASE_WIND_SPEED * 0.15f;
+                    const float REVERSE_ACCEL    = 0.8f; /* time-constant in seconds */
+                    float rev_blen = 1.0f - expf(-dt / REVERSE_ACCEL);
+                    float rev_vx = -cosf(ship_rot) * REVERSE_SPEED;
+                    float rev_vy = -sinf(ship_rot) * REVERSE_SPEED;
+                    vx += (rev_vx - vx) * rev_blen;
+                    vy += (rev_vy - vy) * rev_blen;
+                }
+            }
+
             ship->velocity.x = Q16_FROM_FLOAT(vx);
             ship->velocity.y = Q16_FROM_FLOAT(vy);
             

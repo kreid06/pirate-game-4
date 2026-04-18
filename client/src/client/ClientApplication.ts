@@ -776,8 +776,8 @@ export class ClientApplication {
       this.inputManager.onShipSailControl = (desiredOpenness) => {
         this.networkManager.sendShipSailControl(desiredOpenness);
       };
-      this.inputManager.onShipRudderControl = (turningLeft, turningRight) => {
-        this.networkManager.sendShipRudderControl(turningLeft, turningRight);
+      this.inputManager.onShipRudderControl = (turningLeft, turningRight, movingBackward) => {
+        this.networkManager.sendShipRudderControl(turningLeft, turningRight, movingBackward);
       };
       this.inputManager.onShipSailAngleControl = (desiredAngle) => {
         this.networkManager.sendShipSailAngleControl(desiredAngle);

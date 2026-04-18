@@ -97,6 +97,9 @@ typedef struct SimpleShip {
     /* Sinking state — entered when hull_health hits 0; ship stays alive for SHIP_SINK_DURATION_MS */
     bool     is_sinking;
     uint32_t sink_start_ms;
+
+    /* Reverse thrust — set when the helmsman holds S; propels the ship slowly backward */
+    bool reverse_thrust;
 } SimpleShip;
 
 // NPC behavior types

@@ -79,7 +79,7 @@ export class InputManager {
   
   // Ship control callbacks (when mounted to helm)
   public onShipSailControl: ((desiredOpenness: number) => void) | null = null;
-  public onShipRudderControl: ((turningLeft: boolean, turningRight: boolean) => void) | null = null;
+  public onShipRudderControl: ((turningLeft: boolean, turningRight: boolean, movingBackward: boolean) => void) | null = null;
   public onShipSailAngleControl: ((desiredAngle: number) => void) | null = null;
   
   // Cannon control callbacks
@@ -168,7 +168,7 @@ export class InputManager {
   }
   private currentSailOpenness: number = 100; // Start at 100% (full sails)
   private currentSailAngle: number = 0; // Start at 0 degrees
-  private lastRudderState: { left: boolean; right: boolean } = { left: false, right: false };
+  private lastRudderState: { left: boolean; right: boolean; backward: boolean } = { left: false, right: false, backward: false };
   private lastSailOpenness: number = 100;
   private lastSailAngle: number = 0;
   private lastSailOpennessChangeTime: number = 0; // Track last sail openness change
@@ -461,7 +461,7 @@ export class InputManager {
         this.lastSailOpenness    = seeded;
         this.currentSailAngle = 0;
         this.lastSailAngle = 0;
-        this.lastRudderState = { left: false, right: false };
+        this.lastRudderState = { left: false, right: false, backward: false };
         this.lastSailOpennessChangeTime = 0;
         this.lastSailAngleChangeTime = 0;
         this.activeAmmoGroup = 'cannon';
@@ -495,15 +495,18 @@ export class InputManager {
     
     // Rudder control (A/D without shift)
     if (!shiftPressed) {
-      const turningLeft = this.isActionActive('move_left');   // A key
-      const turningRight = this.isActionActive('move_right'); // D key
+      const turningLeft = this.isActionActive('move_left');    // A key
+      const turningRight = this.isActionActive('move_right');   // D key
+      const movingBackward = this.isActionActive('move_backward'); // S key — slow reverse
       
-      // Send rudder control if state changed
-      if (turningLeft !== this.lastRudderState.left || turningRight !== this.lastRudderState.right) {
+      // Send rudder control if any state changed
+      if (turningLeft !== this.lastRudderState.left ||
+          turningRight !== this.lastRudderState.right ||
+          movingBackward !== this.lastRudderState.backward) {
         if (this.onShipRudderControl) {
-          this.onShipRudderControl(turningLeft, turningRight);
+          this.onShipRudderControl(turningLeft, turningRight, movingBackward);
         }
-        this.lastRudderState = { left: turningLeft, right: turningRight };
+        this.lastRudderState = { left: turningLeft, right: turningRight, backward: movingBackward };
       }
       
       // Sail openness control (W/S without shift)

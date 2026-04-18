@@ -307,6 +307,7 @@ interface ShipRudderControlMessage extends NetworkMessage {
   type: MessageType.SHIP_RUDDER_CONTROL;
   turning_left: boolean;
   turning_right: boolean;
+  moving_backward: boolean;
 }
 
 /**
@@ -958,7 +959,7 @@ export class NetworkManager {
    * Send ship rudder control (when mounted to helm)
    * A/D keys control turning
    */
-  sendShipRudderControl(turningLeft: boolean, turningRight: boolean): void {
+  sendShipRudderControl(turningLeft: boolean, turningRight: boolean, movingBackward: boolean = false): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
       return;
     }
@@ -967,10 +968,11 @@ export class NetworkManager {
       type: MessageType.SHIP_RUDDER_CONTROL,
       timestamp: Date.now(),
       turning_left: turningLeft,
-      turning_right: turningRight
+      turning_right: turningRight,
+      moving_backward: movingBackward
     };
 
-    console.log(`🚢 Rudder: ${turningLeft ? 'LEFT' : turningRight ? 'RIGHT' : 'STRAIGHT'}`);
+    console.log(`🚢 Rudder: ${turningLeft ? 'LEFT' : turningRight ? 'RIGHT' : 'STRAIGHT'}${movingBackward ? ' REVERSE' : ''}`);
     this.sendMessage(message);
   }
 
