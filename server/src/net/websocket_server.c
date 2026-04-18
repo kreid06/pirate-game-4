@@ -678,6 +678,112 @@ static void handle_ship_dock_collisions(void) {
              * so wall B in iteration 2 sees the corrected state from wall A. */
             float cur_vx = vx_dl, cur_vy = vy_dl, cur_w = omega;
 
+            /* ── Translational CCD pre-pass ──────────────────────────────────
+             * The SAT solver below can only resolve overlaps it can see.  If
+             * the ship moves faster than a wall's thickness in one tick it may
+             * fully pass through before the SAT check runs, giving zero
+             * penetration and therefore zero response (the classic tunnelling
+             * bug).
+             *
+             * We sweep the bounding circle from (lx - vx_dl*dt, ly - vy_dl*dt)
+             * — the position one tick ago — to (lx, ly) against each of the
+             * three inner-facing dock wall segments.  If we find a hit, we
+             * rewind to just before the TOI, reflect the penetrating velocity
+             * component, and rebuild the hull array so the SAT solver still
+             * runs on the corrected state.                                    */
+            {
+                float dt_tick = 1.0f / (float)TICK_RATE_HZ;
+                float ax_ccd = lx - vx_dl * dt_tick;
+                float ay_ccd = ly - vy_dl * dt_tick;
+                float disp_x = lx - ax_ccd, disp_y = ly - ay_ccd;
+
+                /* Only bother if the ship actually moved a meaningful amount */
+                if (disp_x * disp_x + disp_y * disp_y > 0.25f) {
+                    float ai_ccd = DOCK_HW - DOCK_ARM_T;                 /* 120 */
+                    float bi_ccd = DOCK_HH - DOCK_BACK_T;                /* 395 */
+
+                    /* Inner-facing wall segments in dock-local px.
+                     * nx/ny is the outward (interior-facing) normal. */
+                    struct { float x0,y0,x1,y1, nx,ny; } iw[3] = {
+                        { -ai_ccd, -DOCK_HH, -ai_ccd,  DOCK_HH,   1.0f,  0.0f },
+                        {  ai_ccd, -DOCK_HH,  ai_ccd,  DOCK_HH,  -1.0f,  0.0f },
+                        { -ai_ccd,   -bi_ccd,  ai_ccd, -bi_ccd,   0.0f,  1.0f },
+                    };
+
+                    float best_t = 2.0f, best_nx = 0.0f, best_ny = 0.0f;
+
+                    for (int wi = 0; wi < 3; wi++) {
+                        float ex = iw[wi].x1 - iw[wi].x0;
+                        float ey = iw[wi].y1 - iw[wi].y0;
+                        float elen = sqrtf(ex*ex + ey*ey);
+                        if (elen < 1e-6f) continue;
+
+                        float enx = iw[wi].nx, eny = iw[wi].ny;
+                        float d0 = (ax_ccd - iw[wi].x0)*enx + (ay_ccd - iw[wi].y0)*eny;
+                        float d1 = (lx     - iw[wi].x0)*enx + (ly     - iw[wi].y0)*eny;
+                        float dd  = d1 - d0;
+                        if (fabsf(dd) < 1e-10f) continue;
+
+                        /* Circle surface touches the wall line at t where d(t) == ±brad */
+                        float target_d = (d0 > 0.0f) ? brad : -brad;
+                        float t = (target_d - d0) / dd;
+                        if (t < 0.0f || t > 1.0f) continue;
+
+                        /* Confirm contact point is within segment extent */
+                        float cx_t = ax_ccd + disp_x * t;
+                        float cy_t = ay_ccd + disp_y * t;
+                        float proj = ((cx_t - iw[wi].x0)*ex + (cy_t - iw[wi].y0)*ey)
+                                     / (elen * elen);
+                        if (proj < 0.0f || proj > 1.0f) continue;
+
+                        if (t < best_t) {
+                            best_t  = t;
+                            best_nx = enx;
+                            best_ny = eny;
+                        }
+                    }
+
+                    if (best_t <= 1.0f) {
+                        /* Rewind to just before the wall */
+                        float safe_t  = fmaxf(best_t - 0.01f, 0.0f);
+                        float new_lx  = ax_ccd + disp_x * safe_t;
+                        float new_ly  = ay_ccd + disp_y * safe_t;
+
+                        /* Reflect penetrating velocity component */
+                        float vn_ccd  = vx_dl * best_nx + vy_dl * best_ny;
+                        if (vn_ccd < 0.0f) {
+                            vx_dl   -= (1.0f + RESTITUTION) * vn_ccd * best_nx;
+                            vy_dl   -= (1.0f + RESTITUTION) * vn_ccd * best_ny;
+                            cur_vx   = vx_dl;
+                            cur_vy   = vy_dl;
+
+                            /* Write corrected velocity back to sim ship (rotate
+                             * dock-local → world, then px/s → server units/s) */
+                            float vx_w2 = vx_dl * dc - vy_dl * ds;
+                            float vy_w2 = vx_dl * ds + vy_dl * dc;
+                            ship->velocity.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(vx_w2));
+                            ship->velocity.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(vy_w2));
+                        }
+
+                        /* Write corrected position back to sim ship */
+                        float new_wx2, new_wy2;
+                        dock_local_to_world(sy, new_lx, new_ly, &new_wx2, &new_wy2);
+                        ship->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_wx2));
+                        ship->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_wy2));
+
+                        /* Rebuild hull vertices in dock-local space so the SAT
+                         * solver below sees the corrected position. */
+                        float offset_x = new_lx - lx, offset_y = new_ly - ly;
+                        lx = new_lx;
+                        ly = new_ly;
+                        for (int vi = 0; vi < N; vi++) {
+                            hdx[vi] += offset_x;
+                            hdy[vi] += offset_y;
+                        }
+                    }
+                }
+            } /* end translational CCD pre-pass */
+
             /* Warm start from contact cache: seed P_n/P_f with 80% of last
              * tick's accumulated impulse so the solver starts near the
              * converged answer instead of building up from zero.
