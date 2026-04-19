@@ -337,13 +337,19 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
         {
             float ship_cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
             float ship_cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y));
+            float max_depth = 0.0f;
             for (int ii = 0; ii < ISLAND_COUNT; ii++) {
-                if (island_in_shallow_water(&ISLAND_PRESETS[ii], ship_cx, ship_cy)) {
-                    const q16_t shallow_drag = Q16_FROM_FLOAT(0.90f);
-                    ship->velocity = vec2_mul_scalar(ship->velocity, shallow_drag);
-                    ship->angular_velocity = q16_mul(ship->angular_velocity, shallow_drag);
-                    break;
-                }
+                float d = island_shallow_water_depth(&ISLAND_PRESETS[ii], ship_cx, ship_cy);
+                if (d > max_depth) max_depth = d;
+            }
+            if (max_depth > 0.0f) {
+                /* Gradient drag: full penalty (0.90) at island boundary,
+                 * no extra drag (1.0) at the outer shallow-water edge.    */
+                const float MAX_DRAG_COEFF = 0.90f;
+                float drag = 1.0f - max_depth * (1.0f - MAX_DRAG_COEFF);
+                const q16_t shallow_drag = Q16_FROM_FLOAT(drag);
+                ship->velocity = vec2_mul_scalar(ship->velocity, shallow_drag);
+                ship->angular_velocity = q16_mul(ship->angular_velocity, shallow_drag);
             }
         }
 

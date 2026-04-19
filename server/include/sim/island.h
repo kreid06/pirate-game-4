@@ -190,6 +190,38 @@ static inline bool island_in_shallow_water(const IslandDef *isl, float px, float
 }
 
 /**
+ * Returns a value in [0, 1] representing how deep inside the shallow-water
+ * zone (px, py) is:
+ *   0.0 = at or beyond the outer edge (no extra drag)
+ *   1.0 = right at the island beach boundary (maximum extra drag)
+ * Returns 0.0 when outside the shallow zone or inside the island.
+ */
+static inline float island_shallow_water_depth(const IslandDef *isl, float px, float py) {
+    float dx = px - isl->x, dy = py - isl->y;
+    float dist_sq = dx * dx + dy * dy;
+
+    if (isl->vertex_count > 0) {
+        float shallow_depth = isl->poly_bound_r * SHALLOW_WATER_SCALE;
+        float outer_r = isl->poly_bound_r + shallow_depth;
+        if (dist_sq > outer_r * outer_r) return 0.0f;
+        if (island_poly_contains(isl, px, py)) return 0.0f;
+        float dist = sqrtf(dist_sq);
+        float t = (outer_r - dist) / shallow_depth;
+        return (t < 0.0f) ? 0.0f : (t > 1.0f ? 1.0f : t);
+    } else {
+        float shallow_depth = isl->beach_radius_px * SHALLOW_WATER_SCALE;
+        float broad_outer = isl->beach_radius_px + isl->beach_max_bump + shallow_depth;
+        if (dist_sq > broad_outer * broad_outer) return 0.0f;
+        float angle   = atan2f(dy, dx);
+        float beach_r = island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle);
+        float dist    = sqrtf(dist_sq);
+        if (dist <= beach_r || dist >= beach_r + shallow_depth) return 0.0f;
+        float t = 1.0f - (dist - beach_r) / shallow_depth;
+        return (t < 0.0f) ? 0.0f : (t > 1.0f ? 1.0f : t);
+    }
+}
+
+/**
  * Procedurally generate tree (wood resource) positions for all polygon
  * islands, filling their resource arrays with a grid+jitter pattern that
  * covers the entire grass polygon interior.  Call once at server startup
