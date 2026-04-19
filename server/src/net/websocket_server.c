@@ -3745,18 +3745,13 @@ static void tick_world_npcs(float dt) {
                     // Initiate passive regen
                     mod->state_bits |= MODULE_STATE_REPAIRING;
 
-                    // Repair main HP at 10%/s, capped at target_health for planks
-                    {
-                        q16_t hp_cap = (mod->type_id == MODULE_TYPE_PLANK)
-                            ? mod->target_health : mod->max_health;
-                        if (mod->health < hp_cap) {
-                            float heal = (float)mod->max_health * 0.10f * dt;
-                            mod->health += (int32_t)heal;
-                            if (mod->health >= hp_cap) {
-                                mod->health = hp_cap;
-                                if (mod->health >= (int32_t)mod->max_health)
-                                    mod->state_bits &= ~(uint16_t)MODULE_STATE_DAMAGED;
-                            } else {
+                                    // Repair main HP at 10%/s, capped at target_health
+                                    {
+                                        if (mod->health < (int32_t)mod->target_health) {
+                                            float heal = (float)mod->max_health * 0.10f * dt;
+                                            mod->health += (int32_t)heal;
+                                            if (mod->health >= (int32_t)mod->target_health) {
+                                                mod->health = (int32_t)mod->target_health;
                                 still_working = true;
                             }
                         }
@@ -7398,10 +7393,19 @@ static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t
     s->infinite_ammo = true;
     s->module_id_base = module_id_base;
 
+    // Emergency ladder at stern — always present, fixed ID 300
+    s->modules[s->module_count].id          = 300;
+    s->modules[s->module_count].type_id     = MODULE_TYPE_LADDER;
+    s->modules[s->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-305.0f));
+    s->modules[s->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
+    s->modules[s->module_count].local_rot   = Q16_FROM_FLOAT(0.0f);
+    s->modules[s->module_count].state_bits  = MODULE_STATE_ACTIVE;
+    s->module_count++;
+
     /* Bare skeleton — hull geometry only, no modules at all. */
     if (modules_placed == 0) {
         ship_init_default_weapon_groups(s);
-        log_info("🔧 Ship slot %d (ID %u): SKELETON (0 modules), pos=(%.0f,%.0f)", idx, s->ship_id, world_x, world_y);
+        log_info("🔧 Ship slot %d (ID %u): SKELETON (emergency ladder only), pos=(%.0f,%.0f)", idx, s->ship_id, world_x, world_y);
         return;
     }
 
@@ -7463,14 +7467,8 @@ static void init_brigantine_ship(int idx, float world_x, float world_y, uint16_t
     }
     } /* end if MODULE_MAST */
 
-    // Ladder at stern
-    s->modules[s->module_count].id          = mid++;
-    s->modules[s->module_count].type_id     = MODULE_TYPE_LADDER;
-    s->modules[s->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-305.0f));
-    s->modules[s->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
-    s->modules[s->module_count].local_rot   = Q16_FROM_FLOAT(0.0f);
-    s->modules[s->module_count].state_bits  = MODULE_STATE_ACTIVE;
-    s->module_count++;
+    // Ladder — already added above as the permanent emergency ladder (ID 300)
+    mid++; // consume one ID slot to keep subsequent IDs consistent
 
     /* Brigantine hull: 10 planks (IDs 100-109) + centre deck (ID 200).
      * Fixed IDs match the client layout in modules.ts / NetworkManager. */
@@ -9925,7 +9923,8 @@ int websocket_server_update(struct Sim* sim) {
                             handled = true;
 
                         } else if (strcmp(msg_type, "repair_plank") == 0) {
-                            // REPAIR PLANK: raise target_health by 1000 on the most in-need plank.
+                            // REPAIR MODULE: raise target_health on the module with the lowest
+                            // target_health/max_health ratio across ALL module types.
                             // Consumes 1 ITEM_WOOD from the player's inventory.
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
@@ -9956,35 +9955,39 @@ int websocket_server_update(struct Sim* sim) {
                                         if (!sim_ship) {
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
                                         } else {
-                                            // Find plank with lowest target_health (most in need of repair commit)
-                                            ShipModule* worst_plank = NULL;
+                                            // Find module with lowest target_health/max_health ratio
+                                            ShipModule* worst = NULL;
+                                            float worst_ratio = 2.0f;
                                             for (uint8_t m = 0; m < sim_ship->module_count; m++) {
                                                 ShipModule* mod = &sim_ship->modules[m];
-                                                if (mod->type_id == MODULE_TYPE_PLANK &&
-                                                    mod->target_health < mod->max_health) {
-                                                    if (!worst_plank || mod->target_health < worst_plank->target_health)
-                                                        worst_plank = mod;
+                                                if (mod->max_health <= 0) continue;
+                                                if (mod->target_health >= mod->max_health) continue;
+                                                float ratio = (float)mod->target_health / (float)mod->max_health;
+                                                if (ratio < worst_ratio) {
+                                                    worst_ratio = ratio;
+                                                    worst = mod;
                                                 }
                                             }
-                                            if (!worst_plank) {
-                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"planks_full_target\"}");
+                                            if (!worst) {
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"all_modules_full_target\"}");
                                             } else {
-                                                // Raise target_health by 1000 per wood piece (10% of max)
-                                                worst_plank->target_health += 1000;
-                                                if (worst_plank->target_health > worst_plank->max_health)
-                                                    worst_plank->target_health = worst_plank->max_health;
+                                                // Raise target_health by 10% of max_health per wood
+                                                int32_t boost = (int32_t)(worst->max_health / 10);
+                                                worst->target_health += boost;
+                                                if (worst->target_health > worst->max_health)
+                                                    worst->target_health = worst->max_health;
                                                 // Consume 1 wood
                                                 player->inventory.slots[wood_slot].quantity--;
                                                 if (player->inventory.slots[wood_slot].quantity == 0)
                                                     player->inventory.slots[wood_slot].item = ITEM_NONE;
-                                                log_info("🔧 Player %u wood-repaired plank %u on ship %u: target_hp now %d/%d",
-                                                         player->player_id, worst_plank->id, sim_ship->id,
-                                                         (int)worst_plank->target_health, (int)worst_plank->max_health);
+                                                log_info("🔧 Player %u wood-repaired module %u (type %u) on ship %u: target_hp now %d/%d",
+                                                         player->player_id, worst->id, worst->type_id, sim_ship->id,
+                                                         (int)worst->target_health, (int)worst->max_health);
                                                 snprintf(response, sizeof(response),
-                                                    "{\"type\":\"message_ack\",\"status\":\"plank_target_raised\","
-                                                    "\"plank_id\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
-                                                    worst_plank->id, (int)worst_plank->health,
-                                                    (int)worst_plank->target_health, (int)worst_plank->max_health);
+                                                    "{\"type\":\"message_ack\",\"status\":\"module_target_raised\","
+                                                    "\"moduleId\":%u,\"typeId\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
+                                                    worst->id, worst->type_id, (int)worst->health,
+                                                    (int)worst->target_health, (int)worst->max_health);
                                             }
                                         }
                                     }
@@ -10030,14 +10033,11 @@ int websocket_server_update(struct Sim* sim) {
                                         if (!target || target->health <= 0) {
                                             strcpy(response, "{\"type\":\"message_ack\",\"status\":\"module_not_found\"}");
                                         } else {
-                                            // Apply 20% of max_health as instant repair;
-                                            // for planks, cap at target_health (not max_health)
+                                            // Apply 20% of max_health as instant repair, capped at target_health
                                             int32_t repair = (int32_t)(target->max_health * 20 / 100);
                                             target->health += repair;
-                                            q16_t hp_cap = (target->type_id == MODULE_TYPE_PLANK)
-                                                ? target->target_health : target->max_health;
-                                            if (target->health > hp_cap)
-                                                target->health = hp_cap;
+                                            if (target->health > (int32_t)target->target_health)
+                                                target->health = (int32_t)target->target_health;
                                             if (target->health >= (int32_t)target->max_health)
                                                 target->state_bits &= ~MODULE_STATE_DAMAGED;
                                             // For masts: also repair 20% of fibers
@@ -11706,39 +11706,39 @@ int websocket_server_update(struct Sim* sim) {
                             float fh         = Q16_TO_FLOAT(module->data.mast.fiber_health);
                             float fhmax      = Q16_TO_FLOAT(module->data.mast.fiber_max_health);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"fiberFireIntensity\":%u,\"health\":%d,\"maxHealth\":%d}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"fiberFireIntensity\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
                                 m > 0 ? "," : "", module->id, module->type_id, 
                                 module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff,
                                 fh, fhmax, (unsigned)module->data.mast.sail_fire_intensity,
-                                (int)module->health, (int)module->max_health);
+                                (int)module->health, (int)module->target_health, (int)module->max_health);
                         } else if (module->type_id == MODULE_TYPE_CANNON) {
                             // Cannon: include aim direction, state, and health
                             float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"maxHealth\":%d}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
                                 m > 0 ? "," : "", module->id, module->type_id,
                                 module_x, module_y, module_rot, aim_direction,
                                 (unsigned)module->state_bits,
-                                (int)module->health, (int)module->max_health);
+                                (int)module->health, (int)module->target_health, (int)module->max_health);
                         } else if (module->type_id == MODULE_TYPE_SWIVEL) {
                             // Swivel: include current aim direction, state, and health
                             float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"maxHealth\":%d}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
                                 m > 0 ? "," : "", module->id, module->type_id,
                                 module_x, module_y, module_rot, aim_dir,
                                 (unsigned)module->state_bits,
-                                (int)module->health, (int)module->max_health);
+                                (int)module->health, (int)module->target_health, (int)module->max_health);
                         } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                             // Helm: include wheel rotation, occupied status, state, and health
                             float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u,\"health\":%d,\"maxHealth\":%d}",
+                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
                                 m > 0 ? "," : "", module->id, module->type_id,
                                 module_x, module_y, module_rot, wheel_rot,
                                 (module->data.helm.occupied_by != 0) ? "true" : "false",
                                 (unsigned)module->state_bits,
-                                (int)module->health, (int)module->max_health);
+                                (int)module->health, (int)module->target_health, (int)module->max_health);
                         } else {
                             // Generic module (ladder, etc.): transform + state + health
                             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,

@@ -577,10 +577,8 @@ export class ClientApplication {
             const moduleId = hoveredForHammer.module.id;
             // Don't start the minigame if the module is already at its repair ceiling
             const md = hoveredForHammer.module.moduleData as any;
-            const plankCap = hoveredForHammer.module.kind === 'plank'
-              ? (md?.targetHealth ?? md?.maxHealth ?? 0)
-              : (md?.maxHealth ?? 0);
-            const poleFullHealth  = !md || md.health >= plankCap;
+            const repairCap = md?.targetHealth ?? md?.maxHealth ?? 0;
+            const poleFullHealth  = !md || md.health >= repairCap;
             const fiberFullHealth = hoveredForHammer.module.kind !== 'mast'
               || (md?.fiberHealth ?? 0) >= (md?.fiberMaxHealth ?? 0);
             if (poleFullHealth && fiberFullHealth) {
@@ -3411,8 +3409,8 @@ export class ClientApplication {
         mkCannon(1008,  65,  -75,  0),
         mkCannon(1009, -135, -75,  0),
 
-        // Boarding ladder at stern
-        ModuleUtils.createDefaultModule(1010, 'ladder', Vec2.from(-305, 0)),
+        // Emergency boarding ladder at stern (fixed ID 300 — always present)
+        ModuleUtils.createDefaultModule(300, 'ladder', Vec2.from(-305, 0)),
       ]
     };
 

@@ -1599,6 +1599,7 @@ export class NetworkManager {
                       ammunition: mod.ammo ?? 50,
                       maxAmmunition: 50,
                       health: mod.health ?? 8000,
+                      targetHealth: mod.targetHealth ?? mod.maxHealth ?? 8000,
                       maxHealth: mod.maxHealth ?? 8000,
                       stateBits: mod.state ?? 0,
                     };
@@ -1611,6 +1612,7 @@ export class NetworkManager {
                       wheelRotation: mod.wheelRot ?? 0,
                       occupied: mod.occupied ?? false,
                       health: mod.health ?? 10000,
+                      targetHealth: mod.targetHealth ?? mod.maxHealth ?? 10000,
                       maxHealth: mod.maxHealth ?? 10000,
                     };
                   } else if (kind === 'mast') {
@@ -1628,6 +1630,7 @@ export class NetworkManager {
                       sailWidth: 80,
                       sailColor: '#F5F5DC',
                       health: mod.health ?? 15000,
+                      targetHealth: mod.targetHealth ?? mod.maxHealth ?? 15000,
                       maxHealth: mod.maxHealth ?? 15000,
                     };
                   } else if (kind === 'ladder') {
@@ -1649,6 +1652,7 @@ export class NetworkManager {
                       reloadTime: 1.2,
                       timeSinceLastFire: 0,
                       health: mod.health ?? 4000,
+                      targetHealth: mod.targetHealth ?? mod.maxHealth ?? 4000,
                       maxHealth: mod.maxHealth ?? 4000,
                     };
                   }

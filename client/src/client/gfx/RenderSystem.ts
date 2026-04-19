@@ -9016,25 +9016,29 @@ export class RenderSystem {
       }
     } else if (moduleData.kind === 'cannon') {
       const hp = Math.round(moduleData.health);
+      const tgt = Math.round((moduleData as any).targetHealth ?? (moduleData as any).maxHealth ?? 8000);
       const maxHp = (moduleData as any).maxHealth ?? 8000;
-      lines.push(`Health: ${hp} / ${maxHp}`);
+      lines.push(`Health: ${hp} / ${tgt} / ${maxHp}`);
       lines.push(`Dmg: 3000`);
       lines.push(`Reload: ${(moduleData as any).reloadTime ?? 3.0}s`);
       lines.push(`Quality: Common`);
     } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
       const hp = Math.round((moduleData as any).health ?? 10000);
+      const tgt = Math.round((moduleData as any).targetHealth ?? (moduleData as any).maxHealth ?? 10000);
       const maxHp = (moduleData as any).maxHealth ?? 10000;
-      lines.push(`Health: ${hp} / ${maxHp}`);
+      lines.push(`Health: ${hp} / ${tgt} / ${maxHp}`);
       lines.push(`Turn Rate: ${moduleData.maxTurnRate.toFixed(2)}`);
       lines.push(`Responsiveness: ${(moduleData.responsiveness * 100).toFixed(0)}%`);
     } else if (moduleData.kind === 'mast') {
       // Guard against Q16 fixed-point blowup from server (Q16 max for 15000 ≈ 983 million)
       const Q16_THRESHOLD = 100_000;
-      const rawHp = moduleData.health ?? 15000;
+      const rawHp  = moduleData.health ?? 15000;
+      const rawTgt = (moduleData as any).targetHealth ?? moduleData.maxHealth ?? 15000;
       const rawMax = moduleData.maxHealth ?? 15000;
       const hp    = Math.round(rawHp  > Q16_THRESHOLD ? rawHp  / 65536 : rawHp);
+      const tgt   = Math.round(rawTgt > Q16_THRESHOLD ? rawTgt / 65536 : rawTgt);
       const maxHp = Math.round(rawMax > Q16_THRESHOLD ? rawMax / 65536 : rawMax);
-      lines.push(`Health: ${hp} / ${maxHp}`);
+      lines.push(`Health: ${hp} / ${tgt} / ${maxHp}`);
       // Guard against 0/0 fiber health on freshly placed masts
       const rawFh    = moduleData.fiberHealth    ?? 15000;
       const rawFhMax = moduleData.fiberMaxHealth ?? 15000;

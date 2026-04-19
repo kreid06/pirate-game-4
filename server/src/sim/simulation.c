@@ -396,18 +396,31 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
             }
         }
 
-        // Passive healing for deck at same 2.5%/s rate
+        // Passive healing for all gameplay modules toward target_health (always active)
+        // Rates: deck 3.5%/s, helm 2.0%/s, mast 1.5%/s, cannon/swivel 1.0%/s
         for (uint8_t m = 0; m < ship->module_count; m++) {
             ShipModule* mod = &ship->modules[m];
-            if (mod->type_id != MODULE_TYPE_DECK) continue;
-            if (mod->health <= 0 || mod->health >= (int32_t)mod->max_health) continue;
-            if (!(mod->state_bits & MODULE_STATE_REPAIRING)) continue;
-            float heal = (float)mod->max_health * 0.025f * dt_secs;
+            if (mod->health <= 0 || mod->max_health <= 0) continue;
+            if (mod->type_id == MODULE_TYPE_PLANK) continue; // handled separately above
+            if (mod->health >= (int32_t)mod->target_health) continue;
+
+            float rate;
+            switch (mod->type_id) {
+                case MODULE_TYPE_DECK:           rate = 0.035f; break;
+                case MODULE_TYPE_HELM:
+                case MODULE_TYPE_STEERING_WHEEL: rate = 0.020f; break;
+                case MODULE_TYPE_MAST:           rate = 0.015f; break;
+                case MODULE_TYPE_CANNON:
+                case MODULE_TYPE_SWIVEL:         rate = 0.010f; break;
+                default:                         continue; // no passive heal for ladders etc
+            }
+
+            float heal = (float)mod->max_health * rate * dt_secs;
             mod->health += (int32_t)heal;
-            if (mod->health >= (int32_t)mod->max_health) {
-                mod->health = (int32_t)mod->max_health;
-                mod->state_bits &= (uint16_t)~MODULE_STATE_REPAIRING;
-                mod->state_bits &= (uint16_t)~MODULE_STATE_DAMAGED;
+            if (mod->health >= (int32_t)mod->target_health) {
+                mod->health = (int32_t)mod->target_health;
+                if (mod->health >= (int32_t)mod->max_health)
+                    mod->state_bits &= (uint16_t)~(MODULE_STATE_REPAIRING | MODULE_STATE_DAMAGED);
             }
         }
 
@@ -988,11 +1001,18 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation, uin
     // (ship 1 → 1000-1010, ship 2 → 2000-2010, etc.)
     ship->module_count = 0;
     
-    /* Bare skeleton — hull polygon only, no modules at all.
+    // Emergency ladder always present at stern (ID 300 — fixed well-known ID)
+    ship->modules[ship->module_count++] = module_create(
+        300, MODULE_TYPE_LADDER,
+        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-305.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
+        0
+    );
+
+    /* Bare skeleton — hull polygon only, no gameplay modules.
      * initial_plank_count stays 0 so the drain formula sees missing=0. */
     if (modules_placed == 0) {
         ship->initial_plank_count = 0;
-        log_info("⚓ Created skeleton ship %u with 0 modules (bare hull)", id);
+        log_info("⚓ Created skeleton ship %u with emergency ladder only", id);
         sim->ship_count++;
         return id;
     }
@@ -1064,11 +1084,8 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation, uin
     } else { module_id += 3; }
     
     // Add ladder at specified position (-305, 0 in client coords)
-    ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_LADDER,
-        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-305.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
-        0
-    );
+    // NOTE: already added above as emergency ladder (ID 300); skip duplicate
+    module_id++; // consume one slot to keep spacing consistent
     
     // Initialize 10 hull planks with positions matching client hull geometry.
     // Positions are the segment midpoints derived from createCompleteHullSegments()

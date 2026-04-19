@@ -23,8 +23,9 @@ ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t
             module.data.cannon.ammunition = 10;
             module.data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
             module.data.cannon.reload_time = CANNON_RELOAD_TIME_MS;
-            module.health     = 8000;
-            module.max_health = 8000;
+            module.health        = 8000;
+            module.target_health = 8000;
+            module.max_health    = 8000;
             break;
             
         case MODULE_TYPE_MAST:
@@ -33,16 +34,18 @@ ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t
             module.data.mast.fiber_health     = Q16_FROM_FLOAT(15000.0f);
             module.data.mast.fiber_max_health = Q16_FROM_FLOAT(15000.0f);
             module.data.mast.wind_efficiency  = Q16_ONE; // starts at full efficiency
-            module.health     = 15000;
-            module.max_health = 15000;
+            module.health        = 15000;
+            module.target_health = 15000;
+            module.max_health    = 15000;
             break;
             
         case MODULE_TYPE_HELM:
         case MODULE_TYPE_STEERING_WHEEL:
             module.data.helm.wheel_rotation = 0;
             module.data.helm.occupied_by = 0;
-            module.health     = 10000;
-            module.max_health = 10000;
+            module.health        = 10000;
+            module.target_health = 10000;
+            module.max_health    = 10000;
             break;
             
         case MODULE_TYPE_SEAT:
@@ -56,8 +59,9 @@ ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t
             break;
             
         case MODULE_TYPE_DECK:
-            module.health     = 65000;
-            module.max_health = 65000;
+            module.health        = 65000;
+            module.target_health = 65000;
+            module.max_health    = 65000;
             break;
 
         case MODULE_TYPE_LADDER:
@@ -131,9 +135,9 @@ void module_apply_damage(ShipModule* module, q16_t damage) {
     // Mark as damaged
     module->state_bits |= MODULE_STATE_DAMAGED;
     
-    // For planks: damage also lowers the repair ceiling (target_health)
-    // so that passive regen alone cannot restore past the hit point
-    if (module->type_id == MODULE_TYPE_PLANK) {
+    // Damage lowers the repair ceiling (target_health) for all module types
+    // that have health tracking (skip zero-max_health modules like ladders)
+    if (module->max_health > 0) {
         if (module->target_health > damage)
             module->target_health -= damage;
         else
