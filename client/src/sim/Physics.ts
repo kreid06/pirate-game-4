@@ -1074,7 +1074,8 @@ function applyRadialPlankDamage(
   const primaryPlank = planks[primaryPlankIndex];
   if (primaryPlank && primaryPlank.moduleData && primaryPlank.moduleData.kind === 'plank') {
     const plankData = primaryPlank.moduleData;
-    plankData.health = Math.max(0, plankData.health - damage);
+    plankData.health       = Math.max(0, plankData.health       - damage);
+    plankData.targetHealth = Math.max(0, (plankData.targetHealth ?? plankData.maxHealth) - damage);
     
     if (plankData.health <= 0) {
       console.log(`💥 Radial collision destroyed plank ${primaryPlankIndex}! (${damage.toFixed(1)} damage)`);
@@ -1096,14 +1097,16 @@ function applyRadialPlankDamage(
       const leftIndex = (primaryPlankIndex - offset + planks.length) % planks.length;
       const leftPlank = planks[leftIndex];
       if (leftPlank && leftPlank.moduleData && leftPlank.moduleData.kind === 'plank') {
-        leftPlank.moduleData.health = Math.max(0, leftPlank.moduleData.health - spreadDamage);
+        leftPlank.moduleData.health       = Math.max(0, leftPlank.moduleData.health       - spreadDamage);
+        leftPlank.moduleData.targetHealth = Math.max(0, (leftPlank.moduleData.targetHealth ?? leftPlank.moduleData.maxHealth) - spreadDamage);
       }
       
       // Damage plank to the right
       const rightIndex = (primaryPlankIndex + offset) % planks.length;
       const rightPlank = planks[rightIndex];
       if (rightPlank && rightPlank.moduleData && rightPlank.moduleData.kind === 'plank') {
-        rightPlank.moduleData.health = Math.max(0, rightPlank.moduleData.health - spreadDamage);
+        rightPlank.moduleData.health       = Math.max(0, rightPlank.moduleData.health       - spreadDamage);
+        rightPlank.moduleData.targetHealth = Math.max(0, (rightPlank.moduleData.targetHealth ?? rightPlank.moduleData.maxHealth) - spreadDamage);
       }
     }
   }

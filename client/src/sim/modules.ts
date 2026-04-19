@@ -192,6 +192,7 @@ export interface PlankModuleData {
   length: number;              // Length of the plank segment
   width: number;               // Width/thickness of the plank
   health: number;              // Current HP (base max: 10000)
+  targetHealth: number;        // Repair ceiling — decreases with damage; spend wood to raise
   maxHealth: number;           // Max HP
   material: 'wood' | 'iron' | 'steel'; // Plank material type
   segmentIndex: number;        // Which segment of the ship hull (0-11)
@@ -386,6 +387,7 @@ export class ModuleUtils {
           length: 16,              // Default plank length
           width: 4,                // Default plank thickness
           health: 10000,           // Full health
+          targetHealth: 10000,     // Full repair ceiling on placement
           maxHealth: 10000,
           material: 'wood',        // Default wooden planks
           segmentIndex: 0,         // Default to first segment

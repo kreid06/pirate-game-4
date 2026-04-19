@@ -484,7 +484,7 @@ export class NetworkManager {
   /** Brigantine hull/module template — created once, reused on every GAME_STATE message. */
   private _shipTemplate: { planks: ShipModule[]; deck: ShipModule[]; ship: Ship } | null = null;
   /** Plank-health lookup buffer — cleared and refilled each tick instead of being re-allocated. */
-  private readonly _plankHealthBuf = new Map<number, { health: number; maxHealth: number }>();
+  private readonly _plankHealthBuf = new Map<number, { health: number; targetHealth: number; maxHealth: number }>();
 
   // Event callbacks
   public onWorldStateReceived: ((worldState: WorldState) => void) | null = null;
@@ -1576,6 +1576,7 @@ export class NetworkManager {
                   // Plank: Server only sends health, client generates positions
                   plankHealthBuf.set(mod.id, {
                     health: mod.health ?? 10000,
+                    targetHealth: mod.targetHealth ?? mod.maxHealth ?? 10000,
                     maxHealth: mod.maxHealth ?? 10000,
                   });
                 } else if (kind === 'deck') {
@@ -1682,7 +1683,7 @@ export class NetworkManager {
                   return {
                     ...p,
                     moduleData: md?.kind === 'plank'
-                      ? { ...md, health: d.health, maxHealth: d.maxHealth }
+                      ? { ...md, health: d.health, targetHealth: d.targetHealth, maxHealth: d.maxHealth }
                       : md,
                   } as ShipModule;
                 });

@@ -530,7 +530,12 @@ export class ClientApplication {
                   const repairable = playerShip.modules.filter(m => m.kind === 'plank' || m.kind === 'deck');
                   const damaged = repairable.filter(m => {
                     const md = m.moduleData as any;
-                    return md && md.health < (md.maxHealth ?? 0);
+                    if (!md) return false;
+                    // For planks, repairable means below target HP (not max HP)
+                    const cap = m.kind === 'plank'
+                      ? (md.targetHealth ?? md.maxHealth ?? 0)
+                      : (md.maxHealth ?? 0);
+                    return md.health < cap;
                   });
                   if (damaged.length === 0) {
                     console.log('🔨 [HAMMER] All planks and deck are at full health');
@@ -570,13 +575,16 @@ export class ClientApplication {
             }
             const shipId   = player.carrierId;
             const moduleId = hoveredForHammer.module.id;
-            // Don't start the minigame if the module is already at full health
+            // Don't start the minigame if the module is already at its repair ceiling
             const md = hoveredForHammer.module.moduleData as any;
-            const poleFullHealth  = !md || md.health >= (md.maxHealth ?? 0);
+            const plankCap = hoveredForHammer.module.kind === 'plank'
+              ? (md?.targetHealth ?? md?.maxHealth ?? 0)
+              : (md?.maxHealth ?? 0);
+            const poleFullHealth  = !md || md.health >= plankCap;
             const fiberFullHealth = hoveredForHammer.module.kind !== 'mast'
               || (md?.fiberHealth ?? 0) >= (md?.fiberMaxHealth ?? 0);
             if (poleFullHealth && fiberFullHealth) {
-              console.log('🔨 [HAMMER] Module is already at full health');
+              console.log('🔨 [HAMMER] Module is already at its repair ceiling (use wood to raise target HP)');
               return;
             }
             this.uiManager?.startHammerMinigame((won) => {
@@ -618,9 +626,9 @@ export class ClientApplication {
           const activeSlot = player?.inventory?.activeSlot ?? 0;
           const activeItem = player?.inventory?.slots[activeSlot]?.item ?? 'none';
 
-          // Repair mode: active slot = repair_kit → repair most damaged plank on ship
-          if (activeItem === 'repair_kit' && player && player.carrierId !== 0) {
-            console.log(`🔧 [REPAIR] Sending repair_plank for ship ${player.carrierId}`);
+          // Repair mode: active slot = wood → spend 1 wood to raise target_health on worst plank
+          if (activeItem === 'wood' && player && player.carrierId !== 0) {
+            console.log(`🔧 [REPAIR] Sending repair_plank (wood) for ship ${player.carrierId}`);
             this.networkManager.sendRepairPlank(player.carrierId);
             return;
           }

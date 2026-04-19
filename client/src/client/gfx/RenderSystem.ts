@@ -8757,12 +8757,17 @@ export class RenderSystem {
       : `${companyName} Brigantine`;
 
     // Sum plank/deck module health
-    let totalPlankHp    = 0;
-    let totalPlankMaxHp = 0;
+    let totalPlankHp       = 0;
+    let totalPlankTargetHp = 0;
+    let totalPlankMaxHp    = 0;
     for (const mod of ship.modules) {
       const md = mod.moduleData as any;
       if (!md) continue;
-      if (md.kind === 'plank' || md.kind === 'deck') {
+      if (md.kind === 'plank') {
+        totalPlankHp       += md.health       ?? md.maxHealth ?? 10000;
+        totalPlankTargetHp += md.targetHealth ?? md.maxHealth ?? 10000;
+        totalPlankMaxHp    += md.maxHealth    ?? 10000;
+      } else if (md.kind === 'deck') {
         totalPlankHp    += md.health    ?? md.maxHealth ?? 10000;
         totalPlankMaxHp += md.maxHealth ?? 10000;
       }
@@ -8775,9 +8780,10 @@ export class RenderSystem {
       ? `Hull: ${ship.hullHealth.toFixed(0)} / ${GHOST_MAX_HULL_HP.toLocaleString()}`
       : `Hull: ${ship.hullHealth.toFixed(0)}%`;
     const deckText = totalPlankMaxHp > 0
-      ? `Deck HP: ${Math.round(totalPlankHp)} / ${Math.round(totalPlankMaxHp)}`
-      : 'Deck HP: —';
-    const deckPct  = totalPlankMaxHp > 0 ? totalPlankHp / totalPlankMaxHp : 1;
+      ? `Planks: ${Math.round(totalPlankHp)} / ${Math.round(totalPlankTargetHp)} / ${Math.round(totalPlankMaxHp)}`
+      : 'Planks: —';
+    const deckPct       = totalPlankMaxHp    > 0 ? totalPlankHp    / totalPlankMaxHp    : 1;
+    const deckTargetPct = totalPlankMaxHp    > 0 ? totalPlankTargetHp / totalPlankMaxHp : 1;
 
     const screenPos = camera.worldToScreen(this.mouseWorldPos);
     const padding   = 10;
@@ -8837,16 +8843,31 @@ export class RenderSystem {
     this.ctx.strokeRect(bx, cy, bw, barH);
     cy += barH + 6;
 
-    // Deck HP label
+    // Deck HP label  (format: current / target / max)
     this.ctx.fillStyle = '#ccc';
     this.ctx.font = '12px monospace';
     this.ctx.fillText(deckText, bx, cy);  cy += lineH;
-    // Deck bar
+    // Plank bar: grey background, amber target-HP marker, green/amber/red current-HP fill
     this.ctx.fillStyle = '#333';
     this.ctx.fillRect(bx, cy, bw, barH);
+    // Target HP marker (dimmer fill up to target ceiling)
+    if (deckTargetPct < 1) {
+      this.ctx.fillStyle = 'rgba(200,160,60,0.35)';
+      this.ctx.fillRect(bx, cy, Math.round(bw * deckTargetPct), barH);
+    }
     const deckColor = deckPct > 0.6 ? '#44cc66' : deckPct > 0.3 ? '#ffaa44' : '#ff5544';
     this.ctx.fillStyle = deckColor;
     this.ctx.fillRect(bx, cy, Math.round(bw * deckPct), barH);
+    // Target HP tick mark
+    if (deckTargetPct < 1) {
+      const tx2 = bx + Math.round(bw * deckTargetPct);
+      this.ctx.strokeStyle = '#c8a03c';
+      this.ctx.lineWidth = 1.5;
+      this.ctx.beginPath();
+      this.ctx.moveTo(tx2, cy - 1);
+      this.ctx.lineTo(tx2, cy + barH + 1);
+      this.ctx.stroke();
+    }
     this.ctx.strokeStyle = '#556';
     this.ctx.lineWidth = 0.8;
     this.ctx.strokeRect(bx, cy, bw, barH);

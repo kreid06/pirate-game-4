@@ -383,13 +383,14 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
             }
             planks_remaining++;
 
-            // Passive healing at 2.5%/s — only while repair has been initiated
-            if ((mod->state_bits & MODULE_STATE_REPAIRING) &&
-                mod->health < (int32_t)mod->max_health) {
-                float heal = (float)mod->max_health * 0.025f * dt_secs;
+            // Passive healing at 3.5%/s toward target_health — always active.
+            // target_health is the repair ceiling; it decreases with damage and
+            // must be raised back by the player spending wood (repair_plank msg).
+            if (mod->health < (int32_t)mod->target_health) {
+                float heal = (float)mod->max_health * 0.035f * dt_secs;
                 mod->health += (int32_t)heal;
-                if (mod->health >= (int32_t)mod->max_health) {
-                    mod->health = (int32_t)mod->max_health;
+                if (mod->health >= (int32_t)mod->target_health) {
+                    mod->health = (int32_t)mod->target_health;
                     mod->state_bits &= (uint16_t)~MODULE_STATE_REPAIRING;
                 }
             }

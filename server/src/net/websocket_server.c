@@ -3742,18 +3742,23 @@ static void tick_world_npcs(float dt) {
                     if ((uint32_t)mod->id != target_id) continue;
                     if (mod->state_bits & MODULE_STATE_DESTROYED) break;
 
-                    // Initiate passive regen (2.5%/s via sim_update_ships)
+                    // Initiate passive regen
                     mod->state_bits |= MODULE_STATE_REPAIRING;
 
-                    // Repair main HP at 10%/s
-                    if (mod->health < (int32_t)mod->max_health) {
-                        float heal = (float)mod->max_health * 0.10f * dt;
-                        mod->health += (int32_t)heal;
-                        if (mod->health >= (int32_t)mod->max_health) {
-                            mod->health = (int32_t)mod->max_health;
-                            mod->state_bits &= ~(uint16_t)MODULE_STATE_DAMAGED;
-                        } else {
-                            still_working = true;
+                    // Repair main HP at 10%/s, capped at target_health for planks
+                    {
+                        q16_t hp_cap = (mod->type_id == MODULE_TYPE_PLANK)
+                            ? mod->target_health : mod->max_health;
+                        if (mod->health < hp_cap) {
+                            float heal = (float)mod->max_health * 0.10f * dt;
+                            mod->health += (int32_t)heal;
+                            if (mod->health >= hp_cap) {
+                                mod->health = hp_cap;
+                                if (mod->health >= (int32_t)mod->max_health)
+                                    mod->state_bits &= ~(uint16_t)MODULE_STATE_DAMAGED;
+                            } else {
+                                still_working = true;
+                            }
                         }
                     }
 
@@ -9920,8 +9925,8 @@ int websocket_server_update(struct Sim* sim) {
                             handled = true;
 
                         } else if (strcmp(msg_type, "repair_plank") == 0) {
-                            // REPAIR PLANK: restore 5000 HP to the most damaged plank on the ship.
-                            // Consumes 1 ITEM_REPAIR_KIT from the player's inventory.
+                            // REPAIR PLANK: raise target_health by 1000 on the most in-need plank.
+                            // Consumes 1 ITEM_WOOD from the player's inventory.
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                             } else {
@@ -9929,16 +9934,16 @@ int websocket_server_update(struct Sim* sim) {
                                 if (!player || player->parent_ship_id == 0) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 } else {
-                                    // Find a repair kit in inventory
-                                    int kit_slot = -1;
+                                    // Find wood in inventory
+                                    int wood_slot = -1;
                                     for (int s = 0; s < INVENTORY_SLOTS; s++) {
-                                        if (player->inventory.slots[s].item == ITEM_REPAIR_KIT &&
+                                        if (player->inventory.slots[s].item == ITEM_WOOD &&
                                             player->inventory.slots[s].quantity > 0) {
-                                            kit_slot = s; break;
+                                            wood_slot = s; break;
                                         }
                                     }
-                                    if (kit_slot < 0) {
-                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_repair_kits\"}");
+                                    if (wood_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_wood\"}");
                                     } else if (!global_sim) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                     } else {
@@ -9951,35 +9956,35 @@ int websocket_server_update(struct Sim* sim) {
                                         if (!sim_ship) {
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
                                         } else {
-                                            // Find most damaged plank
+                                            // Find plank with lowest target_health (most in need of repair commit)
                                             ShipModule* worst_plank = NULL;
                                             for (uint8_t m = 0; m < sim_ship->module_count; m++) {
                                                 ShipModule* mod = &sim_ship->modules[m];
                                                 if (mod->type_id == MODULE_TYPE_PLANK &&
-                                                    mod->health < mod->max_health) {
-                                                    if (!worst_plank || mod->health < worst_plank->health)
+                                                    mod->target_health < mod->max_health) {
+                                                    if (!worst_plank || mod->target_health < worst_plank->target_health)
                                                         worst_plank = mod;
                                                 }
                                             }
                                             if (!worst_plank) {
-                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"planks_full_health\"}");
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"planks_full_target\"}");
                                             } else {
-                                                // Restore 5000 HP (half a plank's max) and start passive regen
-                                                worst_plank->health += 5000;
-                                                if (worst_plank->health > worst_plank->max_health)
-                                                    worst_plank->health = worst_plank->max_health;
-                                                worst_plank->state_bits |= MODULE_STATE_REPAIRING;
-                                                // Consume 1 repair kit
-                                                player->inventory.slots[kit_slot].quantity--;
-                                                if (player->inventory.slots[kit_slot].quantity == 0)
-                                                    player->inventory.slots[kit_slot].item = ITEM_NONE;
-                                                log_info("🔧 Player %u repaired plank %u on ship %u to %d/%d HP",
+                                                // Raise target_health by 1000 per wood piece (10% of max)
+                                                worst_plank->target_health += 1000;
+                                                if (worst_plank->target_health > worst_plank->max_health)
+                                                    worst_plank->target_health = worst_plank->max_health;
+                                                // Consume 1 wood
+                                                player->inventory.slots[wood_slot].quantity--;
+                                                if (player->inventory.slots[wood_slot].quantity == 0)
+                                                    player->inventory.slots[wood_slot].item = ITEM_NONE;
+                                                log_info("🔧 Player %u wood-repaired plank %u on ship %u: target_hp now %d/%d",
                                                          player->player_id, worst_plank->id, sim_ship->id,
-                                                         (int)worst_plank->health, (int)worst_plank->max_health);
+                                                         (int)worst_plank->target_health, (int)worst_plank->max_health);
                                                 snprintf(response, sizeof(response),
-                                                    "{\"type\":\"message_ack\",\"status\":\"plank_repaired\","
-                                                    "\"plank_id\":%u,\"health\":%d,\"maxHealth\":%d}",
-                                                    worst_plank->id, (int)worst_plank->health, (int)worst_plank->max_health);
+                                                    "{\"type\":\"message_ack\",\"status\":\"plank_target_raised\","
+                                                    "\"plank_id\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
+                                                    worst_plank->id, (int)worst_plank->health,
+                                                    (int)worst_plank->target_health, (int)worst_plank->max_health);
                                             }
                                         }
                                     }
@@ -10025,11 +10030,14 @@ int websocket_server_update(struct Sim* sim) {
                                         if (!target || target->health <= 0) {
                                             strcpy(response, "{\"type\":\"message_ack\",\"status\":\"module_not_found\"}");
                                         } else {
-                                            // Apply 20% of max_health as instant repair
+                                            // Apply 20% of max_health as instant repair;
+                                            // for planks, cap at target_health (not max_health)
                                             int32_t repair = (int32_t)(target->max_health * 20 / 100);
                                             target->health += repair;
-                                            if (target->health > (int32_t)target->max_health)
-                                                target->health = (int32_t)target->max_health;
+                                            q16_t hp_cap = (target->type_id == MODULE_TYPE_PLANK)
+                                                ? target->target_health : target->max_health;
+                                            if (target->health > hp_cap)
+                                                target->health = hp_cap;
                                             if (target->health >= (int32_t)target->max_health)
                                                 target->state_bits &= ~MODULE_STATE_DAMAGED;
                                             // For masts: also repair 20% of fibers
@@ -10048,8 +10056,9 @@ int websocket_server_update(struct Sim* sim) {
                                                      sim_ship->id, (int)target->health, (int)target->max_health);
                                             snprintf(response, sizeof(response),
                                                 "{\"type\":\"message_ack\",\"status\":\"hammer_repair_applied\","
-                                                "\"moduleId\":%u,\"health\":%d,\"maxHealth\":%d}",
-                                                target->id, (int)target->health, (int)target->max_health);
+                                                "\"moduleId\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
+                                                target->id, (int)target->health,
+                                                (int)target->target_health, (int)target->max_health);
                                         }
                                     }
                                 }
@@ -11675,9 +11684,9 @@ int websocket_server_update(struct Sim* sim) {
                     if (module->type_id == MODULE_TYPE_PLANK) {
                         // Plank: only health data (client has hard-coded positions from hull)
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"health\":%d,\"maxHealth\":%d}",
+                            "%s{\"id\":%u,\"typeId\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
                             m > 0 ? "," : "", module->id, module->type_id,
-                            (int)module->health, (int)module->max_health);
+                            (int)module->health, (int)module->target_health, (int)module->max_health);
                     } else if (module->type_id == MODULE_TYPE_DECK) {
                         // Deck: ID, type, and fire zone state bits (client generates polygon from hull)
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,

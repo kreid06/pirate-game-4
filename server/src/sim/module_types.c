@@ -50,8 +50,9 @@ ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t
             break;
             
         case MODULE_TYPE_PLANK:
-            module.health     = 10000;
-            module.max_health = 10000;
+            module.health        = 10000;
+            module.target_health = 10000; // full target on placement
+            module.max_health    = 10000;
             break;
             
         case MODULE_TYPE_DECK:
@@ -129,6 +130,15 @@ void module_apply_damage(ShipModule* module, q16_t damage) {
     
     // Mark as damaged
     module->state_bits |= MODULE_STATE_DAMAGED;
+    
+    // For planks: damage also lowers the repair ceiling (target_health)
+    // so that passive regen alone cannot restore past the hit point
+    if (module->type_id == MODULE_TYPE_PLANK) {
+        if (module->target_health > damage)
+            module->target_health -= damage;
+        else
+            module->target_health = 0;
+    }
     
     // Reduce health; clamp to 0
     if (module->health > damage) {
