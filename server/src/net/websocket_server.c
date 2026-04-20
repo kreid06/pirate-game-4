@@ -14583,7 +14583,7 @@ void websocket_server_tick(float dt) {
             
             // Convert rudder angle to turning rate
             // Max rudder (50°) at full speed = max turn rate
-            const float MAX_TURN_RATE = 0.5f; // radians per second at full speed
+            const float MAX_TURN_RATE = 1.0f; // radians per second at full speed
             float rudder_factor = ship->rudder_angle / 50.0f; // -1 to +1
             float turn_rate = rudder_factor * MAX_TURN_RATE * speed_factor;
             

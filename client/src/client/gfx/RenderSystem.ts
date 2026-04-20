@@ -4435,59 +4435,91 @@ export class RenderSystem {
     }
     this.ctx.lineWidth = 2 / cameraState.zoom;
 
-    // Ghost hull fades as it takes damage (health 60000→0 maps opacity 1.0→0.2)
-    if (isGhost) {
-      const healthFade = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
-      this.ctx.globalAlpha = phase1Alpha * healthFade;
-    }
-    
-    this.ctx.beginPath();
-    this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
-    
-    for (let i = 1; i < ship.hull.length; i++) {
-      this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
-    }
-    
-    this.ctx.closePath();
-    this.ctx.fill();
-    this.ctx.stroke();
+    const hasDeck = ship.modules.some(m => m.kind === 'deck');
 
-    // Ghost ships: add a second thin cyan edge stroke for the spectral glow outline
-    if (isGhost) {
-      const healthMult = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
-      const sinkMult   = phase1Alpha < 1 ? phase1Alpha : 1;
-      this.ctx.shadowBlur   = 0;
-      this.ctx.strokeStyle  = `rgba(0,230,255,${0.55 * sinkMult * healthMult})`;
-      this.ctx.lineWidth    = 1.5 / cameraState.zoom;
+    if (!hasDeck && !isGhost) {
+      // ── Skeleton hull: bare wooden frame (no deck installed) ──
+      // Hull outline only — no fill; show the raw outer edge in bare-wood colour
+      this.ctx.strokeStyle = isEnemy ? '#1a1a4a' : '#8B4513';
+      this.ctx.lineWidth = 2.5 / cameraState.zoom;
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
       for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
       this.ctx.closePath();
       this.ctx.stroke();
-    }
 
-    // Water flood tint: blue overlay (non-ghost), cyan mist dissolve (ghost)
-    // Ghost mist begins at 75% HP (25% damage) and reaches full intensity at 0 HP
-    const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / GHOST_MAX_HULL_HP) - 0.25) / 0.75 : 0;
-    if (isGhost ? ghostMistAlpha > 0 : floodTint > 0) {
-      if (isGhost) {
-        // Ghost dissolve: cyan/teal mist, starts from 75% HP
-        const sinkMult = phase1Alpha < 1 ? phase1Alpha : 1;
-        this.ctx.globalAlpha = ghostMistAlpha * 0.75 * sinkMult;
-        this.ctx.fillStyle = '#00eeff';
-        this.ctx.shadowColor = '#00eeff';
-        this.ctx.shadowBlur  = 16 / cameraState.zoom;
-      } else {
-        this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
-        this.ctx.fillStyle = '#1a6eb5';
+      // Ribs: cross-beams at plank-boundary x-positions.
+      // Port side (y=+90) and starboard side (y=-90) share the same four x values:
+      //   stern (-260), 1st joint (-110), 2nd joint (40), bow (190)
+      this.ctx.strokeStyle = isEnemy ? '#12124a' : '#6B3A10';
+      this.ctx.lineWidth = 1.5 / cameraState.zoom;
+      for (const rx of [-260, -110, 40, 190]) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(rx,  90);
+        this.ctx.lineTo(rx, -90);
+        this.ctx.stroke();
       }
+
+      // Keel: longitudinal centre beam from bow tip (415,0) to stern tip (-345,0)
+      this.ctx.strokeStyle = isEnemy ? '#0e0e3a' : '#5A3008';
+      this.ctx.lineWidth = 2 / cameraState.zoom;
+      this.ctx.beginPath();
+      this.ctx.moveTo( 415, 0);
+      this.ctx.lineTo(-345, 0);
+      this.ctx.stroke();
+    } else {
+      // ── Normal hull: filled polygon ──
+
+      // Ghost hull fades as it takes damage (health 60000→0 maps opacity 1.0→0.2)
+      if (isGhost) {
+        const healthFade = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
+        this.ctx.globalAlpha = phase1Alpha * healthFade;
+      }
+
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
       for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
       this.ctx.closePath();
       this.ctx.fill();
+      this.ctx.stroke();
+
+      // Ghost ships: add a second thin cyan edge stroke for the spectral glow outline
+      if (isGhost) {
+        const healthMult = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
+        const sinkMult   = phase1Alpha < 1 ? phase1Alpha : 1;
+        this.ctx.shadowBlur   = 0;
+        this.ctx.strokeStyle  = `rgba(0,230,255,${0.55 * sinkMult * healthMult})`;
+        this.ctx.lineWidth    = 1.5 / cameraState.zoom;
+        this.ctx.beginPath();
+        this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+        for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+        this.ctx.closePath();
+        this.ctx.stroke();
+      }
+
+      // Water flood tint: blue overlay (non-ghost), cyan mist dissolve (ghost)
+      // Ghost mist begins at 75% HP (25% damage) and reaches full intensity at 0 HP
+      const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / GHOST_MAX_HULL_HP) - 0.25) / 0.75 : 0;
+      if (isGhost ? ghostMistAlpha > 0 : floodTint > 0) {
+        if (isGhost) {
+          // Ghost dissolve: cyan/teal mist, starts from 75% HP
+          const sinkMult = phase1Alpha < 1 ? phase1Alpha : 1;
+          this.ctx.globalAlpha = ghostMistAlpha * 0.75 * sinkMult;
+          this.ctx.fillStyle = '#00eeff';
+          this.ctx.shadowColor = '#00eeff';
+          this.ctx.shadowBlur  = 16 / cameraState.zoom;
+        } else {
+          this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
+          this.ctx.fillStyle = '#1a6eb5';
+        }
+        this.ctx.beginPath();
+        this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+        for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+        this.ctx.closePath();
+        this.ctx.fill();
+      }
     }
-    
+
     // Draw ship direction indicator
     this.ctx.globalAlpha = phase1Alpha < 1 ? phase1Alpha : 1;
     this.ctx.strokeStyle = '#ff0000';
@@ -4639,7 +4671,22 @@ export class RenderSystem {
       const health = plankData.health;
       const isCurved = plankData.isCurved || false;
       
-      // Skip completely destroyed planks
+      // Draw dark slot for every plank position (missing or present)
+      {
+        const missingFill = 'rgb(38, 24, 10)';
+        this.ctx.save();
+        if (isCurved && plankData.curveData) {
+          this.drawCurvedPlank(plankData.curveData, width, missingFill, 'transparent');
+        } else {
+          this.ctx.fillStyle = missingFill;
+          this.ctx.translate(pos.x, pos.y);
+          this.ctx.rotate(rot);
+          this.ctx.fillRect(-length / 2, -width / 2, length, width);
+        }
+        this.ctx.restore();
+      }
+
+      // Missing plank (health=0): nothing more to draw
       if (health <= 0) continue;
       
       // Smoothly darken toward black as health decreases

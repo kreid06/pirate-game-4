@@ -1708,17 +1708,19 @@ export class NetworkManager {
                 stateBits: deckStateBitsFromServer !== undefined ? deckStateBitsFromServer : p.stateBits,
               }) as ShipModule) : [];
 
-              // Only include planks the server still reports — absence means destroyed.
-              // Build with updated health directly (avoids separate filter + mutation loop).
-              const activePlanks = tmpl.planks
-                .filter(p => plankHealthBuf.has(p.id))
-                .map(p => {
-                  const d = plankHealthBuf.get(p.id)!;
+              // Include ALL 10 template plank slots. Slots the server reports get real health;
+              // slots absent from the server (never placed or destroyed) get health=0 so the
+              // renderer can draw them as a dark "missing" placeholder.
+              const activePlanks = tmpl.planks.map(p => {
+                  const d = plankHealthBuf.get(p.id);
                   const md = p.moduleData;
                   return {
                     ...p,
                     moduleData: md?.kind === 'plank'
-                      ? { ...md, health: d.health, targetHealth: d.targetHealth, maxHealth: d.maxHealth }
+                      ? { ...md,
+                          health:       d ? d.health       : 0,
+                          targetHealth: d ? d.targetHealth : 0,
+                          maxHealth:    d ? d.maxHealth    : md.maxHealth }
                       : md,
                   } as ShipModule;
                 });
@@ -1986,7 +1988,9 @@ export class NetworkManager {
         const plankDmg: number = message.damage || 0;
         const plankHitX: number | undefined = message.x;
         const plankHitY: number | undefined = message.y;
-        console.log(`💥 PLANK_HIT: ship ${plankShipId} plank ${plankId} destroyed — ${plankDmg} dmg at (${plankHitX}, ${plankHitY})`);
+        const _tmplHit = this._shipTemplates.get(plankShipId);
+        const _tmplHitIds = _tmplHit?.planks.map(p => '0x' + p.id.toString(16)) ?? [];
+        console.log(`💥 PLANK_HIT: ship=${plankShipId} plankId=0x${plankId.toString(16)} dmg=${plankDmg}\n  tmpl has id? ${_tmplHit?.planks.some(p => p.id === plankId)}  tmpl=[${_tmplHitIds.join(', ')}]`);
         this.onModuleDestroyed?.(plankShipId, plankId, plankDmg, plankHitX, plankHitY);
         break;
       }
@@ -1998,7 +2002,9 @@ export class NetworkManager {
         const plankDamage: number = message.damage || 0;
         const plankHitX: number | undefined = message.x;
         const plankHitY: number | undefined = message.y;
-        console.log(`💥 PLANK_DAMAGED: ship ${plankShipId} plank ${plankId} — ${plankDamage} dmg at (${plankHitX}, ${plankHitY})`);
+        const _tmplDmg = this._shipTemplates.get(plankShipId);
+        const _tmplDmgIds = _tmplDmg?.planks.map(p => '0x' + p.id.toString(16)) ?? [];
+        console.log(`💥 PLANK_DAMAGED: ship=${plankShipId} plankId=0x${plankId.toString(16)} dmg=${plankDamage}\n  tmpl has id? ${_tmplDmg?.planks.some(p => p.id === plankId)}  tmpl=[${_tmplDmgIds.join(', ')}]`);
         this.onModuleDamaged?.(plankShipId, plankId, plankDamage, plankHitX, plankHitY);
         break;
       }

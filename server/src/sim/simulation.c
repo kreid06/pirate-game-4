@@ -2361,7 +2361,19 @@ void handle_projectile_collisions(struct Sim* sim) {
                                  proj->id, plank_idx, ship->id);
                     }
 
-                    uint16_t plank_module_id = (uint16_t)(100 + plank_idx);
+                    /* Derive ship_seq from the first plank module's ID.
+                     * All plank IDs are MID(ship_seq, MODULE_OFFSET_PLANK(i)) = (seq<<8)|(0x0C+i).
+                     * Old code used legacy IDs 100-109; now compute correct MID. */
+                    uint8_t plank_seq = 0;
+                    for (uint8_t pm = 0; pm < ship->module_count; pm++) {
+                        if (ship->modules[pm].type_id == MODULE_TYPE_PLANK) {
+                            plank_seq = MID_SHIP_SEQ(ship->modules[pm].id);
+                            break;
+                        }
+                    }
+                    uint16_t plank_module_id = (plank_seq != 0)
+                        ? MID(plank_seq, MODULE_OFFSET_PLANK(plank_idx))
+                        : (uint16_t)(100 + plank_idx); /* legacy fallback */
                     int hit_plank_idx = -1;
                     for (uint8_t m = 0; m < ship->module_count; m++) {
                         if (ship->modules[m].id == plank_module_id) { hit_plank_idx = m; break; }
