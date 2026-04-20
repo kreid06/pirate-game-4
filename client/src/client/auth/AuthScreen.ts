@@ -50,38 +50,43 @@ export class AuthScreen {
           <button class="auth-tab" data-panel="guest">Guest</button>
         </div>
 
-        <!-- Login panel -->
-        <div class="auth-panel" id="panel-login">
-          <input class="auth-input" id="login-username" type="text"
-                 placeholder="Username" autocomplete="username" />
-          <input class="auth-input" id="login-password" type="password"
-                 placeholder="Password" autocomplete="current-password" />
-          <div class="auth-error" id="login-error"></div>
-          <button class="auth-btn primary" id="login-submit">Set Sail</button>
-        </div>
+        <!-- Panel container — fixed height keeps the card stable across tabs -->
+        <div class="auth-panels-container">
 
-        <!-- Register panel -->
-        <div class="auth-panel" id="panel-register">
-          <input class="auth-input" id="reg-username" type="text"
-                 placeholder="Username (3–24 chars, a-z 0-9 _ -)"
-                 autocomplete="username" />
-          <input class="auth-input" id="reg-password" type="password"
-                 placeholder="Password (min 8 chars)"
-                 autocomplete="new-password" />
-          <input class="auth-input" id="reg-confirm" type="password"
-                 placeholder="Confirm password"
-                 autocomplete="new-password" />
-          <div class="auth-error" id="reg-error"></div>
-          <button class="auth-btn primary" id="reg-submit">Create Account</button>
-        </div>
+          <!-- Login panel -->
+          <div class="auth-panel" id="panel-login">
+            <input class="auth-input" id="login-username" type="text"
+                   placeholder="Username" autocomplete="username" />
+            <input class="auth-input" id="login-password" type="password"
+                   placeholder="Password" autocomplete="current-password" />
+            <div class="auth-error" id="login-error"></div>
+            <button class="auth-btn primary" id="login-submit">Set Sail</button>
+          </div>
 
-        <!-- Guest panel -->
-        <div class="auth-panel" id="panel-guest">
-          <p class="auth-hint">Play without an account. Your progress won't be saved.</p>
-          <input class="auth-input" id="guest-name" type="text"
-                 placeholder="Display name (optional)" />
-          <div class="auth-error" id="guest-error"></div>
-          <button class="auth-btn primary" id="guest-submit">Play as Guest</button>
+          <!-- Register panel -->
+          <div class="auth-panel" id="panel-register">
+            <input class="auth-input" id="reg-username" type="text"
+                   placeholder="Username (3–24 chars, a-z 0-9 _ -)"
+                   autocomplete="username" />
+            <input class="auth-input" id="reg-password" type="password"
+                   placeholder="Password (min 8 chars)"
+                   autocomplete="new-password" />
+            <input class="auth-input" id="reg-confirm" type="password"
+                   placeholder="Confirm password"
+                   autocomplete="new-password" />
+            <div class="auth-error" id="reg-error"></div>
+            <button class="auth-btn primary" id="reg-submit">Create Account</button>
+          </div>
+
+          <!-- Guest panel -->
+          <div class="auth-panel" id="panel-guest">
+            <p class="auth-hint">Play without an account. Your progress won't be saved.</p>
+            <input class="auth-input" id="guest-name" type="text"
+                   placeholder="Display name (optional)" />
+            <div class="auth-error" id="guest-error"></div>
+            <button class="auth-btn primary" id="guest-submit">Play as Guest</button>
+          </div>
+
         </div>
       </div>
     `;
@@ -125,8 +130,19 @@ export class AuthScreen {
       .auth-tab.active {
         background: rgba(245,200,66,0.2); color: #f5c842;
       }
-      .auth-panel { display: none; flex-direction: column; gap: 12px; }
-      .auth-panel.visible { display: flex; }
+      .auth-panel {
+        display: flex; flex-direction: column; gap: 12px;
+        position: absolute; inset: 0;
+        opacity: 0; pointer-events: none;
+        transition: opacity 0.15s;
+      }
+      .auth-panel.visible { opacity: 1; pointer-events: auto; }
+      .auth-panels-container {
+        position: relative;
+        /* Height = 3 inputs (44px each) + confirm input + error row + button + gaps.
+           Sized to the tallest panel (register) so the card never resizes. */
+        height: 268px;
+      }
       .auth-input {
         background: rgba(255,255,255,0.08);
         border: 1px solid rgba(255,255,255,0.18);
