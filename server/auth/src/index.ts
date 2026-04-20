@@ -1,9 +1,30 @@
 import express from 'express';
+import cors from 'cors';
 import { pruneTokens } from './jwt.js';
 import authRouter from './routes/auth.js';
 
 const app  = express();
 const PORT = Number(process.env.AUTH_PORT ?? 3001);
+
+// ── CORS ──────────────────────────────────────────────────────────────────────
+// CORS_ORIGINS env var: comma-separated list of allowed origins.
+// Defaults to permissive (*) for dev; set explicitly in production.
+const allowedOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',')
+  : null;
+
+app.use(cors({
+  origin: allowedOrigins
+    ? (origin, cb) => {
+        // Allow requests with no Origin header (e.g. curl, server-to-server)
+        if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+        cb(new Error(`CORS: origin '${origin}' not allowed`));
+      }
+    : '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false,
+}));
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '16kb' }));
