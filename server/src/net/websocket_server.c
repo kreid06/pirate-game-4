@@ -8805,13 +8805,13 @@ int websocket_server_update(struct Sim* sim) {
                                              ships_offset, sizeof(ships_str));
                                     
                                     snprintf(game_state_response, sizeof(game_state_response),
-                                            "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":[{\"id\":%u,\"name\":\"Player\","
+                                            "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":[{\"id\":%u,\"name\":\"%s\","
                                             "\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
                                             "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
                                             "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
                                             "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\"}],\"projectiles\":[]}",
                                             get_time_ms() / 33, get_time_ms(), ships_str, 
-                                            client->player_id, player->x, player->y, player->rotation,
+                                            client->player_id, player->name, player->x, player->y, player->rotation,
                                             player->velocity_x, player->velocity_y,
                                             player->is_moving ? "true" : "false",
                                             player->movement_direction_x, player->movement_direction_y,
@@ -12058,13 +12058,13 @@ int websocket_server_update(struct Sim* sim) {
 
                 char player_entry[680];
                 snprintf(player_entry, sizeof(player_entry),
-                        "{\"id\":%u,\"name\":\"Player_%u\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
+                        "{\"id\":%u,\"name\":\"%s\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
                         "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
                         "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\","
                         "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
                         "\"company\":%u,\"health\":%u,\"max_health\":%u,\"on_island\":%u%s}",
-                        players[p].player_id, players[p].player_id,
+                        players[p].player_id, players[p].name[0] ? players[p].name : "Player",
                         players[p].x, players[p].y, players[p].rotation,
                         players[p].velocity_x, players[p].velocity_y,
                         players[p].is_moving ? "true" : "false",
