@@ -60,7 +60,7 @@ export async function main(): Promise<void> {
     await clientApp.initialize();
     
     // Start the application, passing auth credentials for the server handshake
-    clientApp.start(session.displayName, session.accessToken);
+    clientApp.start(session.displayName, session.accessToken, session.guest);
     
     console.log('✅ Pirate MMO Client Started Successfully');
     

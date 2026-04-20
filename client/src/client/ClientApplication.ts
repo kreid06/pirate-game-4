@@ -1241,6 +1241,13 @@ export class ClientApplication {
         this.shutdown();
         logout().finally(() => window.location.reload());
       };
+
+      // Tell the pause menu whether this session is a guest (shows "Create Account" if so)
+      this.pauseMenu.setGuest(guest);
+      this.pauseMenu.onAccountCreated = (displayName: string) => {
+        console.log(`✅ Guest converted to permanent account: ${displayName}`);
+        this.pauseMenu.setGuest(false);
+      };
       
       // Initialize UI System
       this.uiManager = new UIManager(this.canvas, this.config);
@@ -1558,7 +1565,7 @@ export class ClientApplication {
   /**
    * Start the client application (connect to server and begin game loop)
    */
-  async start(playerName?: string, accessToken?: string): Promise<void> {
+  async start(playerName?: string, accessToken?: string, guest = false): Promise<void> {
     if (this.running) {
       console.warn('⚠️ Client is already running');
       return;

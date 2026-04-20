@@ -7,6 +7,7 @@ import {
   issueRefreshToken,
   consumeRefreshToken,
   revokeAllTokens,
+  verifyAccessToken,
 } from '../jwt.js';
 
 const router = Router();
@@ -140,6 +141,59 @@ router.post('/logout', (req: Request, res: Response) => {
   db.prepare('UPDATE refresh_tokens SET revoked = 1 WHERE token_hash = ?').run(hash);
 
   return res.json({ ok: true });
+});
+
+// ── POST /auth/convert ────────────────────────────────────────────────────────
+// Converts a guest session into a permanent account, preserving the player_id
+// (and therefore all in-game progress tied to that ID).
+// Body: { access_token, username, password }
+// Returns: { access_token, refresh_token }
+router.post('/convert', async (req: Request, res: Response) => {
+  const { access_token, username, password } = req.body ?? {};
+
+  if (typeof access_token !== 'string') {
+    return res.status(400).json({ error: 'missing_token' });
+  }
+  if (typeof username !== 'string' || username.trim().length < 3) {
+    return res.status(400).json({ error: 'username_too_short' });
+  }
+  if (typeof password !== 'string' || password.length < 8) {
+    return res.status(400).json({ error: 'password_too_short' });
+  }
+
+  // Verify the token and ensure it is a guest token
+  let payload: { player_id: string; guest: boolean };
+  try {
+    payload = verifyAccessToken(access_token);
+  } catch {
+    return res.status(401).json({ error: 'invalid_token' });
+  }
+  if (!payload.guest) {
+    return res.status(400).json({ error: 'not_a_guest' });
+  }
+
+  const clean = username.trim().slice(0, 24);
+  if (!/^[a-zA-Z0-9_-]+$/.test(clean)) {
+    return res.status(400).json({ error: 'username_invalid_chars' });
+  }
+
+  const existing = db.prepare('SELECT id FROM accounts WHERE username = ?').get(clean);
+  if (existing) return res.status(409).json({ error: 'username_taken' });
+
+  const password_hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+
+  // Insert permanent account reusing the guest player_id
+  db.prepare(`
+    INSERT INTO accounts (player_id, username, password_hash) VALUES (?, ?, ?)
+  `).run(payload.player_id, clean, password_hash);
+
+  // Revoke all guest tokens for this player
+  revokeAllTokens(payload.player_id);
+
+  const new_access  = signAccessToken({ player_id: payload.player_id, display_name: clean, guest: false });
+  const new_refresh = issueRefreshToken(payload.player_id, clean, false);
+
+  return res.status(201).json({ access_token: new_access, refresh_token: new_refresh });
 });
 
 export default router;

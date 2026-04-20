@@ -152,6 +152,35 @@ export async function restoreSession(): Promise<AuthResult | null> {
 }
 
 /**
+ * Convert the current guest session to a permanent account.
+ * Sends the stored guest access token to the server so the same player_id is
+ * preserved — all in-game progress carries over automatically.
+ */
+export async function convertAccount(username: string, password: string): Promise<AuthResult> {
+  const accessToken = localStorage.getItem(LS_ACCESS);
+  if (!accessToken) throw new Error('no_session');
+
+  const res = await fetch(`${AUTH_URL}/auth/convert`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ access_token: accessToken, username, password }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? 'convert_failed');
+
+  const result: AuthResult = {
+    accessToken:  data.access_token,
+    refreshToken: data.refresh_token,
+    displayName:  username,
+    guest:        false,
+  };
+  saveSession(result);
+  return result;
+}
+
+/**
  * Revoke the stored refresh token on the auth server, then clear local storage.
  * Fire-and-forget safe — if the server call fails we still clear locally.
  */
