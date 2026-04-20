@@ -2292,7 +2292,7 @@ void handle_projectile_collisions(struct Sim* sim) {
             if (proj->inside_ship_id == ship->id && !inside_hull) {
                 proj->inside_ship_id = 0;
                 proj->ticks_inside = 0;
-                if (proj->last_hit_module_id == 200) proj->last_hit_module_id = 0; // clear deck hit flag
+                proj->last_hit_module_id = 0; // clear deck hit sentinel so re-entry can damage deck again
                 log_info("🚪 Projectile %u exited hull of ship %u", proj->id, ship->id);
                 continue;
             }

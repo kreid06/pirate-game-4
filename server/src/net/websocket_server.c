@@ -3599,18 +3599,23 @@ static void tick_world_npcs(float dt) {
             if (npc->role == NPC_ROLE_REPAIRER && npc->assigned_weapon_id == 0 && global_sim) {
                 struct Ship* intr_ship = find_sim_ship(npc->ship_id);
                 if (intr_ship) {
+                    // Resolve ship_seq for MID-based module IDs
+                    SimpleShip* _intr_ss = find_ship(npc->ship_id);
+                    uint8_t _intr_seq = _intr_ss ? _intr_ss->ship_seq : (uint8_t)(npc->ship_id & 0xFF);
+                    uint16_t _intr_deck_mid = MID(_intr_seq, MODULE_OFFSET_DECK);
+
                     // Check for missing deck (highest priority)
                     bool intr_deck_present = false;
                     for (uint8_t m = 0; m < intr_ship->module_count; m++) {
-                        if (intr_ship->modules[m].id == 200) { intr_deck_present = true; break; }
+                        if (intr_ship->modules[m].type_id == MODULE_TYPE_DECK) { intr_deck_present = true; break; }
                     }
                     bool intr_deck_taken = !intr_deck_present &&
-                        occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, 200);
+                        occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, _intr_deck_mid);
                     if (!intr_deck_present && !intr_deck_taken) {
                         npc->target_local_x     = 0.0f;
                         npc->target_local_y     = 0.0f;
-                        npc->assigned_weapon_id = 200;
-                        occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, 200 };
+                        npc->assigned_weapon_id = _intr_deck_mid;
+                        occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, _intr_deck_mid };
                         log_info("🔨 NPC %u (%s) interrupted — redirecting to replace missing deck",
                                  npc->id, npc->name);
                     } else {
@@ -3618,12 +3623,13 @@ static void tick_world_npcs(float dt) {
                     bool present[10] = {false};
                     for (uint8_t m = 0; m < intr_ship->module_count; m++) {
                         uint16_t mid = intr_ship->modules[m].id;
-                        if (mid >= 100 && mid <= 109) present[mid - 100] = true;
+                        if (MODULE_OFFSET_IS_PLANK(MID_OFFSET(mid))) present[MID_OFFSET(mid) - MODULE_OFFSET_PLANK_BASE] = true;
                     }
                     int intr_missing = -1;
                     for (int k = 0; k < 10; k++) {
                         if (present[k]) continue;
-                        if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, (uint32_t)(100 + k)))
+                        uint32_t pmid_k = MID(_intr_seq, MODULE_OFFSET_PLANK(k));
+                        if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, pmid_k))
                             { intr_missing = k; break; }
                     }
                     if (intr_missing >= 0) {
@@ -3632,10 +3638,10 @@ static void tick_world_npcs(float dt) {
                         if (pmag > 0.0f) { pcx -= (pcx / pmag) * 28.0f; pcy -= (pcy / pmag) * 28.0f; }
                         npc->target_local_x     = pcx;
                         npc->target_local_y     = pcy;
-                        npc->assigned_weapon_id = (uint32_t)(100 + intr_missing);
+                        npc->assigned_weapon_id = MID(_intr_seq, MODULE_OFFSET_PLANK(intr_missing));
                         occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                         log_info("🔨 NPC %u (%s) interrupted — redirecting to missing plank %u",
-                                 npc->id, npc->name, 100 + intr_missing);
+                                 npc->id, npc->name, npc->assigned_weapon_id);
                     } else {
                         // Check for damaged modules
                         ShipModule* intr_mod = NULL;
@@ -3812,13 +3818,13 @@ static void tick_world_npcs(float dt) {
                 uint32_t target_id = npc->assigned_weapon_id;
 
                 // If the deck is missing, place it first
-                if (target_id == 200) {
+                if (MID_OFFSET((uint16_t)target_id) == MODULE_OFFSET_DECK) {
                     bool deck_exists = false;
                     for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                        if (sim_ship->modules[m].id == 200) { deck_exists = true; break; }
+                        if (sim_ship->modules[m].type_id == MODULE_TYPE_DECK) { deck_exists = true; break; }
                     }
                     if (!deck_exists && sim_ship->module_count < MAX_MODULES_PER_SHIP) {
-                        ShipModule new_deck = module_create(200, MODULE_TYPE_DECK, (Vec2Q16){0,0}, 0);
+                        ShipModule new_deck = module_create((uint16_t)target_id, MODULE_TYPE_DECK, (Vec2Q16){0,0}, 0);
                         new_deck.health      = new_deck.max_health / 10;
                         new_deck.state_bits |= MODULE_STATE_DAMAGED | MODULE_STATE_REPAIRING;
                         sim_ship->modules[sim_ship->module_count++] = new_deck;
@@ -3831,7 +3837,7 @@ static void tick_world_npcs(float dt) {
                 }
 
                 // If it's a plank slot that's empty, place a new plank first
-                if (target_id >= 100 && target_id <= 109) {
+                if (MODULE_OFFSET_IS_PLANK(MID_OFFSET((uint16_t)target_id))) {
                     bool module_exists = false;
                     for (uint8_t m = 0; m < sim_ship->module_count; m++) {
                         if ((uint32_t)sim_ship->modules[m].id == target_id) {
@@ -3839,7 +3845,7 @@ static void tick_world_npcs(float dt) {
                         }
                     }
                     if (!module_exists && sim_ship->module_count < MAX_MODULES_PER_SHIP) {
-                        int idx = (int)(target_id - 100);
+                        int idx = (int)(MID_OFFSET((uint16_t)target_id) - MODULE_OFFSET_PLANK_BASE);
                         Vec2Q16 pos = {
                             Q16_FROM_FLOAT(CLIENT_TO_SERVER(s_plank_cx[idx])),
                             Q16_FROM_FLOAT(CLIENT_TO_SERVER(s_plank_cy[idx]))
@@ -3912,18 +3918,23 @@ static void tick_world_npcs(float dt) {
         if (npc->state == WORLD_NPC_STATE_IDLE) {
             if (!sim_ship) continue;
 
+            // Resolve ship_seq for MID-based module IDs
+            SimpleShip* _idle_ss = find_ship(npc->ship_id);
+            uint8_t _idle_seq = _idle_ss ? _idle_ss->ship_seq : (uint8_t)(npc->ship_id & 0xFF);
+            uint16_t _idle_deck_mid = MID(_idle_seq, MODULE_OFFSET_DECK);
+
             // --- 0. Check for missing deck (highest priority) -------------------
             bool deck_present = false;
             for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                if (sim_ship->modules[m].id == 200) { deck_present = true; break; }
+                if (sim_ship->modules[m].type_id == MODULE_TYPE_DECK) { deck_present = true; break; }
             }
             if (!deck_present) {
-                if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, 200)) {
+                if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, _idle_deck_mid)) {
                     npc->target_local_x     = 0.0f;
                     npc->target_local_y     = 0.0f;
-                    npc->assigned_weapon_id = 200;
+                    npc->assigned_weapon_id = _idle_deck_mid;
                     npc->state              = WORLD_NPC_STATE_MOVING;
-                    occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, 200 };
+                    occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, _idle_deck_mid };
                     log_info("🔨 NPC %u (%s) → walking to replace missing deck", npc->id, npc->name);
                     continue;
                 }
@@ -3933,12 +3944,13 @@ static void tick_world_npcs(float dt) {
             bool present[10] = {false};
             for (uint8_t m = 0; m < sim_ship->module_count; m++) {
                 uint16_t mid = sim_ship->modules[m].id;
-                if (mid >= 100 && mid <= 109) present[mid - 100] = true;
+                if (MODULE_OFFSET_IS_PLANK(MID_OFFSET(mid))) present[MID_OFFSET(mid) - MODULE_OFFSET_PLANK_BASE] = true;
             }
             int missing_idx = -1;
             for (int k = 0; k < 10; k++) {
                 if (present[k]) continue;
-                if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, (uint32_t)(100 + k)))
+                uint32_t plank_mid_k = MID(_idle_seq, MODULE_OFFSET_PLANK(k));
+                if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, plank_mid_k))
                     { missing_idx = k; break; }
             }
 
@@ -3949,11 +3961,11 @@ static void tick_world_npcs(float dt) {
                 if (pmag > 0.0f) { pcx -= (pcx / pmag) * 28.0f; pcy -= (pcy / pmag) * 28.0f; }
                 npc->target_local_x     = pcx;
                 npc->target_local_y     = pcy;
-                npc->assigned_weapon_id = (uint32_t)(100 + missing_idx);
+                npc->assigned_weapon_id = MID(_idle_seq, MODULE_OFFSET_PLANK(missing_idx));
                 npc->state              = WORLD_NPC_STATE_MOVING;
                 occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                 log_info("🔨 NPC %u (%s) → walking to place missing plank %u",
-                         npc->id, npc->name, 100 + missing_idx);
+                         npc->id, npc->name, npc->assigned_weapon_id);
                 continue;
             }
 
@@ -9891,18 +9903,20 @@ int websocket_server_update(struct Sim* sim) {
                                         } else {
                                             bool deck_present = false;
                                             for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                                                if (sim_ship->modules[m].id == 200) { deck_present = true; break; }
+                                                if (sim_ship->modules[m].type_id == MODULE_TYPE_DECK) { deck_present = true; break; }
                                             }
                                             if (deck_present) {
                                                 strcpy(response, "{\"type\":\"message_ack\",\"status\":\"deck_already_present\"}");
                                             } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
                                                 strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
                                             } else {
-                                                ShipModule new_deck = module_create(200, MODULE_TYPE_DECK, (Vec2Q16){0,0}, 0);
+                                                SimpleShip* simple = find_ship(player->parent_ship_id);
+                                                uint8_t deck_seq = simple ? simple->ship_seq : (uint8_t)(player->parent_ship_id & 0xFF);
+                                                uint16_t deck_mid = MID(deck_seq, MODULE_OFFSET_DECK);
+                                                ShipModule new_deck = module_create(deck_mid, MODULE_TYPE_DECK, (Vec2Q16){0,0}, 0);
                                                 new_deck.health = new_deck.max_health / 10; // start at 10%
                                                 new_deck.state_bits |= MODULE_STATE_DAMAGED | MODULE_STATE_REPAIRING;
                                                 sim_ship->modules[sim_ship->module_count++] = new_deck;
-                                                SimpleShip* simple = find_ship(player->parent_ship_id);
                                                 if (simple && simple->module_count < MAX_MODULES_PER_SHIP)
                                                     simple->modules[simple->module_count++] = new_deck;
                                                 player->inventory.slots[deck_slot].quantity--;

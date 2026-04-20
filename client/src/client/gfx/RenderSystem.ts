@@ -4645,13 +4645,9 @@ export class RenderSystem {
     this.ctx.rotate(ship.rotation - cameraState.rotation);
     // Find all plank modules
     const planks = ship.modules.filter(m => m.kind === 'plank');
-
-    // TODO(missing-deck-visuals): When a ship has no planks and no deck module (bare skeleton /
-    // newly constructed hull), render placeholder "missing plank" shapes along the hull outline
-    // at each of the 10 standard plank positions.  Style should match the build-mode ghost planks
-    // (semi-transparent outline with a dashed or hatched fill) to communicate that the structure
-    // exists but is not yet built.  Also draw a faint "missing deck" rectangle in the centre.
-    // Implement once the shipyard build flow is stable.
+    // Only show dark "unbuilt" slot on skeleton ships (no deck present).
+    // On a real ship a health=0 plank was destroyed — it should simply disappear.
+    const shipHasDeck = ship.modules.some(m => m.kind === 'deck');
     
     for (const plank of planks) {
       if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
@@ -4663,24 +4659,25 @@ export class RenderSystem {
       const width = plankData.width;
       const health = plankData.health;
       const isCurved = plankData.isCurved || false;
-      
-      // Draw dark slot for every plank position (missing or present)
-      {
-        const missingFill = 'rgb(38, 24, 10)';
-        this.ctx.save();
-        if (isCurved && plankData.curveData) {
-          this.drawCurvedPlank(plankData.curveData, width, missingFill, 'transparent');
-        } else {
-          this.ctx.fillStyle = missingFill;
-          this.ctx.translate(pos.x, pos.y);
-          this.ctx.rotate(rot);
-          this.ctx.fillRect(-length / 2, -width / 2, length, width);
-        }
-        this.ctx.restore();
-      }
 
-      // Missing plank (health=0): nothing more to draw
-      if (health <= 0) continue;
+      if (health <= 0) {
+        if (!shipHasDeck) {
+          // Skeleton ship — show dark unbuilt slot
+          const missingFill = 'rgb(38, 24, 10)';
+          this.ctx.save();
+          if (isCurved && plankData.curveData) {
+            this.drawCurvedPlank(plankData.curveData, width, missingFill, 'transparent');
+          } else {
+            this.ctx.fillStyle = missingFill;
+            this.ctx.translate(pos.x, pos.y);
+            this.ctx.rotate(rot);
+            this.ctx.fillRect(-length / 2, -width / 2, length, width);
+          }
+          this.ctx.restore();
+        }
+        // Destroyed on a real ship — render nothing
+        continue;
+      }
       
       // Smoothly darken toward black as health decreases
       const maxHealth = plankData.maxHealth || 10000;
@@ -5130,7 +5127,8 @@ export class RenderSystem {
     );
     for (const pm of plankModules) {
       const pd = pm.moduleData as PlankModuleData;
-      presentKeys.add(`${pd.sectionName}_${pd.segmentIndex}`);
+      // Health=0 means destroyed — treat as absent (show missing icon)
+      if ((pd.health ?? 1) > 0) presentKeys.add(`${pd.sectionName}_${pd.segmentIndex}`);
     }
 
     const template = this.getPlankTemplate();
@@ -8803,22 +8801,12 @@ export class RenderSystem {
       ? 'Phantom Brig'
       : `${companyName} Brigantine`;
 
-    // Sum plank/deck module health
-    let totalPlankHp       = 0;
-    let totalPlankTargetHp = 0;
-    let totalPlankMaxHp    = 0;
-    for (const mod of ship.modules) {
-      const md = mod.moduleData as any;
-      if (!md) continue;
-      if (md.kind === 'plank') {
-        totalPlankHp       += md.health       ?? md.maxHealth ?? 10000;
-        totalPlankTargetHp += md.targetHealth ?? md.maxHealth ?? 10000;
-        totalPlankMaxHp    += md.maxHealth    ?? 10000;
-      } else if (md.kind === 'deck') {
-        totalPlankHp    += md.health    ?? md.maxHealth ?? 10000;
-        totalPlankMaxHp += md.maxHealth ?? 10000;
-      }
-    }
+    // Deck module health for the tooltip bar
+    const deckModTip = ship.modules.find(m => m.kind === 'deck');
+    const dmdTip = deckModTip?.moduleData as any;
+    const deckHp       = dmdTip?.health    ?? 0;
+    const deckMaxHp    = dmdTip?.maxHealth ?? 10000;
+    const deckTargetHp = dmdTip?.targetHealth ?? deckHp;
 
     const isGhost = ship.shipType === SHIP_TYPE_GHOST;
     const maxHullHP = isGhost ? GHOST_MAX_HULL_HP : 100;
@@ -8826,11 +8814,11 @@ export class RenderSystem {
     const hullText = isGhost
       ? `Hull: ${ship.hullHealth.toFixed(0)} / ${GHOST_MAX_HULL_HP.toLocaleString()}`
       : `Hull: ${ship.hullHealth.toFixed(0)}%`;
-    const deckText = totalPlankMaxHp > 0
-      ? `Planks: ${Math.round(totalPlankHp)} / ${Math.round(totalPlankTargetHp)} / ${Math.round(totalPlankMaxHp)}`
-      : 'Planks: —';
-    const deckPct       = totalPlankMaxHp    > 0 ? totalPlankHp    / totalPlankMaxHp    : 1;
-    const deckTargetPct = totalPlankMaxHp    > 0 ? totalPlankTargetHp / totalPlankMaxHp : 1;
+    const deckText = deckModTip
+      ? `Deck: ${Math.round(deckHp)} / ${Math.round(deckTargetHp)} / ${Math.round(deckMaxHp)}`
+      : 'Deck: —';
+    const deckPct       = deckMaxHp > 0 ? deckHp       / deckMaxHp : 1;
+    const deckTargetPct = deckMaxHp > 0 ? deckTargetHp / deckMaxHp : 1;
 
     const screenPos = camera.worldToScreen(this.mouseWorldPos);
     const padding   = 10;
