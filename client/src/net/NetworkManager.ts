@@ -466,6 +466,7 @@ export class NetworkManager {
   private messageSequenceId = 0;
   private pendingPings = new Map<number, number>(); // sequenceId -> timestamp
   private playerName: string = 'Player_' + Math.random().toString(36).substr(2, 5);
+  private accessToken: string | null = null;
   
   // Statistics tracking
   private stats: NetworkStats = {
@@ -613,9 +614,12 @@ export class NetworkManager {
   /**
    * Connect to the game server
    */
-  async connect(playerName?: string): Promise<void> {
+  async connect(playerName?: string, accessToken?: string): Promise<void> {
     if (playerName) {
       this.playerName = playerName;
+    }
+    if (accessToken) {
+      this.accessToken = accessToken;
     }
     
     // Stronger protection against duplicate connections
@@ -716,12 +720,15 @@ export class NetworkManager {
       }
       
       // Send JSON handshake that server expects
-      const handshakeMessage = {
+      const handshakeMessage: Record<string, unknown> = {
         type: 'handshake',
         playerName: this.playerName,
         protocolVersion: 1,
         timestamp: Date.now()
       };
+      if (this.accessToken) {
+        handshakeMessage.token = this.accessToken;
+      }
       const handshakeJson = JSON.stringify(handshakeMessage);
       
       // Set timeout for handshake response

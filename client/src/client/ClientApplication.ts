@@ -1542,7 +1542,7 @@ export class ClientApplication {
   /**
    * Start the client application (connect to server and begin game loop)
    */
-  async start(): Promise<void> {
+  async start(playerName?: string, accessToken?: string): Promise<void> {
     if (this.running) {
       console.warn('⚠️ Client is already running');
       return;
@@ -1554,7 +1554,7 @@ export class ClientApplication {
       // Try to connect to server, but continue even if it fails
       this.state = ClientState.CONNECTING;
       try {
-        await this.networkManager.connect('Player'); // Default player name
+        await this.networkManager.connect(playerName ?? 'Player', accessToken);
         console.log('✅ Connected to physics server');
       } catch (serverError) {
         console.warn('⚠️ Could not connect to physics server:', serverError);
