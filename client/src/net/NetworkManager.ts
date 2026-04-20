@@ -481,8 +481,10 @@ export class NetworkManager {
   private latency = 0;
 
   // ── Per-tick allocation caches ────────────────────────────────────────────
-  /** Brigantine hull/module template — created once, reused on every GAME_STATE message. */
-  private _shipTemplate: { planks: ShipModule[]; deck: ShipModule[]; ship: Ship } | null = null;
+  /** Per-ship hull/module template — keyed by ship_id, created once per ship.
+   *  Plank IDs are stamped to match the server's MID(ship_seq, offset) encoding
+   *  so that plankHealthBuf lookups and damage-event module finds both work. */
+  private readonly _shipTemplates = new Map<number, { planks: ShipModule[]; deck: ShipModule[]; ship: Ship }>();
   /** Plank-health lookup buffer — cleared and refilled each tick instead of being re-allocated. */
   private readonly _plankHealthBuf = new Map<number, { health: number; targetHealth: number; maxHealth: number }>();
 
@@ -1538,16 +1540,35 @@ export class NetworkManager {
           tick: message.tick || 0,
           timestamp: Date.now(),
           ships: (message.ships || []).map((ship: any) => {
-            // Use cached brigantine template — avoids recreating hull curve geometry on every tick.
-            if (!this._shipTemplate) {
+            // Use per-ship cached template — created once per ship_id to avoid
+            // recreating hull curve geometry on every tick.
+            // Plank IDs in the template are stamped to match the server's MID encoding:
+            //   MID(ship_seq, MODULE_OFFSET_PLANK(i)) = (ship_seq << 8) | (0x0C + i)
+            // On a single-server ship_seq === ship_id (low byte).
+            const shipId = ship.id || 0;
+            if (!this._shipTemplates.has(shipId)) {
               const s = createShipAtPosition(Vec2.from(0, 0), 0);
-              this._shipTemplate = {
+              const shipSeq = shipId & 0xFF;          // low byte == ship_seq on single-server
+              const MID_PLANK_BASE = 0x0C;            // MODULE_OFFSET_PLANK(0)
+              const MID_DECK       = 0x16;            // MODULE_OFFSET_DECK
+              let plankIdx = 0;
+              s.modules = s.modules.map(m => {
+                if (m.kind === 'plank') {
+                  const newId = (shipSeq << 8) | (MID_PLANK_BASE + plankIdx++);
+                  return { ...m, id: newId };
+                }
+                if (m.kind === 'deck') {
+                  return { ...m, id: (shipSeq << 8) | MID_DECK };
+                }
+                return m;
+              });
+              this._shipTemplates.set(shipId, {
                 planks: s.modules.filter(m => m.kind === 'plank'),
                 deck:   s.modules.filter(m => m.kind === 'deck'),
                 ship:   s,
-              };
+              });
             }
-            const tmpl = this._shipTemplate;
+            const tmpl = this._shipTemplates.get(shipId)!;
             
             // Parse modules from server if available
             // Server sends: modules: [{id, typeId, x, y, rotation}, ...]
