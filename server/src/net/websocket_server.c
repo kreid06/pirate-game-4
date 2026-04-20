@@ -10002,14 +10002,21 @@ int websocket_server_update(struct Sim* sim) {
                                                 sim_ship = &global_sim->ships[si]; break;
                                             }
                                         }
-                                        if (!sim_ship) {
+                                        SimpleShip* simple_ship = find_ship(target_ship_id);
+                                        if (!sim_ship || !simple_ship) {
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
                                         } else {
-                                            // Determine which plank IDs (100-109) are present
+                                            uint8_t ship_seq = simple_ship->ship_seq;
+                                            // Determine which plank slots are already present using MID encoding
                                             bool present[10] = {false};
                                             for (uint8_t m = 0; m < sim_ship->module_count; m++) {
                                                 uint16_t mid = sim_ship->modules[m].id;
-                                                if (mid >= 100 && mid <= 109) present[mid - 100] = true;
+                                                uint8_t off = MID_OFFSET(mid);
+                                                if (MID_BELONGS_TO(mid, ship_seq) &&
+                                                    off >= MODULE_OFFSET_PLANK_BASE &&
+                                                    off < MODULE_OFFSET_PLANK_BASE + 10) {
+                                                    present[off - MODULE_OFFSET_PLANK_BASE] = true;
+                                                }
                                             }
                                             /* Use the client-requested slot; fall back to first missing */
                                             int missing_idx = plank_slot_idx >= 0 ? plank_slot_idx : -1;
@@ -10029,7 +10036,7 @@ int websocket_server_update(struct Sim* sim) {
                                             } else if (missing_idx != -2 && sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
                                                 strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
                                             } else if (missing_idx >= 0) {
-                                                uint16_t plank_id = 100 + (uint16_t)missing_idx;
+                                                uint16_t plank_id = MID(ship_seq, MODULE_OFFSET_PLANK(missing_idx));
                                                 static const float pp_cx[10] = {
                                                      246.25f,  246.25f,  115.0f,  -35.0f, -185.0f,
                                                     -281.25f, -281.25f, -185.0f,  -35.0f,  115.0f };
@@ -10045,14 +10052,17 @@ int websocket_server_update(struct Sim* sim) {
                                                 // New planks start at 10% HP and heal passively
                                                 new_plank.health = new_plank.max_health / 10;
                                                 new_plank.state_bits |= MODULE_STATE_DAMAGED;
+                                                // Add to sim ship (physics) and SimpleShip (broadcast) layers
                                                 sim_ship->modules[sim_ship->module_count++] = new_plank;
+                                                if (simple_ship->module_count < MAX_MODULES_PER_SHIP)
+                                                    simple_ship->modules[simple_ship->module_count++] = new_plank;
                                                 // Consume 1 plank
                                                 player->inventory.slots[plank_slot].quantity--;
                                                 if (player->inventory.slots[plank_slot].quantity == 0)
                                                     player->inventory.slots[plank_slot].item = ITEM_NONE;
-                                                log_info("🔨 Player %u placed plank %u on ship %u (%d planks remain in slot %d)",
-                                                         player->player_id, plank_id, sim_ship->id,
-                                                         player->inventory.slots[plank_slot].quantity, plank_slot);
+                                                log_info("🔨 Player %u placed plank %u (seq=%u slot=%d) on ship %u (%d planks remain)",
+                                                         player->player_id, plank_id, ship_seq, missing_idx, sim_ship->id,
+                                                         player->inventory.slots[plank_slot].quantity);
                                                 snprintf(response, sizeof(response),
                                                     "{\"type\":\"message_ack\",\"status\":\"plank_placed\",\"plank_id\":%u}",
                                                     plank_id);
