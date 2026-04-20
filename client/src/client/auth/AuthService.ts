@@ -150,3 +150,19 @@ export async function restoreSession(): Promise<AuthResult | null> {
     return null;
   }
 }
+
+/**
+ * Revoke the stored refresh token on the auth server, then clear local storage.
+ * Fire-and-forget safe — if the server call fails we still clear locally.
+ */
+export async function logout(): Promise<void> {
+  const refreshToken = localStorage.getItem(LS_REFRESH);
+  if (refreshToken) {
+    try {
+      await post('/auth/logout', { refresh_token: refreshToken });
+    } catch {
+      // Network failure — token will expire on its own; proceed with local clear.
+    }
+  }
+  clearSession();
+}

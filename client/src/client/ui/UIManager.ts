@@ -56,6 +56,21 @@ export enum UIElementType {
 }
 
 /**
+ * All menu identifiers — used to track which menu is currently open.
+ * ClientApplication uses these same IDs for its own menus (crafting, shipyard, pause).
+ */
+export const MENU_ID = {
+  COMPANY:   'company',
+  PLAYER:    'player',
+  SHIP:      'ship',
+  CREW:      'crew',
+  CRAFTING:  'crafting',
+  SHIPYARD:  'shipyard',
+  PAUSE:     'pause',
+} as const;
+export type MenuId = typeof MENU_ID[keyof typeof MENU_ID];
+
+/**
  * Base UI element interface
  */
 interface UIElement {
@@ -85,6 +100,9 @@ export class UIManager {
   private shipMenu = new ShipMenu();
   // Crew level / upgrade panel (opened by clicking an NPC)
   private crewMenu = new CrewLevelMenu();
+
+  /** Which menu is currently open — null when none. */
+  private activeMenuId: MenuId | null = null;
 
   // UI State
   private showDebugOverlay = false;
@@ -183,6 +201,50 @@ export class UIManager {
       resultTime: -1,
       won: null,
     };
+  }
+
+  /** Returns which menu is currently open, or null. */
+  getActiveMenuId(): MenuId | null {
+    return this.activeMenuId;
+  }
+
+  /** Returns true if any canvas-side menu/modal is currently open. */
+  isAnyMenuOpen(): boolean {
+    return this.activeMenuId !== null;
+  }
+
+  /**
+   * Open one of the UIManager-owned menus by ID, closing any currently open menu first.
+   * For menus owned by ClientApplication (crafting, shipyard, pause), call this to keep
+   * activeMenuId in sync — pass the id and handle open/close yourself.
+   */
+  openMenu(id: MenuId): void {
+    this.closeActiveMenu();
+    this.activeMenuId = id;
+    switch (id) {
+      case MENU_ID.COMPANY: this.companyMenu.open(); break;
+      case MENU_ID.PLAYER:  this.playerMenu.open();  break;
+      case MENU_ID.SHIP:    this.shipMenu.open();     break;
+      case MENU_ID.CREW:    /* opened externally via openCrewMenu() */ break;
+      // CRAFTING / SHIPYARD / PAUSE are owned by ClientApplication — ID is set here,
+      // but the actual DOM/canvas open call happens in ClientApplication.
+    }
+  }
+
+  /** Close whichever UIManager-owned menu is active and clear the tracked ID. */
+  closeActiveMenu(): void {
+    switch (this.activeMenuId) {
+      case MENU_ID.COMPANY: this.companyMenu.close(); break;
+      case MENU_ID.PLAYER:  this.playerMenu.close();  break;
+      case MENU_ID.SHIP:    this.shipMenu.close();     break;
+      case MENU_ID.CREW:    this.crewMenu.close();     break;
+    }
+    this.activeMenuId = null;
+  }
+
+  /** Notify UIManager that an externally-owned menu (crafting/shipyard/pause) was opened. */
+  setActiveMenuId(id: MenuId | null): void {
+    this.activeMenuId = id;
   }
 
   /**
@@ -299,7 +361,7 @@ export class UIManager {
     this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId);
     this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
     // Crew level menu — update live NPC data before rendering
-    if (this.crewMenu.visible && this.crewMenu.npcId) {
+    if (this.activeMenuId === MENU_ID.CREW && this.crewMenu.npcId) {
       const liveNpc = context.worldState.npcs.find(n => n.id === this.crewMenu.npcId);
       if (liveNpc) this.crewMenu.update(liveNpc);
     }
@@ -823,6 +885,7 @@ export class UIManager {
     // Also wire ShipMenu NPC rows → open crew menu
     this.shipMenu.onNpcClick = (npc) => {
       this.crewMenu.open(npc);
+      this.activeMenuId = MENU_ID.CREW;
     };
   }
 
@@ -831,6 +894,7 @@ export class UIManager {
    */
   openCrewMenuForNpc(npc: Npc): void {
     this.crewMenu.open(npc);
+    this.activeMenuId = MENU_ID.CREW;
   }
 
   /**
@@ -900,23 +964,23 @@ export class UIManager {
     }
     // If company menu is open, clicks anywhere close it (the menu itself has no buttons yet).
     // Log-term: route internal clicks to menu sub-elements here.
-    if (this.companyMenu.visible) {
-      this.companyMenu.close();
+    if (this.activeMenuId === MENU_ID.COMPANY) {
+      this.closeActiveMenu();
       return true;
     }
-    if (this.playerMenu.visible) {
-      this.playerMenu.close();
+    if (this.activeMenuId === MENU_ID.PLAYER) {
+      this.closeActiveMenu();
       return true;
     }
-    if (this.crewMenu.visible) {
+    if (this.activeMenuId === MENU_ID.CREW) {
       const consumed = this.crewMenu.handleClick(x, y);
-      if (!consumed) this.crewMenu.close();
+      if (!consumed) this.closeActiveMenu();
       return true;
     }
-    if (this.shipMenu.visible) {
+    if (this.activeMenuId === MENU_ID.SHIP) {
       // Forward to shipMenu — returns true if inside panel (upgrade click or panel area)
       const consumed = this.shipMenu.handleClick(x, y);
-      if (!consumed) this.shipMenu.close();
+      if (!consumed) this.closeActiveMenu();
       return true;
     }
     return this.manningPanel.handleClick(x, y);
@@ -1383,42 +1447,48 @@ export class UIManager {
   private onKeyDown(event: KeyboardEvent): void {
     // Close any open modal on Escape or backtick
     if (event.code === 'Escape' || event.code === 'Backquote') {
-      if (this.companyMenu.visible) { this.companyMenu.close(); event.preventDefault(); event.stopPropagation(); return; }
-      if (this.playerMenu.visible)  { this.playerMenu.close();  event.preventDefault(); event.stopPropagation(); return; }
-      if (this.shipMenu.visible)    { this.shipMenu.close();    event.preventDefault(); event.stopPropagation(); return; }
-      if (this.crewMenu.visible)    { this.crewMenu.close();    event.preventDefault(); event.stopPropagation(); return; }
+      if (this.activeMenuId !== null
+          && this.activeMenuId !== MENU_ID.CRAFTING
+          && this.activeMenuId !== MENU_ID.SHIPYARD
+          && this.activeMenuId !== MENU_ID.PAUSE) {
+        this.closeActiveMenu();
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      // Don't stopPropagation here — let ClientApplication handle Escape for pause menu
       return;
     }
 
     switch (event.code) {
       case 'KeyK':
-        // [K] toggles (opens or closes) the company ledger menu
-        this.companyMenu.toggle();
-        // Close sibling menus so only one is open at a time
-        if (this.companyMenu.visible) { this.playerMenu.close(); this.shipMenu.close(); }
-        if (this.companyMenu.visible) { event.preventDefault(); event.stopPropagation(); }
+        if (this.activeMenuId === MENU_ID.COMPANY) {
+          this.closeActiveMenu();
+        } else {
+          this.openMenu(MENU_ID.COMPANY);
+        }
+        event.preventDefault();
+        event.stopPropagation();
         break;
 
       case 'KeyI':
-        // [I] opens the player character sheet.
-        // Only intercept if the menu is already open (so normal I key still fires when closed).
-        if (this.playerMenu.visible) {
-          this.playerMenu.close();
-          event.preventDefault();
-          event.stopPropagation();
+        if (this.activeMenuId === MENU_ID.PLAYER) {
+          this.closeActiveMenu();
         } else {
-          this.playerMenu.open();
-          this.companyMenu.close();
-          this.shipMenu.close();
-          event.preventDefault();
-          event.stopPropagation();
+          this.openMenu(MENU_ID.PLAYER);
         }
+        event.preventDefault();
+        event.stopPropagation();
         break;
 
       case 'KeyG':
-        this.shipMenu.toggle();
-        if (this.shipMenu.visible) { this.companyMenu.close(); this.playerMenu.close(); }
-        if (this.shipMenu.visible) { event.preventDefault(); event.stopPropagation(); }
+        if (this.activeMenuId === MENU_ID.SHIP) {
+          this.closeActiveMenu();
+        } else {
+          this.openMenu(MENU_ID.SHIP);
+        }
+        event.preventDefault();
+        event.stopPropagation();
         break;
 
       case 'F1':

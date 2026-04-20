@@ -22,9 +22,12 @@ import { PhysicsConfig } from '../sim/Types.js';
 
 // UI System
 import { UIManager } from './ui/UIManager.js';
+import { MENU_ID } from './ui/UIManager.js';
 import { RadialMenu } from './ui/RadialMenu.js';
 import { CraftingMenu } from './ui/CraftingMenu.js';
 import { ShipyardMenu } from './ui/ShipyardMenu.js';
+import { PauseMenu } from './ui/PauseMenu.js';
+import { logout } from './auth/AuthService.js';
 
 // Audio System
 import { AudioManager } from './audio/AudioManager.js';
@@ -154,6 +157,8 @@ export class ClientApplication {
   private craftingMenu = new CraftingMenu();
   /** Ship construction panel opened when the player presses E at a shipyard. */
   private shipyardMenu = new ShipyardMenu();
+  /** Pause overlay — opened by Escape / ` / P when no other menu is up. */
+  private pauseMenu = new PauseMenu();
   /** True when the player's active slot is wooden_floor or workbench on an island. */
   private islandBuildMode = false;
   private accumulator = 0;
@@ -663,10 +668,12 @@ export class ClientApplication {
           if (player && player.carrierId === 0) {
             if (this.craftingMenu.visible) {
               this.craftingMenu.close();
+              this.uiManager.setActiveMenuId(null);
               return;
             }
             if (this.shipyardMenu.visible) {
               this.shipyardMenu.close();
+              this.uiManager.setActiveMenuId(null);
               return;
             }
             const hovered = this.renderSystem.getHoveredStructure();
@@ -1228,6 +1235,12 @@ export class ClientApplication {
       
       // Set up debug keyboard shortcuts
       this.setupDebugKeys();
+
+      // Wire pause menu logout button → revoke token on auth server, clear local storage, reload
+      this.pauseMenu.onLogout = () => {
+        this.shutdown();
+        logout().finally(() => window.location.reload());
+      };
       
       // Initialize UI System
       this.uiManager = new UIManager(this.canvas, this.config);
@@ -1366,8 +1379,10 @@ export class ClientApplication {
         if (structureType === 'shipyard') {
           // Fallback if server still sends crafting_open for shipyard (pre-update)
           this.shipyardMenu.open(structureId, 'empty', []);
+          this.uiManager.setActiveMenuId(MENU_ID.SHIPYARD);
         } else {
           this.craftingMenu.open(structureId);
+          this.uiManager.setActiveMenuId(MENU_ID.CRAFTING);
         }
       };
 
@@ -1380,6 +1395,7 @@ export class ClientApplication {
         // installs modules by clicking on the skeleton directly.
         if (shipSpawned) {
           this.shipyardMenu.close();
+          this.uiManager.setActiveMenuId(null);
           this.renderSystem.showAnnouncement('⚓ Ship released!', 'info', 3.5);
         }
       };
@@ -2662,9 +2678,26 @@ export class ClientApplication {
       switch (e.key) {
         case 'Escape':
         case '`': { // backtick also closes/cancels
+          // Close pause menu if open
+          if (this.pauseMenu.visible) {
+            this.pauseMenu.close();
+            this.uiManager.setActiveMenuId(null);
+            e.preventDefault();
+            break;
+          }
           // Close crafting/shipyard menus if open
-          if (this.craftingMenu.visible) { this.craftingMenu.close(); e.preventDefault(); break; }
-          if (this.shipyardMenu.visible) { this.shipyardMenu.close(); e.preventDefault(); break; }
+          if (this.craftingMenu.visible) {
+            this.craftingMenu.close();
+            this.uiManager.setActiveMenuId(null);
+            e.preventDefault();
+            break;
+          }
+          if (this.shipyardMenu.visible) {
+            this.shipyardMenu.close();
+            this.uiManager.setActiveMenuId(null);
+            e.preventDefault();
+            break;
+          }
           // Exit any active build mode (ship or island)
           if (this.buildMenuOpen || this.explicitBuildMode || this.pendingGhostKind !== null || this.islandBuildMode) {
             this.exitAllBuildModes();
@@ -2689,6 +2722,31 @@ export class ClientApplication {
             this._moveToNpcId = null;
             this.renderSystem.clearMoveToHint();
             this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            e.preventDefault();
+            break;
+          }
+          // Nothing else to close — open pause menu if no other menu is up
+          if (!this.uiManager.isAnyMenuOpen()) {
+            this.pauseMenu.open();
+            this.uiManager.setActiveMenuId(MENU_ID.PAUSE);
+            e.preventDefault();
+          }
+          break;
+        }
+
+        case 'p':
+        case 'P': {
+          // P toggles pause menu only when no other menu is open
+          if (!this.uiManager.isAnyMenuOpen()
+            && !this.buildMenuOpen
+            && !this.explicitBuildMode) {
+            if (this.pauseMenu.visible) {
+              this.pauseMenu.close();
+              this.uiManager.setActiveMenuId(null);
+            } else {
+              this.pauseMenu.open();
+              this.uiManager.setActiveMenuId(MENU_ID.PAUSE);
+            }
             e.preventDefault();
           }
           break;
