@@ -2475,14 +2475,22 @@ void handle_projectile_collisions(struct Sim* sim) {
                 if (removed) { continue; }
 
                 // ---- Deck pass-through: damage deck once per hull entry (priority) ----
-                // Deck ID is always 200; use last_hit_module_id==200 to fire only once per pass.
-                if (proj->last_hit_module_id != 200) {
+                // Use the actual deck module id as the sentinel in last_hit_module_id to avoid
+                // double-hitting if the projectile re-enters the hull bounds this tick.
+                // Find the deck module id first.
+                uint16_t _deck_mid = 0;
+                for (uint8_t _dm = 0; _dm < ship->module_count; _dm++) {
+                    if (ship->modules[_dm].type_id == MODULE_TYPE_DECK) {
+                        _deck_mid = ship->modules[_dm].id; break;
+                    }
+                }
+                if (_deck_mid != 0 && proj->last_hit_module_id != _deck_mid) {
                     for (uint8_t m = 0; m < ship->module_count; m++) {
                         ShipModule* deck = &ship->modules[m];
                         if (deck->type_id != MODULE_TYPE_DECK) continue;
                         if (deck->health <= 0) break;
 
-                        proj->last_hit_module_id = 200; // mark deck as hit for this pass
+                        proj->last_hit_module_id = _deck_mid; // mark deck as hit for this pass
 
                         float dmg_before = (float)deck->health;
                         q16_t eff_dmg = Q16_FROM_FLOAT(

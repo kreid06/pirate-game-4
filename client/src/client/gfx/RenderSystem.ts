@@ -4426,13 +4426,6 @@ export class RenderSystem {
       this.ctx.shadowBlur   = 12 / cameraState.zoom;
     }
 
-    // Enemy ship: dark blue hull
-    const isEnemy = this._localCompanyId !== 0 && ship.companyId !== 0
-      && ship.companyId !== this._localCompanyId;
-    if (!isGhost && isEnemy) {
-      this.ctx.strokeStyle = '#1a1a4a';
-      this.ctx.fillStyle = '#1e3a6e';
-    }
     this.ctx.lineWidth = 2 / cameraState.zoom;
 
     const hasDeck = ship.modules.some(m => m.kind === 'deck');
@@ -4440,7 +4433,7 @@ export class RenderSystem {
     if (!hasDeck && !isGhost) {
       // ── Skeleton hull: bare wooden frame (no deck installed) ──
       // Hull outline only — no fill; show the raw outer edge in bare-wood colour
-      this.ctx.strokeStyle = isEnemy ? '#1a1a4a' : '#8B4513';
+      this.ctx.strokeStyle = '#8B4513';
       this.ctx.lineWidth = 2.5 / cameraState.zoom;
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
@@ -4451,7 +4444,7 @@ export class RenderSystem {
       // Ribs: cross-beams at plank-boundary x-positions.
       // Port side (y=+90) and starboard side (y=-90) share the same four x values:
       //   stern (-260), 1st joint (-110), 2nd joint (40), bow (190)
-      this.ctx.strokeStyle = isEnemy ? '#12124a' : '#6B3A10';
+      this.ctx.strokeStyle = '#6B3A10';
       this.ctx.lineWidth = 1.5 / cameraState.zoom;
       for (const rx of [-260, -110, 40, 190]) {
         this.ctx.beginPath();
@@ -4461,7 +4454,7 @@ export class RenderSystem {
       }
 
       // Keel: longitudinal centre beam from bow tip (415,0) to stern tip (-345,0)
-      this.ctx.strokeStyle = isEnemy ? '#0e0e3a' : '#5A3008';
+      this.ctx.strokeStyle = '#5A3008';
       this.ctx.lineWidth = 2 / cameraState.zoom;
       this.ctx.beginPath();
       this.ctx.moveTo( 415, 0);

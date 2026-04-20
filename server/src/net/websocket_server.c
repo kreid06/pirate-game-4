@@ -12543,7 +12543,18 @@ void websocket_server_tick(float dt) {
                     }
 
                     // ── Deck destroyed: cascade-destroy all non-mast non-ladder modules ──
-                    if (ev->module_id == 200) {
+                    // Detect by module type on the sim ship rather than legacy ID 200
+                    bool deck_destroyed = false;
+                    {
+                        struct Ship* _ds = find_sim_ship((uint32_t)ev->ship_id);
+                        if (_ds) {
+                            /* If the destroyed module is no longer in the ship's list that means
+                             * it was just removed by the hit path in simulation.c — check by type. */
+                            /* Simpler: check if the MID offset == MODULE_OFFSET_DECK (0x16) */
+                            deck_destroyed = (MID_OFFSET(ev->module_id) == MODULE_OFFSET_DECK);
+                        }
+                    }
+                    if (deck_destroyed) {
                         log_info("💥 Deck destroyed on ship %u — cascading destruction", ev->ship_id);
 
                         // Destroy on the sim ship
