@@ -11814,12 +11814,13 @@ int websocket_server_update(struct Sim* sim) {
                     ? (float)ship->hull_health
                     : Q16_TO_FLOAT(ship->hull_health);
                 int offset = snprintf(ship_entry, sizeof(ship_entry),
-                        "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
+                        "{\"id\":%u,\"seq\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                         "\"rudder_angle\":%.3f,"
                         "\"hullHealth\":%.2f,\"company\":%u,\"shipType\":%u,"
                         "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
-                        ship->id, pos_x, pos_y, rotation, vel_x, vel_y, ang_vel,
+                        ship->id, simple_ship ? simple_ship->ship_seq : (uint8_t)(ship->id & 0xFF),
+                        pos_x, pos_y, rotation, vel_x, vel_y, ang_vel,
                         rudder_radians,
                         hull_health_pct,
                         simple_ship ? simple_ship->company_id : COMPANY_NEUTRAL,

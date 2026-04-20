@@ -199,7 +199,7 @@ export interface PlankModuleData {
   maxHealth: number;           // Max HP
   material: 'wood' | 'iron' | 'steel'; // Plank material type
   segmentIndex: number;        // Which segment of the ship hull (0-11)
-  sectionName?: string;        // Section name (e.g., "port_bow", "starboard_side")
+  sectionName?: string;        // Section name (e.g., "bow_port", "starboard_side")
   isCurved?: boolean;          // Whether this plank follows a curve
   curveData?: {                // Curve information for rendering
     start: PlankPoint;
@@ -624,8 +624,6 @@ export class ModuleUtils {
       }
       
       planks.push(plank);
-      
-      const curveInfo = segment.isCurved ? ' [CURVED]' : ' [STRAIGHT]';
     }
     
     return planks;
