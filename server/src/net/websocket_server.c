@@ -8737,9 +8737,10 @@ int websocket_server_update(struct Sim* sim) {
                                     for (int s = 0; s < ship_count && ships_offset < (int)sizeof(ships_str) - 512; s++) {
                                         if (ships[s].active) {
                                             ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
-                                                    "%s{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
+                                                    "%s{\"id\":%u,\"seq\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                                                     first_ship ? "" : ",",
-                                                    ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
+                                                    ships[s].ship_id, ships[s].ship_seq,
+                                                    ships[s].x, ships[s].y, ships[s].rotation,
                                                     ships[s].velocity_x, ships[s].velocity_y,
                                                     ships[s].cannon_ammo, ships[s].infinite_ammo ? "true" : "false");
                                             
@@ -11950,11 +11951,12 @@ int websocket_server_update(struct Sim* sim) {
                     // Build ship entry with modules
                     char ship_entry[6144];
                     int offset = snprintf(ship_entry, sizeof(ship_entry),
-                            "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
+                            "{\"id\":%u,\"seq\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                             "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                             "\"rudder_angle\":%.3f,"
                             "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
-                            ships[s].ship_id, ships[s].x, ships[s].y, ships[s].rotation,
+                            ships[s].ship_id, ships[s].ship_seq,
+                            ships[s].x, ships[s].y, ships[s].rotation,
                             ships[s].velocity_x, ships[s].velocity_y, ships[s].angular_velocity,
                             0.0f,
                             ships[s].cannon_ammo, ships[s].infinite_ammo ? "true" : "false");

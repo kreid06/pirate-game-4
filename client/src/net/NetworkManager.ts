@@ -1551,11 +1551,11 @@ export class NetworkManager {
             // recreating hull curve geometry on every tick.
             // Plank IDs in the template are stamped to match the server's MID encoding:
             //   MID(ship_seq, MODULE_OFFSET_PLANK(i)) = (ship_seq << 8) | (0x0C + i)
-            // On a single-server ship_seq === ship_id (low byte).
+            // The server sends "seq" explicitly; on older builds fall back to the low byte of ship_id.
             const shipId = ship.id || 0;
             if (!this._shipTemplates.has(shipId)) {
               const s = createShipAtPosition(Vec2.from(0, 0), 0);
-              const shipSeq = shipId & 0xFF;          // low byte == ship_seq on single-server
+              const shipSeq = (ship.seq !== undefined ? ship.seq : shipId) & 0xFF;
               const MID_PLANK_BASE = 0x0C;            // MODULE_OFFSET_PLANK(0)
               const MID_DECK       = 0x16;            // MODULE_OFFSET_DECK
               let plankIdx = 0;

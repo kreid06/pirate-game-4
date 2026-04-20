@@ -4620,6 +4620,13 @@ export class RenderSystem {
     this.ctx.rotate(ship.rotation - cameraState.rotation);
     // Find all plank modules
     const planks = ship.modules.filter(m => m.kind === 'plank');
+
+    // TODO(missing-deck-visuals): When a ship has no planks and no deck module (bare skeleton /
+    // newly constructed hull), render placeholder "missing plank" shapes along the hull outline
+    // at each of the 10 standard plank positions.  Style should match the build-mode ghost planks
+    // (semi-transparent outline with a dashed or hatched fill) to communicate that the structure
+    // exists but is not yet built.  Also draw a faint "missing deck" rectangle in the centre.
+    // Implement once the shipyard build flow is stable.
     
     for (const plank of planks) {
       if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
