@@ -1596,6 +1596,7 @@ export class NetworkManager {
               const plankHealthBuf = this._plankHealthBuf;
               plankHealthBuf.clear();
               let deckStateBitsFromServer: number | undefined;
+              let hasDeckFromServer = false;
               
               for (const mod of ship.modules) {
                 const kind = MODULE_TYPE_MAP.toKind(mod.typeId);
@@ -1608,7 +1609,8 @@ export class NetworkManager {
                     maxHealth: mod.maxHealth ?? 10000,
                   });
                 } else if (kind === 'deck') {
-                  // Deck: client generates polygon from hull; track state bits to apply after
+                  // Deck: client generates polygon from hull; only include if server confirms it exists
+                  hasDeckFromServer = true;
                   if (mod.stateBits !== undefined) {
                     deckStateBitsFromServer = mod.stateBits ?? 0;
                   }
@@ -1699,11 +1701,12 @@ export class NetworkManager {
               }
               
               // Merge: Keep client-generated planks/deck (shallow-cloned from template) + server gameplay modules.
+              // Deck is only included when the server confirmed it exists — skeleton ships have no deck.
               // Plank objects are cloned so health can be updated per-tick without mutating the template.
-              const clientDeck = tmpl.deck.map(p => ({
+              const clientDeck = hasDeckFromServer ? tmpl.deck.map(p => ({
                 ...p,
                 stateBits: deckStateBitsFromServer !== undefined ? deckStateBitsFromServer : p.stateBits,
-              }) as ShipModule);
+              }) as ShipModule) : [];
 
               // Only include planks the server still reports — absence means destroyed.
               // Build with updated health directly (avoids separate filter + mutation loop).

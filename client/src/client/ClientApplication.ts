@@ -2849,7 +2849,18 @@ export class ClientApplication {
           }
 
           // ── Structure interact: floors and workbenches, only when off-ship ──
-          if (meE.carrierId === 0) {
+          // Skip the structure check when a ship module is within interaction range —
+          // module/ship interactions take priority over the shipyard while hovered.
+          const _hovModPriority = this.renderSystem.getHoveredModule();
+          const _moduleInRange = (() => {
+            if (!_hovModPriority) return false;
+            const _hCos = Math.cos(_hovModPriority.ship.rotation);
+            const _hSin = Math.sin(_hovModPriority.ship.rotation);
+            const _mwx = _hovModPriority.ship.position.x + (_hovModPriority.module.localPos.x * _hCos - _hovModPriority.module.localPos.y * _hSin);
+            const _mwy = _hovModPriority.ship.position.y + (_hovModPriority.module.localPos.x * _hSin + _hovModPriority.module.localPos.y * _hCos);
+            return Math.hypot(meE.position.x - _mwx, meE.position.y - _mwy) <= 200;
+          })();
+          if (meE.carrierId === 0 && !_moduleInRange) {
             const struct = this.renderSystem.getHoveredStructure();
             if (struct) {
               const myCompanyE = meE.companyId ?? 0;
