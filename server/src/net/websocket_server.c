@@ -124,12 +124,12 @@ static int next_player_id = 1000;
 // NPC agents
 static NpcAgent npc_agents[MAX_NPC_AGENTS] = {0};
 static int npc_count = 0;
-static uint32_t next_npc_id = 5000;
+static uint16_t next_npc_id = 5000;
 
 // World NPCs (visible, interactable entities)
 static WorldNpc world_npcs[MAX_WORLD_NPCS] = {0};
 static int world_npc_count = 0;
-static uint32_t next_world_npc_id = 9000;
+static uint16_t next_world_npc_id = 9000;
 static bool g_npcs_dirty = true; // set whenever NPC state changes; cleared after JSON rebuild
 
 // Global ship data (simple ships for testing)
@@ -146,7 +146,7 @@ static uint8_t next_ship_seq = 1;
 // ── Island placed structures ─────────────────────────────────────────────────
 static PlacedStructure placed_structures[MAX_PLACED_STRUCTURES];
 static uint32_t placed_structure_count = 0;
-static uint32_t next_structure_id = 1;
+static uint16_t next_structure_id = 1;
 
 int websocket_server_get_placed_structures(PlacedStructure **out_structs, uint32_t *out_count) {
     if (!out_structs || !out_count) return -1;
@@ -1559,7 +1559,7 @@ static WebSocketPlayer* find_player(uint32_t player_id) {
     return NULL;
 }
 
-static WebSocketPlayer* find_player_by_sim_id(uint32_t sim_entity_id) {
+static WebSocketPlayer* find_player_by_sim_id(entity_id sim_entity_id) {
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (players[i].active && players[i].sim_entity_id == sim_entity_id) {
             return &players[i];
@@ -2574,7 +2574,7 @@ static void tick_ghost_ships(float dt);
 static void ship_init_default_weapon_groups(SimpleShip* ship);
 static void broadcast_cannon_group_state(SimpleShip* ship, uint8_t company_id);
 static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship);
-static void handle_crew_assign(uint16_t ship_id, uint32_t npc_id, const char* task);
+static void handle_crew_assign(uint16_t ship_id, uint16_t npc_id, const char* task);
 static void update_npc_cannon_sector(SimpleShip* ship, float aim_angle);
 static void dismount_npc(WorldNpc* npc, SimpleShip* ship);
 
@@ -2661,7 +2661,7 @@ static void dismount_npc(WorldNpc* npc, SimpleShip* ship) {
     npc->state = WORLD_NPC_STATE_MOVING; /* will be overridden by caller if needed */
 }
 
-static void handle_crew_assign(uint16_t ship_id, uint32_t npc_id, const char* task) {
+static void handle_crew_assign(uint16_t ship_id, uint16_t npc_id, const char* task) {
     SimpleShip* ship = find_ship(ship_id);
     if (!ship) return;
 
@@ -3436,10 +3436,10 @@ static void npc_apply_xp(WorldNpc* npc, uint32_t xp_gain) {
 // All active repairers with a current assignment are snapshotted before the NPC
 // loop.  Entries are added inline whenever a new claim is made so that
 // subsequent NPCs in the same tick see it and don't double-claim the same slot.
-typedef struct { uint32_t npc_id; uint16_t ship_id; uint32_t mod_id; } NpcOccEntry;
+typedef struct { uint16_t npc_id; uint16_t ship_id; module_id_t mod_id; } NpcOccEntry;
 
 static bool occ_taken_by_other(const NpcOccEntry* buf, int cnt,
-                                uint32_t self_npc_id, uint16_t ship_id, uint32_t mod_id) {
+                                uint16_t self_npc_id, uint16_t ship_id, module_id_t mod_id) {
     for (int k = 0; k < cnt; k++)
         if (buf[k].ship_id == ship_id && buf[k].mod_id == mod_id && buf[k].npc_id != self_npc_id)
             return true;
@@ -5803,7 +5803,7 @@ static void handle_place_structure(WebSocketPlayer* player, struct WebSocketClie
     }
 
     /* Add structure */
-    uint32_t new_id = next_structure_id++;
+    uint16_t new_id = next_structure_id++;
     placed_structures[placed_structure_count].active     = true;
     placed_structures[placed_structure_count].id         = new_id;
     placed_structures[placed_structure_count].type       = stype_enum;
@@ -7336,7 +7336,7 @@ static void ship_init_default_weapon_groups(SimpleShip* ship) {
     /* Reset all company slots to HALTFIRE with no cannons */
     for (int co = 0; co < MAX_COMPANIES; co++) {
         for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-            ship->weapon_groups[co][g].mode         = WEAPON_GROUP_MODE_HALTFIRE;
+            ship->weapon_groups[co][g].mode         = (uint8_t)WEAPON_GROUP_MODE_HALTFIRE;
             ship->weapon_groups[co][g].weapon_count = 0;
             ship->weapon_groups[co][g].target_ship_id = 0;
         }
@@ -7677,7 +7677,7 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
      * Disable all weapon groups so tick_ship_weapon_groups() ignores this ship. */
     for (int co = 0; co < MAX_COMPANIES; co++) {
         for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-            ship->weapon_groups[co][g].mode = WEAPON_GROUP_MODE_HALTFIRE;
+            ship->weapon_groups[co][g].mode = (uint8_t)WEAPON_GROUP_MODE_HALTFIRE;
             ship->weapon_groups[co][g].target_ship_id = 0;
         }
     }
@@ -7768,7 +7768,7 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
         }
     }
     if (helm) {
-        uint32_t npc_id = websocket_server_create_npc(ship_id, helm->id, NPC_ROLE_HELMSMAN);
+        uint16_t npc_id = websocket_server_create_npc(ship_id, helm->id, NPC_ROLE_HELMSMAN);
         (void)npc_id;  /* we don't need to track it separately */
     }
 
@@ -8044,8 +8044,8 @@ int websocket_server_init(uint16_t port) {
         // Port-side cannon and starboard-side cannon on ship 2
         // MID(2, MODULE_OFFSET_CANNON_PORT_0) = 0x0203 = 515
         // MID(2, MODULE_OFFSET_CANNON_STBD_0) = 0x0206 = 518
-        uint32_t npc1 = websocket_server_create_npc(ship2_id, MID(2, MODULE_OFFSET_CANNON_PORT_0), NPC_ROLE_GUNNER);
-        uint32_t npc2 = websocket_server_create_npc(ship2_id, MID(2, MODULE_OFFSET_CANNON_STBD_0), NPC_ROLE_GUNNER);
+        uint16_t npc1 = websocket_server_create_npc(ship2_id, MID(2, MODULE_OFFSET_CANNON_PORT_0), NPC_ROLE_GUNNER);
+        uint16_t npc2 = websocket_server_create_npc(ship2_id, MID(2, MODULE_OFFSET_CANNON_STBD_0), NPC_ROLE_GUNNER);
         if (npc1) websocket_server_npc_set_target(npc1, ship1_id);
         if (npc2) websocket_server_npc_set_target(npc2, ship1_id);
         log_info("🤖 NPC gunners %u and %u spawned on ship 2, targeting ship 1", npc1, npc2);
@@ -10737,7 +10737,7 @@ int websocket_server_update(struct Sim* sim) {
                                              ca_npc_ptr->id, ca_npc_ptr->company_id);
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"company_mismatch\"}");
                                 } else {
-                                    handle_crew_assign(ca_ship, ca_npc, ca_task);
+                                    handle_crew_assign((uint16_t)ca_ship, (uint16_t)ca_npc, ca_task);
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"crew_assigned\"}");
                                 }
                             } else {
@@ -12123,7 +12123,7 @@ int websocket_server_update(struct Sim* sim) {
  * NPC Public API
  * ========================================================================= */
 
-uint32_t websocket_server_create_npc(uint16_t ship_id, uint32_t module_id, NpcRole role) {
+uint16_t websocket_server_create_npc(uint16_t ship_id, module_id_t module_id, NpcRole role) {
     if (npc_count >= MAX_NPC_AGENTS) {
         log_warn("Cannot create NPC: MAX_NPC_AGENTS (%d) reached", MAX_NPC_AGENTS);
         return 0;
@@ -12153,7 +12153,7 @@ uint32_t websocket_server_create_npc(uint16_t ship_id, uint32_t module_id, NpcRo
     return npc->npc_id;
 }
 
-void websocket_server_remove_npc(uint32_t npc_id) {
+void websocket_server_remove_npc(uint16_t npc_id) {
     for (int i = 0; i < npc_count; i++) {
         if (npc_agents[i].npc_id == npc_id) {
             // Release the module
@@ -12173,7 +12173,7 @@ void websocket_server_remove_npc(uint32_t npc_id) {
     log_warn("websocket_server_remove_npc: NPC %u not found", npc_id);
 }
 
-void websocket_server_npc_set_target(uint32_t npc_id, uint16_t target_ship_id) {
+void websocket_server_npc_set_target(uint16_t npc_id, uint16_t target_ship_id) {
     for (int i = 0; i < npc_count; i++) {
         if (npc_agents[i].npc_id == npc_id) {
             npc_agents[i].target_ship_id = target_ship_id;

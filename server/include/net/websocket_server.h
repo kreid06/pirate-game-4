@@ -35,7 +35,7 @@ typedef enum {
 typedef struct {
     module_id_t     weapon_ids[MAX_WEAPONS_PER_GROUP]; /* module_id_t = MID(ship_seq, offset) */
     uint8_t         weapon_count;
-    WeaponGroupMode mode;
+    uint8_t         mode;             /* WeaponGroupMode enum value */
     uint16_t        target_ship_id;
 } WeaponGroup;
 // ────────────────────────────────────────────────────────────────────────────
@@ -46,7 +46,7 @@ typedef struct SimpleShip {
     uint8_t  ship_seq;        /* 8-bit sequence number — top byte of all module IDs.
                                * module_id = MID(ship_seq, offset) = (ship_seq<<8)|offset
                                * See server/include/sim/module_ids.h for offset table. */
-    uint32_t ship_type;      // Ship type ID (1=sloop, 2=cutter, 3=brigantine, etc.)
+    uint8_t  ship_type;      // Ship type ID (1=sloop, 2=cutter, 3=brigantine, etc.)
     float x, y;              // World position
     float rotation;          // Radians
     float velocity_x, velocity_y;
@@ -116,9 +116,9 @@ typedef enum {
 
 // NPC agent — server-side autonomous crew member mounted to a module
 typedef struct NpcAgent {
-    uint32_t npc_id;             // Unique NPC ID (starts at 5000)
-    uint16_t ship_id;            // Ship this NPC belongs to
-    uint32_t module_id;          // Module this NPC is mounted to (0 = unmounted)
+    uint16_t    npc_id;          // Unique NPC ID (starts at 5000)
+    uint16_t    ship_id;          // Ship this NPC belongs to
+    module_id_t module_id;        // Module this NPC is mounted to (0 = unmounted)
     NpcRole  role;               // What this NPC does each tick
     bool     active;
 
@@ -151,7 +151,7 @@ typedef enum {
 } WorldNpcState;
 
 typedef struct WorldNpc {
-    uint32_t      id;
+    uint16_t      id;
     char          name[32];
     bool          active;
     NpcRole       role;          // NPC_ROLE_GUNNER (cannon) or NPC_ROLE_RIGGER (sail)
@@ -271,23 +271,28 @@ typedef enum {
 /* Bitmask values for PlacedStructure.modules_placed — defined in sim/types.h */
 
 typedef struct {
-    bool     active;
-    uint32_t id;
-    PlacedStructureType type;
-    uint32_t island_id;
-    float    x, y;           /* world position */
-    float    rotation;       /* degrees — 0 = no rotation; only meaningful for floor/workbench */
-    uint8_t  company_id;     /* COMPANY_* — faction that owns this structure */
-    uint16_t hp;             /* current hit points */
-    uint16_t max_hp;         /* maximum hit points */
-    uint32_t placer_id;      /* player_id who built this — used for company promotion */
-    char     placer_name[64]; /* display name of the player who built this */
-    bool     open;           /* doors only: true = open (passable) */
-    /* Shipyard-only construction state — zero-initialised for all other types */
-    ShipConstructionPhase construction_phase;
-    uint8_t  modules_placed;   /* bitmask of MODULE_* bits (legacy — tracks what was added) */
+    /* 4-byte aligned fields first */
+    uint32_t placer_id;           /* player_id who built this — used for company promotion */
+    float    x, y;                /* world position */
+    float    rotation;            /* degrees — 0 = no rotation; only meaningful for floor/workbench */
+    /* enum fields (int-sized = 4 bytes each) */
+    PlacedStructureType   type;
+    ShipConstructionPhase construction_phase; /* Shipyard-only; zero for all other types */
+    /* 2-byte fields */
+    uint16_t id;                  /* unique structure ID (max MAX_PLACED_STRUCTURES=512) */
+    uint16_t hp;                  /* current hit points */
+    uint16_t max_hp;              /* maximum hit points */
+    uint16_t scaffolded_ship_id;  /* ship_id attached to this shipyard (0 = none) */
+    /* 1-byte fields */
+    uint8_t  island_id;           /* which island this structure is on (ISLAND_COUNT=2) */
+    uint8_t  company_id;          /* COMPANY_* — faction that owns this structure */
+    uint8_t  modules_placed;      /* bitmask of MODULE_* bits (legacy) */
     uint8_t  construction_company; /* company that owns the ship being built */
-    uint16_t scaffolded_ship_id;   /* ship_id of the real ship attached to this shipyard (0 = none) */
+    /* bool fields */
+    bool     active;
+    bool     open;                /* doors only: true = open (passable) */
+    /* 64-byte string last (avoids breaking alignment of above) */
+    char     placer_name[64];     /* display name of builder */
 } PlacedStructure;
 
 #define MAX_PLACED_STRUCTURES 512
@@ -315,7 +320,7 @@ typedef enum {
 // WebSocket player structure
 typedef struct WebSocketPlayer {
     uint32_t player_id;          // WebSocket client player ID (e.g., 1000, 1001)
-    uint32_t sim_entity_id;      // Simulation entity ID (e.g., 1, 2, 3)
+    entity_id sim_entity_id;     // Simulation entity ID (e.g., 1, 2, 3)
     char name[64];
     float x, y;
     float velocity_x, velocity_y;
@@ -460,17 +465,17 @@ int websocket_server_get_ships(SimpleShip** out_ships, int* out_count);
  * @param role      NPC_ROLE_GUNNER / NPC_ROLE_HELMSMAN / NPC_ROLE_RIGGER
  * @return NPC ID on success, 0 on failure
  */
-uint32_t websocket_server_create_npc(uint16_t ship_id, uint32_t module_id, NpcRole role);
+uint16_t websocket_server_create_npc(uint16_t ship_id, module_id_t module_id, NpcRole role);
 
 /**
  * Remove an NPC agent by ID.
  */
-void websocket_server_remove_npc(uint32_t npc_id);
+void websocket_server_remove_npc(uint16_t npc_id);
 
 /**
  * Set the target ship for a gunner or helmsman NPC.
  */
-void websocket_server_npc_set_target(uint32_t npc_id, uint16_t target_ship_id);
+void websocket_server_npc_set_target(uint16_t npc_id, uint16_t target_ship_id);
 
 
 /**
