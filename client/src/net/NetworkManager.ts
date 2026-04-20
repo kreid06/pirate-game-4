@@ -1597,6 +1597,9 @@ export class NetworkManager {
               plankHealthBuf.clear();
               let deckStateBitsFromServer: number | undefined;
               let hasDeckFromServer = false;
+              let deckHealthFromServer:       number | undefined;
+              let deckTargetHealthFromServer: number | undefined;
+              let deckMaxHealthFromServer:    number | undefined;
               
               for (const mod of ship.modules) {
                 const kind = MODULE_TYPE_MAP.toKind(mod.typeId);
@@ -1610,9 +1613,17 @@ export class NetworkManager {
                   });
                 } else if (kind === 'deck') {
                   // Deck: client generates polygon from hull; only include if server confirms it exists
-                  hasDeckFromServer = true;
-                  if (mod.stateBits !== undefined) {
-                    deckStateBitsFromServer = mod.stateBits ?? 0;
+                  // AND its health is > 0. Health=0 means destroyed — treat as absent so the hull
+                  // stops rendering the filled deck even if the server still broadcasts the slot.
+                  const deckHealth = mod.health ?? 1; // fall back to 1 (alive) for old server builds
+                  if (deckHealth > 0) {
+                    hasDeckFromServer = true;
+                    deckHealthFromServer       = mod.health;
+                    deckTargetHealthFromServer = mod.targetHealth ?? mod.maxHealth;
+                    deckMaxHealthFromServer    = mod.maxHealth;
+                    if (mod.stateBits !== undefined) {
+                      deckStateBitsFromServer = mod.stateBits ?? 0;
+                    }
                   }
                 } else {
                   // Gameplay modules: Full transform data from server
@@ -1703,10 +1714,19 @@ export class NetworkManager {
               // Merge: Keep client-generated planks/deck (shallow-cloned from template) + server gameplay modules.
               // Deck is only included when the server confirmed it exists — skeleton ships have no deck.
               // Plank objects are cloned so health can be updated per-tick without mutating the template.
-              const clientDeck = hasDeckFromServer ? tmpl.deck.map(p => ({
-                ...p,
-                stateBits: deckStateBitsFromServer !== undefined ? deckStateBitsFromServer : p.stateBits,
-              }) as ShipModule) : [];
+              const clientDeck = hasDeckFromServer ? tmpl.deck.map(p => {
+                const dmd = p.moduleData as any;
+                return {
+                  ...p,
+                  stateBits: deckStateBitsFromServer !== undefined ? deckStateBitsFromServer : p.stateBits,
+                  moduleData: dmd ? {
+                    ...dmd,
+                    health:       deckHealthFromServer       ?? dmd.health,
+                    targetHealth: deckTargetHealthFromServer ?? dmd.targetHealth,
+                    maxHealth:    deckMaxHealthFromServer    ?? dmd.maxHealth,
+                  } : dmd,
+                } as ShipModule;
+              }) : [];
 
               // Include ALL 10 template plank slots. Slots the server reports get real health;
               // slots absent from the server (never placed or destroyed) get health=0 so the

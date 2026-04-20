@@ -11855,10 +11855,14 @@ int websocket_server_update(struct Sim* sim) {
                             m > 0 ? "," : "", module->id, module->type_id,
                             (int)module->health, (int)module->target_health, (int)module->max_health);
                     } else if (module->type_id == MODULE_TYPE_DECK) {
-                        // Deck: ID, type, and fire zone state bits (client generates polygon from hull)
+                        // Deck: ID, type, health, and fire zone state bits (client generates polygon from hull).
+                        // Including health lets the client hide the deck the tick it reaches 0 HP,
+                        // even if the server hasn't yet removed it from the sim ship's module list.
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"stateBits\":%u}",
-                            m > 0 ? "," : "", module->id, module->type_id, (unsigned)module->state_bits);
+                            "%s{\"id\":%u,\"typeId\":%u,\"health\":%d,\"maxHealth\":%d,\"targetHealth\":%d,\"stateBits\":%u}",
+                            m > 0 ? "," : "", module->id, module->type_id,
+                            (int)module->health, (int)module->max_health, (int)module->target_health,
+                            (unsigned)module->state_bits);
                     } else {
                         // Gameplay modules: full transform data
                         float module_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
@@ -12543,7 +12547,7 @@ void websocket_server_tick(float dt) {
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
                 } else
                 if (ev->destroyed) {
-                    // Interior module destroyed through breach: remove from SimpleShip and broadcast MODULE_HIT
+                    // Interior module destroyed through breach: remove from SimpleShip and sim ship, then broadcast MODULE_HIT
                     SimpleShip* simple = find_ship(ev->ship_id);
                     if (simple) {
                         for (int m = 0; m < simple->module_count; m++) {
@@ -12552,6 +12556,20 @@ void websocket_server_tick(float dt) {
                                         (simple->module_count - m - 1) * sizeof(ShipModule));
                                 simple->module_count--;
                                 break;
+                            }
+                        }
+                    }
+                    // Also remove from the authoritative sim ship so GAME_STATE stops broadcasting it
+                    {
+                        struct Ship* sim_ship = find_sim_ship((uint32_t)ev->ship_id);
+                        if (sim_ship) {
+                            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                                if (sim_ship->modules[m].id == ev->module_id) {
+                                    memmove(&sim_ship->modules[m], &sim_ship->modules[m + 1],
+                                            (sim_ship->module_count - m - 1) * sizeof(ShipModule));
+                                    sim_ship->module_count--;
+                                    break;
+                                }
                             }
                         }
                     }
