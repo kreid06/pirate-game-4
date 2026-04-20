@@ -1,5 +1,6 @@
 #include "sim/simulation.h"
 #include "sim/module_types.h"
+#include "sim/module_ids.h"
 #include "sim/ship_level.h"
 #include "sim/island.h"
 #include "net/protocol.h"
@@ -897,10 +898,22 @@ void sim_handle_collisions(struct Sim* sim) {
     contact_cache_age(&sim->contact_cache, sim->tick);
 }
 
+/** Monotonically-incrementing ship sequence counter (shared with websocket_server.c
+ *  via websocket_server_create_ship which passes the seq explicitly).
+ *  Starts at 1; 0 is reserved as MODULE_ID_INVALID's ship. */
+static uint8_t sim_next_ship_seq = 1;
+
 // Entity creation functions
-entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation, uint8_t modules_placed) {
+entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
+                           uint8_t modules_placed, uint8_t ship_seq) {
     if (!sim || sim->ship_count >= MAX_SHIPS) {
         return INVALID_ENTITY_ID;
+    }
+
+    /* ship_seq == 0 means auto-allocate the next available sequence number. */
+    if (ship_seq == 0) {
+        ship_seq = sim_next_ship_seq++;
+        if (sim_next_ship_seq == 0) sim_next_ship_seq = 1; /* wrap around, skip 0 */
     }
     
     entity_id id = allocate_entity_id(sim);
@@ -999,11 +1012,15 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation, uin
     // Matches BrigantineLoadouts.BROADSIDE from BrigantineTestBuilder.ts
     // Module IDs are based on ship entity ID so two ships have distinct IDs
     // (ship 1 → 1000-1010, ship 2 → 2000-2010, etc.)
+    /* ── Module ID space for this ship ─────────────────────────────────────
+     * All module IDs: MID(ship_seq, offset) = (ship_seq << 8) | offset
+     * See server/include/sim/module_ids.h for the full offset table.
+     */
     ship->module_count = 0;
-    
-    // Emergency ladder always present at stern (ID 300 — fixed well-known ID)
+
+    /* Emergency ladder — offset 0x01 — always present on every ship */
     ship->modules[ship->module_count++] = module_create(
-        300, MODULE_TYPE_LADDER,
+        MID(ship_seq, MODULE_OFFSET_LADDER), MODULE_TYPE_LADDER,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-305.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
@@ -1017,75 +1034,69 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation, uin
         return id;
     }
 
-    uint16_t module_id = (uint16_t)(ship->id * 1000);
-    
-    // Helm
+    /* Helm — offset 0x02 */
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_HELM,
+        MID(ship_seq, MODULE_OFFSET_HELM), MODULE_TYPE_HELM,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-90.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
     
-    // Port side cannons (3) — local_rot = -PI/2 (barrel faces port/left)
+    // Port side cannons (3) — offsets 0x03..0x05
     if (modules_placed & MODULE_CANNON_PORT) {
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_CANNON,
+        MID(ship_seq, MODULE_OFFSET_CANNON_PORT_0), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
-        Q16_FROM_FLOAT(3.1415927f) // -PI/2: port barrel faces left
+        Q16_FROM_FLOAT(3.1415927f)
     );
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_CANNON,
+        MID(ship_seq, MODULE_OFFSET_CANNON_PORT_1), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(65.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
         Q16_FROM_FLOAT(3.1415927f)
     );
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_CANNON,
+        MID(ship_seq, MODULE_OFFSET_CANNON_PORT_2), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
         Q16_FROM_FLOAT(3.1415927f)
     );
-    } else { module_id += 3; }
+    }
     
-    // Starboard side cannons (3) — local_rot = PI/2 (barrel faces starboard/right)
+    // Starboard side cannons (3) — offsets 0x06..0x08
     if (modules_placed & MODULE_CANNON_STBD) {
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_CANNON,
+        MID(ship_seq, MODULE_OFFSET_CANNON_STBD_0), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
-        Q16_FROM_FLOAT(0.0f) // PI/2: starboard barrel faces right
+        Q16_FROM_FLOAT(0.0f)
     );
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_CANNON,
+        MID(ship_seq, MODULE_OFFSET_CANNON_STBD_1), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(65.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
         Q16_FROM_FLOAT(0.0f)
     );
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_CANNON,
+        MID(ship_seq, MODULE_OFFSET_CANNON_STBD_2), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
         Q16_FROM_FLOAT(0.0f)
     );
-    } else { module_id += 3; }
+    }
     
-    // Three masts (front, middle, back)
+    // Three masts — offsets 0x09..0x0B (bow, mid, stern)
     if (modules_placed & MODULE_MAST) {
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_MAST,
+        MID(ship_seq, MODULE_OFFSET_MAST_BOW), MODULE_TYPE_MAST,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(165.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_MAST,
+        MID(ship_seq, MODULE_OFFSET_MAST_MID), MODULE_TYPE_MAST,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_MAST,
+        MID(ship_seq, MODULE_OFFSET_MAST_STERN), MODULE_TYPE_MAST,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-235.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
-    } else { module_id += 3; }
-    
-    // Add ladder at specified position (-305, 0 in client coords)
-    // NOTE: already added above as emergency ladder (ID 300); skip duplicate
-    module_id++; // consume one slot to keep spacing consistent
+    }
     
     // Initialize 10 hull planks with positions matching client hull geometry.
     // Positions are the segment midpoints derived from createCompleteHullSegments()
@@ -1109,20 +1120,21 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation, uin
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(plank_cx[i])),
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(plank_cy[i]))
         };
-        ShipModule plank = module_create(100 + i, MODULE_TYPE_PLANK, pos, 0);
+        /* Planks — offsets 0x0C..0x15 (MODULE_OFFSET_PLANK(0..9)) */
+        ShipModule plank = module_create(MID(ship_seq, MODULE_OFFSET_PLANK(i)), MODULE_TYPE_PLANK, pos, 0);
         ship->modules[ship->module_count++] = plank;
     }
     ship->initial_plank_count = 10;
-    
-    // Deck module (ID 200) - position not used, client generates from hull polygon
+
+    /* Deck — offset 0x16 */
     ship->modules[ship->module_count++] = module_create(
-        200, MODULE_TYPE_DECK,
+        MID(ship_seq, MODULE_OFFSET_DECK), MODULE_TYPE_DECK,
         (Vec2Q16){0, 0},
         0
     );
-    
-    log_info("⚓ Created brigantine ship %u with BROADSIDE loadout: %u modules (6 cannons, 3 masts, 1 helm, 1 ladder, 10 planks, 1 deck)",
-             id, ship->module_count);
+
+    log_info("⚓ Created brigantine ship %u (seq=%u) with BROADSIDE loadout: %u modules",
+             id, ship_seq, ship->module_count);
     
     sim->ship_count++;
     

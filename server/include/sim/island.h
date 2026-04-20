@@ -26,19 +26,50 @@
 #define ISLAND_BUMP_COUNT    16
 #define ISLAND_MAX_VERTS     64
 
-/* Resource types — must match client-side IslandResource['type'] literals */
-#define ISLAND_RES_WOOD  "wood"
-#define ISLAND_RES_FIBER "fiber"
-#define ISLAND_RES_FOOD  "food"
-#define ISLAND_RES_ROCK  "rock"
+/* Resource type enum — integer values used internally.
+ * res_type_str() converts back to the string expected by the client. */
+typedef enum { RES_WOOD = 0, RES_FIBER = 1, RES_ROCK = 2, RES_FOOD = 3 } ResType;
+
+/* Convenience aliases matching old ISLAND_RES_* macro names */
+#define ISLAND_RES_WOOD  RES_WOOD
+#define ISLAND_RES_FIBER RES_FIBER
+#define ISLAND_RES_FOOD  RES_FOOD
+#define ISLAND_RES_ROCK  RES_ROCK
+
+static inline const char *res_type_str(uint8_t t) {
+    switch (t) {
+        case RES_WOOD:  return "wood";
+        case RES_FIBER: return "fiber";
+        case RES_ROCK:  return "rock";
+        default:        return "food";
+    }
+}
 
 typedef struct {
-    float ox, oy;       /* Offset from island centre (world px) */
-    const char *type;   /* ISLAND_RES_WOOD / ISLAND_RES_FIBER / ISLAND_RES_FOOD */
-    float size;         /* Size scale: 0.5–1.8 (1.0 = default). Derived from hash of ox/oy. */
-    int   health;       /* Current health */
-    int   max_health;   /* Max health (set at init, depends on type) */
+    float   ox, oy;    /* Offset from island centre (world px) */
+    uint8_t type_id;   /* ResType — RES_WOOD / RES_FIBER / RES_ROCK / RES_FOOD */
+    float   size;      /* Size scale: 0.5–1.8 (1.0 = default). Derived from hash of ox/oy. */
+    int     health;    /* Current health */
+    int     max_health;/* Max health (set at init, depends on type) */
 } IslandResource;
+
+/* ── Spatial grid for wood (tree) nodes ─────────────────────────────────────
+ * Built once by islands_build_grid() after islands_generate_trees().
+ * Used by cannonball and player-collision loops for O(1) neighbourhood
+ * lookup instead of scanning all resource_count nodes.
+ *
+ * Cell size is chosen to be 2× tree grid spacing so each cell holds ≤4 trees.
+ * 32×32 covers a 10240×10240 px area — larger than any current island.
+ */
+#define ISLAND_GRID_CELL_PX  320.0f   /* must be >= TREE_GRID_SPACING */
+#define ISLAND_GRID_COLS     32
+#define ISLAND_GRID_ROWS     32
+#define ISLAND_GRID_MAXPC    8        /* max wood-node indices stored per cell */
+
+typedef struct {
+    uint16_t ri[ISLAND_GRID_MAXPC]; /* indices into IslandDef.resources[] */
+    uint8_t  count;
+} IslandGridCell;
 
 typedef struct {
     int            id;
@@ -63,6 +94,18 @@ typedef struct {
     float vy[ISLAND_MAX_VERTS];         /* vertex Y offsets from centre (world px) */
     float poly_bound_r;                 /* broad-phase radius = max dist to vertex + margin */
     float grass_poly_scale;             /* inner-grass polygon scale (e.g. 0.78) */
+
+    /* ── Wood spatial grid (built by islands_build_grid) ─────────────────
+     * grid_ox/oy = world-px of cell [0][0] corner.
+     * Cell [row][col] covers X in [grid_ox + col*CELL, +CELL), same for Y. */
+    IslandGridCell wood_grid[ISLAND_GRID_ROWS][ISLAND_GRID_COLS];
+    float          grid_ox, grid_oy;  /* world px origin of the grid */
+    int            grid_w,  grid_h;   /* active column and row count */
+
+    /* ── Alive wood index list ────────────────────────────────────────────
+     * Shrinks as trees are destroyed; maintained by island_mark_tree_dead(). */
+    uint16_t alive_wood[ISLAND_MAX_RESOURCES];
+    int      alive_wood_count;
 } IslandDef;
 
 /**
@@ -228,6 +271,20 @@ static inline float island_shallow_water_depth(const IslandDef *isl, float px, f
  * before any client connects.
  */
 void islands_generate_trees(void);
+
+/**
+ * Build the spatial wood grid and alive_wood list for all islands.
+ * Must be called once after islands_generate_trees() completes.
+ */
+void islands_build_grid(void);
+
+/**
+ * Remove a wood node from the alive_wood list and from the spatial grid.
+ * Call whenever a tree's health reaches zero.
+ * @param isl  The island that owns the resource.
+ * @param ri   Index into isl->resources[].
+ */
+void island_mark_tree_dead(IslandDef *isl, int ri);
 
 /**
  * Returns true if the resource at (rx, ry) is allowed to respawn.

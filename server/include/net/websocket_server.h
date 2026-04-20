@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sim/types.h"
+#include "sim/module_ids.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -32,17 +33,19 @@ typedef enum {
 #define MAX_WEAPONS_PER_GROUP  16
 
 typedef struct {
-    uint32_t        weapon_ids[MAX_WEAPONS_PER_GROUP];
+    module_id_t     weapon_ids[MAX_WEAPONS_PER_GROUP]; /* module_id_t = MID(ship_seq, offset) */
     uint8_t         weapon_count;
     WeaponGroupMode mode;
-    uint32_t        target_ship_id;
+    uint16_t        target_ship_id;
 } WeaponGroup;
 // ────────────────────────────────────────────────────────────────────────────
 
 // Simple ship structure for WebSocket server
 typedef struct SimpleShip {
-    uint32_t ship_id;
-    uint16_t module_id_base;  // ID of the helm module (= module_id_base passed to init_brigantine_ship)
+    uint16_t ship_id;
+    uint8_t  ship_seq;        /* 8-bit sequence number — top byte of all module IDs.
+                               * module_id = MID(ship_seq, offset) = (ship_seq<<8)|offset
+                               * See server/include/sim/module_ids.h for offset table. */
     uint32_t ship_type;      // Ship type ID (1=sloop, 2=cutter, 3=brigantine, etc.)
     float x, y;              // World position
     float rotation;          // Radians
@@ -114,13 +117,13 @@ typedef enum {
 // NPC agent — server-side autonomous crew member mounted to a module
 typedef struct NpcAgent {
     uint32_t npc_id;             // Unique NPC ID (starts at 5000)
-    uint32_t ship_id;            // Ship this NPC belongs to
+    uint16_t ship_id;            // Ship this NPC belongs to
     uint32_t module_id;          // Module this NPC is mounted to (0 = unmounted)
     NpcRole  role;               // What this NPC does each tick
     bool     active;
 
     // Gunner state
-    uint32_t target_ship_id;     // Enemy ship to aim at (0 = no target)
+    uint16_t target_ship_id;     // Enemy ship to aim at (0 = no target)
     float    fire_cooldown;      // Seconds remaining before next shot (counts down each tick)
     float    fire_interval;      // Seconds between shots (default 5.0)
 
@@ -158,15 +161,15 @@ typedef struct WorldNpc {
     float         rotation;
 
     // Ship attachment
-    uint32_t      ship_id;         // 0 = free-standing
+    uint16_t      ship_id;         // 0 = free-standing
     float         local_x, local_y; // Ship-local position in CLIENT units
 
     // Module associations
     // Rigger: port_cannon_id = mast module ID (starboard_cannon_id mirrors it).
     // Gunner: port_cannon_id = future locked-cannon preference (0 = any; player-set later).
-    uint32_t      port_cannon_id;       // Rigger: mast ID.  Gunner: locked preference (0=free)
-    uint32_t      starboard_cannon_id;  // Rigger: mast ID (mirrors port).  Gunner: unused (0)
-    uint32_t      assigned_weapon_id;   // Module the NPC is currently heading to / stationed at
+    module_id_t   port_cannon_id;       /* Rigger: mast ID.  Gunner: locked preference (0=free) */
+    module_id_t   starboard_cannon_id;  /* Rigger: mast ID (mirrors port).  Gunner: unused (0) */
+    module_id_t   assigned_weapon_id;   /* Module the NPC is currently heading to / stationed at */
     bool          wants_cannon;         // Gunner: true = on cannon duty via manning panel
 
     // Movement / state machine
@@ -207,7 +210,7 @@ typedef struct WorldNpc {
     // ── Boarding approach ──────────────────────────────────────────────────
     // When boarding_ship_id != 0 the NPC is swimming (ship_id == 0) toward a hull
     // entry point.  On arrival it snaps aboard and walks to (boarding_local_x/y).
-    uint32_t      boarding_ship_id;  // target ship to board; 0 = not boarding
+    uint16_t      boarding_ship_id;  // target ship to board; 0 = not boarding
     float         boarding_local_x;  // on-deck destination (ship-local) after boarding
     float         boarding_local_y;
 } WorldNpc;
@@ -284,7 +287,7 @@ typedef struct {
     ShipConstructionPhase construction_phase;
     uint8_t  modules_placed;   /* bitmask of MODULE_* bits (legacy — tracks what was added) */
     uint8_t  construction_company; /* company that owns the ship being built */
-    uint32_t scaffolded_ship_id;   /* entity ID of the real ship attached to this shipyard (0 = none) */
+    uint16_t scaffolded_ship_id;   /* ship_id of the real ship attached to this shipyard (0 = none) */
 } PlacedStructure;
 
 #define MAX_PLACED_STRUCTURES 512
@@ -328,7 +331,7 @@ typedef struct WebSocketPlayer {
     float last_rotation;         // Previous rotation value
     uint32_t last_rotation_update_time;
     
-    uint32_t parent_ship_id;
+    uint16_t parent_ship_id;
     float local_x, local_y;
     PlayerMovementState movement_state;
     uint32_t last_input_time;
@@ -336,8 +339,8 @@ typedef struct WebSocketPlayer {
     
     // Module interaction state
     bool is_mounted;               // Is player mounted to a module
-    uint32_t mounted_module_id;    // ID of mounted module (0 if not mounted)
-    uint32_t controlling_ship_id;  // ID of ship being controlled (helm only, 0 if not controlling)
+    module_id_t mounted_module_id; /* ID of mounted module — MID(ship_seq, offset); 0 if not mounted */
+    uint16_t controlling_ship_id;  // ID of ship being controlled (helm only, 0 if not controlling)
     
     // Cannon aiming state
     float cannon_aim_angle;        // World coordinates aim angle (radians)
@@ -457,7 +460,7 @@ int websocket_server_get_ships(SimpleShip** out_ships, int* out_count);
  * @param role      NPC_ROLE_GUNNER / NPC_ROLE_HELMSMAN / NPC_ROLE_RIGGER
  * @return NPC ID on success, 0 on failure
  */
-uint32_t websocket_server_create_npc(uint32_t ship_id, uint32_t module_id, NpcRole role);
+uint32_t websocket_server_create_npc(uint16_t ship_id, uint32_t module_id, NpcRole role);
 
 /**
  * Remove an NPC agent by ID.
@@ -467,7 +470,7 @@ void websocket_server_remove_npc(uint32_t npc_id);
 /**
  * Set the target ship for a gunner or helmsman NPC.
  */
-void websocket_server_npc_set_target(uint32_t npc_id, uint32_t target_ship_id);
+void websocket_server_npc_set_target(uint32_t npc_id, uint16_t target_ship_id);
 
 
 /**

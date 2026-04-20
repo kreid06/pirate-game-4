@@ -36,16 +36,16 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
         .preset          = "tropical",
         .resource_count  = 10,
         .resources = {
-            { .ox = -65.0f, .oy = -55.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  85.0f, .oy = -25.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  15.0f, .oy =  80.0f, .type = ISLAND_RES_WOOD  },
-            { .ox = -90.0f, .oy =  38.0f, .type = ISLAND_RES_WOOD  },
-            { .ox =  45.0f, .oy = -78.0f, .type = ISLAND_RES_FIBER },
-            { .ox = -28.0f, .oy =  32.0f, .type = ISLAND_RES_FIBER },
-            { .ox =  70.0f, .oy =  50.0f, .type = ISLAND_RES_FIBER },
-            { .ox =  -5.0f, .oy = -90.0f, .type = ISLAND_RES_ROCK  },
-            { .ox =  60.0f, .oy =  75.0f, .type = ISLAND_RES_ROCK  },
-            { .ox = -75.0f, .oy = -15.0f, .type = ISLAND_RES_ROCK  },
+            { .ox = -65.0f, .oy = -55.0f, .type_id = RES_WOOD  },
+            { .ox =  85.0f, .oy = -25.0f, .type_id = RES_WOOD  },
+            { .ox =  15.0f, .oy =  80.0f, .type_id = RES_WOOD  },
+            { .ox = -90.0f, .oy =  38.0f, .type_id = RES_WOOD  },
+            { .ox =  45.0f, .oy = -78.0f, .type_id = RES_FIBER },
+            { .ox = -28.0f, .oy =  32.0f, .type_id = RES_FIBER },
+            { .ox =  70.0f, .oy =  50.0f, .type_id = RES_FIBER },
+            { .ox =  -5.0f, .oy = -90.0f, .type_id = RES_ROCK  },
+            { .ox =  60.0f, .oy =  75.0f, .type_id = RES_ROCK  },
+            { .ox = -75.0f, .oy = -15.0f, .type_id = RES_ROCK  },
         },
     },
 
@@ -88,15 +88,15 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
         .resource_count = 8,
         .resources = {
             /* Fiber — meadow patches */
-            { .ox =  -800.0f, .oy = -1000.0f, .type = ISLAND_RES_FIBER },
-            { .ox =  1000.0f, .oy = -1000.0f, .type = ISLAND_RES_FIBER },
-            { .ox =  1200.0f, .oy =  1000.0f, .type = ISLAND_RES_FIBER },
-            { .ox = -1500.0f, .oy =  -400.0f, .type = ISLAND_RES_FIBER },
+            { .ox =  -800.0f, .oy = -1000.0f, .type_id = RES_FIBER },
+            { .ox =  1000.0f, .oy = -1000.0f, .type_id = RES_FIBER },
+            { .ox =  1200.0f, .oy =  1000.0f, .type_id = RES_FIBER },
+            { .ox = -1500.0f, .oy =  -400.0f, .type_id = RES_FIBER },
             /* Rock — mountain outcrops near the edges */
-            { .ox = -2500.0f, .oy = -1600.0f, .type = ISLAND_RES_ROCK  },
-            { .ox =  2500.0f, .oy = -1000.0f, .type = ISLAND_RES_ROCK  },
-            { .ox =  2400.0f, .oy =  1600.0f, .type = ISLAND_RES_ROCK  },
-            { .ox = -2500.0f, .oy =  1400.0f, .type = ISLAND_RES_ROCK  },
+            { .ox = -2500.0f, .oy = -1600.0f, .type_id = RES_ROCK  },
+            { .ox =  2500.0f, .oy = -1000.0f, .type_id = RES_ROCK  },
+            { .ox =  2400.0f, .oy =  1600.0f, .type_id = RES_ROCK  },
+            { .ox = -2500.0f, .oy =  1400.0f, .type_id = RES_ROCK  },
         },
     },
 };
@@ -171,12 +171,14 @@ static float resource_size_from_offset(float ox, float oy)
     return 0.5f + ((float)(h & 0xFFu) / 255.0f) * 1.3f;
 }
 
-static int resource_max_health(const char *type)
+static int resource_max_health(uint8_t type_id)
 {
-    if (strcmp(type, ISLAND_RES_WOOD)  == 0) return 100;
-    if (strcmp(type, ISLAND_RES_ROCK)  == 0) return  60;
-    if (strcmp(type, ISLAND_RES_FIBER) == 0) return  30;
-    return 50;
+    switch (type_id) {
+        case RES_WOOD:  return 100;
+        case RES_ROCK:  return  60;
+        case RES_FIBER: return  30;
+        default:        return  50;
+    }
 }
 
 /* Apply size + health to every pre-defined resource in ISLAND_PRESETS[]. */
@@ -187,7 +189,7 @@ static void init_static_resource_fields(void)
         for (int ri = 0; ri < isl->resource_count; ri++) {
             IslandResource *r = &isl->resources[ri];
             r->size       = resource_size_from_offset(r->ox, r->oy);
-            r->max_health = resource_max_health(r->type);
+            r->max_health = resource_max_health(r->type_id);
             r->health     = r->max_health;
         }
     }
@@ -232,9 +234,9 @@ void islands_generate_trees(void)
                 IslandResource *r = &isl->resources[isl->resource_count];
                 r->ox         = tx - isl->x;
                 r->oy         = ty - isl->y;
-                r->type       = ISLAND_RES_WOOD;
+                r->type_id    = RES_WOOD;
                 r->size       = resource_size_from_offset(r->ox, r->oy);
-                r->max_health = resource_max_health(ISLAND_RES_WOOD);
+                r->max_health = resource_max_health(RES_WOOD);
                 r->health     = r->max_health;
                 isl->resource_count++;
                 added++;
@@ -286,15 +288,94 @@ void islands_generate_trees(void)
                 IslandResource *r = &isl->resources[isl->resource_count];
                 r->ox         = fx - isl->x;
                 r->oy         = fy - isl->y;
-                r->type       = ISLAND_RES_FIBER;
+                r->type_id    = RES_FIBER;
                 r->size       = resource_size_from_offset(r->ox, r->oy);
-                r->max_health = resource_max_health(ISLAND_RES_FIBER);
+                r->max_health = resource_max_health(RES_FIBER);
                 r->health     = r->max_health;
                 isl->resource_count++;
                 added_fiber++;
             }
         }
         (void)added_fiber;
+    }
+}
+
+/* ── Spatial grid + alive list ───────────────────────────────────────────── */
+
+void islands_build_grid(void)
+{
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        IslandDef *isl = &ISLAND_PRESETS[ii];
+
+        /* Clear grid and alive list */
+        memset(isl->wood_grid, 0, sizeof(isl->wood_grid));
+        isl->alive_wood_count = 0;
+
+        if (isl->resource_count == 0) continue;
+
+        /* Compute bounding box of all wood nodes to set grid origin */
+        float min_x =  1e9f, min_y =  1e9f;
+        float max_x = -1e9f, max_y = -1e9f;
+        for (int ri = 0; ri < isl->resource_count; ri++) {
+            const IslandResource *r = &isl->resources[ri];
+            if (r->type_id != RES_WOOD) continue;
+            float wx = isl->x + r->ox;
+            float wy = isl->y + r->oy;
+            if (wx < min_x) min_x = wx;
+            if (wy < min_y) min_y = wy;
+            if (wx > max_x) max_x = wx;
+            if (wy > max_y) max_y = wy;
+        }
+        if (min_x > max_x) continue; /* no wood nodes on this island */
+
+        /* Grid origin: one cell-width before the first node so all nodes
+         * map to col/row >= 0 even with floating-point rounding */
+        isl->grid_ox = min_x - ISLAND_GRID_CELL_PX;
+        isl->grid_oy = min_y - ISLAND_GRID_CELL_PX;
+        isl->grid_w  = (int)((max_x - isl->grid_ox) / ISLAND_GRID_CELL_PX) + 2;
+        isl->grid_h  = (int)((max_y - isl->grid_oy) / ISLAND_GRID_CELL_PX) + 2;
+        if (isl->grid_w > ISLAND_GRID_COLS) isl->grid_w = ISLAND_GRID_COLS;
+        if (isl->grid_h > ISLAND_GRID_ROWS) isl->grid_h = ISLAND_GRID_ROWS;
+
+        /* Insert each wood node into the grid + alive list */
+        for (int ri = 0; ri < isl->resource_count; ri++) {
+            const IslandResource *r = &isl->resources[ri];
+            if (r->type_id != RES_WOOD) continue;
+
+            /* Add to alive list */
+            if (isl->alive_wood_count < ISLAND_MAX_RESOURCES)
+                isl->alive_wood[isl->alive_wood_count++] = (uint16_t)ri;
+
+            /* Add to spatial grid */
+            int col = (int)((isl->x + r->ox - isl->grid_ox) / ISLAND_GRID_CELL_PX);
+            int row = (int)((isl->y + r->oy - isl->grid_oy) / ISLAND_GRID_CELL_PX);
+            if (col < 0 || col >= isl->grid_w || row < 0 || row >= isl->grid_h) continue;
+            IslandGridCell *cell = &isl->wood_grid[row][col];
+            if (cell->count < ISLAND_GRID_MAXPC)
+                cell->ri[cell->count++] = (uint16_t)ri;
+        }
+    }
+}
+
+void island_mark_tree_dead(IslandDef *isl, int ri)
+{
+    /* Remove from alive list (swap-and-pop) */
+    for (int k = 0; k < isl->alive_wood_count; k++) {
+        if (isl->alive_wood[k] == (uint16_t)ri) {
+            isl->alive_wood[k] = isl->alive_wood[--isl->alive_wood_count];
+            break;
+        }
+    }
+    /* Remove from spatial grid (swap-and-pop in the cell) */
+    int col = (int)((isl->x + isl->resources[ri].ox - isl->grid_ox) / ISLAND_GRID_CELL_PX);
+    int row = (int)((isl->y + isl->resources[ri].oy - isl->grid_oy) / ISLAND_GRID_CELL_PX);
+    if (col < 0 || col >= isl->grid_w || row < 0 || row >= isl->grid_h) return;
+    IslandGridCell *cell = &isl->wood_grid[row][col];
+    for (int k = 0; k < cell->count; k++) {
+        if (cell->ri[k] == (uint16_t)ri) {
+            cell->ri[k] = cell->ri[--cell->count];
+            return;
+        }
     }
 }
 
