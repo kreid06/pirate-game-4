@@ -10,7 +10,7 @@ import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind } from './EffectRenderer.js';
 import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase } from '../../sim/Types.js';
-import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
+import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
@@ -4445,7 +4445,7 @@ export class RenderSystem {
       // Port side (y=+90) and starboard side (y=-90) share the same four x values:
       //   stern (-260), 1st joint (-110), 2nd joint (40), bow (190)
       this.ctx.strokeStyle = '#6B3A10';
-      this.ctx.lineWidth = 1.5 / cameraState.zoom;
+      this.ctx.lineWidth = 1.5;
       for (const rx of [-260, -110, 40, 190]) {
         this.ctx.beginPath();
         this.ctx.moveTo(rx,  90);
@@ -4455,7 +4455,7 @@ export class RenderSystem {
 
       // Keel: longitudinal centre beam from bow tip (415,0) to stern tip (-345,0)
       this.ctx.strokeStyle = '#5A3008';
-      this.ctx.lineWidth = 2 / cameraState.zoom;
+      this.ctx.lineWidth = 2;
       this.ctx.beginPath();
       this.ctx.moveTo( 415, 0);
       this.ctx.lineTo(-345, 0);
@@ -4645,10 +4645,41 @@ export class RenderSystem {
     this.ctx.rotate(ship.rotation - cameraState.rotation);
     // Find all plank modules
     const planks = ship.modules.filter(m => m.kind === 'plank');
-    // Only show dark "unbuilt" slot on skeleton ships (no deck present).
-    // On a real ship a health=0 plank was destroyed — it should simply disappear.
     const shipHasDeck = ship.modules.some(m => m.kind === 'deck');
-    
+
+    if (!shipHasDeck) {
+      // ── Skeleton mode: fill hull sections (between ribs/keel/hull-edge)
+      // for PRESENT planks. Missing planks (health ≤ 0) are transparent gaps.
+      const sectionFill = 'rgb(125, 103, 76)';
+      this.ctx.fillStyle = sectionFill;
+
+      // Rib x-positions that divide the straight hull sides into 3 sections each
+      const portRibBounds: [number, number][] = [[-260, -110], [-110, 40], [40, 190]];
+      const stbdRibBounds: [number, number][] = [[40, 190], [-110, 40], [-260, -110]];
+
+      for (const plank of planks) {
+        if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
+        if ((plank.moduleData.health ?? 0) <= 0) continue;
+
+        const section = plank.moduleData.sectionName;
+        const seg = plank.moduleData.segmentIndex;
+
+        if (section === 'port_side') {
+          const [x1, x2] = portRibBounds[seg] ?? [0, 0];
+          this.ctx.fillRect(x1, 0, x2 - x1, 90);
+        } else if (section === 'starboard_side') {
+          const [x1, x2] = stbdRibBounds[seg] ?? [0, 0];
+          this.ctx.fillRect(x1, -90, x2 - x1, 90);
+        } else if (section) {
+          this.drawCurvedHullSection(section);
+        }
+      }
+
+      this.ctx.restore();
+      return;
+    }
+
+    // ── Normal mode (has deck): draw wood-textured planks
     for (const plank of planks) {
       if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
       
@@ -4660,24 +4691,7 @@ export class RenderSystem {
       const health = plankData.health;
       const isCurved = plankData.isCurved || false;
 
-      if (health <= 0) {
-        if (!shipHasDeck) {
-          // Skeleton ship — show dark unbuilt slot
-          const missingFill = 'rgb(38, 24, 10)';
-          this.ctx.save();
-          if (isCurved && plankData.curveData) {
-            this.drawCurvedPlank(plankData.curveData, width, missingFill, 'transparent');
-          } else {
-            this.ctx.fillStyle = missingFill;
-            this.ctx.translate(pos.x, pos.y);
-            this.ctx.rotate(rot);
-            this.ctx.fillRect(-length / 2, -width / 2, length, width);
-          }
-          this.ctx.restore();
-        }
-        // Destroyed on a real ship — render nothing
-        continue;
-      }
+      if (health <= 0) continue;
       
       // Smoothly darken toward black as health decreases
       const maxHealth = plankData.maxHealth || 10000;
@@ -4771,6 +4785,50 @@ export class RenderSystem {
     }
     
     this.ctx.restore();
+  }
+
+  /**
+   * Draw a curved hull section (bow/stern) as a filled polygon bounded by rib, keel, and hull curve.
+   * Used in skeleton mode to show sealed panels where planks are present.
+   */
+  private drawCurvedHullSection(section: string): void {
+    const p = HULL_POINTS;
+    const steps = 12;
+    let p0: {x: number; y: number}, p1: {x: number; y: number}, p2: {x: number; y: number};
+    let tFrom: number, tTo: number;
+    let ribX: number, hullEdgeY: number;
+
+    if (section === 'bow_port') {
+      p0 = p.bow; p1 = p.bowTip; p2 = p.bowBottom;
+      tFrom = 0; tTo = 0.5;
+      ribX = 190; hullEdgeY = 90;
+    } else if (section === 'bow_starboard') {
+      p0 = p.bow; p1 = p.bowTip; p2 = p.bowBottom;
+      tFrom = 1.0; tTo = 0.5;
+      ribX = 190; hullEdgeY = -90;
+    } else if (section === 'stern_starboard') {
+      p0 = p.sternBottom; p1 = p.sternTip; p2 = p.stern;
+      tFrom = 0; tTo = 0.5;
+      ribX = -260; hullEdgeY = -90;
+    } else if (section === 'stern_port') {
+      p0 = p.sternBottom; p1 = p.sternTip; p2 = p.stern;
+      tFrom = 1.0; tTo = 0.5;
+      ribX = -260; hullEdgeY = 90;
+    } else {
+      return;
+    }
+
+    this.ctx.beginPath();
+    this.ctx.moveTo(ribX, 0);            // rib/keel corner
+    this.ctx.lineTo(ribX, hullEdgeY);    // along rib to hull edge
+    // Trace the hull curve from hull-edge toward the tip
+    for (let i = 0; i <= steps; i++) {
+      const t = tFrom + (i / steps) * (tTo - tFrom);
+      const pt = getQuadraticPoint(p0, p1, p2, t);
+      this.ctx.lineTo(pt.x, pt.y);
+    }
+    this.ctx.closePath();               // back along keel to rib/keel corner
+    this.ctx.fill();
   }
 
   /**
