@@ -1241,13 +1241,6 @@ export class ClientApplication {
         this.shutdown();
         logout().finally(() => window.location.reload());
       };
-
-      // Tell the pause menu whether this session is a guest (shows "Create Account" if so)
-      this.pauseMenu.setGuest(guest);
-      this.pauseMenu.onAccountCreated = (displayName: string) => {
-        console.log(`✅ Guest converted to permanent account: ${displayName}`);
-        this.pauseMenu.setGuest(false);
-      };
       
       // Initialize UI System
       this.uiManager = new UIManager(this.canvas, this.config);
@@ -1573,6 +1566,13 @@ export class ClientApplication {
     
     try {
       console.log('🚀 Starting client application...');
+
+      // Configure pause menu for guest vs permanent account
+      this.pauseMenu.setGuest(guest);
+      this.pauseMenu.onAccountCreated = (displayName: string) => {
+        console.log(`✅ Guest converted to permanent account: ${displayName}`);
+        this.pauseMenu.setGuest(false);
+      };
       
       // Try to connect to server, but continue even if it fails
       this.state = ClientState.CONNECTING;
