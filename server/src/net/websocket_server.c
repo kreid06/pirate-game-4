@@ -10701,7 +10701,7 @@ int websocket_server_update(struct Sim* sim) {
                                                          player->player_id, MID(seq, MODULE_OFFSET_HELM), sim_ship->id);
                                                 snprintf(response, sizeof(response),
                                                     "{\"type\":\"message_ack\",\"status\":\"helm_placed\",\"helm_id\":%u}",
-                                                    base);
+                                                    nh->id);
                                             }
                                         }
                                     }
