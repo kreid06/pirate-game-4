@@ -969,7 +969,8 @@ export class UIManager {
       return true;
     }
     if (this.activeMenuId === MENU_ID.PLAYER) {
-      this.closeActiveMenu();
+      const consumed = this.playerMenu.handleClick(x, y);
+      if (!consumed) this.closeActiveMenu();
       return true;
     }
     if (this.activeMenuId === MENU_ID.CREW) {
@@ -1466,6 +1467,18 @@ export class UIManager {
           this.closeActiveMenu();
         } else {
           this.openMenu(MENU_ID.COMPANY);
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        break;
+
+      case 'KeyO':
+        if (this.activeMenuId === MENU_ID.PLAYER) {
+          this.closeActiveMenu();
+        } else {
+          this.closeActiveMenu();
+          this.activeMenuId = MENU_ID.PLAYER;
+          this.playerMenu.openSkillsTab();
         }
         event.preventDefault();
         event.stopPropagation();

@@ -35,7 +35,8 @@ const COMPANY_COLORS: Record<number, string> = {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const PANEL_W  = 480;
-const PANEL_H  = 490;
+const TAB_H    = 32;
+const PANEL_H  = 522; // 490 content + 32 tab bar
 const PAD      = 18;
 const HEADER_H = 40;
 const ROW_H    = 22;
@@ -56,10 +57,40 @@ const SLOT_GAP = 5;
 
 export class PlayerMenu {
   public visible = false;
+  private activeTab: 'character' | 'skills' = 'character';
+
+  // Cached panel origin — set each render frame, used by handleClick
+  private _panelX = 0;
+  private _panelY = 0;
 
   toggle(): void { this.visible = !this.visible; }
-  open():   void { this.visible = true;  }
+  open():   void { this.visible = true; this.activeTab = 'character'; }
   close():  void { this.visible = false; }
+
+  /** Open directly to the Skills tab. */
+  openSkillsTab(): void { this.visible = true; this.activeTab = 'skills'; }
+
+  /**
+   * Handle a click inside the player menu.
+   * Returns true if the click was consumed (tab switch or click inside panel).
+   * Returns false if the click was outside the panel (so UIManager can close the menu).
+   */
+  handleClick(x: number, y: number): boolean {
+    if (!this.visible) return false;
+    const px = this._panelX, py = this._panelY;
+    // Outside panel → signal UIManager to close
+    if (x < px || x > px + PANEL_W || y < py || y > py + PANEL_H) return false;
+
+    // Tab bar region
+    const tabBarY = py + HEADER_H;
+    if (y >= tabBarY && y < tabBarY + TAB_H) {
+      const tabW = PANEL_W / 2;
+      this.activeTab = x < px + tabW ? 'character' : 'skills';
+      return true;
+    }
+
+    return true; // click inside panel — consume to avoid accidental close
+  }
 
   render(
     ctx:             CanvasRenderingContext2D,
@@ -78,18 +109,29 @@ export class PlayerMenu {
     const px = Math.round((cw - PANEL_W) / 2);
     const py = Math.round((ch - PANEL_H) / 2);
 
+    // Cache for handleClick
+    this._panelX = px;
+    this._panelY = py;
+
     ctx.fillStyle   = BG_PANEL;
     ctx.fillRect(px, py, PANEL_W, PANEL_H);
     ctx.strokeStyle = GOLD;
     ctx.lineWidth   = 1.5;
     ctx.strokeRect(px, py, PANEL_W, PANEL_H);
 
+    let cur = py;
+    cur = this._header(ctx, px, cur);
+    cur = this._tabBar(ctx, px, cur);
+
+    if (this.activeTab === 'skills') {
+      this._skillsTab(ctx, px, cur, py + PANEL_H);
+      ctx.restore();
+      return;
+    }
+
     const player = assignedId != null
       ? worldState.players.find(p => p.id === assignedId)
       : worldState.players[0] ?? null;
-
-    let cur = py;
-    cur = this._header(ctx, px, cur);
 
     if (!player) {
       ctx.font = '14px Consolas, monospace';
@@ -127,7 +169,7 @@ export class PlayerMenu {
     ctx.font = '12px Consolas, monospace';
     ctx.textAlign = 'right';
     ctx.fillStyle = TEXT_DIM;
-    ctx.fillText('[I / ESC] close', px + PANEL_W - PAD, py + HEADER_H / 2);
+    ctx.fillText('[O / I / ESC] close', px + PANEL_W - PAD, py + HEADER_H / 2);
 
     ctx.strokeStyle = BORDER;
     ctx.lineWidth = 1;
@@ -343,6 +385,66 @@ export class PlayerMenu {
   }
 
   // ────────────────────────────────────────────────────────────────────────────
+
+  private _tabBar(ctx: CanvasRenderingContext2D, px: number, py: number): number {
+    const tabs: Array<{ label: string; id: 'character' | 'skills' }> = [
+      { label: '⚔  CHARACTER', id: 'character' },
+      { label: '✦  SKILLS',    id: 'skills'    },
+    ];
+    const tabW = PANEL_W / tabs.length;
+
+    for (let i = 0; i < tabs.length; i++) {
+      const { label, id } = tabs[i];
+      const tx = px + i * tabW;
+      const isActive = this.activeTab === id;
+
+      ctx.fillStyle = isActive ? 'rgba(255,215,0,0.10)' : 'rgba(0,0,0,0.30)';
+      ctx.fillRect(tx, py, tabW, TAB_H);
+
+      // Bottom border — gold for active, dim for inactive
+      ctx.strokeStyle = isActive ? GOLD : BORDER;
+      ctx.lineWidth = isActive ? 2 : 1;
+      ctx.beginPath();
+      ctx.moveTo(tx, py + TAB_H);
+      ctx.lineTo(tx + tabW, py + TAB_H);
+      ctx.stroke();
+
+      // Divider between tabs
+      if (i < tabs.length - 1) {
+        ctx.strokeStyle = BORDER;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(tx + tabW, py);
+        ctx.lineTo(tx + tabW, py + TAB_H);
+        ctx.stroke();
+      }
+
+      ctx.font = `${isActive ? 'bold ' : ''}12px Consolas, monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = isActive ? GOLD : TEXT_DIM;
+      ctx.fillText(label, tx + tabW / 2, py + TAB_H / 2);
+    }
+
+    return py + TAB_H;
+  }
+
+  private _skillsTab(ctx: CanvasRenderingContext2D, px: number, contentTop: number, contentBottom: number): void {
+    const midY = Math.round((contentTop + contentBottom) / 2);
+    const midX = px + PANEL_W / 2;
+
+    ctx.font = '14px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = TEXT_DIM;
+    ctx.fillText('No skills unlocked yet.', midX, midY - 12);
+
+    ctx.font = '12px Consolas, monospace';
+    ctx.fillStyle = 'rgba(120,120,136,0.5)';
+    ctx.fillText('Skill tree coming soon…', midX, midY + 12);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
 
   private _sectionHeader(
     ctx: CanvasRenderingContext2D,
