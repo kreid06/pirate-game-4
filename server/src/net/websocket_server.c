@@ -1711,6 +1711,12 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].movement_state = PLAYER_STATE_SWIMMING;
             players[i].health = 100;
             players[i].max_health = 100;
+            players[i].player_level = 1;
+            players[i].player_xp = 0;
+            players[i].stat_health = 0;
+            players[i].stat_damage = 0;
+            players[i].stat_stamina = 0;
+            players[i].stat_weight = 0;
             
             // ===== ADD PLAYER TO C SIMULATION FOR COLLISION DETECTION =====
             if (global_sim) {
@@ -11346,6 +11352,85 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "upgrade_player_stat") == 0) {
+                            // UPGRADE PLAYER STAT: spend an earned stat point on a player stat.
+                            // {"type":"upgrade_player_stat","stat":"health"}
+                            // Stats: health | damage | stamina | weight
+                            // Cost: 1 stat point (earned per level-up).
+                            // Stat points available = (player_level - 1) - total_stats_spent.
+                            #define PLAYER_MAX_LEVEL 66u
+                            WebSocketPlayer* ups_player = find_player(client->player_id);
+                            if (!ups_player) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"player_not_found\"}");
+                            } else {
+                                char ups_stat[32] = "";
+                                char* ups_p = strstr(payload, "\"stat\":\"");
+                                if (ups_p) sscanf(ups_p + 8, "%31[^\"]", ups_stat);
+
+                                uint8_t* ups_stat_ptr = NULL;
+                                if      (strcmp(ups_stat, "health")  == 0) ups_stat_ptr = &ups_player->stat_health;
+                                else if (strcmp(ups_stat, "damage")  == 0) ups_stat_ptr = &ups_player->stat_damage;
+                                else if (strcmp(ups_stat, "stamina") == 0) ups_stat_ptr = &ups_player->stat_stamina;
+                                else if (strcmp(ups_stat, "weight")  == 0) ups_stat_ptr = &ups_player->stat_weight;
+
+                                if (!ups_stat_ptr) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"unknown_stat\"}");
+                                } else {
+                                    uint8_t ups_total_spent = (uint8_t)(
+                                        ups_player->stat_health + ups_player->stat_damage +
+                                        ups_player->stat_stamina + ups_player->stat_weight);
+                                    uint8_t ups_points_earned = (uint8_t)(ups_player->player_level > 1
+                                        ? ups_player->player_level - 1 : 0);
+                                    if (ups_total_spent >= ups_points_earned) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"error\",\"message\":\"no_stat_points\","
+                                            "\"playerLevel\":%u,\"pointsEarned\":%u,\"pointsSpent\":%u}",
+                                            ups_player->player_level, ups_points_earned, ups_total_spent);
+                                    } else {
+                                        (*ups_stat_ptr)++;
+                                        /* Recalculate max HP if health stat upgraded */
+                                        if (ups_stat_ptr == &ups_player->stat_health) {
+                                            uint16_t new_max = (uint16_t)(100 + ups_player->stat_health * 20);
+                                            if (new_max > ups_player->max_health)
+                                                ups_player->health += (new_max - ups_player->max_health);
+                                            ups_player->max_health = new_max;
+                                        }
+                                        uint8_t ups_points_left = (uint8_t)(ups_points_earned - (ups_total_spent + 1));
+                                        log_info("👤 Player %u upgraded %s → %u (level %u, %u stat points left)",
+                                                 ups_player->player_id, ups_stat, *ups_stat_ptr,
+                                                 ups_player->player_level, ups_points_left);
+                                        /* Broadcast PLAYER_STAT_UP to all clients */
+                                        char ups_msg[256];
+                                        snprintf(ups_msg, sizeof(ups_msg),
+                                            "{\"type\":\"PLAYER_STAT_UP\",\"playerId\":%u,\"stat\":\"%s\","
+                                            "\"level\":%u,\"xp\":%u,\"maxHealth\":%u,\"playerLevel\":%u,"
+                                            "\"statHealth\":%u,\"statDamage\":%u,\"statStamina\":%u,\"statWeight\":%u,"
+                                            "\"statPoints\":%u}",
+                                            ups_player->player_id, ups_stat, *ups_stat_ptr,
+                                            ups_player->player_xp, ups_player->max_health,
+                                            ups_player->player_level,
+                                            ups_player->stat_health, ups_player->stat_damage,
+                                            ups_player->stat_stamina, ups_player->stat_weight,
+                                            ups_points_left);
+                                        uint8_t ups_frame[512];
+                                        size_t ups_flen = websocket_create_frame(WS_OPCODE_TEXT,
+                                            ups_msg, strlen(ups_msg), (char*)ups_frame, sizeof(ups_frame));
+                                        if (ups_flen > 0) {
+                                            for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                                                struct WebSocketClient* wc = &ws_server.clients[ci];
+                                                if (wc->connected && wc->handshake_complete)
+                                                    send(wc->fd, ups_frame, ups_flen, 0);
+                                            }
+                                        }
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"message_ack\",\"status\":\"stat_upgraded\","
+                                            "\"stat\":\"%s\",\"level\":%u,\"statPoints\":%u}",
+                                            ups_stat, *ups_stat_ptr, ups_points_left);
+                                    }
+                                }
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "toggle_ladder") == 0) {
                             // TOGGLE LADDER: retract or extend a ladder on the player's current ship.
                             // {"type":"toggle_ladder","moduleId":N}
@@ -12087,14 +12172,17 @@ int websocket_server_update(struct Sim* sim) {
                                     (int)players[p].inventory.shield,
                                     (int)players[p].inventory.active_slot);
 
-                char player_entry[680];
+                char player_entry[900];
                 snprintf(player_entry, sizeof(player_entry),
                         "{\"id\":%u,\"name\":\"%s\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
                         "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
                         "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\","
                         "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
-                        "\"company\":%u,\"health\":%u,\"max_health\":%u,\"on_island\":%u%s}",
+                        "\"company\":%u,\"health\":%u,\"max_health\":%u,\"on_island\":%u,"
+                        "\"player_level\":%u,\"player_xp\":%u,"
+                        "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
+                        "\"stat_points\":%u%s}",
                         players[p].player_id, players[p].name[0] ? players[p].name : "Player",
                         players[p].x, players[p].y, players[p].rotation,
                         players[p].velocity_x, players[p].velocity_y,
@@ -12108,6 +12196,17 @@ int websocket_server_update(struct Sim* sim) {
                         players[p].company_id,
                         players[p].health, players[p].max_health,
                         players[p].on_island_id,
+                        (unsigned)players[p].player_level,
+                        (unsigned)players[p].player_xp,
+                        (unsigned)players[p].stat_health,
+                        (unsigned)players[p].stat_damage,
+                        (unsigned)players[p].stat_stamina,
+                        (unsigned)players[p].stat_weight,
+                        (unsigned)((players[p].player_level > 1)
+                            ? (players[p].player_level - 1)
+                              - (players[p].stat_health + players[p].stat_damage
+                                 + players[p].stat_stamina + players[p].stat_weight)
+                            : 0),
                         inv_buf);
                 players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "%s", player_entry);
                 first_player = false;

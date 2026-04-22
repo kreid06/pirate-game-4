@@ -36,7 +36,7 @@ const COMPANY_COLORS: Record<number, string> = {
 
 const PANEL_W  = 480;
 const TAB_H    = 32;
-const PANEL_H  = 522; // 490 content + 32 tab bar
+const PANEL_H  = 760; // expanded for level/XP + stats section
 const PAD      = 18;
 const HEADER_H = 40;
 const ROW_H    = 22;
@@ -55,13 +55,45 @@ const ORANGE    = '#ffaa44';
 const SLOT_SZ  = 40;
 const SLOT_GAP = 5;
 
+// ── Player stat configuration (mirrors CrewLevelMenu STATS) ──────────────────
+interface StatDef {
+  key:    'statHealth' | 'statDamage' | 'statStamina' | 'statWeight';
+  server: string;
+  label:  string;
+  desc:   (lvl: number) => string;
+  color:  string;
+}
+
+const PLAYER_MAX_LEVEL = 66;
+
+const STATS: StatDef[] = [
+  { key: 'statHealth',  server: 'health',  label: 'Health',
+    desc: (l) => l > 0 ? `+${l * 20} max HP` : 'No bonus', color: '#44cc66' },
+  { key: 'statDamage',  server: 'damage',  label: 'Damage',
+    desc: (l) => l > 0 ? `+${l * 10}% weapon dmg` : 'No bonus', color: '#ff5544' },
+  { key: 'statStamina', server: 'stamina', label: 'Stamina',
+    desc: (l) => l > 0 ? `+${l * 10}% speed` : 'No bonus', color: '#ffaa44' },
+  { key: 'statWeight',  server: 'weight',  label: 'Weight',
+    desc: (l) => l > 0 ? `+${l * 10}% carry` : 'No bonus', color: '#88ccff' },
+];
+
+interface BtnHit {
+  serverKey: string;
+  x: number; y: number; w: number; h: number;
+  affordable: boolean;
+}
+
 export class PlayerMenu {
   public visible = false;
   private activeTab: 'character' | 'skills' = 'character';
 
+  /** Set by UIManager; called when the player clicks an affordable upgrade button. */
+  public onUpgradeRequest: ((stat: string) => void) | null = null;
+
   // Cached panel origin — set each render frame, used by handleClick
   private _panelX = 0;
   private _panelY = 0;
+  private _btnHits: BtnHit[] = [];
 
   toggle(): void { this.visible = !this.visible; }
   open():   void { this.visible = true; this.activeTab = 'character'; }
@@ -87,6 +119,16 @@ export class PlayerMenu {
       const tabW = PANEL_W / 2;
       this.activeTab = x < px + tabW ? 'character' : 'skills';
       return true;
+    }
+
+    // Upgrade buttons
+    for (const btn of this._btnHits) {
+      if (btn.affordable &&
+          x >= btn.x && x <= btn.x + btn.w &&
+          y >= btn.y && y <= btn.y + btn.h) {
+        this.onUpgradeRequest?.(btn.serverKey);
+        return true;
+      }
     }
 
     return true; // click inside panel — consume to avoid accidental close
@@ -129,6 +171,8 @@ export class PlayerMenu {
       return;
     }
 
+    this._btnHits = [];
+
     const player = assignedId != null
       ? worldState.players.find(p => p.id === assignedId)
       : worldState.players[0] ?? null;
@@ -147,6 +191,7 @@ export class PlayerMenu {
       ? worldState.ships.find(s => s.id === player.carrierId) ?? null
       : null;
 
+    cur = this._levelXpSection(ctx, px, cur, player);
     cur = this._identity(ctx, px, cur, player, ship);
     cur = this._status(ctx, px, cur, player, ship, worldState);
     cur = this._inventorySection(ctx, px, cur, player);
@@ -179,6 +224,115 @@ export class PlayerMenu {
     ctx.stroke();
 
     return py + HEADER_H;
+  }
+
+  private _levelXpSection(
+    ctx:    CanvasRenderingContext2D,
+    px:     number, py: number,
+    player: NonNullable<ReturnType<WorldState['players']['find']>>,
+  ): number {
+    const lvl       = player.level ?? 1;
+    const xp        = player.xp ?? 0;
+    const isMax     = lvl >= PLAYER_MAX_LEVEL;
+    const xpToNext  = isMax ? PLAYER_MAX_LEVEL * 100 : lvl * 100;
+    const xpPct     = isMax ? 1 : Math.min(xp / xpToNext, 1);
+
+    const statPoints = player.statPoints ?? 0;
+
+    const BLUE_XP = '#4488ff';
+    const BAR_H   = 7;
+
+    py = this._sectionHeader(ctx, px, py, 'LEVEL & XP', '');
+    py += 4;
+
+    // Level badge + XP bar
+    const badge = `Lv. ${lvl}${isMax ? '  MAX' : ''}`;
+    ctx.font      = 'bold 14px Consolas, monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = GOLD;
+    ctx.fillText(badge, px + PAD + 8, py + 8);
+
+    const xpLabel = isMax ? 'MAX LEVEL' : `${xp} / ${xpToNext} XP`;
+    ctx.font      = '12px Consolas, monospace';
+    ctx.textAlign = 'right';
+    ctx.fillStyle = TEXT_DIM;
+    ctx.fillText(xpLabel, px + PANEL_W - PAD - 8, py + 8);
+
+    py += 20;
+
+    // XP progress bar
+    const barX = px + PAD;
+    const barW = PANEL_W - PAD * 2;
+    ctx.fillStyle = '#1a2040';
+    ctx.fillRect(barX, py, barW, BAR_H);
+    ctx.fillStyle = BLUE_XP;
+    ctx.fillRect(barX, py, Math.round(barW * xpPct), BAR_H);
+    py += BAR_H + 10;
+
+    // Stat points notice
+    if (statPoints > 0) {
+      ctx.font      = 'bold 12px Consolas, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = GOLD;
+      ctx.fillText(`★ ${statPoints} stat point${statPoints !== 1 ? 's' : ''} available`, px + PANEL_W / 2, py + 6);
+      py += 20;
+    }
+
+    // Stat rows
+    const BTN_W = 80, BTN_H = 24;
+    const ROW = 48;
+
+    for (const stat of STATS) {
+      const statLvl = (player[stat.key] ?? 0) as number;
+      const afford  = statPoints > 0;
+
+      ctx.fillStyle = 'rgba(255,255,255,0.03)';
+      ctx.fillRect(px + PAD / 2, py, PANEL_W - PAD, ROW - 4);
+
+      // Stat label + level
+      ctx.font      = 'bold 13px Consolas, monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = stat.color;
+      ctx.fillText(stat.label, px + PAD, py + 14);
+
+      ctx.font      = 'bold 12px Consolas, monospace';
+      ctx.fillStyle = statLvl > 0 ? stat.color : TEXT_DIM;
+      ctx.fillText(`${statLvl}`, px + 90, py + 14);
+
+      // Effect description
+      ctx.font         = '11px Consolas, monospace';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = TEXT_DIM;
+      ctx.fillText(stat.desc(statLvl), px + PAD, py + ROW - 18);
+
+      // Upgrade button
+      const btnX = px + PANEL_W - PAD - BTN_W;
+      const btnY = py + (ROW - 4 - BTN_H) / 2;
+      ctx.fillStyle   = afford ? '#2a4a2a' : '#2a2a2a';
+      ctx.strokeStyle = afford ? '#44aa44' : '#445';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.roundRect(btnX, btnY, BTN_W, BTN_H, 3);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.font         = 'bold 11px Consolas, monospace';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = afford ? '#aaffaa' : '#556';
+      ctx.fillText(afford ? '+1 Point' : 'No Points', btnX + BTN_W / 2, btnY + BTN_H / 2);
+
+      if (afford) {
+        this._btnHits.push({ serverKey: stat.server, x: btnX, y: btnY, w: BTN_W, h: BTN_H, affordable: true });
+      }
+
+      py += ROW;
+    }
+
+    return py + 6;
   }
 
   private _identity(

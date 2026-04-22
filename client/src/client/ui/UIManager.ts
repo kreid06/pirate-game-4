@@ -890,6 +890,16 @@ export class UIManager {
   }
 
   /**
+   * Set callback for player stat upgrades from the player character menu.
+   * Called when the player clicks an affordable upgrade button in the character tab.
+   */
+  setPlayerUpgradeCallback(
+    cb: (stat: string) => void
+  ): void {
+    this.playerMenu.onUpgradeRequest = cb;
+  }
+
+  /**
    * Open the crew level menu for a specific NPC (e.g. from a world click).
    */
   openCrewMenuForNpc(npc: Npc): void {

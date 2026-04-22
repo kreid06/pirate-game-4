@@ -95,6 +95,7 @@ export enum MessageType {
   NPC_LOCK = 'npc_lock',
   NPC_GOTO_MODULE = 'npc_goto_module',
   NPC_MOVE_TO_POS = 'npc_move_to_pos',
+  UPGRADE_PLAYER_STAT = 'upgrade_player_stat',
 
   PING = 'ping',
   
@@ -508,6 +509,11 @@ export class NetworkManager {
   /** Fired when the server confirms an NPC stat upgrade. */
   public onNpcStatUp: ((npcId: number, stat: string, statLevel: number, xp: number,
     maxHealth: number, npcLevel: number,
+    statHealth: number, statDamage: number, statStamina: number, statWeight: number,
+    statPoints: number) => void) | null = null;
+  /** Fired when the server confirms a player stat upgrade. */
+  public onPlayerStatUp: ((stat: string, statLevel: number, xp: number,
+    maxHealth: number, playerLevel: number,
     statHealth: number, statDamage: number, statStamina: number, statWeight: number,
     statPoints: number) => void) | null = null;
   /** Fired when a cannonball hits an NPC or player. */
@@ -1399,6 +1405,15 @@ export class NetworkManager {
   }
 
   /**
+   * Request the server to spend a player stat point upgrading one player stat.
+   * stat must be one of: 'health' | 'damage' | 'stamina' | 'weight'
+   */
+  sendPlayerStatUpgrade(stat: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.UPGRADE_PLAYER_STAT, stat }));
+  }
+
+  /**
    * Get current network statistics
    */
   getNetworkStats(): NetworkStats {
@@ -1843,6 +1858,13 @@ export class NetworkManager {
             health: player.health ?? 100,
             maxHealth: player.max_health ?? 100,
             onIslandId: player.on_island ?? 0,
+            level: player.player_level ?? 1,
+            xp: player.player_xp ?? 0,
+            statHealth: player.stat_health ?? 0,
+            statDamage: player.stat_damage ?? 0,
+            statStamina: player.stat_stamina ?? 0,
+            statWeight: player.stat_weight ?? 0,
+            statPoints: player.stat_points ?? 0,
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,
@@ -1960,6 +1982,16 @@ export class NetworkManager {
         this.onNpcStatUp?.(
           message.npcId, message.stat, message.level, message.xp,
           message.maxHealth, message.npcLevel,
+          message.statHealth, message.statDamage, message.statStamina, message.statWeight,
+          message.statPoints ?? 0,
+        );
+        break;
+      }
+
+      case 'PLAYER_STAT_UP': {
+        this.onPlayerStatUp?.(
+          message.stat, message.level, message.xp,
+          message.maxHealth, message.playerLevel,
           message.statHealth, message.statDamage, message.statStamina, message.statWeight,
           message.statPoints ?? 0,
         );

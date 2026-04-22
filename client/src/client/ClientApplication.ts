@@ -1260,6 +1260,11 @@ export class ClientApplication {
         this.networkManager.sendCrewUpgrade(npcId, stat);
       });
 
+      // Wire player stat upgrade requests from the character menu to the server
+      this.uiManager.setPlayerUpgradeCallback((stat) => {
+        this.networkManager.sendPlayerStatUpgrade(stat);
+      });
+
       // Handle NPC_STAT_UP broadcast: refresh world-state NPC fields
       this.networkManager.onNpcStatUp = (npcId, _stat, _statLevel, xp,
           maxHealth, npcLevel, statHealth, statDamage, statStamina, statWeight, statPoints) => {
@@ -1275,6 +1280,26 @@ export class ClientApplication {
           npc.statStamina = statStamina;
           npc.statWeight  = statWeight;
           npc.statPoints  = statPoints;
+        }
+      };
+
+      // Handle PLAYER_STAT_UP broadcast: refresh world-state player fields
+      this.networkManager.onPlayerStatUp = (_stat, _statLevel, xp,
+          maxHealth, playerLevel, statHealth, statDamage, statStamina, statWeight, statPoints) => {
+        const playerId = this.networkManager.getAssignedPlayerId();
+        if (playerId === null) return;
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const p = ws.players.find(pl => pl.id === playerId);
+          if (!p) continue;
+          p.xp         = xp;
+          p.maxHealth  = maxHealth;
+          p.level      = playerLevel;
+          p.statHealth  = statHealth;
+          p.statDamage  = statDamage;
+          p.statStamina = statStamina;
+          p.statWeight  = statWeight;
+          p.statPoints  = statPoints;
         }
       };
 

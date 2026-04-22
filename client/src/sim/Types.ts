@@ -89,6 +89,15 @@ export interface Player {
 
   // Island presence (0 = not on island)
   onIslandId: number;
+
+  // Player XP / levelling (optional until server sends it)
+  level?: number;       // player_level (1–66)
+  xp?: number;          // accumulated XP
+  statHealth?: number;  // health stat points spent
+  statDamage?: number;  // damage stat points spent
+  statStamina?: number; // stamina stat points spent
+  statWeight?: number;  // weight stat points spent
+  statPoints?: number;  // unspent stat points
 }
 
 /**
