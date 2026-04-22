@@ -1785,7 +1785,7 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
 
             // Initialize inventory — 4 starter items: swivel, hammer, sword, axe + building items
             memset(&players[i].inventory, 0, sizeof(PlayerInventory));
-            players[i].inventory.active_slot = 0;
+            players[i].inventory.active_slot = 2; // Default to sword (slot 2)
             players[i].inventory.slots[0].item     = ITEM_SWIVEL;
             players[i].inventory.slots[0].quantity = 3;
             players[i].inventory.slots[1].item     = ITEM_HAMMER;
@@ -3553,6 +3553,30 @@ static void npc_apply_xp(WorldNpc* npc, uint32_t xp_gain) {
         if (npc->xp < cost) break;
         npc->xp -= cost;
         npc->npc_level++;
+    }
+}
+
+/* ── Player levelling constants ────────────────────────────────────────────── */
+/* Reuses NPC level cap and XP curve for parity */
+#define PLAYER_MAX_LEVEL    NPC_MAX_LEVEL
+#define PLAYER_LEVEL_XP_BASE NPC_LEVEL_XP_BASE
+/* XP awarded per kill */
+#define PLAYER_XP_PER_NPC_KILL    25u
+#define PLAYER_XP_PER_PLAYER_KILL 75u
+
+/*
+ * Grant XP to a player and apply any level-ups.
+ * Each level-up gives 1 stat point (player_level - 1 - total_stats_spent).
+ */
+static void player_apply_xp(WebSocketPlayer* p, uint32_t xp_gain) {
+    if (p->player_level >= PLAYER_MAX_LEVEL) return;
+    p->player_xp += xp_gain;
+    while (p->player_level < PLAYER_MAX_LEVEL) {
+        uint32_t cost = PLAYER_LEVEL_XP_BASE * (uint32_t)p->player_level;
+        if (p->player_xp < cost) break;
+        p->player_xp -= cost;
+        p->player_level++;
+        log_info("🎉 Player %u levelled up to %u!", p->player_id, (unsigned)p->player_level);
     }
 }
 
@@ -9412,6 +9436,8 @@ int websocket_server_update(struct Sim* sim) {
                                                         tnpc->health = 0;
                                                         tnpc->active = false;
                                                         killed_npc = true;
+                                                        // Award XP to the attacker
+                                                        player_apply_xp(player, PLAYER_XP_PER_NPC_KILL);
                                                     } else {
                                                         tnpc->health -= dmg16;
                                                     }
@@ -9457,8 +9483,12 @@ int websocket_server_update(struct Sim* sim) {
                                                     if (fabsf(pdiff) > (float)M_PI / 3.0f * 2.0f) continue;
 
                                                     uint16_t dmg16 = (uint16_t)SWORD_DAMAGE;
-                                                    if (tp->health <= dmg16) tp->health = 0;
+                                                    bool killed_player = (tp->health <= dmg16);
+                                                    if (killed_player) tp->health = 0;
                                                     else tp->health -= dmg16;
+                                                    // Award XP to the attacker on kill
+                                                    if (killed_player)
+                                                        player_apply_xp(player, PLAYER_XP_PER_PLAYER_KILL);
 
                                                     char hit_msg[256];
                                                     snprintf(hit_msg, sizeof(hit_msg),
@@ -9467,7 +9497,7 @@ int websocket_server_update(struct Sim* sim) {
                                                         "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
                                                         tp->player_id, tp->x, tp->y, SWORD_DAMAGE,
                                                         (unsigned)tp->health, (unsigned)tp->max_health,
-                                                        tp->health == 0 ? "true" : "false");
+                                                        killed_player ? "true" : "false");
                                                     websocket_server_broadcast(hit_msg);
                                                 }
 
@@ -11358,7 +11388,6 @@ int websocket_server_update(struct Sim* sim) {
                             // Stats: health | damage | stamina | weight
                             // Cost: 1 stat point (earned per level-up).
                             // Stat points available = (player_level - 1) - total_stats_spent.
-                            #define PLAYER_MAX_LEVEL 66u
                             WebSocketPlayer* ups_player = find_player(client->player_id);
                             if (!ups_player) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"player_not_found\"}");
@@ -12141,7 +12170,7 @@ int websocket_server_update(struct Sim* sim) {
         ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "]");
         
         // Build players JSON array with ship relationship data
-        char players_json[2048];
+        char players_json[4096];
         int players_offset = 0;
         players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "[");
         bool first_player = true;
