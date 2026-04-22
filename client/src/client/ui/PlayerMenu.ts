@@ -64,7 +64,7 @@ interface StatDef {
   color:  string;
 }
 
-const PLAYER_MAX_LEVEL = 66;
+const PLAYER_MAX_LEVEL = 120;
 
 const STATS: StatDef[] = [
   { key: 'statHealth',  server: 'health',  label: 'Health',

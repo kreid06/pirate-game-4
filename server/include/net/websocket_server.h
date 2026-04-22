@@ -358,7 +358,7 @@ typedef struct WebSocketPlayer {
     uint16_t max_health;         // Max HP (default 100)
 
     // Player XP / levelling (mirrors WorldNpc system)
-    uint8_t  player_level;       // 1–66
+    uint8_t  player_level;       // 1–120
     uint32_t player_xp;          // accumulated XP
     uint8_t  stat_health;        // health stat points spent
     uint8_t  stat_damage;        // damage stat points spent

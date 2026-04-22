@@ -127,7 +127,7 @@ export class ClientApplication {
   private lastFrameTime = 0;
   /** Timestamp (ms) of the last sword attack sent to the server — enforces client-side cooldown matching the server's 600ms. */
   private lastSwordSwingMs = 0;
-  private readonly SWORD_COOLDOWN_MS = 600;
+  private readonly SWORD_COOLDOWN_MS = 1000; // matches server SWORD_COOLDOWN_MS
   /** E-hold interaction state — covers ladders and mountable modules. */
   private _ladderHoldTimer: ReturnType<typeof setTimeout> | null = null;
   private _suppressLadderInteract = false;
@@ -1498,11 +1498,17 @@ export class ClientApplication {
         console.log(`🪤 Ladder ${moduleId} on ship ${shipId}: ${retracted ? 'retracted' : 'extended'}`);
       };
 
-      // Handle SWORD_SWING: show arc for other players' sword attacks
+      // Handle SWORD_SWING: show arc for other players' attacks;
+      // for own player use it to re-sync the cooldown ring to the server-confirmed timestamp.
       this.networkManager.onSwordSwing = (playerId, x, y, angle, _range) => {
         const myId = this.networkManager.getAssignedPlayerId();
-        // Skip own swing — already shown optimistically in onActionEvent
-        if (playerId === myId) return;
+        if (playerId === myId) {
+          // Server confirmed the swing — re-anchor cooldown to now so the ring
+          // stays in sync even if there's clock drift or the attack was delayed.
+          this.swordLastAttackMs = performance.now();
+          this.renderSystem.notifySwordSwing(this.SWORD_COOLDOWN_MS);
+          return;
+        }
         this.renderSystem.spawnSwordArc(Vec2.from(x, y), angle);
       };
 

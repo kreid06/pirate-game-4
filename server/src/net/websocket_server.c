@@ -3557,8 +3557,7 @@ static void npc_apply_xp(WorldNpc* npc, uint32_t xp_gain) {
 }
 
 /* ── Player levelling constants ────────────────────────────────────────────── */
-/* Reuses NPC level cap and XP curve for parity */
-#define PLAYER_MAX_LEVEL    NPC_MAX_LEVEL
+#define PLAYER_MAX_LEVEL     120u  /* 1 base + 119 upgrades */
 #define PLAYER_LEVEL_XP_BASE NPC_LEVEL_XP_BASE
 /* XP awarded per kill */
 #define PLAYER_XP_PER_NPC_KILL    25u
@@ -9401,8 +9400,9 @@ int websocket_server_update(struct Sim* sim) {
                                                 player->sword_last_attack_ms = now_ms;
 
                                                 const float SWORD_RANGE  = 45.0f;
-                                                const float SWORD_DAMAGE = 30.0f;
                                                 const float SWORD_RANGE2 = SWORD_RANGE * SWORD_RANGE;
+                                                // Base 30 damage, +10% per stat_damage point (mirrors NPC stat)
+                                                const float SWORD_DAMAGE = 30.0f * (1.0f + 0.1f * (float)player->stat_damage);
 
                                                 // Direction vector toward target
                                                 float atk_dx = target_x - player->x;
