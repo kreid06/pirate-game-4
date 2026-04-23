@@ -116,6 +116,7 @@ export enum MessageType {
   STRUCTURE_PLACED = 'structure_placed',
   STRUCTURE_DEMOLISHED = 'structure_demolished',
   DEMOLISH_STRUCTURE = 'demolish_structure',
+  DEMOLISH_MODULE = 'demolish_module',
   CRAFTING_OPEN  = 'crafting_open',
   STRUCTURES_LIST = 'STRUCTURES',
 
@@ -560,6 +561,8 @@ export class NetworkManager {
   public onStructurePlaced: ((s: PlacedStructure) => void) | null = null;
   /** Fired when the server confirms a structure has been demolished. */
   public onStructureDemolished: ((id: number, x?: number, y?: number) => void) | null = null;
+  /** Fired when the server broadcasts that a ship module was demolished. */
+  public onModuleDemolished: ((shipId: number, moduleId: number) => void) | null = null;
   /** Fired when a structure's company ownership is promoted (one-way, neutral → non-neutral). */
   public onStructureCompanyUpdated: ((id: number, companyId: number) => void) | null = null;
   /** Fired when a structure takes damage from a cannonball hit. Includes world position for FX. */
@@ -1181,6 +1184,16 @@ export class NetworkManager {
   sendRepairPlank(shipId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.REPAIR_PLANK, timestamp: Date.now(), shipId });
+  }
+
+  /**
+   * Request the server to permanently remove a ship module (axe + E).
+   * Server validates proximity and company before removing.
+   */
+  sendDemolishModule(shipId: number, moduleId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.DEMOLISH_MODULE, timestamp: Date.now(), shipId, moduleId }));
+    console.log(`🪓 Demolish module ${moduleId} on ship ${shipId}`);
   }
 
   /**
@@ -2265,6 +2278,10 @@ export class NetworkManager {
           message.x,
           message.y,
         );
+        break;
+
+      case 'module_demolished':
+        this.onModuleDemolished?.(message.shipId ?? 0, message.moduleId ?? 0);
         break;
 
       case 'structure_company_updated':

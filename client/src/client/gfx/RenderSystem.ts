@@ -71,6 +71,7 @@ export class RenderSystem {
   private swordCooldownMs: number = 800;
   /** Set to true each frame when the local player has the sword as their active item. */
   public swordEquipped: boolean = false;
+  public axeEquipped: boolean = false;
 
   // Build mode state
   private buildMode: boolean = false;
@@ -771,6 +772,31 @@ export class RenderSystem {
       this.ctx.fill();
 
       this.ctx.restore();
+
+      // Demolish hint: axe equipped + non-plank module → show "🪓 E – Demolish [kind]"
+      if (this.axeEquipped && mod.kind !== 'plank') {
+        const modWorldX = modShip.position.x + mod.localPos.x * Math.cos(modShip.rotation) - mod.localPos.y * Math.sin(modShip.rotation);
+        const modWorldY = modShip.position.y + mod.localPos.x * Math.sin(modShip.rotation) + mod.localPos.y * Math.cos(modShip.rotation);
+        const hintScreen = camera.worldToScreen({ x: modWorldX, y: modWorldY });
+        const label = `🪓 E – Demolish ${mod.kind}`;
+        const labelX = hintScreen.x;
+        const labelY = hintScreen.y - 42;
+        const tCtx = this.ctx;
+        tCtx.save();
+        tCtx.font = 'bold 13px sans-serif';
+        tCtx.textAlign = 'center';
+        const tw = tCtx.measureText(label).width;
+        tCtx.fillStyle = 'rgba(30,10,10,0.7)';
+        tCtx.strokeStyle = '#cc2222';
+        tCtx.lineWidth = 1.5;
+        tCtx.beginPath();
+        tCtx.roundRect(labelX - tw / 2 - 8, labelY - 16, tw + 16, 22, 4);
+        tCtx.fill();
+        tCtx.stroke();
+        tCtx.fillStyle = '#ffcccc';
+        tCtx.fillText(label, labelX, labelY);
+        tCtx.restore();
+      }
     }
 
     // ── Ship hull highlight: pulse the hull outline when cursor is over a ship ──

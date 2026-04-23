@@ -6506,6 +6506,142 @@ ds_send:;
     if (ds_flen > 0 && ds_flen < sizeof(ds_frame)) send(client->fd, ds_frame, ds_flen, 0);
 }
 
+/*
+ * demolish_module: player presses E while holding axe on a ship module.
+ * Validates proximity and company, then removes the module from both the
+ * SimpleShip layout and the physics sim, and broadcasts the removal.
+ */
+static void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    uint32_t ship_id   = 0;
+    uint32_t module_id = 0;
+    const char* sp = strstr(payload, "\"shipId\":");
+    if (sp) sscanf(sp + 9, "%u", &ship_id);
+    const char* mp = strstr(payload, "\"moduleId\":");
+    if (mp) sscanf(mp + 11, "%u", &module_id);
+
+    char response[256];
+
+    if (ship_id == 0 || module_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"demolish_fail\",\"reason\":\"missing_ids\"}");
+        goto dm_send;
+    }
+
+    /* Player must be aboard the target ship */
+    if (player->parent_ship_id != (uint16_t)ship_id) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"demolish_fail\",\"reason\":\"not_on_ship\"}");
+        goto dm_send;
+    }
+
+    {
+        SimpleShip* ship = find_ship((uint16_t)ship_id);
+        if (!ship || !ship->active) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"demolish_fail\",\"reason\":\"ship_not_found\"}");
+            goto dm_send;
+        }
+
+        /* Company check: only same-company members may demolish */
+        if (ship->company_id != 0 && ship->company_id != (uint8_t)player->company_id) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"demolish_fail\",\"reason\":\"wrong_company\"}");
+            goto dm_send;
+        }
+
+        /* Find the module */
+        int mod_idx = -1;
+        for (int i = 0; i < (int)ship->module_count; i++) {
+            if (ship->modules[i].id == (uint16_t)module_id) {
+                mod_idx = i;
+                break;
+            }
+        }
+        if (mod_idx < 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"demolish_fail\",\"reason\":\"module_not_found\"}");
+            goto dm_send;
+        }
+
+        ShipModule* mod = &ship->modules[mod_idx];
+
+        /* Planks use the placement/repair system — not demolishable here */
+        if (mod->type_id == MODULE_TYPE_PLANK) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"demolish_fail\",\"reason\":\"cant_demolish_planks\"}");
+            goto dm_send;
+        }
+
+        /* Range check: compare player local coords (client-px) to module local pos */
+        {
+            const float DEMOLISH_RANGE_PX = 120.0f;
+            float mod_lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+            float mod_ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+            float dx = player->local_x - mod_lx;
+            float dy = player->local_y - mod_ly;
+            if (dx * dx + dy * dy > DEMOLISH_RANGE_PX * DEMOLISH_RANGE_PX) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"demolish_fail\",\"reason\":\"too_far\"}");
+                goto dm_send;
+            }
+        }
+
+        /* Dismount anyone occupying this module */
+        for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+            if (!players[pi].active) continue;
+            if (players[pi].is_mounted &&
+                players[pi].mounted_module_id == (module_id_t)module_id) {
+                players[pi].is_mounted          = false;
+                players[pi].mounted_module_id   = 0;
+                players[pi].controlling_ship_id = 0;
+            }
+        }
+
+        log_info("🪓 Player %u demolished module %u (type %u) on ship %u",
+                 player->player_id, module_id, (unsigned)mod->type_id, ship_id);
+
+        /* Remove from SimpleShip */
+        memmove(&ship->modules[mod_idx],
+                &ship->modules[mod_idx + 1],
+                ((size_t)ship->module_count - (size_t)mod_idx - 1) * sizeof(ShipModule));
+        ship->module_count--;
+
+        /* Remove from global_sim counterpart */
+        if (global_sim) {
+            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                if (global_sim->ships[si].id != (entity_id)ship_id) continue;
+                struct Ship* sim_ship = &global_sim->ships[si];
+                for (int mi = 0; mi < (int)sim_ship->module_count; mi++) {
+                    if (sim_ship->modules[mi].id != (uint16_t)module_id) continue;
+                    memmove(&sim_ship->modules[mi],
+                            &sim_ship->modules[mi + 1],
+                            ((size_t)sim_ship->module_count - (size_t)mi - 1) * sizeof(ShipModule));
+                    sim_ship->module_count--;
+                    break;
+                }
+                break;
+            }
+        }
+
+        /* Broadcast removal to all clients */
+        {
+            char bcast[128];
+            snprintf(bcast, sizeof(bcast),
+                     "{\"type\":\"module_demolished\",\"shipId\":%u,\"moduleId\":%u}",
+                     ship_id, module_id);
+            websocket_server_broadcast(bcast);
+        }
+        return; /* already broadcast */
+    }
+
+dm_send:;
+    char dm_frame[256];
+    size_t dm_flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), dm_frame, sizeof(dm_frame));
+    if (dm_flen > 0 && dm_flen < sizeof(dm_frame))
+        send(client->fd, dm_frame, dm_flen, 0);
+}
+
 static void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* client) {
     char response[256];
 
@@ -9336,6 +9472,14 @@ int websocket_server_update(struct Sim* sim) {
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) handle_demolish_structure(player, client, payload);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "demolish_module") == 0) {
+                            // Axe + E: remove a ship module permanently
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_demolish_module(player, client, payload);
                             }
                             handled = true;
 

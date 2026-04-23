@@ -302,6 +302,15 @@ export class ClientApplication {
           ws.ships = ws.ships.filter(s => s.id !== shipId);
         }
       };
+
+      this.networkManager.onModuleDemolished = (shipId, moduleId) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const ship = ws.ships.find(s => s.id === shipId);
+          if (ship) ship.modules = ship.modules.filter(m => m.id !== moduleId);
+        }
+        this.renderSystem.showAnnouncement('🪓 Module demolished', 'info', 2.0);
+      };
       this.networkManager.onShipSinking = (shipId) => {
         // Trigger the client-side fade animation immediately when the server enters sinking state
         this.renderSystem.markShipSinking(shipId);
@@ -645,6 +654,33 @@ export class ClientApplication {
             if (tree) {
               console.log(`🪓 [HARVEST] Sending harvest_resource`);
               this.networkManager.sendHarvestResource();
+              return;
+            }
+          }
+
+          // Demolish mode: axe + on ship + hovering a non-plank module → demolish
+          if (activeItem === 'axe' && player && player.carrierId !== 0) {
+            const hoveredDemolish = this.renderSystem.getHoveredModule();
+            if (hoveredDemolish && hoveredDemolish.module.kind !== 'plank' &&
+                hoveredDemolish.ship.id === player.carrierId) {
+              const modLx = hoveredDemolish.module.localPos.x;
+              const modLy = hoveredDemolish.module.localPos.y;
+              let demolishDist: number;
+              if (player.localPosition) {
+                demolishDist = player.localPosition.sub(Vec2.from(modLx, modLy)).length();
+              } else {
+                const cos = Math.cos(hoveredDemolish.ship.rotation);
+                const sin = Math.sin(hoveredDemolish.ship.rotation);
+                const wx = hoveredDemolish.ship.position.x + modLx * cos - modLy * sin;
+                const wy = hoveredDemolish.ship.position.y + modLx * sin + modLy * cos;
+                demolishDist = player.position.sub(Vec2.from(wx, wy)).length();
+              }
+              if (demolishDist <= 120) {
+                console.log(`🪓 [DEMOLISH] Sending demolish_module for module ${hoveredDemolish.module.id} on ship ${player.carrierId}`);
+                this.networkManager.sendDemolishModule(player.carrierId, hoveredDemolish.module.id);
+              } else {
+                console.log(`🪓 [DEMOLISH] Module too far (${demolishDist.toFixed(1)}px) — get closer`);
+              }
               return;
             }
           }
@@ -1906,6 +1942,9 @@ export class ClientApplication {
       const _activeSlot  = localPlayer?.inventory?.activeSlot ?? 0;
       this.renderSystem.swordEquipped =
         (localPlayer?.inventory?.slots[_activeSlot]?.item === 'sword') &&
+        !(localPlayer?.isMounted ?? false);
+      this.renderSystem.axeEquipped =
+        (localPlayer?.inventory?.slots[_activeSlot]?.item === 'axe') &&
         !(localPlayer?.isMounted ?? false);
       if (this.explicitBuildMode) this.syncBuildModeState();
 
