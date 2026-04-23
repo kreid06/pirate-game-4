@@ -16,6 +16,7 @@ import { CompanyMenu } from './CompanyMenu.js';
 import { PlayerMenu } from './PlayerMenu.js';
 import { ShipMenu } from './ShipMenu.js';
 import { CrewLevelMenu } from './CrewLevelMenu.js';
+import { RespawnScreen } from './RespawnScreen.js';
 
 /**
  * UI render context
@@ -68,6 +69,7 @@ export const MENU_ID = {
   SHIPYARD:  'shipyard',
   PAUSE:     'pause',
   CONSOLE:   'console',
+  RESPAWN:   'respawn',
 } as const;
 export type MenuId = typeof MENU_ID[keyof typeof MENU_ID];
 
@@ -101,6 +103,11 @@ export class UIManager {
   private shipMenu = new ShipMenu();
   // Crew level / upgrade panel (opened by clicking an NPC)
   private crewMenu = new CrewLevelMenu();
+
+  // Respawn screen — shown on player death or first spawn
+  private respawnScreen = new RespawnScreen();
+  // Islands stored for the respawn screen minimap
+  private _islands: import('../../sim/Types.js').IslandDef[] = [];
 
   /** Which menu is currently open — null when none. */
   private activeMenuId: MenuId | null = null;
@@ -211,7 +218,7 @@ export class UIManager {
 
   /** Returns true if any canvas-side menu/modal is currently open. */
   isAnyMenuOpen(): boolean {
-    return this.activeMenuId !== null;
+    return this.activeMenuId !== null || this.respawnScreen.visible;
   }
 
   /**
@@ -246,6 +253,32 @@ export class UIManager {
   /** Notify UIManager that an externally-owned menu (crafting/shipyard/pause) was opened. */
   setActiveMenuId(id: MenuId | null): void {
     this.activeMenuId = id;
+  }
+
+  /** Open the respawn screen. Pass the current world ships, islands, and local company ID. */
+  openRespawnScreen(ships: import('../../sim/Types.js').Ship[], islands: import('../../sim/Types.js').IslandDef[], localCompanyId: number): void {
+    this._islands = islands;
+    this.respawnScreen.open(ships, islands, localCompanyId);
+  }
+
+  /** Close the respawn screen (called after the server confirms respawn). */
+  closeRespawnScreen(): void {
+    this.respawnScreen.close();
+  }
+
+  /** True while the respawn screen is showing. */
+  isRespawnScreenVisible(): boolean {
+    return this.respawnScreen.visible;
+  }
+
+  /** Set the callback that fires when the player confirms a respawn location. */
+  setRespawnConfirmedCallback(cb: (shipId?: number, worldX?: number, worldY?: number) => void): void {
+    this.respawnScreen.onRespawnConfirmed = cb;
+  }
+
+  /** Store island definitions so the respawn screen minimap can draw them. */
+  setIslandsForRespawn(islands: import('../../sim/Types.js').IslandDef[]): void {
+    this._islands = islands;
   }
 
   /**
@@ -386,6 +419,14 @@ export class UIManager {
     // Hammer minigame — topmost overlay, blocks all game input when active
     if (this.hammerGame.active) {
       this.renderHammerMinigame(ctx, ctx.canvas);
+    }
+
+    // Respawn screen — rendered last so it covers everything
+    if (this.respawnScreen.visible) {
+      const ws = context.worldState;
+      const localPlayer = ws.players.find(p => p.id === context.assignedPlayerId);
+      const companyId = localPlayer?.companyId ?? 0;
+      this.respawnScreen.render(ctx, ws.ships, this._islands, companyId);
     }
   }
   
@@ -959,6 +1000,10 @@ export class UIManager {
   }
 
   handleClick(x: number, y: number): boolean {
+    // Respawn screen takes absolute priority — blocks all game input
+    if (this.respawnScreen.visible) {
+      return this.respawnScreen.handleClick(x, y);
+    }
     // Hammer minigame swallows all clicks while active
     if (this.hammerGame.active) {
       if (this.hammerGame.resultTime === -1) this.strikeHammer();

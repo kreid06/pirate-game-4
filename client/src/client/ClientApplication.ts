@@ -1312,6 +1312,11 @@ export class ClientApplication {
         if (!ws) return [];
         return ws.ships.filter(s => s.id).map(s => String(s.id));
       });
+      this.commandConsole.setArgValuesProvider('KillPlayer', 0, () => {
+        const ws = this.authoritativeWorldState;
+        if (!ws) return [];
+        return ws.players.filter(p => p.name).map(p => p.name as string);
+      });
       this.networkManager.onCommandResponse = (text, success) => {
         this.commandConsole.pushResponse(text, success ? 'response' : 'error');
         // Don't auto-open — the player can re-open with / to see the log
@@ -1348,6 +1353,12 @@ export class ClientApplication {
       // Wire player stat upgrade requests from the character menu to the server
       this.uiManager.setPlayerUpgradeCallback((stat) => {
         this.networkManager.sendPlayerStatUpgrade(stat);
+      });
+
+      // Wire respawn confirmation: send respawn_request to server, close screen
+      this.uiManager.setRespawnConfirmedCallback((shipId, worldX, worldY) => {
+        this.networkManager.sendRespawnRequest(shipId, worldX, worldY);
+        this.uiManager.closeRespawnScreen();
       });
 
       // Handle NPC_STAT_UP broadcast: refresh world-state NPC fields
@@ -1414,6 +1425,19 @@ export class ClientApplication {
         }
         this.renderSystem.spawnDamageNumber(Vec2.from(x, y), damage, killed);
         this.renderSystem.notifyEntityDamaged(id, entityType === 'npc');
+
+        // Detect local player death → show respawn screen
+        if (killed && entityType === 'player') {
+          const myId = this.networkManager.getAssignedPlayerId();
+          if (myId !== null && id === myId) {
+            const ws = this.authoritativeWorldState || this.predictedWorldState;
+            const me = ws?.players.find(p => p.id === myId);
+            const companyId = me?.companyId ?? 0;
+            const islands = this.renderSystem.getIslands();
+            const ships = ws?.ships ?? [];
+            this.uiManager.openRespawnScreen(ships, islands, companyId);
+          }
+        }
       };
 
       // Handle FIRE_EFFECT: mark entity/module as burning
@@ -1424,6 +1448,7 @@ export class ClientApplication {
       // Handle ISLANDS: server-defined island layout
       this.networkManager.onIslands = (islands) => {
         this.renderSystem.setIslands(islands);
+        this.uiManager.setIslandsForRespawn(islands);
       };
 
       // Update a resource's HP when the server broadcasts resource_damaged

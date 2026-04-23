@@ -97,6 +97,7 @@ export enum MessageType {
   NPC_MOVE_TO_POS = 'npc_move_to_pos',
   UPGRADE_PLAYER_STAT = 'upgrade_player_stat',
   COMMAND = 'command',
+  RESPAWN_REQUEST = 'respawn_request',
 
   PING = 'ping',
   
@@ -1445,6 +1446,17 @@ export class NetworkManager {
   sendPlayerStatUpgrade(stat: string): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: MessageType.UPGRADE_PLAYER_STAT, stat }));
+  }
+
+  /** Send a respawn request to the server.
+   *  Pass shipId to spawn aboard a friendly ship, or worldX/worldY to spawn at a world position. */
+  sendRespawnRequest(shipId?: number, worldX?: number, worldY?: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    const msg: Record<string, unknown> = { type: MessageType.RESPAWN_REQUEST };
+    if (shipId !== undefined) msg.shipId = shipId;
+    if (worldX !== undefined) msg.worldX = worldX;
+    if (worldY !== undefined) msg.worldY = worldY;
+    this.socket.send(JSON.stringify(msg));
   }
 
   /**

@@ -9730,6 +9730,66 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "respawn_request") == 0) {
+                            // Player chose a spawn location on the respawn screen
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player && player->health == 0) {
+                                    // Restore full health
+                                    player->health = player->max_health;
+
+                                    // Parse optional shipId
+                                    uint32_t ship_id = 0;
+                                    const char* p_sid = strstr(payload, "\"shipId\":");
+                                    if (p_sid) ship_id = (uint32_t)atoi(p_sid + 9);
+
+                                    if (ship_id != 0) {
+                                        // Spawn aboard a friendly ship
+                                        SimpleShip* target_ship = NULL;
+                                        for (int si = 0; si < MAX_SHIPS; si++) {
+                                            if (ws_server.ships[si].ship_id == ship_id) {
+                                                target_ship = &ws_server.ships[si];
+                                                break;
+                                            }
+                                        }
+                                        if (target_ship) {
+                                            board_player_on_ship(player, target_ship, 0.0f, 0.0f);
+                                            log_info("⚔️  Player %u respawned on ship %u", player->player_id, ship_id);
+                                        } else {
+                                            // Ship not found — fall back to world spawn
+                                            player->x = 800.0f;
+                                            player->y = 600.0f;
+                                            player->parent_ship_id = 0;
+                                            player->movement_state = PLAYER_STATE_SWIMMING;
+                                            log_warn("⚔️  Respawn ship %u not found — spawning at world origin", ship_id);
+                                        }
+                                    } else {
+                                        // Spawn at provided world coordinates or default
+                                        float spawn_x = 800.0f, spawn_y = 600.0f;
+                                        const char* p_x = strstr(payload, "\"worldX\":");
+                                        const char* p_y = strstr(payload, "\"worldY\":");
+                                        if (p_x) spawn_x = strtof(p_x + 9, NULL);
+                                        if (p_y) spawn_y = strtof(p_y + 9, NULL);
+                                        player->x = spawn_x;
+                                        player->y = spawn_y;
+                                        player->parent_ship_id = 0;
+                                        player->movement_state = PLAYER_STATE_SWIMMING;
+                                        log_info("⚔️  Player %u respawned at world (%.1f, %.1f)", player->player_id, spawn_x, spawn_y);
+                                    }
+
+                                    // Broadcast a teleport event so clients update this player's position
+                                    char tp_msg[256];
+                                    snprintf(tp_msg, sizeof(tp_msg),
+                                        "{\"type\":\"player_teleported\",\"playerId\":%u,"
+                                        "\"x\":%.1f,\"y\":%.1f,\"parentShip\":%u,"
+                                        "\"localX\":%.1f,\"localY\":%.1f}",
+                                        player->player_id, player->x, player->y,
+                                        player->parent_ship_id, player->local_x, player->local_y);
+                                    websocket_server_broadcast(tp_msg);
+                                }
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "shipyard_action") == 0) {
                             // Ship construction: craft_skeleton / add_module / release_ship
                             if (client->player_id != 0) {
@@ -12271,6 +12331,72 @@ int websocket_server_update(struct Sim* sim) {
                                         "\"success\":true,"
                                         "\"text\":\"Spawned crewmember (id %u) [%s] at your location.\"}",
                                         npc->id, cname);
+                                }
+
+                            } else if (strcmp(cmd_name, "killplayer") == 0) {
+                                /* /KillPlayer <playername>
+                                 * Sets a player's health to 0, triggering the respawn screen on their client. */
+                                char kp_name[64] = "";
+                                {
+                                    const char *p = cmd_body;
+                                    while (*p && *p != ' ') p++;
+                                    while (*p == ' ') p++;
+                                    int ai = 0;
+                                    while (*p && *p != '\0' && ai < 63) kp_name[ai++] = *p++;
+                                    kp_name[ai] = '\0';
+                                }
+                                /* Case-insensitive match */
+                                char kp_lower[64] = "";
+                                for (int i = 0; kp_name[i] && i < 63; i++)
+                                    kp_lower[i] = (kp_name[i] >= 'A' && kp_name[i] <= 'Z')
+                                        ? kp_name[i] + 32 : kp_name[i];
+                                kp_lower[strlen(kp_name)] = '\0';
+
+                                if (kp_name[0] == '\0') {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\","
+                                        "\"success\":false,"
+                                        "\"text\":\"Usage: /KillPlayer <playername>\"}");
+                                } else {
+                                    WebSocketPlayer *kp_player = NULL;
+                                    for (int i = 0; i < WS_MAX_CLIENTS && !kp_player; i++) {
+                                        if (!players[i].active) continue;
+                                        char lower_n[64] = "";
+                                        for (int j = 0; players[i].name[j] && j < 63; j++)
+                                            lower_n[j] = (players[i].name[j] >= 'A' && players[i].name[j] <= 'Z')
+                                                ? players[i].name[j] + 32 : players[i].name[j];
+                                        lower_n[strlen(players[i].name)] = '\0';
+                                        if (strstr(lower_n, kp_lower)) kp_player = &players[i];
+                                    }
+
+                                    if (!kp_player) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":false,"
+                                            "\"text\":\"Player '%s' not found.\"}",
+                                            kp_name);
+                                    } else {
+                                        kp_player->health = 0;
+
+                                        /* Broadcast ENTITY_HIT with killed=true so all clients see it
+                                         * and the dead player's client opens the respawn screen. */
+                                        char hit_msg[256];
+                                        snprintf(hit_msg, sizeof(hit_msg),
+                                            "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\","
+                                            "\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                                            "\"damage\":9999,\"health\":0,\"maxHealth\":%u,\"killed\":true}",
+                                            kp_player->player_id, kp_player->x, kp_player->y,
+                                            (unsigned)kp_player->max_health);
+                                        websocket_server_broadcast(hit_msg);
+
+                                        log_info("☠️  Admin killed player %u (%s) via /KillPlayer",
+                                                 kp_player->player_id, kp_player->name);
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":true,"
+                                            "\"text\":\"Killed %s.\"}",
+                                            kp_player->name);
+                                    }
                                 }
 
                             } else {
