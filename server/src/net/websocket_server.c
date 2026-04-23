@@ -4043,13 +4043,37 @@ static void tick_world_npcs(float dt) {
                 continue;
             }
 
-            // --- 3. Nothing to do: drift back to idle position if not already there
-            float hdx = npc->idle_local_x - npc->local_x;
-            float hdy = npc->idle_local_y - npc->local_y;
-            if (sqrtf(hdx * hdx + hdy * hdy) > 1.0f) {
-                npc->target_local_x = npc->idle_local_x;
-                npc->target_local_y = npc->idle_local_y;
-                npc->state          = WORLD_NPC_STATE_MOVING;
+            // --- 3. Nothing to do: wander to a random ship module
+            if (npc->state == WORLD_NPC_STATE_IDLE) {
+                float hdx = npc->target_local_x - npc->local_x;
+                float hdy = npc->target_local_y - npc->local_y;
+                if (sqrtf(hdx * hdx + hdy * hdy) < 2.0f && sim_ship && sim_ship->module_count > 0) {
+                    /* Collect walkable module positions (skip destroyed, skip current target) */
+                    float mx_list[MAX_MODULES_PER_SHIP];
+                    float my_list[MAX_MODULES_PER_SHIP];
+                    int   mod_choices = 0;
+                    for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                        ShipModule* mod = &sim_ship->modules[m];
+                        if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
+                        float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                        float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                        /* Skip if this is basically where we already are */
+                        float ddx = mx - npc->local_x, ddy = my - npc->local_y;
+                        if (sqrtf(ddx * ddx + ddy * ddy) < 10.0f) continue;
+                        mx_list[mod_choices] = mx;
+                        my_list[mod_choices] = my;
+                        mod_choices++;
+                    }
+                    if (mod_choices > 0) {
+                        unsigned int seed = (unsigned int)(npc->id * 2654435761u)
+                                          ^ (unsigned int)(npc->local_x * 7.0f)
+                                          ^ (unsigned int)(npc->local_y * 13.0f);
+                        int pick = (int)((seed >> 8) % (unsigned int)mod_choices);
+                        npc->target_local_x = mx_list[pick];
+                        npc->target_local_y = my_list[pick];
+                        npc->state          = WORLD_NPC_STATE_MOVING;
+                    }
+                }
             }
         }
     }
