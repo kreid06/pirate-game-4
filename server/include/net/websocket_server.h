@@ -213,6 +213,11 @@ typedef struct WorldNpc {
     uint16_t      boarding_ship_id;  // target ship to board; 0 = not boarding
     float         boarding_local_x;  // on-deck destination (ship-local) after boarding
     float         boarding_local_y;
+
+    // ── Repairer idle dwell timer ───────────────────────────────────────
+    // When > 0, NPC is dwelling at a roam module; counts down in ms per tick.
+    // Cleared to 0 when any module on the ship takes damage.
+    uint32_t      roam_wait_ms;
 } WorldNpc;
 // ────────────────────────────────────────────────────────────────────────────
 

@@ -4047,31 +4047,40 @@ static void tick_world_npcs(float dt) {
             if (npc->state == WORLD_NPC_STATE_IDLE) {
                 float hdx = npc->target_local_x - npc->local_x;
                 float hdy = npc->target_local_y - npc->local_y;
-                if (sqrtf(hdx * hdx + hdy * hdy) < 2.0f && sim_ship && sim_ship->module_count > 0) {
-                    /* Collect walkable module positions (skip destroyed, skip current target) */
-                    float mx_list[MAX_MODULES_PER_SHIP];
-                    float my_list[MAX_MODULES_PER_SHIP];
-                    int   mod_choices = 0;
-                    for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                        ShipModule* mod = &sim_ship->modules[m];
-                        if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
-                        float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
-                        float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
-                        /* Skip if this is basically where we already are */
-                        float ddx = mx - npc->local_x, ddy = my - npc->local_y;
-                        if (sqrtf(ddx * ddx + ddy * ddy) < 10.0f) continue;
-                        mx_list[mod_choices] = mx;
-                        my_list[mod_choices] = my;
-                        mod_choices++;
-                    }
-                    if (mod_choices > 0) {
-                        unsigned int seed = (unsigned int)(npc->id * 2654435761u)
-                                          ^ (unsigned int)(npc->local_x * 7.0f)
-                                          ^ (unsigned int)(npc->local_y * 13.0f);
-                        int pick = (int)((seed >> 8) % (unsigned int)mod_choices);
-                        npc->target_local_x = mx_list[pick];
-                        npc->target_local_y = my_list[pick];
-                        npc->state          = WORLD_NPC_STATE_MOVING;
+                bool at_dest = sqrtf(hdx * hdx + hdy * hdy) < 2.0f;
+
+                if (at_dest) {
+                    if (npc->roam_wait_ms > 0) {
+                        /* Still dwelling — count down the timer */
+                        uint32_t dec = (uint32_t)(dt * 1000.0f);
+                        npc->roam_wait_ms = (npc->roam_wait_ms > dec) ? npc->roam_wait_ms - dec : 0;
+                    } else if (sim_ship && sim_ship->module_count > 0) {
+                        /* Timer expired — pick a new random module and start a fresh dwell */
+                        float mx_list[MAX_MODULES_PER_SHIP];
+                        float my_list[MAX_MODULES_PER_SHIP];
+                        int   mod_choices = 0;
+                        for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+                            ShipModule* mod = &sim_ship->modules[m];
+                            if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
+                            float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                            float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                            float ddx = mx - npc->local_x, ddy = my - npc->local_y;
+                            if (sqrtf(ddx * ddx + ddy * ddy) < 10.0f) continue;
+                            mx_list[mod_choices] = mx;
+                            my_list[mod_choices] = my;
+                            mod_choices++;
+                        }
+                        if (mod_choices > 0) {
+                            unsigned int seed = (unsigned int)(npc->id * 2654435761u)
+                                              ^ (unsigned int)(npc->local_x * 7.0f)
+                                              ^ (unsigned int)(npc->local_y * 13.0f);
+                            int pick = (int)((seed >> 8) % (unsigned int)mod_choices);
+                            npc->target_local_x = mx_list[pick];
+                            npc->target_local_y = my_list[pick];
+                            npc->state          = WORLD_NPC_STATE_MOVING;
+                            /* Dwell will start when NPC arrives at the new destination */
+                            npc->roam_wait_ms   = 15000 + (uint32_t)(rand() % 45001);
+                        }
                     }
                 }
             }
@@ -13091,6 +13100,12 @@ void websocket_server_tick(float dt) {
                         "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                    /* Wake up any idle repairers dwelling on this ship */
+                    for (int _ni = 0; _ni < world_npc_count; _ni++) {
+                        if (world_npcs[_ni].active && world_npcs[_ni].role == NPC_ROLE_REPAIRER &&
+                            world_npcs[_ni].ship_id == ev->ship_id)
+                            world_npcs[_ni].roam_wait_ms = 0;
+                    }
                 } else {
                     // Non-fatal interior module hit: just broadcast MODULE_DAMAGED for damage numbers
                     snprintf(msg, sizeof(msg),
@@ -13101,6 +13116,12 @@ void websocket_server_tick(float dt) {
                     log_info("📤 Broadcasting MODULE_DAMAGED: ship %u module %u damage %.0f at (%.1f, %.1f)",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
+                    /* Wake up any idle repairers dwelling on this ship */
+                    for (int _ni = 0; _ni < world_npc_count; _ni++) {
+                        if (world_npcs[_ni].active && world_npcs[_ni].role == NPC_ROLE_REPAIRER &&
+                            world_npcs[_ni].ship_id == ev->ship_id)
+                            world_npcs[_ni].roam_wait_ms = 0;
+                    }
                 }
             } else {
                 if (ev->destroyed) {
