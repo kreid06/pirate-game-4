@@ -1262,10 +1262,23 @@ export class ClientApplication {
       this.commandConsole.onVisibilityChange = (visible) => {
         this.uiManager?.setActiveMenuId(visible ? MENU_ID.CONSOLE : null);
       };
+
+      // Dynamic autocomplete — player names and ship IDs from live world state
+      this.commandConsole.setArgValuesProvider('TpPlayerToShip', 0, () => {
+        const ws = this.authoritativeWorldState;
+        if (!ws) return [];
+        return ws.players
+          .filter(p => p.name)
+          .map(p => p.name as string);
+      });
+      this.commandConsole.setArgValuesProvider('TpPlayerToShip', 1, () => {
+        const ws = this.authoritativeWorldState;
+        if (!ws) return [];
+        return ws.ships.filter(s => s.id).map(s => String(s.id));
+      });
       this.networkManager.onCommandResponse = (text, success) => {
         this.commandConsole.pushResponse(text, success ? 'response' : 'error');
-        // Auto-open the console so the player sees the reply
-        if (!this.commandConsole.visible) this.commandConsole.open();
+        // Don't auto-open — the player can re-open with / to see the log
       };
       this.networkManager.onPlayerTeleported = (playerId, x, y, parentShip, localX, localY) => {
         // Snap the local player position if it's us being teleported

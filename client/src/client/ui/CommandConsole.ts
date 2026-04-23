@@ -19,6 +19,8 @@ interface ArgDef {
   name: string;
   /** Fixed set of accepted values shown during Tab-completion. */
   values?: string[];
+  /** Dynamic values provider — called at Tab-press time instead of static values. */
+  valuesProvider?: () => string[];
 }
 
 /** A registered command with autocomplete metadata. */
@@ -41,6 +43,14 @@ const COMMANDS: CommandDef[] = [
     args: [
       { name: 'playername' },
       { name: 'ship_id' },
+    ],
+  },
+  {
+    name: 'SpawnEntity',
+    description: 'Spawn an entity at your current location.',
+    args: [
+      { name: 'entityname', values: ['crewmember'] },
+      { name: 'company', values: ['neutral', 'pirates', 'navy'] },
     ],
   },
   {
@@ -134,6 +144,19 @@ export class CommandConsole {
     this.pushLog({ kind, text });
   }
 
+  /**
+   * Register a dynamic values provider for a command argument.
+   * Called at Tab-press time so it always reflects live game state.
+   * @param cmdName  Command name (case-insensitive, without leading slash)
+   * @param argIndex 0-based index of the argument slot
+   * @param provider Function returning the current list of valid values
+   */
+  setArgValuesProvider(cmdName: string, argIndex: number, provider: () => string[]): void {
+    const def = CMD_MAP.get(cmdName.toLowerCase());
+    if (!def || argIndex >= def.args.length) return;
+    def.args[argIndex].valuesProvider = provider;
+  }
+
   // ── Autocomplete ─────────────────────────────────────────────────────────────
 
   private clearTabState(): void {
@@ -164,13 +187,14 @@ export class CommandConsole {
     if (!def) return [];
     const argIndex = argCount - 1;
     const argDef = def.args[argIndex];
-    if (!argDef?.values) return [];
+    const values = argDef?.valuesProvider?.() ?? argDef?.values;
+    if (!values) return [];
     const prefix = argParts[argIndex].toLowerCase();
     // Use the original command name casing for the completed result
     const origCmdName = def.name;
     const base = `/${origCmdName} ${argParts.slice(0, argIndex).join(' ')}${argIndex > 0 ? ' ' : ''}`;
-    return argDef.values
-      .filter(v => v.startsWith(prefix))
+    return values
+      .filter(v => v.toLowerCase().startsWith(prefix))
       .map(v => `${base}${v}`);
   }
 
@@ -301,11 +325,17 @@ export class CommandConsole {
           }
 
           const chosen = this.tabMatches[this.tabIndex];
-          // Append trailing space after a fully completed command name so next
-          // Tab immediately moves into argument completion.
-          const isFullCommand = CMD_MAP.has(chosen.slice(1).toLowerCase())
-            && !chosen.includes(' ');
-          this.inputEl.value = isFullCommand ? chosen + ' ' : chosen;
+          // Append trailing space after a completed command name, or after a
+          // completed argument when there are more arguments to fill in.
+          const chosenBody = chosen.slice(1); // strip leading slash
+          const chosenParts = chosenBody.split(' ');
+          const chosenCmdName = chosenParts[0].toLowerCase();
+          const isFullCommand = CMD_MAP.has(chosenCmdName) && chosenParts.length === 1;
+          const completedArgIndex = chosenParts.length - 2; // 0-based index of the arg just completed
+          const cmdDef = CMD_MAP.get(chosenCmdName);
+          const hasMoreArgs = cmdDef ? completedArgIndex + 1 < cmdDef.args.length : false;
+          const needsSpace = isFullCommand || hasMoreArgs;
+          this.inputEl.value = needsSpace ? chosen + ' ' : chosen;
           const len = this.inputEl.value.length;
           this.inputEl.setSelectionRange(len, len);
           this.updateInputWidth();

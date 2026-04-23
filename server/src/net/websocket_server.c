@@ -11529,6 +11529,8 @@ int websocket_server_update(struct Sim* sim) {
                              * {"type":"command","command":"/AddPlayerToCompany pirates"}
                              * Supported commands:
                              *   /AddPlayerToCompany <pirates|navy|neutral>
+                             *   /TpPlayerToShip <playername> <ship_id>
+                             *   /SpawnEntity <crewmember> [neutral|pirates|navy]
                              */
                             char cmd_str[256] = "";
                             char *p_cmd = strstr(payload, "\"command\":");
@@ -11709,6 +11711,88 @@ int websocket_server_update(struct Sim* sim) {
                                             "\"text\":\"Teleported %s to ship %u.\"}",
                                             tp_player->name, tp_ship->ship_id);
                                     }
+                                }
+
+                            } else if (strcmp(cmd_name, "spawnentity") == 0) {
+                                /* /SpawnEntity <entityname> [company]
+                                 * Spawns an entity at the issuing player's world position.
+                                 * entityname: crewmember
+                                 * company:    neutral (default), pirates, navy */
+                                char cmd_arg2[64] = "";
+                                {
+                                    const char *p = cmd_body;
+                                    while (*p && *p != ' ') p++;
+                                    while (*p == ' ') p++;
+                                    int ai = 0;
+                                    while (*p && *p != ' ' && ai < 63) cmd_arg1[ai++] = *p++;
+                                    cmd_arg1[ai] = '\0';
+                                    while (*p == ' ') p++;
+                                    ai = 0;
+                                    while (*p && *p != ' ' && ai < 63) cmd_arg2[ai++] = *p++;
+                                    cmd_arg2[ai] = '\0';
+                                }
+                                /* Lowercase entity and company args */
+                                for (int i = 0; cmd_arg1[i]; i++)
+                                    if (cmd_arg1[i] >= 'A' && cmd_arg1[i] <= 'Z') cmd_arg1[i] += 32;
+                                for (int i = 0; cmd_arg2[i]; i++)
+                                    if (cmd_arg2[i] >= 'A' && cmd_arg2[i] <= 'Z') cmd_arg2[i] += 32;
+
+                                if (cmd_arg1[0] == '\0') {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\","
+                                        "\"success\":false,"
+                                        "\"text\":\"Usage: /SpawnEntity <entityname> [company]\"}");
+                                } else if (strcmp(cmd_arg1, "crewmember") != 0) {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\","
+                                        "\"success\":false,"
+                                        "\"text\":\"Unknown entity '%s'. Known: crewmember\"}",
+                                        cmd_arg1);
+                                } else if (world_npc_count >= MAX_WORLD_NPCS) {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\","
+                                        "\"success\":false,"
+                                        "\"text\":\"Cannot spawn: NPC cap reached.\"}");
+                                } else {
+                                    /* Resolve company (default neutral) */
+                                    uint8_t spawn_company = 0;
+                                    if (strcmp(cmd_arg2, "pirates") == 0)      spawn_company = 1;
+                                    else if (strcmp(cmd_arg2, "navy") == 0)    spawn_company = 2;
+
+                                    /* Issuing player's world position */
+                                    WebSocketPlayer *issuer = find_player(client->player_id);
+                                    float sx = issuer ? issuer->x : 0.0f;
+                                    float sy = issuer ? issuer->y : 0.0f;
+
+                                    /* Spawn free-standing crewmember at that position */
+                                    WorldNpc *npc = &world_npcs[world_npc_count++];
+                                    memset(npc, 0, sizeof(WorldNpc));
+                                    npc->id              = next_world_npc_id++;
+                                    npc->active          = true;
+                                    npc->role            = NPC_ROLE_NONE;
+                                    npc->ship_id         = 0;
+                                    npc->company_id      = spawn_company;
+                                    npc->move_speed      = 80.0f;
+                                    npc->interact_radius = 40.0f;
+                                    npc->state           = WORLD_NPC_STATE_IDLE;
+                                    npc->x               = sx + 30.0f;
+                                    npc->y               = sy;
+                                    npc->npc_level       = 1;
+                                    npc->max_health      = 100;
+                                    npc->health          = 100;
+                                    strncpy(npc->name,     "Crewmember",         sizeof(npc->name)     - 1);
+                                    strncpy(npc->dialogue, "Aye aye, Captain!",  sizeof(npc->dialogue) - 1);
+                                    g_npcs_dirty = true;
+
+                                    const char *company_names[] = {"Neutral","Pirates","Navy"};
+                                    const char *cname = (spawn_company < 3) ? company_names[spawn_company] : "Unknown";
+                                    log_info("👤 Spawned crewmember (id %u, company %s) at (%.0f,%.0f) by player %u",
+                                             npc->id, cname, npc->x, npc->y, client->player_id);
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\","
+                                        "\"success\":true,"
+                                        "\"text\":\"Spawned crewmember (id %u) [%s] at your location.\"}",
+                                        npc->id, cname);
                                 }
 
                             } else {
