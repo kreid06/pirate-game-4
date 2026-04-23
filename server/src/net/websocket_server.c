@@ -9746,9 +9746,9 @@ int websocket_server_update(struct Sim* sim) {
                                     if (ship_id != 0) {
                                         // Spawn aboard a friendly ship
                                         SimpleShip* target_ship = NULL;
-                                        for (int si = 0; si < MAX_SHIPS; si++) {
-                                            if (ws_server.ships[si].ship_id == ship_id) {
-                                                target_ship = &ws_server.ships[si];
+                                        for (int si = 0; si < MAX_SIMPLE_SHIPS; si++) {
+                                            if (ships[si].ship_id == ship_id) {
+                                                target_ship = &ships[si];
                                                 break;
                                             }
                                         }
