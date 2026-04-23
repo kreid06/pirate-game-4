@@ -12469,26 +12469,30 @@ int websocket_server_update(struct Sim* sim) {
                                             tp2_name);
                                     } else {
                                         /* Detach from any ship and move to world coords */
+                                        if (tp2_pl->is_mounted) {
+                                            tp2_pl->is_mounted = false;
+                                            tp2_pl->mounted_module_id = 0;
+                                            tp2_pl->controlling_ship_id = 0;
+                                        }
                                         tp2_pl->parent_ship_id = 0;
                                         tp2_pl->local_x = 0.0f;
                                         tp2_pl->local_y = 0.0f;
+                                        tp2_pl->velocity_x = 0.0f;
+                                        tp2_pl->velocity_y = 0.0f;
+                                        tp2_pl->movement_state = PLAYER_STATE_SWIMMING;
                                         tp2_pl->x = tp2_x;
                                         tp2_pl->y = tp2_y;
 
-                                        /* Update sim position */
-                                        struct Player *sim_pl = NULL;
-                                        for (uint16_t si = 0; si < sim.player_count; si++) {
-                                            if (sim.players[si].id == tp2_pl->player_id) {
-                                                sim_pl = &sim.players[si];
-                                                break;
+                                        /* Update sim position via sim_entity_id */
+                                        if (global_sim && tp2_pl->sim_entity_id != 0) {
+                                            struct Player *sim_pl = sim_get_player(global_sim, tp2_pl->sim_entity_id);
+                                            if (sim_pl) {
+                                                sim_pl->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(tp2_x));
+                                                sim_pl->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(tp2_y));
+                                                sim_pl->velocity.x = 0;
+                                                sim_pl->velocity.y = 0;
+                                                sim_pl->ship_id = 0;
                                             }
-                                        }
-                                        if (sim_pl) {
-                                            sim_pl->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(tp2_x));
-                                            sim_pl->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(tp2_y));
-                                            sim_pl->velocity.x = 0;
-                                            sim_pl->velocity.y = 0;
-                                            sim_pl->parent_ship_id = 0;
                                         }
 
                                         char tp2_msg[256];
