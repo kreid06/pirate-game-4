@@ -11777,6 +11777,12 @@ int websocket_server_update(struct Sim* sim) {
                                     npc->state           = WORLD_NPC_STATE_IDLE;
                                     npc->x               = sx + 30.0f;
                                     npc->y               = sy;
+                                    /* For ship_id==0 NPCs, tick_world_npcs syncs x/y FROM local_x/y,
+                                     * so they must match or the NPC will snap to (0,0) next tick. */
+                                    npc->local_x         = npc->x;
+                                    npc->local_y         = npc->y;
+                                    npc->target_local_x  = npc->x;
+                                    npc->target_local_y  = npc->y;
                                     npc->npc_level       = 1;
                                     npc->max_health      = 100;
                                     npc->health          = 100;
