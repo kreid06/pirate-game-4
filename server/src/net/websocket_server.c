@@ -23,6 +23,7 @@
 #include <openssl/buffer.h>
 #include <openssl/hmac.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 // Include shared ship definitions from protocol folder
 #include "../../protocol/ship_definitions.h"
@@ -1653,6 +1654,173 @@ static bool websocket_handshake(int client_fd, const char* request) {
 static WebSocketPlayer* find_player(uint32_t player_id);
 static WebSocketPlayer* create_player(uint32_t player_id);
 static void remove_player(uint32_t player_id);
+
+// ============================================================================
+// PLAYER SAVE / LOAD  (./player_saves/<name>.json)
+// ============================================================================
+
+/** Replace characters that are unsafe in filenames with '_'. */
+static void sanitize_filename(const char *name, char *out, size_t size) {
+    size_t i = 0;
+    while (i < size - 1 && *name) {
+        char c = *name++;
+        out[i++] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '-' || c == '_') ? c : '_';
+    }
+    out[i] = '\0';
+}
+
+static void save_player_to_file(const WebSocketPlayer *p) {
+    if (!p || !p->active || p->name[0] == '\0') return;
+
+    mkdir("player_saves", 0755);
+
+    char safe[64];
+    sanitize_filename(p->name, safe, sizeof(safe));
+    char path[128];
+    snprintf(path, sizeof(path), "player_saves/%s.json", safe);
+
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        log_warn("Could not save player '%s': %s", p->name, strerror(errno));
+        return;
+    }
+
+    fprintf(f,
+        "{\n"
+        "  \"name\": \"%s\",\n"
+        "  \"x\": %.3f,\n"
+        "  \"y\": %.3f,\n"
+        "  \"health\": %u,\n"
+        "  \"max_health\": %u,\n"
+        "  \"player_level\": %u,\n"
+        "  \"player_xp\": %u,\n"
+        "  \"stat_health\": %u,\n"
+        "  \"stat_damage\": %u,\n"
+        "  \"stat_stamina\": %u,\n"
+        "  \"stat_weight\": %u,\n"
+        "  \"company_id\": %u,\n"
+        "  \"active_slot\": %u,\n"
+        "  \"armor\": %u,\n"
+        "  \"shield\": %u,\n"
+        "  \"slots\": [",
+        p->name,
+        (double)p->x, (double)p->y,
+        (unsigned)p->health, (unsigned)p->max_health,
+        (unsigned)p->player_level, (unsigned)p->player_xp,
+        (unsigned)p->stat_health, (unsigned)p->stat_damage,
+        (unsigned)p->stat_stamina, (unsigned)p->stat_weight,
+        (unsigned)p->company_id,
+        (unsigned)p->inventory.active_slot,
+        (unsigned)p->inventory.armor,
+        (unsigned)p->inventory.shield
+    );
+
+    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+        fprintf(f, "%s{\"item\":%u,\"qty\":%u}",
+                s == 0 ? "" : ",",
+                (unsigned)p->inventory.slots[s].item,
+                (unsigned)p->inventory.slots[s].quantity);
+    }
+    fprintf(f, "]\n}\n");
+    fclose(f);
+    log_info("💾 Saved player '%s' (lvl %u, xp %u) to %s",
+             p->name, p->player_level, p->player_xp, path);
+}
+
+static bool json_parse_uint_field(const char *json, const char *key, unsigned *out) {
+    char search[64];
+    snprintf(search, sizeof(search), "\"%s\":", key);
+    const char *p = strstr(json, search);
+    if (!p) return false;
+    p += strlen(search);
+    while (*p == ' ') p++;
+    return sscanf(p, "%u", out) == 1;
+}
+
+static bool json_parse_float_field(const char *json, const char *key, float *out) {
+    char search[64];
+    snprintf(search, sizeof(search), "\"%s\":", key);
+    const char *p = strstr(json, search);
+    if (!p) return false;
+    p += strlen(search);
+    while (*p == ' ') p++;
+    return sscanf(p, "%f", out) == 1;
+}
+
+/** Restore persistent fields from a save file into *p.
+ *  Returns true if a save file was found and loaded.
+ *  p->name must already be set.  Sim / transient state is NOT modified. */
+static bool load_player_from_file(WebSocketPlayer *p) {
+    if (!p || p->name[0] == '\0') return false;
+
+    char safe[64];
+    sanitize_filename(p->name, safe, sizeof(safe));
+    char path[128];
+    snprintf(path, sizeof(path), "player_saves/%s.json", safe);
+
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    rewind(f);
+    if (sz <= 0 || sz > 8192) { fclose(f); return false; }
+
+    char *buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return false; }
+    fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[sz] = '\0';
+
+    unsigned tmp = 0;
+    float ftmp = 0.f;
+
+    if (json_parse_float_field(buf, "x", &ftmp)) p->x = ftmp;
+    if (json_parse_float_field(buf, "y", &ftmp)) p->y = ftmp;
+    if (json_parse_uint_field(buf, "health", &tmp))       p->health        = (uint16_t)tmp;
+    if (json_parse_uint_field(buf, "max_health", &tmp))   p->max_health    = (uint16_t)tmp;
+    if (json_parse_uint_field(buf, "player_level", &tmp)) p->player_level  = (uint8_t)tmp;
+    if (json_parse_uint_field(buf, "player_xp", &tmp))    p->player_xp     = (uint32_t)tmp;
+    if (json_parse_uint_field(buf, "stat_health", &tmp))  p->stat_health   = (uint8_t)tmp;
+    if (json_parse_uint_field(buf, "stat_damage", &tmp))  p->stat_damage   = (uint8_t)tmp;
+    if (json_parse_uint_field(buf, "stat_stamina", &tmp)) p->stat_stamina  = (uint8_t)tmp;
+    if (json_parse_uint_field(buf, "stat_weight", &tmp))  p->stat_weight   = (uint8_t)tmp;
+    if (json_parse_uint_field(buf, "company_id", &tmp))   p->company_id    = (uint8_t)tmp;
+    if (json_parse_uint_field(buf, "active_slot", &tmp))  p->inventory.active_slot = (uint8_t)tmp;
+    if (json_parse_uint_field(buf, "armor", &tmp))        p->inventory.armor  = (ItemKind)tmp;
+    if (json_parse_uint_field(buf, "shield", &tmp))       p->inventory.shield = (ItemKind)tmp;
+
+    // Parse inventory slots array
+    const char *slots_arr = strstr(buf, "\"slots\":");
+    if (slots_arr) {
+        slots_arr = strchr(slots_arr, '[');
+        if (slots_arr) {
+            memset(p->inventory.slots, 0, sizeof(p->inventory.slots));
+            const char *cur = slots_arr + 1;
+            for (int s = 0; s < INVENTORY_SLOTS && cur; s++) {
+                cur = strchr(cur, '{');
+                if (!cur) break;
+                unsigned item = 0, qty = 0;
+                const char *ip = strstr(cur, "\"item\":");
+                if (ip) sscanf(ip + 7, "%u", &item);
+                const char *qp = strstr(cur, "\"qty\":");
+                if (qp) sscanf(qp + 6, "%u", &qty);
+                p->inventory.slots[s].item     = (ItemKind)item;
+                p->inventory.slots[s].quantity = (uint8_t)qty;
+                cur = strchr(cur, '}');
+                if (cur) cur++;
+            }
+        }
+    }
+
+    free(buf);
+    log_info("💾 Loaded player '%s' (lvl %u, xp %u) from %s",
+             p->name, p->player_level, p->player_xp, path);
+    return true;
+}
+
+// ============================================================================
 static ShipModule* find_module_by_id(SimpleShip* ship, uint32_t module_id);
 static void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship);
 
@@ -1850,6 +2018,8 @@ static void remove_player(uint32_t player_id) {
                     log_warn("sim_destroy_entity could not find entity %u for player %u", players[i].sim_entity_id, player_id);
                 }
             }
+            // Save player data before clearing
+            save_player_to_file(&players[i]);
             // Clear the entire player structure
             memset(&players[i], 0, sizeof(WebSocketPlayer));
             log_info("🎮 Removed player %u", player_id);
@@ -8951,6 +9121,39 @@ int websocket_server_update(struct Sim* sim) {
                                     client->player_id = 0;
                                 }
                             }
+
+                            // Kick any other active session with the same name (duplicate login)
+                            if (!handled) {
+                                for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+                                    if (!players[pi].active) continue;
+                                    if (strncmp(players[pi].name, player_name, sizeof(players[pi].name)) != 0) continue;
+                                    uint32_t old_id = players[pi].player_id;
+                                    log_info("👤 Duplicate login for '%s': kicking old session (player_id %u)",
+                                             player_name, old_id);
+                                    // Find and close the old client connection
+                                    for (int ci2 = 0; ci2 < WS_MAX_CLIENTS; ci2++) {
+                                        if (ws_server.clients[ci2].connected &&
+                                            ws_server.clients[ci2].player_id == old_id) {
+                                            // Send a kick notification before closing
+                                            const char *kick_json =
+                                                "{\"type\":\"kicked\",\"reason\":\"Logged in from another session\"}";
+                                            size_t klen = strlen(kick_json);
+                                            char kframe[256];
+                                            size_t kflen = websocket_create_frame(
+                                                WS_OPCODE_TEXT, kick_json, klen, kframe, sizeof(kframe));
+                                            if (kflen > 0)
+                                                (void)send(ws_server.clients[ci2].fd, kframe, kflen, 0);
+                                            close(ws_server.clients[ci2].fd);
+                                            ws_server.clients[ci2].connected = false;
+                                            ws_server.clients[ci2].player_id = 0;
+                                            break;
+                                        }
+                                    }
+                                    // remove_player saves the data before clearing
+                                    remove_player(old_id);
+                                    break;
+                                }
+                            }
                             
                             if (client->player_id == 0 && !handled) {
                                 // Handshake message - create new player
@@ -8966,16 +9169,29 @@ int websocket_server_update(struct Sim* sim) {
                                             "{\"type\":\"handshake_response\",\"status\":\"error\",\"message\":\"Server full\"}");
                                     handled = true;
                                 } else {
-                                    // Store player name
+                                    // Set player name first so load can find the save file
                                     strncpy(player->name, player_name, sizeof(player->name) - 1);
                                     player->name[sizeof(player->name) - 1] = '\0';
-                                    
+
+                                    // Restore persistent data (position, XP, inventory, etc.)
+                                    bool resumed = load_player_from_file(player);
+
+                                    // If position was restored, sync the sim entity position too
+                                    if (resumed && global_sim && player->sim_entity_id != 0) {
+                                        struct Player* sim_pl = sim_get_player(global_sim, player->sim_entity_id);
+                                        if (sim_pl) {
+                                            sim_pl->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(player->x));
+                                            sim_pl->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(player->y));
+                                        }
+                                    }
+
+                                    const char *join_status = resumed ? "resumed" : "connected";
                                     snprintf(response, sizeof(response),
-                                            "{\"type\":\"handshake_response\",\"player_id\":%u,\"playerName\":\"%s\",\"server_time\":%u,\"status\":\"connected\"}",
-                                            player_id, player_name, get_time_ms());
+                                            "{\"type\":\"handshake_response\",\"player_id\":%u,\"playerName\":\"%s\",\"server_time\":%u,\"status\":\"%s\"}",
+                                            player_id, player_name, get_time_ms(), join_status);
                                     handled = true;
-                                    log_info("🤝 WebSocket handshake from %s:%u (Player: %s, ID: %u)", 
-                                             client->ip_address, client->port, player_name, player_id);
+                                    log_info("🤝 WebSocket handshake from %s:%u (Player: %s, ID: %u, %s)", 
+                                             client->ip_address, client->port, player_name, player_id, join_status);
                                 }
                             }
                             
