@@ -59,6 +59,15 @@ const COMMANDS: CommandDef[] = [
     args: [{ name: 'playername' }],
   },
   {
+    name: 'TpPlayerTo',
+    description: 'Teleport a player to world coordinates.',
+    args: [
+      { name: 'playername' },
+      { name: 'x' },
+      { name: 'y' },
+    ],
+  },
+  {
     name: 'help',
     description: 'List available commands.',
     args: [],

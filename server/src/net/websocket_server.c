@@ -12406,6 +12406,112 @@ int websocket_server_update(struct Sim* sim) {
                                         npc->id, cname);
                                 }
 
+                            } else if (strcmp(cmd_name, "tpplayerto") == 0) {
+                                /* /TpPlayerTo <playername> <x> <y>
+                                 * Teleports the named player to world coordinates (x, y).
+                                 * Removes them from any ship and places them swimming. */
+                                char tp2_name[64] = "";
+                                float tp2_x = 0.0f, tp2_y = 0.0f;
+                                bool tp2_valid = false;
+                                {
+                                    const char *p = cmd_body;
+                                    while (*p && *p != ' ') p++; // skip cmd name
+                                    while (*p == ' ') p++;
+                                    // read player name (up to next space)
+                                    int ai = 0;
+                                    while (*p && *p != ' ' && ai < 63) tp2_name[ai++] = *p++;
+                                    tp2_name[ai] = '\0';
+                                    while (*p == ' ') p++;
+                                    // read x
+                                    char xbuf[32] = ""; int xi = 0;
+                                    while (*p && *p != ' ' && xi < 31) xbuf[xi++] = *p++;
+                                    xbuf[xi] = '\0';
+                                    while (*p == ' ') p++;
+                                    // read y
+                                    char ybuf[32] = ""; int yi = 0;
+                                    while (*p && *p != '\0' && yi < 31) ybuf[yi++] = *p++;
+                                    ybuf[yi] = '\0';
+                                    if (tp2_name[0] && xbuf[0] && ybuf[0]) {
+                                        tp2_x = (float)atof(xbuf);
+                                        tp2_y = (float)atof(ybuf);
+                                        tp2_valid = true;
+                                    }
+                                }
+                                if (!tp2_valid) {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\","
+                                        "\"success\":false,"
+                                        "\"text\":\"Usage: /TpPlayerTo <playername> <x> <y>\"}");
+                                } else {
+                                    /* Find player (case-insensitive prefix) */
+                                    char tp2_lower[64] = "";
+                                    for (int i = 0; tp2_name[i] && i < 63; i++)
+                                        tp2_lower[i] = (tp2_name[i] >= 'A' && tp2_name[i] <= 'Z')
+                                            ? tp2_name[i] + 32 : tp2_name[i];
+                                    tp2_lower[strlen(tp2_name)] = '\0';
+
+                                    WebSocketPlayer *tp2_pl = NULL;
+                                    for (int i = 0; i < WS_MAX_CLIENTS && !tp2_pl; i++) {
+                                        if (!players[i].active) continue;
+                                        char ln[64] = "";
+                                        for (int j = 0; players[i].name[j] && j < 63; j++)
+                                            ln[j] = (players[i].name[j] >= 'A' && players[i].name[j] <= 'Z')
+                                                ? players[i].name[j] + 32 : players[i].name[j];
+                                        ln[strlen(players[i].name)] = '\0';
+                                        if (strstr(ln, tp2_lower)) tp2_pl = &players[i];
+                                    }
+
+                                    if (!tp2_pl) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":false,"
+                                            "\"text\":\"Player '%s' not found.\"}",
+                                            tp2_name);
+                                    } else {
+                                        /* Detach from any ship and move to world coords */
+                                        tp2_pl->parent_ship_id = 0;
+                                        tp2_pl->local_x = 0.0f;
+                                        tp2_pl->local_y = 0.0f;
+                                        tp2_pl->x = tp2_x;
+                                        tp2_pl->y = tp2_y;
+
+                                        /* Update sim position */
+                                        struct Player *sim_pl = NULL;
+                                        for (uint16_t si = 0; si < sim.player_count; si++) {
+                                            if (sim.players[si].id == tp2_pl->player_id) {
+                                                sim_pl = &sim.players[si];
+                                                break;
+                                            }
+                                        }
+                                        if (sim_pl) {
+                                            sim_pl->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(tp2_x));
+                                            sim_pl->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(tp2_y));
+                                            sim_pl->velocity.x = 0;
+                                            sim_pl->velocity.y = 0;
+                                            sim_pl->parent_ship_id = 0;
+                                        }
+
+                                        char tp2_msg[256];
+                                        snprintf(tp2_msg, sizeof(tp2_msg),
+                                            "{\"type\":\"player_teleported\","
+                                            "\"player_id\":%u,"
+                                            "\"x\":%.1f,\"y\":%.1f,"
+                                            "\"parent_ship\":0,"
+                                            "\"local_x\":0.0,\"local_y\":0.0}",
+                                            tp2_pl->player_id, tp2_x, tp2_y);
+                                        websocket_server_broadcast(tp2_msg);
+                                        save_player_to_file(tp2_pl);
+
+                                        log_info("🚀 Admin teleported player %u (%s) to (%.1f, %.1f)",
+                                                 tp2_pl->player_id, tp2_pl->name, tp2_x, tp2_y);
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":true,"
+                                            "\"text\":\"Teleported %s to (%.1f, %.1f).\"}",
+                                            tp2_pl->name, tp2_x, tp2_y);
+                                    }
+                                }
+
                             } else if (strcmp(cmd_name, "killplayer") == 0) {
                                 /* /KillPlayer <playername>
                                  * Sets a player's health to 0, triggering the respawn screen on their client. */

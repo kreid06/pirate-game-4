@@ -1056,6 +1056,18 @@ export class ClientApplication {
         return false;
       };
 
+      // Forward mouse-move/up to world map for drag-pan
+      this.inputManager.onUIMouseMove = (x, y) => {
+        this.uiManager?.handleWorldMapMouseMove(x, y);
+      };
+      this.inputManager.onUIMouseUp = () => {
+        this.uiManager?.handleWorldMapMouseUp();
+      };
+      // Forward wheel to world map zoom (returns true when map is visible)
+      this.inputManager.onUIWheel = (deltaY, x, y) => {
+        return this.uiManager?.handleWorldMapWheel(deltaY, x, y) ?? false;
+      };
+
       // Ctrl+left-click: assign/remove cannon from the active weapon group
       //   — but if an NPC is hovered, open an NPC command radial instead
       this.inputManager.onGroupAssign = () => {
@@ -1313,6 +1325,11 @@ export class ClientApplication {
         return ws.ships.filter(s => s.id).map(s => String(s.id));
       });
       this.commandConsole.setArgValuesProvider('KillPlayer', 0, () => {
+        const ws = this.authoritativeWorldState;
+        if (!ws) return [];
+        return ws.players.filter(p => p.name).map(p => p.name as string);
+      });
+      this.commandConsole.setArgValuesProvider('TpPlayerTo', 0, () => {
         const ws = this.authoritativeWorldState;
         if (!ws) return [];
         return ws.players.filter(p => p.name).map(p => p.name as string);
@@ -2847,6 +2864,12 @@ export class ClientApplication {
       switch (e.key) {
         case 'Escape':
         case '`': { // backtick also closes/cancels
+          // Close world map first
+          if (this.uiManager?.isWorldMapVisible()) {
+            this.uiManager.closeWorldMap();
+            e.preventDefault();
+            break;
+          }
           // Close command console if open
           if (this.commandConsole.visible) {
             this.commandConsole.close();
@@ -3227,6 +3250,23 @@ export class ClientApplication {
           this.renderSystem.toggleHoverBoundaries();
           e.preventDefault();
           break;
+
+        case 'm':
+        case 'M': {
+          if (e.repeat) break;
+          // Toggle world map — close it if open, otherwise open (centred on local player)
+          if (this.uiManager?.isWorldMapVisible()) {
+            this.uiManager.closeWorldMap();
+          } else if (this.uiManager && !this.uiManager.isRespawnScreenVisible()) {
+            const ws = this.authoritativeWorldState || this.predictedWorldState;
+            const myId = this.networkManager.getAssignedPlayerId();
+            const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
+            const pos = me?.position ? { x: me.position.x, y: me.position.y } : undefined;
+            this.uiManager.openWorldMap(pos);
+          }
+          e.preventDefault();
+          break;
+        }
       }
     });
 

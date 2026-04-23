@@ -196,7 +196,7 @@ int admin_api_physics_objects(struct HttpResponse* resp, const struct Sim* sim) 
         total_objects,
         collisions_per_second,
         (float)FIXED_DT_Q16 / Q16_ONE,
-        -4096.0f, -4096.0f, 4096.0f, 4096.0f // World bounds
+        -500.0f, -500.0f, 9500.0f, 8500.0f // World bounds (client pixel space)
     );
     
     if (len >= (int)sizeof(json_buffer)) return -1;

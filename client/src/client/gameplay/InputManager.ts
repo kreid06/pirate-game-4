@@ -153,6 +153,14 @@ export class InputManager {
 
   // Camera zoom callback
   public onZoom: ((factor: number, screenPoint: Vec2) => void) | null = null;
+
+  // UI overlay input hooks — called before game input is processed
+  /** Called on every mousemove so overlays (e.g. world map) can update drag state. */
+  public onUIMouseMove: ((x: number, y: number) => void) | null = null;
+  /** Called on left mouse-up so overlays can end drag. */
+  public onUIMouseUp: (() => void) | null = null;
+  /** Called before onZoom — if returns true, zoom is consumed by UI (e.g. world map). */
+  public onUIWheel: ((deltaY: number, x: number, y: number) => boolean) | null = null;
   
   // HYBRID PROTOCOL: State tracking for change detection
   private previousMovementState: Vec2 = Vec2.zero();
@@ -1249,6 +1257,9 @@ export class InputManager {
       event.clientX - rect.left,
       event.clientY - rect.top
     );
+    if (this.onUIMouseMove) {
+      this.onUIMouseMove(this.inputState.mousePosition.x, this.inputState.mousePosition.y);
+    }
   }
   
   private onMouseDown(event: MouseEvent): void {
@@ -1355,6 +1366,7 @@ export class InputManager {
     if (event.button === 0) { // Left mouse button
       this.inputState.leftMouseDown = false;
       this.inputState.leftMouseReleased = true;
+      if (this.onUIMouseUp) this.onUIMouseUp();
       // Stop liquid flame stream if running
       if (this.flameStreamTimer !== null) {
         clearInterval(this.flameStreamTimer);
@@ -1378,14 +1390,17 @@ export class InputManager {
   
   private onMouseWheel(event: WheelEvent): void {
     event.preventDefault();
-    if (!this.onZoom) return;
 
     const rect = this.canvas.getBoundingClientRect();
-    const screenPoint = Vec2.from(
-      event.clientX - rect.left,
-      event.clientY - rect.top
-    );
+    const cx = event.clientX - rect.left;
+    const cy = event.clientY - rect.top;
 
+    // Let UI overlays consume the wheel event first (e.g. world map zoom)
+    if (this.onUIWheel && this.onUIWheel(event.deltaY, cx, cy)) return;
+
+    if (!this.onZoom) return;
+
+    const screenPoint = Vec2.from(cx, cy);
     // deltaY > 0 = scroll down = zoom out, < 0 = scroll up = zoom in
     const zoomFactor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
     this.onZoom(zoomFactor, screenPoint);

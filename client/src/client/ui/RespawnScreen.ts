@@ -28,9 +28,11 @@ export class RespawnScreen {
   // World bounds (pixels) — covers both islands with margin.
   // Island 1 (tropical): centre (800, 600).
   // Island 2 (continental): centre (6000, 5000), vertices ±3100 X, ±3050 Y → edges ~2900–9100 X, ~2000–8050 Y.
-  // No hard server boundary, but playable space is effectively 0–9500 × 0–8500.
-  private readonly WORLD_W = 9500;
-  private readonly WORLD_H = 8500;
+  // MIN values allow for negative-coordinate content (physics can push entities below 0).
+  private readonly WORLD_MIN_X = -500;
+  private readonly WORLD_MIN_Y = -500;
+  private readonly WORLD_MAX_X = 9500;
+  private readonly WORLD_MAX_Y = 8500;
 
   // Cached render bounds for click hit-testing
   private _btnBounds: { x: number; y: number; w: number; h: number } | null = null;
@@ -103,7 +105,9 @@ export class RespawnScreen {
     ctx.fillText('Select a spawn location and press RESPAWN', cw / 2, ch * 0.14 + 38);
 
     // ── Minimap panel — fills available space maintaining world aspect ratio ──
-    const worldAspect = this.WORLD_W / this.WORLD_H;
+    const worldW = this.WORLD_MAX_X - this.WORLD_MIN_X;
+    const worldH = this.WORLD_MAX_Y - this.WORLD_MIN_Y;
+    const worldAspect = worldW / worldH;
     const maxMapW = cw - 64;
     const maxMapH = ch * 0.72;
     let mapW = maxMapW;
@@ -119,9 +123,9 @@ export class RespawnScreen {
     ctx.fillRect(mapX, mapY, mapW, mapH);
     ctx.strokeRect(mapX, mapY, mapW, mapH);
 
-    // World-space → map-pixel helpers
-    const toMapX = (wx: number) => mapX + (wx / this.WORLD_W) * mapW;
-    const toMapY = (wy: number) => mapY + (wy / this.WORLD_H) * mapH;
+    // World-space → map-pixel helpers (supports negative coordinates via MIN offset)
+    const toMapX = (wx: number) => mapX + ((wx - this.WORLD_MIN_X) / worldW) * mapW;
+    const toMapY = (wy: number) => mapY + ((wy - this.WORLD_MIN_Y) / worldH) * mapH;
 
     // Draw islands
     for (const isl of islands) {
@@ -131,20 +135,15 @@ export class RespawnScreen {
       ctx.save();
       ctx.beginPath();
       if (isl.vertices && isl.vertices.length > 2) {
-        ctx.moveTo(
-          toMapX(isl.x + isl.vertices[0].x),
-          toMapY(isl.y + isl.vertices[0].y)
-        );
+        // vertices are already absolute world coordinates (server sends isl.x + vx[i])
+        ctx.moveTo(toMapX(isl.vertices[0].x), toMapY(isl.vertices[0].y));
         for (let i = 1; i < isl.vertices.length; i++) {
-          ctx.lineTo(
-            toMapX(isl.x + isl.vertices[i].x),
-            toMapY(isl.y + isl.vertices[i].y)
-          );
+          ctx.lineTo(toMapX(isl.vertices[i].x), toMapY(isl.vertices[i].y));
         }
         ctx.closePath();
       } else {
         // Circular island — use beach_radius if available
-        const r = Math.max(3, (((isl as any).beach_radius ?? 120) / this.WORLD_W) * mapW);
+        const r = Math.max(3, (((isl as any).beach_radius ?? 120) / worldW) * mapW);
         ctx.arc(mx, my, r, 0, Math.PI * 2);
       }
       ctx.fillStyle = '#1e4a12';
@@ -280,8 +279,8 @@ export class RespawnScreen {
     if (this._mapBounds) {
       const m = this._mapBounds;
       if (x >= m.x && x <= m.x + m.w && y >= m.y && y <= m.y + m.h) {
-        const wx = ((x - m.x) / m.w) * this.WORLD_W;
-        const wy = ((y - m.y) / m.h) * this.WORLD_H;
+        const wx = this.WORLD_MIN_X + ((x - m.x) / m.w) * (this.WORLD_MAX_X - this.WORLD_MIN_X);
+        const wy = this.WORLD_MIN_Y + ((y - m.y) / m.h) * (this.WORLD_MAX_Y - this.WORLD_MIN_Y);
         let best: SpawnOption | null = null;
         let bestDist = Infinity;
         for (const opt of this.spawnOptions) {

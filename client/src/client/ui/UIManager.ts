@@ -17,6 +17,7 @@ import { PlayerMenu } from './PlayerMenu.js';
 import { ShipMenu } from './ShipMenu.js';
 import { CrewLevelMenu } from './CrewLevelMenu.js';
 import { RespawnScreen } from './RespawnScreen.js';
+import { WorldMapScreen } from './WorldMapScreen.js';
 
 /**
  * UI render context
@@ -70,6 +71,7 @@ export const MENU_ID = {
   PAUSE:     'pause',
   CONSOLE:   'console',
   RESPAWN:   'respawn',
+  MAP:       'map',
 } as const;
 export type MenuId = typeof MENU_ID[keyof typeof MENU_ID];
 
@@ -108,6 +110,9 @@ export class UIManager {
   private respawnScreen = new RespawnScreen();
   // Islands stored for the respawn screen minimap
   private _islands: import('../../sim/Types.js').IslandDef[] = [];
+
+  // World map screen — toggleable with M
+  private worldMapScreen = new WorldMapScreen();
 
   /** Which menu is currently open — null when none. */
   private activeMenuId: MenuId | null = null;
@@ -218,7 +223,7 @@ export class UIManager {
 
   /** Returns true if any canvas-side menu/modal is currently open. */
   isAnyMenuOpen(): boolean {
-    return this.activeMenuId !== null || this.respawnScreen.visible;
+    return this.activeMenuId !== null || this.respawnScreen.visible || this.worldMapScreen.visible;
   }
 
   /**
@@ -279,6 +284,49 @@ export class UIManager {
   /** Store island definitions so the respawn screen minimap can draw them. */
   setIslandsForRespawn(islands: import('../../sim/Types.js').IslandDef[]): void {
     this._islands = islands;
+  }
+
+  // ── World map ──────────────────────────────────────────────────────────────
+
+  /** Open the world map screen, optionally centring on the local player's position. */
+  openWorldMap(localPlayerPos?: { x: number; y: number }): void {
+    this.worldMapScreen.open(localPlayerPos);
+  }
+
+  /** Close the world map. */
+  closeWorldMap(): void {
+    this.worldMapScreen.close();
+  }
+
+  /** True while the world map is showing. */
+  isWorldMapVisible(): boolean {
+    return this.worldMapScreen.visible;
+  }
+
+  /** Toggle the world map open/closed. */
+  toggleWorldMap(localPlayerPos?: { x: number; y: number }): void {
+    if (this.worldMapScreen.visible) this.worldMapScreen.close();
+    else this.worldMapScreen.open(localPlayerPos);
+  }
+
+  /** Forward a mouse-down event to the world map (for drag-pan and close-button). */
+  handleWorldMapMouseDown(x: number, y: number): boolean {
+    return this.worldMapScreen.handleMouseDown(x, y);
+  }
+
+  /** Forward mouse-move to the world map for drag-pan. */
+  handleWorldMapMouseMove(x: number, y: number): void {
+    this.worldMapScreen.handleMouseMove(x, y);
+  }
+
+  /** Notify world map of mouse-up to end drag. */
+  handleWorldMapMouseUp(): void {
+    this.worldMapScreen.handleMouseUp();
+  }
+
+  /** Forward wheel delta to the world map for zoom. Returns true if consumed. */
+  handleWorldMapWheel(deltaY: number, x: number, y: number): boolean {
+    return this.worldMapScreen.handleWheel(deltaY, x, y);
   }
 
   /**
@@ -419,6 +467,14 @@ export class UIManager {
     // Hammer minigame — topmost overlay, blocks all game input when active
     if (this.hammerGame.active) {
       this.renderHammerMinigame(ctx, ctx.canvas);
+    }
+
+    // World map — below respawn screen so respawn screen still covers it
+    if (this.worldMapScreen.visible) {
+      const ws = context.worldState;
+      const localPlayer = ws.players.find(p => p.id === context.assignedPlayerId);
+      const companyId = localPlayer?.companyId ?? 0;
+      this.worldMapScreen.render(ctx, ws.ships, this._islands, ws.players, context.assignedPlayerId, companyId);
     }
 
     // Respawn screen — rendered last so it covers everything
@@ -1003,6 +1059,10 @@ export class UIManager {
     // Respawn screen takes absolute priority — blocks all game input
     if (this.respawnScreen.visible) {
       return this.respawnScreen.handleClick(x, y);
+    }
+    // World map consumes all clicks (mousedown starts drag or closes)
+    if (this.worldMapScreen.visible) {
+      return this.worldMapScreen.handleMouseDown(x, y);
     }
     // Hammer minigame swallows all clicks while active
     if (this.hammerGame.active) {
