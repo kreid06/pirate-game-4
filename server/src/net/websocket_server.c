@@ -1805,12 +1805,10 @@ static bool load_player_from_file(WebSocketPlayer *p) {
     if (saved_ship_id != 0) {
         SimpleShip *ship = find_ship((uint16_t)saved_ship_id);
         if (ship && ship->active) {
-            p->parent_ship_id   = (uint16_t)saved_ship_id;
-            p->local_x          = saved_lx;
-            p->local_y          = saved_ly;
-            p->movement_state   = PLAYER_STATE_WALKING;
-            // Compute current world position from ship's live transform
-            ship_local_to_world(ship, saved_lx, saved_ly, &p->x, &p->y);
+            // Use the same boarding helper the ladder/teleport code uses — ensures
+            // parent_ship_id, local_x/y, movement_state, world pos and velocity are
+            // all set consistently.
+            board_player_on_ship(p, ship, saved_lx, saved_ly);
             log_info("💾 Restored '%s' onto ship %u at local (%.1f, %.1f)",
                      p->name, saved_ship_id, saved_lx, saved_ly);
         } else {
