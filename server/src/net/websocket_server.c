@@ -9761,6 +9761,15 @@ int websocket_server_update(struct Sim* sim) {
                                             player->y = 600.0f;
                                             player->parent_ship_id = 0;
                                             player->movement_state = PLAYER_STATE_SWIMMING;
+                                            // Sync sim entity so the tick loop doesn't snap the player back
+                                            if (global_sim && player->sim_entity_id != 0) {
+                                                struct Player* sp = sim_get_player(global_sim, player->sim_entity_id);
+                                                if (sp) {
+                                                    sp->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(player->x));
+                                                    sp->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(player->y));
+                                                    sp->velocity.x = 0; sp->velocity.y = 0;
+                                                }
+                                            }
                                             log_warn("⚔️  Respawn ship %u not found — spawning at world origin", ship_id);
                                         }
                                     } else {
@@ -9774,6 +9783,15 @@ int websocket_server_update(struct Sim* sim) {
                                         player->y = spawn_y;
                                         player->parent_ship_id = 0;
                                         player->movement_state = PLAYER_STATE_SWIMMING;
+                                        // Sync sim entity so the tick loop doesn't snap the player back
+                                        if (global_sim && player->sim_entity_id != 0) {
+                                            struct Player* sp = sim_get_player(global_sim, player->sim_entity_id);
+                                            if (sp) {
+                                                sp->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(spawn_x));
+                                                sp->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(spawn_y));
+                                                sp->velocity.x = 0; sp->velocity.y = 0;
+                                            }
+                                        }
                                         log_info("⚔️  Player %u respawned at world (%.1f, %.1f)", player->player_id, spawn_x, spawn_y);
                                     }
 
@@ -9786,6 +9804,9 @@ int websocket_server_update(struct Sim* sim) {
                                         player->player_id, player->x, player->y,
                                         player->parent_ship_id, player->local_x, player->local_y);
                                     websocket_server_broadcast(tp_msg);
+
+                                    // Persist new position so relog doesn't load pre-death location
+                                    save_player_to_file(player);
                                 }
                             }
                             handled = true;
