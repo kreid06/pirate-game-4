@@ -54,6 +54,11 @@ const COMMANDS: CommandDef[] = [
     ],
   },
   {
+    name: 'KillPlayer',
+    description: 'Kill a player by name, triggering the respawn screen.',
+    args: [{ name: 'playername' }],
+  },
+  {
     name: 'help',
     description: 'List available commands.',
     args: [],

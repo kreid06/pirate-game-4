@@ -9780,9 +9780,9 @@ int websocket_server_update(struct Sim* sim) {
                                     // Broadcast a teleport event so clients update this player's position
                                     char tp_msg[256];
                                     snprintf(tp_msg, sizeof(tp_msg),
-                                        "{\"type\":\"player_teleported\",\"playerId\":%u,"
-                                        "\"x\":%.1f,\"y\":%.1f,\"parentShip\":%u,"
-                                        "\"localX\":%.1f,\"localY\":%.1f}",
+                                        "{\"type\":\"player_teleported\",\"player_id\":%u,"
+                                        "\"x\":%.1f,\"y\":%.1f,\"parent_ship\":%u,"
+                                        "\"local_x\":%.1f,\"local_y\":%.1f}",
                                         player->player_id, player->x, player->y,
                                         player->parent_ship_id, player->local_x, player->local_y);
                                     websocket_server_broadcast(tp_msg);

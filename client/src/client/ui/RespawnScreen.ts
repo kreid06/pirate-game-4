@@ -23,9 +23,12 @@ export class RespawnScreen {
   private selectedOption: SpawnOption | null = null;
   private spawnOptions: SpawnOption[] = [];
 
-  // Approximate world bounds (pixels) used for minimap scaling
+  // World bounds (pixels) — covers both islands with margin.
+  // Island 1 (tropical): centre (800, 600).
+  // Island 2 (continental): centre (6000, 5000), vertices ±3100 X, ±3050 Y → edges ~2900–9100 X, ~2000–8050 Y.
+  // No hard server boundary, but playable space is effectively 0–9500 × 0–8500.
   private readonly WORLD_W = 9500;
-  private readonly WORLD_H = 8000;
+  private readonly WORLD_H = 8500;
 
   // Cached render bounds for click hit-testing
   private _btnBounds: { x: number; y: number; w: number; h: number } | null = null;
