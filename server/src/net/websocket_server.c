@@ -13686,11 +13686,12 @@ void websocket_server_tick(float dt) {
                     }
                 }
                 
-                // Auto-expire stale movement input: if no input received in 200ms, stop the player.
+                // Auto-expire stale movement input: if no input received in 500ms, stop the player.
                 // This prevents "stuck key" when a keyup event is dropped (focus loss, network blip, etc.).
+                // The client sends a heartbeat every ~150ms while moving, so 500ms gives 3× margin.
                 {
                     uint32_t now = get_time_ms();
-                    if (ws_player->is_moving && (now - ws_player->last_input_time) > 200) {
+                    if (ws_player->is_moving && (now - ws_player->last_input_time) > 500) {
                         ws_player->is_moving = false;
                         ws_player->movement_direction_x = 0.0f;
                         ws_player->movement_direction_y = 0.0f;

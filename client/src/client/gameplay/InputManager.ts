@@ -68,6 +68,24 @@ export class InputManager {
   private currentInputFrame: InputFrame;
   private inputFrameCounter = 0;
   private playerPosition: Vec2 = Vec2.zero();
+
+  // Stored bound handlers so removeEventListeners can actually remove them
+  private boundOnKeyDown!: (e: KeyboardEvent) => void;
+  private boundOnKeyUp!: (e: KeyboardEvent) => void;
+  private boundOnMouseMove!: (e: MouseEvent) => void;
+  private boundOnMouseDown!: (e: MouseEvent) => void;
+  private boundOnMouseUp!: (e: MouseEvent) => void;
+  private boundOnMouseWheel!: (e: WheelEvent) => void;
+  private boundOnContextMenu!: (e: MouseEvent) => void;
+  private boundOnBlur!: () => void;
+  private boundOnVisibilityChange!: () => void;
+  private boundOnGamepadConnected!: (e: GamepadEvent) => void;
+  private boundOnGamepadDisconnected!: (e: GamepadEvent) => void;
+
+  // Movement heartbeat — resend current movement every 150ms while keys are held
+  // so the server's inactivity timeout doesn't fire during sustained keypresses.
+  private movementHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly MOVEMENT_HEARTBEAT_INTERVAL = 150;
   
   // Event callbacks
   public onInputFrame: ((inputFrame: InputFrame) => void) | null = null;
@@ -313,6 +331,13 @@ export class InputManager {
       }
       this.previousMovementState = currentMovement.clone();
       this.previousSprintState = isSprinting;
+
+      // Start or stop heartbeat based on whether we're now moving
+      if (isMoving) {
+        this.startMovementHeartbeat();
+      } else {
+        this.stopMovementHeartbeat();
+      }
     }
     
     // HYBRID PROTOCOL: Detect if player released keys but is still moving (server-side friction)
@@ -599,13 +624,7 @@ export class InputManager {
     const dx = this.inputState.mouseWorldPosition.x - this.playerPosition.x;
     const dy = this.inputState.mouseWorldPosition.y - this.playerPosition.y;
 
-    // Only rotate cannons when the mouse is within effective cannonball range.
-    // Beyond this distance the aim angle is physically meaningless.
-    const CANNON_AIM_RANGE = 800; // client units — matches CANNONBALL_RANGE
-    if (dx * dx + dy * dy > CANNON_AIM_RANGE * CANNON_AIM_RANGE) {
-      return;
-    }
-
+    // Always aim toward mouse — no range limit (server enforces fire range separately)
     const aimAngleWorld = Math.atan2(dy, dx);
     
     // Convert to ship-relative angle
@@ -740,6 +759,7 @@ export class InputManager {
    * Shutdown input manager
    */
   shutdown(): void {
+    this.stopMovementHeartbeat();
     this.removeEventListeners();
     console.log('🎮 Input manager shutdown');
   }
@@ -747,34 +767,69 @@ export class InputManager {
   // Private methods
   
   private setupEventListeners(): void {
+    // Bind and store handlers so they can be properly removed later
+    this.boundOnKeyDown = this.onKeyDown.bind(this);
+    this.boundOnKeyUp = this.onKeyUp.bind(this);
+    this.boundOnMouseMove = this.onMouseMove.bind(this);
+    this.boundOnMouseDown = this.onMouseDown.bind(this);
+    this.boundOnMouseUp = this.onMouseUp.bind(this);
+    this.boundOnMouseWheel = this.onMouseWheel.bind(this);
+    this.boundOnContextMenu = this.onContextMenu.bind(this);
+    this.boundOnGamepadConnected = this.onGamepadConnected.bind(this);
+    this.boundOnGamepadDisconnected = this.onGamepadDisconnected.bind(this);
+
     // Keyboard events
-    window.addEventListener('keydown', this.onKeyDown.bind(this));
-    window.addEventListener('keyup', this.onKeyUp.bind(this));
+    window.addEventListener('keydown', this.boundOnKeyDown);
+    window.addEventListener('keyup', this.boundOnKeyUp);
     
     // Mouse events
-    this.canvas.addEventListener('mousemove', this.onMouseMove.bind(this));
-    this.canvas.addEventListener('mousedown', this.onMouseDown.bind(this));
-    this.canvas.addEventListener('mouseup', this.onMouseUp.bind(this));
-    this.canvas.addEventListener('wheel', this.onMouseWheel.bind(this));
-    this.canvas.addEventListener('contextmenu', this.onContextMenu.bind(this));
+    this.canvas.addEventListener('mousemove', this.boundOnMouseMove);
+    this.canvas.addEventListener('mousedown', this.boundOnMouseDown);
+    this.canvas.addEventListener('mouseup', this.boundOnMouseUp);
+    this.canvas.addEventListener('wheel', this.boundOnMouseWheel);
+    this.canvas.addEventListener('contextmenu', this.boundOnContextMenu);
     
+    // Clear all input when the window loses focus (prevents stuck keys on tab-out)
+    this.boundOnBlur = () => this.clearAllInput();
+    this.boundOnVisibilityChange = () => { if (document.hidden) this.clearAllInput(); };
+    window.addEventListener('blur', this.boundOnBlur);
+    document.addEventListener('visibilitychange', this.boundOnVisibilityChange);
+
     // Gamepad events (future)
-    window.addEventListener('gamepadconnected', this.onGamepadConnected.bind(this));
-    window.addEventListener('gamepaddisconnected', this.onGamepadDisconnected.bind(this));
+    window.addEventListener('gamepadconnected', this.boundOnGamepadConnected);
+    window.addEventListener('gamepaddisconnected', this.boundOnGamepadDisconnected);
     
     console.log('🎮 Input event listeners setup');
   }
   
   private removeEventListeners(): void {
-    window.removeEventListener('keydown', this.onKeyDown.bind(this));
-    window.removeEventListener('keyup', this.onKeyUp.bind(this));
-    this.canvas.removeEventListener('mousemove', this.onMouseMove.bind(this));
-    this.canvas.removeEventListener('mousedown', this.onMouseDown.bind(this));
-    this.canvas.removeEventListener('mouseup', this.onMouseUp.bind(this));
-    this.canvas.removeEventListener('wheel', this.onMouseWheel.bind(this));
-    this.canvas.removeEventListener('contextmenu', this.onContextMenu.bind(this));
-    window.removeEventListener('gamepadconnected', this.onGamepadConnected.bind(this));
-    window.removeEventListener('gamepaddisconnected', this.onGamepadDisconnected.bind(this));
+    window.removeEventListener('keydown', this.boundOnKeyDown);
+    window.removeEventListener('keyup', this.boundOnKeyUp);
+    this.canvas.removeEventListener('mousemove', this.boundOnMouseMove);
+    this.canvas.removeEventListener('mousedown', this.boundOnMouseDown);
+    this.canvas.removeEventListener('mouseup', this.boundOnMouseUp);
+    this.canvas.removeEventListener('wheel', this.boundOnMouseWheel);
+    this.canvas.removeEventListener('contextmenu', this.boundOnContextMenu);
+    window.removeEventListener('blur', this.boundOnBlur);
+    document.removeEventListener('visibilitychange', this.boundOnVisibilityChange);
+    window.removeEventListener('gamepadconnected', this.boundOnGamepadConnected);
+    window.removeEventListener('gamepaddisconnected', this.boundOnGamepadDisconnected);
+  }
+
+  /** Clear all pressed keys and send a stop — called on blur/visibility-hidden. */
+  private clearAllInput(): void {
+    this.inputState.pressedKeys.clear();
+    this.inputState.leftMouseDown = false;
+    this.inputState.rightMouseDown = false;
+    for (const mapping of this.actionMappings) {
+      mapping.pressed = false;
+    }
+    this.stopMovementHeartbeat();
+    if (this.onMovementStateChange) {
+      this.onMovementStateChange(Vec2.zero(), false, false);
+    }
+    this.previousMovementState = Vec2.zero();
+    this.previousSprintState = false;
   }
   
   private setupActionMappings(): void {
@@ -919,6 +974,30 @@ export class InputManager {
   
   private resetFrameFlags(): void {
     this.inputState.leftMouseReleased = false;
+  }
+
+  /** Start a repeating heartbeat that refreshes the server's movement state while keys are held. */
+  private startMovementHeartbeat(): void {
+    if (this.movementHeartbeatTimer !== null) return; // already running
+    this.movementHeartbeatTimer = setInterval(() => {
+      const m = this.previousMovementState;
+      const isMoving = m.lengthSq() > 0.01;
+      if (!isMoving) {
+        this.stopMovementHeartbeat();
+        return;
+      }
+      const sprint = this.previousSprintState;
+      if (this.onMovementStateChange) {
+        this.onMovementStateChange(m, true, sprint);
+      }
+    }, this.MOVEMENT_HEARTBEAT_INTERVAL);
+  }
+
+  private stopMovementHeartbeat(): void {
+    if (this.movementHeartbeatTimer !== null) {
+      clearInterval(this.movementHeartbeatTimer);
+      this.movementHeartbeatTimer = null;
+    }
   }
   
   private updateGamepad(): void {
