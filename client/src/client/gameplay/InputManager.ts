@@ -495,9 +495,9 @@ export class InputManager {
     
     // Rudder control (A/D without shift)
     if (!shiftPressed) {
-      const turningLeft = this.isActionActive('move_left');    // A key
-      const turningRight = this.isActionActive('move_right');   // D key
-      const movingBackward = this.isActionActive('move_backward'); // S key — slow reverse
+      const turningLeft = this.isActionActive('ship_move_left');
+      const turningRight = this.isActionActive('ship_move_right');
+      const movingBackward = this.isActionActive('ship_move_backward');
       
       // Send rudder control if any state changed
       if (turningLeft !== this.lastRudderState.left ||
@@ -510,8 +510,8 @@ export class InputManager {
       }
       
       // Sail openness control (W/S without shift)
-      const openSails = this.isActionActive('move_forward');   // W key
-      const closeSails = this.isActionActive('move_backward'); // S key
+      const openSails = this.isActionActive('ship_move_forward');
+      const closeSails = this.isActionActive('ship_move_backward');
       const currentTime = Date.now();
       
       // Check cooldown before allowing sail openness change
@@ -538,8 +538,8 @@ export class InputManager {
       }
     } else {
       // Sail angle control (Shift+A/D)
-      const rotateLeft = this.isActionActive('move_left');   // Shift+A
-      const rotateRight = this.isActionActive('move_right'); // Shift+D
+      const rotateLeft = this.isActionActive('ship_move_left');
+      const rotateRight = this.isActionActive('ship_move_right');
       const currentTime = Date.now();
       
       // Check cooldown before allowing sail angle change
@@ -566,8 +566,8 @@ export class InputManager {
       }
     }
     
-    // Handle interact key (E) to dismount
-    if (this.isActionActive('interact') && this.canInteract()) {
+    // Handle interact key to dismount helm
+    if (this.isActionActive('ship_interact') && this.canInteract()) {
       this.lastInteractionTime = Date.now();
       if (this.onActionEvent) {
         this.onActionEvent('dismount');

@@ -26,7 +26,7 @@ import { MENU_ID } from './ui/UIManager.js';
 import { RadialMenu } from './ui/RadialMenu.js';
 import { CraftingMenu } from './ui/CraftingMenu.js';
 import { ShipyardMenu } from './ui/ShipyardMenu.js';
-import { PauseMenu } from './ui/PauseMenu.js';
+import { PauseMenu, GameSettings } from './ui/PauseMenu.js';
 import { logout } from './auth/AuthService.js';
 
 // Audio System
@@ -1241,6 +1241,16 @@ export class ClientApplication {
         this.shutdown();
         logout().finally(() => window.location.reload());
       };
+
+      // Clear the active menu ID when the pause menu closes (Resume, backdrop, Escape)
+      this.pauseMenu.onClose = () => {
+        this.uiManager?.setActiveMenuId(null);
+      };
+
+      // Wire pause menu settings → apply live to running systems
+      this.pauseMenu.onSettingsChange = (settings) => {
+        this.applySettings(settings);
+      };
       
       // Initialize UI System
       this.uiManager = new UIManager(this.canvas, this.config);
@@ -1633,6 +1643,18 @@ export class ClientApplication {
     }
   }
   
+  /**
+   * Apply live settings changes from the pause menu.
+   * Currently handles audio volume; graphics/FPS settings take effect on next load.
+   */
+  private applySettings(settings: GameSettings): void {
+    this.audioManager?.setVolumes(
+      settings.masterVolume,
+      settings.sfxVolume,
+      settings.musicVolume,
+    );
+  }
+
   /**
    * Shutdown the client application gracefully
    */

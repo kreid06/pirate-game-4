@@ -427,4 +427,15 @@ export class AudioManager {
       }
     }
   }
+
+  /** Apply volume changes live — called when the user adjusts settings. */
+  setVolumes(masterVolume: number, sfxVolume: number, musicVolume: number): void {
+    this.config.masterVolume = masterVolume;
+    this.config.sfxVolume    = sfxVolume;
+    this.config.musicVolume  = musicVolume;
+
+    if (this.masterGain) this.masterGain.gain.value = masterVolume;
+    if (this.sfxGain)    this.sfxGain.gain.value    = sfxVolume;
+    if (this.musicGain)  this.musicGain.gain.value   = musicVolume;
+  }
 }
