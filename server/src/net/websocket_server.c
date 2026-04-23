@@ -3594,6 +3594,59 @@ static bool occ_taken_by_other(const NpcOccEntry* buf, int cnt,
 }
 
 /**
+ * Compute the ship-local stand position (client units) for an NPC interacting
+ * with a module.  Each module type gets a type-aware offset so NPCs stand
+ * beside or behind the module rather than walking into its visual centre.
+ */
+static void get_module_interact_pos(const ShipModule* mod, float* out_x, float* out_y) {
+    float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+    float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+    switch (mod->type_id) {
+        case MODULE_TYPE_CANNON:
+        case MODULE_TYPE_SWIVEL: {
+            /* Stand behind the barrel — mirrors dispatch_gunner_to_weapon logic */
+            float barrel_angle = Q16_TO_FLOAT(mod->local_rot) - (float)(M_PI / 2.0f);
+            float dist = (mod->type_id == MODULE_TYPE_SWIVEL) ? 18.0f : 25.0f;
+            *out_x = cx - cosf(barrel_angle) * dist;
+            *out_y = cy - sinf(barrel_angle) * dist;
+            break;
+        }
+        case MODULE_TYPE_PLANK: {
+            /* Stand 28 client units inward from the hull edge */
+            float mag = sqrtf(cx * cx + cy * cy);
+            if (mag > 0.0f) { *out_x = cx - (cx / mag) * 28.0f; *out_y = cy - (cy / mag) * 28.0f; }
+            else             { *out_x = cx; *out_y = cy; }
+            break;
+        }
+        case MODULE_TYPE_MAST: {
+            /* Stand 20 units toward ship centre from the mast base */
+            float mag = sqrtf(cx * cx + cy * cy);
+            if (mag > 0.0f) { *out_x = cx - (cx / mag) * 20.0f; *out_y = cy - (cy / mag) * 20.0f; }
+            else             { *out_x = cx; *out_y = cy + 20.0f; }
+            break;
+        }
+        case MODULE_TYPE_HELM:
+        case MODULE_TYPE_STEERING_WHEEL: {
+            /* Stand slightly forward of the wheel */
+            *out_x = cx;
+            *out_y = cy + 22.0f;
+            break;
+        }
+        case MODULE_TYPE_LADDER: {
+            /* Stand beside the ladder so the NPC doesn't block it */
+            *out_x = cx + 22.0f;
+            *out_y = cy;
+            break;
+        }
+        default:
+            /* DECK, SEAT, CUSTOM: stand at module centre */
+            *out_x = cx;
+            *out_y = cy;
+            break;
+    }
+}
+
+/**
  * Tick world NPCs: animate movement across deck, then update world positions.
  */
 static void tick_world_npcs(float dt) {
@@ -3688,10 +3741,8 @@ static void tick_world_npcs(float dt) {
                         }
                         if (!intr_mod) intr_mod = intr_stack;
                         if (intr_mod) {
-                            float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(intr_mod->local_pos.x));
-                            float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(intr_mod->local_pos.y));
-                            float mmag = sqrtf(mx * mx + my * my);
-                            if (mmag > 0.0f) { mx -= (mx / mmag) * 28.0f; my -= (my / mmag) * 28.0f; }
+                            float mx, my;
+                            get_module_interact_pos(intr_mod, &mx, &my);
                             npc->target_local_x     = mx;
                             npc->target_local_y     = my;
                             npc->assigned_weapon_id = (uint32_t)intr_mod->id;
@@ -4028,11 +4079,8 @@ static void tick_world_npcs(float dt) {
             if (!target_mod) target_mod = stack_mod;
 
             if (target_mod) {
-                float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(target_mod->local_pos.x));
-                float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(target_mod->local_pos.y));
-                // Stop 28 client units inward from the hull edge
-                float mmag = sqrtf(mx * mx + my * my);
-                if (mmag > 0.0f) { mx -= (mx / mmag) * 28.0f; my -= (my / mmag) * 28.0f; }
+                float mx, my;
+                get_module_interact_pos(target_mod, &mx, &my);
                 npc->target_local_x     = mx;
                 npc->target_local_y     = my;
                 npc->assigned_weapon_id = (uint32_t)target_mod->id;
@@ -4062,8 +4110,8 @@ static void tick_world_npcs(float dt) {
                         for (uint8_t m = 0; m < sim_ship->module_count; m++) {
                             ShipModule* mod = &sim_ship->modules[m];
                             if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
-                            float mx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
-                            float my = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                            float mx, my;
+                            get_module_interact_pos(mod, &mx, &my);
                             float ddx = mx - npc->local_x, ddy = my - npc->local_y;
                             if (sqrtf(ddx * ddx + ddy * ddy) < 10.0f) continue;
                             mx_list[mod_choices] = mx;
