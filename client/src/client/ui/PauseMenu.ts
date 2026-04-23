@@ -15,8 +15,6 @@ export interface GameSettings {
   antialiasing: boolean;
   particleQuality: 'low' | 'medium' | 'high';
   targetFPS: number;
-  mouseSensitivity: number;
-  invertMouseY: boolean;
   keyBindings: Map<string, string>;
 }
 
@@ -31,6 +29,11 @@ export class PauseMenu {
   /** Action currently waiting for a key press, or null. */
   private listeningAction: string | null = null;
   private boundKeyListener: ((e: KeyboardEvent) => void) | null = null;
+  private boundMouseListener: ((e: MouseEvent) => void) | null = null;
+  /** True when settings have been changed but not yet applied. */
+  private hasUnsavedChanges = false;
+  /** Keybind changes staged but not yet applied. */
+  private pendingBindings: Map<string, string> = new Map();
 
   /** Called when the player clicks "Logout". */
   public onLogout: (() => void) | null = null;
@@ -196,26 +199,29 @@ export class PauseMenu {
           <!-- Controls tab -->
           <div class="pm-settings-body" id="ps-tab-controls" style="display:none">
 
-            <label class="pm-setting-row">
-              <span class="pm-setting-label">Mouse Sensitivity</span>
-              <div class="pm-slider-wrap">
-                <input class="pm-slider" id="ps-mouse-sens" type="range" min="10" max="300" step="5" />
-                <span class="pm-slider-val" id="ps-mouse-sens-val">100</span>
-              </div>
-            </label>
-
-            <label class="pm-setting-row">
-              <span class="pm-setting-label">Invert Mouse Y</span>
-              <input class="pm-toggle" id="ps-invert-y" type="checkbox" />
-            </label>
-
             <div class="pm-keybind-header">Key Bindings</div>
             <div id="ps-keybinds"></div>
 
           </div>
 
           <div class="pm-divider"></div>
-          <button class="pm-btn primary" id="pm-settings-back">← Back</button>
+          <div class="pm-settings-footer">
+            <button class="pm-btn" id="pm-settings-back">← Back</button>
+            <button class="pm-btn primary" id="pm-settings-apply" disabled>Apply</button>
+          </div>
+        </div>
+
+        <!-- Unsaved changes prompt (shown over settings panel) -->
+        <div id="pm-unsaved-prompt" style="display:none">
+          <div class="pm-unsaved-box">
+            <div class="pm-unsaved-title">Unsaved Changes</div>
+            <div class="pm-unsaved-msg">You have unapplied changes. Apply them before leaving?</div>
+            <div class="pm-unsaved-btns">
+              <button class="pm-btn primary" id="pm-unsaved-apply">Apply &amp; Back</button>
+              <button class="pm-btn pm-btn-danger" id="pm-unsaved-discard">Discard</button>
+              <button class="pm-btn" id="pm-unsaved-cancel">Cancel</button>
+            </div>
+          </div>
         </div>
       </div>
     `;
@@ -373,7 +379,8 @@ export class PauseMenu {
         display: flex;
         flex-direction: column;
         gap: 4px;
-        max-height: 380px;
+        height: 380px;
+        min-height: 380px;
         overflow-x: hidden;
         overflow-y: auto;
         padding-right: 6px;
@@ -555,6 +562,79 @@ export class PauseMenu {
         from { opacity: 1; }
         to   { opacity: 0.5; }
       }
+      #pause-menu .pm-settings-footer {
+        display: flex;
+        gap: 8px;
+        width: 100%;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+      #pause-menu .pm-settings-footer .pm-btn {
+        flex: 1;
+        min-width: 100px;
+        max-width: 160px;
+      }
+      #pause-menu #pm-settings-apply:disabled {
+        opacity: 0.3;
+        cursor: not-allowed;
+        pointer-events: none;
+      }
+      #pause-menu #pm-settings-apply:not(:disabled) {
+        box-shadow: 0 0 10px rgba(245,200,66,0.55);
+      }
+      #pause-menu .pm-btn-danger {
+        background: rgba(180, 40, 40, 0.35);
+        border-color: rgba(200, 60, 60, 0.5);
+        color: #f88;
+      }
+      #pause-menu .pm-btn-danger:hover {
+        background: rgba(200, 50, 50, 0.55);
+      }
+      /* Unsaved changes overlay */
+      #pause-menu #pm-unsaved-prompt {
+        position: absolute;
+        inset: 0;
+        background: rgba(0,0,0,0.72);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 16px;
+        z-index: 10;
+      }
+      #pause-menu .pm-unsaved-box {
+        background: rgba(20,15,10,0.97);
+        border: 1px solid rgba(212,175,55,0.4);
+        border-radius: 12px;
+        padding: 24px 28px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        max-width: 300px;
+        text-align: center;
+      }
+      #pause-menu .pm-unsaved-title {
+        font-size: 16px;
+        font-weight: 700;
+        color: #d4af37;
+        letter-spacing: 0.5px;
+      }
+      #pause-menu .pm-unsaved-msg {
+        font-size: 13px;
+        color: rgba(255,255,255,0.65);
+        line-height: 1.5;
+      }
+      #pause-menu .pm-unsaved-btns {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+      #pause-menu .pm-unsaved-btns .pm-btn {
+        font-size: 12px;
+        padding: 8px 14px;
+        min-width: 80px;
+      }
     `;
     return style;
   }
@@ -605,9 +685,29 @@ export class PauseMenu {
       tab.addEventListener('click', () => this.switchSettingsTab(tab.dataset.tab!));
     });
 
-    // Settings back button
+    // Settings back button — check for unsaved changes first
     this.container.querySelector('#pm-settings-back')!.addEventListener('click', () => {
+      this.tryGoBack();
+    });
+
+    // Apply button
+    this.container.querySelector('#pm-settings-apply')!.addEventListener('click', () => {
+      this.applySettings();
+    });
+
+    // Unsaved prompt buttons
+    this.container.querySelector('#pm-unsaved-apply')!.addEventListener('click', () => {
+      this.applySettings();
+      this.hideUnsavedPrompt();
       this.hideSettingsPanel();
+    });
+    this.container.querySelector('#pm-unsaved-discard')!.addEventListener('click', () => {
+      this.hasUnsavedChanges = false;
+      this.hideUnsavedPrompt();
+      this.hideSettingsPanel();
+    });
+    this.container.querySelector('#pm-unsaved-cancel')!.addEventListener('click', () => {
+      this.hideUnsavedPrompt();
     });
 
     // Settings inputs — wire live changes
@@ -684,17 +784,42 @@ export class PauseMenu {
 
   private showSettingsPanel(): void {
     this.settingsVisible = true;
+    this.hasUnsavedChanges = false;
+    // Seed pending keybinds from saved config so changes are staged separately
+    const savedCfg = ClientConfigManager.load();
+    this.pendingBindings = new Map(savedCfg.input.keyBindings);
     this.container.querySelector<HTMLElement>('#pm-main')!.style.display = 'none';
     const panel = this.container.querySelector<HTMLElement>('#pm-settings-panel')!;
     panel.style.display = '';
     this.switchSettingsTab('audio');
     this.loadSettingsIntoPanel();
+    // Reset apply button to disabled state
+    const applyBtn = this.container.querySelector<HTMLButtonElement>('#pm-settings-apply')!;
+    applyBtn.disabled = true;
   }
 
   private hideSettingsPanel(): void {
     this.settingsVisible = false;
+    this.hasUnsavedChanges = false;
+    this.pendingBindings.clear();
     this.container.querySelector<HTMLElement>('#pm-settings-panel')!.style.display = 'none';
     this.container.querySelector<HTMLElement>('#pm-main')!.style.display = '';
+  }
+
+  private tryGoBack(): void {
+    if (this.hasUnsavedChanges) {
+      this.showUnsavedPrompt();
+    } else {
+      this.hideSettingsPanel();
+    }
+  }
+
+  private showUnsavedPrompt(): void {
+    this.container.querySelector<HTMLElement>('#pm-unsaved-prompt')!.style.display = '';
+  }
+
+  private hideUnsavedPrompt(): void {
+    this.container.querySelector<HTMLElement>('#pm-unsaved-prompt')!.style.display = 'none';
   }
 
   private switchSettingsTab(tab: string): void {
@@ -713,7 +838,6 @@ export class PauseMenu {
     const cfg = ClientConfigManager.load();
     const g = cfg.graphics;
     const a = cfg.audio;
-    const i = cfg.input;
 
     this.setSlider('ps-master-vol', Math.round((a.masterVolume ?? 1) * 100));
     this.setSlider('ps-sfx-vol',    Math.round((a.sfxVolume   ?? 0.8) * 100));
@@ -726,11 +850,8 @@ export class PauseMenu {
     (this.container.querySelector<HTMLSelectElement>('#ps-fps-cap')!).value =
       String(g.targetFPS ?? 144);
 
-    this.setSlider('ps-mouse-sens', Math.round((i.mouseSensitivity ?? 1) * 100));
-    (this.container.querySelector<HTMLInputElement>('#ps-invert-y')!).checked =
-      i.invertMouseY ?? false;
-
-    this.buildKeybindRows(i.keyBindings);
+    // Use pendingBindings so unsaved keybind changes survive tab switches
+    this.buildKeybindRows(this.pendingBindings);
   }
 
   // ── Keybind rows ──────────────────────────────────────────────────────────
@@ -750,10 +871,19 @@ export class PauseMenu {
         { action: 'jump',          label: 'Jump'            },
         { action: 'interact',      label: 'Interact / Board'},
         { action: 'dismount',      label: 'Dismount'        },
-        { keys: ['LMB'],           label: 'Attack / Fire'   },
-        { keys: ['RMB'],           label: 'Aim'             },
         { keys: ['1–9'],           label: 'Hotbar Slots'    },
         { keys: ['F'],             label: 'Unequip Item'    },
+      ],
+    },
+    {
+      label: 'Combat Controls',
+      entries: [
+        { action: 'attack',       label: 'Attack'                              },
+        { action: 'block',        label: 'Block'                               },
+        { action: 'heavy_attack', label: 'Heavy Attack', note: 'hold to charge'},
+        { keys: ['1–9'],          label: 'Select Weapon Slot'                  },
+        { keys: ['F'],            label: 'Unequip / Holster'                   },
+        { keys: ['Scroll'],       label: 'Cycle Weapons'                       },
       ],
     },
     {
@@ -795,8 +925,11 @@ export class PauseMenu {
     },
   ];
 
-  /** Convert a KeyboardEvent.code like "KeyW" or "Space" to a short display string. */
+  /** Convert a KeyboardEvent.code or mouse button code to a short display string. */
   private static codeToLabel(code: string): string {
+    if (code === 'MouseLeft')      return 'LMB';
+    if (code === 'MouseRight')     return 'RMB';
+    if (code === 'MouseMiddle')    return 'MMB';
     if (code.startsWith('Key'))    return code.slice(3);
     if (code.startsWith('Digit'))  return code.slice(5);
     if (code === 'Space')          return 'Space';
@@ -894,15 +1027,11 @@ export class PauseMenu {
   }
 
   private startListening(action: string): void {
-    // Cancel any previous listen
     this.stopListening(false);
 
     this.listeningAction = action;
-    const btn = this.container.querySelector<HTMLButtonElement>(`.pm-bind-btn[data-action="${action}"]`);
-    if (btn) {
-      btn.classList.add('listening');
-      btn.textContent = 'Press a key…';
-    }
+    const btns = this.container.querySelectorAll<HTMLButtonElement>(`.pm-bind-btn[data-action="${action}"]`);
+    btns.forEach(btn => { btn.classList.add('listening'); btn.textContent = 'Press key or click…'; });
 
     this.boundKeyListener = (e: KeyboardEvent) => {
       e.preventDefault();
@@ -911,10 +1040,29 @@ export class PauseMenu {
         this.stopListening(false);
         return;
       }
+      this.removeBoundMouseListener();
       this.commitBind(action, e.code);
     };
 
-    window.addEventListener('keydown', this.boundKeyListener, { capture: true, once: true });
+    this.boundMouseListener = (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const codeMap: Record<number, string> = { 0: 'MouseLeft', 1: 'MouseMiddle', 2: 'MouseRight' };
+      const code = codeMap[e.button] ?? `Mouse${e.button}`;
+      window.removeEventListener('keydown', this.boundKeyListener!, { capture: true });
+      this.boundKeyListener = null;
+      this.commitBind(action, code);
+    };
+
+    window.addEventListener('keydown',   this.boundKeyListener,   { capture: true, once: true });
+    window.addEventListener('mousedown', this.boundMouseListener, { capture: true, once: true });
+  }
+
+  private removeBoundMouseListener(): void {
+    if (this.boundMouseListener) {
+      window.removeEventListener('mousedown', this.boundMouseListener, { capture: true });
+      this.boundMouseListener = null;
+    }
   }
 
   private stopListening(committed: boolean): void {
@@ -922,35 +1070,32 @@ export class PauseMenu {
       window.removeEventListener('keydown', this.boundKeyListener, { capture: true });
       this.boundKeyListener = null;
     }
+    this.removeBoundMouseListener();
     if (!committed && this.listeningAction) {
-      // Restore the old label
-      const cfg = ClientConfigManager.load();
-      const code = cfg.input.keyBindings.get(this.listeningAction) ?? '';
-      const btn = this.container.querySelector<HTMLButtonElement>(
-        `.pm-bind-btn[data-action="${this.listeningAction}"]`);
-      if (btn) {
+      // Restore the pending label (not saved config) so staged changes survive cancels
+      const code = this.pendingBindings.get(this.listeningAction) ?? '';
+      this.container.querySelectorAll<HTMLButtonElement>(
+        `.pm-bind-btn[data-action="${this.listeningAction}"]`
+      ).forEach(btn => {
         btn.classList.remove('listening');
         btn.textContent = PauseMenu.codeToLabel(code);
-      }
+      });
     }
     this.listeningAction = null;
   }
 
   private commitBind(action: string, code: string): void {
-    const cfg = ClientConfigManager.load();
-    cfg.input.keyBindings.set(action, code);
-    ClientConfigManager.save(cfg);
+    // Stage the change — do NOT save to config or fire onSettingsChange until Apply
+    this.pendingBindings.set(action, code);
 
-    const btn = this.container.querySelector<HTMLButtonElement>(`.pm-bind-btn[data-action="${action}"]`);
-    if (btn) {
-      btn.classList.remove('listening');
-      btn.textContent = PauseMenu.codeToLabel(code);
-    }
+    this.container.querySelectorAll<HTMLButtonElement>(`.pm-bind-btn[data-action="${action}"]`)
+      .forEach(btn => { btn.classList.remove('listening'); btn.textContent = PauseMenu.codeToLabel(code); });
+
     this.listeningAction = null;
     this.boundKeyListener = null;
+    this.boundMouseListener = null;
 
-    // Notify so the app can apply the new bindings immediately
-    this.saveAndNotify();
+    this.markDirty();
   }
 
   private setSlider(id: string, value: number): void {
@@ -960,37 +1105,40 @@ export class PauseMenu {
     label.textContent = String(value);
   }
 
-  /** Wire all settings inputs to save + notify on change. */
+  private markDirty(): void {
+    this.hasUnsavedChanges = true;
+    const applyBtn = this.container.querySelector<HTMLButtonElement>('#pm-settings-apply')!;
+    applyBtn.disabled = false;
+  }
+
+  /** Wire all settings inputs to mark dirty on change (not auto-save). */
   private wireSettingsInputs(): void {
     const onSlider = (id: string, valId: string) => {
       const input = this.container.querySelector<HTMLInputElement>(`#${id}`)!;
       const label = this.container.querySelector<HTMLElement>(`#${valId}`)!;
       input.addEventListener('input', () => {
         label.textContent = input.value;
-        this.saveAndNotify();
+        this.markDirty();
       });
     };
 
     onSlider('ps-master-vol', 'ps-master-vol-val');
     onSlider('ps-sfx-vol',    'ps-sfx-vol-val');
     onSlider('ps-music-vol',  'ps-music-vol-val');
-    onSlider('ps-mouse-sens', 'ps-mouse-sens-val');
 
-    for (const id of ['ps-antialiasing', 'ps-particle-quality', 'ps-fps-cap', 'ps-invert-y']) {
-      this.container.querySelector(`#${id}`)!.addEventListener('change', () => this.saveAndNotify());
+    for (const id of ['ps-antialiasing', 'ps-particle-quality', 'ps-fps-cap']) {
+      this.container.querySelector(`#${id}`)!.addEventListener('change', () => this.markDirty());
     }
   }
 
-  /** Read inputs → build GameSettings → persist → fire callback. */
-  private saveAndNotify(): void {
-    const masterVol      = parseInt((this.container.querySelector<HTMLInputElement>('#ps-master-vol')!).value, 10) / 100;
-    const sfxVol         = parseInt((this.container.querySelector<HTMLInputElement>('#ps-sfx-vol')!).value, 10) / 100;
-    const musicVol       = parseInt((this.container.querySelector<HTMLInputElement>('#ps-music-vol')!).value, 10) / 100;
-    const antialiasing   = (this.container.querySelector<HTMLInputElement>('#ps-antialiasing')!).checked;
+  /** Read inputs → persist (including pending keybinds) → fire callback. Clears dirty flag. */
+  private applySettings(): void {
+    const masterVol       = parseInt((this.container.querySelector<HTMLInputElement>('#ps-master-vol')!).value, 10) / 100;
+    const sfxVol          = parseInt((this.container.querySelector<HTMLInputElement>('#ps-sfx-vol')!).value, 10) / 100;
+    const musicVol        = parseInt((this.container.querySelector<HTMLInputElement>('#ps-music-vol')!).value, 10) / 100;
+    const antialiasing    = (this.container.querySelector<HTMLInputElement>('#ps-antialiasing')!).checked;
     const particleQuality = (this.container.querySelector<HTMLSelectElement>('#ps-particle-quality')!).value as GameSettings['particleQuality'];
-    const targetFPS      = parseInt((this.container.querySelector<HTMLSelectElement>('#ps-fps-cap')!).value, 10);
-    const mouseSensitivity = parseInt((this.container.querySelector<HTMLInputElement>('#ps-mouse-sens')!).value, 10) / 100;
-    const invertMouseY   = (this.container.querySelector<HTMLInputElement>('#ps-invert-y')!).checked;
+    const targetFPS       = parseInt((this.container.querySelector<HTMLSelectElement>('#ps-fps-cap')!).value, 10);
 
     const cfg = ClientConfigManager.load();
     cfg.audio.masterVolume       = masterVol;
@@ -999,9 +1147,15 @@ export class PauseMenu {
     cfg.graphics.antialiasing    = antialiasing;
     cfg.graphics.particleQuality = particleQuality;
     cfg.graphics.targetFPS       = targetFPS;
-    cfg.input.mouseSensitivity   = mouseSensitivity;
-    cfg.input.invertMouseY       = invertMouseY;
+    // Merge staged keybind changes into config
+    for (const [action, code] of this.pendingBindings) {
+      cfg.input.keyBindings.set(action, code);
+    }
     ClientConfigManager.save(cfg);
+
+    this.hasUnsavedChanges = false;
+    const applyBtn = this.container.querySelector<HTMLButtonElement>('#pm-settings-apply')!;
+    applyBtn.disabled = true;
 
     this.onSettingsChange?.({
       masterVolume: masterVol,
@@ -1010,8 +1164,6 @@ export class PauseMenu {
       antialiasing,
       particleQuality,
       targetFPS,
-      mouseSensitivity,
-      invertMouseY,
       keyBindings: new Map(cfg.input.keyBindings),
     });
   }

@@ -153,6 +153,9 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
       ['jump',          'Space'],
       ['interact',      'KeyE'],
       ['dismount',      'KeyR'],
+      ['attack',        'MouseLeft'],
+      ['block',         'MouseRight'],
+      ['heavy_attack',  'MouseLeft'],  // placeholder — will require hold/combo logic
       // Ship controls (independent bindings — same defaults as player WASD)
       ['ship_move_forward',  'KeyW'],
       ['ship_move_backward', 'KeyS'],

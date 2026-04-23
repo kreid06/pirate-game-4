@@ -67,6 +67,7 @@ export const MENU_ID = {
   CRAFTING:  'crafting',
   SHIPYARD:  'shipyard',
   PAUSE:     'pause',
+  CONSOLE:   'console',
 } as const;
 export type MenuId = typeof MENU_ID[keyof typeof MENU_ID];
 

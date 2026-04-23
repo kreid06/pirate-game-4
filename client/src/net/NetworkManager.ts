@@ -96,11 +96,13 @@ export enum MessageType {
   NPC_GOTO_MODULE = 'npc_goto_module',
   NPC_MOVE_TO_POS = 'npc_move_to_pos',
   UPGRADE_PLAYER_STAT = 'upgrade_player_stat',
+  COMMAND = 'command',
 
   PING = 'ping',
   
   // Server to Client  
   HANDSHAKE_RESPONSE = 'handshake_response',
+  COMMAND_RESPONSE = 'command_response',
   WORLD_STATE = 'world_state',
   SNAPSHOT = 'snapshot',
   PONG = 'pong',
@@ -575,6 +577,9 @@ export class NetworkManager {
   public onPlacementFailed: ((reason: string, x: number, y: number, structureType: string, blockerId: number | null) => void) | null = null;
   /** Fired when a door is toggled open or closed by any player. */
   public onDoorToggled: ((id: number, open: boolean) => void) | null = null;
+
+  /** Fired when the server responds to a player command. */
+  public onCommandResponse: ((text: string, success: boolean) => void) | null = null;
 
   /** Fired each server tick with the current state of an active flamethrower wave. */
   public onFlameWaveUpdate: ((
@@ -1227,10 +1232,22 @@ export class NetworkManager {
     this.socket.send(JSON.stringify({ type: 'demolish_structure', timestamp: Date.now(), structure_id: structureId }));
   }
 
-  /** Send a crafting request to the server for the given recipe ID. */
+  /** Send a raw crafting request to the server for the given recipe ID. */
   sendCraftItem(recipeId: string): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: 'craft_item', recipe_id: recipeId, timestamp: Date.now() }));
+  }
+
+  /**
+   * Send a player command (e.g. "/spawn ship") to the server.
+   * The server will reply with a `command_response` message.
+   */
+  sendCommand(command: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
+      this.onCommandResponse?.('Not connected to server.', false);
+      return;
+    }
+    this.socket.send(JSON.stringify({ type: MessageType.COMMAND, command, timestamp: Date.now() }));
   }
 
   /**
@@ -2270,6 +2287,11 @@ export class NetworkManager {
           message.recipe_id ?? '',
           message.reason,
         );
+        break;
+
+      case MessageType.COMMAND_RESPONSE:
+      case 'command_response':
+        this.onCommandResponse?.(message.text ?? message.message ?? '', message.success !== false);
         break;
 
       case 'crafting_open':

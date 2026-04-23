@@ -5,7 +5,7 @@
  * It follows the composition pattern, delegating specific concerns to specialized systems.
  */
 
-import { ClientConfig } from './ClientConfig.js';
+import { ClientConfig, ClientConfigManager } from './ClientConfig.js';
 
 // Graphics System
 import { RenderSystem } from './gfx/RenderSystem.js';
@@ -27,6 +27,7 @@ import { RadialMenu } from './ui/RadialMenu.js';
 import { CraftingMenu } from './ui/CraftingMenu.js';
 import { ShipyardMenu } from './ui/ShipyardMenu.js';
 import { PauseMenu, GameSettings } from './ui/PauseMenu.js';
+import { CommandConsole } from './ui/CommandConsole.js';
 import { logout } from './auth/AuthService.js';
 
 // Audio System
@@ -159,6 +160,8 @@ export class ClientApplication {
   private shipyardMenu = new ShipyardMenu();
   /** Pause overlay — opened by Escape / ` / P when no other menu is up. */
   private pauseMenu = new PauseMenu();
+  /** Terminal command bar — opened by / when no other menu is up. */
+  private commandConsole = new CommandConsole();
   /** True when the player's active slot is wooden_floor or workbench on an island. */
   private islandBuildMode = false;
   private accumulator = 0;
@@ -1251,6 +1254,19 @@ export class ClientApplication {
       this.pauseMenu.onSettingsChange = (settings) => {
         this.applySettings(settings);
       };
+
+      // Wire command console
+      this.commandConsole.onCommand = (cmd) => {
+        this.networkManager.sendCommand(cmd);
+      };
+      this.commandConsole.onVisibilityChange = (visible) => {
+        this.uiManager?.setActiveMenuId(visible ? MENU_ID.CONSOLE : null);
+      };
+      this.networkManager.onCommandResponse = (text, success) => {
+        this.commandConsole.pushResponse(text, success ? 'response' : 'error');
+        // Auto-open the console so the player sees the reply
+        if (!this.commandConsole.visible) this.commandConsole.open();
+      };
       
       // Initialize UI System
       this.uiManager = new UIManager(this.canvas, this.config);
@@ -1645,7 +1661,7 @@ export class ClientApplication {
   
   /**
    * Apply live settings changes from the pause menu.
-   * Currently handles audio volume; graphics/FPS settings take effect on next load.
+   * Currently handles audio volume and input bindings; graphics/FPS settings take effect on next load.
    */
   private applySettings(settings: GameSettings): void {
     this.audioManager?.setVolumes(
@@ -1653,6 +1669,12 @@ export class ClientApplication {
       settings.sfxVolume,
       settings.musicVolume,
     );
+
+    // Rebuild action mappings so rebound keys take effect immediately
+    if (this.inputManager) {
+      const cfg = ClientConfigManager.load();
+      this.inputManager.updateConfig(cfg.input);
+    }
   }
 
   /**
@@ -2738,6 +2760,13 @@ export class ClientApplication {
       switch (e.key) {
         case 'Escape':
         case '`': { // backtick also closes/cancels
+          // Close command console if open
+          if (this.commandConsole.visible) {
+            this.commandConsole.close();
+            this.uiManager.setActiveMenuId(null);
+            e.preventDefault();
+            break;
+          }
           // Close pause menu if open
           if (this.pauseMenu.visible) {
             this.pauseMenu.close();
@@ -2807,6 +2836,17 @@ export class ClientApplication {
               this.pauseMenu.open();
               this.uiManager.setActiveMenuId(MENU_ID.PAUSE);
             }
+            e.preventDefault();
+          }
+          break;
+        }
+
+        case '/': {
+          // Open command console if nothing else is open
+          if (!this.uiManager.isAnyMenuOpen()
+            && !this.buildMenuOpen
+            && !this.explicitBuildMode) {
+            this.commandConsole.open();
             e.preventDefault();
           }
           break;

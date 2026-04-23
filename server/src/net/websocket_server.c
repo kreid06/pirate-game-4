@@ -11524,6 +11524,99 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "command") == 0) {
+                            /* Player-typed console command.
+                             * {"type":"command","command":"/AddPlayerToCompany pirates"}
+                             * Supported commands:
+                             *   /AddPlayerToCompany <pirates|navy|neutral>
+                             */
+                            char cmd_str[256] = "";
+                            char *p_cmd = strstr(payload, "\"command\":");
+                            if (p_cmd) {
+                                p_cmd += 10;
+                                while (*p_cmd == ' ') p_cmd++;
+                                if (*p_cmd == '"') {
+                                    p_cmd++;
+                                    int ci = 0;
+                                    while (*p_cmd && *p_cmd != '"' && ci < 255)
+                                        cmd_str[ci++] = *p_cmd++;
+                                    cmd_str[ci] = '\0';
+                                }
+                            }
+
+                            /* Strip leading slash */
+                            char *cmd_body = cmd_str;
+                            if (cmd_body[0] == '/') cmd_body++;
+
+                            /* Parse command name and first argument */
+                            char cmd_name[64] = "";
+                            char cmd_arg1[64] = "";
+                            {
+                                int i = 0;
+                                while (cmd_body[i] && cmd_body[i] != ' ' && i < 63)
+                                    { cmd_name[i] = cmd_body[i]; i++; }
+                                cmd_name[i] = '\0';
+                                if (cmd_body[i] == ' ') {
+                                    i++;
+                                    int j = 0;
+                                    while (cmd_body[i] && cmd_body[i] != ' ' && j < 63)
+                                        cmd_arg1[j++] = cmd_body[i++];
+                                    cmd_arg1[j] = '\0';
+                                }
+                            }
+
+                            /* Lowercase for case-insensitive matching */
+                            for (int i = 0; cmd_name[i]; i++)
+                                if (cmd_name[i] >= 'A' && cmd_name[i] <= 'Z')
+                                    cmd_name[i] += 32;
+                            for (int i = 0; cmd_arg1[i]; i++)
+                                if (cmd_arg1[i] >= 'A' && cmd_arg1[i] <= 'Z')
+                                    cmd_arg1[i] += 32;
+
+                            if (strcmp(cmd_name, "addplayertocompany") == 0) {
+                                uint8_t new_company = 0;
+                                bool company_valid = true;
+                                if (strcmp(cmd_arg1, "pirates") == 0)       new_company = 1;
+                                else if (strcmp(cmd_arg1, "navy") == 0)     new_company = 2;
+                                else if (strcmp(cmd_arg1, "neutral") == 0)  new_company = 0;
+                                else company_valid = false;
+
+                                if (!company_valid) {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\","
+                                        "\"success\":false,"
+                                        "\"text\":\"Unknown company '%s'. Use: pirates, navy, neutral\"}",
+                                        cmd_arg1);
+                                } else {
+                                    int res = websocket_server_set_player_company(
+                                        client->player_id, new_company);
+                                    if (res == 0) {
+                                        const char *company_names[] = {"Neutral","Pirates","Navy"};
+                                        const char *cname = (new_company < 3)
+                                            ? company_names[new_company] : "Unknown";
+                                        log_info("🏴 Player %u joined company %u (%s) via command",
+                                                 client->player_id, new_company, cname);
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":true,"
+                                            "\"text\":\"You joined the %s.\"}",
+                                            cname);
+                                    } else {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":false,"
+                                            "\"text\":\"Failed to update company.\"}");
+                                    }
+                                }
+                            } else {
+                                snprintf(response, sizeof(response),
+                                    "{\"type\":\"command_response\","
+                                    "\"success\":false,"
+                                    "\"text\":\"Unknown command: /%s\"}",
+                                    cmd_name);
+                            }
+                            handled = true;
+
                         } else {
                             ws_server.unknown_messages_received++;
                             ws_server.last_unknown_time = get_time_ms();
