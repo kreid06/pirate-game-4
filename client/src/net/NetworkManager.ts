@@ -103,6 +103,7 @@ export enum MessageType {
   // Server to Client  
   HANDSHAKE_RESPONSE = 'handshake_response',
   COMMAND_RESPONSE = 'command_response',
+  PLAYER_TELEPORTED = 'player_teleported',
   WORLD_STATE = 'world_state',
   SNAPSHOT = 'snapshot',
   PONG = 'pong',
@@ -580,6 +581,9 @@ export class NetworkManager {
 
   /** Fired when the server responds to a player command. */
   public onCommandResponse: ((text: string, success: boolean) => void) | null = null;
+
+  /** Fired when the server teleports a player (e.g. TpPlayerToShip command). */
+  public onPlayerTeleported: ((playerId: number, x: number, y: number, parentShip: number, localX: number, localY: number) => void) | null = null;
 
   /** Fired each server tick with the current state of an active flamethrower wave. */
   public onFlameWaveUpdate: ((
@@ -2292,6 +2296,17 @@ export class NetworkManager {
       case MessageType.COMMAND_RESPONSE:
       case 'command_response':
         this.onCommandResponse?.(message.text ?? message.message ?? '', message.success !== false);
+        break;
+
+      case 'player_teleported':
+        this.onPlayerTeleported?.(
+          message.player_id ?? 0,
+          message.x ?? 0,
+          message.y ?? 0,
+          message.parent_ship ?? 0,
+          message.local_x ?? 0,
+          message.local_y ?? 0,
+        );
         break;
 
       case 'crafting_open':

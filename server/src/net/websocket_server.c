@@ -11608,6 +11608,109 @@ int websocket_server_update(struct Sim* sim) {
                                             "\"text\":\"Failed to update company.\"}");
                                     }
                                 }
+
+                            } else if (strcmp(cmd_name, "tpplayertoship") == 0) {
+                                /* /TpPlayerToShip <playername> <ship_id>
+                                 * Teleports the named player to the deck of the specified ship.
+                                 * <playername> is a case-insensitive prefix/exact match.
+                                 * <ship_id> is the numeric ship ID. */
+                                char cmd_arg2[64] = "";
+                                {
+                                    /* Re-parse from cmd_body to get both args cleanly */
+                                    const char *p = cmd_body;
+                                    /* Skip command name */
+                                    while (*p && *p != ' ') p++;
+                                    while (*p == ' ') p++;
+                                    /* arg1 = player name */
+                                    int ai = 0;
+                                    while (*p && *p != ' ' && ai < 63) cmd_arg1[ai++] = *p++;
+                                    cmd_arg1[ai] = '\0';
+                                    while (*p == ' ') p++;
+                                    /* arg2 = ship id */
+                                    ai = 0;
+                                    while (*p && *p != ' ' && ai < 63) cmd_arg2[ai++] = *p++;
+                                    cmd_arg2[ai] = '\0';
+                                }
+
+                                if (cmd_arg1[0] == '\0' || cmd_arg2[0] == '\0') {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\","
+                                        "\"success\":false,"
+                                        "\"text\":\"Usage: /TpPlayerToShip <playername> <ship_id>\"}");
+                                } else {
+                                    /* Find target player by name (case-insensitive prefix) */
+                                    WebSocketPlayer *tp_player = NULL;
+                                    char lower_arg1[64];
+                                    for (int i = 0; cmd_arg1[i] && i < 63; i++)
+                                        lower_arg1[i] = (cmd_arg1[i] >= 'A' && cmd_arg1[i] <= 'Z')
+                                            ? cmd_arg1[i] + 32 : cmd_arg1[i];
+                                    lower_arg1[strlen(cmd_arg1)] = '\0';
+
+                                    for (int i = 0; i < WS_MAX_CLIENTS && !tp_player; i++) {
+                                        if (!players[i].active) continue;
+                                        char lower_name[64];
+                                        for (int j = 0; players[i].name[j] && j < 63; j++)
+                                            lower_name[j] = (players[i].name[j] >= 'A' && players[i].name[j] <= 'Z')
+                                                ? players[i].name[j] + 32 : players[i].name[j];
+                                        lower_name[strlen(players[i].name)] = '\0';
+                                        if (strstr(lower_name, lower_arg1))
+                                            tp_player = &players[i];
+                                    }
+
+                                    /* Find target ship by ID */
+                                    uint16_t target_ship_id = (uint16_t)atoi(cmd_arg2);
+                                    SimpleShip *tp_ship = find_ship(target_ship_id);
+
+                                    if (!tp_player) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":false,"
+                                            "\"text\":\"Player '%s' not found.\"}",
+                                            cmd_arg1);
+                                    } else if (!tp_ship) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":false,"
+                                            "\"text\":\"Ship %s not found.\"}",
+                                            cmd_arg2);
+                                    } else {
+                                        /* Place player at the deck centre of the target ship */
+                                        float deck_cx = (tp_ship->deck_min_x + tp_ship->deck_max_x) * 0.5f;
+                                        float deck_cy = (tp_ship->deck_min_y + tp_ship->deck_max_y) * 0.5f;
+
+                                        /* Dismount from any module first */
+                                        if (tp_player->is_mounted) {
+                                            tp_player->is_mounted         = false;
+                                            tp_player->mounted_module_id  = 0;
+                                            tp_player->controlling_ship_id = 0;
+                                        }
+
+                                        board_player_on_ship(tp_player, tp_ship, deck_cx, deck_cy);
+
+                                        /* Notify all clients of the new position */
+                                        char tp_msg[256];
+                                        snprintf(tp_msg, sizeof(tp_msg),
+                                            "{\"type\":\"player_teleported\","
+                                            "\"player_id\":%u,"
+                                            "\"x\":%.1f,\"y\":%.1f,"
+                                            "\"parent_ship\":%u,"
+                                            "\"local_x\":%.1f,\"local_y\":%.1f}",
+                                            tp_player->player_id,
+                                            tp_player->x, tp_player->y,
+                                            tp_ship->ship_id,
+                                            deck_cx, deck_cy);
+                                        websocket_server_broadcast(tp_msg);
+
+                                        log_info("🚀 Teleported player %u (%s) to ship %u",
+                                                 tp_player->player_id, tp_player->name, tp_ship->ship_id);
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":true,"
+                                            "\"text\":\"Teleported %s to ship %u.\"}",
+                                            tp_player->name, tp_ship->ship_id);
+                                    }
+                                }
+
                             } else {
                                 snprintf(response, sizeof(response),
                                     "{\"type\":\"command_response\","

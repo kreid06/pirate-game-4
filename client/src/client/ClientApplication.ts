@@ -1267,6 +1267,16 @@ export class ClientApplication {
         // Auto-open the console so the player sees the reply
         if (!this.commandConsole.visible) this.commandConsole.open();
       };
+      this.networkManager.onPlayerTeleported = (playerId, x, y, parentShip, localX, localY) => {
+        // Snap the local player position if it's us being teleported
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws?.player) continue;
+          if (ws.player.id !== playerId) continue;
+          ws.player.position = { x, y };
+          ws.player.carrierId = parentShip;
+          ws.player.localPosition = { x: localX, y: localY };
+        }
+      };
       
       // Initialize UI System
       this.uiManager = new UIManager(this.canvas, this.config);

@@ -36,14 +36,22 @@ const COMMANDS: CommandDef[] = [
     args: [{ name: 'company', values: ['pirates', 'navy', 'neutral'] }],
   },
   {
+    name: 'TpPlayerToShip',
+    description: 'Teleport a player to a ship by ship ID.',
+    args: [
+      { name: 'playername' },
+      { name: 'ship_id' },
+    ],
+  },
+  {
     name: 'help',
     description: 'List available commands.',
     args: [],
   },
 ];
 
-/** Lookup by name for quick access. */
-const CMD_MAP = new Map<string, CommandDef>(COMMANDS.map(c => [c.name, c]));
+/** Lookup by lowercase name for case-insensitive access. */
+const CMD_MAP = new Map<string, CommandDef>(COMMANDS.map(c => [c.name.toLowerCase(), c]));
 
 export class CommandConsole {
   public visible = false;
@@ -58,6 +66,7 @@ export class CommandConsole {
   private logEl!: HTMLDivElement;
   private inputEl!: HTMLInputElement;
   private hintEl!: HTMLSpanElement;
+  private sizerEl!: HTMLSpanElement;
 
   private history: string[] = [];
   private historyIndex = -1;
@@ -80,6 +89,7 @@ export class CommandConsole {
     this.logEl   = this.container.querySelector<HTMLDivElement>('#cmd-log')!;
     this.inputEl = this.container.querySelector<HTMLInputElement>('#cmd-input')!;
     this.hintEl  = this.container.querySelector<HTMLSpanElement>('#cmd-hint')!;
+    this.sizerEl = this.container.querySelector<HTMLSpanElement>('#cmd-sizer')!
 
     this.bindEvents();
     this.syncVisibility();
@@ -95,6 +105,7 @@ export class CommandConsole {
     this.clearTabState();
     this.syncVisibility();
     requestAnimationFrame(() => {
+      this.updateInputWidth();
       this.inputEl.focus();
       this.inputEl.setSelectionRange(1, 1);
     });
@@ -141,10 +152,11 @@ export class CommandConsole {
     const argCount = argParts.length;       // 0 = still typing command name
 
     if (argCount === 0) {
-      // Complete command name
+      // Complete command name (case-insensitive prefix match, preserve original casing)
+      const lowerCurrent = current.toLowerCase();
       return COMMANDS
         .map(c => `/${c.name}`)
-        .filter(c => c.startsWith(current.toLowerCase()));
+        .filter(c => c.toLowerCase().startsWith(lowerCurrent));
     }
 
     // Complete an argument value
@@ -154,34 +166,51 @@ export class CommandConsole {
     const argDef = def.args[argIndex];
     if (!argDef?.values) return [];
     const prefix = argParts[argIndex].toLowerCase();
-    const base = `/${cmdName} ${argParts.slice(0, argIndex).join(' ')}${argIndex > 0 ? ' ' : ''}`;
+    // Use the original command name casing for the completed result
+    const origCmdName = def.name;
+    const base = `/${origCmdName} ${argParts.slice(0, argIndex).join(' ')}${argIndex > 0 ? ' ' : ''}`;
     return argDef.values
       .filter(v => v.startsWith(prefix))
       .map(v => `${base}${v}`);
   }
 
+  /** Resize the input to its content so the ghost hint sits flush after the text. */
+  private updateInputWidth(): void {
+    this.sizerEl.textContent = this.inputEl.value || '/';
+    this.inputEl.style.width = Math.max(this.sizerEl.offsetWidth + 2, 40) + 'px';
+  }
+
   /** Update the ghost-hint shown to the right of the cursor. */
   private updateHint(current: string): void {
-    const body = current.slice(1);
-    const parts = body.split(' ');
-    const cmdName = parts[0].toLowerCase();
-    const def = CMD_MAP.get(cmdName);
+    const matches = this.buildTabMatches(current);
+    if (matches.length === 0) { this.clearHint(); return; }
 
-    if (!def) {
-      // Partial command name → show first matching command
-      const match = COMMANDS.find(c => c.name.startsWith(cmdName) && c.name !== cmdName);
-      this.hintEl.textContent = match ? match.name.slice(cmdName.length) : '';
+    const best = matches[0];
+    const suffix = best.slice(current.length);
+
+    if (suffix !== '') {
+      // Show the remaining characters of the best match
+      this.hintEl.textContent = suffix;
       return;
     }
 
-    // Show argument hint
-    const argIndex = parts.length - 2; // parts[0]=cmd, parts[1..]=args; -2 for 0-index
-    const nextArg = def.args[Math.max(0, argIndex + 1)];
-    if (nextArg && parts.length <= def.args.length) {
-      this.hintEl.textContent = ` <${nextArg.name}>`;
-    } else {
-      this.hintEl.textContent = '';
+    // Current text fully matches a candidate — if it's a full command name,
+    // show the first expected argument value as a hint.
+    const body = current.slice(1);           // strip leading slash
+    const parts = body.split(' ');
+    const cmdName = parts[0].toLowerCase();
+    const def = CMD_MAP.get(cmdName);
+    if (def) {
+      const argIndex = parts.length - 2;     // 0-based index of the arg being typed
+      const nextIndex = argIndex + 1;
+      const nextArg = def.args[nextIndex];
+      if (nextArg) {
+        const firstVal = nextArg.values?.[0] ?? nextArg.name;
+        this.hintEl.textContent = firstVal;
+        return;
+      }
     }
+    this.clearHint();
   }
 
   private clearHint(): void { this.hintEl.textContent = ''; }
@@ -208,12 +237,12 @@ export class CommandConsole {
     if (name === 'help') {
       this.showHelp();
       this.inputEl.value = '/';
+      this.updateInputWidth();
       return;
     }
 
     this.onCommand?.(cmd);
-    this.inputEl.value = '/';
-    this.updateHint('/');
+    this.close();
   }
 
   private showHelp(): void {
@@ -229,6 +258,7 @@ export class CommandConsole {
   private bindEvents(): void {
     this.inputEl.addEventListener('input', () => {
       this.clearTabState();
+      this.updateInputWidth();
       this.updateHint(this.inputEl.value);
     });
 
@@ -250,7 +280,7 @@ export class CommandConsole {
           e.preventDefault();
           const current = this.inputEl.value;
 
-          // First Tab press — build the match list from current text
+          // Build match list on first Tab press
           if (this.tabMatches.length === 0) {
             this.tabBase = current;
             this.tabMatches = this.buildTabMatches(current);
@@ -259,19 +289,26 @@ export class CommandConsole {
 
           if (this.tabMatches.length === 0) break;
 
-          // Cycle forward (Shift+Tab cycles backward)
+          // First Tab completes the ghost suggestion (index 0); subsequent Tabs cycle
           if (e.shiftKey) {
-            this.tabIndex = (this.tabIndex - 1 + this.tabMatches.length) % this.tabMatches.length;
+            this.tabIndex = this.tabIndex <= 0
+              ? this.tabMatches.length - 1
+              : this.tabIndex - 1;
           } else {
-            this.tabIndex = (this.tabIndex + 1) % this.tabMatches.length;
+            this.tabIndex = this.tabIndex < 0
+              ? 0
+              : (this.tabIndex + 1) % this.tabMatches.length;
           }
 
           const chosen = this.tabMatches[this.tabIndex];
-          // Append a space after a completed command name so next Tab jumps to args
-          const isFullCommand = CMD_MAP.has(chosen.slice(1));
+          // Append trailing space after a fully completed command name so next
+          // Tab immediately moves into argument completion.
+          const isFullCommand = CMD_MAP.has(chosen.slice(1).toLowerCase())
+            && !chosen.includes(' ');
           this.inputEl.value = isFullCommand ? chosen + ' ' : chosen;
           const len = this.inputEl.value.length;
           this.inputEl.setSelectionRange(len, len);
+          this.updateInputWidth();
           this.updateHint(this.inputEl.value);
           break;
         }
@@ -285,6 +322,7 @@ export class CommandConsole {
             this.inputEl.value = this.history[next];
             const len = this.inputEl.value.length;
             this.inputEl.setSelectionRange(len, len);
+            this.updateInputWidth();
             this.updateHint(this.inputEl.value);
           }
           break;
@@ -299,10 +337,12 @@ export class CommandConsole {
             this.inputEl.value = this.history[prev];
             const len = this.inputEl.value.length;
             this.inputEl.setSelectionRange(len, len);
+            this.updateInputWidth();
             this.updateHint(this.inputEl.value);
           } else {
             this.historyIndex = -1;
             this.inputEl.value = '/';
+            this.updateInputWidth();
             this.clearHint();
           }
           break;
@@ -361,6 +401,7 @@ export class CommandConsole {
           <input id="cmd-input" type="text" autocomplete="off" spellcheck="false"
                  placeholder="type a command… (Tab to autocomplete)" />
           <span id="cmd-hint"></span>
+          <span id="cmd-sizer" aria-hidden="true"></span>
         </div>
       </div>
     `;
@@ -428,10 +469,10 @@ export class CommandConsole {
         position: relative;
         display: flex;
         align-items: center;
+        overflow: hidden;
       }
 
       #cmd-input {
-        flex: 1;
         background: transparent;
         border: none;
         outline: none;
@@ -439,19 +480,32 @@ export class CommandConsole {
         font-family: inherit;
         font-size: inherit;
         caret-color: #f5c842;
-        min-width: 0;
+        min-width: 40px;
+        width: 40px;    /* dynamically updated via JS */
+        flex-shrink: 0;
       }
       #cmd-input::placeholder {
         color: rgba(245,200,66,0.3);
       }
 
       #cmd-hint {
-        color: rgba(245,200,66,0.35);
+        color: rgba(245,200,66,0.32);
         font-family: inherit;
         font-size: inherit;
         pointer-events: none;
         white-space: pre;
         user-select: none;
+        flex-shrink: 0;
+      }
+
+      #cmd-sizer {
+        position: absolute;
+        visibility: hidden;
+        white-space: pre;
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 13px;
+        pointer-events: none;
+        left: 0; top: 0;
       }
     `;
     return el;
