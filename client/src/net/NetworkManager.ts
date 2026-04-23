@@ -1450,12 +1450,13 @@ export class NetworkManager {
 
   /** Send a respawn request to the server.
    *  Pass shipId to spawn aboard a friendly ship, or worldX/worldY to spawn at a world position. */
-  sendRespawnRequest(shipId?: number, worldX?: number, worldY?: number): void {
+  sendRespawnRequest(shipId?: number, worldX?: number, worldY?: number, islandId?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: Record<string, unknown> = { type: MessageType.RESPAWN_REQUEST };
     if (shipId !== undefined) msg.shipId = shipId;
     if (worldX !== undefined) msg.worldX = worldX;
     if (worldY !== undefined) msg.worldY = worldY;
+    if (islandId !== undefined) msg.islandId = islandId;
     this.socket.send(JSON.stringify(msg));
   }
 

@@ -1356,8 +1356,8 @@ export class ClientApplication {
       });
 
       // Wire respawn confirmation: send respawn_request to server, close screen
-      this.uiManager.setRespawnConfirmedCallback((shipId, worldX, worldY) => {
-        this.networkManager.sendRespawnRequest(shipId, worldX, worldY);
+      this.uiManager.setRespawnConfirmedCallback((shipId, worldX, worldY, islandId) => {
+        this.networkManager.sendRespawnRequest(shipId, worldX, worldY, islandId);
         this.uiManager.closeRespawnScreen();
       });
 

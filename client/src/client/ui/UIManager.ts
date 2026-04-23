@@ -272,7 +272,7 @@ export class UIManager {
   }
 
   /** Set the callback that fires when the player confirms a respawn location. */
-  setRespawnConfirmedCallback(cb: (shipId?: number, worldX?: number, worldY?: number) => void): void {
+  setRespawnConfirmedCallback(cb: (shipId?: number, worldX?: number, worldY?: number, islandId?: number) => void): void {
     this.respawnScreen.onRespawnConfirmed = cb;
   }
 

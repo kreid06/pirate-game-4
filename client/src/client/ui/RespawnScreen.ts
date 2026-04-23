@@ -8,6 +8,7 @@ import { Ship, IslandDef } from '../../sim/Types.js';
 interface SpawnOption {
   type: 'ship' | 'island';
   shipId?: number;
+  islandId?: number;
   x: number;
   y: number;
   label: string;
@@ -17,8 +18,9 @@ export class RespawnScreen {
   public visible: boolean = false;
 
   /** Called when the player confirms a respawn location.
-   *  shipId is set when spawning on a ship, otherwise worldX/worldY are used. */
-  public onRespawnConfirmed: ((shipId?: number, worldX?: number, worldY?: number) => void) | null = null;
+   *  shipId is set when spawning on a ship, islandId when spawning on an island,
+   *  otherwise worldX/worldY are used. */
+  public onRespawnConfirmed: ((shipId?: number, worldX?: number, worldY?: number, islandId?: number) => void) | null = null;
 
   private selectedOption: SpawnOption | null = null;
   private spawnOptions: SpawnOption[] = [];
@@ -56,6 +58,7 @@ export class RespawnScreen {
     for (const isl of islands) {
       this.spawnOptions.push({
         type: 'island',
+        islandId: isl.id,
         x: isl.x,
         y: isl.y,
         label: `Isle ${isl.id ?? '?'}`,
@@ -99,11 +102,16 @@ export class RespawnScreen {
     ctx.fillStyle = '#999999';
     ctx.fillText('Select a spawn location and press RESPAWN', cw / 2, ch * 0.14 + 38);
 
-    // ── Minimap panel ─────────────────────────────────────────────────────────
-    const mapW = Math.min(cw - 64, 680);
-    const mapH = Math.min(ch * 0.52, 460);
+    // ── Minimap panel — fills available space maintaining world aspect ratio ──
+    const worldAspect = this.WORLD_W / this.WORLD_H;
+    const maxMapW = cw - 64;
+    const maxMapH = ch * 0.72;
+    let mapW = maxMapW;
+    let mapH = mapW / worldAspect;
+    if (mapH > maxMapH) { mapH = maxMapH; mapW = mapH * worldAspect; }
+    mapW = Math.floor(mapW); mapH = Math.floor(mapH);
     const mapX = (cw - mapW) / 2;
-    const mapY = ch * 0.22;
+    const mapY = ch * 0.20;
 
     ctx.fillStyle = '#071420';
     ctx.strokeStyle = '#335566';
@@ -258,9 +266,9 @@ export class RespawnScreen {
       if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
         if (this.selectedOption) {
           if (this.selectedOption.type === 'ship') {
-            this.onRespawnConfirmed?.(this.selectedOption.shipId, undefined, undefined);
+            this.onRespawnConfirmed?.(this.selectedOption.shipId, undefined, undefined, undefined);
           } else {
-            this.onRespawnConfirmed?.(undefined, this.selectedOption.x, this.selectedOption.y);
+            this.onRespawnConfirmed?.(undefined, undefined, undefined, this.selectedOption.islandId);
           }
           this.visible = false;
         }

@@ -9773,12 +9773,64 @@ int websocket_server_update(struct Sim* sim) {
                                             log_warn("⚔️  Respawn ship %u not found — spawning at world origin", ship_id);
                                         }
                                     } else {
-                                        // Spawn at provided world coordinates or default
+                                        // Spawn at provided world coordinates, island, or default
                                         float spawn_x = 800.0f, spawn_y = 600.0f;
-                                        const char* p_x = strstr(payload, "\"worldX\":");
-                                        const char* p_y = strstr(payload, "\"worldY\":");
-                                        if (p_x) spawn_x = strtof(p_x + 9, NULL);
-                                        if (p_y) spawn_y = strtof(p_y + 9, NULL);
+
+                                        // Check for islandId — pick a random point on that island
+                                        const char* p_iid = strstr(payload, "\"islandId\":");
+                                        if (p_iid) {
+                                            int island_id = atoi(p_iid + 11);
+                                            IslandDef *isl = NULL;
+                                            for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+                                                if (ISLAND_PRESETS[ii].id == island_id) {
+                                                    isl = &ISLAND_PRESETS[ii];
+                                                    break;
+                                                }
+                                            }
+                                            if (isl) {
+                                                if (isl->vertex_count > 0) {
+                                                    // Polygon island — rejection sampling within scaled grass poly
+                                                    float scale = isl->grass_poly_scale;
+                                                    float bound = isl->poly_bound_r * scale;
+                                                    int attempts = 0;
+                                                    do {
+                                                        float rx = ((float)rand() / (float)RAND_MAX) * 2.0f * bound - bound;
+                                                        float ry = ((float)rand() / (float)RAND_MAX) * 2.0f * bound - bound;
+                                                        // Test against scaled grass polygon
+                                                        float wx = isl->x + rx;
+                                                        float wy = isl->y + ry;
+                                                        // Temporarily check scaled polygon inline
+                                                        int n = isl->vertex_count;
+                                                        int inside = 0;
+                                                        for (int vi = 0, vj = n - 1; vi < n; vj = vi++) {
+                                                            float xi = isl->x + isl->vx[vi] * scale;
+                                                            float yi = isl->y + isl->vy[vi] * scale;
+                                                            float xj = isl->x + isl->vx[vj] * scale;
+                                                            float yj = isl->y + isl->vy[vj] * scale;
+                                                            if (((yi > wy) != (yj > wy)) &&
+                                                                (wx < (xj - xi) * (wy - yi) / (yj - yi) + xi))
+                                                                inside = !inside;
+                                                        }
+                                                        if (inside) { spawn_x = wx; spawn_y = wy; break; }
+                                                    } while (++attempts < 200);
+                                                } else {
+                                                    // Circular island — random point within inner grass radius
+                                                    float r_max = isl->grass_radius_px - isl->grass_max_bump;
+                                                    if (r_max < 10.0f) r_max = 10.0f;
+                                                    float angle = ((float)rand() / (float)RAND_MAX) * 6.2831853f;
+                                                    float dist  = sqrtf((float)rand() / (float)RAND_MAX) * r_max;
+                                                    spawn_x = isl->x + cosf(angle) * dist;
+                                                    spawn_y = isl->y + sinf(angle) * dist;
+                                                }
+                                                log_info("⚔️  Player %u respawning on island %d at (%.1f, %.1f)",
+                                                    player->player_id, island_id, spawn_x, spawn_y);
+                                            }
+                                        } else {
+                                            const char* p_x = strstr(payload, "\"worldX\":");
+                                            const char* p_y = strstr(payload, "\"worldY\":");
+                                            if (p_x) spawn_x = strtof(p_x + 9, NULL);
+                                            if (p_y) spawn_y = strtof(p_y + 9, NULL);
+                                        }
                                         player->x = spawn_x;
                                         player->y = spawn_y;
                                         player->parent_ship_id = 0;
