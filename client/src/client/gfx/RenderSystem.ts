@@ -8264,6 +8264,10 @@ export class RenderSystem {
     const radius = 8 * cameraState.zoom;
     const isMoving = npc.state === NPC_STATE_MOVING;
 
+    // NPC rotation is in ship-local space; add the ship's rotation for world-space rendering
+    const ship = npc.shipId ? worldState.ships.find(s => s.id === npc.shipId) : null;
+    const worldRotation = npc.rotation + (ship ? ship.rotation : 0);
+
     this.ctx.save();
     this.ctx.globalAlpha = isMoving ? 0.7 : 1.0;
 
@@ -8305,8 +8309,8 @@ export class RenderSystem {
     this.ctx.beginPath();
     this.ctx.moveTo(screenPos.x, screenPos.y);
     this.ctx.lineTo(
-      screenPos.x + Math.cos(npc.rotation) * radius * 1.5,
-      screenPos.y + Math.sin(npc.rotation) * radius * 1.5
+      screenPos.x + Math.cos(worldRotation - cameraState.rotation) * radius * 1.5,
+      screenPos.y + Math.sin(worldRotation - cameraState.rotation) * radius * 1.5
     );
     this.ctx.stroke();
 
