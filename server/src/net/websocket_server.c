@@ -1691,6 +1691,9 @@ static void save_player_to_file(const WebSocketPlayer *p) {
         "  \"name\": \"%s\",\n"
         "  \"x\": %.3f,\n"
         "  \"y\": %.3f,\n"
+        "  \"parent_ship_id\": %u,\n"
+        "  \"local_x\": %.3f,\n"
+        "  \"local_y\": %.3f,\n"
         "  \"health\": %u,\n"
         "  \"max_health\": %u,\n"
         "  \"player_level\": %u,\n"
@@ -1706,6 +1709,8 @@ static void save_player_to_file(const WebSocketPlayer *p) {
         "  \"slots\": [",
         p->name,
         (double)p->x, (double)p->y,
+        (unsigned)p->parent_ship_id,
+        (double)p->local_x, (double)p->local_y,
         (unsigned)p->health, (unsigned)p->max_health,
         (unsigned)p->player_level, (unsigned)p->player_xp,
         (unsigned)p->stat_health, (unsigned)p->stat_damage,
@@ -1778,6 +1783,11 @@ static bool load_player_from_file(WebSocketPlayer *p) {
 
     if (json_parse_float_field(buf, "x", &ftmp)) p->x = ftmp;
     if (json_parse_float_field(buf, "y", &ftmp)) p->y = ftmp;
+    unsigned saved_ship_id = 0;
+    float saved_lx = 0.f, saved_ly = 0.f;
+    json_parse_uint_field(buf, "parent_ship_id", &saved_ship_id);
+    json_parse_float_field(buf, "local_x", &saved_lx);
+    json_parse_float_field(buf, "local_y", &saved_ly);
     if (json_parse_uint_field(buf, "health", &tmp))       p->health        = (uint16_t)tmp;
     if (json_parse_uint_field(buf, "max_health", &tmp))   p->max_health    = (uint16_t)tmp;
     if (json_parse_uint_field(buf, "player_level", &tmp)) p->player_level  = (uint8_t)tmp;
@@ -1790,6 +1800,29 @@ static bool load_player_from_file(WebSocketPlayer *p) {
     if (json_parse_uint_field(buf, "active_slot", &tmp))  p->inventory.active_slot = (uint8_t)tmp;
     if (json_parse_uint_field(buf, "armor", &tmp))        p->inventory.armor  = (ItemKind)tmp;
     if (json_parse_uint_field(buf, "shield", &tmp))       p->inventory.shield = (ItemKind)tmp;
+
+    // If the player was on a ship and it still exists, restore local position
+    if (saved_ship_id != 0) {
+        SimpleShip *ship = find_ship((uint16_t)saved_ship_id);
+        if (ship && ship->active) {
+            p->parent_ship_id   = (uint16_t)saved_ship_id;
+            p->local_x          = saved_lx;
+            p->local_y          = saved_ly;
+            p->movement_state   = PLAYER_STATE_WALKING;
+            // Compute current world position from ship's live transform
+            ship_local_to_world(ship, saved_lx, saved_ly, &p->x, &p->y);
+            log_info("💾 Restored '%s' onto ship %u at local (%.1f, %.1f)",
+                     p->name, saved_ship_id, saved_lx, saved_ly);
+        } else {
+            // Ship is gone — fall back to swimming at the saved world coords
+            p->parent_ship_id = 0;
+            p->movement_state = PLAYER_STATE_SWIMMING;
+            log_info("💾 Ship %u no longer exists for '%s' — spawning in water",
+                     saved_ship_id, p->name);
+        }
+    } else {
+        p->movement_state = PLAYER_STATE_SWIMMING;
+    }
 
     // Parse inventory slots array
     const char *slots_arr = strstr(buf, "\"slots\":");
