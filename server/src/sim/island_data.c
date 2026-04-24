@@ -215,7 +215,7 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
    On grass:  spacing = 160/sqrt(0.5) ≈ 226 px → ~50% of tree count.
    On sand:   spacing = 160 px → ~100% of tree count (matches tree density). */
 #define ROCK_GRASS_SPACING 226.0f
-#define ROCK_SAND_SPACING  160.0f
+#define ROCK_SAND_SPACING  226.0f
 #define ROCK_JITTER         40.0f
 
 /**

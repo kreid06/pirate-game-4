@@ -121,6 +121,12 @@ export class RenderSystem {
   private _blockerStructureId: number | null = null;
   /** Timestamp when the blocker highlight should expire (ms). */
   private _blockerExpiry = 0;
+  /** Fiber bushes pending draw — populated by drawIsland, consumed after the render queue (above players). */
+  private _pendingBushes: Array<{
+    sp: { x: number; y: number };
+    isHovered: boolean; bushAlpha: number; deathAlpha: number;
+    ox: number; oy: number;
+  }> = [];
   /** Tree node currently under cursor (world coords) — updated each frame in drawIsland. */
   private _hoveredTree: { wx: number; wy: number } | null = null;
   /** Fiber plant currently under cursor (world coords) — updated each frame in drawIsland. */
@@ -311,7 +317,161 @@ export class RenderSystem {
     return sprites;
   }
 
-  // ── Tree trunk sprite cache (normal + hovered) ──────────────────────────────
+  // ── Rock sprite cache — 4 tones × 3 shapes ─────────────────────────────────
+  private static _rockSprites: Map<string, OffscreenCanvas> | null = null;
+  private static readonly ROCK_SPRITE_SIZE = 96;
+  private static readonly ROCK_SPRITE_R    = 22;
+  private static readonly ROCK_TONES = [
+    { body: '#888890', shadow: '#555560', hi: '#b8b8c0', crack: '#666670' }, // grey
+    { body: '#8a7060', shadow: '#5a4030', hi: '#b09080', crack: '#6a5040' }, // brown
+    { body: '#a09060', shadow: '#6a5830', hi: '#c8b080', crack: '#807040' }, // tan
+    { body: '#505058', shadow: '#303038', hi: '#808088', crack: '#404048' }, // dark
+  ];
+  // Shape variants: [xScale, yScale, rotation, crackX1,crackY1,crackX2,crackY2 as fraction of R]
+  private static readonly ROCK_SHAPES: [number, number, number, number, number, number, number][] = [
+    [1.0,  0.70,  0.0,   -0.10, -0.20,  0.25,  0.30], // standard flat
+    [0.85, 0.85,  0.3,    0.05, -0.30, -0.20,  0.20], // rounder, tilted
+    [1.15, 0.55, -0.2,   -0.20, -0.10,  0.30,  0.25], // wide flat
+  ];
+
+  private static _ensureRockSprites(): Map<string, OffscreenCanvas> {
+    if (RenderSystem._rockSprites) return RenderSystem._rockSprites;
+    const SIZE = RenderSystem.ROCK_SPRITE_SIZE;
+    const R    = RenderSystem.ROCK_SPRITE_R;
+    const cx = SIZE / 2, cy = SIZE / 2;
+    const sprites = new Map<string, OffscreenCanvas>();
+    for (let ti = 0; ti < RenderSystem.ROCK_TONES.length; ti++) {
+      const tone = RenderSystem.ROCK_TONES[ti];
+      for (let si = 0; si < RenderSystem.ROCK_SHAPES.length; si++) {
+        const [sx, sy, rot, cx1, cy1, cx2, cy2] = RenderSystem.ROCK_SHAPES[si];
+        for (const hovered of [false, true]) {
+          const off = new OffscreenCanvas(SIZE, SIZE);
+          const ctx = off.getContext('2d')!;
+          // Shadow
+          ctx.beginPath();
+          ctx.ellipse(cx + R * 0.18, cy + R * 0.18 * sy, R * sx, R * sy, rot, 0, Math.PI * 2);
+          ctx.fillStyle = tone.shadow; ctx.fill();
+          // Body
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, R * sx, R * sy, rot, 0, Math.PI * 2);
+          ctx.fillStyle = hovered ? tone.hi : tone.body; ctx.fill();
+          if (hovered) {
+            ctx.strokeStyle = '#ffe090'; ctx.lineWidth = 2;
+            ctx.stroke();
+          } else {
+            ctx.strokeStyle = tone.shadow; ctx.lineWidth = 1.5;
+            ctx.stroke();
+          }
+          // Highlight fleck
+          ctx.beginPath();
+          ctx.ellipse(cx - R * sx * 0.28, cy - R * sy * 0.28, R * sx * 0.26, R * sy * 0.18, rot - 0.5, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255,255,255,0.32)'; ctx.fill();
+          // Crack
+          ctx.strokeStyle = tone.crack; ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(cx + R * cx1, cy + R * cy1);
+          ctx.lineTo(cx + R * cx2, cy + R * cy2);
+          ctx.stroke();
+          sprites.set(`${ti}_${si}_${hovered ? 'h' : 'n'}`, off);
+        }
+      }
+    }
+    RenderSystem._rockSprites = sprites;
+    return sprites;
+  }
+
+  // ── Fiber bush sprite cache — 4 tints × 4 shape variants ───────────────────
+  private static _fiberSprites: Map<string, OffscreenCanvas> | null = null;
+  private static readonly FIBER_SPRITE_SIZE = 96;
+  private static readonly FIBER_SPRITE_H    = 32; // reference radius for draw-size math
+  private static readonly FIBER_ROT_BINS    = 4;  // reused as shape variant count
+  private static readonly FIBER_TINTS = [
+    { shadow: '#2a5010', mid: '#4a7a20', bright: '#78b838', hi: '#a8e050' }, // green
+    { shadow: '#203a08', mid: '#3c6618', bright: '#62a028', hi: '#90cc48' }, // deep green
+    { shadow: '#3a5010', mid: '#607020', bright: '#96b030', hi: '#c0dc58' }, // yellow-green
+    { shadow: '#284818', mid: '#486830', bright: '#6c9848', hi: '#98c070' }, // sage
+  ];
+  // Each variant: cluster offsets as [dx, dy, r] fractions of base radius
+  private static readonly FIBER_CLUSTERS: [number, number, number][][] = [
+    [ [-0.55,-0.30,0.55], [0.55,-0.30,0.50], [0.00,-0.62,0.52], [0.00, 0.10,0.48] ], // symmetric dome
+    [ [-0.60,-0.18,0.52], [0.50,-0.38,0.48], [0.05,-0.65,0.50], [-0.10,0.08,0.44] ], // lean left
+    [ [-0.45,-0.40,0.50], [0.60,-0.20,0.54], [0.02,-0.60,0.48], [ 0.12,0.12,0.46] ], // lean right
+    [ [-0.50,-0.35,0.56], [0.50,-0.35,0.50], [-0.05,-0.72,0.44],[0.05,-0.10,0.52] ], // tall crown
+  ];
+
+  private static _ensureFiberSprites(): Map<string, OffscreenCanvas> {
+    if (RenderSystem._fiberSprites) return RenderSystem._fiberSprites;
+    const SIZE = RenderSystem.FIBER_SPRITE_SIZE;
+    const BR   = 18; // base radius in sprite pixels
+    const cx = SIZE / 2, cy = SIZE * 0.60; // anchor slightly below centre
+    const sprites = new Map<string, OffscreenCanvas>();
+
+    for (let ti = 0; ti < RenderSystem.FIBER_TINTS.length; ti++) {
+      const tint = RenderSystem.FIBER_TINTS[ti];
+      const clusters = RenderSystem.FIBER_CLUSTERS[ti % RenderSystem.FIBER_CLUSTERS.length];
+      for (let vi = 0; vi < RenderSystem.FIBER_ROT_BINS; vi++) {
+        const vc = RenderSystem.FIBER_CLUSTERS[vi];
+        for (const hovered of [false, true]) {
+          const off = new OffscreenCanvas(SIZE, SIZE);
+          const ctx = off.getContext('2d')!;
+
+          // Ground shadow
+          ctx.beginPath();
+          ctx.ellipse(cx + 2, cy + 3, BR * 0.90, BR * 0.28, 0, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fill();
+
+          // Stem stubs
+          ctx.strokeStyle = tint.shadow; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+          for (let s = -1; s <= 1; s++) {
+            ctx.beginPath();
+            ctx.moveTo(cx + s * BR * 0.28, cy);
+            ctx.lineTo(cx + s * BR * 0.18, cy - BR * 0.55);
+            ctx.stroke();
+          }
+
+          // Back clusters (drawn first = behind)
+          for (let ci = 0; ci < vc.length; ci++) {
+            const [dx, dy, fr] = vc[ci];
+            if (ci >= 2) continue; // back row only
+            const bx = cx + dx * BR, by = cy + dy * BR, r = fr * BR;
+            ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI * 2);
+            ctx.fillStyle = tint.shadow; ctx.fill();
+          }
+
+          // Mid clusters
+          for (let ci = 0; ci < vc.length; ci++) {
+            const [dx, dy, fr] = vc[ci];
+            const bx = cx + dx * BR, by = cy + dy * BR, r = fr * BR;
+            ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI * 2);
+            ctx.fillStyle = hovered ? tint.bright : tint.mid; ctx.fill();
+            if (hovered) {
+              ctx.strokeStyle = '#ffe090'; ctx.lineWidth = 1.5; ctx.stroke();
+            }
+          }
+
+          // Bright top foliage blobs
+          for (let ci = 0; ci < vc.length; ci++) {
+            const [dx, dy, fr] = vc[ci];
+            const bx = cx + dx * BR * 0.72, by = cy + dy * BR * 0.72, r = fr * BR * 0.55;
+            ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI * 2);
+            ctx.fillStyle = hovered ? tint.hi : tint.bright; ctx.fill();
+          }
+
+          // Specular highlight on top cluster
+          const [tx, ty] = vc[2] ?? vc[0];
+          ctx.beginPath();
+          ctx.arc(cx + tx * BR * 0.5 - BR * 0.1, cy + ty * BR * 0.5 - BR * 0.1, BR * 0.18, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.fill();
+
+          sprites.set(`${ti}_${vi}_${hovered ? 'h' : 'n'}`, off);
+        }
+      }
+    }
+    RenderSystem._fiberSprites = sprites;
+    return sprites;
+  }
+
+
   private static _trunkSprites: Map<string, OffscreenCanvas> | null = null;
   private static readonly TRUNK_SPRITE_SIZE = 96;
   private static readonly TRUNK_SPRITE_R    = 30; // reference radius within sprite
@@ -360,51 +520,6 @@ export class RenderSystem {
     RenderSystem._trunkSprites = sprites;
     return sprites;
   }
-
-  // ── Fiber plant sprite cache (normal + hovered) ─────────────────────────────
-  private static _fiberSprites: Map<string, OffscreenCanvas> | null = null;
-  private static readonly FIBER_SPRITE_SIZE = 96;
-  private static readonly FIBER_SPRITE_H    = 32; // reference blade length within sprite
-
-  private static _ensureFiberSprites(): Map<string, OffscreenCanvas> {
-    if (RenderSystem._fiberSprites) return RenderSystem._fiberSprites;
-    const SIZE       = RenderSystem.FIBER_SPRITE_SIZE;
-    const H          = RenderSystem.FIBER_SPRITE_H;
-    const bladeCount = 6;
-    const cx = SIZE / 2, cy = SIZE / 2;
-    const sprites = new Map<string, OffscreenCanvas>();
-    for (const hovered of [false, true]) {
-      const off = new OffscreenCanvas(SIZE, SIZE);
-      const ctx = off.getContext('2d')!;
-      ctx.lineCap = 'round';
-      // Dark base blades
-      ctx.strokeStyle = hovered ? '#7ac040' : '#5a9030';
-      ctx.lineWidth   = 2.5;
-      for (let i = 0; i < bladeCount; i++) {
-        const angle = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.95;
-        const bend  = Math.sin(i * 1.8) * 0.3;
-        const midX  = cx + Math.cos(angle + bend * 0.5) * H * 0.5;
-        const midY  = cy + Math.sin(angle + bend * 0.5) * H * 0.5;
-        const tipX  = cx + Math.cos(angle + bend) * H;
-        const tipY  = cy + Math.sin(angle + bend) * H;
-        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.quadraticCurveTo(midX, midY, tipX, tipY); ctx.stroke();
-      }
-      // Bright inner blades
-      ctx.strokeStyle = hovered ? '#b0ff60' : '#8acc48';
-      ctx.lineWidth   = 1.5;
-      for (let i = 1; i < bladeCount - 1; i++) {
-        const angle = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.6;
-        ctx.beginPath();
-        ctx.moveTo(cx, cy - H * 0.25);
-        ctx.lineTo(cx + Math.cos(angle) * H * 0.72, cy + Math.sin(angle) * H * 0.72);
-        ctx.stroke();
-      }
-      sprites.set(hovered ? 'hovered' : 'normal', off);
-    }
-    RenderSystem._fiberSprites = sprites;
-    return sprites;
-  }
-
 
   private static readonly DEFAULT_ISLAND = {
     id: 0, x: 800, y: 600, preset: 'tropical' as const,
@@ -2045,6 +2160,12 @@ export class RenderSystem {
     // Execute render queue in layer order
     this.executeRenderQueue();
 
+    // ── Fiber bushes — drawn above players (layer 3 equivalent), fade when nearby ──
+    const zoom = camera.getState().zoom;
+    for (const b of this._pendingBushes) {
+      this.drawIslandFiberPlant(b.sp.x, b.sp.y, zoom, b.isHovered, b.bushAlpha * b.deathAlpha, b.ox, b.oy);
+    }
+
     // Restore scaffolded ship positions so game logic is unaffected
     for (const o of scaffoldOverrides) {
       o.ship.position = o.origPos;
@@ -2433,6 +2554,7 @@ export class RenderSystem {
     this._hoveredTree       = null;
     this._hoveredFiberPlant = null;
     this._hoveredRock       = null;
+    this._pendingBushes     = [];
 
     // Hoist frame-constants so they're available both inside the per-island loop
     // and in the post-loop passes 4+5 that execute after structures are drawn.
@@ -2448,12 +2570,15 @@ export class RenderSystem {
       return localPlayer.inventory?.slots[slot]?.item === 'pickaxe';
     })();
     const HARVEST_RANGE_SQ = 110 * 110;
-    const PLANT_HOVER_SQ = (14 * zoom) * (14 * zoom);
+    const PLANT_HOVER_SQ = (30 * zoom) * (30 * zoom);
     const ROCK_HOVER_SQ  = (12 * zoom) * (12 * zoom);
     const LEAF_FADE_OUTER = 420;
     const LEAF_FADE_INNER = 120;
     const MIN_LEAF_ALPHA  = 0.12;
-    const DEATH_FADE_MS   = 2000; // ms — how long a depleted resource fades out
+    const BUSH_FADE_OUTER = 320;
+    const BUSH_FADE_INNER = 90;
+    const MIN_BUSH_ALPHA  = 0.10;
+    const DEATH_FADE_MS   = 2000;// ms — how long a depleted resource fades out
     const now = performance.now();
     const cw = this.canvas.width;
     const ch = this.canvas.height;
@@ -2463,7 +2588,7 @@ export class RenderSystem {
       res: { ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number };
       wx: number; wy: number;
       sp: ReturnType<typeof camera.worldToScreen>;
-      isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number; deathAlpha: number;
+      isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number; bushAlpha: number; deathAlpha: number;
     }> = [];
 
     for (const isl of this.islands) {
@@ -2695,20 +2820,23 @@ export class RenderSystem {
               return MIN_LEAF_ALPHA + t * (1.0 - MIN_LEAF_ALPHA);
             })()
           : 1.0;
-        visibleRes.push({ res, wx, wy, sp, isHovered, inRange, playerNear, leafAlpha, deathAlpha });
+        // Bush fade alpha: fades out when player is close (same pattern as leaf fade)
+        const bushAlpha = res.type === 'fiber' && localPlayer
+          ? (() => {
+              const dist = Math.sqrt((localPlayer.position.x - wx) ** 2 + (localPlayer.position.y - wy) ** 2);
+              const t = Math.max(0, Math.min(1, (dist - BUSH_FADE_INNER) / (BUSH_FADE_OUTER - BUSH_FADE_INNER)));
+              return MIN_BUSH_ALPHA + t * (1.0 - MIN_BUSH_ALPHA);
+            })()
+          : 1.0;
+        visibleRes.push({ res, wx, wy, sp, isHovered, inRange, playerNear, leafAlpha, bushAlpha, deathAlpha });
       }
 
-      // Pass 1 – fiber plants (back-most layer)
-      for (const e of visibleRes) {
-        if (e.res.type !== 'fiber') continue;
-        this.drawIslandFiberPlant(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha);
-      }
-      // Pass 2 – rocks
+      // Pass 1 – rocks (below structures)
       for (const e of visibleRes) {
         if (e.res.type !== 'rock') continue;
-        this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha);
+        this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha, e.res.ox, e.res.oy);
       }
-      // Pass 3 – tree trunks (only visible when player is near or hovering)
+      // Pass 2 – tree trunks (only visible when player is near or hovering)
       for (const e of visibleRes) {
         if (e.res.type !== 'wood') continue;
         if (!e.playerNear && !e.isHovered) continue;
@@ -2716,6 +2844,11 @@ export class RenderSystem {
         const trunkAlpha = (1.0 - e.leafAlpha) * e.deathAlpha;
         if (trunkAlpha < 0.01) continue;
         this.drawIslandTreeTrunk(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.playerNear, e.res.size ?? 1.0, trunkAlpha);
+      }
+      // Fiber bushes deferred to _pendingBushes — drawn above players after render queue
+      for (const e of visibleRes) {
+        if (e.res.type !== 'fiber') continue;
+        this._pendingBushes.push({ sp: e.sp, isHovered: e.isHovered, bushAlpha: e.bushAlpha, deathAlpha: e.deathAlpha, ox: e.res.ox, oy: e.res.oy });
       }
       allVisibleRes.push(...visibleRes);
     }
@@ -2861,44 +2994,37 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0): void {
+  private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0): void {
     const ctx      = this.ctx;
-    const h        = 15 * zoom;
+    const h        = 40 * zoom;
     const spriteH  = RenderSystem.FIBER_SPRITE_H;
     const SIZE     = RenderSystem.FIBER_SPRITE_SIZE;
     const drawSize = SIZE * (h / spriteH);
-    const sprite   = RenderSystem._ensureFiberSprites().get(hovered ? 'hovered' : 'normal')!;
+    const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
+    const ti       = hash % RenderSystem.FIBER_TINTS.length;
+    const bin      = (hash >> 4) % RenderSystem.FIBER_ROT_BINS;
+    const key      = `${ti}_${bin}_${hovered ? 'h' : 'n'}`;
+    const sprite   = RenderSystem._ensureFiberSprites().get(key)!;
     ctx.save();
     ctx.globalAlpha = deathAlpha;
     ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
     ctx.restore();
   }
 
-  private drawIslandRock(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0): void {
-    const ctx = this.ctx;
-    const r   = 12 * zoom;
+  private drawIslandRock(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0): void {
+    const ctx  = this.ctx;
+    const R    = RenderSystem.ROCK_SPRITE_R;
+    const SIZE = RenderSystem.ROCK_SPRITE_SIZE;
+    const r    = 12 * zoom;
+    const drawSize = SIZE * (r / R);
+    const hash = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
+    const ti   = hash % RenderSystem.ROCK_TONES.length;
+    const si   = (hash >> 4) % RenderSystem.ROCK_SHAPES.length;
+    const key  = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
+    const sprite = RenderSystem._ensureRockSprites().get(key)!;
     ctx.save();
     ctx.globalAlpha = deathAlpha;
-    // Main rock body
-    ctx.beginPath();
-    ctx.ellipse(sx, sy + r * 0.15, r, r * 0.7, 0, 0, Math.PI * 2);
-    ctx.fillStyle   = hovered ? '#b0b0b4' : '#888890';
-    ctx.strokeStyle = hovered ? '#ffe090' : '#555560';
-    ctx.lineWidth   = hovered ? 2.5 * zoom : 1.5 * zoom;
-    ctx.fill();
-    ctx.stroke();
-    // Highlight fleck
-    ctx.beginPath();
-    ctx.ellipse(sx - r * 0.25, sy - r * 0.15, r * 0.28, r * 0.18, -0.5, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
-    ctx.fill();
-    // Crack lines
-    ctx.strokeStyle = hovered ? '#888890' : '#666670';
-    ctx.lineWidth   = zoom;
-    ctx.beginPath();
-    ctx.moveTo(sx - r * 0.1, sy - r * 0.2);
-    ctx.lineTo(sx + r * 0.25, sy + r * 0.3);
-    ctx.stroke();
+    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
     ctx.restore();
   }
 
