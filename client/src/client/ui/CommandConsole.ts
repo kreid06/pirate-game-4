@@ -72,6 +72,11 @@ const COMMANDS: CommandDef[] = [
     description: 'List available commands.',
     args: [],
   },
+  {
+    name: 'islandEditor',
+    description: 'Open the island polygon editor (dev tool).',
+    args: [{ name: 'island_id' }],
+  },
 ];
 
 /** Lookup by lowercase name for case-insensitive access. */

@@ -28,6 +28,7 @@ import { CraftingMenu } from './ui/CraftingMenu.js';
 import { ShipyardMenu } from './ui/ShipyardMenu.js';
 import { PauseMenu, GameSettings } from './ui/PauseMenu.js';
 import { CommandConsole } from './ui/CommandConsole.js';
+import { IslandEditor } from './gfx/IslandEditor.js';
 import { logout } from './auth/AuthService.js';
 
 // Audio System
@@ -162,6 +163,8 @@ export class ClientApplication {
   private pauseMenu = new PauseMenu();
   /** Terminal command bar — opened by / when no other menu is up. */
   private commandConsole = new CommandConsole();
+  /** Dev tool for editing island polygon layers — opened via /islandEditor. */
+  private islandEditor: IslandEditor | null = null;
   /** True when the player's active slot is wooden_floor or workbench on an island. */
   private islandBuildMode = false;
   private accumulator = 0;
@@ -1305,6 +1308,22 @@ export class ClientApplication {
 
       // Wire command console
       this.commandConsole.onCommand = (cmd) => {
+        const parts = cmd.slice(1).trim().split(/\s+/);
+        const name  = parts[0].toLowerCase();
+
+        // Client-side-only commands — do NOT forward to server
+        if (name === 'islandeditor') {
+          if (!this.islandEditor) {
+            this.islandEditor = new IslandEditor(this.canvas, () => this.camera);
+          }
+          // Feed current islands from renderSystem (the authoritative client store)
+          this.islandEditor.setIslands(this.renderSystem.getIslands() as any);
+          const idArg = parseInt(parts[1] ?? '', 10);
+          this.islandEditor.open(isNaN(idArg) ? undefined : idArg);
+          this.commandConsole.pushResponse('Island editor opened.', 'info');
+          return;
+        }
+
         this.networkManager.sendCommand(cmd);
       };
       this.commandConsole.onVisibilityChange = (visible) => {
@@ -1466,6 +1485,7 @@ export class ClientApplication {
       this.networkManager.onIslands = (islands) => {
         this.renderSystem.setIslands(islands);
         this.uiManager.setIslandsForRespawn(islands);
+        this.islandEditor?.setIslands(islands);
       };
 
       // Update a resource's HP when the server broadcasts resource_damaged
@@ -1992,6 +2012,11 @@ export class ClientApplication {
 
       // Render game world with hybrid state
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
+
+      // Island editor overlay (dev tool)
+      if (this.islandEditor?.visible) {
+        this.islandEditor.render(this.renderSystem.getContext(), this.camera);
+      }
 
       // Update sword cooldown cursor ring
       if (this.inputManager) {

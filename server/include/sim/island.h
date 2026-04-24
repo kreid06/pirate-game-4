@@ -25,7 +25,7 @@
 #define ISLAND_MAX_RESOURCES 1024
 #define ISLAND_MAX_COUNT     16
 #define ISLAND_BUMP_COUNT    16
-#define ISLAND_MAX_VERTS     64
+#define ISLAND_MAX_VERTS     128
 
 /* Resource type enum — integer values used internally.
  * res_type_str() converts back to the string expected by the client. */
