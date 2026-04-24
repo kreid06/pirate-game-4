@@ -9356,7 +9356,7 @@ int websocket_server_update(struct Sim* sim) {
 
                                     // Send ISLANDS so client can render island geometry
                                     {
-                                        static char hs_islands_buf[524288];
+                                        static char hs_islands_buf[600000];
                                         int hsi_pos = 0;
                                         hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
                                                             "{\"type\":\"ISLANDS\",\"islands\":[");
@@ -12715,7 +12715,7 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 // Send ISLANDS
                                 {
-                                    static char islands_buf[524288];
+                                    static char islands_buf[600000];
                                     int pos = 0;
                                     pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
                                                     "{\"type\":\"ISLANDS\",\"islands\":[");
