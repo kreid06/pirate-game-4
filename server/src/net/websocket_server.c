@@ -182,7 +182,7 @@ struct WebSocketClient {
     uint16_t pending_group_broadcast_ship_id;
     uint8_t  pending_group_broadcast_company_id;
     /* Per-client TCP receive accumulation buffer (handles TCP fragmentation) */
-    char recv_buf[8192];
+    char recv_buf[65536];
     size_t recv_buf_len;
     /* WebSocket message fragment reassembly (handles FIN=0 fragmented frames) */
     char frag_buf[4096];
@@ -9052,18 +9052,29 @@ int websocket_server_update(struct Sim* sim) {
         if (!ws_server.clients[i].connected) continue;
         
         struct WebSocketClient* client = &ws_server.clients[i];
-        char new_data[4096];
-        ssize_t received = recv(client->fd, new_data, sizeof(new_data) - 1, 0);
+        /* Recv directly into the accumulation buffer at the current write offset
+         * so no bytes are ever silently dropped (avoids TCP stream desync). */
+        size_t avail = sizeof(client->recv_buf) - client->recv_buf_len;
+        ssize_t received = (avail > 0)
+            ? recv(client->fd, client->recv_buf + client->recv_buf_len, avail, 0)
+            : 0;
         
         if (received > 0) {
+            client->recv_buf_len += (size_t)received;
+            
             if (!client->handshake_complete) {
-                new_data[received] = '\0';
+                /* Null-terminate for string functions */
+                if (client->recv_buf_len < sizeof(client->recv_buf))
+                    client->recv_buf[client->recv_buf_len] = '\0';
+                else
+                    client->recv_buf[sizeof(client->recv_buf) - 1] = '\0';
                 log_debug("📨 Received handshake request from %s:%u (%zd bytes)", 
                          client->ip_address, client->port, received);
                 
                 // Handle WebSocket handshake
-                if (websocket_handshake(client->fd, new_data)) {
+                if (websocket_handshake(client->fd, client->recv_buf)) {
                     client->handshake_complete = true;
+                    client->recv_buf_len = 0; /* clear - upgrade is done */
                     log_info("✅ WebSocket handshake successful for %s:%u", 
                             client->ip_address, client->port);
                 } else {
@@ -9073,13 +9084,12 @@ int websocket_server_update(struct Sim* sim) {
                     client->connected = false;
                 }
             } else {
-                /* Append new bytes to per-client accumulation buffer */
-                size_t avail = sizeof(client->recv_buf) - client->recv_buf_len;
-                size_t to_copy = ((size_t)received < avail) ? (size_t)received : avail;
-                memcpy(client->recv_buf + client->recv_buf_len, new_data, to_copy);
-                client->recv_buf_len += to_copy;
+                /* recv_buf already has the new bytes; no copy needed */
 
                 if (client->recv_buf_len < 2) continue; /* need at least a frame header */
+
+                /* Process ALL complete frames currently in the accumulation buffer */
+                while (client->recv_buf_len >= 2) {
 
                 /* Peek at FIN bit before parse consumes the buffer position */
                 bool ws_fin = (client->recv_buf[0] & 0x80) != 0;
@@ -9093,12 +9103,18 @@ int websocket_server_update(struct Sim* sim) {
                 if (opcode < 0 || frame_size == 0) {
                     /* Incomplete frame — keep buffered data and wait for more */
                     if (client->recv_buf_len >= sizeof(client->recv_buf) - 1) {
-                        /* Buffer full but still can't parse — discard to avoid deadlock */
-                        log_warn("recv_buf overflow for %s:%u (Player: %u), resetting",
+                        /* recv_buf completely full with an unparseable frame —
+                         * the frame must be larger than our buffer. Close connection. */
+                        log_warn("recv_buf overflow for %s:%u (Player: %u), closing connection",
                                 client->ip_address, client->port, client->player_id);
-                        client->recv_buf_len = 0;
+                        if (client->player_id > 0) {
+                            remove_player(client->player_id);
+                            client->player_id = 0;
+                        }
+                        close(client->fd);
+                        client->connected = false;
                     }
-                    continue;
+                    break; /* wait for more TCP data */
                 }
 
                 /* Consume this frame from the accumulation buffer */
@@ -13005,6 +13021,7 @@ int websocket_server_update(struct Sim* sim) {
                     }
                     close(client->fd);
                     client->connected = false;
+                    break; /* stop processing frames on a closed connection */
                 } else if (opcode == WS_OPCODE_PING) {
                     // PING received - sending PONG
                     // Respond with pong
@@ -13020,6 +13037,7 @@ int websocket_server_update(struct Sim* sim) {
                     log_warn("⚠️ Unknown WebSocket opcode 0x%X from %s:%u (Player: %u)", 
                             opcode, client->ip_address, client->port, client->player_id);
                 }
+                } /* end while: process all buffered frames */
             }
         } else if (received == 0) {
             // Client disconnected
