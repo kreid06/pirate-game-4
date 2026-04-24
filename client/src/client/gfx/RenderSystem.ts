@@ -127,6 +127,15 @@ export class RenderSystem {
     isHovered: boolean; bushAlpha: number; deathAlpha: number;
     ox: number; oy: number;
   }> = [];
+  /** All visible resources — populated by drawIsland, leaves+prompts drawn after bushes in renderWorld. */
+  private _pendingAllRes: Array<{
+    res: { ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number };
+    wx: number; wy: number;
+    sp: { x: number; y: number };
+    isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number; bushAlpha: number; deathAlpha: number;
+  }> = [];
+  private _pendingAxeEquipped     = false;
+  private _pendingPickaxeEquipped = false;
   /** Tree node currently under cursor (world coords) — updated each frame in drawIsland. */
   private _hoveredTree: { wx: number; wy: number } | null = null;
   /** Fiber plant currently under cursor (world coords) — updated each frame in drawIsland. */
@@ -2160,10 +2169,31 @@ export class RenderSystem {
     // Execute render queue in layer order
     this.executeRenderQueue();
 
-    // ── Fiber bushes — drawn above players (layer 3 equivalent), fade when nearby ──
+    // ── Fiber bushes — above players, below tree leaves ──────────────────────
     const zoom = camera.getState().zoom;
     for (const b of this._pendingBushes) {
       this.drawIslandFiberPlant(b.sp.x, b.sp.y, zoom, b.isHovered, b.bushAlpha * b.deathAlpha, b.ox, b.oy);
+    }
+
+    // ── Tree leaves — above bushes and players ────────────────────────────────
+    for (const e of this._pendingAllRes) {
+      if (e.res.type !== 'wood') continue;
+      this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha);
+    }
+    // ── Hover prompts + health bars (always on top) ───────────────────────────
+    for (const e of this._pendingAllRes) {
+      if (e.res.type === 'wood' && e.isHovered) {
+        if (this._pendingAxeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
+        else                          this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, (e.res.size ?? 1.0) * 40);
+      } else if (e.res.type === 'fiber' && e.isHovered) {
+        this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 30);
+      } else if (e.res.type === 'rock' && e.isHovered) {
+        if (this._pendingPickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Rock');
+        else                              this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 28);
+      }
     }
 
     // Restore scaffolded ship positions so game logic is unaffected
@@ -2555,9 +2585,8 @@ export class RenderSystem {
     this._hoveredFiberPlant = null;
     this._hoveredRock       = null;
     this._pendingBushes     = [];
+    this._pendingAllRes     = [];
 
-    // Hoist frame-constants so they're available both inside the per-island loop
-    // and in the post-loop passes 4+5 that execute after structures are drawn.
     const localPlayer = this._cachedLocalPlayer;
     const axeEquipped = (() => {
       if (!localPlayer || localPlayer.carrierId !== 0) return false;
@@ -2569,27 +2598,22 @@ export class RenderSystem {
       const slot = localPlayer.inventory?.activeSlot ?? 0;
       return localPlayer.inventory?.slots[slot]?.item === 'pickaxe';
     })();
+    this._pendingAxeEquipped     = axeEquipped;
+    this._pendingPickaxeEquipped = pickaxeEquipped;
     const HARVEST_RANGE_SQ = 110 * 110;
     const PLANT_HOVER_SQ = (30 * zoom) * (30 * zoom);
     const ROCK_HOVER_SQ  = (12 * zoom) * (12 * zoom);
     const LEAF_FADE_OUTER = 420;
     const LEAF_FADE_INNER = 120;
-    const MIN_LEAF_ALPHA  = 0.12;
+    const MIN_LEAF_ALPHA  = 0.35;
     const BUSH_FADE_OUTER = 320;
     const BUSH_FADE_INNER = 90;
-    const MIN_BUSH_ALPHA  = 0.10;
-    const DEATH_FADE_MS   = 2000;// ms — how long a depleted resource fades out
+    const MIN_BUSH_ALPHA  = 0.30;
+    const DEATH_FADE_MS   = 2000;
     const now = performance.now();
     const cw = this.canvas.width;
     const ch = this.canvas.height;
     const msp = this.mouseWorldPos ? camera.worldToScreen(this.mouseWorldPos) : null;
-    // Collects visible resources from all islands; leaves+prompts drawn after structures.
-    const allVisibleRes: Array<{
-      res: { ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number };
-      wx: number; wy: number;
-      sp: ReturnType<typeof camera.worldToScreen>;
-      isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number; bushAlpha: number; deathAlpha: number;
-    }> = [];
 
     for (const isl of this.islands) {
       const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
@@ -2850,32 +2874,12 @@ export class RenderSystem {
         if (e.res.type !== 'fiber') continue;
         this._pendingBushes.push({ sp: e.sp, isHovered: e.isHovered, bushAlpha: e.bushAlpha, deathAlpha: e.deathAlpha, ox: e.res.ox, oy: e.res.oy });
       }
-      allVisibleRes.push(...visibleRes);
+      this._pendingAllRes.push(...visibleRes);
     }
 
     // ── Structures: above trunks, below leaves ────────────────────────────────
     this.drawPlacedStructures(camera);
-
-    // ── Pass 4 – tree leaves (all islands, above structures) ──────────────────
-    for (const e of allVisibleRes) {
-      if (e.res.type !== 'wood') continue;
-      this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha);
-    }
-    // ── Pass 5 – hover prompts + health bars (always on top) ─────────────────
-    for (const e of allVisibleRes) {
-      if (e.res.type === 'wood' && e.isHovered) {
-        if (axeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
-        else             this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
-        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, (e.res.size ?? 1.0) * 40);
-      } else if (e.res.type === 'fiber' && e.isHovered) {
-        this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
-        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 30);
-      } else if (e.res.type === 'rock' && e.isHovered) {
-        if (pickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Rock');
-        else                 this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
-        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 28);
-      }
-    }
+    // Tree leaves and prompts are drawn in renderWorld after bushes (player → bushes → leaves)
   }
 
   /** Draw a floating "Too far" or "[E] Chop" prompt above a tree. */
@@ -2996,7 +3000,7 @@ export class RenderSystem {
 
   private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0): void {
     const ctx      = this.ctx;
-    const h        = 40 * zoom;
+    const h        = 60 * zoom;
     const spriteH  = RenderSystem.FIBER_SPRITE_H;
     const SIZE     = RenderSystem.FIBER_SPRITE_SIZE;
     const drawSize = SIZE * (h / spriteH);
@@ -3005,9 +3009,13 @@ export class RenderSystem {
     const bin      = (hash >> 4) % RenderSystem.FIBER_ROT_BINS;
     const key      = `${ti}_${bin}_${hovered ? 'h' : 'n'}`;
     const sprite   = RenderSystem._ensureFiberSprites().get(key)!;
+    // Full 360° rotation derived from a different hash bit-range
+    const rot      = ((hash >> 8) % 360) * Math.PI / 180;
     ctx.save();
     ctx.globalAlpha = deathAlpha;
-    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
+    ctx.translate(sx, sy);
+    ctx.rotate(rot);
+    ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
     ctx.restore();
   }
 
