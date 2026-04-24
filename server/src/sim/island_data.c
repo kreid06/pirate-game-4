@@ -211,6 +211,13 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
    interior and away from the rocky/treed edges. */
 #define FIBER_POLY_SCALE    0.70f
 
+/* Rock procedural density settings.
+   On grass:  spacing = 160/sqrt(0.5) ≈ 226 px → ~50% of tree count.
+   On sand:   spacing = 160 px → ~100% of tree count (matches tree density). */
+#define ROCK_GRASS_SPACING 226.0f
+#define ROCK_SAND_SPACING  160.0f
+#define ROCK_JITTER         40.0f
+
 /**
  * Returns non-zero if world point (px, py) lies inside the scaled grass
  * polygon of the island (ray-cast even–odd rule).
@@ -233,7 +240,28 @@ static int inside_grass_poly(const IslandDef *isl, float px, float py)
     return inside;
 }
 
-/* ── Resource size hash ─────────────────────────────────────────────────────
+/**
+ * Returns non-zero if world point (px, py) lies inside the sand (outer)
+ * polygon of the island (ray-cast even–odd rule, uses vx/vy).
+ */
+static int inside_sand_poly(const IslandDef *isl, float px, float py)
+{
+    if (isl->vertex_count == 0) return 0;
+    int inside = 0;
+    int n = isl->vertex_count;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+        float xi = isl->x + isl->vx[i];
+        float yi = isl->y + isl->vy[i];
+        float xj = isl->x + isl->vx[j];
+        float yj = isl->y + isl->vy[j];
+        if ((yi > py) != (yj > py) &&
+            px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+            inside = !inside;
+    }
+    return inside;
+}
+
+
  * Derives a deterministic size scale [0.5, 1.8] from a resource's ox/oy.
  * Matches the JavaScript hash used by the client for visual consistency.
  */
@@ -380,6 +408,63 @@ void islands_generate_trees(void)
             }
         }
         (void)added_fiber;
+    }
+
+    /* ── Third pass: procedural rocks for polygon islands ── */
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        IslandDef *isl = &ISLAND_PRESETS[ii];
+
+        if (isl->vertex_count == 0) continue;
+
+        /* Derive rock seed independently from tree/fiber streams */
+        unsigned int island_seed = (unsigned int)((unsigned int)isl->id * 1664525u + 1013904223u);
+        unsigned int seed = island_seed ^ 0x517CC1B7u;
+
+        /* Bounding box from sand vertices */
+        float half_bound = 0.0f;
+        for (int vi = 0; vi < isl->vertex_count; vi++) {
+            float r = sqrtf(isl->vx[vi]*isl->vx[vi] + isl->vy[vi]*isl->vy[vi]);
+            if (r > half_bound) half_bound = r;
+        }
+
+        /* Two passes: grass zone (sparse) then sand zone (denser) */
+        for (int pass = 0; pass < 2; pass++) {
+            float spacing = (pass == 0) ? ROCK_GRASS_SPACING : ROCK_SAND_SPACING;
+            /* Offset grid origin per pass to avoid overlap at same points */
+            float offset  = (pass == 0) ? 0.0f : spacing * 0.5f;
+
+            float x0 = isl->x - half_bound + offset;
+            float x1 = isl->x + half_bound;
+            float y0 = isl->y - half_bound + offset;
+            float y1 = isl->y + half_bound;
+
+            for (float gx = x0; gx <= x1 && isl->resource_count < ISLAND_MAX_RESOURCES; gx += spacing) {
+                for (float gy = y0; gy <= y1 && isl->resource_count < ISLAND_MAX_RESOURCES; gy += spacing) {
+                    seed = seed * 1664525u + 1013904223u;
+                    float jx = ((float)(seed & 0xFFFFu) / 65535.0f - 0.5f) * (2.0f * ROCK_JITTER);
+                    seed = seed * 1664525u + 1013904223u;
+                    float jy = ((float)(seed & 0xFFFFu) / 65535.0f - 0.5f) * (2.0f * ROCK_JITTER);
+
+                    float rx = gx + jx;
+                    float ry = gy + jy;
+
+                    int on_grass = inside_grass_poly(isl, rx, ry);
+                    int on_sand  = inside_sand_poly(isl, rx, ry);
+
+                    if (pass == 0 && !on_grass) continue;          /* grass pass: grass only */
+                    if (pass == 1 && (on_grass || !on_sand)) continue; /* sand pass: sand ring only */
+
+                    IslandResource *r = &isl->resources[isl->resource_count];
+                    r->ox         = rx - isl->x;
+                    r->oy         = ry - isl->y;
+                    r->type_id    = RES_ROCK;
+                    r->size       = resource_size_from_offset(r->ox, r->oy);
+                    r->max_health = resource_max_health(RES_ROCK);
+                    r->health     = r->max_health;
+                    isl->resource_count++;
+                }
+            }
+        }
     }
 }
 
