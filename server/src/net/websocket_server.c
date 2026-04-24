@@ -14782,6 +14782,27 @@ void websocket_server_tick(float dt) {
                                         }
                                     }
                                 }
+                                /* Boulder collision — push player out of boulder radius */
+                                if (isl_mv) {
+                                    const float PLAYER_R = 8.0f;
+                                    const float BOULDER_BASE_R = 38.0f;
+                                    for (int ri = 0; ri < isl_mv->resource_count; ri++) {
+                                        const IslandResource *res = &isl_mv->resources[ri];
+                                        if (res->type_id != RES_BOULDER) continue;
+                                        if (res->health <= 0) continue;
+                                        float combined_r = PLAYER_R + BOULDER_BASE_R * res->size;
+                                        float bx = isl_mv->x + res->ox;
+                                        float by = isl_mv->y + res->oy;
+                                        float dx = new_x - bx, dy = new_y - by;
+                                        float dist_sq = dx * dx + dy * dy;
+                                        if (dist_sq < combined_r * combined_r && dist_sq > 0.0001f) {
+                                            float dist = sqrtf(dist_sq);
+                                            float pen  = combined_r - dist;
+                                            new_x += (dx / dist) * pen;
+                                            new_y += (dy / dist) * pen;
+                                        }
+                                    }
+                                }
                                 ws_player->x = new_x;
                                 ws_player->y = new_y;
                                 sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(new_x));
