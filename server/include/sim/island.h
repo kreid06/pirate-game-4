@@ -22,7 +22,7 @@
  *   grass_max_bump  — max(abs(grass_bumps)); used as broad-phase margin
  */
 
-#define ISLAND_MAX_RESOURCES 1024
+#define ISLAND_MAX_RESOURCES 4096
 #define ISLAND_MAX_COUNT     16
 #define ISLAND_BUMP_COUNT    16
 #define ISLAND_MAX_VERTS     128

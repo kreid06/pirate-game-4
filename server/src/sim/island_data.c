@@ -198,25 +198,25 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
 
 /* ── Tree generation ─────────────────────────────────────────────────────── */
 
-/* Grid spacing between fiber plants (client pixels). */
-#define TREE_GRID_SPACING 160.0f
+/* Grid spacing between trees (client pixels). */
+#define TREE_GRID_SPACING 220.0f
 /* Half-amplitude of per-tree random jitter (client pixels). */
-#define TREE_JITTER       40.0f
+#define TREE_JITTER       55.0f
 
 /* Fiber-plant procedural density settings.
-   Spacing = TREE_GRID_SPACING / sqrt(2) ≈ 113 px gives ~2× more fiber than trees. */
-#define FIBER_GRID_SPACING 113.0f
-#define FIBER_JITTER        30.0f
+   Spacing = TREE_GRID_SPACING / sqrt(2) ≈ 156 px gives ~2× more fiber than trees. */
+#define FIBER_GRID_SPACING 156.0f
+#define FIBER_JITTER        40.0f
 /* Fiber is scattered over a slightly smaller polygon fraction to keep it
    interior and away from the rocky/treed edges. */
 #define FIBER_POLY_SCALE    0.70f
 
 /* Rock procedural density settings.
-   On grass:  spacing = 160/sqrt(0.5) ≈ 226 px → ~50% of tree count.
-   On sand:   spacing = 160 px → ~100% of tree count (matches tree density). */
-#define ROCK_GRASS_SPACING 226.0f
-#define ROCK_SAND_SPACING  160.0f
-#define ROCK_JITTER         40.0f
+   On grass:  spacing = 220/sqrt(0.5) ≈ 311 px → ~50% of tree count.
+   On sand:   spacing = 220 px → ~100% of tree count (matches tree density). */
+#define ROCK_GRASS_SPACING 311.0f
+#define ROCK_SAND_SPACING  220.0f
+#define ROCK_JITTER         55.0f
 
 /**
  * Returns non-zero if world point (px, py) lies inside the scaled grass
