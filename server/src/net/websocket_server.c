@@ -9395,6 +9395,10 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                                 hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
                                             }
+                                            if (isl->shallow_poly_scale > 0.0f) {
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                                    ",\"shallowPolyScale\":%.4f", isl->shallow_poly_scale);
+                                            }
                                             hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"resources\":[");
                                             for (int hri = 0; hri < isl->resource_count; hri++) {
                                                 const IslandResource *r = &isl->resources[hri];

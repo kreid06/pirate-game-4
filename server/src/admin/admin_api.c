@@ -822,8 +822,8 @@ int admin_api_islands(struct HttpResponse* resp) {
 
         if (isl->vertex_count > 0) {
             /* Polygon island — emit shape vertices as local offsets from centre */
-            ISL_APPEND(",\"grassPolyScale\":%.4f,\"vertexCount\":%d,\"outerVerts\":[",
-                isl->grass_poly_scale, isl->vertex_count);
+            ISL_APPEND(",\"grassPolyScale\":%.4f,\"shallowPolyScale\":%.4f,\"vertexCount\":%d,\"outerVerts\":[",
+                isl->grass_poly_scale, isl->shallow_poly_scale > 0 ? isl->shallow_poly_scale : 1.375f, isl->vertex_count);
             for (int vi = 0; vi < isl->vertex_count; vi++) {
                 if (vi > 0) ISL_APPEND(",");
                 ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->vx[vi], isl->vy[vi]);

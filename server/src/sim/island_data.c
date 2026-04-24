@@ -66,7 +66,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
         .preset           = "continental",
         .vertex_count     = 28,
         .poly_bound_r     = 3300.0f,
-        .grass_poly_scale = 0.82f,
+        .grass_poly_scale  = 0.82f,
+        .shallow_poly_scale = 1.375f,
         /*             N     NNE    NE    ENE   E-NE  E-near   E    ESE */
         .vx = {        0,   800, 1600, 2300, 2750,  2950, 3100, 2900,
         /*            SE    SSE   S-SE     S  S-bay bay-in bay-fl bay-in */
@@ -119,7 +120,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
         .preset           = "continental",
         .vertex_count     = 70,
         .poly_bound_r     = 5800.0f,
-        .grass_poly_scale = 0.82f,
+        .grass_poly_scale  = 0.82f,
+        .shallow_poly_scale = 1.375f,
         .grass_vertex_count = 67,
         .gvx = {
             -2536, -1357,  -197,   927,  2511,  3799,  4518,  4504,

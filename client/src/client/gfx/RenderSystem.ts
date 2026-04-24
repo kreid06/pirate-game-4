@@ -2338,22 +2338,20 @@ export class RenderSystem {
           const verts = isl.vertices;
           const polyBoundR = Math.max(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
           const polyMinR   = Math.min(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
-          const SHALLOW_DEPTH = polyBoundR * SHALLOW_SCALE;
 
-          // Outer subpath: explicit shallow polygon if available, else expand verts radially
+          // Outer subpath: explicit shallow polygon if available, else uniform scale
           let outerScreenVerts: { x: number; y: number }[];
           let shallowBoundR: number;
           if (isl.shallowVertices?.length) {
             outerScreenVerts = isl.shallowVertices.map(v => camera.worldToScreen(Vec2.from(v.x, v.y)));
             shallowBoundR = Math.max(...isl.shallowVertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
           } else {
+            const shallowScale = isl.shallowPolyScale ?? 1.375;
             outerScreenVerts = verts.map(v => {
               const dx = v.x - isl.x, dy = v.y - isl.y;
-              const d  = Math.hypot(dx, dy);
-              const scale = d > 0 ? (d + SHALLOW_DEPTH) / d : 1;
-              return camera.worldToScreen(Vec2.from(isl.x + dx * scale, isl.y + dy * scale));
+              return camera.worldToScreen(Vec2.from(isl.x + dx * shallowScale, isl.y + dy * shallowScale));
             });
-            shallowBoundR = polyBoundR + SHALLOW_DEPTH;
+            shallowBoundR = polyBoundR * shallowScale;
           }
           ctx.beginPath();
           outerScreenVerts.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
