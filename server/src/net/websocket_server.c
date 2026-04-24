@@ -8566,6 +8566,7 @@ static void tick_ghost_ships(float dt) {
 int websocket_server_init(uint16_t port) {
     /* Generate procedural tree positions for all polygon islands. Must be
      * called before any client connects so the ISLANDS message is complete. */
+    islands_load_from_files("data/islands");
     islands_generate_trees();
     islands_build_grid();
 

@@ -904,6 +904,35 @@ document.getElementById('btn-export')!.addEventListener('click', () => {
   );
 });
 
+// Save to Server
+document.getElementById('btn-save-to-server')!.addEventListener('click', async () => {
+  const isl    = ISLANDS[selectedIslandIdx];
+  const schema: Record<string, unknown> = { islandId: isl.id, centre: { x: isl.cx, y: isl.cy } };
+  for (const ld of LAYERS) {
+    const polys = getPolys(isl.id, ld.key).filter(p => p.length > 0);
+    if (!polys.length) continue;
+    if (ld.key === 'islandShape' || ld.key === 'outerSand' || ld.key === 'innerGrass' || ld.key === 'outerShallow') {
+      const verts = polys[0];
+      const label = ld.key === 'innerGrass' ? 'grass' : ld.key === 'outerShallow' ? 'shallow' : 'sand';
+      schema[`${label}_verts_JSON`] = verts;
+    }
+  }
+  const base = serverUrlInput.value.trim().replace(/\/$/, '');
+  try {
+    const res = await fetch(`${base}/api/islands/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(schema, null, 2),
+      signal: AbortSignal.timeout(5000),
+    });
+    const data = await res.json();
+    if (data.ok) toast(`Saved → ${data.file}`);
+    else toast(`Error: ${data.error ?? res.status}`);
+  } catch (e) {
+    toast(`Save failed: ${(e as Error).message}`);
+  }
+});
+
 function toast(msg: string): void {
   const d = document.createElement('div');
   d.textContent = msg;

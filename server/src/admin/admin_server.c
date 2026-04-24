@@ -797,7 +797,10 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                     *path_end = '\0';
 
                     struct HttpResponse resp = {0};
-                    if (strcmp(post_start, "/api/admin/ship") == 0) {
+                    if (strcmp(post_start, "/api/islands/save") == 0) {
+                        size_t blen = body ? strlen(body) : 0;
+                        admin_api_islands_save(&resp, body, blen);
+                    } else if (strcmp(post_start, "/api/admin/ship") == 0) {
                         float x = 400.0f, y = 400.0f;
                         uint8_t company = 1; // COMPANY_PIRATES default
                         if (body) {

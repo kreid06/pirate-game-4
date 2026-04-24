@@ -865,3 +865,69 @@ int admin_api_islands(struct HttpResponse* resp) {
     resp->cache_control = false;
     return 0;
 }
+
+/* ── Island save endpoint ────────────────────────────────────────────────── *
+ * POST /api/islands/save                                                      *
+ * Body: the full island JSON schema (same format as the editor export).       *
+ * Writes to data/islands/island_<id>.json on the server filesystem.          */
+static char save_resp_buf[256];
+
+int admin_api_islands_save(struct HttpResponse *resp, const char *body, size_t body_len)
+{
+    if (!resp || !body || body_len == 0) {
+        resp->status_code = 400;
+        resp->body = (char *)"{\"error\":\"empty body\"}";
+        resp->body_length = 21;
+        resp->content_type = "application/json";
+        return -1;
+    }
+
+    const char *id_ptr = strstr(body, "\"islandId\"");
+    if (!id_ptr) {
+        resp->status_code = 400;
+        resp->body = (char *)"{\"error\":\"missing islandId\"}";
+        resp->body_length = 27;
+        resp->content_type = "application/json";
+        return -1;
+    }
+    id_ptr = strchr(id_ptr, ':');
+    if (!id_ptr) {
+        resp->status_code = 400;
+        resp->body = (char *)"{\"error\":\"malformed islandId\"}";
+        resp->body_length = 29;
+        resp->content_type = "application/json";
+        return -1;
+    }
+    int island_id = atoi(id_ptr + 1);
+    if (island_id <= 0) {
+        resp->status_code = 400;
+        resp->body = (char *)"{\"error\":\"invalid islandId\"}";
+        resp->body_length = 27;
+        resp->content_type = "application/json";
+        return -1;
+    }
+
+    char path[256];
+    snprintf(path, sizeof(path), "data/islands/island_%d.json", island_id);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        int len = snprintf(save_resp_buf, sizeof(save_resp_buf),
+                           "{\"error\":\"cannot write %s\"}", path);
+        resp->status_code = 500;
+        resp->body = save_resp_buf;
+        resp->body_length = (size_t)len;
+        resp->content_type = "application/json";
+        return -1;
+    }
+    fwrite(body, 1, body_len, f);
+    fclose(f);
+
+    int len = snprintf(save_resp_buf, sizeof(save_resp_buf),
+                       "{\"ok\":true,\"file\":\"%s\"}", path);
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = save_resp_buf;
+    resp->body_length = (size_t)len;
+    return 0;
+}

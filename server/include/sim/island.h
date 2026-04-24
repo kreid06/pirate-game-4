@@ -338,6 +338,14 @@ static inline float island_shallow_water_depth(const IslandDef *isl, float px, f
 }
 
 /**
+ * Load island polygon data (sand/grass/shallow vertices, centre) from JSON
+ * files in the given directory.  File names must be island_<id>.json.
+ * Call once at server startup BEFORE islands_generate_trees().
+ * Islands without a matching file keep their compiled-in data.
+ */
+void islands_load_from_files(const char *dir);
+
+/**
  * Procedurally generate tree (wood resource) positions for all polygon
  * islands, filling their resource arrays with a grid+jitter pattern that
  * covers the entire grass polygon interior.  Call once at server startup
