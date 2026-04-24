@@ -213,6 +213,27 @@ extern IslandDef ISLAND_PRESETS[];
 #define SHALLOW_WATER_SCALE 0.375f
 
 /**
+ * Minimum distance from point (px, py) to any edge of the island's sand polygon.
+ * Only valid when isl->vertex_count > 0.
+ */
+static inline float island_poly_edge_dist(const IslandDef *isl, float px, float py) {
+    float min_dist = 1e30f;
+    int n = isl->vertex_count;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+        float ax = isl->x + isl->vx[j], ay = isl->y + isl->vy[j];
+        float bx = isl->x + isl->vx[i], by = isl->y + isl->vy[i];
+        float ex = bx - ax, ey = by - ay;
+        float len2 = ex * ex + ey * ey;
+        float t = len2 > 0.0f ? ((px - ax) * ex + (py - ay) * ey) / len2 : 0.0f;
+        if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+        float cx = ax + t * ex - px, cy = ay + t * ey - py;
+        float d = sqrtf(cx * cx + cy * cy);
+        if (d < min_dist) min_dist = d;
+    }
+    return min_dist;
+}
+
+/**
  * Returns true if (px, py) is in the shallow-water zone of the given island:
  *   - outside the island's beach boundary, AND
  *   - within (island_radius * SHALLOW_WATER_SCALE) of that boundary.
@@ -226,8 +247,9 @@ static inline bool island_in_shallow_water(const IslandDef *isl, float px, float
         float shallow_depth = isl->poly_bound_r * SHALLOW_WATER_SCALE;
         float outer_r = isl->poly_bound_r + shallow_depth;
         if (dist_sq > outer_r * outer_r) return false;
-        /* Must be outside the polygon (in water) */
-        return !island_poly_contains(isl, px, py);
+        if (island_poly_contains(isl, px, py)) return false;
+        /* Use actual edge distance so the zone follows the polygon shape */
+        return island_poly_edge_dist(isl, px, py) < shallow_depth;
     } else {
         float shallow_depth = isl->beach_radius_px * SHALLOW_WATER_SCALE;
         float broad_outer = isl->beach_radius_px + isl->beach_max_bump + shallow_depth;
@@ -245,6 +267,7 @@ static inline bool island_in_shallow_water(const IslandDef *isl, float px, float
  *   0.0 = at or beyond the outer edge (no extra drag)
  *   1.0 = right at the island beach boundary (maximum extra drag)
  * Returns 0.0 when outside the shallow zone or inside the island.
+ * For polygon islands the gradient follows the polygon edge (not a circle).
  */
 static inline float island_shallow_water_depth(const IslandDef *isl, float px, float py) {
     float dx = px - isl->x, dy = py - isl->y;
@@ -252,12 +275,16 @@ static inline float island_shallow_water_depth(const IslandDef *isl, float px, f
 
     if (isl->vertex_count > 0) {
         float shallow_depth = isl->poly_bound_r * SHALLOW_WATER_SCALE;
+        /* Broad-phase circle: skip entirely if clearly outside */
         float outer_r = isl->poly_bound_r + shallow_depth;
         if (dist_sq > outer_r * outer_r) return 0.0f;
+        /* Points inside the island are not shallow water */
         if (island_poly_contains(isl, px, py)) return 0.0f;
-        float dist = sqrtf(dist_sq);
-        float t = (outer_r - dist) / shallow_depth;
-        return (t < 0.0f) ? 0.0f : (t > 1.0f ? 1.0f : t);
+        /* Use actual distance to the nearest polygon edge */
+        float edge_dist = island_poly_edge_dist(isl, px, py);
+        if (edge_dist >= shallow_depth) return 0.0f;
+        float t = 1.0f - edge_dist / shallow_depth;
+        return (t > 1.0f) ? 1.0f : t;
     } else {
         float shallow_depth = isl->beach_radius_px * SHALLOW_WATER_SCALE;
         float broad_outer = isl->beach_radius_px + isl->beach_max_bump + shallow_depth;

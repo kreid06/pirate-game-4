@@ -3694,6 +3694,24 @@ export class RenderSystem {
         return true;
       };
 
+      // Helper: minimum distance from (wx, wy) to any edge of an island's polygon
+      const polyEdgeDist = (verts: {x:number;y:number}[], cx: number, cy: number, wx: number, wy: number): number => {
+        let minDist = Infinity;
+        const n = verts.length;
+        for (let i = 0, j = n - 1; i < n; j = i++) {
+          const ax = verts[j].x, ay = verts[j].y;
+          const bx = verts[i].x, by = verts[i].y;
+          const ex = bx - ax, ey = by - ay;
+          const len2 = ex * ex + ey * ey;
+          let t = len2 > 0 ? ((wx - ax) * ex + (wy - ay) * ey) / len2 : 0;
+          t = Math.max(0, Math.min(1, t));
+          const nearX = ax + t * ex - wx, nearY = ay + t * ey - wy;
+          const d = Math.hypot(nearX, nearY);
+          if (d < minDist) minDist = d;
+        }
+        return minDist;
+      };
+
       let inShallowZone = false;
       if (inWater) {
         for (const isl of this.islands) {
@@ -3701,7 +3719,11 @@ export class RenderSystem {
             const polyBoundR = Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
             const shallowDepth = polyBoundR * SHALLOW_SCALE_G;
             const d = Math.hypot(mx - isl.x, my - isl.y);
-            if (d <= polyBoundR + shallowDepth) { inShallowZone = true; break; }
+            if (d <= polyBoundR + shallowDepth) {
+              // Polygon-accurate: check actual edge distance
+              const edgeDist = polyEdgeDist(isl.vertices, isl.x, isl.y, mx, my);
+              if (edgeDist < shallowDepth) { inShallowZone = true; break; }
+            }
           } else {
             const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
             const maxBump = Math.max(...preset.beachBumps.map(Math.abs));
