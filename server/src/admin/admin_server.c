@@ -869,7 +869,10 @@ int admin_send_response(int client_fd, const struct HttpResponse* resp) {
         "Connection: close\r\n"
         "\r\n",
         resp->status_code,
-        resp->status_code == 200 ? "OK" : "Not Found",
+        resp->status_code == 200 ? "OK" :
+        resp->status_code == 204 ? "No Content" :
+        resp->status_code == 404 ? "Not Found" :
+        resp->status_code == 503 ? "Service Unavailable" : "Internal Server Error",
         resp->content_type ? resp->content_type : "text/plain",
         resp->body_length
     );

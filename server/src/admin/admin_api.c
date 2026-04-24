@@ -799,64 +799,64 @@ static char islands_json_buffer[262144]; /* 256KB — accommodates large polygon
 int admin_api_islands(struct HttpResponse* resp) {
     if (!resp) return -1;
 
+#define ISL_APPEND(...) do { \
+    if (pos < buf_size - 1) \
+        pos += snprintf(islands_json_buffer + pos, (size_t)(buf_size - pos), __VA_ARGS__); \
+} while(0)
+
     int pos = 0;
-    pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
-        "{\"islands\":[");
+    int buf_size = (int)sizeof(islands_json_buffer);
+    ISL_APPEND("{\"islands\":[");
 
     for (int ii = 0; ii < ISLAND_COUNT; ii++) {
         const IslandDef *isl = &ISLAND_PRESETS[ii];
+        if (pos >= buf_size - 8192) {
+            /* Buffer nearly full — stop safely */
+            break;
+        }
         if (ii > 0)
-            pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, ",");
+            ISL_APPEND(",");
 
-        pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
-            "{\"id\":%d,\"cx\":%.1f,\"cy\":%.1f,\"preset\":\"%s\"",
+        ISL_APPEND("{\"id\":%d,\"cx\":%.1f,\"cy\":%.1f,\"preset\":\"%s\"",
             isl->id, isl->x, isl->y, isl->preset);
 
         if (isl->vertex_count > 0) {
             /* Polygon island — emit shape vertices as local offsets from centre */
-            pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
-                ",\"grassPolyScale\":%.4f,\"vertexCount\":%d,\"outerVerts\":[",
+            ISL_APPEND(",\"grassPolyScale\":%.4f,\"vertexCount\":%d,\"outerVerts\":[",
                 isl->grass_poly_scale, isl->vertex_count);
             for (int vi = 0; vi < isl->vertex_count; vi++) {
-                if (vi > 0)
-                    pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, ",");
-                pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
-                    "{\"x\":%.1f,\"y\":%.1f}", isl->vx[vi], isl->vy[vi]);
+                if (vi > 0) ISL_APPEND(",");
+                ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->vx[vi], isl->vy[vi]);
             }
-            pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, "]");
+            ISL_APPEND("]");
             if (isl->grass_vertex_count > 0) {
-                pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
-                    ",\"grassVertCount\":%d,\"grassVerts\":[", isl->grass_vertex_count);
+                ISL_APPEND(",\"grassVertCount\":%d,\"grassVerts\":[", isl->grass_vertex_count);
                 for (int vi = 0; vi < isl->grass_vertex_count; vi++) {
-                    if (vi > 0)
-                        pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, ",");
-                    pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
-                        "{\"x\":%.1f,\"y\":%.1f}", isl->gvx[vi], isl->gvy[vi]);
+                    if (vi > 0) ISL_APPEND(",");
+                    ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->gvx[vi], isl->gvy[vi]);
                 }
-                pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, "]");
+                ISL_APPEND("]");
             }
             if (isl->shallow_vertex_count > 0) {
-                pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
-                    ",\"shallowVertCount\":%d,\"shallowVerts\":[", isl->shallow_vertex_count);
+                ISL_APPEND(",\"shallowVertCount\":%d,\"shallowVerts\":[", isl->shallow_vertex_count);
                 for (int vi = 0; vi < isl->shallow_vertex_count; vi++) {
-                    if (vi > 0)
-                        pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, ",");
-                    pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
-                        "{\"x\":%.1f,\"y\":%.1f}", isl->svx[vi], isl->svy[vi]);
+                    if (vi > 0) ISL_APPEND(",");
+                    ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->svx[vi], isl->svy[vi]);
                 }
-                pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, "]");
+                ISL_APPEND("]");
             }
         } else {
             /* Bump-circle island */
-            pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
-                ",\"beachRadius\":%.1f,\"grassRadius\":%.1f",
+            ISL_APPEND(",\"beachRadius\":%.1f,\"grassRadius\":%.1f",
                 isl->beach_radius_px, isl->grass_radius_px);
         }
 
-        pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, "}");
+        ISL_APPEND("}");
     }
 
-    pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, "]}");
+    ISL_APPEND("]}");
+
+#undef ISL_APPEND
 
     resp->status_code = 200;
     resp->content_type = "application/json";
