@@ -12,6 +12,10 @@ const WORLD_MAX_Y = 8500;
 const WORLD_W = WORLD_MAX_X - WORLD_MIN_X; // 10000
 const WORLD_H = WORLD_MAX_Y - WORLD_MIN_Y; // 9000
 
+// Full coordinate space capacity (Q16.16 × WORLD_SCALE_FACTOR=10)
+const FULL_WORLD_HALF = 327679; // ±327,679 client pixels
+const FULL_WORLD_SIZE = FULL_WORLD_HALF * 2; // 655,358
+
 export class WorldMapScreen {
   public visible = false;
 
@@ -41,13 +45,13 @@ export class WorldMapScreen {
   open(localPlayerPos?: { x: number; y: number }): void {
     this.visible = true;
     this._closeBounds = null;
-    // Always start panned to world centre — centring on the player at fit-zoom
-    // would shift the world box off-screen. Player position is stored for later use.
-    this.panX = WORLD_MIN_X + WORLD_W / 2;
-    this.panY = WORLD_MIN_Y + WORLD_H / 2;
     this._openPlayerPos = localPlayerPos ?? null;
-    // Default zoom: fit the whole world on-screen (recalculated in first render)
-    this.zoom = 0;
+    // Only reset pan/zoom on the very first open (zoom===0 is the sentinel for "never opened")
+    if (this.zoom === 0) {
+      this.panX = WORLD_MIN_X + WORLD_W / 2;
+      this.panY = WORLD_MIN_Y + WORLD_H / 2;
+      // zoom stays 0 — first render will call fitZoom()
+    }
   }
 
   close(): void {
@@ -139,7 +143,71 @@ export class WorldMapScreen {
     const toScreenY = (wy: number) => (wy - this.panY) / this.zoom + ch / 2;
     const toScreenLen = (wl: number) => wl / this.zoom;
 
-    // ── Ocean / world boundary ─────────────────────────────────────────────
+    // ── Grid lines every 100,000 units ────────────────────────────────────
+    {
+      const GRID = 100_000;
+      const gridStart = Math.ceil(-FULL_WORLD_HALF / GRID) * GRID;
+      const gridEnd   = Math.floor( FULL_WORLD_HALF / GRID) * GRID;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+      ctx.lineWidth = 1;
+      ctx.font = '9px Consolas, monospace';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+      for (let g = gridStart; g <= gridEnd; g += GRID) {
+        const sx = toScreenX(g);
+        const sy = toScreenY(g);
+        // Vertical line
+        if (sx >= 0 && sx <= cw) {
+          ctx.beginPath();
+          ctx.moveTo(sx, 0);
+          ctx.lineTo(sx, ch);
+          ctx.stroke();
+          if (g !== 0) {
+            ctx.textAlign = 'center';
+            ctx.fillText(g >= 1000 ? `${g / 1000}k` : String(g), sx, ch - 4);
+          }
+        }
+        // Horizontal line
+        if (sy >= 0 && sy <= ch) {
+          ctx.beginPath();
+          ctx.moveTo(0, sy);
+          ctx.lineTo(cw, sy);
+          ctx.stroke();
+          if (g !== 0) {
+            ctx.textAlign = 'left';
+            ctx.fillText(g >= 1000 ? `${g / 1000}k` : String(g), 4, sy - 3);
+          }
+        }
+      }
+      // Draw the 0,0 axes slightly brighter
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+      const ox = toScreenX(0), oy = toScreenY(0);
+      if (ox >= 0 && ox <= cw) { ctx.beginPath(); ctx.moveTo(ox, 0); ctx.lineTo(ox, ch); ctx.stroke(); }
+      if (oy >= 0 && oy <= ch) { ctx.beginPath(); ctx.moveTo(0, oy); ctx.lineTo(cw, oy); ctx.stroke(); }
+      ctx.restore();
+    }
+
+    // ── Full coordinate-space boundary (±327,679) ─────────────────────────
+    const fbx = toScreenX(-FULL_WORLD_HALF);
+    const fby = toScreenY(-FULL_WORLD_HALF);
+    const fbw = toScreenLen(FULL_WORLD_SIZE);
+    const fbh = toScreenLen(FULL_WORLD_SIZE);
+    ctx.strokeStyle = 'rgba(180, 60, 60, 0.5)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 6]);
+    ctx.strokeRect(fbx, fby, fbw, fbh);
+    ctx.setLineDash([]);
+
+    // Label the full boundary
+    const labelY = Math.max(fby + 14, 16);
+    ctx.save();
+    ctx.textAlign = 'left';
+    ctx.font = '10px Consolas, monospace';
+    ctx.fillStyle = 'rgba(180, 60, 60, 0.6)';
+    ctx.fillText('coordinate boundary ±327,679', fbx + 4, labelY);
+    ctx.restore();
+
+    // ── Ocean / world boundary (content area) ─────────────────────────────
     const bx = toScreenX(WORLD_MIN_X);
     const by = toScreenY(WORLD_MIN_Y);
     const bw = toScreenLen(WORLD_W);
@@ -195,7 +263,7 @@ export class WorldMapScreen {
 
       ctx.save();
       ctx.translate(sx, sy);
-      ctx.rotate(ship.rotation ?? 0);
+      ctx.rotate((ship.rotation ?? 0) + Math.PI / 2);
       // Draw a small ship triangle
       ctx.beginPath();
       ctx.moveTo(0, -r * 1.4);      // bow
@@ -299,20 +367,22 @@ export class WorldMapScreen {
   // ── Private helpers ────────────────────────────────────────────────────────
 
   private fitZoom(): number {
-    if (this._cw === 0 || this._ch === 0) return 14;
-    return Math.max(WORLD_W / (this._cw * 0.92), WORLD_H / (this._ch * 0.92));
+    if (this._cw === 0 || this._ch === 0) return 800;
+    // Zoom out to fit the entire coordinate space (±327,679)
+    return Math.max(FULL_WORLD_SIZE / (this._cw * 0.92), FULL_WORLD_SIZE / (this._ch * 0.92));
   }
 
   private clampPan(): void {
     const hw = (this._cw / 2) * this.zoom;
     const hh = (this._ch / 2) * this.zoom;
-    const worldCX = WORLD_MIN_X + WORLD_W / 2;
-    const worldCY = WORLD_MIN_Y + WORLD_H / 2;
-    // When viewport is larger than the world, lock to world centre
-    if (hw * 2 >= WORLD_W) this.panX = worldCX;
-    else this.panX = Math.max(WORLD_MIN_X + hw, Math.min(WORLD_MAX_X - hw, this.panX));
-    if (hh * 2 >= WORLD_H) this.panY = worldCY;
-    else this.panY = Math.max(WORLD_MIN_Y + hh, Math.min(WORLD_MAX_Y - hh, this.panY));
+    // Pan is clamped to the full coordinate space, not just the content area
+    const fullMin = -FULL_WORLD_HALF;
+    const fullMax =  FULL_WORLD_HALF;
+    const fullSize = FULL_WORLD_SIZE;
+    if (hw * 2 >= fullSize) this.panX = 0;
+    else this.panX = Math.max(fullMin + hw, Math.min(fullMax - hw, this.panX));
+    if (hh * 2 >= fullSize) this.panY = 0;
+    else this.panY = Math.max(fullMin + hh, Math.min(fullMax - hh, this.panY));
   }
 
   private renderScaleBar(ctx: CanvasRenderingContext2D, cw: number, ch: number): void {

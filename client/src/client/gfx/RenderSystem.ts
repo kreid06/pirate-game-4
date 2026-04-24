@@ -2527,50 +2527,47 @@ export class RenderSystem {
         visibleRes.push({ res, wx, wy, sp, isHovered, inRange, playerNear, leafAlpha, deathAlpha });
       }
 
+      // TEMPORARILY DISABLED: resource node rendering (passes 1–5)
       // Pass 1 – fiber plants (back-most layer)
-      for (const e of visibleRes) {
-        if (e.res.type !== 'fiber') continue;
-        this.drawIslandFiberPlant(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha);
-      }
+      // for (const e of visibleRes) {
+      //   if (e.res.type !== 'fiber') continue;
+      //   this.drawIslandFiberPlant(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha);
+      // }
       // Pass 2 – rocks
-      for (const e of visibleRes) {
-        if (e.res.type !== 'rock') continue;
-        this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha);
-      }
+      // for (const e of visibleRes) {
+      //   if (e.res.type !== 'rock') continue;
+      //   this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha);
+      // }
       // Pass 3 – tree trunks
-      for (const e of visibleRes) {
-        if (e.res.type !== 'wood') continue;
-        this.drawIslandTreeTrunk(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.playerNear, e.res.size ?? 1.0, e.deathAlpha);
-      }
-
-      // Defer leaves + prompts until ALL trunks (across all islands) are done,
-      // so that structures can slot in between the two layers.
-      for (const e of visibleRes) allVisibleRes.push(e);
+      // for (const e of visibleRes) {
+      //   if (e.res.type !== 'wood') continue;
+      //   this.drawIslandTreeTrunk(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.playerNear, e.res.size ?? 1.0, e.deathAlpha);
+      // }
     }
 
     // ── Structures: above trunks, below leaves ────────────────────────────────
     this.drawPlacedStructures(camera);
 
     // ── Pass 4 – tree leaves (all islands, above structures) ──────────────────
-    for (const e of allVisibleRes) {
-      if (e.res.type !== 'wood') continue;
-      this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha);
-    }
+    // for (const e of allVisibleRes) {
+    //   if (e.res.type !== 'wood') continue;
+    //   this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha);
+    // }
     // ── Pass 5 – hover prompts + health bars (always on top) ─────────────────
-    for (const e of allVisibleRes) {
-      if (e.res.type === 'wood' && e.isHovered) {
-        if (axeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
-        else             this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
-        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, (e.res.size ?? 1.0) * 40);
-      } else if (e.res.type === 'fiber' && e.isHovered) {
-        this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
-        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 30);
-      } else if (e.res.type === 'rock' && e.isHovered) {
-        if (pickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Rock');
-        else                 this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
-        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 28);
-      }
-    }
+    // for (const e of allVisibleRes) {
+    //   if (e.res.type === 'wood' && e.isHovered) {
+    //     if (axeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
+    //     else             this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
+    //     if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, (e.res.size ?? 1.0) * 40);
+    //   } else if (e.res.type === 'fiber' && e.isHovered) {
+    //     this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
+    //     if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 30);
+    //   } else if (e.res.type === 'rock' && e.isHovered) {
+    //     if (pickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Rock');
+    //     else                 this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
+    //     if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 28);
+    //   }
+    // }
   }
 
   /** Draw a floating "Too far" or "[E] Chop" prompt above a tree. */

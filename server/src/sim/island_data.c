@@ -99,6 +99,185 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
             { .ox = -2500.0f, .oy =  1400.0f, .type_id = RES_ROCK  },
         },
     },
+
+    /* ── Island 3: Crescent (horseshoe) — Combat Cove / Smuggler Cove ──────
+     * ~10,000 × ~8,200 px, centre (-2500, 2500).  Opens southward.
+     * Combat Cove = large inner bay between the two arms.
+     * Smuggler Cove = secondary inlet on inner-west face of left arm.
+     * Beach = concave cove on outer-east face of right arm.
+     * CW winding in screen-space (y-down).                                  */
+    {
+        .id               = 3,
+        .x                = -2500.0f,
+        .y                =  2500.0f,
+        .beach_radius_px  = 0.0f,
+        .grass_radius_px  = 0.0f,
+        .beach_bumps      = {0},
+        .grass_bumps      = {0},
+        .beach_max_bump   = 0.0f,
+        .grass_max_bump   = 0.0f,
+        .preset           = "continental",
+        .vertex_count     = 45,
+        .poly_bound_r     = 5800.0f,
+        .grass_poly_scale = 0.82f,
+        /*  0– 7: outer top arc (upper-left → upper-right)
+         *  8–13: Beach cove — concave outer-east of right arm
+         * 14–17: right arm tip
+         * 18–21: inner right wall (going north)
+         * 22–26: inner top arc (Combat Cove ceiling)
+         * 27–28: inner left upper
+         * 29–33: Smuggler Cove — concave inner-west of left arm
+         * 34–36: inner left south
+         * 37–39: left arm tip
+         * 40–44: left outer coast (going north)                              */
+        .vx = {
+            -4200, -2200,  -700,  1300,  3000,  4400,  4900,  5000,  /* outer top  */
+             4700,  4100,  3100,  2000,  3100,  3800,                 /* beach cove */
+             3700,  3200,  2600,  1800,                               /* right tip  */
+             1300,  1400,  1800,  1700,                               /* inner right*/
+             1100,   400,  -400, -1100, -1700,                        /* inner top  */
+            -1700, -2100,                                             /* inner L up */
+            -2200, -2900, -3400, -3400, -2600,                        /* smuggler   */
+            -2300, -2800, -3000,                                      /* inner L S  */
+            -3100, -3700, -4200,                                      /* left tip   */
+            -4800, -4900, -4700, -4300, -4100,                        /* left outer */
+        },
+        .vy = {
+            -3700, -4000, -3900, -3600, -2800, -1600,  -200,   700,  /* outer top  */
+             1300,  1800,  2200,  2500,  2800,  3200,                 /* beach cove */
+             3500,  3700,  3700,  3500,                               /* right tip  */
+             3000,  2200,  1000,  -200,                               /* inner right*/
+             -900, -1300, -1400, -1200,  -600,                        /* inner top  */
+              100,   300,                                             /* inner L up */
+              600,   700,   900,  1200,  1300,                        /* smuggler   */
+             1600,  2400,  3000,                                      /* inner L S  */
+             3500,  3400,  3000,                                      /* left tip   */
+             2300,  1200,  -100, -1400, -2700,                        /* left outer */
+        },
+        .resource_count = 10,
+        .resources = {
+            { .ox = -3800.0f, .oy = -2000.0f, .type_id = RES_ROCK  },
+            { .ox =  3500.0f, .oy = -1200.0f, .type_id = RES_ROCK  },
+            { .ox = -2500.0f, .oy =  2800.0f, .type_id = RES_ROCK  },
+            { .ox =  2200.0f, .oy =  2800.0f, .type_id = RES_ROCK  },
+            { .ox = -3000.0f, .oy =  -800.0f, .type_id = RES_FIBER },
+            { .ox =  2000.0f, .oy =  -600.0f, .type_id = RES_FIBER },
+            { .ox = -1000.0f, .oy = -2000.0f, .type_id = RES_FIBER },
+            { .ox =  -200.0f, .oy = -2500.0f, .type_id = RES_FIBER },
+            { .ox = -3200.0f, .oy =  1600.0f, .type_id = RES_FIBER },
+            { .ox =  2800.0f, .oy =  1500.0f, .type_id = RES_FIBER },
+        },
+    },
+
+    /* ── Islands 4–8: Smuggler Cove entrance cluster ───────────────────────
+     * Small islets blocking the channel into Smuggler Cove (~offset from
+     * Island 3 centre: X –2200 to –3400, Y 600–1300).                      */
+    {
+        .id = 4, .x = -5550.0f, .y = 3175.0f,
+        .beach_radius_px = 110.0f, .grass_radius_px = 78.0f,
+        .beach_bumps    = {  0, 10, -7, 14,  5, -9, 12,  3, -5, 11, -4,  8, 10, -8,  5, -7 },
+        .beach_max_bump = 14.0f,
+        .grass_bumps    = {  0,  6, -4,  9,  3, -6,  8,  2, -3,  7, -3,  5,  7, -5,  4, -5 },
+        .grass_max_bump =  9.0f,
+        .preset = "tropical",
+    },
+    {
+        .id = 5, .x = -5250.0f, .y = 3000.0f,
+        .beach_radius_px = 90.0f, .grass_radius_px = 64.0f,
+        .beach_bumps    = {  0,  8, -6, 11,  4, -8, 10,  2, -4,  9, -4,  7,  8, -7,  4, -6 },
+        .beach_max_bump = 11.0f,
+        .grass_bumps    = {  0,  5, -4,  7,  3, -5,  7,  1, -3,  6, -2,  5,  5, -5,  3, -4 },
+        .grass_max_bump =  7.0f,
+        .preset = "tropical",
+    },
+    {
+        .id = 6, .x = -4985.0f, .y = 3090.0f,
+        .beach_radius_px = 100.0f, .grass_radius_px = 71.0f,
+        .beach_bumps    = {  0, 12, -6, 10,  5, -7, 11,  2, -6, 10, -5,  9, 11, -7,  6, -5 },
+        .beach_max_bump = 12.0f,
+        .grass_bumps    = {  0,  7, -4,  7,  3, -5,  7,  1, -4,  7, -3,  6,  7, -5,  4, -3 },
+        .grass_max_bump =  7.0f,
+        .preset = "tropical",
+    },
+    {
+        .id = 7, .x = -4770.0f, .y = 3175.0f,
+        .beach_radius_px = 80.0f, .grass_radius_px = 57.0f,
+        .beach_bumps    = {  0,  9, -5, 12,  4, -8, 10,  2, -4,  9, -3,  7,  9, -7,  4, -6 },
+        .beach_max_bump = 12.0f,
+        .grass_bumps    = {  0,  5, -3,  8,  2, -5,  6,  1, -2,  6, -2,  4,  6, -4,  2, -4 },
+        .grass_max_bump =  8.0f,
+        .preset = "tropical",
+    },
+    {
+        .id = 8, .x = -4900.0f, .y = 3310.0f,
+        .beach_radius_px = 85.0f, .grass_radius_px = 60.0f,
+        .beach_bumps    = {  0, 11, -7, 13,  5, -9, 11,  3, -5, 10, -4,  8, 10, -8,  5, -7 },
+        .beach_max_bump = 13.0f,
+        .grass_bumps    = {  0,  6, -4,  8,  3, -6,  7,  2, -3,  7, -3,  5,  6, -5,  3, -5 },
+        .grass_max_bump =  8.0f,
+        .preset = "tropical",
+    },
+
+    /* ── Islands 9–11: Combat Cove east entrance cluster ───────────────────
+     * Guard the passage near the inner right arm (~offset from Island 3:
+     * X 1100–1500, Y 350–600).                                               */
+    {
+        .id = 9, .x = -1435.0f, .y = 2872.0f,
+        .beach_radius_px = 100.0f, .grass_radius_px = 71.0f,
+        .beach_bumps    = {  0, 10, -6, 13,  5, -8, 11,  2, -5, 10, -4,  8, 10, -7,  5, -6 },
+        .beach_max_bump = 13.0f,
+        .grass_bumps    = {  0,  6, -4,  8,  3, -5,  7,  1, -3,  6, -3,  5,  7, -5,  3, -4 },
+        .grass_max_bump =  8.0f,
+        .preset = "tropical",
+    },
+    {
+        .id = 10, .x = -1218.0f, .y = 2959.0f,
+        .beach_radius_px = 90.0f, .grass_radius_px = 64.0f,
+        .beach_bumps    = {  0,  9, -5, 12,  4, -7, 10,  2, -4,  9, -3,  7,  9, -7,  4, -5 },
+        .beach_max_bump = 12.0f,
+        .grass_bumps    = {  0,  5, -3,  7,  2, -5,  6,  1, -3,  6, -2,  4,  6, -4,  2, -3 },
+        .grass_max_bump =  7.0f,
+        .preset = "tropical",
+    },
+    {
+        .id = 11, .x = -1002.0f, .y = 3046.0f,
+        .beach_radius_px = 85.0f, .grass_radius_px = 60.0f,
+        .beach_bumps    = {  0,  8, -6, 11,  4, -8, 10,  2, -4,  9, -4,  7,  8, -6,  4, -6 },
+        .beach_max_bump = 11.0f,
+        .grass_bumps    = {  0,  5, -4,  7,  2, -5,  6,  1, -2,  6, -3,  4,  5, -4,  2, -4 },
+        .grass_max_bump =  7.0f,
+        .preset = "tropical",
+    },
+
+    /* ── Islands 12–14: South islets ───────────────────────────────────────
+     * Scattered south of the two arm tips.                                  */
+    {
+        .id = 12, .x = -5160.0f, .y = 5945.0f,
+        .beach_radius_px = 200.0f, .grass_radius_px = 148.0f,
+        .beach_bumps    = {  0, 18,-11, 22,  8,-14, 19,  5, -8, 17, -6, 13, 16,-12,  8,-10 },
+        .beach_max_bump = 22.0f,
+        .grass_bumps    = {  0, 11, -7, 14,  5, -9, 12,  3, -5, 11, -4,  8, 10, -8,  5, -7 },
+        .grass_max_bump = 14.0f,
+        .preset = "tropical",
+    },
+    {
+        .id = 13, .x = -4015.0f, .y = 6005.0f,
+        .beach_radius_px = 140.0f, .grass_radius_px = 100.0f,
+        .beach_bumps    = {  0, 13, -8, 16,  6,-11, 14,  4, -6, 13, -5, 10, 12,-10,  6, -8 },
+        .beach_max_bump = 16.0f,
+        .grass_bumps    = {  0,  8, -5, 10,  4, -7,  9,  2, -4,  8, -3,  6,  8, -6,  4, -5 },
+        .grass_max_bump = 10.0f,
+        .preset = "tropical",
+    },
+    {
+        .id = 14, .x = -3625.0f, .y = 5885.0f,
+        .beach_radius_px = 90.0f, .grass_radius_px = 64.0f,
+        .beach_bumps    = {  0,  9, -5, 12,  4, -8, 10,  2, -4,  9, -3,  7,  9, -7,  4, -6 },
+        .beach_max_bump = 12.0f,
+        .grass_bumps    = {  0,  5, -3,  7,  2, -5,  6,  1, -3,  6, -2,  4,  6, -4,  2, -3 },
+        .grass_max_bump =  7.0f,
+        .preset = "tropical",
+    },
 };
 
 /* ── Tree generation ─────────────────────────────────────────────────────── */
