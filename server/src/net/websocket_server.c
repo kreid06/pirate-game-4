@@ -7792,6 +7792,17 @@ static int websocket_parse_frame(const char* buffer, size_t buffer_len, char* pa
     return opcode;
 }
 
+/* Send all bytes, looping on partial writes (e.g. large frames filling the kernel send buffer). */
+static ssize_t send_all(int fd, const char *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = send(fd, buf + sent, len - sent, 0);
+        if (n <= 0) return (ssize_t)sent;
+        sent += (size_t)n;
+    }
+    return (ssize_t)sent;
+}
+
 // Create WebSocket frame
 // NOTE: Caller must ensure frame buffer is large enough (payload_len + 10 bytes for header)
 size_t websocket_create_frame(uint8_t opcode, const char* payload, size_t payload_len, char* frame, size_t frame_size) {
@@ -9379,9 +9390,12 @@ int websocket_server_update(struct Sim* sim) {
                                         size_t hs_isl_len = websocket_create_frame(
                                             WS_OPCODE_TEXT, hs_islands_buf, (size_t)hsi_pos,
                                             hs_isl_frame, sizeof(hs_isl_frame));
-                                        if (hs_isl_len > 0 && hs_isl_len < sizeof(hs_isl_frame))
-                                            send(client->fd, hs_isl_frame, hs_isl_len, 0);
-                                        log_info("🏝️  Sent ISLANDS to JSON-handshake player %u", client->player_id);
+                                        if (hs_isl_len > 0 && hs_isl_len < sizeof(hs_isl_frame)) {
+                                            send_all(client->fd, hs_isl_frame, hs_isl_len);
+                                            log_info("🏝️  Sent ISLANDS to JSON-handshake player %u (payload=%d bytes)", client->player_id, hsi_pos);
+                                        } else {
+                                            log_error("❌ ISLANDS frame creation failed: payload=%d, frame_len=%zu", hsi_pos, hs_isl_len);
+                                        }
                                     }
 
                                     // Send current placed structures
@@ -12697,8 +12711,10 @@ int websocket_server_update(struct Sim* sim) {
                                         WS_OPCODE_TEXT, islands_buf, (size_t)pos,
                                         isl_frame, sizeof(isl_frame));
                                     if (isl_frame_len > 0 && isl_frame_len < sizeof(isl_frame)) {
-                                        send(client->fd, isl_frame, isl_frame_len, 0);
-                                        log_info("🏝️  Sent ISLANDS (%d islands) to player %u", ISLAND_COUNT, player_id);
+                                        send_all(client->fd, isl_frame, isl_frame_len);
+                                        log_info("🏝️  Sent ISLANDS (%d islands) to player %u (payload=%d bytes)", ISLAND_COUNT, player_id, pos);
+                                    } else {
+                                        log_error("❌ ISLANDS frame creation failed: payload=%d, frame_len=%zu", pos, isl_frame_len);
                                     }
                                 }
                                 /* Send current placed structures */
