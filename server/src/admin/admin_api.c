@@ -794,7 +794,7 @@ int admin_api_set_player_company(struct HttpResponse* resp, uint32_t player_id, 
 
 /* Island schema endpoint — returns shape vertices + metadata for all islands.
  * Used by the standalone island editor to keep itself in sync with the server. */
-static char islands_json_buffer[65536];
+static char islands_json_buffer[262144]; /* 256KB — accommodates large polygon islands */
 
 int admin_api_islands(struct HttpResponse* resp) {
     if (!resp) return -1;

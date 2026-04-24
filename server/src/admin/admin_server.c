@@ -736,9 +736,22 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
             buffer[received] = '\0';
             
             // Parse request path for GET
+            char *options_start = strstr(buffer, "OPTIONS ");
             char *path_start = strstr(buffer, "GET ");
             char *post_start = strstr(buffer, "POST ");
-            if (path_start) {
+            if (options_start) {
+                /* CORS preflight — reply with all necessary headers */
+                const char *preflight =
+                    "HTTP/1.1 204 No Content\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                    "Access-Control-Allow-Headers: Content-Type\r\n"
+                    "Access-Control-Max-Age: 86400\r\n"
+                    "Content-Length: 0\r\n"
+                    "Connection: close\r\n"
+                    "\r\n";
+                send(client_fd, preflight, strlen(preflight), 0);
+            } else if (path_start) {
                 path_start += 4;
                 char *path_end = strchr(path_start, ' ');
                 if (path_end) {
