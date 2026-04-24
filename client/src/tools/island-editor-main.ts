@@ -167,6 +167,9 @@ function getPolys(islandId: number, layer: LayerKey): Pt[][] {
       if (isl?.shallowVerts) {
         layerData.set(k, [isl.shallowVerts.map(v => ({ ...v }))]);
       } else {
+        const sandKey = dataKey(islandId, 'outerSand');
+        if (!layerData.has(sandKey)) getPolys(islandId, 'outerSand');
+        const sandPoly = layerData.get(sandKey)?.[0] ?? [];
         layerData.set(k, sandPoly.length ? [generateShallowFromSand(sandPoly)] : [[]]);
       }
     } else {
