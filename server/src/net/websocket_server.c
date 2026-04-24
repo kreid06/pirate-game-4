@@ -181,6 +181,13 @@ struct WebSocketClient {
      * only sent to clients of the same company. */
     uint16_t pending_group_broadcast_ship_id;
     uint8_t  pending_group_broadcast_company_id;
+    /* Per-client TCP receive accumulation buffer (handles TCP fragmentation) */
+    char recv_buf[8192];
+    size_t recv_buf_len;
+    /* WebSocket message fragment reassembly (handles FIN=0 fragmented frames) */
+    char frag_buf[4096];
+    size_t frag_buf_len;
+    uint8_t frag_opcode;
 };
 
 struct WebSocketServer {
@@ -7740,18 +7747,20 @@ static void update_player_movement(WebSocketPlayer* player, float rotation, floa
     }
 }
 
-static int websocket_parse_frame(const char* buffer, size_t buffer_len, char* payload, size_t* payload_len) {
+static int websocket_parse_frame(const char* buffer, size_t buffer_len, char* payload, size_t* payload_len, size_t* frame_size_out) {
+    if (frame_size_out) *frame_size_out = 0;
     if (buffer_len < 2) return -1;
     
     uint8_t first_byte = buffer[0];
     uint8_t second_byte = buffer[1];
     
     bool fin = (first_byte & 0x80) != 0;
+    (void)fin; /* caller reads buffer[0] & 0x80 directly */
     uint8_t opcode = first_byte & 0x0F;
     bool masked = (second_byte & 0x80) != 0;
     uint8_t payload_length = second_byte & 0x7F;
     
-    if (!fin || !masked) return -1; // We expect final, masked frames from clients
+    if (!masked) return -1; /* clients must always mask frames */
     
     size_t header_len = 2;
     uint64_t actual_payload_len = payload_length;
@@ -7771,11 +7780,14 @@ static int websocket_parse_frame(const char* buffer, size_t buffer_len, char* pa
     if (actual_payload_len > 4095) {
         log_warn("⚠️ Dropping oversized WebSocket frame: %lu bytes (max 4095) - connection remains active", 
                   (unsigned long)actual_payload_len);
+        /* Advance past the frame even though we drop the payload */
+        size_t total = header_len + 4 + (size_t)actual_payload_len;
+        if (buffer_len >= total && frame_size_out) *frame_size_out = total;
         *payload_len = 0;
-        return opcode;  // Return opcode but with zero payload length
+        return opcode;
     }
     
-    if (buffer_len < header_len + 4 + actual_payload_len) return -1;
+    if (buffer_len < header_len + 4 + actual_payload_len) return -1; /* incomplete frame */
     
     // Extract masking key
     uint8_t mask[4];
@@ -7789,6 +7801,7 @@ static int websocket_parse_frame(const char* buffer, size_t buffer_len, char* pa
     payload[actual_payload_len] = '\0';
     *payload_len = actual_payload_len;
     
+    if (frame_size_out) *frame_size_out = header_len + actual_payload_len;
     return opcode;
 }
 
@@ -9016,6 +9029,9 @@ int websocket_server_update(struct Sim* sim) {
             ws_server.clients[slot].handshake_complete = false;
             ws_server.clients[slot].last_ping_time = get_time_ms();
             ws_server.clients[slot].player_id = 0; // Will be assigned during handshake
+            ws_server.clients[slot].recv_buf_len = 0;
+            ws_server.clients[slot].frag_buf_len = 0;
+            ws_server.clients[slot].frag_opcode = 0;
             inet_ntop(AF_INET, &client_addr.sin_addr, ws_server.clients[slot].ip_address, INET_ADDRSTRLEN);
             ws_server.clients[slot].port = ntohs(client_addr.sin_port);
             
@@ -9036,18 +9052,17 @@ int websocket_server_update(struct Sim* sim) {
         if (!ws_server.clients[i].connected) continue;
         
         struct WebSocketClient* client = &ws_server.clients[i];
-        char buffer[4096];
-        ssize_t received = recv(client->fd, buffer, sizeof(buffer) - 1, 0);
+        char new_data[4096];
+        ssize_t received = recv(client->fd, new_data, sizeof(new_data) - 1, 0);
         
         if (received > 0) {
-            buffer[received] = '\0';
-            
             if (!client->handshake_complete) {
+                new_data[received] = '\0';
                 log_debug("📨 Received handshake request from %s:%u (%zd bytes)", 
                          client->ip_address, client->port, received);
                 
                 // Handle WebSocket handshake
-                if (websocket_handshake(client->fd, buffer)) {
+                if (websocket_handshake(client->fd, new_data)) {
                     client->handshake_complete = true;
                     log_info("✅ WebSocket handshake successful for %s:%u", 
                             client->ip_address, client->port);
@@ -9058,31 +9073,66 @@ int websocket_server_update(struct Sim* sim) {
                     client->connected = false;
                 }
             } else {
+                /* Append new bytes to per-client accumulation buffer */
+                size_t avail = sizeof(client->recv_buf) - client->recv_buf_len;
+                size_t to_copy = ((size_t)received < avail) ? (size_t)received : avail;
+                memcpy(client->recv_buf + client->recv_buf_len, new_data, to_copy);
+                client->recv_buf_len += to_copy;
+
+                if (client->recv_buf_len < 2) continue; /* need at least a frame header */
+
+                /* Peek at FIN bit before parse consumes the buffer position */
+                bool ws_fin = (client->recv_buf[0] & 0x80) != 0;
+
                 // Handle WebSocket frames
-                char payload[4096];  // Increased to handle larger messages
+                char payload[4096];
                 size_t payload_len = 0;
-                int opcode = websocket_parse_frame(buffer, received, payload, &payload_len);
+                size_t frame_size = 0;
+                int opcode = websocket_parse_frame(client->recv_buf, client->recv_buf_len, payload, &payload_len, &frame_size);
                 
-                // Check for parsing errors
-                if (opcode < 0) {
-                    log_warn("WebSocket frame parsing failed from %s:%u (Player: %u) | Received: %zd bytes",
-                            client->ip_address, client->port, client->player_id, received);
-                    
-                    if (received >= 2) {
-                        log_warn("Frame header: 0x%02X 0x%02X (FIN=%d, Opcode=0x%X, Masked=%d, PayloadLen=%d)",
-                                (unsigned char)buffer[0], (unsigned char)buffer[1],
-                                (buffer[0] & 0x80) >> 7, buffer[0] & 0x0F,
-                                (buffer[1] & 0x80) >> 7, buffer[1] & 0x7F);
+                if (opcode < 0 || frame_size == 0) {
+                    /* Incomplete frame — keep buffered data and wait for more */
+                    if (client->recv_buf_len >= sizeof(client->recv_buf) - 1) {
+                        /* Buffer full but still can't parse — discard to avoid deadlock */
+                        log_warn("recv_buf overflow for %s:%u (Player: %u), resetting",
+                                client->ip_address, client->port, client->player_id);
+                        client->recv_buf_len = 0;
                     }
-                    
-                    // Log raw data for debugging
-                    char hex_dump[256] = {0};
-                    int offset = 0;
-                    for (size_t i = 0; i < (size_t)received && i < 32; i++) {
-                        offset += snprintf(hex_dump + offset, sizeof(hex_dump) - offset, "%02X ", (unsigned char)buffer[i]);
-                    }
-                    log_warn("Raw bytes (first 32): %s", hex_dump);
                     continue;
+                }
+
+                /* Consume this frame from the accumulation buffer */
+                memmove(client->recv_buf, client->recv_buf + frame_size,
+                        client->recv_buf_len - frame_size);
+                client->recv_buf_len -= frame_size;
+
+                /* Handle WebSocket message fragmentation (RFC 6455 §5.4) */
+                if (!ws_fin || opcode == WS_OPCODE_CONTINUATION) {
+                    if (opcode == WS_OPCODE_CONTINUATION) {
+                        /* Continuation frame — append payload to fragment buffer */
+                        size_t fspace = sizeof(client->frag_buf) - client->frag_buf_len;
+                        size_t fcopy  = payload_len < fspace ? payload_len : fspace;
+                        memcpy(client->frag_buf + client->frag_buf_len, payload, fcopy);
+                        client->frag_buf_len += fcopy;
+                        if (!ws_fin) continue; /* more fragments coming */
+                        /* FIN=1 on continuation — assemble full message */
+                        size_t alen = client->frag_buf_len < sizeof(payload) - 1
+                                      ? client->frag_buf_len : sizeof(payload) - 1;
+                        memcpy(payload, client->frag_buf, alen);
+                        payload[alen] = '\0';
+                        payload_len = alen;
+                        opcode = (int)client->frag_opcode;
+                        client->frag_buf_len = 0;
+                    } else {
+                        /* FIN=0 on a data frame — first fragment */
+                        client->frag_opcode = (uint8_t)opcode;
+                        client->frag_buf_len = 0;
+                        size_t fspace = sizeof(client->frag_buf);
+                        size_t fcopy  = payload_len < fspace ? payload_len : fspace;
+                        memcpy(client->frag_buf, payload, fcopy);
+                        client->frag_buf_len = fcopy;
+                        continue; /* wait for continuation frames */
+                    }
                 }
                 
                 // Frame received - processing
