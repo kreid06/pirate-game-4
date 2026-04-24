@@ -16,7 +16,7 @@
 
 type Pt = { x: number; y: number };
 type EditMode = 'move' | 'add';
-type LayerKey = 'islandShape' | 'outerSand' | 'innerGrass' | 'waterZone' | 'sandPatch';
+type LayerKey = 'islandShape' | 'outerSand' | 'innerGrass' | 'outerShallow' | 'waterZone' | 'sandPatch';
 
 interface LayerDef {
   key: LayerKey;
@@ -36,16 +36,18 @@ interface IslandData {
   grassPolyScale?: number;  // grass polygon = outerVerts scaled by this toward centre
   sandVerts?: Pt[];         // explicit sand polygon (overrides outerVerts for sand layer)
   grassVerts?: Pt[];        // explicit grass polygon (overrides scale calculation)
+  shallowVerts?: Pt[];      // explicit shallow water polygon (outer boundary of shallow zone)
 }
 
 // ── Layer definitions ──────────────────────────────────────────────────────────
 
 const LAYERS: LayerDef[] = [
-  { key: 'islandShape', label: '🗺 Shape',  fill: 'rgba(160,128,64,0.25)',  stroke: '#f5c842', multi: false },
-  { key: 'outerSand',   label: '🏖 Sand',   fill: 'rgba(214,194,139,0.35)', stroke: '#d6c28b', multi: false },
-  { key: 'innerGrass',  label: '🌿 Grass',  fill: 'rgba(79,127,54,0.35)',   stroke: '#4f7f36', multi: false },
-  { key: 'waterZone',   label: '💧 Water',  fill: 'rgba(30,144,255,0.35)',  stroke: '#3abaff', multi: true  },
-  { key: 'sandPatch',   label: '🏝 Patch',  fill: 'rgba(200,180,100,0.35)', stroke: '#c8b464', multi: true  },
+  { key: 'islandShape',  label: '🗺 Shape',   fill: 'rgba(160,128,64,0.25)',  stroke: '#f5c842', multi: false },
+  { key: 'outerSand',    label: '🏖 Sand',    fill: 'rgba(214,194,139,0.35)', stroke: '#d6c28b', multi: false },
+  { key: 'innerGrass',   label: '🌿 Grass',   fill: 'rgba(79,127,54,0.35)',   stroke: '#4f7f36', multi: false },
+  { key: 'outerShallow', label: '🌊 Shallow', fill: 'rgba(30,144,255,0.20)',  stroke: '#3abaff', multi: false },
+  { key: 'waterZone',    label: '💧 Water',   fill: 'rgba(30,144,255,0.35)',  stroke: '#1e8fff', multi: true  },
+  { key: 'sandPatch',    label: '🏝 Patch',   fill: 'rgba(200,180,100,0.35)', stroke: '#c8b464', multi: true  },
 ];
 
 const VERTEX_RADIUS = 6;
@@ -139,6 +141,18 @@ const layerData = new Map<string, Pt[][]>();
 function dataKey(islandId: number, layer: LayerKey): string {
   return `${islandId}:${layer}`;
 }
+
+function generateShallowFromSand(sandPoly: Pt[]): Pt[] {
+  const polyBoundR = Math.max(...sandPoly.map(v => Math.hypot(v.x, v.y)));
+  const shallowDepth = polyBoundR * 0.375;
+  return sandPoly.map(v => {
+    const d = Math.hypot(v.x, v.y);
+    if (d < 1e-6) return { ...v };
+    const scale = (d + shallowDepth) / d;
+    return { x: v.x * scale, y: v.y * scale };
+  });
+}
+
 function getPolys(islandId: number, layer: LayerKey): Pt[][] {
   const k = dataKey(islandId, layer);
   if (!layerData.has(k)) {
@@ -155,6 +169,16 @@ function getPolys(islandId: number, layer: LayerKey): Pt[][] {
         const scale = isl?.grassPolyScale ?? 0.82;
         const verts = isl?.outerVerts?.map(v => ({ x: v.x * scale, y: v.y * scale })) ?? [];
         layerData.set(k, verts.length ? [verts] : [[]]);
+      }
+    } else if (layer === 'outerShallow') {
+      if (isl?.shallowVerts) {
+        layerData.set(k, [isl.shallowVerts.map(v => ({ ...v }))]);
+      } else {
+        // Auto-generate: ensure sand layer is loaded first, then expand radially
+        const sandKey = dataKey(islandId, 'outerSand');
+        if (!layerData.has(sandKey)) getPolys(islandId, 'outerSand');
+        const sandPoly = layerData.get(sandKey)?.[0] ?? [];
+        layerData.set(k, sandPoly.length ? [generateShallowFromSand(sandPoly)] : [[]]);
       }
     } else {
       layerData.set(k, [[]]);
@@ -722,6 +746,8 @@ interface ServerIslandData {
   outerVerts?: Pt[];
   grassVertCount?: number;
   grassVerts?: Pt[];
+  shallowVertCount?: number;
+  shallowVerts?: Pt[];
   beachRadius?: number;
   grassRadius?: number;
 }
@@ -759,6 +785,14 @@ async function fetchFromServer(): Promise<void> {
           local.grassVerts = srv.grassVerts.map(v => ({ x: v.x, y: v.y }));
           layerData.delete(dataKey(local.id, 'innerGrass'));
         }
+        // Load explicit shallow polygon from server if provided
+        if (srv.shallowVerts && srv.shallowVerts.length) {
+          local.shallowVerts = srv.shallowVerts.map(v => ({ x: v.x, y: v.y }));
+          layerData.delete(dataKey(local.id, 'outerShallow'));
+        } else {
+          // Regenerate shallow from updated sand
+          layerData.delete(dataKey(local.id, 'outerShallow'));
+        }
       }
       if (srv.beachRadius !== undefined) local.circleRadius = srv.beachRadius;
       updated++;
@@ -779,6 +813,18 @@ async function fetchFromServer(): Promise<void> {
 
 document.getElementById('btn-fetch-server')!.addEventListener('click', fetchFromServer);
 
+document.getElementById('btn-shallow-from-sand')?.addEventListener('click', () => {
+  const isl = ISLANDS.find(i => i.id === selectedIsland);
+  if (!isl) return;
+  // Force regenerate shallow from current sand polygon
+  const sandPoly = getPolys(isl.id, 'outerSand')[0] ?? [];
+  if (!sandPoly.length) { toast('No sand polygon to expand from'); return; }
+  const generated = generateShallowFromSand(sandPoly);
+  layerData.set(dataKey(isl.id, 'outerShallow'), [generated]);
+  toast('Shallow polygon reset from sand');
+  redraw();
+});
+
 // Auto-fetch on load (silent failure — just updates status)
 fetchFromServer();
 
@@ -796,6 +842,9 @@ fetchFromServer();
       }
       if (parsed.grass_verts_JSON) {
         layerData.set(dataKey(isl.id, 'innerGrass'), [(parsed.grass_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
+      }
+      if (parsed.shallow_verts_JSON) {
+        layerData.set(dataKey(isl.id, 'outerShallow'), [(parsed.shallow_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
       }
       if (Array.isArray(parsed.islets)) {
         const subs: SubIslandEntry[] = (parsed.islets as any[]).map((s: any) => ({
@@ -833,9 +882,9 @@ document.getElementById('btn-export')!.addEventListener('click', () => {
     const polys = getPolys(isl.id, ld.key).filter(p => p.length > 0);
     if (!polys.length) continue;
 
-    if (ld.key === 'islandShape' || ld.key === 'outerSand' || ld.key === 'innerGrass') {
+    if (ld.key === 'islandShape' || ld.key === 'outerSand' || ld.key === 'innerGrass' || ld.key === 'outerShallow') {
       const verts = polys[0];
-      const label = ld.key === 'innerGrass' ? 'grass' : 'sand';
+      const label = ld.key === 'innerGrass' ? 'grass' : ld.key === 'outerShallow' ? 'shallow' : 'sand';
       schema[`${label}_verts_JSON`] = verts;
       schema[`${label}_C_vx`]      = `.vx = { ${verts.map(v => Math.round(v.x)).join(', ')} }`;
       schema[`${label}_C_vy`]      = `.vy = { ${verts.map(v => Math.round(v.y)).join(', ')} }`;

@@ -2218,6 +2218,9 @@ export class NetworkManager {
           grassVertices: isl.grassVertices
             ? (isl.grassVertices as any[]).map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 }))
             : undefined,
+          shallowVertices: isl.shallowVertices
+            ? (isl.shallowVertices as any[]).map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 }))
+            : undefined,
         }));
         this.onIslands?.(islands);
         break;

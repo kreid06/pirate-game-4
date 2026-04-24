@@ -835,6 +835,17 @@ int admin_api_islands(struct HttpResponse* resp) {
                 }
                 pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, "]");
             }
+            if (isl->shallow_vertex_count > 0) {
+                pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
+                    ",\"shallowVertCount\":%d,\"shallowVerts\":[", isl->shallow_vertex_count);
+                for (int vi = 0; vi < isl->shallow_vertex_count; vi++) {
+                    if (vi > 0)
+                        pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, ",");
+                    pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
+                        "{\"x\":%.1f,\"y\":%.1f}", isl->svx[vi], isl->svy[vi]);
+                }
+                pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, "]");
+            }
         } else {
             /* Bump-circle island */
             pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,

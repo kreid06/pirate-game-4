@@ -2339,23 +2339,32 @@ export class RenderSystem {
           const polyBoundR = Math.max(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
           const polyMinR   = Math.min(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
           const SHALLOW_DEPTH = polyBoundR * SHALLOW_SCALE;
-          // Outer subpath: expand each vertex outward by SHALLOW_DEPTH
-          const expanded = verts.map(v => {
-            const dx = v.x - isl.x, dy = v.y - isl.y;
-            const d  = Math.hypot(dx, dy);
-            const scale = d > 0 ? (d + SHALLOW_DEPTH) / d : 1;
-            return camera.worldToScreen(Vec2.from(isl.x + dx * scale, isl.y + dy * scale));
-          });
+
+          // Outer subpath: explicit shallow polygon if available, else expand verts radially
+          let outerScreenVerts: { x: number; y: number }[];
+          let shallowBoundR: number;
+          if (isl.shallowVertices?.length) {
+            outerScreenVerts = isl.shallowVertices.map(v => camera.worldToScreen(Vec2.from(v.x, v.y)));
+            shallowBoundR = Math.max(...isl.shallowVertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+          } else {
+            outerScreenVerts = verts.map(v => {
+              const dx = v.x - isl.x, dy = v.y - isl.y;
+              const d  = Math.hypot(dx, dy);
+              const scale = d > 0 ? (d + SHALLOW_DEPTH) / d : 1;
+              return camera.worldToScreen(Vec2.from(isl.x + dx * scale, isl.y + dy * scale));
+            });
+            shallowBoundR = polyBoundR + SHALLOW_DEPTH;
+          }
           ctx.beginPath();
-          expanded.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
+          outerScreenVerts.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
           ctx.closePath();
-          // Inner subpath: original polygon boundary (cut out via even-odd)
+          // Inner subpath: sand polygon boundary (cut out via even-odd)
           verts.forEach((v, i) => {
             const sp = camera.worldToScreen(Vec2.from(v.x, v.y));
             i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
           });
           ctx.closePath();
-          const sg = ctx.createRadialGradient(sc.x, sc.y, polyMinR * zoom * 0.85, sc.x, sc.y, (polyBoundR + SHALLOW_DEPTH) * zoom);
+          const sg = ctx.createRadialGradient(sc.x, sc.y, polyMinR * zoom * 0.85, sc.x, sc.y, shallowBoundR * zoom);
           sg.addColorStop(0.0,  'rgba(220, 195, 130, 0.95)');
           sg.addColorStop(0.30, 'rgba(130, 210, 200, 0.75)');
           sg.addColorStop(0.65, 'rgba(70, 185, 215, 0.35)');

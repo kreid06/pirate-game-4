@@ -9385,6 +9385,16 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                                 hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
                                             }
+                                            if (isl->shallow_vertex_count > 0) {
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"shallowVertices\":[");
+                                                for (int vi = 0; vi < isl->shallow_vertex_count; vi++) {
+                                                    hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                                        "%s{\"x\":%.1f,\"y\":%.1f}",
+                                                                        vi ? "," : "",
+                                                                        isl->x + isl->svx[vi], isl->y + isl->svy[vi]);
+                                                }
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
+                                            }
                                             hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"resources\":[");
                                             for (int hri = 0; hri < isl->resource_count; hri++) {
                                                 const IslandResource *r = &isl->resources[hri];

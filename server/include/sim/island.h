@@ -102,6 +102,13 @@ typedef struct {
     float gvx[ISLAND_MAX_VERTS];        /* grass vertex X offsets from centre (world px) */
     float gvy[ISLAND_MAX_VERTS];        /* grass vertex Y offsets from centre (world px) */
 
+    /* Explicit shallow water polygon — when shallow_vertex_count > 0 the shallow zone is
+     * defined as: inside shallow polygon AND outside sand polygon.
+     * 0 = fall back to sand polygon edge expanded by poly_bound_r × SHALLOW_WATER_SCALE. */
+    int   shallow_vertex_count;
+    float svx[ISLAND_MAX_VERTS];        /* shallow water poly X offsets from centre (world px) */
+    float svy[ISLAND_MAX_VERTS];        /* shallow water poly Y offsets from centre (world px) */
+
     /* ── Wood spatial grid (built by islands_build_grid) ─────────────────
      * grid_ox/oy = world-px of cell [0][0] corner.
      * Cell [row][col] covers X in [grid_ox + col*CELL, +CELL), same for Y. */
@@ -234,6 +241,22 @@ static inline float island_poly_edge_dist(const IslandDef *isl, float px, float 
 }
 
 /**
+ * Point-in-polygon test for the explicit shallow water polygon (svx/svy).
+ * Only valid when isl->shallow_vertex_count > 0.
+ */
+static inline bool island_shallow_poly_contains(const IslandDef *isl, float px, float py) {
+    int n = isl->shallow_vertex_count;
+    int inside = 0;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+        float xi = isl->x + isl->svx[i], yi = isl->y + isl->svy[i];
+        float xj = isl->x + isl->svx[j], yj = isl->y + isl->svy[j];
+        if ((yi > py) != (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+            inside = !inside;
+    }
+    return inside != 0;
+}
+
+/**
  * Returns true if (px, py) is in the shallow-water zone of the given island:
  *   - outside the island's beach boundary, AND
  *   - within (island_radius * SHALLOW_WATER_SCALE) of that boundary.
@@ -244,6 +267,17 @@ static inline bool island_in_shallow_water(const IslandDef *isl, float px, float
     float dist_sq = dx * dx + dy * dy;
 
     if (isl->vertex_count > 0) {
+        if (isl->shallow_vertex_count > 0) {
+            /* Explicit shallow polygon — compute its broad-phase bound */
+            float shallow_bound_r = 0.0f;
+            for (int vi = 0; vi < isl->shallow_vertex_count; vi++) {
+                float r = sqrtf(isl->svx[vi]*isl->svx[vi] + isl->svy[vi]*isl->svy[vi]);
+                if (r > shallow_bound_r) shallow_bound_r = r;
+            }
+            if (dist_sq > shallow_bound_r * shallow_bound_r) return false;
+            if (island_poly_contains(isl, px, py)) return false;
+            return island_shallow_poly_contains(isl, px, py);
+        }
         float shallow_depth = isl->poly_bound_r * SHALLOW_WATER_SCALE;
         float outer_r = isl->poly_bound_r + shallow_depth;
         if (dist_sq > outer_r * outer_r) return false;
@@ -275,12 +309,26 @@ static inline float island_shallow_water_depth(const IslandDef *isl, float px, f
 
     if (isl->vertex_count > 0) {
         float shallow_depth = isl->poly_bound_r * SHALLOW_WATER_SCALE;
-        /* Broad-phase circle: skip entirely if clearly outside */
+        if (isl->shallow_vertex_count > 0) {
+            /* Explicit shallow polygon broad-phase */
+            float shallow_bound_r = 0.0f;
+            for (int vi = 0; vi < isl->shallow_vertex_count; vi++) {
+                float r = sqrtf(isl->svx[vi]*isl->svx[vi] + isl->svy[vi]*isl->svy[vi]);
+                if (r > shallow_bound_r) shallow_bound_r = r;
+            }
+            if (dist_sq > shallow_bound_r * shallow_bound_r) return 0.0f;
+            if (island_poly_contains(isl, px, py)) return 0.0f;
+            if (!island_shallow_poly_contains(isl, px, py)) return 0.0f;
+            /* Gradient: 1.0 at sand edge, 0.0 at shallow_depth away */
+            float edge_dist = island_poly_edge_dist(isl, px, py);
+            if (edge_dist >= shallow_depth) return 0.0f;
+            float t = 1.0f - edge_dist / shallow_depth;
+            return (t > 1.0f) ? 1.0f : t;
+        }
+        /* Fallback: edge-distance-based zone */
         float outer_r = isl->poly_bound_r + shallow_depth;
         if (dist_sq > outer_r * outer_r) return 0.0f;
-        /* Points inside the island are not shallow water */
         if (island_poly_contains(isl, px, py)) return 0.0f;
-        /* Use actual distance to the nearest polygon edge */
         float edge_dist = island_poly_edge_dist(isl, px, py);
         if (edge_dist >= shallow_depth) return 0.0f;
         float t = 1.0f - edge_dist / shallow_depth;

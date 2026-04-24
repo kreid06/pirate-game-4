@@ -308,6 +308,8 @@ export interface IslandDef {
   vertices?: { x: number; y: number }[];
   /** Explicit grass polygon vertices in world-space. When present, used instead of scaling sand vertices. */
   grassVertices?: { x: number; y: number }[];
+  /** Explicit shallow water polygon vertices in world-space. Defines the outer boundary of the shallow zone. */
+  shallowVertices?: { x: number; y: number }[];
 }
 
 /**
