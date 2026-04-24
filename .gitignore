@@ -17,4 +17,3 @@ server/auth/.env.test
 server/auth/auth.log
 server/auth/debug.log
 server/auth/error.log
-server/data
