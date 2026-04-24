@@ -12661,7 +12661,7 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 // Send ISLANDS
                                 {
-                                    static char islands_buf[131072];
+                                    static char islands_buf[524288];
                                     int pos = 0;
                                     pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
                                                     "{\"type\":\"ISLANDS\",\"islands\":[");
@@ -12692,7 +12692,7 @@ int websocket_server_update(struct Sim* sim) {
                                         pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
                                     }
                                     pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
-                                    static char isl_frame[131100];
+                                    static char isl_frame[524300];
                                     size_t isl_frame_len = websocket_create_frame(
                                         WS_OPCODE_TEXT, islands_buf, (size_t)pos,
                                         isl_frame, sizeof(isl_frame));
