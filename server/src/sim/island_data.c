@@ -203,9 +203,10 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
 /* Half-amplitude of per-tree random jitter (client pixels). */
 #define TREE_JITTER       40.0f
 
-/* Fiber-plant procedural density settings. */
-#define FIBER_GRID_SPACING 280.0f
-#define FIBER_JITTER        80.0f
+/* Fiber-plant procedural density settings.
+   Spacing = TREE_GRID_SPACING / sqrt(2) ≈ 113 px gives ~2× more fiber than trees. */
+#define FIBER_GRID_SPACING 113.0f
+#define FIBER_JITTER        30.0f
 /* Fiber is scattered over a slightly smaller polygon fraction to keep it
    interior and away from the rocky/treed edges. */
 #define FIBER_POLY_SCALE    0.70f

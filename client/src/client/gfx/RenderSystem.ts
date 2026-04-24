@@ -255,6 +255,157 @@ export class RenderSystem {
   };
 
   /** Default fallback island — shown before the server sends ISLANDS. */
+  // ── Tree leaf sprite cache ──────────────────────────────────────────────────
+  private static _treeLeafSprites: Map<string, OffscreenCanvas> | null = null;
+  private static readonly TREE_SPRITE_SIZE = 256;
+  private static readonly TREE_ROT_BINS    = 8;
+  private static readonly TREE_TINTS: [string, string, string, string][] = [
+    ['#1a3a0a', '#3a7320', '#52a030', '#6ecf42'],
+    ['#1c3e08', '#3f7a18', '#5aae2e', '#74d93e'],
+    ['#152f08', '#2e6318', '#456e22', '#5a9030'],
+    ['#233a10', '#4a7c28', '#5fa035', '#72b845'],
+  ];
+
+  private static _ensureTreeSprites(): Map<string, OffscreenCanvas> {
+    if (RenderSystem._treeLeafSprites) return RenderSystem._treeLeafSprites;
+    const SIZE      = RenderSystem.TREE_SPRITE_SIZE;
+    const BINS      = RenderSystem.TREE_ROT_BINS;
+    const ROT_RANGE = Math.PI / 3.6;
+    const canopy    = SIZE * 0.38;
+    const cx = SIZE / 2, cy = SIZE / 2;
+    const BASE_L: [number, number, number][] = [
+      [  0.00, -0.22, 0.80 ],
+      [ -0.44,  0.00, 0.62 ],
+      [  0.46,  0.05, 0.58 ],
+      [ -0.20,  0.40, 0.50 ],
+      [  0.25,  0.38, 0.48 ],
+    ];
+    const sprites = new Map<string, OffscreenCanvas>();
+    for (let tintIdx = 0; tintIdx < 4; tintIdx++) {
+      const [shadowCol, baseCol, hlCol, glintCol] = RenderSystem.TREE_TINTS[tintIdx];
+      for (let bin = 0; bin < BINS; bin++) {
+        const clusterRot = -ROT_RANGE + (bin / (BINS - 1)) * 2 * ROT_RANGE;
+        const c = Math.cos(clusterRot), s = Math.sin(clusterRot);
+        const rot = (dx: number, dy: number): [number, number] =>
+          [dx * c - dy * s, dx * s + dy * c];
+        const L = BASE_L.map(([dx, dy, r]) => { const [rx, ry] = rot(dx, dy); return [rx, ry, r] as [number, number, number]; });
+        const off = new OffscreenCanvas(SIZE, SIZE);
+        const ctx = off.getContext('2d')!;
+        // Pass 1: shadow
+        ctx.fillStyle = shadowCol;
+        for (const [dx, dy, r] of L) { ctx.beginPath(); ctx.arc(cx + (dx + 0.13) * canopy, cy + (dy + 0.11) * canopy, r * canopy, 0, Math.PI * 2); ctx.fill(); }
+        // Pass 2: base
+        ctx.fillStyle = baseCol;
+        for (const [dx, dy, r] of L) { ctx.beginPath(); ctx.arc(cx + dx * canopy, cy + dy * canopy, r * canopy, 0, Math.PI * 2); ctx.fill(); }
+        // Pass 3: highlight
+        ctx.fillStyle = hlCol;
+        for (const [dx, dy, r] of L.slice(0, 3)) { ctx.beginPath(); ctx.arc(cx + (dx - 0.10) * canopy, cy + (dy - 0.15) * canopy, r * canopy * 0.62, 0, Math.PI * 2); ctx.fill(); }
+        // Pass 4: specular glint
+        const [apexRx, apexRy] = rot(-0.09, -0.34);
+        ctx.fillStyle = glintCol;
+        ctx.beginPath(); ctx.arc(cx + apexRx * canopy, cy + apexRy * canopy, canopy * 0.25, 0, Math.PI * 2); ctx.fill();
+        sprites.set(`${tintIdx}_${bin}`, off);
+      }
+    }
+    RenderSystem._treeLeafSprites = sprites;
+    return sprites;
+  }
+
+  // ── Tree trunk sprite cache (normal + hovered) ──────────────────────────────
+  private static _trunkSprites: Map<string, OffscreenCanvas> | null = null;
+  private static readonly TRUNK_SPRITE_SIZE = 96;
+  private static readonly TRUNK_SPRITE_R    = 30; // reference radius within sprite
+
+  private static _ensureTrunkSprites(): Map<string, OffscreenCanvas> {
+    if (RenderSystem._trunkSprites) return RenderSystem._trunkSprites;
+    const SIZE = RenderSystem.TRUNK_SPRITE_SIZE;
+    const R    = RenderSystem.TRUNK_SPRITE_R;
+    const cx = SIZE / 2, cy = SIZE / 2;
+    const sprites = new Map<string, OffscreenCanvas>();
+    for (const hovered of [false, true]) {
+      const off = new OffscreenCanvas(SIZE, SIZE);
+      const ctx = off.getContext('2d')!;
+      // Shadow
+      ctx.fillStyle = '#2e1a0a';
+      ctx.beginPath(); ctx.arc(cx + R * 0.22, cy + R * 0.22, R, 0, Math.PI * 2); ctx.fill();
+      // Body
+      ctx.fillStyle = '#7a4820';
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
+      // Highlight crescent
+      ctx.fillStyle = '#a0642e';
+      ctx.beginPath(); ctx.arc(cx - R * 0.28, cy - R * 0.22, R * 0.45, 0, Math.PI * 2); ctx.fill();
+      // Hover ring baked in for the hovered variant
+      if (hovered) {
+        ctx.strokeStyle = '#cccccc';
+        ctx.lineWidth   = 2;
+        ctx.beginPath(); ctx.arc(cx, cy, R + 3, 0, Math.PI * 2); ctx.stroke();
+      }
+      sprites.set(hovered ? 'hovered' : 'normal', off);
+    }
+    // In-range hovered variant (gold ring)
+    {
+      const off = new OffscreenCanvas(SIZE, SIZE);
+      const ctx = off.getContext('2d')!;
+      ctx.fillStyle = '#2e1a0a';
+      ctx.beginPath(); ctx.arc(cx + R * 0.22, cy + R * 0.22, R, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#7a4820';
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#a0642e';
+      ctx.beginPath(); ctx.arc(cx - R * 0.28, cy - R * 0.22, R * 0.45, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#f0c040';
+      ctx.lineWidth   = 2;
+      ctx.beginPath(); ctx.arc(cx, cy, R + 3, 0, Math.PI * 2); ctx.stroke();
+      sprites.set('inrange', off);
+    }
+    RenderSystem._trunkSprites = sprites;
+    return sprites;
+  }
+
+  // ── Fiber plant sprite cache (normal + hovered) ─────────────────────────────
+  private static _fiberSprites: Map<string, OffscreenCanvas> | null = null;
+  private static readonly FIBER_SPRITE_SIZE = 96;
+  private static readonly FIBER_SPRITE_H    = 32; // reference blade length within sprite
+
+  private static _ensureFiberSprites(): Map<string, OffscreenCanvas> {
+    if (RenderSystem._fiberSprites) return RenderSystem._fiberSprites;
+    const SIZE       = RenderSystem.FIBER_SPRITE_SIZE;
+    const H          = RenderSystem.FIBER_SPRITE_H;
+    const bladeCount = 6;
+    const cx = SIZE / 2, cy = SIZE / 2;
+    const sprites = new Map<string, OffscreenCanvas>();
+    for (const hovered of [false, true]) {
+      const off = new OffscreenCanvas(SIZE, SIZE);
+      const ctx = off.getContext('2d')!;
+      ctx.lineCap = 'round';
+      // Dark base blades
+      ctx.strokeStyle = hovered ? '#7ac040' : '#5a9030';
+      ctx.lineWidth   = 2.5;
+      for (let i = 0; i < bladeCount; i++) {
+        const angle = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.95;
+        const bend  = Math.sin(i * 1.8) * 0.3;
+        const midX  = cx + Math.cos(angle + bend * 0.5) * H * 0.5;
+        const midY  = cy + Math.sin(angle + bend * 0.5) * H * 0.5;
+        const tipX  = cx + Math.cos(angle + bend) * H;
+        const tipY  = cy + Math.sin(angle + bend) * H;
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.quadraticCurveTo(midX, midY, tipX, tipY); ctx.stroke();
+      }
+      // Bright inner blades
+      ctx.strokeStyle = hovered ? '#b0ff60' : '#8acc48';
+      ctx.lineWidth   = 1.5;
+      for (let i = 1; i < bladeCount - 1; i++) {
+        const angle = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.6;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - H * 0.25);
+        ctx.lineTo(cx + Math.cos(angle) * H * 0.72, cy + Math.sin(angle) * H * 0.72);
+        ctx.stroke();
+      }
+      sprites.set(hovered ? 'hovered' : 'normal', off);
+    }
+    RenderSystem._fiberSprites = sprites;
+    return sprites;
+  }
+
+
   private static readonly DEFAULT_ISLAND = {
     id: 0, x: 800, y: 600, preset: 'tropical' as const,
     resources: [
@@ -2547,47 +2698,51 @@ export class RenderSystem {
         visibleRes.push({ res, wx, wy, sp, isHovered, inRange, playerNear, leafAlpha, deathAlpha });
       }
 
-      // TEMPORARILY DISABLED: resource node rendering (passes 1–5)
       // Pass 1 – fiber plants (back-most layer)
-      // for (const e of visibleRes) {
-      //   if (e.res.type !== 'fiber') continue;
-      //   this.drawIslandFiberPlant(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha);
-      // }
+      for (const e of visibleRes) {
+        if (e.res.type !== 'fiber') continue;
+        this.drawIslandFiberPlant(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha);
+      }
       // Pass 2 – rocks
-      // for (const e of visibleRes) {
-      //   if (e.res.type !== 'rock') continue;
-      //   this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha);
-      // }
-      // Pass 3 – tree trunks
-      // for (const e of visibleRes) {
-      //   if (e.res.type !== 'wood') continue;
-      //   this.drawIslandTreeTrunk(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.playerNear, e.res.size ?? 1.0, e.deathAlpha);
-      // }
+      for (const e of visibleRes) {
+        if (e.res.type !== 'rock') continue;
+        this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha);
+      }
+      // Pass 3 – tree trunks (only visible when player is near or hovering)
+      for (const e of visibleRes) {
+        if (e.res.type !== 'wood') continue;
+        if (!e.playerNear && !e.isHovered) continue;
+        // Trunk fades IN as leaves fade OUT — inverse of leafAlpha
+        const trunkAlpha = (1.0 - e.leafAlpha) * e.deathAlpha;
+        if (trunkAlpha < 0.01) continue;
+        this.drawIslandTreeTrunk(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.playerNear, e.res.size ?? 1.0, trunkAlpha);
+      }
+      allVisibleRes.push(...visibleRes);
     }
 
     // ── Structures: above trunks, below leaves ────────────────────────────────
     this.drawPlacedStructures(camera);
 
     // ── Pass 4 – tree leaves (all islands, above structures) ──────────────────
-    // for (const e of allVisibleRes) {
-    //   if (e.res.type !== 'wood') continue;
-    //   this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha);
-    // }
+    for (const e of allVisibleRes) {
+      if (e.res.type !== 'wood') continue;
+      this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha);
+    }
     // ── Pass 5 – hover prompts + health bars (always on top) ─────────────────
-    // for (const e of allVisibleRes) {
-    //   if (e.res.type === 'wood' && e.isHovered) {
-    //     if (axeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
-    //     else             this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
-    //     if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, (e.res.size ?? 1.0) * 40);
-    //   } else if (e.res.type === 'fiber' && e.isHovered) {
-    //     this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
-    //     if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 30);
-    //   } else if (e.res.type === 'rock' && e.isHovered) {
-    //     if (pickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Rock');
-    //     else                 this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
-    //     if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 28);
-    //   }
-    // }
+    for (const e of allVisibleRes) {
+      if (e.res.type === 'wood' && e.isHovered) {
+        if (axeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
+        else             this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, (e.res.size ?? 1.0) * 40);
+      } else if (e.res.type === 'fiber' && e.isHovered) {
+        this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 30);
+      } else if (e.res.type === 'rock' && e.isHovered) {
+        if (pickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Rock');
+        else                 this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 28);
+      }
+    }
   }
 
   /** Draw a floating "Too far" or "[E] Chop" prompt above a tree. */
@@ -2653,70 +2808,33 @@ export class RenderSystem {
     const ctx = this.ctx;
     const h  = (Math.imul(seedX | 0, 2654435761) ^ Math.imul(seedY | 0, 1664525)) >>> 0;
     const h2 = (Math.imul(h, 2246822519) ^ Math.imul(h >>> 13, 2654435761)) >>> 0;
-    // size comes from server hash (range 0.5–1.8); only use local hash for rotation/tint
-    const clusterRot  = (((h2 & 0xFF) / 255) - 0.5) * (Math.PI / 3.6);
-    const tintIdx = (h >>> 16) & 3;
-    const TINTS: [string, string, string, string][] = [
-      ['#1a3a0a', '#3a7320', '#52a030', '#6ecf42'],
-      ['#1c3e08', '#3f7a18', '#5aae2e', '#74d93e'],
-      ['#152f08', '#2e6318', '#456e22', '#5a9030'],
-      ['#233a10', '#4a7c28', '#5fa035', '#72b845'],
-    ];
-    const [shadowCol, baseCol, hlCol, glintCol] = TINTS[tintIdx];
-    const canopy = 72 * zoom * size;
-    const rot = (dx: number, dy: number): [number, number] => {
-      const c = Math.cos(clusterRot), s = Math.sin(clusterRot);
-      return [dx * c - dy * s, dx * s + dy * c];
-    };
-    const BASE_L: [number, number, number][] = [
-      [  0.00, -0.22,  0.80 ],
-      [ -0.44,  0.00,  0.62 ],
-      [  0.46,  0.05,  0.58 ],
-      [ -0.20,  0.40,  0.50 ],
-      [  0.25,  0.38,  0.48 ],
-    ];
-    const L = BASE_L.map(([dx, dy, r]) => { const [rx, ry] = rot(dx, dy); return [rx, ry, r] as [number, number, number]; });
+    const clusterRot = (((h2 & 0xFF) / 255) - 0.5) * (Math.PI / 3.6);
+    const tintIdx    = (h >>> 16) & 3;
+    const canopy     = 72 * zoom * size;
+
+    // Map rotation to nearest pre-baked bin
+    const ROT_RANGE = Math.PI / 3.6;
+    const BINS      = RenderSystem.TREE_ROT_BINS;
+    const rotBin    = Math.max(0, Math.min(BINS - 1,
+      Math.round(((clusterRot + ROT_RANGE) / (2 * ROT_RANGE)) * (BINS - 1))));
+
+    const sprite     = RenderSystem._ensureTreeSprites().get(`${tintIdx}_${rotBin}`)!;
+    const spriteCanopy = RenderSystem.TREE_SPRITE_SIZE * 0.38; // matches bake
+    const drawSize   = RenderSystem.TREE_SPRITE_SIZE * (canopy / spriteCanopy);
 
     ctx.save();
-    // Hover glow behind canopy
+    // Hover glow (cheap direct draw — changes each frame)
     if (hovered) {
       const glowColor = inRange ? 'rgba(255,230,80,0.22)' : 'rgba(180,180,180,0.15)';
-      const glowR     = inRange ? canopy * 1.25 : canopy * 1.15;
       ctx.beginPath();
-      ctx.arc(sx, sy, glowR, 0, Math.PI * 2);
+      ctx.arc(sx, sy, inRange ? canopy * 1.25 : canopy * 1.15, 0, Math.PI * 2);
       ctx.fillStyle = glowColor;
       ctx.fill();
     }
-    // Canopy — fades when player is underneath (leafAlpha) AND when tree is dying (deathAlpha)
+    // Sprite blit — single drawImage replaces 20 arc fills
     ctx.globalAlpha = leafAlpha * deathAlpha;
-    // Pass 1: deep shadow
-    ctx.fillStyle = shadowCol;
-    for (const [dx, dy, r] of L) {
-      ctx.beginPath();
-      ctx.arc(sx + (dx + 0.13) * canopy, sy + (dy + 0.11) * canopy, r * canopy, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    // Pass 2: base colour
-    ctx.fillStyle = baseCol;
-    for (const [dx, dy, r] of L) {
-      ctx.beginPath();
-      ctx.arc(sx + dx * canopy, sy + dy * canopy, r * canopy, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    // Pass 3: highlight — top 3 lobes
-    ctx.fillStyle = hlCol;
-    for (const [dx, dy, r] of L.slice(0, 3)) {
-      ctx.beginPath();
-      ctx.arc(sx + (dx - 0.10) * canopy, sy + (dy - 0.15) * canopy, r * canopy * 0.62, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    // Pass 4: specular glint
-    const [apexRx, apexRy] = rot(-0.09, -0.34);
-    ctx.fillStyle = glintCol;
-    ctx.beginPath();
-    ctx.arc(sx + apexRx * canopy, sy + apexRy * canopy, canopy * 0.25, 0, Math.PI * 2);
-    ctx.fill();
-    // Canopy hover ring
+    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
+    // Hover ring
     ctx.globalAlpha = deathAlpha;
     if (hovered) {
       ctx.beginPath();
@@ -2728,70 +2846,31 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandTreeTrunk(sx: number, sy: number, zoom: number, hovered = false, inRange = false, playerNear = false, size = 1.0, deathAlpha = 1.0): void {
-    const ctx   = this.ctx;
-    const trunk = 18 * zoom * size;
+  private drawIslandTreeTrunk(sx: number, sy: number, zoom: number, hovered = false, inRange = false, playerNear = false, size = 1.0, alpha = 1.0): void {
+    const ctx      = this.ctx;
+    const trunk    = 18 * zoom * size;
+    const spriteR  = RenderSystem.TRUNK_SPRITE_R;
+    const SIZE     = RenderSystem.TRUNK_SPRITE_SIZE;
+    const drawSize = SIZE * (trunk / spriteR);
+    // Caller only invokes this when playerNear || hovered, so show ring whenever hovered
+    const key    = hovered ? (inRange ? 'inrange' : 'hovered') : 'normal';
+    const sprite = RenderSystem._ensureTrunkSprites().get(key)!;
     ctx.save();
-    ctx.globalAlpha = deathAlpha;
-    // Shadow circle (offset SE)
-    ctx.fillStyle = '#2e1a0a';
-    ctx.beginPath();
-    ctx.arc(sx + trunk * 0.22, sy + trunk * 0.22, trunk, 0, Math.PI * 2);
-    ctx.fill();
-    // Body circle — matches server TREE_TRUNK_R_PX exactly
-    ctx.fillStyle = '#7a4820';
-    ctx.beginPath();
-    ctx.arc(sx, sy, trunk, 0, Math.PI * 2);
-    ctx.fill();
-    // Highlight crescent (small circle offset NW)
-    ctx.fillStyle = '#a0642e';
-    ctx.beginPath();
-    ctx.arc(sx - trunk * 0.28, sy - trunk * 0.22, trunk * 0.45, 0, Math.PI * 2);
-    ctx.fill();
-    // Hover ring when player is near
-    if (playerNear && hovered) {
-      ctx.strokeStyle = inRange ? '#f0c040' : '#cccccc';
-      ctx.lineWidth   = 1.5 * zoom;
-      ctx.beginPath();
-      ctx.arc(sx, sy, trunk + 2 * zoom, 0, Math.PI * 2);
-      ctx.stroke();
-    }
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
     ctx.restore();
   }
 
   private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0): void {
-    const ctx        = this.ctx;
-    const h          = 15 * zoom;
-    const bladeCount = 6;
-
+    const ctx      = this.ctx;
+    const h        = 15 * zoom;
+    const spriteH  = RenderSystem.FIBER_SPRITE_H;
+    const SIZE     = RenderSystem.FIBER_SPRITE_SIZE;
+    const drawSize = SIZE * (h / spriteH);
+    const sprite   = RenderSystem._ensureFiberSprites().get(hovered ? 'hovered' : 'normal')!;
     ctx.save();
     ctx.globalAlpha = deathAlpha;
-    ctx.lineCap = 'round';
-    // Dark base blades
-    ctx.strokeStyle = hovered ? '#7ac040' : '#5a9030';
-    ctx.lineWidth   = Math.max(1, 2.2 * zoom);
-    for (let i = 0; i < bladeCount; i++) {
-      const angle  = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.95;
-      const bend   = Math.sin(i * 1.8) * 0.3;
-      const midX   = sx + Math.cos(angle + bend * 0.5) * h * 0.5;
-      const midY   = sy + Math.sin(angle + bend * 0.5) * h * 0.5;
-      const tipX   = sx + Math.cos(angle + bend) * h;
-      const tipY   = sy + Math.sin(angle + bend) * h;
-      ctx.beginPath();
-      ctx.moveTo(sx, sy);
-      ctx.quadraticCurveTo(midX, midY, tipX, tipY);
-      ctx.stroke();
-    }
-    // Bright inner blades
-    ctx.strokeStyle = hovered ? '#b0ff60' : '#8acc48';
-    ctx.lineWidth   = Math.max(0.5, 1.2 * zoom);
-    for (let i = 1; i < bladeCount - 1; i++) {
-      const angle = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.6;
-      ctx.beginPath();
-      ctx.moveTo(sx, sy - h * 0.25);
-      ctx.lineTo(sx + Math.cos(angle) * h * 0.72, sy + Math.sin(angle) * h * 0.72);
-      ctx.stroke();
-    }
+    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
     ctx.restore();
   }
 
