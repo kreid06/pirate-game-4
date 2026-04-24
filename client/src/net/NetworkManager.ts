@@ -2221,7 +2221,6 @@ export class NetworkManager {
           shallowVertices: isl.shallowVertices
             ? (isl.shallowVertices as any[]).map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 }))
             : undefined,
-          shallowPolyScale: typeof isl.shallowPolyScale === 'number' ? isl.shallowPolyScale : undefined,
         }));
         this.onIslands?.(islands);
         break;

@@ -34,7 +34,6 @@ interface IslandData {
   outerVerts?: Pt[];
   circleRadius?: number;
   grassPolyScale?: number;   // grass polygon = outerVerts scaled by this toward centre (default 0.82)
-  shallowPolyScale?: number; // shallow polygon scale factor (default 1.0 = same as sand)
   sandVerts?: Pt[];          // explicit sand polygon (overrides outerVerts for sand layer)
   grassVerts?: Pt[];         // explicit grass polygon (overrides scale calculation)
   shallowVerts?: Pt[];       // explicit shallow water polygon (outer boundary of shallow zone)
@@ -143,8 +142,8 @@ function dataKey(islandId: number, layer: LayerKey): string {
   return `${islandId}:${layer}`;
 }
 
-function generateShallowFromSand(sandPoly: Pt[], scale: number): Pt[] {
-  return sandPoly.map(v => ({ x: v.x * scale, y: v.y * scale }));
+function generateShallowFromSand(sandPoly: Pt[]): Pt[] {
+  return sandPoly.map(v => ({ ...v }));
 }
 
 function getPolys(islandId: number, layer: LayerKey): Pt[][] {
@@ -168,11 +167,7 @@ function getPolys(islandId: number, layer: LayerKey): Pt[][] {
       if (isl?.shallowVerts) {
         layerData.set(k, [isl.shallowVerts.map(v => ({ ...v }))]);
       } else {
-        const scale = isl?.shallowPolyScale ?? 1.0;
-        const sandKey = dataKey(islandId, 'outerSand');
-        if (!layerData.has(sandKey)) getPolys(islandId, 'outerSand');
-        const sandPoly = layerData.get(sandKey)?.[0] ?? [];
-        layerData.set(k, sandPoly.length ? [generateShallowFromSand(sandPoly, scale)] : [[]]);
+        layerData.set(k, sandPoly.length ? [generateShallowFromSand(sandPoly)] : [[]]);
       }
     } else {
       layerData.set(k, [[]]);
@@ -737,7 +732,6 @@ interface ServerIslandData {
   preset: string;
   vertexCount?: number;
   grassPolyScale?: number;
-  shallowPolyScale?: number;
   outerVerts?: Pt[];
   grassVertCount?: number;
   grassVerts?: Pt[];
@@ -768,9 +762,8 @@ async function fetchFromServer(): Promise<void> {
       local.cy = srv.cy;
       // Update shape/outer verts for polygon islands
       if (srv.outerVerts && srv.outerVerts.length) {
-        local.outerVerts    = srv.outerVerts.map(v => ({ x: v.x, y: v.y }));
-        local.grassPolyScale   = srv.grassPolyScale   ?? local.grassPolyScale;
-        local.shallowPolyScale = srv.shallowPolyScale ?? local.shallowPolyScale;
+        local.outerVerts     = srv.outerVerts.map(v => ({ x: v.x, y: v.y }));
+        local.grassPolyScale = srv.grassPolyScale ?? local.grassPolyScale;
         // Invalidate cached layer data so getPolys() re-seeds from updated outerVerts
         layerData.delete(dataKey(local.id, 'islandShape'));
         // Only reset sand/grass from server if they're not already explicitly set
@@ -815,8 +808,7 @@ document.getElementById('btn-shallow-from-sand')?.addEventListener('click', () =
   // Force regenerate shallow from current sand polygon
   const sandPoly = getPolys(isl.id, 'outerSand')[0] ?? [];
   if (!sandPoly.length) { toast('No sand polygon to expand from'); return; }
-  const scale = isl.shallowPolyScale ?? 1.0;
-  const generated = generateShallowFromSand(sandPoly, scale);
+  const generated = generateShallowFromSand(sandPoly);
   layerData.set(dataKey(isl.id, 'outerShallow'), [generated]);
   toast('Shallow polygon reset from sand');
 });

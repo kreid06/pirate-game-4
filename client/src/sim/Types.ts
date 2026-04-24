@@ -310,8 +310,6 @@ export interface IslandDef {
   grassVertices?: { x: number; y: number }[];
   /** Explicit shallow water polygon vertices in world-space. Defines the outer boundary of the shallow zone. */
   shallowVertices?: { x: number; y: number }[];
-  /** Shallow polygon scale factor (default 1.375). Used when shallowVertices is absent. */
-  shallowPolyScale?: number;
 }
 
 /**
