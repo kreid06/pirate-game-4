@@ -120,7 +120,29 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
         .vertex_count     = 70,
         .poly_bound_r     = 5800.0f,
         .grass_poly_scale = 0.82f,
-        .vx = {
+        .grass_vertex_count = 67,
+        .gvx = {
+            -2536, -1357,  -197,   927,  2511,  3799,  4518,  4504,
+             4078,  3490,  3167,  2800,  2594,  2447,  1977,  1596,
+             1023,   773,   949,  1170,  1478,  1610,  1875,  2124,
+             2712,  3329,  3255,  2932,  2286,  2183,  2036,  1508,
+              803,   156,  -446, -1048, -1488, -1738, -1812, -2105,
+            -2281, -2179, -2370, -2732, -3171, -4118, -4442, -4141,
+            -3605, -3145, -2666, -2555, -2224, -1892, -1407, -1395,
+            -1929, -2739, -3071, -3800, -4268, -4821, -4692, -4158,
+            -3679, -3476, -3568,
+        },
+        .gvy = {
+            -3184, -3405, -3498, -3019, -2411, -1386,  -109,   596,
+             1213,  1654,  2006,  2153,  2535,  3005,  3152,  3313,
+             3401,  3166,  2946,  2711,  2564,  2153,  1683,  1844,
+             1830,  1316,   758,   185,   141,   -21,  -447,  -990,
+            -1372, -1842, -1886, -1592, -1137,  -373,   -35,   244,
+              156,   -94,  -344,  -593,  -501,    31,   562,  1325,
+             1428,  1446,  1520,  1888,  2441,  2883,  3228,  3454,
+             3362,  3104,  2920,  2592,  1925,  1225,   175,  -661,
+            -1121, -1784, -2724,
+        },
             -3152, -1494,  -296,  1457,  2926,  4400,  4900,  5000,
              4700,  4100,  3100,  3203,  3100,  2932,  2521,  1743,
              1061,   550,   248,   865,  1400,  1682,  1756,  2161,
@@ -178,9 +200,26 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
  */
 static int inside_grass_poly(const IslandDef *isl, float px, float py)
 {
+    int inside = 0;
+
+    if (isl->grass_vertex_count > 0) {
+        /* Explicit grass polygon — gvx/gvy are local offsets from centre */
+        int n = isl->grass_vertex_count;
+        for (int i = 0, j = n - 1; i < n; j = i++) {
+            float xi = isl->x + isl->gvx[i];
+            float yi = isl->y + isl->gvy[i];
+            float xj = isl->x + isl->gvx[j];
+            float yj = isl->y + isl->gvy[j];
+            if ((yi > py) != (yj > py) &&
+                px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+                inside = !inside;
+        }
+        return inside;
+    }
+
+    /* Scale-based fallback */
     int   n      = isl->vertex_count;
     float scale  = isl->grass_poly_scale;
-    int   inside = 0;
 
     for (int i = 0, j = n - 1; i < n; j = i++) {
         /* Grass polygon vertex = island centre + offset × scale */

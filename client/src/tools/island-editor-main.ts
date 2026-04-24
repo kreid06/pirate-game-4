@@ -89,7 +89,7 @@ function makeIsland3GrassVerts(): Pt[] {
   return vx.map((x, i) => ({ x, y: vy[i] }));
 }
 
-const ISLANDS: IslandData[] = [
+let ISLANDS: IslandData[] = [
   { id: 1, name: 'Island 1 — Tropical',      cx:  800,  cy:  600,  circleRadius: 185, grassPolyScale: 148/185 },
   { id: 2, name: 'Island 2 — Continental',    cx: 6000,  cy: 5000,  outerVerts: makeIsland2Verts(), grassPolyScale: 0.82 },
   { id: 3, name: 'Island 3 — Crescent Cove',  cx: -2500, cy: 2500,  outerVerts: makeIsland3Verts(), grassPolyScale: 0.82,
@@ -710,8 +710,79 @@ document.getElementById('btn-shape-from-sand')!.addEventListener('click', () => 
   toast('Shape reset to sand vertices');
 });
 
-// Import
-document.getElementById('btn-import')!.addEventListener('click', () => {
+// ── Server fetch ───────────────────────────────────────────────────────────────
+
+interface ServerIslandData {
+  id: number;
+  cx: number;
+  cy: number;
+  preset: string;
+  vertexCount?: number;
+  grassPolyScale?: number;
+  outerVerts?: Pt[];
+  grassVertCount?: number;
+  grassVerts?: Pt[];
+  beachRadius?: number;
+  grassRadius?: number;
+}
+
+const serverStatusEl = document.getElementById('server-status')!;
+const serverUrlInput = document.getElementById('server-url') as HTMLInputElement;
+
+async function fetchFromServer(): Promise<void> {
+  const base = serverUrlInput.value.trim().replace(/\/$/, '');
+  serverStatusEl.textContent = 'connecting…';
+  serverStatusEl.style.color = 'rgba(232,213,154,0.5)';
+  try {
+    const res  = await fetch(`${base}/api/islands`, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data: { islands: ServerIslandData[] } = await res.json();
+
+    let updated = 0;
+    for (const srv of data.islands) {
+      const local = ISLANDS.find(i => i.id === srv.id);
+      if (!local) continue;
+      // Update centre
+      local.cx = srv.cx;
+      local.cy = srv.cy;
+      // Update shape/outer verts for polygon islands
+      if (srv.outerVerts && srv.outerVerts.length) {
+        local.outerVerts    = srv.outerVerts.map(v => ({ x: v.x, y: v.y }));
+        local.grassPolyScale = srv.grassPolyScale ?? local.grassPolyScale;
+        // Invalidate cached layer data so getPolys() re-seeds from updated outerVerts
+        layerData.delete(dataKey(local.id, 'islandShape'));
+        // Only reset sand/grass from server if they're not already explicitly set
+        if (!local.sandVerts)  layerData.delete(dataKey(local.id, 'outerSand'));
+        if (!local.grassVerts) layerData.delete(dataKey(local.id, 'innerGrass'));
+        // Load explicit grass polygon from server if provided
+        if (srv.grassVerts && srv.grassVerts.length) {
+          local.grassVerts = srv.grassVerts.map(v => ({ x: v.x, y: v.y }));
+          layerData.delete(dataKey(local.id, 'innerGrass'));
+        }
+      }
+      if (srv.beachRadius !== undefined) local.circleRadius = srv.beachRadius;
+      updated++;
+    }
+
+    serverStatusEl.textContent = `✓ ${updated} island(s) loaded`;
+    serverStatusEl.style.color = '#a8e890';
+    refreshPolySelect();
+    refreshVertCount();
+    refreshSubIslandList();
+    toast(`Loaded ${updated} island(s) from server`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    serverStatusEl.textContent = `✗ ${msg}`;
+    serverStatusEl.style.color = '#e87070';
+  }
+}
+
+document.getElementById('btn-fetch-server')!.addEventListener('click', fetchFromServer);
+
+// Auto-fetch on load (silent failure — just updates status)
+fetchFromServer();
+
+
   const ta = document.getElementById('import-area') as HTMLTextAreaElement;
   try {
     const parsed = JSON.parse(ta.value.trim());

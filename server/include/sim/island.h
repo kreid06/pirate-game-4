@@ -94,7 +94,13 @@ typedef struct {
     float vx[ISLAND_MAX_VERTS];         /* vertex X offsets from centre (world px) */
     float vy[ISLAND_MAX_VERTS];         /* vertex Y offsets from centre (world px) */
     float poly_bound_r;                 /* broad-phase radius = max dist to vertex + margin */
-    float grass_poly_scale;             /* inner-grass polygon scale (e.g. 0.78) */
+    float grass_poly_scale;             /* inner-grass polygon scale (e.g. 0.82); used when grass_vertex_count == 0 */
+
+    /* Explicit grass polygon — when grass_vertex_count > 0 these override the
+     * scale-based grass derivation for both server collision and client rendering. */
+    int   grass_vertex_count;           /* 0 = derive grass from vx/vy × grass_poly_scale */
+    float gvx[ISLAND_MAX_VERTS];        /* grass vertex X offsets from centre (world px) */
+    float gvy[ISLAND_MAX_VERTS];        /* grass vertex Y offsets from centre (world px) */
 
     /* ── Wood spatial grid (built by islands_build_grid) ─────────────────
      * grid_ox/oy = world-px of cell [0][0] corner.

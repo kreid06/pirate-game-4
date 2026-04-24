@@ -306,6 +306,8 @@ export interface IslandDef {
   resources: IslandResource[];
   /** Polygon coastline vertices in world-space (present for polygon-mode islands). */
   vertices?: { x: number; y: number }[];
+  /** Explicit grass polygon vertices in world-space. When present, used instead of scaling sand vertices. */
+  grassVertices?: { x: number; y: number }[];
 }
 
 /**

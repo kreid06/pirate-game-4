@@ -9375,6 +9375,16 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                                 hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
                                             }
+                                            if (isl->grass_vertex_count > 0) {
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"grassVertices\":[");
+                                                for (int vi = 0; vi < isl->grass_vertex_count; vi++) {
+                                                    hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                                        "%s{\"x\":%.1f,\"y\":%.1f}",
+                                                                        vi ? "," : "",
+                                                                        isl->x + isl->gvx[vi], isl->y + isl->gvy[vi]);
+                                                }
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
+                                            }
                                             hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"resources\":[");
                                             for (int hri = 0; hri < isl->resource_count; hri++) {
                                                 const IslandResource *r = &isl->resources[hri];

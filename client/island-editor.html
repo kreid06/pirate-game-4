@@ -131,7 +131,18 @@
   <div id="sidebar">
     <h2>🏝 Island Editor</h2>
 
-    <!-- Island selector -->
+    <!-- Server connection -->
+    <div>
+      <h3>Server</h3>
+      <div style="display:flex;gap:4px;">
+        <input type="text" id="server-url" value="http://localhost:8081"
+          style="flex:1;background:rgba(0,0,0,0.5);color:#e8d59a;border:1px solid rgba(245,200,66,0.3);border-radius:3px;padding:4px 6px;font-family:inherit;font-size:11px;"/>
+        <button class="btn" id="btn-fetch-server">↺</button>
+      </div>
+      <div id="server-status" style="font-size:10px;color:rgba(232,213,154,0.5);margin-top:3px;">not connected</div>
+    </div>
+
+    <hr class="sep"/>
     <div>
       <label>Island</label>
       <select id="isl-select"></select>

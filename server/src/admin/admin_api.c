@@ -791,3 +791,66 @@ int admin_api_set_player_company(struct HttpResponse* resp, uint32_t player_id, 
     resp->cache_control = false;
     return 0;
 }
+
+/* Island schema endpoint — returns shape vertices + metadata for all islands.
+ * Used by the standalone island editor to keep itself in sync with the server. */
+static char islands_json_buffer[65536];
+
+int admin_api_islands(struct HttpResponse* resp) {
+    if (!resp) return -1;
+
+    int pos = 0;
+    pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
+        "{\"islands\":[");
+
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        const IslandDef *isl = &ISLAND_PRESETS[ii];
+        if (ii > 0)
+            pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, ",");
+
+        pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
+            "{\"id\":%d,\"cx\":%.1f,\"cy\":%.1f,\"preset\":\"%s\"",
+            isl->id, isl->x, isl->y, isl->preset);
+
+        if (isl->vertex_count > 0) {
+            /* Polygon island — emit shape vertices as local offsets from centre */
+            pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
+                ",\"grassPolyScale\":%.4f,\"vertexCount\":%d,\"outerVerts\":[",
+                isl->grass_poly_scale, isl->vertex_count);
+            for (int vi = 0; vi < isl->vertex_count; vi++) {
+                if (vi > 0)
+                    pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, ",");
+                pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
+                    "{\"x\":%.1f,\"y\":%.1f}", isl->vx[vi], isl->vy[vi]);
+            }
+            pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, "]");
+            if (isl->grass_vertex_count > 0) {
+                pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
+                    ",\"grassVertCount\":%d,\"grassVerts\":[", isl->grass_vertex_count);
+                for (int vi = 0; vi < isl->grass_vertex_count; vi++) {
+                    if (vi > 0)
+                        pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, ",");
+                    pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
+                        "{\"x\":%.1f,\"y\":%.1f}", isl->gvx[vi], isl->gvy[vi]);
+                }
+                pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, "]");
+            }
+        } else {
+            /* Bump-circle island */
+            pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos,
+                ",\"beachRadius\":%.1f,\"grassRadius\":%.1f",
+                isl->beach_radius_px, isl->grass_radius_px);
+        }
+
+        pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, "}");
+    }
+
+    pos += snprintf(islands_json_buffer + pos, sizeof(islands_json_buffer) - pos, "]}");
+
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = islands_json_buffer;
+    resp->body_length = (size_t)pos;
+    resp->cache_control = false;
+    return 0;
+}

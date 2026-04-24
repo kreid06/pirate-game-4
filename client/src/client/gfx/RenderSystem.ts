@@ -2417,14 +2417,16 @@ export class RenderSystem {
         ctx.lineWidth   = Math.max(1, 2 * zoom);
         ctx.stroke();
 
-        // Grass interior (polygon scaled toward island centre)
-        const gScale = preset.grassPolyScale ?? 0.78;
-        const grassVerts = isl.vertices.map(v => ({
-          x: isl.x + (v.x - isl.x) * gScale,
-          y: isl.y + (v.y - isl.y) * gScale,
-        }));
+        // Grass interior (explicit polygon if provided, else scale sand polygon toward centre)
+        const grassVerts = isl.grassVertices ?? (() => {
+          const gScale = preset.grassPolyScale ?? 0.78;
+          return isl.vertices.map(v => ({
+            x: isl.x + (v.x - isl.x) * gScale,
+            y: isl.y + (v.y - isl.y) * gScale,
+          }));
+        })();
         this.traceIslandPolygon(camera, grassVerts);
-        const grassBoundR = polyBoundR * gScale;
+        const grassBoundR = Math.max(...grassVerts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
         const grassGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, grassBoundR * zoom);
         grassGrad.addColorStop(0.0, preset.grassColors[0]);
         grassGrad.addColorStop(0.7, preset.grassColors[1]);

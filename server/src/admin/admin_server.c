@@ -762,6 +762,8 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                         admin_api_input_tiers(&resp);
                     } else if (strcmp(path_start, "/api/websocket") == 0) {
                         admin_api_websocket_entities(&resp);
+                    } else if (strcmp(path_start, "/api/islands") == 0) {
+                        admin_api_islands(&resp);
                     } else {
                         resp.status_code = 404;
                         resp.body = "Not Found";
@@ -850,6 +852,7 @@ int admin_send_response(int client_fd, const struct HttpResponse* resp) {
         "HTTP/1.1 %d %s\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
         "Connection: close\r\n"
         "\r\n",
         resp->status_code,
