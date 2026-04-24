@@ -9826,25 +9826,40 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                             }
                                             if (isl) {
-                                                if (isl->vertex_count > 0) {
-                                                    // Polygon island — rejection sampling within scaled grass poly
-                                                    float scale = isl->grass_poly_scale;
-                                                    float bound = isl->poly_bound_r * scale;
+                                                if (isl->vertex_count > 0 && isl->grass_vertex_count > 0) {
+                                                    // Polygon island — rejection sampling within explicit grass poly
+                                                    float bound = 0.0f;
+                                                    for (int vi = 0; vi < isl->grass_vertex_count; vi++) {
+                                                        float r = sqrtf(isl->gvx[vi]*isl->gvx[vi] + isl->gvy[vi]*isl->gvy[vi]);
+                                                        if (r > bound) bound = r;
+                                                    }
                                                     int attempts = 0;
                                                     do {
                                                         float rx = ((float)rand() / (float)RAND_MAX) * 2.0f * bound - bound;
                                                         float ry = ((float)rand() / (float)RAND_MAX) * 2.0f * bound - bound;
-                                                        // Test against scaled grass polygon
-                                                        float wx = isl->x + rx;
-                                                        float wy = isl->y + ry;
-                                                        // Temporarily check scaled polygon inline
-                                                        int n = isl->vertex_count;
-                                                        int inside = 0;
+                                                        float wx = isl->x + rx, wy = isl->y + ry;
+                                                        int n = isl->grass_vertex_count, inside = 0;
                                                         for (int vi = 0, vj = n - 1; vi < n; vj = vi++) {
-                                                            float xi = isl->x + isl->vx[vi] * scale;
-                                                            float yi = isl->y + isl->vy[vi] * scale;
-                                                            float xj = isl->x + isl->vx[vj] * scale;
-                                                            float yj = isl->y + isl->vy[vj] * scale;
+                                                            float xi = isl->x + isl->gvx[vi], yi = isl->y + isl->gvy[vi];
+                                                            float xj = isl->x + isl->gvx[vj], yj = isl->y + isl->gvy[vj];
+                                                            if (((yi > wy) != (yj > wy)) &&
+                                                                (wx < (xj - xi) * (wy - yi) / (yj - yi) + xi))
+                                                                inside = !inside;
+                                                        }
+                                                        if (inside) { spawn_x = wx; spawn_y = wy; break; }
+                                                    } while (++attempts < 200);
+                                                } else if (isl->vertex_count > 0) {
+                                                    // Polygon island without explicit grass — spawn within sand polygon
+                                                    float bound = isl->poly_bound_r;
+                                                    int attempts = 0;
+                                                    do {
+                                                        float rx = ((float)rand() / (float)RAND_MAX) * 2.0f * bound - bound;
+                                                        float ry = ((float)rand() / (float)RAND_MAX) * 2.0f * bound - bound;
+                                                        float wx = isl->x + rx, wy = isl->y + ry;
+                                                        int n = isl->vertex_count, inside = 0;
+                                                        for (int vi = 0, vj = n - 1; vi < n; vj = vi++) {
+                                                            float xi = isl->x + isl->vx[vi], yi = isl->y + isl->vy[vi];
+                                                            float xj = isl->x + isl->vx[vj], yj = isl->y + isl->vy[vj];
                                                             if (((yi > wy) != (yj > wy)) &&
                                                                 (wx < (xj - xi) * (wy - yi) / (yj - yi) + xi))
                                                                 inside = !inside;

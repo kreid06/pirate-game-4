@@ -2336,39 +2336,29 @@ export class RenderSystem {
         ctx.save();
         if (isl.vertices) {
           const verts = isl.vertices;
-          const polyBoundR = Math.max(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
-          const polyMinR   = Math.min(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
 
-          // Outer subpath: explicit shallow polygon if available, else uniform scale
-          let outerScreenVerts: { x: number; y: number }[];
-          let shallowBoundR: number;
+          // Only render shallow zone if explicit shallow vertices are defined
           if (isl.shallowVertices?.length) {
-            outerScreenVerts = isl.shallowVertices.map(v => camera.worldToScreen(Vec2.from(v.x, v.y)));
-            shallowBoundR = Math.max(...isl.shallowVertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
-          } else {
-            const shallowScale = isl.shallowPolyScale ?? 1.375;
-            outerScreenVerts = verts.map(v => {
-              const dx = v.x - isl.x, dy = v.y - isl.y;
-              return camera.worldToScreen(Vec2.from(isl.x + dx * shallowScale, isl.y + dy * shallowScale));
+            const polyMinR   = Math.min(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+            const shallowBoundR = Math.max(...isl.shallowVertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+            const outerScreenVerts = isl.shallowVertices.map(v => camera.worldToScreen(Vec2.from(v.x, v.y)));
+            ctx.beginPath();
+            outerScreenVerts.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
+            ctx.closePath();
+            // Inner subpath: sand polygon (cut out via even-odd)
+            verts.forEach((v, i) => {
+              const sp = camera.worldToScreen(Vec2.from(v.x, v.y));
+              i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
             });
-            shallowBoundR = polyBoundR * shallowScale;
+            ctx.closePath();
+            const sg = ctx.createRadialGradient(sc.x, sc.y, polyMinR * zoom * 0.85, sc.x, sc.y, shallowBoundR * zoom);
+            sg.addColorStop(0.0,  'rgba(220, 195, 130, 0.95)');
+            sg.addColorStop(0.30, 'rgba(130, 210, 200, 0.75)');
+            sg.addColorStop(0.65, 'rgba(70, 185, 215, 0.35)');
+            sg.addColorStop(1.0,  'rgba(60, 170, 205, 0.0)');
+            ctx.fillStyle = sg;
+            ctx.fill('evenodd');
           }
-          ctx.beginPath();
-          outerScreenVerts.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
-          ctx.closePath();
-          // Inner subpath: sand polygon boundary (cut out via even-odd)
-          verts.forEach((v, i) => {
-            const sp = camera.worldToScreen(Vec2.from(v.x, v.y));
-            i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
-          });
-          ctx.closePath();
-          const sg = ctx.createRadialGradient(sc.x, sc.y, polyMinR * zoom * 0.85, sc.x, sc.y, shallowBoundR * zoom);
-          sg.addColorStop(0.0,  'rgba(220, 195, 130, 0.95)');
-          sg.addColorStop(0.30, 'rgba(130, 210, 200, 0.75)');
-          sg.addColorStop(0.65, 'rgba(70, 185, 215, 0.35)');
-          sg.addColorStop(1.0,  'rgba(60, 170, 205, 0.0)');
-          ctx.fillStyle = sg;
-          ctx.fill('evenodd');
         } else {
           const SHALLOW_DEPTH = preset.beachRadius * SHALLOW_SCALE;
           const n    = preset.beachBumps.length;

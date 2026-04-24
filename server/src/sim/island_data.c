@@ -203,54 +203,15 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
  */
 static int inside_grass_poly(const IslandDef *isl, float px, float py)
 {
+    if (isl->grass_vertex_count == 0) return 0;
+
     int inside = 0;
-
-    if (isl->grass_vertex_count > 0) {
-        /* Explicit grass polygon — gvx/gvy are local offsets from centre */
-        int n = isl->grass_vertex_count;
-        for (int i = 0, j = n - 1; i < n; j = i++) {
-            float xi = isl->x + isl->gvx[i];
-            float yi = isl->y + isl->gvy[i];
-            float xj = isl->x + isl->gvx[j];
-            float yj = isl->y + isl->gvy[j];
-            if ((yi > py) != (yj > py) &&
-                px < (xj - xi) * (py - yi) / (yj - yi) + xi)
-                inside = !inside;
-        }
-        return inside;
-    }
-
-    /* Scale-based fallback */
-    int   n      = isl->vertex_count;
-    float scale  = isl->grass_poly_scale;
-
+    int n = isl->grass_vertex_count;
     for (int i = 0, j = n - 1; i < n; j = i++) {
-        /* Grass polygon vertex = island centre + offset × scale */
-        float xi = isl->x + isl->vx[i] * scale;
-        float yi = isl->y + isl->vy[i] * scale;
-        float xj = isl->x + isl->vx[j] * scale;
-        float yj = isl->y + isl->vy[j] * scale;
-
-        if ((yi > py) != (yj > py) &&
-            px < (xj - xi) * (py - yi) / (yj - yi) + xi)
-            inside = !inside;
-    }
-    return inside;
-}
-
-/* Variant of inside_grass_poly that uses an explicit polygon scale factor
-   instead of the island's grass_poly_scale.  Used for fiber placement. */
-static int inside_grass_poly_scaled(const IslandDef *isl, float px, float py, float scale)
-{
-    int n      = isl->vertex_count;
-    int inside = 0;
-
-    for (int i = 0, j = n - 1; i < n; j = i++) {
-        float xi = isl->x + isl->vx[i] * scale;
-        float yi = isl->y + isl->vy[i] * scale;
-        float xj = isl->x + isl->vx[j] * scale;
-        float yj = isl->y + isl->vy[j] * scale;
-
+        float xi = isl->x + isl->gvx[i];
+        float yi = isl->y + isl->gvy[i];
+        float xj = isl->x + isl->gvx[j];
+        float yj = isl->y + isl->gvy[j];
         if ((yi > py) != (yj > py) &&
             px < (xj - xi) * (py - yi) / (yj - yi) + xi)
             inside = !inside;
@@ -302,10 +263,15 @@ void islands_generate_trees(void)
     for (int ii = 0; ii < ISLAND_COUNT; ii++) {
         IslandDef *isl = &ISLAND_PRESETS[ii];
 
-        /* Only polygon islands with a grass scale get procedural trees. */
-        if (isl->vertex_count == 0 || isl->grass_poly_scale <= 0.0f) continue;
+        /* Only polygon islands with an explicit grass polygon get procedural trees. */
+        if (isl->vertex_count == 0 || isl->grass_vertex_count == 0) continue;
 
-        float half_bound = isl->poly_bound_r * isl->grass_poly_scale;
+        /* Bounding box from explicit grass vertices */
+        float half_bound = 0.0f;
+        for (int gi = 0; gi < isl->grass_vertex_count; gi++) {
+            float r = sqrtf(isl->gvx[gi]*isl->gvx[gi] + isl->gvy[gi]*isl->gvy[gi]);
+            if (r > half_bound) half_bound = r;
+        }
 
         /* One deterministic seed per island — the fiber pass derives its own
          * stream from the same formula XOR'd with a golden-ratio constant. */
@@ -350,7 +316,7 @@ void islands_generate_trees(void)
     for (int ii = 0; ii < ISLAND_COUNT; ii++) {
         IslandDef *isl = &ISLAND_PRESETS[ii];
 
-        if (isl->vertex_count == 0 || isl->grass_poly_scale <= 0.0f) continue;
+        if (isl->vertex_count == 0 || isl->grass_vertex_count == 0) continue;
 
         /* Derive fiber seed from the same island seed formula as the tree pass,
          * XOR'd with a golden-ratio constant to give an independent jitter stream
@@ -358,9 +324,13 @@ void islands_generate_trees(void)
         unsigned int island_seed = (unsigned int)((unsigned int)isl->id * 1664525u + 1013904223u);
         unsigned int seed = island_seed ^ 0x9E3779B9u;
 
-        /* Use a reduced polygon scale so fiber stays well inside the island. */
-        float fiber_scale = isl->grass_poly_scale * FIBER_POLY_SCALE;
-        float half_bound  = isl->poly_bound_r * fiber_scale;
+        /* Bounding box from explicit grass vertices */
+        float half_bound = 0.0f;
+        for (int gi = 0; gi < isl->grass_vertex_count; gi++) {
+            float r = sqrtf(isl->gvx[gi]*isl->gvx[gi] + isl->gvy[gi]*isl->gvy[gi]);
+            if (r > half_bound) half_bound = r;
+        }
+        half_bound *= FIBER_POLY_SCALE;
 
         /* Shift fiber grid origin by half a cell in both axes — this is the
          * primary guarantee that fiber can never land on a tree grid point
@@ -381,8 +351,8 @@ void islands_generate_trees(void)
                 float fx = gx + jx;
                 float fy = gy + jy;
 
-                /* Must be inside the reduced grass polygon. */
-                if (!inside_grass_poly_scaled(isl, fx, fy, fiber_scale)) continue;
+                /* Must be inside the grass polygon (shrunk by FIBER_POLY_SCALE search area). */
+                if (!inside_grass_poly(isl, fx, fy)) continue;
 
                 IslandResource *r = &isl->resources[isl->resource_count];
                 r->ox         = fx - isl->x;

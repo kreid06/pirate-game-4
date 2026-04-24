@@ -94,18 +94,18 @@ typedef struct {
     float vx[ISLAND_MAX_VERTS];         /* vertex X offsets from centre (world px) */
     float vy[ISLAND_MAX_VERTS];         /* vertex Y offsets from centre (world px) */
     float poly_bound_r;                 /* broad-phase radius = max dist to vertex + margin */
-    float grass_poly_scale;             /* inner-grass polygon scale (e.g. 0.82); used when grass_vertex_count == 0 */
-    float shallow_poly_scale;           /* shallow water polygon scale (e.g. 1.375); used when shallow_vertex_count == 0 */
+    float grass_poly_scale;             /* legacy/metadata — no longer used for collision; explicit gvx/gvy always required */
+    float shallow_poly_scale;           /* legacy/metadata — no longer used for collision; explicit svx/svy always required */
 
     /* Explicit grass polygon — when grass_vertex_count > 0 these override the
      * scale-based grass derivation for both server collision and client rendering. */
-    int   grass_vertex_count;           /* 0 = derive grass from vx/vy × grass_poly_scale */
+    int   grass_vertex_count;           /* 0 = no grass zone; explicit gvx/gvy required */
     float gvx[ISLAND_MAX_VERTS];        /* grass vertex X offsets from centre (world px) */
     float gvy[ISLAND_MAX_VERTS];        /* grass vertex Y offsets from centre (world px) */
 
     /* Explicit shallow water polygon — when shallow_vertex_count > 0 the shallow zone is
      * defined as: inside shallow polygon AND outside sand polygon.
-     * 0 = fall back to sand polygon edge expanded by poly_bound_r × SHALLOW_WATER_SCALE. */
+     * 0 = no shallow zone for this island. */
     int   shallow_vertex_count;
     float svx[ISLAND_MAX_VERTS];        /* shallow water poly X offsets from centre (world px) */
     float svy[ISLAND_MAX_VERTS];        /* shallow water poly Y offsets from centre (world px) */
@@ -279,12 +279,8 @@ static inline bool island_in_shallow_water(const IslandDef *isl, float px, float
             if (island_poly_contains(isl, px, py)) return false;
             return island_shallow_poly_contains(isl, px, py);
         }
-        float shallow_depth = isl->poly_bound_r * SHALLOW_WATER_SCALE;
-        float outer_r = isl->poly_bound_r + shallow_depth;
-        if (dist_sq > outer_r * outer_r) return false;
-        if (island_poly_contains(isl, px, py)) return false;
-        /* Use actual edge distance so the zone follows the polygon shape */
-        return island_poly_edge_dist(isl, px, py) < shallow_depth;
+        /* No explicit shallow polygon — no shallow zone for this island */
+        return false;
     } else {
         float shallow_depth = isl->beach_radius_px * SHALLOW_WATER_SCALE;
         float broad_outer = isl->beach_radius_px + isl->beach_max_bump + shallow_depth;
@@ -309,7 +305,6 @@ static inline float island_shallow_water_depth(const IslandDef *isl, float px, f
     float dist_sq = dx * dx + dy * dy;
 
     if (isl->vertex_count > 0) {
-        float shallow_depth = isl->poly_bound_r * SHALLOW_WATER_SCALE;
         if (isl->shallow_vertex_count > 0) {
             /* Explicit shallow polygon broad-phase */
             float shallow_bound_r = 0.0f;
@@ -320,20 +315,15 @@ static inline float island_shallow_water_depth(const IslandDef *isl, float px, f
             if (dist_sq > shallow_bound_r * shallow_bound_r) return 0.0f;
             if (island_poly_contains(isl, px, py)) return 0.0f;
             if (!island_shallow_poly_contains(isl, px, py)) return 0.0f;
-            /* Gradient: 1.0 at sand edge, 0.0 at shallow_depth away */
+            /* Gradient: 1.0 at sand edge, 0.0 at shallow boundary */
             float edge_dist = island_poly_edge_dist(isl, px, py);
-            if (edge_dist >= shallow_depth) return 0.0f;
+            float shallow_depth = shallow_bound_r - isl->poly_bound_r;
+            if (shallow_depth <= 0.0f || edge_dist >= shallow_depth) return 0.0f;
             float t = 1.0f - edge_dist / shallow_depth;
             return (t > 1.0f) ? 1.0f : t;
         }
-        /* Fallback: edge-distance-based zone */
-        float outer_r = isl->poly_bound_r + shallow_depth;
-        if (dist_sq > outer_r * outer_r) return 0.0f;
-        if (island_poly_contains(isl, px, py)) return 0.0f;
-        float edge_dist = island_poly_edge_dist(isl, px, py);
-        if (edge_dist >= shallow_depth) return 0.0f;
-        float t = 1.0f - edge_dist / shallow_depth;
-        return (t > 1.0f) ? 1.0f : t;
+        /* No explicit shallow polygon — no shallow zone for this island */
+        return 0.0f;
     } else {
         float shallow_depth = isl->beach_radius_px * SHALLOW_WATER_SCALE;
         float broad_outer = isl->beach_radius_px + isl->beach_max_bump + shallow_depth;

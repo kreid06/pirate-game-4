@@ -34,7 +34,7 @@ interface IslandData {
   outerVerts?: Pt[];
   circleRadius?: number;
   grassPolyScale?: number;   // grass polygon = outerVerts scaled by this toward centre (default 0.82)
-  shallowPolyScale?: number; // shallow polygon = outerVerts scaled by this outward (default 1.375)
+  shallowPolyScale?: number; // shallow polygon scale factor (default 1.0 = same as sand)
   sandVerts?: Pt[];          // explicit sand polygon (overrides outerVerts for sand layer)
   grassVerts?: Pt[];         // explicit grass polygon (overrides scale calculation)
   shallowVerts?: Pt[];       // explicit shallow water polygon (outer boundary of shallow zone)
@@ -168,7 +168,7 @@ function getPolys(islandId: number, layer: LayerKey): Pt[][] {
       if (isl?.shallowVerts) {
         layerData.set(k, [isl.shallowVerts.map(v => ({ ...v }))]);
       } else {
-        const scale = isl?.shallowPolyScale ?? 1.375;
+        const scale = isl?.shallowPolyScale ?? 1.0;
         const sandKey = dataKey(islandId, 'outerSand');
         if (!layerData.has(sandKey)) getPolys(islandId, 'outerSand');
         const sandPoly = layerData.get(sandKey)?.[0] ?? [];
@@ -815,7 +815,7 @@ document.getElementById('btn-shallow-from-sand')?.addEventListener('click', () =
   // Force regenerate shallow from current sand polygon
   const sandPoly = getPolys(isl.id, 'outerSand')[0] ?? [];
   if (!sandPoly.length) { toast('No sand polygon to expand from'); return; }
-  const scale = isl.shallowPolyScale ?? 1.375;
+  const scale = isl.shallowPolyScale ?? 1.0;
   const generated = generateShallowFromSand(sandPoly, scale);
   layerData.set(dataKey(isl.id, 'outerShallow'), [generated]);
   toast('Shallow polygon reset from sand');
