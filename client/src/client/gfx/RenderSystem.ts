@@ -2339,25 +2339,46 @@ export class RenderSystem {
 
           // Only render shallow zone if explicit shallow vertices are defined
           if (isl.shallowVertices?.length) {
-            const polyMinR   = Math.min(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
             const shallowBoundR = Math.max(...isl.shallowVertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+            const sandBoundR    = Math.max(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+            const shallowW = Math.max(4, (shallowBoundR - sandBoundR) * zoom);
             const outerScreenVerts = isl.shallowVertices.map(v => camera.worldToScreen(Vec2.from(v.x, v.y)));
+            const sandScreenVerts  = verts.map(v => camera.worldToScreen(Vec2.from(v.x, v.y)));
+
+            const drawSandPath = () => {
+              ctx.beginPath();
+              sandScreenVerts.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
+              ctx.closePath();
+            };
+
+            // Clip to the shallow ring (outer poly minus sand poly, even-odd)
+            // so shadow and fill are only visible in the ring zone.
             ctx.beginPath();
             outerScreenVerts.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
             ctx.closePath();
-            // Inner subpath: sand polygon (cut out via even-odd)
-            verts.forEach((v, i) => {
-              const sp = camera.worldToScreen(Vec2.from(v.x, v.y));
-              i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
-            });
+            sandScreenVerts.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
             ctx.closePath();
-            const sg = ctx.createRadialGradient(sc.x, sc.y, polyMinR * zoom * 0.85, sc.x, sc.y, shallowBoundR * zoom);
-            sg.addColorStop(0.0,  'rgba(220, 195, 130, 0.95)');
-            sg.addColorStop(0.30, 'rgba(130, 210, 200, 0.75)');
-            sg.addColorStop(0.65, 'rgba(70, 185, 215, 0.35)');
-            sg.addColorStop(1.0,  'rgba(60, 170, 205, 0.0)');
-            ctx.fillStyle = sg;
-            ctx.fill('evenodd');
+            ctx.clip('evenodd');
+
+            // Draw the sand polygon with shadow passes.
+            // Shadow bleeds outward from the sand edge into the ring, clipped to the shallow boundary.
+            // Multiple passes produce a sandy→teal→blue gradient by edge distance.
+            ctx.fillStyle = 'rgba(220, 195, 130, 1)'; // opaque fill required to cast shadow
+
+            // Pass 1 — sandy, tight near-edge halo
+            ctx.shadowBlur  = Math.max(1, shallowW * 0.30);
+            ctx.shadowColor = 'rgba(220, 195, 130, 0.95)';
+            drawSandPath(); ctx.fill();
+
+            // Pass 2 — teal mid-zone
+            ctx.shadowBlur  = Math.max(1, shallowW * 0.62);
+            ctx.shadowColor = 'rgba(100, 205, 195, 0.80)';
+            drawSandPath(); ctx.fill();
+
+            // Pass 3 — blue outer fade
+            ctx.shadowBlur  = Math.max(1, shallowW);
+            ctx.shadowColor = 'rgba(60, 170, 205, 0.50)';
+            drawSandPath(); ctx.fill();
           }
         } else {
           const SHALLOW_DEPTH = preset.beachRadius * SHALLOW_SCALE;
