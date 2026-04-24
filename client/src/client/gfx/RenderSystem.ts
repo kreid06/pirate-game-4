@@ -2276,11 +2276,6 @@ export class RenderSystem {
       this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha);
     }
 
-    // ── Boulders — above tree leaves (large occluding objects) ───────────────
-    for (const b of this._pendingBoulders) {
-      this.drawIslandBoulder(b.sp.x, b.sp.y, zoom, b.isHovered, b.boulderAlpha * b.deathAlpha, b.ox, b.oy, b.size);
-    }
-
     // ── Hover prompts + health bars (always on top) ───────────────────────────
     for (const e of this._pendingAllRes) {
       if (e.res.type === 'wood' && e.isHovered) {
@@ -2984,7 +2979,12 @@ export class RenderSystem {
         if (e.res.type !== 'rock') continue;
         this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha, e.res.ox, e.res.oy);
       }
-      // Pass 2 – tree trunks (only visible when player is near or hovering)
+      // Pass 2 – boulders (above rocks, below players)
+      for (const e of visibleRes) {
+        if (e.res.type !== 'boulder') continue;
+        this.drawIslandBoulder(e.sp.x, e.sp.y, zoom, e.isHovered, e.boulderAlpha * e.deathAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0);
+      }
+      // Pass 3 – tree trunks (only visible when player is near or hovering)
       for (const e of visibleRes) {
         if (e.res.type !== 'wood') continue;
         if (!e.playerNear && !e.isHovered) continue;
@@ -2997,11 +2997,6 @@ export class RenderSystem {
       for (const e of visibleRes) {
         if (e.res.type !== 'fiber') continue;
         this._pendingBushes.push({ sp: e.sp, isHovered: e.isHovered, bushAlpha: e.bushAlpha, deathAlpha: e.deathAlpha, ox: e.res.ox, oy: e.res.oy });
-      }
-      // Boulders deferred to _pendingBoulders — drawn after tree leaves in renderWorld
-      for (const e of visibleRes) {
-        if (e.res.type !== 'boulder') continue;
-        this._pendingBoulders.push({ sp: e.sp, isHovered: e.isHovered, boulderAlpha: e.boulderAlpha, deathAlpha: e.deathAlpha, ox: e.res.ox, oy: e.res.oy, size: e.res.size ?? 1.0 });
       }
       this._pendingAllRes.push(...visibleRes);
     }

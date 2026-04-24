@@ -220,6 +220,7 @@ static void update_player_physics(struct Player* player, struct Sim* sim, q16_t 
 static void update_projectile_physics(struct Projectile* projectile, q16_t dt);
 static void handle_ship_collisions(struct Sim* sim);
 static void handle_player_player_collisions(struct Sim* sim);
+static void handle_player_boulder_collisions(struct Sim* sim);
 static entity_id allocate_entity_id(struct Sim* sim);
 static Vec2Q16 transform_hull_vertex(Vec2Q16 local_vertex, Vec2Q16 position, q16_t rotation);
 
@@ -887,6 +888,9 @@ void sim_handle_collisions(struct Sim* sim) {
     
     // Handle player-to-player collisions
     handle_player_player_collisions(sim);
+
+    // Handle player-to-boulder collisions
+    handle_player_boulder_collisions(sim);
     
     // Handle projectile collisions with ships and players
     handle_projectile_collisions(sim);
@@ -2649,7 +2653,102 @@ void handle_projectile_collisions(struct Sim* sim) {
             }
         }
 
+        /* ---- Boulder collision — projectile stops on contact ---- */
+        if (!removed) {
+            float px_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
+            float py_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
+
+            for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {
+                const IslandDef *isl = &ISLAND_PRESETS[ii];
+                for (int ri = 0; ri < isl->resource_count && !removed; ri++) {
+                    const IslandResource *res = &isl->resources[ri];
+                    if (res->type_id != RES_BOULDER) continue;
+                    if (res->health <= 0) continue;
+
+                    float bx_cli = isl->x + res->ox;
+                    float by_cli = isl->y + res->oy;
+                    float dx_cli = px_cli - bx_cli;
+                    float dy_cli = py_cli - by_cli;
+                    float r_cli  = 38.0f * res->size; /* collision radius in client px */
+                    if (dx_cli*dx_cli + dy_cli*dy_cli < r_cli * r_cli) {
+                        log_info("💥 Proj %u hit boulder at (%.1f, %.1f) — absorbed",
+                                 proj->id, bx_cli, by_cli);
+                        memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                                (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                        sim->projectile_count--;
+                        removed = true;
+                    }
+                }
+            }
+        }
+
         if (!removed) i++;
+    }
+}
+
+/**
+ * Handle player vs boulder collisions — solid pushout, no impulse
+ * (boulders are infinite-mass static objects).
+ */
+static void handle_player_boulder_collisions(struct Sim* sim) {
+    static const float BAUMGARTE = 0.6f;
+
+    for (uint16_t pi = 0; pi < sim->player_count; pi++) {
+        struct Player* p = &sim->players[pi];
+        if (p->ship_id != 0) continue;  /* on a ship — skip */
+
+        float px_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(p->position.x));
+        float py_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(p->position.y));
+        float pr_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(p->radius));
+
+        for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+            const IslandDef *isl = &ISLAND_PRESETS[ii];
+            for (int ri = 0; ri < isl->resource_count; ri++) {
+                const IslandResource *res = &isl->resources[ri];
+                if (res->type_id != RES_BOULDER) continue;
+                if (res->health <= 0) continue;
+
+                float bx_cli = isl->x + res->ox;
+                float by_cli = isl->y + res->oy;
+                float br_cli = 38.0f * res->size;
+
+                float dx = px_cli - bx_cli;
+                float dy = py_cli - by_cli;
+                float dist_sq = dx*dx + dy*dy;
+                float min_dist = pr_cli + br_cli;
+                if (dist_sq >= min_dist * min_dist) continue;
+
+                float dist = sqrtf(dist_sq);
+                if (dist < 0.1f) {
+                    /* Perfectly stacked — nudge outward */
+                    dx = pr_cli; dy = 0.0f; dist = pr_cli;
+                }
+
+                float nx = dx / dist;
+                float ny = dy / dist;
+                float pen = min_dist - dist;
+                float corr_cli = BAUMGARTE * pen;
+
+                /* Push the player out (boulder is immovable) */
+                px_cli += corr_cli * nx;
+                py_cli += corr_cli * ny;
+
+                /* Cancel velocity component toward the boulder */
+                float vx_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(p->velocity.x));
+                float vy_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(p->velocity.y));
+                float vn = vx_cli * (-nx) + vy_cli * (-ny);
+                if (vn > 0.0f) {
+                    vx_cli += vn * nx;
+                    vy_cli += vn * ny;
+                    p->velocity.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(vx_cli));
+                    p->velocity.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(vy_cli));
+                }
+            }
+        }
+
+        /* Write corrected position back */
+        p->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(px_cli));
+        p->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(py_cli));
     }
 }
 
