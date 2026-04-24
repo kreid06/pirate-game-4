@@ -132,7 +132,8 @@ export class RenderSystem {
     res: { ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number };
     wx: number; wy: number;
     sp: { x: number; y: number };
-    isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number; bushAlpha: number; deathAlpha: number;
+    isHovered: boolean; inRange: boolean; playerNear: boolean;
+    leafAlpha: number; bushAlpha: number; boulderAlpha: number; deathAlpha: number;
   }> = [];
   private _pendingAxeEquipped     = false;
   private _pendingPickaxeEquipped = false;
@@ -142,6 +143,14 @@ export class RenderSystem {
   private _hoveredFiberPlant: { wx: number; wy: number } | null = null;
   /** Rock node currently under cursor (world coords) — updated each frame in drawIsland. */
   private _hoveredRock: { wx: number; wy: number } | null = null;
+  /** Boulder node currently under cursor (world coords) — updated each frame in drawIsland. */
+  private _hoveredBoulder: { wx: number; wy: number } | null = null;
+  /** Boulders pending draw — populated by drawIsland, consumed after tree leaves in renderWorld. */
+  private _pendingBoulders: Array<{
+    sp: { x: number; y: number };
+    isHovered: boolean; boulderAlpha: number; deathAlpha: number;
+    ox: number; oy: number; size: number;
+  }> = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
   private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
@@ -389,7 +398,93 @@ export class RenderSystem {
     return sprites;
   }
 
-  // ── Fiber bush sprite cache — 4 tints × 4 shape variants ───────────────────
+  // ── Boulder sprite cache — 3 tones × 3 shapes (large rocks / boulders) ─────
+  private static _boulderSprites: Map<string, OffscreenCanvas> | null = null;
+  private static readonly BOULDER_SPRITE_SIZE = 160;
+  private static readonly BOULDER_SPRITE_R    = 52; // reference half-size within sprite
+  private static readonly BOULDER_TONES = [
+    { body: '#797975', shadow: '#44443f', hi: '#aaaaa4', crack: '#55554f', moss: '#5a7040' },
+    { body: '#8a7860', shadow: '#504030', hi: '#b09880', crack: '#60503a', moss: '#607848' },
+    { body: '#585858', shadow: '#303030', hi: '#888888', crack: '#404040', moss: '#4a6038' },
+  ];
+  private static readonly BOULDER_SHAPES: [number, number, number][] = [
+    [1.00, 0.72, 0.0],  // flat classic
+    [0.88, 0.88, 0.4],  // round
+    [1.18, 0.60, -0.2], // wide flat
+  ];
+
+  private static _ensureBoulderSprites(): Map<string, OffscreenCanvas> {
+    if (RenderSystem._boulderSprites) return RenderSystem._boulderSprites;
+    const SIZE = RenderSystem.BOULDER_SPRITE_SIZE;
+    const R    = RenderSystem.BOULDER_SPRITE_R;
+    const cx = SIZE / 2, cy = SIZE / 2;
+    const sprites = new Map<string, OffscreenCanvas>();
+
+    for (let ti = 0; ti < RenderSystem.BOULDER_TONES.length; ti++) {
+      const tone = RenderSystem.BOULDER_TONES[ti];
+      for (let si = 0; si < RenderSystem.BOULDER_SHAPES.length; si++) {
+        const [sx, sy, rot] = RenderSystem.BOULDER_SHAPES[si];
+        for (const hovered of [false, true]) {
+          const off = new OffscreenCanvas(SIZE, SIZE);
+          const ctx = off.getContext('2d')!;
+
+          // Soft ground shadow
+          ctx.beginPath();
+          ctx.ellipse(cx + R * 0.20, cy + R * 0.25 * sy, R * sx * 1.10, R * sy * 0.35, rot, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(0,0,0,0.30)'; ctx.fill();
+
+          // Body shadow (offset copy)
+          ctx.beginPath();
+          ctx.ellipse(cx + R * 0.15, cy + R * 0.12 * sy, R * sx, R * sy, rot, 0, Math.PI * 2);
+          ctx.fillStyle = tone.shadow; ctx.fill();
+
+          // Main body
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, R * sx, R * sy, rot, 0, Math.PI * 2);
+          ctx.fillStyle = hovered ? tone.hi : tone.body;
+          ctx.fill();
+          ctx.strokeStyle = hovered ? '#ffe090' : tone.shadow;
+          ctx.lineWidth = hovered ? 3 : 2;
+          ctx.stroke();
+
+          // Large highlight
+          ctx.beginPath();
+          ctx.ellipse(cx - R * sx * 0.28, cy - R * sy * 0.28, R * sx * 0.38, R * sy * 0.26, rot - 0.6, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.fill();
+
+          // Specular fleck
+          ctx.beginPath();
+          ctx.arc(cx - R * sx * 0.35, cy - R * sy * 0.38, R * 0.08, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255,255,255,0.40)'; ctx.fill();
+
+          // Moss patches (3 blobs near base)
+          for (let m = 0; m < 3; m++) {
+            const ma = rot + m * 0.7 + 0.3;
+            const mx = cx + Math.cos(ma) * R * sx * 0.55;
+            const my = cy + R * sy * 0.48 + Math.sin(ma) * R * sy * 0.12;
+            ctx.beginPath();
+            ctx.ellipse(mx, my, R * 0.14, R * 0.08, ma, 0, Math.PI * 2);
+            ctx.fillStyle = tone.moss; ctx.fill();
+          }
+
+          // Two crack lines
+          ctx.strokeStyle = tone.crack; ctx.lineWidth = 1.5; ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(cx - R * sx * 0.10, cy - R * sy * 0.30);
+          ctx.lineTo(cx + R * sx * 0.28, cy + R * sy * 0.32);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(cx + R * sx * 0.05, cy - R * sy * 0.18);
+          ctx.lineTo(cx - R * sx * 0.22, cy + R * sy * 0.20);
+          ctx.stroke();
+
+          sprites.set(`${ti}_${si}_${hovered ? 'h' : 'n'}`, off);
+        }
+      }
+    }
+    RenderSystem._boulderSprites = sprites;
+    return sprites;
+  }
   private static _fiberSprites: Map<string, OffscreenCanvas> | null = null;
   private static readonly FIBER_SPRITE_SIZE = 96;
   private static readonly FIBER_SPRITE_H    = 32; // reference radius for draw-size math
@@ -2180,6 +2275,12 @@ export class RenderSystem {
       if (e.res.type !== 'wood') continue;
       this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha);
     }
+
+    // ── Boulders — above tree leaves (large occluding objects) ───────────────
+    for (const b of this._pendingBoulders) {
+      this.drawIslandBoulder(b.sp.x, b.sp.y, zoom, b.isHovered, b.boulderAlpha * b.deathAlpha, b.ox, b.oy, b.size);
+    }
+
     // ── Hover prompts + health bars (always on top) ───────────────────────────
     for (const e of this._pendingAllRes) {
       if (e.res.type === 'wood' && e.isHovered) {
@@ -2190,9 +2291,12 @@ export class RenderSystem {
         this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
         if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 30);
       } else if (e.res.type === 'rock' && e.isHovered) {
-        if (this._pendingPickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Rock');
-        else                              this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
+        this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Pick Up');
         if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 28);
+      } else if (e.res.type === 'boulder' && e.isHovered) {
+        if (this._pendingPickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Boulder');
+        else                              this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 64);
       }
     }
 
@@ -2584,7 +2688,9 @@ export class RenderSystem {
     this._hoveredTree       = null;
     this._hoveredFiberPlant = null;
     this._hoveredRock       = null;
+    this._hoveredBoulder    = null;
     this._pendingBushes     = [];
+    this._pendingBoulders   = [];
     this._pendingAllRes     = [];
 
     const localPlayer = this._cachedLocalPlayer;
@@ -2602,13 +2708,17 @@ export class RenderSystem {
     this._pendingPickaxeEquipped = pickaxeEquipped;
     const HARVEST_RANGE_SQ = 110 * 110;
     const PLANT_HOVER_SQ = (30 * zoom) * (30 * zoom);
-    const ROCK_HOVER_SQ  = (12 * zoom) * (12 * zoom);
+    const ROCK_HOVER_SQ  = (8 * zoom) * (8 * zoom);
     const LEAF_FADE_OUTER = 420;
     const LEAF_FADE_INNER = 120;
     const MIN_LEAF_ALPHA  = 0.35;
     const BUSH_FADE_OUTER = 320;
     const BUSH_FADE_INNER = 90;
     const MIN_BUSH_ALPHA  = 0.30;
+    const BOULDER_FADE_OUTER = 500;
+    const BOULDER_FADE_INNER = 150;
+    const MIN_BOULDER_ALPHA  = 0.30;
+    const BOULDER_HOVER_SQ = (44 * zoom) * (44 * zoom);
     const DEATH_FADE_MS   = 2000;
     const now = performance.now();
     const cw = this.canvas.width;
@@ -2782,7 +2892,7 @@ export class RenderSystem {
         res: typeof isl.resources[0];
         wx: number; wy: number;
         sp: ReturnType<typeof camera.worldToScreen>;
-        isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number; deathAlpha: number;
+        isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number; bushAlpha: number; boulderAlpha: number; deathAlpha: number;
       }> = [];
 
       for (const res of isl.resources) {
@@ -2799,7 +2909,7 @@ export class RenderSystem {
           const maxR2 = 100 * zoom;
           if (sp2.x + maxR2 < 0 || sp2.x - maxR2 > cw || sp2.y + maxR2 < 0 || sp2.y - maxR2 > ch) continue;
           // No hover, no interaction while dying
-          visibleRes.push({ res, wx: wx2, wy: wy2, sp: sp2, isHovered: false, inRange: false, playerNear: false, leafAlpha: 1.0, deathAlpha });
+          visibleRes.push({ res, wx: wx2, wy: wy2, sp: sp2, isHovered: false, inRange: false, playerNear: false, leafAlpha: 1.0, bushAlpha: 1.0, boulderAlpha: 1.0, deathAlpha });
           continue;
         }
         const wx = isl.x + res.ox;
@@ -2831,10 +2941,16 @@ export class RenderSystem {
           if (isHovered) this._hoveredFiberPlant = { wx, wy };
         } else if (res.type === 'rock') {
           if (msp) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= ROCK_HOVER_SQ; }
-          inRange = pickaxeEquipped && localPlayer
+          inRange = localPlayer
             ? (() => { const dx = localPlayer!.position.x - wx; const dy = localPlayer!.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
             : false;
           if (isHovered) this._hoveredRock = { wx, wy };
+        } else if (res.type === 'boulder') {
+          if (msp) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= BOULDER_HOVER_SQ; }
+          inRange = pickaxeEquipped && localPlayer
+            ? (() => { const dx = localPlayer!.position.x - wx; const dy = localPlayer!.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
+            : false;
+          if (isHovered) this._hoveredBoulder = { wx, wy };
         }
         // Smooth leaf-fade alpha: 1.0 (far) → MIN_LEAF_ALPHA (inside LEAF_FADE_INNER)
         const leafAlpha = res.type === 'wood' && localPlayer
@@ -2852,7 +2968,15 @@ export class RenderSystem {
               return MIN_BUSH_ALPHA + t * (1.0 - MIN_BUSH_ALPHA);
             })()
           : 1.0;
-        visibleRes.push({ res, wx, wy, sp, isHovered, inRange, playerNear, leafAlpha, bushAlpha, deathAlpha });
+        // Boulder fade alpha: fades when player is close (partially transparent so player is visible)
+        const boulderAlpha = res.type === 'boulder' && localPlayer
+          ? (() => {
+              const dist = Math.sqrt((localPlayer.position.x - wx) ** 2 + (localPlayer.position.y - wy) ** 2);
+              const t = Math.max(0, Math.min(1, (dist - BOULDER_FADE_INNER) / (BOULDER_FADE_OUTER - BOULDER_FADE_INNER)));
+              return MIN_BOULDER_ALPHA + t * (1.0 - MIN_BOULDER_ALPHA);
+            })()
+          : 1.0;
+        visibleRes.push({ res, wx, wy, sp, isHovered, inRange, playerNear, leafAlpha, bushAlpha, boulderAlpha, deathAlpha });
       }
 
       // Pass 1 – rocks (below structures)
@@ -2873,6 +2997,11 @@ export class RenderSystem {
       for (const e of visibleRes) {
         if (e.res.type !== 'fiber') continue;
         this._pendingBushes.push({ sp: e.sp, isHovered: e.isHovered, bushAlpha: e.bushAlpha, deathAlpha: e.deathAlpha, ox: e.res.ox, oy: e.res.oy });
+      }
+      // Boulders deferred to _pendingBoulders — drawn after tree leaves in renderWorld
+      for (const e of visibleRes) {
+        if (e.res.type !== 'boulder') continue;
+        this._pendingBoulders.push({ sp: e.sp, isHovered: e.isHovered, boulderAlpha: e.boulderAlpha, deathAlpha: e.deathAlpha, ox: e.res.ox, oy: e.res.oy, size: e.res.size ?? 1.0 });
       }
       this._pendingAllRes.push(...visibleRes);
     }
@@ -3023,7 +3152,7 @@ export class RenderSystem {
     const ctx  = this.ctx;
     const R    = RenderSystem.ROCK_SPRITE_R;
     const SIZE = RenderSystem.ROCK_SPRITE_SIZE;
-    const r    = 12 * zoom;
+    const r    = 6 * zoom; // 50% smaller than original 12
     const drawSize = SIZE * (r / R);
     const hash = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
     const ti   = hash % RenderSystem.ROCK_TONES.length;
@@ -3032,6 +3161,23 @@ export class RenderSystem {
     const sprite = RenderSystem._ensureRockSprites().get(key)!;
     ctx.save();
     ctx.globalAlpha = deathAlpha;
+    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
+    ctx.restore();
+  }
+
+  private drawIslandBoulder(sx: number, sy: number, zoom: number, hovered = false, alpha = 1.0, ox = 0, oy = 0, size = 1.0): void {
+    const ctx      = this.ctx;
+    const R        = RenderSystem.BOULDER_SPRITE_R;
+    const SIZE     = RenderSystem.BOULDER_SPRITE_SIZE;
+    const r        = 40 * zoom * size;
+    const drawSize = SIZE * (r / R);
+    const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
+    const ti       = hash % RenderSystem.BOULDER_TONES.length;
+    const si       = (hash >> 4) % RenderSystem.BOULDER_SHAPES.length;
+    const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
+    const sprite   = RenderSystem._ensureBoulderSprites().get(key)!;
+    ctx.save();
+    ctx.globalAlpha = alpha;
     ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
     ctx.restore();
   }

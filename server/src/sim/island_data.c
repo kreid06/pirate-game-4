@@ -218,6 +218,12 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
 #define ROCK_SAND_SPACING  226.0f
 #define ROCK_JITTER         40.0f
 
+/* Boulder procedural density settings.
+   1:10 ratio to trees → spacing = TREE_GRID_SPACING * sqrt(10) ≈ 506 px.
+   Spawns on both grass and sand. */
+#define BOULDER_SPACING    506.0f
+#define BOULDER_JITTER      60.0f
+
 /**
  * Returns non-zero if world point (px, py) lies inside the scaled grass
  * polygon of the island (ray-cast even–odd rule).
@@ -277,10 +283,11 @@ static float resource_size_from_offset(float ox, float oy)
 static int resource_max_health(uint8_t type_id)
 {
     switch (type_id) {
-        case RES_WOOD:  return 100;
-        case RES_ROCK:  return  60;
-        case RES_FIBER: return  30;
-        default:        return  50;
+        case RES_WOOD:    return 100;
+        case RES_ROCK:    return  60;
+        case RES_BOULDER: return 400;
+        case RES_FIBER:   return  30;
+        default:          return  50;
     }
 }
 
@@ -464,6 +471,49 @@ void islands_generate_trees(void)
                     r->health     = r->max_health;
                     isl->resource_count++;
                 }
+            }
+        }
+    }
+
+    /* ── Fourth pass: procedural boulders (1:10 ratio vs trees, grass+sand) ── */
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        IslandDef *isl = &ISLAND_PRESETS[ii];
+        if (isl->vertex_count == 0) continue;
+
+        unsigned int seed = ((unsigned int)isl->id * 1664525u + 1013904223u) ^ 0xDEADBEEFu;
+
+        float half_bound = 0.0f;
+        for (int vi = 0; vi < isl->vertex_count; vi++) {
+            float r = sqrtf(isl->vx[vi]*isl->vx[vi] + isl->vy[vi]*isl->vy[vi]);
+            if (r > half_bound) half_bound = r;
+        }
+
+        float x0 = isl->x - half_bound;
+        float x1 = isl->x + half_bound;
+        float y0 = isl->y - half_bound;
+        float y1 = isl->y + half_bound;
+
+        for (float gx = x0; gx <= x1 && isl->resource_count < ISLAND_MAX_RESOURCES; gx += BOULDER_SPACING) {
+            for (float gy = y0; gy <= y1 && isl->resource_count < ISLAND_MAX_RESOURCES; gy += BOULDER_SPACING) {
+                seed = seed * 1664525u + 1013904223u;
+                float jx = ((float)(seed & 0xFFFFu) / 65535.0f - 0.5f) * (2.0f * BOULDER_JITTER);
+                seed = seed * 1664525u + 1013904223u;
+                float jy = ((float)(seed & 0xFFFFu) / 65535.0f - 0.5f) * (2.0f * BOULDER_JITTER);
+
+                float bx = gx + jx;
+                float by = gy + jy;
+
+                /* Must be on the island (grass or sand) */
+                if (!inside_sand_poly(isl, bx, by)) continue;
+
+                IslandResource *r = &isl->resources[isl->resource_count];
+                r->ox         = bx - isl->x;
+                r->oy         = by - isl->y;
+                r->type_id    = RES_BOULDER;
+                r->size       = 0.8f + ((float)((seed >> 8) & 0xFFu) / 255.0f) * 0.8f; /* 0.8–1.6 */
+                r->max_health = resource_max_health(RES_BOULDER);
+                r->health     = r->max_health;
+                isl->resource_count++;
             }
         }
     }

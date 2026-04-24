@@ -29,20 +29,22 @@
 
 /* Resource type enum — integer values used internally.
  * res_type_str() converts back to the string expected by the client. */
-typedef enum { RES_WOOD = 0, RES_FIBER = 1, RES_ROCK = 2, RES_FOOD = 3 } ResType;
+typedef enum { RES_WOOD = 0, RES_FIBER = 1, RES_ROCK = 2, RES_FOOD = 3, RES_BOULDER = 4 } ResType;
 
 /* Convenience aliases matching old ISLAND_RES_* macro names */
-#define ISLAND_RES_WOOD  RES_WOOD
-#define ISLAND_RES_FIBER RES_FIBER
-#define ISLAND_RES_FOOD  RES_FOOD
-#define ISLAND_RES_ROCK  RES_ROCK
+#define ISLAND_RES_WOOD    RES_WOOD
+#define ISLAND_RES_FIBER   RES_FIBER
+#define ISLAND_RES_FOOD    RES_FOOD
+#define ISLAND_RES_ROCK    RES_ROCK
+#define ISLAND_RES_BOULDER RES_BOULDER
 
 static inline const char *res_type_str(uint8_t t) {
     switch (t) {
-        case RES_WOOD:  return "wood";
-        case RES_FIBER: return "fiber";
-        case RES_ROCK:  return "rock";
-        default:        return "food";
+        case RES_WOOD:    return "wood";
+        case RES_FIBER:   return "fiber";
+        case RES_ROCK:    return "rock";
+        case RES_BOULDER: return "boulder";
+        default:          return "food";
     }
 }
 
