@@ -262,6 +262,7 @@ static int inside_sand_poly(const IslandDef *isl, float px, float py)
 }
 
 
+/*
  * Derives a deterministic size scale [0.5, 1.8] from a resource's ox/oy.
  * Matches the JavaScript hash used by the client for visual consistency.
  */

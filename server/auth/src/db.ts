@@ -3,7 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = process.env.AUTH_DB_PATH ?? path.join(__dirname, '../../data/auth.db');
+const DB_PATH = process.env.AUTH_DB_PATH ?? path.join(__dirname, '../../data/auth/auth.db');
 
 const db = new Database(DB_PATH);
 
