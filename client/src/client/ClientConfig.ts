@@ -29,6 +29,8 @@ export interface GraphicsConfig {
   shadowQuality: 'none' | 'low' | 'medium' | 'high';
   textureQuality: 'low' | 'medium' | 'high';
   renderDistance: number; // world units
+  showGrid: boolean;      // render world-space helper grid
+  useWebGL2: boolean;     // enable WebGL2 renderer (falls back to Canvas 2D if unavailable)
 }
 
 /**
@@ -126,10 +128,12 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     targetFPS: 144,
     vsync: false,
     antialiasing: true,
-    particleQuality: 'medium',
-    shadowQuality: 'medium',
-    textureQuality: 'high',
-    renderDistance: 2000
+    particleQuality: 'low',
+    shadowQuality: 'low',
+    textureQuality: 'medium',
+    renderDistance: 1600,
+    showGrid: true,
+    useWebGL2: true
   },
   
   audio: {

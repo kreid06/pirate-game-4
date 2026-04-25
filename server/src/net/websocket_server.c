@@ -8491,7 +8491,7 @@ void websocket_server_tick(float dt) {
             
             // Calculate forward force from wind and sails:
             // wind_power * sail_openness% * fiber_efficiency
-            const float BASE_WIND_SPEED = 75.0f; // meters per second at full wind, full sails (3x sail force increase)
+            const float BASE_WIND_SPEED = 225.0f; // meters per second at full wind, full sails (tripled sail force)
             float wind_force_factor = (global_sim->wind_power * avg_sail_openness / 100.0f) * avg_wind_efficiency;
             float target_speed = BASE_WIND_SPEED * wind_force_factor;
             

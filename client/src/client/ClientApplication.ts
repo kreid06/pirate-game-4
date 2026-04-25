@@ -10,6 +10,8 @@ import { ClientConfig, ClientConfigManager } from './ClientConfig.js';
 // Graphics System
 import { RenderSystem } from './gfx/RenderSystem.js';
 import { Camera } from './gfx/Camera.js';
+import { GLContext } from './gfx/gl/GLContext.js';
+import { GLWorldRenderer } from './gfx/gl/GLWorldRenderer.js';
 
 // Network System  
 import { NetworkManager, ConnectionState } from '../net/NetworkManager.js';
@@ -60,6 +62,21 @@ export enum ClientState {
  */
 export class ClientApplication {
   private canvas: HTMLCanvasElement;
+  /** Separate WebGL2 canvas stacked behind the main 2D canvas. Null if WebGL2 is disabled/unavailable. */
+  private _glCanvas: HTMLCanvasElement | null = null;
+  /** GL world renderer — null when WebGL2 is off or init failed. */
+  private _glRenderer: GLWorldRenderer | null = null;
+  /** Delta time from the last game loop tick (ms), stored for GL frame time accumulation. */
+  private _lastDeltaMs = 16;
+  /** Current GL internal render scale (GL canvas pixels / 2D canvas pixels). */
+  private _glScale = 0.40;
+  /** Adaptive GL scale limits. */
+  private readonly _glScaleMin = 0.33;
+  private readonly _glScaleMax = 0.50;
+  /** Adaptive scaler counters and cooldown timestamp. */
+  private _glBadFrameCount = 0;
+  private _glGoodFrameCount = 0;
+  private _glNextScaleAdjustAt = 0;
   private config: ClientConfig;
   private state: ClientState = ClientState.INITIALIZING;
   
@@ -278,6 +295,34 @@ export class ClientApplication {
       this.renderSystem = new RenderSystem(this.canvas, this.config.graphics);
       await this.renderSystem.initialize();
       this.renderSystem.setRadialMenu(this._radialMenu);
+
+      // Initialize WebGL2 world renderer (dual-canvas setup)
+      if (this.config.graphics.useWebGL2) {
+        try {
+          const glCanvas = document.createElement('canvas');
+          // Render below native resolution to reduce ocean shader fill-rate cost.
+          glCanvas.width  = Math.ceil(this.canvas.width  * this._glScale);
+          glCanvas.height = Math.ceil(this.canvas.height * this._glScale);
+          glCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;image-rendering:auto;';
+          this.canvas.style.position = 'absolute';
+          this.canvas.style.background = 'transparent';
+          this.canvas.parentElement?.insertBefore(glCanvas, this.canvas);
+          const glCtx = GLContext.create(glCanvas);
+          if (!glCtx) throw new Error('WebGL2 context creation failed');
+          this._glCanvas  = glCanvas;
+          this._glRenderer = new GLWorldRenderer(glCtx);
+          this.renderSystem.setGLRenderer(this._glRenderer);
+          // Keep GL canvas pixel dimensions in sync on resize and scale changes.
+          this.applyGLCanvasScale();
+          window.addEventListener('resize', () => this.applyGLCanvasScale());
+          console.log(`✅ WebGL2 world renderer initialized (${Math.round(this._glScale * 100)}% scale)`);
+        } catch (e) {
+          console.warn('[GL] WebGL2 init failed, falling back to Canvas 2D:', e);
+          this._glCanvas?.remove();
+          this._glCanvas   = null;
+          this._glRenderer = null;
+        }
+      }
       
       // Initialize Network System
       this.networkManager = new NetworkManager(this.config.network);
@@ -1994,9 +2039,11 @@ export class ClientApplication {
     
     const deltaTime = currentTime - this.lastFrameTime;
     this.lastFrameTime = currentTime;
+    this._lastDeltaMs = deltaTime;
     
     // Cap delta time to prevent spiral of death
     const clampedDelta = Math.min(deltaTime, 100); // Max 100ms
+    this.updateAdaptiveGLScale(clampedDelta, currentTime);
     this.accumulator += clampedDelta;
     
     // Update FPS tracking
@@ -2186,7 +2233,14 @@ export class ClientApplication {
       this.renderSystem.updateDroppedItems(worldToRender.droppedItems ?? []);
 
       // Render game world with hybrid state
+      if (this._glRenderer) {
+        const camState = this.camera.getState();
+        this.renderSystem.beginGLFrame(camState.position.x, camState.position.y, camState.zoom, this._lastDeltaMs);
+      }
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
+      if (this._glRenderer) {
+        this.renderSystem.endGLFrame();
+      }
 
       // Island editor overlay (dev tool)
       if (this.islandEditor?.visible) {
@@ -2230,6 +2284,9 @@ export class ClientApplication {
         worldState: worldToRender,
         camera: this.camera,
         fps: this.currentFPS,
+        frameMs: this._lastDeltaMs,
+        glDrawCalls: this.renderSystem.glDrawCallCount,
+        glScalePct: this._glRenderer ? Math.round(this._glScale * 100) : 0,
         networkStats: this.networkManager.getStats(),
         config: this.config,
         assignedPlayerId,
@@ -3813,10 +3870,59 @@ export class ClientApplication {
         
         // Update UI system
         this.uiManager.onCanvasResize(width, height);
+
+        // Keep GL canvas resolution in sync with 2D canvas size and current GL scale
+        this.applyGLCanvasScale();
       }
     });
     
     resizeObserver.observe(this.canvas);
+  }
+
+  /** Apply the current GL scale to the back-buffer dimensions. */
+  private applyGLCanvasScale(): void {
+    if (!this._glCanvas) return;
+    this._glCanvas.width  = Math.ceil(this.canvas.width  * this._glScale);
+    this._glCanvas.height = Math.ceil(this.canvas.height * this._glScale);
+  }
+
+  /**
+   * Adaptive dynamic resolution for the GL pass.
+   * Drops internal GL resolution under sustained frame pressure and recovers slowly when stable.
+   */
+  private updateAdaptiveGLScale(frameMs: number, nowMs: number): void {
+    if (!this._glRenderer || !this._glCanvas) return;
+
+    const targetMs = 1000 / Math.max(30, this.config.graphics.targetFPS || 60);
+    const isOverBudget = frameMs > targetMs * 1.18;
+    const isComfortable = frameMs < targetMs * 0.75;
+
+    if (isOverBudget) this._glBadFrameCount++;
+    else this._glBadFrameCount = Math.max(0, this._glBadFrameCount - 1);
+
+    if (isComfortable) this._glGoodFrameCount++;
+    else this._glGoodFrameCount = Math.max(0, this._glGoodFrameCount - 1);
+
+    if (nowMs < this._glNextScaleAdjustAt) return;
+
+    if (this._glBadFrameCount >= 20 && this._glScale > this._glScaleMin) {
+      this._glScale = Math.max(this._glScaleMin, this._glScale - 0.05);
+      this.applyGLCanvasScale();
+      this._glBadFrameCount = 0;
+      this._glGoodFrameCount = 0;
+      this._glNextScaleAdjustAt = nowMs + 1500;
+      console.log(`[GL] Adaptive scale lowered to ${Math.round(this._glScale * 100)}%`);
+      return;
+    }
+
+    if (this._glGoodFrameCount >= 180 && this._glScale < this._glScaleMax) {
+      this._glScale = Math.min(this._glScaleMax, this._glScale + 0.05);
+      this.applyGLCanvasScale();
+      this._glBadFrameCount = 0;
+      this._glGoodFrameCount = 0;
+      this._glNextScaleAdjustAt = nowMs + 2500;
+      console.log(`[GL] Adaptive scale raised to ${Math.round(this._glScale * 100)}%`);
+    }
   }
   
   /**
