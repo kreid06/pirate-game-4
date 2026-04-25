@@ -82,10 +82,17 @@ export class GLWorldRenderer {
   /**
    * Call once at the start of each world render, BEFORE RenderSystem.renderWorld().
    */
-  beginFrame(camX: number, camY: number, zoom: number, timeSec: number): void {
+  beginFrame(
+    camX: number,
+    camY: number,
+    zoom: number,
+    timeSec: number,
+    viewWidth?: number,
+    viewHeight?: number,
+  ): void {
     this._gl.resize(this._gl.canvas.width, this._gl.canvas.height);
     this._gl.beginFrame();
-    this._ocean.render(camX, camY, zoom, timeSec);
+    this._ocean.render(camX, camY, zoom, timeSec, viewWidth, viewHeight);
     this._viewProj = this._gl.buildCameraOrtho(camX, camY, zoom);
     this._tex.beginFrame(Math.round(timeSec * 60));
     this._batch.begin(this._viewProj);

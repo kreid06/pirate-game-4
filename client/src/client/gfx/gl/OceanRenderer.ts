@@ -1,9 +1,12 @@
 /**
- * OceanRenderer — animated full-screen ocean background.
+ * OceanRenderer — animated tiled caustic water background.
  *
- * Renders a full-screen quad using GLSL Worley-noise foam and sine-wave
- * ripples. Must be drawn first in the frame (before sprites) to act as the
- * background. Writes alpha=1 so it fully covers the GL canvas.
+ * Renders a full-screen quad using a GLSL Voronoi (F1/F2) caustic shader
+ * that matches the look of top-down tropical water: bright caustic edge
+ * lines around darker blob-shaped cell interiors.
+ *
+ * The pattern is in world space — it tiles and scrolls naturally as the
+ * camera moves, exactly like the grid lines do.
  *
  * Usage:
  *   const ocean = new OceanRenderer(ctx);
@@ -32,7 +35,11 @@ void main() {
   gl_Position = vec4(a_clipPos, 0.0, 1.0);
   vec2 ndc    = a_clipPos;
   vec2 pixel  = (ndc * 0.5 + 0.5) * u_resolution;
-  v_worldPos  = u_cameraPos + (pixel - u_resolution * 0.5) / u_zoom;
+  // WebGL NDC Y is +1 at top; 2D canvas Y is 0 at top — flip Y offset
+  // so the pattern scrolls in the same direction as everything else.
+  vec2 offset = vec2(pixel.x - u_resolution.x * 0.5,
+                     u_resolution.y * 0.5 - pixel.y);
+  v_worldPos  = u_cameraPos + offset / u_zoom;
 }`;
 
 const FRAG_SRC = /* glsl */`#version 300 es
@@ -54,72 +61,77 @@ vec2 hash2(vec2 p) {
   return fract(sin(p) * 43758.5453);
 }
 
-float worley(vec2 p) {
-  vec2  i       = floor(p);
-  vec2  f       = fract(p);
-  float minDist = 1.0;
-  for (int y = -1; y <= 1; y++) {
-    for (int x = -1; x <= 1; x++) {
-      vec2 nb  = vec2(float(x), float(y));
-      vec2 pt  = hash2(i + nb);
-      pt       = 0.5 + 0.5 * sin(u_time * 0.4 + 6.2831 * pt);
-      float d  = length(nb + pt - f);
-      minDist  = min(minDist, d);
-    }
-  }
-  return minDist;
-}
-
-float valueNoise(vec2 p) {
+// Smooth value noise returning a 2D vector — used for domain warping.
+vec2 smoothNoise2(vec2 p) {
   vec2 i = floor(p);
   vec2 f = fract(p);
-  vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-  float a = fract(sin(dot(i + vec2(0.0, 0.0), vec2(127.1, 311.7))) * 43758.5453);
-  float b = fract(sin(dot(i + vec2(1.0, 0.0), vec2(127.1, 311.7))) * 43758.5453);
-  float c = fract(sin(dot(i + vec2(0.0, 1.0), vec2(127.1, 311.7))) * 43758.5453);
-  float d = fract(sin(dot(i + vec2(1.0, 1.0), vec2(127.1, 311.7))) * 43758.5453);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  vec2 a = hash2(i + vec2(0.0, 0.0));
+  vec2 b = hash2(i + vec2(1.0, 0.0));
+  vec2 c = hash2(i + vec2(0.0, 1.0));
+  vec2 d = hash2(i + vec2(1.0, 1.0));
   return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// Returns (F1, F2): distances to nearest and second-nearest Voronoi sites.
+// Uses a 3×3 neighbourhood — fast enough for a full-screen shader while
+// still producing clean cell edges at the scales we render at.
+// Cell centres drift slowly over time to animate the caustic pattern.
+vec2 voronoiF1F2(vec2 p, float t, float speed) {
+  vec2  i  = floor(p);
+  vec2  f  = fract(p);
+  float F1 = 9.0;
+  float F2 = 9.0;
+  for (int y = -1; y <= 1; y++) {
+    for (int x = -1; x <= 1; x++) {
+      vec2 nb   = vec2(float(x), float(y));
+      vec2 seed = hash2(i + nb);
+      vec2 pt   = 0.5 + 0.45 * sin(t * speed + 6.2831 * seed);
+      float d   = length(nb + pt - f);
+      if      (d < F1) { F2 = F1; F1 = d; }
+      else if (d < F2) { F2 = d; }
+    }
+  }
+  return vec2(F1, F2);
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────
 
 void main() {
-  float SCALE = 0.0028;
-  vec2  wp    = v_worldPos * SCALE;
-  float t     = u_time;
+  const float SCALE = 0.0050;
+  vec2  wp = v_worldPos * SCALE;
+  float t  = u_time;
 
-  // Depth gradient
-  float depthNoise  = valueNoise(wp * 0.6 + vec2(t * 0.015, t * 0.010));
-  vec3  deepColor   = vec3(0.039, 0.165, 0.322);
-  vec3  midColor    = vec3(0.082, 0.376, 0.741);
-  vec3  shallowColor= vec3(0.118, 0.565, 1.000);
-  vec3  baseColor   = mix(deepColor, mix(midColor, shallowColor, depthNoise), depthNoise);
+  // ── Domain warp ───────────────────────────────────────────────────────
+  const float WARP_STR = 0.55;
+  vec2 warp1 = smoothNoise2(wp * 1.3 + vec2(t * 0.035,  t * 0.022)) * 2.0 - 1.0;
+  vec2 warp2 = smoothNoise2(wp * 2.1 + vec2(t * 0.018, -t * 0.029)) * 2.0 - 1.0;
+  vec2 warped = wp + (warp1 + warp2 * 0.5) * WARP_STR;
 
-  // Wave ripples
-  float wd1    = wp.x * 1.4 + wp.y * 0.5 - t * 0.22;
-  float wd2    = wp.x * 0.8 - wp.y * 1.2 - t * 0.154;
-  float ripple = pow(abs(sin(wd1 * 6.0)), 12.0) * 0.20
-               + pow(abs(sin(wd2 * 5.0)), 14.0) * 0.12;
+  // ── Single Voronoi pass (3×3, fast) ──────────────────────────────────
+  vec2  v1    = voronoiF1F2(warped, t, 0.10);
+  float edge1 = v1.y - v1.x;
 
-  // Worley foam
-  float w1   = worley(wp * 3.5 + vec2( t * 0.08,  t * 0.04));
-  float w2   = worley(wp * 6.0 + vec2(-t * 0.05,  t * 0.07));
-  float foam = clamp(smoothstep(0.50, 0.38, w1)
-                   + smoothstep(0.45, 0.35, w2) * 0.55, 0.0, 1.0);
+  // Derive inner detail from the warp noise magnitude — free, no extra Voronoi
+  float warpMag = length(warp1 * 0.6 + warp2 * 0.3);
+  float edge2   = clamp(warpMag * 0.9, 0.0, 1.0);
 
-  // Sparkle
-  float sparkle = pow(valueNoise(wp * 18.0 + vec2(t * 0.25, -t * 0.18)), 6.0) * 0.35;
+  // ── Colour palette ────────────────────────────────────────────────────
+  vec3 deepCell = vec3(0.012, 0.643, 0.780);
+  vec3 fillBlue = vec3(0.067, 0.737, 0.855);
+  vec3 caustic  = vec3(0.600, 0.918, 0.953);
 
-  // Compose
-  vec3 color = baseColor;
-  color = mix(color, shallowColor + 0.12, ripple * 0.55);
-  color = mix(color, vec3(0.82, 0.90, 1.00), foam * 0.65);
-  color = mix(color, vec3(1.0), sparkle);
+  float interior = smoothstep(0.55, 0.05, v1.x);
+  vec3  color    = mix(fillBlue, deepCell, interior * 0.55);
 
-  // Subtle depth vignette
-  float dist    = length(v_worldPos - u_cameraPos) * 0.00035;
-  float vignette = 1.0 - clamp(dist * dist * 0.18, 0.0, 0.22);
-  color *= vignette;
+  float ePrimary = 1.0 - smoothstep(0.0, 0.10, edge1);
+  color = mix(color, caustic, ePrimary * 0.88);
+
+  float eSecond = 1.0 - smoothstep(0.35, 0.55, edge2);
+  color = mix(color, mix(caustic, fillBlue, 0.55), eSecond * 0.30);
+
+  float shimmer = sin(v1.x * 11.0 + t * 0.60) * 0.012;
+  color = clamp(color + shimmer, 0.0, 1.0);
 
   fragColor = vec4(color, 1.0);
 }`;
@@ -171,14 +183,23 @@ export class OceanRenderer {
    * @param zoom     Pixels per world unit
    * @param timeSec  Elapsed time in seconds (monotonically increasing)
    */
-  render(camX: number, camY: number, zoom: number, timeSec: number): void {
+  render(
+    camX: number,
+    camY: number,
+    zoom: number,
+    timeSec: number,
+    viewWidth?: number,
+    viewHeight?: number,
+  ): void {
     const gl   = this._gl;
     const prog = this._prog;
+    const rw = viewWidth  ?? this._ctx.width;
+    const rh = viewHeight ?? this._ctx.height;
 
     prog.use();
     prog.setUniform2f('u_cameraPos',  camX, camY);
     prog.setUniform1f('u_zoom',       zoom);
-    prog.setUniform2f('u_resolution', this._ctx.width, this._ctx.height);
+    prog.setUniform2f('u_resolution', rw, rh);
     prog.setUniform1f('u_time',       timeSec);
 
     gl.bindVertexArray(this._vao);

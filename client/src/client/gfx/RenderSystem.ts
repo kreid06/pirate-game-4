@@ -45,6 +45,34 @@ interface RenderQueueItem {
   priority?: number;
 }
 
+type ResourceNode = {
+  ox: number;
+  oy: number;
+  type: string;
+  size: number;
+  hp: number;
+  maxHp: number;
+  depletedAt?: number;
+};
+
+type RenderIslandInput = {
+  id: number;
+  x: number;
+  y: number;
+  preset: string;
+  resources: ResourceNode[];
+  vertices?: { x: number; y: number }[];
+  grassVertices?: { x: number; y: number }[];
+  shallowVertices?: { x: number; y: number }[];
+};
+
+type RenderIsland = RenderIslandInput & {
+  resourceGrid: {
+    cellSize: number;
+    cells: Map<string, number[]>;
+  };
+};
+
 /**
  * Main rendering system
  */
@@ -651,20 +679,73 @@ export class RenderSystem {
     ],
   };
 
+  private static readonly RESOURCE_GRID_CELL = 220;
+
+  private static gridKey(cx: number, cy: number): string {
+    return `${cx},${cy}`;
+  }
+
+  private static toGridCoord(v: number, cellSize: number): number {
+    return Math.floor(v / cellSize);
+  }
+
+  private buildResourceGrid(island: RenderIsland): void {
+    const cellSize = RenderSystem.RESOURCE_GRID_CELL;
+    const cells = new Map<string, number[]>();
+    for (let ri = 0; ri < island.resources.length; ri++) {
+      const res = island.resources[ri];
+      const wx = island.x + res.ox;
+      const wy = island.y + res.oy;
+      const cx = RenderSystem.toGridCoord(wx, cellSize);
+      const cy = RenderSystem.toGridCoord(wy, cellSize);
+      const key = RenderSystem.gridKey(cx, cy);
+      let bucket = cells.get(key);
+      if (!bucket) {
+        bucket = [];
+        cells.set(key, bucket);
+      }
+      bucket.push(ri);
+    }
+    island.resourceGrid = { cellSize, cells };
+  }
+
+  private queryResourceIndices(island: RenderIsland, minX: number, minY: number, maxX: number, maxY: number): number[] {
+    const cellSize = island.resourceGrid.cellSize;
+    const cx0 = RenderSystem.toGridCoord(minX, cellSize);
+    const cy0 = RenderSystem.toGridCoord(minY, cellSize);
+    const cx1 = RenderSystem.toGridCoord(maxX, cellSize);
+    const cy1 = RenderSystem.toGridCoord(maxY, cellSize);
+
+    const out: number[] = [];
+    for (let cy = cy0; cy <= cy1; cy++) {
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const bucket = island.resourceGrid.cells.get(RenderSystem.gridKey(cx, cy));
+        if (!bucket) continue;
+        out.push(...bucket);
+      }
+    }
+    return out;
+  }
+
+  private decorateIsland(island: RenderIslandInput): RenderIsland {
+    const decorated: RenderIsland = {
+      ...island,
+      resourceGrid: { cellSize: RenderSystem.RESOURCE_GRID_CELL, cells: new Map<string, number[]>() },
+    };
+    this.buildResourceGrid(decorated);
+    return decorated;
+  }
+
   /** Live island list — replaced by server ISLANDS message when received. */
-  private islands: Array<{
-    id: number; x: number; y: number; preset: string;
-    resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number }>;
-    vertices?: { x: number; y: number }[];
-  }> = [RenderSystem.DEFAULT_ISLAND];
+  private islands: RenderIsland[] = [];
 
   /** Called by ClientApplication when the server sends the ISLANDS message. */
-  setIslands(islands: Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number }>; vertices?: { x: number; y: number }[] }>): void {
-    this.islands = islands;
+  setIslands(islands: RenderIslandInput[]): void {
+    this.islands = islands.map((i) => this.decorateIsland(i));
   }
 
   /** Returns the live island list (for proximity checks in ClientApplication). */
-  getIslands(): Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number }>; vertices?: { x: number; y: number }[] }> {
+  getIslands(): RenderIslandInput[] {
     return this.islands;
   }
 
@@ -702,6 +783,9 @@ export class RenderSystem {
     // Initialize sub-systems
     this.particleSystem = new ParticleSystem(this.ctx);
     this.effectRenderer = new EffectRenderer(this.ctx);
+
+    // Seed fallback island through the same path as server islands so resource grids are built.
+    this.setIslands([RenderSystem.DEFAULT_ISLAND]);
   }
   
   /**
@@ -741,7 +825,7 @@ export class RenderSystem {
   beginGLFrame(camX: number, camY: number, zoom: number, deltaMs: number): void {
     if (!this._gl) return;
     this._glTimeSec += deltaMs / 1000;
-    this._gl.beginFrame(camX, camY, zoom, this._glTimeSec);
+    this._gl.beginFrame(camX, camY, zoom, this._glTimeSec, this.canvas.width, this.canvas.height);
   }
 
   /** Flush the GL batcher — call AFTER renderWorld() each frame when GL is active. */
@@ -2528,7 +2612,7 @@ export class RenderSystem {
 
     // Draw background elements
     this.drawWater(camera);
-    this.drawGrid(camera);
+    if (this.config.showGrid) this.drawGrid(camera);
     this.drawIsland(camera); // drawPlacedStructures is called inside, between trunk and leaf passes
     this.drawIslandBuildGhost(camera);
     
@@ -2895,7 +2979,7 @@ export class RenderSystem {
     this.ctx.strokeStyle = '#ffffff20';
     this.ctx.lineWidth = 1;
     
-    const gridSize = 100; // World units
+    const gridSize = 1000; // World units
     const startX = Math.floor(bounds.min.x / gridSize) * gridSize;
     const endX = Math.ceil(bounds.max.x / gridSize) * gridSize;
     const startY = Math.floor(bounds.min.y / gridSize) * gridSize;
@@ -3008,6 +3092,10 @@ export class RenderSystem {
     const cw = this.canvas.width;
     const ch = this.canvas.height;
     const msp = this.mouseWorldPos ? camera.worldToScreen(this.mouseWorldPos) : null;
+    const mwp = this.mouseWorldPos;
+    const worldBounds = camera.getWorldBounds();
+    const RESOURCE_WORLD_PAD = 140;
+    const HOVER_QUERY_WORLD_R = 120;
 
     for (const isl of this.islands) {
       const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
@@ -3179,7 +3267,27 @@ export class RenderSystem {
         isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number; bushAlpha: number; boulderAlpha: number; deathAlpha: number;
       }> = [];
 
-      for (const res of isl.resources) {
+      const candidateIndices = this.queryResourceIndices(
+        isl,
+        worldBounds.min.x - RESOURCE_WORLD_PAD,
+        worldBounds.min.y - RESOURCE_WORLD_PAD,
+        worldBounds.max.x + RESOURCE_WORLD_PAD,
+        worldBounds.max.y + RESOURCE_WORLD_PAD,
+      );
+      const hoverCandidateSet = (mwp && msp)
+        ? new Set<number>(
+            this.queryResourceIndices(
+              isl,
+              mwp.x - HOVER_QUERY_WORLD_R,
+              mwp.y - HOVER_QUERY_WORLD_R,
+              mwp.x + HOVER_QUERY_WORLD_R,
+              mwp.y + HOVER_QUERY_WORLD_R,
+            ),
+          )
+        : null;
+
+      for (const ri of candidateIndices) {
+        const res = isl.resources[ri];
         // Depleted resources fade out over DEATH_FADE_MS, then disappear entirely.
         // During the fade they cannot be hovered or interacted with.
         let deathAlpha = 1.0;
@@ -3189,6 +3297,8 @@ export class RenderSystem {
           if (elapsed >= DEATH_FADE_MS) continue; // fully faded, skip
           deathAlpha = 1.0 - elapsed / DEATH_FADE_MS; // 1 → 0 over DEATH_FADE_MS
           const wx2 = isl.x + res.ox, wy2 = isl.y + res.oy;
+          if (wx2 < worldBounds.min.x - RESOURCE_WORLD_PAD || wx2 > worldBounds.max.x + RESOURCE_WORLD_PAD ||
+              wy2 < worldBounds.min.y - RESOURCE_WORLD_PAD || wy2 > worldBounds.max.y + RESOURCE_WORLD_PAD) continue;
           const sp2 = camera.worldToScreen(Vec2.from(wx2, wy2));
           const maxR2 = 100 * zoom;
           if (sp2.x + maxR2 < 0 || sp2.x - maxR2 > cw || sp2.y + maxR2 < 0 || sp2.y - maxR2 > ch) continue;
@@ -3198,6 +3308,8 @@ export class RenderSystem {
         }
         const wx = isl.x + res.ox;
         const wy = isl.y + res.oy;
+        if (wx < worldBounds.min.x - RESOURCE_WORLD_PAD || wx > worldBounds.max.x + RESOURCE_WORLD_PAD ||
+            wy < worldBounds.min.y - RESOURCE_WORLD_PAD || wy > worldBounds.max.y + RESOURCE_WORLD_PAD) continue;
         const sp = camera.worldToScreen(Vec2.from(wx, wy));
         const maxR = 100 * zoom;
         if (sp.x + maxR < 0 || sp.x - maxR > cw || sp.y + maxR < 0 || sp.y - maxR > ch) continue;
@@ -3206,49 +3318,42 @@ export class RenderSystem {
         let isHovered = false;
         let inRange   = false;
         let playerNear = false;
+        const pdx = localPlayer ? localPlayer.position.x - wx : 0;
+        const pdy = localPlayer ? localPlayer.position.y - wy : 0;
+        const pdSq = localPlayer ? (pdx * pdx + pdy * pdy) : Infinity;
+        const playerDist = localPlayer ? Math.sqrt(pdSq) : Infinity;
+        const mayHover = !!(hoverCandidateSet && hoverCandidateSet.has(ri));
 
         if (res.type === 'wood') {
           const treeHoverR = 18 * (res.size ?? 1.0) * zoom;
-          if (msp) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= treeHoverR * treeHoverR; }
-          const pdx = localPlayer ? localPlayer.position.x - wx : Infinity;
-          const pdy = localPlayer ? localPlayer.position.y - wy : Infinity;
-          const pdSq = pdx * pdx + pdy * pdy;
-          const dist = Math.sqrt(pdSq);
+          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= treeHoverR * treeHoverR; }
           inRange    = !!(axeEquipped && localPlayer && pdSq <= HARVEST_RANGE_SQ);
-          playerNear = !!(localPlayer && dist < LEAF_FADE_OUTER);
+          playerNear = !!(localPlayer && playerDist < LEAF_FADE_OUTER);
           if (isHovered) this._hoveredTree = { wx, wy };
         } else if (res.type === 'fiber') {
-          if (msp) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= PLANT_HOVER_SQ; }
-          inRange = localPlayer && localPlayer.carrierId === 0
-            ? (() => { const dx = localPlayer!.position.x - wx; const dy = localPlayer!.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
-            : false;
+          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= PLANT_HOVER_SQ; }
+          inRange = !!(localPlayer && localPlayer.carrierId === 0 && pdSq <= HARVEST_RANGE_SQ);
           if (isHovered) this._hoveredFiberPlant = { wx, wy };
         } else if (res.type === 'rock') {
-          if (msp) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= ROCK_HOVER_SQ; }
-          inRange = localPlayer
-            ? (() => { const dx = localPlayer!.position.x - wx; const dy = localPlayer!.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
-            : false;
+          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= ROCK_HOVER_SQ; }
+          inRange = !!(localPlayer && pdSq <= HARVEST_RANGE_SQ);
           if (isHovered) this._hoveredRock = { wx, wy };
         } else if (res.type === 'boulder') {
-          if (msp) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= BOULDER_HOVER_SQ; }
-          inRange = pickaxeEquipped && localPlayer
-            ? (() => { const dx = localPlayer!.position.x - wx; const dy = localPlayer!.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
-            : false;
+          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= BOULDER_HOVER_SQ; }
+          inRange = !!(pickaxeEquipped && localPlayer && pdSq <= HARVEST_RANGE_SQ);
           if (isHovered) this._hoveredBoulder = { wx, wy };
         }
         // Smooth leaf-fade alpha: 1.0 (far) → MIN_LEAF_ALPHA (inside LEAF_FADE_INNER)
         const leafAlpha = res.type === 'wood' && localPlayer
           ? (() => {
-              const dist = Math.sqrt((localPlayer.position.x - wx) ** 2 + (localPlayer.position.y - wy) ** 2);
-              const t = Math.max(0, Math.min(1, (dist - LEAF_FADE_INNER) / (LEAF_FADE_OUTER - LEAF_FADE_INNER)));
+              const t = Math.max(0, Math.min(1, (playerDist - LEAF_FADE_INNER) / (LEAF_FADE_OUTER - LEAF_FADE_INNER)));
               return MIN_LEAF_ALPHA + t * (1.0 - MIN_LEAF_ALPHA);
             })()
           : 1.0;
         // Bush fade alpha: fades out when player is close (same pattern as leaf fade)
         const bushAlpha = res.type === 'fiber' && localPlayer
           ? (() => {
-              const dist = Math.sqrt((localPlayer.position.x - wx) ** 2 + (localPlayer.position.y - wy) ** 2);
-              const t = Math.max(0, Math.min(1, (dist - BUSH_FADE_INNER) / (BUSH_FADE_OUTER - BUSH_FADE_INNER)));
+              const t = Math.max(0, Math.min(1, (playerDist - BUSH_FADE_INNER) / (BUSH_FADE_OUTER - BUSH_FADE_INNER)));
               return MIN_BUSH_ALPHA + t * (1.0 - MIN_BUSH_ALPHA);
             })()
           : 1.0;
@@ -3364,8 +3469,12 @@ export class RenderSystem {
     const rotBin    = Math.max(0, Math.min(BINS - 1,
       Math.round(((clusterRot + ROT_RANGE) / (2 * ROT_RANGE)) * (BINS - 1))));
 
+    const sprite       = RenderSystem._ensureTreeSprites().get(`${tintIdx}_${rotBin}`)!;
+    const spriteCanopy = RenderSystem.TREE_SPRITE_SIZE * 0.38;
+    const drawSize     = RenderSystem.TREE_SPRITE_SIZE * (canopy / spriteCanopy);
+
     ctx.save();
-    // Hover glow (always Canvas 2D — drawn on the overlay canvas on top of GL sprite)
+    // Hover glow
     if (hovered) {
       const glowColor = inRange ? 'rgba(255,230,80,0.22)' : 'rgba(180,180,180,0.15)';
       ctx.beginPath();
@@ -3373,20 +3482,8 @@ export class RenderSystem {
       ctx.fillStyle = glowColor;
       ctx.fill();
     }
-
-    if (this._gl && wx !== undefined && wy !== undefined) {
-      // GL path: submit to batcher (drawn on the GL canvas beneath the 2D overlay)
-      this._gl.drawTreeLeaves(wx, wy, size, tintIdx, rotBin, leafAlpha * deathAlpha);
-    } else {
-      // Canvas 2D fallback
-      const sprite     = RenderSystem._ensureTreeSprites().get(`${tintIdx}_${rotBin}`)!;
-      const spriteCanopy = RenderSystem.TREE_SPRITE_SIZE * 0.38;
-      const drawSize   = RenderSystem.TREE_SPRITE_SIZE * (canopy / spriteCanopy);
-      ctx.globalAlpha = leafAlpha * deathAlpha;
-      ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
-    }
-
-    // Hover ring (always Canvas 2D)
+    ctx.globalAlpha = leafAlpha * deathAlpha;
+    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
     ctx.globalAlpha = deathAlpha;
     if (hovered) {
       ctx.beginPath();
@@ -3401,88 +3498,72 @@ export class RenderSystem {
   private drawIslandTreeTrunk(sx: number, sy: number, zoom: number, hovered = false, inRange = false, playerNear = false, size = 1.0, alpha = 1.0, wx?: number, wy?: number): void {
     const ctx      = this.ctx;
     const trunk    = 18 * zoom * size;
+    const spriteR  = RenderSystem.TRUNK_SPRITE_R;
+    const SIZE     = RenderSystem.TRUNK_SPRITE_SIZE;
+    const drawSize = SIZE * (trunk / spriteR);
     const key      = hovered ? (inRange ? 'inrange' : 'hovered') : 'normal';
-    if (this._gl && wx !== undefined && wy !== undefined) {
-      this._gl.drawTreeTrunk(wx, wy, size, key as 'normal' | 'hovered' | 'inrange', alpha);
-    } else {
-      const spriteR  = RenderSystem.TRUNK_SPRITE_R;
-      const SIZE     = RenderSystem.TRUNK_SPRITE_SIZE;
-      const drawSize = SIZE * (trunk / spriteR);
-      const sprite   = RenderSystem._ensureTrunkSprites().get(key)!;
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
-      ctx.restore();
-    }
+    const sprite   = RenderSystem._ensureTrunkSprites().get(key)!;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
+    ctx.restore();
   }
 
   private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0, wx?: number, wy?: number): void {
-    const ctx  = this.ctx;
-    const hash = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
-    const ti   = hash % RenderSystem.FIBER_TINTS.length;
-    const bin  = (hash >> 4) % RenderSystem.FIBER_ROT_BINS;
-    const rot  = ((hash >> 8) % 360) * Math.PI / 180;
-    if (this._gl && wx !== undefined && wy !== undefined) {
-      this._gl.drawFiber(wx, wy, ti, bin, hovered, rot, deathAlpha);
-    } else {
-      const h        = 60 * zoom;
-      const spriteH  = RenderSystem.FIBER_SPRITE_H;
-      const SIZE     = RenderSystem.FIBER_SPRITE_SIZE;
-      const drawSize = SIZE * (h / spriteH);
-      const key      = `${ti}_${bin}_${hovered ? 'h' : 'n'}`;
-      const sprite   = RenderSystem._ensureFiberSprites().get(key)!;
-      ctx.save();
-      ctx.globalAlpha = deathAlpha;
-      ctx.translate(sx, sy);
-      ctx.rotate(rot);
-      ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
-      ctx.restore();
-    }
+    const ctx      = this.ctx;
+    const h        = 60 * zoom;
+    const spriteH  = RenderSystem.FIBER_SPRITE_H;
+    const SIZE     = RenderSystem.FIBER_SPRITE_SIZE;
+    const drawSize = SIZE * (h / spriteH);
+    const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
+    const ti       = hash % RenderSystem.FIBER_TINTS.length;
+    const bin      = (hash >> 4) % RenderSystem.FIBER_ROT_BINS;
+    const key      = `${ti}_${bin}_${hovered ? 'h' : 'n'}`;
+    const sprite   = RenderSystem._ensureFiberSprites().get(key)!;
+    const rot      = ((hash >> 8) % 360) * Math.PI / 180;
+    ctx.save();
+    ctx.globalAlpha = deathAlpha;
+    ctx.translate(sx, sy);
+    ctx.rotate(rot);
+    ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
+    ctx.restore();
   }
 
   private drawIslandRock(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0, wx?: number, wy?: number): void {
     const ctx  = this.ctx;
+    const R    = RenderSystem.ROCK_SPRITE_R;
+    const SIZE = RenderSystem.ROCK_SPRITE_SIZE;
+    const r    = 6 * zoom;
+    const drawSize = SIZE * (r / R);
     const hash = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
     const ti   = hash % RenderSystem.ROCK_TONES.length;
     const si   = (hash >> 4) % RenderSystem.ROCK_SHAPES.length;
-    if (this._gl && wx !== undefined && wy !== undefined) {
-      this._gl.drawRock(wx, wy, ti, si, hovered, deathAlpha);
-    } else {
-      const R        = RenderSystem.ROCK_SPRITE_R;
-      const SIZE     = RenderSystem.ROCK_SPRITE_SIZE;
-      const r        = 6 * zoom;
-      const drawSize = SIZE * (r / R);
-      const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
-      const sprite   = RenderSystem._ensureRockSprites().get(key)!;
-      ctx.save();
-      ctx.globalAlpha = deathAlpha;
-      ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
-      ctx.restore();
-    }
+    const key  = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
+    const sprite = RenderSystem._ensureRockSprites().get(key)!;
+    ctx.save();
+    ctx.globalAlpha = deathAlpha;
+    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
+    ctx.restore();
   }
 
   private drawIslandBoulder(sx: number, sy: number, zoom: number, hovered = false, alpha = 1.0, ox = 0, oy = 0, size = 1.0, wx?: number, wy?: number): void {
-    const ctx  = this.ctx;
-    const hash = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
-    const ti   = hash % RenderSystem.BOULDER_TONES.length;
-    const si   = (hash >> 4) % RenderSystem.BOULDER_SHAPES.length;
-    const drawRot = ((hash >> 8) & 0xFF) / 256 * Math.PI * 2;
-    if (this._gl && wx !== undefined && wy !== undefined) {
-      this._gl.drawBoulder(wx, wy, size, ti, si, hovered, drawRot, alpha);
-    } else {
-      const R        = RenderSystem.BOULDER_SPRITE_R;
-      const SIZE     = RenderSystem.BOULDER_SPRITE_SIZE;
-      const r        = 40 * zoom * size;
-      const drawSize = SIZE * (r / R);
-      const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
-      const sprite   = RenderSystem._ensureBoulderSprites().get(key)!;
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.translate(sx, sy);
-      ctx.rotate(drawRot);
-      ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
-      ctx.restore();
-    }
+    const ctx      = this.ctx;
+    const R        = RenderSystem.BOULDER_SPRITE_R;
+    const SIZE     = RenderSystem.BOULDER_SPRITE_SIZE;
+    const r        = 40 * zoom * size;
+    const drawSize = SIZE * (r / R);
+    const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
+    const ti       = hash % RenderSystem.BOULDER_TONES.length;
+    const si       = (hash >> 4) % RenderSystem.BOULDER_SHAPES.length;
+    const drawRot  = ((hash >> 8) & 0xFF) / 256 * Math.PI * 2;
+    const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
+    const sprite   = RenderSystem._ensureBoulderSprites().get(key)!;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(sx, sy);
+    ctx.rotate(drawRot);
+    ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
+    ctx.restore();
   }
 
   /** Draw a floating "[E] action" or "Too far" prompt above a resource node. */

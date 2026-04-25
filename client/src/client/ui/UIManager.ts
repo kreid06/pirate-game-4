@@ -27,6 +27,12 @@ export interface UIRenderContext {
   worldState: WorldState;
   camera: Camera;
   fps: number;
+  /** Last frame duration in milliseconds. */
+  frameMs?: number;
+  /** GL draw calls in the most recent frame (0 when GL is disabled). */
+  glDrawCalls?: number;
+  /** Current GL internal scale percent (e.g. 40 for 40%). */
+  glScalePct?: number;
   networkStats: NetworkStats;
   config: ClientConfig;
   assignedPlayerId?: number | null;
@@ -549,36 +555,48 @@ export class UIManager {
    */
   private renderFPS(ctx: CanvasRenderingContext2D, context: UIRenderContext): void {
     ctx.save();
-    
+
     const fps = Math.round(context.fps);
-    const text = `${fps} FPS`;
-    
-    // Measure text width for background
-    ctx.font = 'bold 20px Consolas, monospace';
-    const textMetrics = ctx.measureText(text);
-    const textWidth = textMetrics.width;
-    const textHeight = 24;
-    
+    const frameMs = context.frameMs ?? (fps > 0 ? (1000 / fps) : 0);
+    const ping = Math.round(context.networkStats?.ping ?? 0);
+    const glDc = context.glDrawCalls ?? 0;
+    const glScale = context.glScalePct ?? 0;
+
+    const lines = [
+      `${fps} FPS  ${frameMs.toFixed(1)} ms`,
+      glScale > 0
+        ? `Ping ${ping} ms  GL ${glDc} dc @ ${glScale}%`
+        : `Ping ${ping} ms  Canvas 2D`,
+    ];
+
+    // Measure text block for background box
+    ctx.font = 'bold 16px Consolas, monospace';
+    const textWidth = Math.max(...lines.map((l) => ctx.measureText(l).width));
+    const lineH = 18;
+    const textHeight = lineH * lines.length;
+
     // Position in top-right corner
     const padding = 10;
     const x = ctx.canvas.width - textWidth - padding * 2;
     const y = padding;
-    
+
     // Draw semi-transparent background
     ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
     ctx.fillRect(x, y, textWidth + padding * 2, textHeight + padding);
-    
+
     // Draw border
     ctx.strokeStyle = fps >= 60 ? '#00ff00' : fps >= 30 ? '#ffaa00' : '#ff0000';
     ctx.lineWidth = 2;
     ctx.strokeRect(x, y, textWidth + padding * 2, textHeight + padding);
-    
-    // Draw FPS text
+
+    // Draw stats text
     ctx.fillStyle = fps >= 60 ? '#00ff00' : fps >= 30 ? '#ffaa00' : '#ff0000';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    ctx.fillText(text, x + padding, y + padding);
-    
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], x + padding, y + padding + i * lineH);
+    }
+
     ctx.restore();
   }
 
