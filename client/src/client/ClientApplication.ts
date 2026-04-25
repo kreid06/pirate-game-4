@@ -1126,13 +1126,17 @@ export class ClientApplication {
       // Let UI panels (e.g. manning priority panel) consume clicks before game logic
       this.inputManager.onUIClick = (x, y) => {
         if (this.shipyardMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
-        if (this.craftingMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
+        const _wsClick = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+        const _pidClick = this.networkManager.getAssignedPlayerId();
+        const _invClick = _wsClick?.players.find(p => p.id === _pidClick)?.inventory ?? null;
+        if (this.craftingMenu.handleClick(x, y, this.canvas.width, this.canvas.height, _invClick)) return true;
         if (this.uiManager?.handleClick(x, y)) return true;
         return false;
       };
 
       // Forward mouse-move/up to world map for drag-pan
       this.inputManager.onUIMouseMove = (x, y) => {
+        if (this.craftingMenu.visible) this.craftingMenu.handleMouseMove(x, y);
         this.uiManager?.handleWorldMapMouseMove(x, y);
       };
       this.inputManager.onUIMouseUp = () => {
@@ -1140,6 +1144,7 @@ export class ClientApplication {
       };
       // Forward wheel to world map zoom (returns true when map is visible)
       this.inputManager.onUIWheel = (deltaY, x, y) => {
+        if (this.craftingMenu.visible) return this.craftingMenu.handleWheel(deltaY);
         return this.uiManager?.handleWorldMapWheel(deltaY, x, y) ?? false;
       };
 
@@ -2150,6 +2155,7 @@ export class ClientApplication {
           this.renderSystem.getContext(),
           this.canvas.width,
           this.canvas.height,
+          localPlayer?.inventory ?? null,
         );
       }
       // Shipyard construction menu
