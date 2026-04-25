@@ -1,14 +1,17 @@
 import { ITEM_DEFS, ITEM_ID_MAP, INVENTORY_SLOTS, ItemKind, PlayerInventory } from '../../sim/Inventory.js';
 
 // ── Layout constants ──────────────────────────────────────────────────────────
-const PANEL_W   = 540;
-const PANEL_H   = 380;
 const COLS      = 6;
 const ISZ       = 52;   // item slot size px
 const PAD       = 14;
-const HEADER_H  = 38;
-const FOOTER_H  = 48;
-const DIVIDER_X = PANEL_W / 2;  // centre divider
+const SCROLLBAR = 8;
+// Each half: COLS*ISZ grid + PAD on each side + scrollbar
+const HALF_W    = COLS * ISZ + PAD * 2 + SCROLLBAR;  // 344px
+const PANEL_W   = HALF_W * 2;                          // 688px
+const PANEL_H   = 520;
+const HEADER_H  = 40;
+const FOOTER_H  = 50;
+const DIVIDER_X = HALF_W;  // centre divider
 
 export class TombstoneMenu {
   public visible = false;
@@ -106,8 +109,8 @@ export class TombstoneMenu {
     this._dragSlot = -1;
 
     const local = this._toLocal(x, y);
-    // Released on player side → take that slot
-    if (local.x >= DIVIDER_X && local.x <= PANEL_W) {
+    // Released on player side (left) → take that slot
+    if (local.x >= 0 && local.x < DIVIDER_X) {
       this.onTakeSlot?.(this._tombstoneId, slot);
       // Optimistic clear
       if (this._tombSlots[slot]) this._tombSlots[slot] = [0, 0];
@@ -119,9 +122,11 @@ export class TombstoneMenu {
     if (!this.visible) return false;
     const local = this._toLocal(x, y);
     if (!this._hitTest(x, y)) return false;
-    if (local.x < DIVIDER_X) {
+    if (local.x >= DIVIDER_X) {
+      // Right side = tombstone
       this._scrollT = this._clampScroll(this._scrollT + deltaY * 0.5, this._tombSlots.length, true);
     } else {
+      // Left side = player
       const pSlots = this._playerInv?.slots.length ?? 0;
       this._scrollP = this._clampScroll(this._scrollP + deltaY * 0.5, pSlots, false);
     }
@@ -157,8 +162,8 @@ export class TombstoneMenu {
 
     this._drawHeader(ctx);
     this._drawDivider(ctx);
-    this._drawTombstonePanel(ctx);
     this._drawPlayerPanel(ctx);
+    this._drawTombstonePanel(ctx);
     this._drawFooter(ctx);
 
     ctx.restore();
@@ -175,17 +180,17 @@ export class TombstoneMenu {
     ctx.fillStyle = 'rgba(200,168,70,0.12)';
     ctx.fillRect(0, 0, PANEL_W, HEADER_H);
 
-    // Tombstone side title
-    ctx.fillStyle = '#ffe97a';
+    // Player side title (left)
+    ctx.fillStyle = '#e8e0cc';
     ctx.font = 'bold 13px Consolas, monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(`☠ ${this._ownerName}'s Items`, PAD, HEADER_H / 2);
+    ctx.fillText('Your Inventory', PAD, HEADER_H / 2);
 
-    // Player side title
+    // Tombstone side title (right)
     ctx.textAlign = 'right';
-    ctx.fillStyle = '#e8e0cc';
-    ctx.fillText('Your Inventory', PANEL_W - PAD - 20, HEADER_H / 2);
+    ctx.fillStyle = '#ffe97a';
+    ctx.fillText(`☠ ${this._ownerName}'s Items`, PANEL_W - PAD - 20, HEADER_H / 2);
 
     // Close button [X]
     const cx = PANEL_W - 10, cy = HEADER_H / 2;
@@ -205,49 +210,15 @@ export class TombstoneMenu {
     ctx.stroke();
   }
 
-  private _drawTombstonePanel(ctx: CanvasRenderingContext2D): void {
-    const panelW  = DIVIDER_X;
-    const panelH  = PANEL_H - HEADER_H - FOOTER_H;
-    const startY  = HEADER_H;
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, startY, panelW, panelH);
-    ctx.clip();
-
-    const slots = this._tombSlots;
-    const rows  = Math.ceil(INVENTORY_SLOTS / COLS);
-    const gridW = COLS * ISZ;
-    const offX  = Math.round((panelW - gridW) / 2);
-
-    for (let i = 0; i < INVENTORY_SLOTS; i++) {
-      const col = i % COLS;
-      const row = Math.floor(i / COLS);
-      const sx  = offX + col * ISZ;
-      const sy  = startY + row * ISZ - this._scrollT;
-      if (sy + ISZ < startY || sy > startY + panelH) continue;
-
-      const [kind, qty] = slots[i] ?? [0, 0];
-      const isDragging  = i === this._dragSlot;
-      this._drawSlot(ctx, sx, sy, kind, qty, isDragging);
-    }
-
-    // Scrollbar
-    this._drawScrollbar(ctx, panelW - 6, startY, panelH, rows * ISZ, this._scrollT);
-
-    ctx.restore();
-  }
-
   private _drawPlayerPanel(ctx: CanvasRenderingContext2D): void {
-    const panelX  = DIVIDER_X;
-    const panelW  = PANEL_W - DIVIDER_X;
+    const panelW  = HALF_W;
     const panelH  = PANEL_H - HEADER_H - FOOTER_H;
     const startY  = HEADER_H;
     const inv     = this._playerInv;
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(panelX, startY, panelW, panelH);
+    ctx.rect(0, startY, panelW, panelH);
     ctx.clip();
 
     if (!inv) {
@@ -255,8 +226,7 @@ export class TombstoneMenu {
       return;
     }
 
-    const gridW = COLS * ISZ;
-    const offX  = panelX + Math.round((panelW - gridW) / 2);
+    const offX  = PAD;
     const rows  = Math.ceil(INVENTORY_SLOTS / COLS);
 
     for (let i = 0; i < INVENTORY_SLOTS; i++) {
@@ -273,7 +243,40 @@ export class TombstoneMenu {
       this._drawSlot(ctx, sx, sy, kindNum, qty, false, true);
     }
 
-    this._drawScrollbar(ctx, PANEL_W - 6, startY, panelH, rows * ISZ, this._scrollP);
+    this._drawScrollbar(ctx, panelW - SCROLLBAR, startY, panelH, rows * ISZ, this._scrollP);
+    ctx.restore();
+  }
+
+  private _drawTombstonePanel(ctx: CanvasRenderingContext2D): void {
+    const panelX  = DIVIDER_X;
+    const panelW  = HALF_W;
+    const panelH  = PANEL_H - HEADER_H - FOOTER_H;
+    const startY  = HEADER_H;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(panelX, startY, panelW, panelH);
+    ctx.clip();
+
+    const slots = this._tombSlots;
+    const rows  = Math.ceil(INVENTORY_SLOTS / COLS);
+    const offX  = panelX + PAD;
+
+    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+      const col = i % COLS;
+      const row = Math.floor(i / COLS);
+      const sx  = offX + col * ISZ;
+      const sy  = startY + row * ISZ - this._scrollT;
+      if (sy + ISZ < startY || sy > startY + panelH) continue;
+
+      const [kind, qty] = slots[i] ?? [0, 0];
+      const isDragging  = i === this._dragSlot;
+      this._drawSlot(ctx, sx, sy, kind, qty, isDragging);
+    }
+
+    // Scrollbar
+    this._drawScrollbar(ctx, PANEL_W - SCROLLBAR, startY, panelH, rows * ISZ, this._scrollT);
+
     ctx.restore();
   }
 
@@ -357,9 +360,16 @@ export class TombstoneMenu {
     ctx.fillStyle = 'rgba(200,168,70,0.08)';
     ctx.fillRect(0, fy, PANEL_W, FOOTER_H);
 
-    // Take All button (left-centre)
+    // Hint text on the left (player) side
+    ctx.fillStyle = '#778';
+    ctx.font = '11px Consolas, monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('[Esc] Close  •  Drag items ←', PAD, fy + FOOTER_H / 2);
+
+    // Take All button on the right (tombstone) side
     const btnW  = 120, btnH = 28;
-    const btnX  = Math.round(DIVIDER_X / 2 - btnW / 2);
+    const btnX  = Math.round(DIVIDER_X + HALF_W / 2 - btnW / 2);
     const btnY  = fy + Math.round((FOOTER_H - btnH) / 2);
     ctx.fillStyle   = '#7a3a00';
     ctx.strokeStyle = '#c8a846';
@@ -373,12 +383,6 @@ export class TombstoneMenu {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('Take All', btnX + btnW / 2, btnY + btnH / 2);
-
-    // Hint text right side
-    ctx.fillStyle = '#778';
-    ctx.font = '11px Consolas, monospace';
-    ctx.textAlign = 'right';
-    ctx.fillText('[Esc] Close  •  Drag items to your inventory', PANEL_W - PAD, fy + FOOTER_H / 2);
   }
 
   private _drawScrollbar(
@@ -414,7 +418,7 @@ export class TombstoneMenu {
   private _hitTakeAll(lx: number, ly: number): boolean {
     const fy   = PANEL_H - FOOTER_H;
     const btnW = 120, btnH = 28;
-    const btnX = Math.round(DIVIDER_X / 2 - btnW / 2);
+    const btnX = Math.round(DIVIDER_X + HALF_W / 2 - btnW / 2);
     const btnY = fy + Math.round((FOOTER_H - btnH) / 2);
     return lx >= btnX && lx <= btnX + btnW && ly >= btnY && ly <= btnY + btnH;
   }
@@ -422,11 +426,9 @@ export class TombstoneMenu {
   private _tombSlotAt(lx: number, ly: number): number {
     const startY = HEADER_H;
     const panelH = PANEL_H - HEADER_H - FOOTER_H;
-    if (lx >= DIVIDER_X || ly < startY || ly > startY + panelH) return -1;
-    const panelW = DIVIDER_X;
-    const gridW  = COLS * ISZ;
-    const offX   = Math.round((panelW - gridW) / 2);
-    const col    = Math.floor((lx - offX) / ISZ);
+    // Tombstone is now on the RIGHT side
+    if (lx < DIVIDER_X || lx > PANEL_W || ly < startY || ly > startY + panelH) return -1;
+    const col    = Math.floor((lx - DIVIDER_X - PAD) / ISZ);
     const row    = Math.floor((ly - startY + this._scrollT) / ISZ);
     if (col < 0 || col >= COLS || row < 0) return -1;
     const idx = row * COLS + col;
