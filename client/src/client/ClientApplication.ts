@@ -1474,6 +1474,11 @@ export class ClientApplication {
         this.uiManager.closeRespawnScreen();
       });
 
+      // Hotbar left-click slot selection
+      this.uiManager.onHotbarSlotClick = (slot) => {
+        this.inputManager.onSlotSelect?.(slot);
+      };
+
       // Handle NPC_STAT_UP broadcast: refresh world-state NPC fields
       this.networkManager.onNpcStatUp = (npcId, _stat, _statLevel, xp,
           maxHealth, npcLevel, statHealth, statDamage, statStamina, statWeight, statPoints) => {

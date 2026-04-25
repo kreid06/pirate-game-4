@@ -146,6 +146,8 @@ export class UIManager {
   public onBuildItemSelect: ((item: 'cannon' | 'sail' | 'swivel') => void) | null = null;
   /** Called when a weapon group has its mode cycled via right-click. */
   public onGroupModeChange: ((groupIndex: number, mode: WeaponGroupMode) => void) | null = null;
+  /** Called when the player left-clicks a hotbar slot. */
+  public onHotbarSlotClick: ((slot: number) => void) | null = null;
   /** Cached from last render frame — used by handleRightClick for hotbar hit-testing. */
   private _cachedHelmActiveGroup: number = -1;
   private _cachedControlGroups: Map<number, WeaponGroupState> | null = null;
@@ -1102,6 +1104,23 @@ export class UIManager {
       const consumed = this.shipMenu.handleClick(x, y);
       if (!consumed) this.closeActiveMenu();
       return true;
+    }
+    // Hotbar left-click slot selection (only when no menu/build mode is consuming)
+    if (this.onHotbarSlotClick && !this._cachedControlGroups) {
+      const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+      const totalW = INVENTORY_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+      const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+      const startX = Math.round((this.canvas.width - totalW) / 2);
+      const startY = this.canvas.height - totalH - 8;
+      if (y >= startY + PADDING && y <= startY + PADDING + SLOT_SIZE) {
+        for (let i = 0; i < INVENTORY_SLOTS; i++) {
+          const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+          if (x >= sx && x <= sx + SLOT_SIZE) {
+            this.onHotbarSlotClick(i);
+            return true;
+          }
+        }
+      }
     }
     return this.manningPanel.handleClick(x, y);
   }
