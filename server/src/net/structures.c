@@ -34,8 +34,10 @@ static bool floor_tiles_overlap(float ax, float ay, float a_rad,
 {
     const float HALF = 25.0f;
     /* Small epsilon — absorbs float rounding on exact touching-edge adjacency.
-       Valid adjacent tiles are exactly 50px apart; genuine overlap is >> 0.01px. */
-    const float EPS  = 0.01f;
+       Must be > 0.1 to cover the %.1f broadcast precision gap (up to ±0.05 per
+       coordinate, ±0.07 diagonal) between a tile's stored position and the
+       client's snapped position derived from the broadcast value. */
+    const float EPS  = 0.2f;
     float cA = cosf(a_rad), sA = sinf(a_rad);
     float cB = cosf(b_rad), sB = sinf(b_rad);
     float dx = bx - ax, dy = by - ay;
@@ -58,7 +60,10 @@ static bool floor_tiles_overlap(float ax, float ay, float a_rad,
 void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
     char response[256];
 
-    /* Parse placement position and structure type up front */
+    /* Parse placement position and structure type up front.
+       Round px/py to 1 decimal place so the stored position exactly matches the
+       %.1f broadcast precision — prevents snap candidates derived from broadcast
+       values being falsely rejected as overlapping the snap source tile. */
     float px = player->x, py = player->y;
     {
         char* pxs = strstr(payload, "\"x\":");
@@ -66,6 +71,9 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         if (pxs) sscanf(pxs + 4, "%f", &px);
         if (pys) sscanf(pys + 4, "%f", &py);
     }
+    /* Snap to 0.1 px grid to match broadcast precision */
+    px = roundf(px * 10.0f) / 10.0f;
+    py = roundf(py * 10.0f) / 10.0f;
 
     char stype[32] = {0};
     {

@@ -1605,8 +1605,9 @@ export class RenderSystem {
   ): boolean {
     const HALF = 25;
     // Small epsilon to absorb floating-point rounding on touching-edge adjacency.
-    // Valid adjacent tiles are exactly TILE=50px apart; any genuine overlap is >> 0.01px.
-    const EPS = 0.01;
+    // Must be > 0.1 to cover the %.1f server-broadcast precision gap (up to ±0.07
+    // diagonal error between stored and snap-derived positions).
+    const EPS = 0.2;
     const cA = Math.cos(aRad), sA = Math.sin(aRad);
     const cB = Math.cos(bRad), sB = Math.sin(bRad);
     const dx = bx - ax, dy = by - ay;
