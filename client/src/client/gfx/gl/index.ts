@@ -18,3 +18,8 @@ export type { TextureEntry }                 from './TextureManager.js';
 
 export { SpriteBatcher, MAX_SPRITES_PER_BATCH } from './SpriteBatcher.js';
 export type { SpriteSubmit }                 from './SpriteBatcher.js';
+
+export { SpriteAtlas }                       from './SpriteAtlas.js';
+export type { UVRect }                       from './SpriteAtlas.js';
+
+export { OceanRenderer }                     from './OceanRenderer.js';
