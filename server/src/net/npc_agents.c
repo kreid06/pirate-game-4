@@ -1,6 +1,10 @@
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+#define _USE_MATH_DEFINES
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include "net/npc_agents.h"
 #include "net/npc_world.h"
 #include "net/module_interactions.h"
@@ -31,14 +35,13 @@
 #define SHIP_SINK_DURATION_MS     8000
 
 /* Forward declaration */
-static void dispatch_gunner_to_weapon(WorldNpc* npc, SimpleShip* ship, uint32_t cannon_id, float abs_diff_deg);
+void dispatch_gunner_to_weapon(WorldNpc* npc, SimpleShip* ship, uint32_t cannon_id, float abs_diff_deg);
 
 /**
  * Aim a specific cannon on a ship toward a world-space target (CLIENT pixel coords).
  * Sets aim_direction on both SimpleShip and sim-ship cannon modules.
  */
-__attribute__((unused))
-static void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float target_x, float target_y) {
+void npc_aim_cannon_at_world(SimpleShip* ship, ShipModule* cannon, float target_x, float target_y) {
     const float CANNON_AIM_RANGE = 30.0f * (float)(M_PI / 180.0);
 
     // World angle from cannon toward target (client-pixel space — same coord system as ship->x/y)
@@ -299,8 +302,8 @@ void tick_npc_agents(float dt) {
 }
 
 /* Walk a gunner to the given cannon or swivel module. */
-static void dispatch_gunner_to_weapon(WorldNpc* npc, SimpleShip* ship,
-                                      uint32_t cannon_id, float abs_diff_deg) {
+void dispatch_gunner_to_weapon(WorldNpc* npc, SimpleShip* ship,
+                               uint32_t cannon_id, float abs_diff_deg) {
     ShipModule* cannon = find_module_by_id(ship, cannon_id);
     if (!cannon) return;
     float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(cannon->local_pos.x));

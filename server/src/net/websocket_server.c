@@ -1,4 +1,5 @@
 #include "net/websocket_server.h"
+#include "net/websocket_server_internal.h"
 #include "sim/ship_level.h"
 #include "sim/island.h"
 #include "net/websocket_protocol.h"
@@ -51,50 +52,13 @@
 // Simple player data structure for movement
 // (Definition in websocket_server.h)
 
-struct WebSocketClient {
-    int fd;
-    bool connected;
-    bool handshake_complete;
-    uint32_t last_ping_time;
-    char ip_address[INET_ADDRSTRLEN];
-    uint16_t port;
-    uint32_t player_id; // Associated player ID
-    /* Set when a cannon_group_config was processed this message-loop iteration.
-     * Broadcast is deferred until all messages from this client in the current
-     * frame have been handled, so a burst of group-config messages (e.g. the
-     * client switching two groups to AIMING simultaneously) produces exactly
-     * one broadcast rather than one per message.
-     * company_id stores which company's groups changed so the broadcast is
-     * only sent to clients of the same company. */
-    uint16_t pending_group_broadcast_ship_id;
-    uint8_t  pending_group_broadcast_company_id;
-    /* Per-client TCP receive accumulation buffer (handles TCP fragmentation) */
-    char recv_buf[65536];
-    size_t recv_buf_len;
-    /* WebSocket message fragment reassembly (handles FIN=0 fragmented frames) */
-    char frag_buf[4096];
-    size_t frag_buf_len;
-    uint8_t frag_opcode;
-};
+/* struct WebSocketClient and struct WebSocketServer are defined in
+ * websocket_server_internal.h (pulled in via module_interactions.h). */
 
-struct WebSocketServer {
-    int socket_fd;
-    uint16_t port;
-    bool running;
-    struct WebSocketClient clients[WS_MAX_CLIENTS];
-    int client_count;
-    uint64_t packets_sent;
-    uint64_t packets_received;
-    uint64_t input_messages_received;
-    uint64_t unknown_messages_received;
-    uint32_t last_input_time;
-    uint32_t last_unknown_time;
-};
-
-static struct WebSocketServer ws_server = {0};
+struct WebSocketServer ws_server = {0};
 
 // Global simulation pointer for player collision detection
-static struct Sim* global_sim = NULL;
+struct Sim* global_sim = NULL;
 
 // ── Company / Alliance registry ───────────────────────────────────────────
 typedef struct { uint8_t id; const char* name; uint8_t alliance_id; } Company;
@@ -131,35 +95,35 @@ static const char* get_state_string(PlayerMovementState state) {
 }
 
 // Global player data for simple movement tracking
-static WebSocketPlayer players[WS_MAX_CLIENTS] = {0};
-static int next_player_id = 1000;
+WebSocketPlayer players[WS_MAX_CLIENTS] = {0};
+int next_player_id = 1000;
 
 // NPC agents
-static NpcAgent npc_agents[MAX_NPC_AGENTS] = {0};
-static int npc_count = 0;
-static uint16_t next_npc_id = 5000;
+NpcAgent npc_agents[MAX_NPC_AGENTS] = {0};
+int npc_count = 0;
+uint16_t next_npc_id = 5000;
 
 // World NPCs (visible, interactable entities)
-static WorldNpc world_npcs[MAX_WORLD_NPCS] = {0};
-static int world_npc_count = 0;
-static uint16_t next_world_npc_id = 9000;
-static bool g_npcs_dirty = true; // set whenever NPC state changes; cleared after JSON rebuild
+WorldNpc world_npcs[MAX_WORLD_NPCS] = {0};
+int world_npc_count = 0;
+uint16_t next_world_npc_id = 9000;
+bool g_npcs_dirty = true; // set whenever NPC state changes; cleared after JSON rebuild
 
 // Global ship data (simple ships for testing)
 #define MAX_SIMPLE_SHIPS 50
-static SimpleShip ships[MAX_SIMPLE_SHIPS] = {0};
-static int ship_count = 0;
+SimpleShip ships[MAX_SIMPLE_SHIPS] = {0};
+int ship_count = 0;
 /* 8-bit ship sequence counter — top byte of all module IDs (see module_ids.h).
  * Also used as ship_id on a single server: ship_id = ship_seq.
  * On a multi-server cluster, ship_id will widen to (server_id<<8)|ship_seq;
  * ship_seq stays frozen as the module namespace byte in both cases.
  * Starts at 1; wraps to 1 after 255 (0 is MODULE_ID_INVALID's ship). */
-static uint8_t next_ship_seq = 1;
+uint8_t next_ship_seq = 1;
 
 // ── Island placed structures ─────────────────────────────────────────────────
-static PlacedStructure placed_structures[MAX_PLACED_STRUCTURES];
-static uint32_t placed_structure_count = 0;
-static uint16_t next_structure_id = 1;
+PlacedStructure placed_structures[MAX_PLACED_STRUCTURES];
+uint32_t placed_structure_count = 0;
+uint16_t next_structure_id = 1;
 
 int websocket_server_get_placed_structures(PlacedStructure **out_structs, uint32_t *out_count) {
     if (!out_structs || !out_count) return -1;
@@ -176,7 +140,7 @@ int websocket_server_get_placed_structures(PlacedStructure **out_structs, uint32
 #define SHIP_ID_LOOKUP_SIZE 512
 static SimpleShip* g_ship_by_id[SHIP_ID_LOOKUP_SIZE]; // zero-initialised by C
 
-static SimpleShip* find_ship(uint16_t ship_id) {
+SimpleShip* find_ship(uint16_t ship_id) {
     if (ship_id > 0 && ship_id < SHIP_ID_LOOKUP_SIZE) {
         SimpleShip* cached = g_ship_by_id[ship_id];
         if (cached && cached->active && cached->ship_id == ship_id) return cached;
@@ -191,7 +155,7 @@ static SimpleShip* find_ship(uint16_t ship_id) {
 }
 
 // Coordinate conversion helpers
-static void ship_local_to_world(const SimpleShip* ship, float local_x, float local_y, float* world_x, float* world_y) {
+void ship_local_to_world(const SimpleShip* ship, float local_x, float local_y, float* world_x, float* world_y) {
     float cos_r = cosf(ship->rotation);
     float sin_r = sinf(ship->rotation);
     *world_x = ship->x + (local_x * cos_r - local_y * sin_r);
@@ -217,7 +181,23 @@ static void update_mounted_players_on_ship(uint16_t ship_id) {
 // Full definition lives after find_ship_by_id (below).
 #define SIM_SHIP_ID_SIZE 512
 static struct Ship* g_sim_ship_by_id[SIM_SHIP_ID_SIZE]; // zero-init by C
-static struct Ship* find_sim_ship(uint32_t id);          // forward declaration
+struct Ship* find_sim_ship(uint32_t id);          // forward declaration
+
+// ── find_sim_ship definition ─────────────────────────────────────────────────
+struct Ship* find_sim_ship(uint32_t id) {
+    if (id > 0 && id < SIM_SHIP_ID_SIZE) {
+        struct Ship* cached = g_sim_ship_by_id[id];
+        if (cached && (uint32_t)cached->id == id) return cached;
+    }
+    if (!global_sim) return NULL;
+    for (uint32_t i = 0; i < global_sim->ship_count; i++) {
+        if ((uint32_t)global_sim->ships[i].id == id) {
+            if (id < SIM_SHIP_ID_SIZE) g_sim_ship_by_id[id] = &global_sim->ships[i];
+            return &global_sim->ships[i];
+        }
+    }
+    return NULL;
+}
 
 // Sync SimpleShip state from simulation ships (position, rotation, velocity)
 static void sync_simple_ships_from_simulation(void) {
@@ -289,7 +269,7 @@ static void ship_clamp_to_deck(const SimpleShip* ship, float* local_x, float* lo
 
 // Helper to convert world coordinates to ship-local coordinates
 __attribute__((unused))
-static void ship_world_to_local(const SimpleShip* ship, float world_x, float world_y, float* local_x, float* local_y) {
+void ship_world_to_local(const SimpleShip* ship, float world_x, float world_y, float* local_x, float* local_y) {
     float dx = world_x - ship->x;
     float dy = world_y - ship->y;
     float cos_r = cosf(-ship->rotation);
@@ -325,7 +305,7 @@ static float swivel_dist_to_hull_edge(float sx, float sy, const struct Ship* shi
 }
 
 // Helper to check if player is outside hull polygon (using simulation ship hull)
-static bool is_outside_deck(uint16_t ship_id, float local_x, float local_y) {
+bool is_outside_deck(uint16_t ship_id, float local_x, float local_y) {
     struct Ship* sim_ship = find_sim_ship(ship_id);
     if (!sim_ship || sim_ship->hull_vertex_count < 3) return false;
 
@@ -469,7 +449,7 @@ static void resolve_player_npc_collisions(const SimpleShip* ship,
 }
 
 // Helper to board a player onto a ship
-static void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y) {
+void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y) {
     player->parent_ship_id = ship->ship_id;
     // company_id is NOT inherited from ship — assigned by admin or player choice
     player->local_x = local_x;
@@ -488,7 +468,7 @@ static void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, floa
 }
 
 // Helper to dismount a player from a ship (into water)
-static void dismount_player_from_ship(WebSocketPlayer* player, const char* reason) {
+void dismount_player_from_ship(WebSocketPlayer* player, const char* reason) {
     if (player->parent_ship_id == 0) {
         return; // Already in water
     }
@@ -652,7 +632,7 @@ static bool websocket_handshake(int client_fd, const char* request) {
 
 // Parse WebSocket frame
 // Forward declarations
-static WebSocketPlayer* find_player(uint32_t player_id);
+WebSocketPlayer* find_player(uint32_t player_id);
 static WebSocketPlayer* create_player(uint32_t player_id);
 static void remove_player(uint32_t player_id);
 
@@ -670,7 +650,7 @@ static void remove_player(uint32_t player_id);
 static WebSocketPlayer* g_player_by_id[PLAYER_ID_MASK + 1]; // zero-initialised by C
 
 // Player management functions
-static WebSocketPlayer* find_player(uint32_t player_id) {
+WebSocketPlayer* find_player(uint32_t player_id) {
     uint32_t slot = player_id & PLAYER_ID_MASK;
     WebSocketPlayer* cached = g_player_by_id[slot];
     if (cached && cached->active && cached->player_id == player_id) return cached;
@@ -683,7 +663,7 @@ static WebSocketPlayer* find_player(uint32_t player_id) {
     return NULL;
 }
 
-static WebSocketPlayer* find_player_by_sim_id(entity_id sim_entity_id) {
+WebSocketPlayer* find_player_by_sim_id(entity_id sim_entity_id) {
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (players[i].active && players[i].sim_entity_id == sim_entity_id) {
             return &players[i];

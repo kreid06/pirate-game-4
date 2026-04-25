@@ -1,7 +1,12 @@
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/socket.h>
+#define _USE_MATH_DEFINES
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include "net/module_interactions.h"
 
 // ============================================================================
@@ -34,9 +39,9 @@ static const char* get_module_type_name(ModuleTypeId type_id) {
  * If the origin and target lie on opposite sides of that line AND the crossing
  * falls within the plank's estimated half-span, the plank occludes.
  */
-static bool plank_occludes_ray(const SimpleShip* ship,
-                                float ox, float oy,   /* flame origin */
-                                float tx, float ty)   /* target position */
+bool plank_occludes_ray(const SimpleShip* ship,
+                        float ox, float oy,   /* flame origin */
+                        float tx, float ty)   /* target position */
 {
     const float PLANK_HALF_SPAN = 260.0f; /* generous half-length for brigantine planks */
     float cos_rs = cosf(ship->rotation);
@@ -92,7 +97,7 @@ ShipModule* find_module_by_id(SimpleShip* ship, uint32_t module_id) {
 /**
  * Send interaction failure to client
  */
-static void send_interaction_failure(struct WebSocketClient* client, const char* reason) {
+void send_interaction_failure(struct WebSocketClient* client, const char* reason) {
     char response[256];
     snprintf(response, sizeof(response),
              "{\"type\":\"module_interact_failure\",\"reason\":\"%s\"}",

@@ -14,6 +14,13 @@
 #define WS_MAX_CLIENTS    100
 #define MAX_SIMPLE_SHIPS  50
 
+/* Ship sinking animation duration */
+#define SHIP_SINK_DURATION_MS  8000
+
+/* XP awarded per kill (mirrors npc_agents.c definitions) */
+#define PLAYER_XP_PER_NPC_KILL    25u
+#define PLAYER_XP_PER_PLAYER_KILL 75u
+
 // ── Internal struct definitions ───────────────────────────────────────────────
 // These are defined only in websocket_server.c but needed by split-out modules.
 
@@ -76,6 +83,8 @@ extern uint16_t next_structure_id;
 // ── Helper function declarations ──────────────────────────────────────────────
 
 SimpleShip* find_ship(uint16_t ship_id);
+/* Alias used in some call sites */
+#define find_ship_by_id find_ship
 struct Ship* find_sim_ship(uint32_t ship_id);
 WebSocketPlayer* find_player(uint32_t player_id);
 WebSocketPlayer* find_player_by_sim_id(entity_id sim_entity_id);
