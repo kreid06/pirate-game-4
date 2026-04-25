@@ -111,3 +111,5 @@ void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShi
 WeaponGroup* find_weapon_group(uint16_t ship_id, uint32_t cannon_id, uint8_t company_id);
 void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw, WebSocketPlayer* player, uint8_t ammo_type);
 bool craft_grant(WebSocketPlayer* player, ItemKind item, int amount);
+void broadcast_json_all(const char* json);
+void update_flame_waves(uint32_t time_elapsed);
