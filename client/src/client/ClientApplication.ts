@@ -149,6 +149,8 @@ export class ClientApplication {
   private _ladderHoldShipId: number | null = null;
   /** NPC id locked in at E-keydown for the NPC radial interact path. */
   private _npcInteractId: number | null = null;
+  /** Hold-E timer: timestamp (ms) when E was pressed near a dropped-item pile; -1 when not pending. */
+  private _holdEDropTimer = -1;
   /** NPC id for the pending "Move To" targeting mode (ctrl+click → Move To → click module). */
   private _moveToNpcId: number | null = null;
   /** Screen-space position to flash once the server confirms (or rejects) a goto-module command. */
@@ -783,6 +785,15 @@ export class ClientApplication {
             const tomb = this.renderSystem.getHoveredTombstone();
             if (tomb) {
               this.networkManager.sendCollectTombstone(tomb.id);
+              return;
+            }
+          }
+
+          // Pick up dropped item: player on foot within 80px → press E → nearest item
+          if (player && player.carrierId === 0) {
+            const nearbyDrops = this.renderSystem.getDroppedItemsInRange(80);
+            if (nearbyDrops.length > 0) {
+              this.networkManager.sendPickupItem(nearbyDrops[0].id);
               return;
             }
           }
@@ -1509,6 +1520,22 @@ export class ClientApplication {
         this.networkManager.sendInvSwap(fromSlot, toSlot);
       };
 
+      this.uiManager.playerMenu.onDropItem = (fromSlot) => {
+        const pid = this.networkManager.getAssignedPlayerId();
+        for (const w of [this.authoritativeWorldState, this.predictedWorldState]) {
+          const p = w?.players.find(pl => pl.id === pid);
+          if (!p) continue;
+          // Optimistic local clear
+          p.inventory.slots[fromSlot] = { item: 'none' as any, quantity: 0 };
+        }
+        this.networkManager.sendDropItem(fromSlot);
+      };
+
+      // Handle drop picker item selection (hold-E near pile)
+      this.uiManager.onDropPickerPick = (itemId) => {
+        this.networkManager.sendPickupItem(itemId);
+      };
+
       // Handle NPC_STAT_UP broadcast: refresh world-state NPC fields
       this.networkManager.onNpcStatUp = (npcId, _stat, _statLevel, xp,
           maxHealth, npcLevel, statHealth, statDamage, statStamina, statWeight, statPoints) => {
@@ -2138,6 +2165,9 @@ export class ClientApplication {
 
       // Sync tombstones into the render system on every frame
       this.renderSystem.updateTombstones(worldToRender.tombstones ?? []);
+
+      // Sync dropped items into the render system on every frame
+      this.renderSystem.updateDroppedItems(worldToRender.droppedItems ?? []);
 
       // Render game world with hybrid state
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
@@ -3121,7 +3151,30 @@ export class ClientApplication {
 
         case 'e':
         case 'E': {
-          if (e.repeat) break; // no auto-repeat for E-hold logic
+          if (e.repeat) {
+            // Hold-E: check if we should open the item picker
+            if (this._holdEDropTimer > 0 && Date.now() - this._holdEDropTimer >= 500) {
+              this._holdEDropTimer = -1; // prevent repeated opens
+              const drops = this.renderSystem.getDroppedItemsInRange(80);
+              if (drops.length > 1) {
+                this.uiManager.openDropPicker(drops);
+              }
+            }
+            break;
+          }
+          // Start hold-E timer if there are multiple items nearby
+          const wsECheck = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+          const myIdECheck = this.networkManager.getAssignedPlayerId();
+          const meECheck = wsECheck
+            ? (myIdECheck !== null ? wsECheck.players.find(p => p.id === myIdECheck) : null) ?? wsECheck.players[0] ?? null
+            : null;
+          if (meECheck && meECheck.carrierId === 0) {
+            const nearbyDrops = this.renderSystem.getDroppedItemsInRange(80);
+            if (nearbyDrops.length > 1) {
+              this._holdEDropTimer = Date.now();
+            }
+          }
+
           const wsE = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
           const myIdE = this.networkManager.getAssignedPlayerId();
           if (!wsE) { console.warn('🪜 E: no world state'); break; }
@@ -3450,6 +3503,9 @@ export class ClientApplication {
     window.addEventListener('keyup', (e) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key !== 'e' && e.key !== 'E') return;
+
+      // Clear hold-E drop timer
+      this._holdEDropTimer = -1;
 
       const moduleId = this._ladderHoldModuleId;
       const shipId   = this._ladderHoldShipId;
@@ -3892,6 +3948,7 @@ export class ClientApplication {
       cannonballs: [],
       npcs: [],
       tombstones: [],
+      droppedItems: [],
       carrierDetection: new Map()
     };
   }

@@ -155,6 +155,22 @@ typedef struct {
 static Tombstone tombstones[MAX_TOMBSTONES];
 static uint32_t  next_tombstone_id = 1;
 
+// ── Dropped items (manually dropped by players) ──────────────────────────────
+#define MAX_DROPPED_ITEMS  256u
+#define DROPPED_ITEM_TTL_MS 300000u  /* 5 minutes */
+
+typedef struct {
+    uint32_t id;
+    uint8_t  item_kind;   /* ItemKind value */
+    uint8_t  quantity;
+    float    x, y;
+    uint32_t spawn_time_ms;
+    bool     active;
+} DroppedItem;
+
+static DroppedItem dropped_items[MAX_DROPPED_ITEMS];
+static uint32_t    next_dropped_item_id = 1;
+
 int websocket_server_get_placed_structures(PlacedStructure **out_structs, uint32_t *out_count) {
     if (!out_structs || !out_count) return -1;
     *out_structs = placed_structures;
@@ -803,6 +819,100 @@ static void handle_collect_tombstone(WebSocketPlayer* player,
     websocket_server_broadcast(msg);
     log_info("⚰️  Tombstone %u collected by player %u (%s)",
              tomb_id, player->player_id, player->name);
+}
+
+/* ── Dropped-item helpers ─────────────────────────────────────────────────── */
+
+static void handle_drop_item(WebSocketPlayer* player,
+                              struct WebSocketClient* client,
+                              const char* payload)
+{
+    int slot = -1;
+    const char* ps = strstr(payload, "\"slot\":");
+    if (ps) sscanf(ps + 7, "%d", &slot);
+    if (slot < 0 || slot >= INVENTORY_SLOTS) {
+        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"invalid_slot\"}");
+        return;
+    }
+    InventorySlot* isl = &player->inventory.slots[slot];
+    if (isl->item == ITEM_NONE || isl->quantity == 0) {
+        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"empty_slot\"}");
+        return;
+    }
+    DroppedItem* di = NULL;
+    for (int i = 0; i < (int)MAX_DROPPED_ITEMS; i++) {
+        if (!dropped_items[i].active) { di = &dropped_items[i]; break; }
+    }
+    if (!di) {
+        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"world_full\"}");
+        return;
+    }
+    di->id            = next_dropped_item_id++;
+    if (next_dropped_item_id == 0) next_dropped_item_id = 1;
+    di->item_kind     = (uint8_t)isl->item;
+    di->quantity      = isl->quantity;
+    di->x             = player->x;
+    di->y             = player->y;
+    di->spawn_time_ms = get_time_ms();
+    di->active        = true;
+    isl->item     = ITEM_NONE;
+    isl->quantity = 0;
+    char resp[128];
+    snprintf(resp, sizeof(resp),
+        "{\"type\":\"message_ack\",\"status\":\"item_dropped\",\"drop_id\":%u}", di->id);
+    websocket_send_text(client->fd, resp);
+    log_info("📦  Player %u dropped item %u qty %u at (%.1f,%.1f) id=%u",
+             player->player_id, (unsigned)di->item_kind, (unsigned)di->quantity,
+             (double)di->x, (double)di->y, di->id);
+}
+
+static void handle_pickup_item(WebSocketPlayer* player,
+                                struct WebSocketClient* client,
+                                const char* payload)
+{
+    uint32_t item_id = 0;
+    const char* pi = strstr(payload, "\"item_id\":");
+    if (pi) sscanf(pi + 10, "%u", &item_id);
+    if (item_id == 0) {
+        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"invalid_id\"}");
+        return;
+    }
+    DroppedItem* di = NULL;
+    for (int i = 0; i < (int)MAX_DROPPED_ITEMS; i++) {
+        if (dropped_items[i].active && dropped_items[i].id == item_id) {
+            di = &dropped_items[i]; break;
+        }
+    }
+    if (!di) {
+        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"not_found\"}");
+        return;
+    }
+    float dx = di->x - player->x;
+    float dy = di->y - player->y;
+    if (dx * dx + dy * dy > 80.0f * 80.0f) {
+        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"too_far\"}");
+        return;
+    }
+    int free_slot = -1;
+    for (int i = 0; i < INVENTORY_SLOTS; i++) {
+        if (player->inventory.slots[i].item == ITEM_NONE ||
+            player->inventory.slots[i].quantity == 0) {
+            free_slot = i; break;
+        }
+    }
+    if (free_slot < 0) {
+        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"inventory_full\"}");
+        return;
+    }
+    player->inventory.slots[free_slot].item     = (ItemKind)di->item_kind;
+    player->inventory.slots[free_slot].quantity = di->quantity;
+    di->active = false;
+    char resp[128];
+    snprintf(resp, sizeof(resp),
+        "{\"type\":\"message_ack\",\"status\":\"item_picked_up\",\"slot\":%d}", free_slot);
+    websocket_send_text(client->fd, resp);
+    log_info("📦  Player %u picked up drop id %u (item %u) into slot %d",
+             player->player_id, item_id, (unsigned)di->item_kind, free_slot);
 }
 
 
@@ -2978,6 +3088,34 @@ int websocket_server_update(struct Sim* sim) {
                                     } else {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"invalid_slots\"}");
                                     }
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "drop_item") == 0) {
+                            // DROP: player dragged item out of inventory {"type":"drop_item","slot":N}
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    handle_drop_item(player, client, payload);
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "pickup_item") == 0) {
+                            // PICKUP: player pressed E on a dropped item {"type":"pickup_item","item_id":N}
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    handle_pickup_item(player, client, payload);
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                                 }
@@ -5964,6 +6102,25 @@ int websocket_server_update(struct Sim* sim) {
             }
         }
         if (gs_off < (int)sizeof(game_state) - 1) game_state[gs_off++] = ']';
+        /* ── Dropped Items ────────────────────────────────────────────────── */
+        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
+                           ",\"droppedItems\":[");
+        {
+            bool first_drop = true;
+            for (int di = 0; di < (int)MAX_DROPPED_ITEMS; di++) {
+                if (!dropped_items[di].active) continue;
+                if (!first_drop && gs_off < (int)sizeof(game_state) - 2)
+                    game_state[gs_off++] = ',';
+                gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
+                    "{\"id\":%u,\"itemKind\":%u,\"quantity\":%u,\"x\":%.1f,\"y\":%.1f}",
+                    dropped_items[di].id,
+                    (unsigned)dropped_items[di].item_kind,
+                    (unsigned)dropped_items[di].quantity,
+                    dropped_items[di].x, dropped_items[di].y);
+                first_drop = false;
+            }
+        }
+        if (gs_off < (int)sizeof(game_state) - 1) game_state[gs_off++] = ']';
         if (gs_off < (int)sizeof(game_state) - 1) {
             game_state[gs_off++] = '}';
             game_state[gs_off]   = '\0';
@@ -8123,6 +8280,23 @@ void websocket_server_tick(float dt) {
                         "{\"type\":\"tombstone_despawned\",\"id\":%u}", tombstones[ti].id);
                     websocket_server_broadcast(dm);
                     log_info("⚰️  Tombstone %u expired (15-min TTL)", tombstones[ti].id);
+                }
+            }
+        }
+    }
+
+    /* ===== DROPPED ITEM EXPIRY TICK (every 30 s) =============================
+       Walk active dropped items and despawn any older than DROPPED_ITEM_TTL_MS. */
+    {
+        static uint32_t last_drop_tick = 0;
+        if (current_time - last_drop_tick >= 30000u) {
+            last_drop_tick = current_time;
+            for (int di = 0; di < (int)MAX_DROPPED_ITEMS; di++) {
+                if (!dropped_items[di].active) continue;
+                uint32_t age = current_time - dropped_items[di].spawn_time_ms;
+                if (age >= DROPPED_ITEM_TTL_MS) {
+                    dropped_items[di].active = false;
+                    log_info("📦  Dropped item %u expired (5-min TTL)", dropped_items[di].id);
                 }
             }
         }

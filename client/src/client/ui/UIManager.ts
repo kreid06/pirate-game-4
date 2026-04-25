@@ -6,7 +6,7 @@
  */
 
 import { ClientConfig } from '../ClientConfig.js';
-import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState } from '../../sim/Types.js';
+import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState, DroppedItem } from '../../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
@@ -191,6 +191,28 @@ export class UIManager {
     sweetspotStart: 0, sweetspotWidth: 0,
     callback: null, resultTime: -1, won: null,
   };
+
+  // ── Drop item picker (hold-E near pile) ───────────────────────────────────
+  private _dropPicker: {
+    open: boolean;
+    items: DroppedItem[];
+    scrollY: number;
+  } = { open: false, items: [], scrollY: 0 };
+
+  /** Called when the player confirms a pickup from the drop picker. */
+  public onDropPickerPick: ((itemId: number) => void) | null = null;
+
+  /** Open the drop-item picker overlay. */
+  openDropPicker(items: DroppedItem[]): void {
+    this._dropPicker = { open: true, items, scrollY: 0 };
+  }
+
+  /** Close the drop-item picker overlay. */
+  closeDropPicker(): void {
+    this._dropPicker.open = false;
+  }
+
+  get isDropPickerOpen(): boolean { return this._dropPicker.open; }
   
   constructor(canvas: HTMLCanvasElement, config: ClientConfig) {
     this.config = config;
@@ -334,6 +356,7 @@ export class UIManager {
 
   /** Forward wheel delta to the respawn screen or world map for zoom. Returns true if consumed. */
   handleWorldMapWheel(deltaY: number, x: number, y: number): boolean {
+    if (this._dropPicker.open) return this.handleDropPickerWheel(deltaY);
     if (this.respawnScreen.visible) return this.respawnScreen.handleWheel(deltaY, x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) return this.playerMenu.handleWheel(deltaY, x, y);
     return this.worldMapScreen.handleWheel(deltaY, x, y);
@@ -344,6 +367,10 @@ export class UIManager {
    * Call this from the application keydown handler before processing game input.
    */
   handleKeyDown(key: string): boolean {
+    if (key === 'Escape' && this._dropPicker.open) {
+      this._dropPicker.open = false;
+      return true;
+    }
     if (!this.hammerGame.active) return false;
     if (key === ' ' || key === 'Enter') {
       if (this.hammerGame.resultTime === -1) this.strikeHammer();
@@ -493,6 +520,11 @@ export class UIManager {
       const localPlayer = ws.players.find(p => p.id === context.assignedPlayerId);
       const companyId = localPlayer?.companyId ?? 0;
       this.respawnScreen.render(ctx, ws.ships, this._islands, companyId);
+    }
+
+    // Drop picker — topmost overlay
+    if (this._dropPicker.open) {
+      this._renderDropPicker(ctx);
     }
   }
   
@@ -1078,6 +1110,10 @@ export class UIManager {
     if (this.hammerGame.active) {
       if (this.hammerGame.resultTime === -1) this.strikeHammer();
       return true;
+    }
+    // Drop picker intercepts all clicks when open
+    if (this._dropPicker.open) {
+      return this.handleDropPickerClick(x, y);
     }
     // Build panel (left side) — check before other panels
     if (this.buildMenuOpen) {
@@ -1791,6 +1827,160 @@ export class UIManager {
 
     ctx.restore();
   }
+
+  // ── Drop item picker overlay ───────────────────────────────────────────────
+
+  private _dropPickerHits: { itemId: number; y: number; h: number }[] = [];
+
+  private _renderDropPicker(ctx: CanvasRenderingContext2D): void {
+    const { items, scrollY } = this._dropPicker;
+    const cw = ctx.canvas.width;
+    const ch = ctx.canvas.height;
+
+    const W = 300, ROW_H = 44, PAD = 12, HEADER_H = 36;
+    const visibleRows = Math.min(items.length, 6);
+    const contentH = items.length * ROW_H;
+    const viewH = visibleRows * ROW_H;
+    const totalH = HEADER_H + viewH + PAD;
+    const px = Math.round((cw - W) / 2);
+    const py = Math.round((ch - totalH) / 2);
+
+    ctx.save();
+
+    // Backdrop
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, cw, ch);
+
+    // Panel
+    ctx.fillStyle = 'rgba(14,18,28,0.97)';
+    ctx.strokeStyle = '#ffd700';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    // Header
+    ctx.fillStyle = '#ffd700';
+    ctx.font = 'bold 13px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Pick Up Item', px + W / 2, py + HEADER_H / 2);
+
+    // Close hint
+    ctx.fillStyle = '#778';
+    ctx.font = '11px Consolas, monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText('[Esc]', px + W - PAD, py + HEADER_H / 2);
+
+    // Clip to viewport
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px, py + HEADER_H, W, viewH);
+    ctx.clip();
+
+    this._dropPickerHits = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const ry = py + HEADER_H + i * ROW_H - scrollY;
+      if (ry + ROW_H < py + HEADER_H || ry > py + HEADER_H + viewH) continue;
+
+      this._dropPickerHits.push({ itemId: item.id, y: ry, h: ROW_H });
+
+      const isHovered = this.mouseY >= ry && this.mouseY <= ry + ROW_H &&
+                        this.mouseX >= px && this.mouseX <= px + W;
+      if (isHovered) {
+        ctx.fillStyle = 'rgba(255,215,0,0.10)';
+        ctx.fillRect(px + 2, ry + 2, W - 4, ROW_H - 4);
+      }
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px + PAD, ry + ROW_H);
+      ctx.lineTo(px + W - PAD, ry + ROW_H);
+      ctx.stroke();
+
+      // Resolve item name/symbol from ITEM_DEFS
+      const kindNum = item.itemKind;
+      let name   = `Item #${kindNum}`;
+      let symbol = '?';
+      const kindStr = Object.entries(ITEM_KIND_ID).find(([, v]) => (v as number) === kindNum)?.[0];
+      if (kindStr && (ITEM_DEFS as any)[kindStr]) {
+        const def = (ITEM_DEFS as any)[kindStr];
+        name   = def.name   ?? name;
+        symbol = def.symbol ?? symbol;
+      }
+
+      ctx.font = '18px monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(symbol, px + PAD, ry + ROW_H / 2);
+
+      ctx.font = '13px Consolas, monospace';
+      ctx.fillStyle = isHovered ? '#ffd700' : '#e8e0cc';
+      ctx.fillText(name, px + PAD + 28, ry + ROW_H / 2);
+
+      if (item.quantity > 1) {
+        ctx.font = 'bold 11px monospace';
+        ctx.fillStyle = '#aaa';
+        ctx.textAlign = 'right';
+        ctx.fillText(`\u00d7${item.quantity}`, px + W - PAD, ry + ROW_H / 2);
+      }
+    }
+    ctx.restore(); // unclip
+
+    // Scrollbar
+    if (contentH > viewH) {
+      const sbH = Math.max(20, (viewH / contentH) * viewH);
+      const maxScroll = contentH - viewH;
+      const sbY = py + HEADER_H + (scrollY / Math.max(1, maxScroll)) * (viewH - sbH);
+      ctx.fillStyle = 'rgba(255,215,0,0.35)';
+      ctx.beginPath();
+      ctx.roundRect(px + W - 6, sbY, 4, sbH, 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  /** Handle click in the drop picker. Returns true if consumed. */
+  handleDropPickerClick(x: number, y: number): boolean {
+    if (!this._dropPicker.open) return false;
+    for (const hit of this._dropPickerHits) {
+      if (y >= hit.y && y <= hit.y + hit.h) {
+        this.onDropPickerPick?.(hit.itemId);
+        this._dropPicker.open = false;
+        return true;
+      }
+    }
+    // Click outside closes picker
+    const W = 300, ROW_H = 44, PAD = 12, HEADER_H = 36;
+    const visibleRows = Math.min(this._dropPicker.items.length, 6);
+    const viewH = visibleRows * ROW_H;
+    const totalH = HEADER_H + viewH + PAD;
+    const px = Math.round((this.canvas.width  - W) / 2);
+    const py = Math.round((this.canvas.height - totalH) / 2);
+    if (x < px || x > px + W || y < py || y > py + totalH) {
+      this._dropPicker.open = false;
+    }
+    return true;
+  }
+
+  /** Handle wheel scroll in the drop picker. Returns true if consumed. */
+  handleDropPickerWheel(deltaY: number): boolean {
+    if (!this._dropPicker.open) return false;
+    const ROW_H = 44;
+    const visibleRows = Math.min(this._dropPicker.items.length, 6);
+    const viewH = visibleRows * ROW_H;
+    const contentH = this._dropPicker.items.length * ROW_H;
+    const maxScroll = Math.max(0, contentH - viewH);
+    this._dropPicker.scrollY = Math.max(0, Math.min(maxScroll, this._dropPicker.scrollY + deltaY * 0.4));
+    return true;
+  }
+
 }
 
 /**

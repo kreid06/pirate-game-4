@@ -112,6 +112,9 @@ export class PlayerMenu {
   /** Called when the player drags a slot onto another; args are (fromSlot, toSlot). */
   public onSwapRequest: ((fromSlot: number, toSlot: number) => void) | null = null;
 
+  /** Called when the player drags an item outside the panel to drop it in the world. */
+  public onDropItem: ((fromSlot: number) => void) | null = null;
+
   toggle(): void { this.visible = !this.visible; }
   open():   void { this.visible = true; this.activeTab = 'character'; }
   close():  void { this.visible = false; }
@@ -183,12 +186,22 @@ export class PlayerMenu {
 
   /**
    * End the drag — if dropped on a different slot, fires onSwapRequest.
+   * If dropped outside the panel, fires onDropItem.
    * Returns true if consumed.
    */
   handleMouseUp(x: number, y: number): boolean {
     if (this._dragSlot === -1) return false;
     const fromSlot = this._dragSlot;
     this._dragSlot = -1;
+
+    // Detect outside-panel drop
+    const px = this._panelX, py = this._panelY;
+    const outsidePanel = x < px || x > px + PANEL_W || y < py || y > py + PANEL_H;
+    if (outsidePanel) {
+      this.onDropItem?.(fromSlot);
+      return true;
+    }
+
     const toSlot = this._slotAt(x, y);
     if (toSlot !== -1 && toSlot !== fromSlot) {
       this.onSwapRequest?.(fromSlot, toSlot);

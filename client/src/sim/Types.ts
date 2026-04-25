@@ -334,9 +334,18 @@ export interface WorldState {
   cannonballs: Cannonball[];
   npcs: Npc[];
   tombstones: Tombstone[];
+  droppedItems: DroppedItem[];
   timestamp: number;
   // Phase 2: Add carrier detection state per player
   carrierDetection: Map<number, CarrierDetectionState>; // playerId -> detection state
+}
+
+export interface DroppedItem {
+  id: number;
+  itemKind: number;   // ItemKind numeric value
+  quantity: number;
+  x: number;
+  y: number;
 }
 
 /**

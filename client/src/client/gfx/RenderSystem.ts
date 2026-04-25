@@ -115,6 +115,8 @@ export class RenderSystem {
   private placedStructures: PlacedStructure[] = [];
   /** Active tombstone item caches in the world. */
   private _tombstones: import('../../sim/Types').Tombstone[] = [];
+  /** Dropped items in the world (player-dropped inventory items). */
+  private _droppedItems: import('../../sim/Types').DroppedItem[] = [];
   /** Maps scaffolded ship entity IDs to the shipyard structure that owns them. */
   private _scaffoldedShips: Map<number, PlacedStructure> = new Map();
   /** Structure currently under the cursor (within hover range of the local player). */
@@ -1915,6 +1917,137 @@ export class RenderSystem {
     }
   }
 
+  // ── Dropped items ──────────────────────────────────────────────────────────
+
+  /** Replace the full dropped-item list (called on every GAME_STATE). */
+  updateDroppedItems(list: import('../../sim/Types').DroppedItem[]): void {
+    this._droppedItems = list;
+  }
+
+  /**
+   * Returns all dropped items within `range` px of the local player.
+   * Items are returned sorted nearest-first.
+   */
+  getDroppedItemsInRange(range: number = 80): import('../../sim/Types').DroppedItem[] {
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return [];
+    const range2 = range * range;
+    return this._droppedItems
+      .filter(d => {
+        const dx = d.x - player.position.x;
+        const dy = d.y - player.position.y;
+        return dx * dx + dy * dy <= range2;
+      })
+      .sort((a, b) => {
+        const dxa = a.x - player.position.x, dya = a.y - player.position.y;
+        const dxb = b.x - player.position.x, dyb = b.y - player.position.y;
+        return (dxa * dxa + dya * dya) - (dxb * dxb + dyb * dyb);
+      });
+  }
+
+  /** Draw all dropped items in world-space. */
+  private drawDroppedItems(ctx: CanvasRenderingContext2D, camera: import('./Camera').CameraState): void {
+    if (this._droppedItems.length === 0) return;
+    const player = this._cachedLocalPlayer;
+    const HOVER_RANGE = 80;
+
+    // Group items into piles: items within 24 world-units of each other
+    const PILE_RADIUS = 24;
+    const consumed = new Set<number>();
+    const piles: { items: import('../../sim/Types').DroppedItem[]; cx: number; cy: number }[] = [];
+
+    for (const item of this._droppedItems) {
+      if (consumed.has(item.id)) continue;
+      const pile = { items: [item], cx: item.x, cy: item.y };
+      for (const other of this._droppedItems) {
+        if (consumed.has(other.id) || other.id === item.id) continue;
+        const dx = other.x - item.x, dy = other.y - item.y;
+        if (dx * dx + dy * dy <= PILE_RADIUS * PILE_RADIUS) {
+          pile.items.push(other);
+          consumed.add(other.id);
+        }
+      }
+      consumed.add(item.id);
+      piles.push(pile);
+    }
+
+    for (const pile of piles) {
+      const sx = (pile.cx - camera.position.x) * camera.zoom + ctx.canvas.width  / 2;
+      const sy = (pile.cy - camera.position.y) * camera.zoom + ctx.canvas.height / 2;
+      const sz = Math.max(0.4, Math.min(1.2, camera.zoom));
+
+      const isNear = player != null && player.carrierId === 0 &&
+        (pile.cx - player.position.x) ** 2 + (pile.cy - player.position.y) ** 2
+          <= HOVER_RANGE * HOVER_RANGE;
+
+      ctx.save();
+      ctx.translate(sx, sy);
+
+      /* Shadow */
+      ctx.beginPath();
+      ctx.ellipse(0, 7 * sz, 12 * sz, 4 * sz, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.fill();
+
+      /* Bag body */
+      const bw = 20 * sz, bh = 18 * sz;
+      ctx.beginPath();
+      ctx.roundRect(-bw / 2, -bh, bw, bh, [4 * sz, 4 * sz, 8 * sz, 8 * sz]);
+      ctx.fillStyle = isNear ? '#d4a84b' : '#8b6914';
+      ctx.strokeStyle = isNear ? '#ffe97a' : '#5a4209';
+      ctx.lineWidth = 1.5 * sz;
+      ctx.fill();
+      ctx.stroke();
+
+      /* Bag tie / neck */
+      ctx.beginPath();
+      ctx.roundRect(-6 * sz, -bh - 5 * sz, 12 * sz, 6 * sz, 2 * sz);
+      ctx.fillStyle = isNear ? '#c49030' : '#7a5710';
+      ctx.fill();
+      ctx.stroke();
+
+      /* Drawstring knot dot */
+      ctx.beginPath();
+      ctx.arc(0, -bh - 2 * sz, 2.5 * sz, 0, Math.PI * 2);
+      ctx.fillStyle = isNear ? '#ffe97a' : '#c4920a';
+      ctx.fill();
+
+      /* Pile count badge */
+      if (pile.items.length > 1) {
+        const badge = pile.items.length.toString();
+        const bsz = Math.round(9 * sz);
+        ctx.font = `bold ${bsz}px monospace`;
+        const bw2 = ctx.measureText(badge).width + 6 * sz;
+        const bx = bw / 2 - 2 * sz;
+        const bby = -bh + 4 * sz;
+        ctx.fillStyle = '#cc3322';
+        ctx.beginPath();
+        ctx.roundRect(bx - bw2 / 2, bby - bsz / 2 - 2 * sz, bw2, bsz + 4 * sz, 3 * sz);
+        ctx.fill();
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(badge, bx, bby);
+      }
+
+      /* Interact hint */
+      if (isNear) {
+        const hint = pile.items.length > 1 ? '[E] Pick Up  [Hold E] Choose' : '[E] Pick Up';
+        const fsz = Math.round(9 * sz);
+        ctx.font = `${fsz}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+        ctx.lineWidth = 3 * sz;
+        ctx.strokeText(hint, 0, 8 * sz);
+        ctx.fillText(hint, 0, 8 * sz);
+      }
+
+      ctx.restore();
+    }
+  }
+
   /**
    * Whether cannon build mode is currently active
    */
@@ -2420,6 +2553,9 @@ export class RenderSystem {
     // ── Tombstones (above ground, below UI) ───────────────────────────────────
     this.drawTombstones(this.ctx, camera.getState());
 
+    // ── Dropped items (bags on the ground) ────────────────────────────────────
+    this.drawDroppedItems(this.ctx, camera.getState());
+
     // Draw explicit B-key build mode ghost (always on top of world objects)
     if (this.explicitBuildState) {
       this.drawExplicitBuildGhost(worldState, camera);
@@ -2829,9 +2965,6 @@ export class RenderSystem {
     const BUSH_FADE_OUTER = 320;
     const BUSH_FADE_INNER = 90;
     const MIN_BUSH_ALPHA  = 0.30;
-    const BOULDER_FADE_OUTER = 500;
-    const BOULDER_FADE_INNER = 150;
-    const MIN_BOULDER_ALPHA  = 0.30;
     const BOULDER_HOVER_SQ = (44 * zoom) * (44 * zoom);
     const DEATH_FADE_MS   = 2000;
     const now = performance.now();
@@ -3082,14 +3215,7 @@ export class RenderSystem {
               return MIN_BUSH_ALPHA + t * (1.0 - MIN_BUSH_ALPHA);
             })()
           : 1.0;
-        // Boulder fade alpha: fades when player is close (partially transparent so player is visible)
-        const boulderAlpha = res.type === 'boulder' && localPlayer
-          ? (() => {
-              const dist = Math.sqrt((localPlayer.position.x - wx) ** 2 + (localPlayer.position.y - wy) ** 2);
-              const t = Math.max(0, Math.min(1, (dist - BOULDER_FADE_INNER) / (BOULDER_FADE_OUTER - BOULDER_FADE_INNER)));
-              return MIN_BOULDER_ALPHA + t * (1.0 - MIN_BOULDER_ALPHA);
-            })()
-          : 1.0;
+        const boulderAlpha = 1.0;
         visibleRes.push({ res, wx, wy, sp, isHovered, inRange, playerNear, leafAlpha, bushAlpha, boulderAlpha, deathAlpha });
       }
 

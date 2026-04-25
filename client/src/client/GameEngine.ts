@@ -126,11 +126,8 @@ export class GameEngine {
       cannonballs: [],
       npcs: [],
       tombstones: [],
+      droppedItems: [],
       carrierDetection: new Map()
-    };
-  }
-
-  /**
    * Set up keyboard input handling
    */
   private setupInputHandlers(): void {

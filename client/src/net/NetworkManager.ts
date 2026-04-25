@@ -66,6 +66,8 @@ export enum MessageType {
 
   SLOT_SELECT = 'slot_select',
   INV_SWAP = 'inv_swap',
+  DROP_ITEM = 'drop_item',
+  PICKUP_ITEM = 'pickup_item',
   UNEQUIP = 'unequip',
   GIVE_ITEM = 'give_item',
   PLACE_PLANK = 'place_plank',
@@ -450,7 +452,26 @@ interface StructureInteractMessage extends NetworkMessage {
   structure_id: number;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage;
+interface InvSwapMessage extends NetworkMessage {
+  type: MessageType.INV_SWAP;
+  timestamp: number;
+  slot_a: number;
+  slot_b: number;
+}
+
+interface DropItemMessage extends NetworkMessage {
+  type: MessageType.DROP_ITEM;
+  timestamp: number;
+  slot: number;
+}
+
+interface PickupItemMessage extends NetworkMessage {
+  type: MessageType.PICKUP_ITEM;
+  timestamp: number;
+  item_id: number;
+}
+
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | PickupItemMessage;
 
 /**
  * Main network manager class
@@ -1163,6 +1184,16 @@ export class NetworkManager {
   sendInvSwap(slotA: number, slotB: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.INV_SWAP, timestamp: Date.now(), slot_a: slotA, slot_b: slotB });
+  }
+
+  sendDropItem(slot: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.DROP_ITEM, timestamp: Date.now(), slot });
+  }
+
+  sendPickupItem(itemId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PICKUP_ITEM, timestamp: Date.now(), item_id: itemId });
   }
 
   /**
@@ -1981,6 +2012,13 @@ export class NetworkManager {
             y:           t.y           ?? 0,
             ownerName:   t.ownerName   ?? '',
             remainingMs: t.remainingMs ?? 0,
+          })),
+          droppedItems: (message.droppedItems ?? []).map((d: any) => ({
+            id:       d.id       ?? 0,
+            itemKind: d.itemKind ?? 0,
+            quantity: d.quantity ?? 0,
+            x:        d.x        ?? 0,
+            y:        d.y        ?? 0,
           })),
         };
         
