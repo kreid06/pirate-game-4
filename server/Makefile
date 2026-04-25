@@ -14,7 +14,7 @@ BINDIR = bin
 
 # Source files (excluding duplicates and test files)
 CORE_SOURCES = $(filter-out $(SRCDIR)/core/server.c, $(wildcard $(SRCDIR)/core/*.c)) $(wildcard $(SRCDIR)/sim/*.c) $(wildcard $(SRCDIR)/util/*.c)
-NET_SOURCES = $(SRCDIR)/net/network.c $(SRCDIR)/net/protocol.c $(SRCDIR)/net/reliability.c $(SRCDIR)/net/snapshot.c $(SRCDIR)/net/websocket_server.c $(SRCDIR)/net/websocket_protocol.c $(SRCDIR)/net/websocket_auth.c $(SRCDIR)/net/player_persistence.c $(SRCDIR)/net/dock_physics.c $(SRCDIR)/net/module_interactions.c $(SRCDIR)/net/harvesting.c $(SRCDIR)/net/npc_agents.c $(SRCDIR)/net/npc_world.c $(SRCDIR)/net/ship_control.c $(SRCDIR)/net/cannon_fire.c
+NET_SOURCES = $(SRCDIR)/net/network.c $(SRCDIR)/net/protocol.c $(SRCDIR)/net/reliability.c $(SRCDIR)/net/snapshot.c $(SRCDIR)/net/websocket_server.c $(SRCDIR)/net/websocket_protocol.c $(SRCDIR)/net/websocket_auth.c $(SRCDIR)/net/player_persistence.c $(SRCDIR)/net/dock_physics.c $(SRCDIR)/net/module_interactions.c $(SRCDIR)/net/harvesting.c $(SRCDIR)/net/npc_agents.c $(SRCDIR)/net/npc_world.c $(SRCDIR)/net/ship_control.c $(SRCDIR)/net/cannon_fire.c $(SRCDIR)/net/structures.c $(SRCDIR)/net/crafting.c $(SRCDIR)/net/player_movement.c $(SRCDIR)/net/ship_init.c
 AOI_SOURCES = $(wildcard $(SRCDIR)/aoi/*.c)
 ADMIN_SOURCES = $(SRCDIR)/admin/admin_server.c $(SRCDIR)/admin/admin_api.c
 MAIN_SOURCES = $(SRCDIR)/main.c $(SRCDIR)/server.c

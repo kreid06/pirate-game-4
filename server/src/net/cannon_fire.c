@@ -1,8 +1,18 @@
+#include <math.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#define _USE_MATH_DEFINES
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include "net/websocket_server_internal.h"
 #include "net/cannon_fire.h"
 #include "net/npc_agents.h"
 #include "net/npc_world.h"
 #include "net/module_interactions.h"
+#include "net/dock_physics.h"
+#include "sim/island.h"
 
 int parse_json_uint32_array(const char* json, const char* key, uint32_t* out, int max_out) {
     // Build search pattern: "key":[
@@ -628,10 +638,14 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
     }
 }
 
+/* Forward declaration */
+static void broadcast_cannon_fire(uint32_t cannon_id, uint16_t ship_id, float world_x, float world_y,
+                                  float angle, entity_id projectile_id, uint8_t ammo_type);
+
 /**
  * Fire a single cannon, spawning projectile
  */
-static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired, uint8_t ammo_type) {
+void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired, uint8_t ammo_type) {
     // Consume ship-level ammo (unless infinite ammo mode is on)
     if (!ship->infinite_ammo) {
         if (ship->cannon_ammo == 0) return; // No ammo — should have been caught earlier
@@ -780,7 +794,7 @@ static void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* p
 #define FLAME_HALF_CONE   (15.0f * (float)(M_PI / 180.0f))  /* ±15°         */
 #define FLAME_STALE_MS    250u      /* ms without a pulse → start retreating  */
 #define FLAME_RETREAT_SPEED 700.0f  /* px/s — retreat 2× faster than advance */
-#define FIRE_DURATION_MS  4000u    /* ms an entity burns after ignition      */
+/* FIRE_DURATION_MS now defined in cannon_fire.h */
 #define FLAME_HALF_CONE_MODULE (25.0f * (float)(M_PI / 180.0f)) /* wider test vs ±15° entity cone */
 
 typedef struct {
@@ -1675,4 +1689,268 @@ void update_flame_waves(uint32_t time_elapsed) {
                 }
             }
         } /* end FLAME WAVE UPDATE */
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Cannonball vs. static-world collision: placed structures and island trees.
+ * Called once per tick before processing network I/O. Projectile positions
+ * are in Q16 server units (1/10 of client pixels); convert with SERVER_TO_CLIENT.
+ * Damage per cannonball hit on a structure: 25 HP (4 shots to destroy).
+ * Trees are indestructible — they simply stop the cannonball.
+ * ────────────────────────────────────────────────────────────────────────────*/
+#define PROJ_HIT_STRUCT_DAMAGE      25u     /* HP deducted per cannonball hit      */
+#define TREE_COLLISION_R_PX         22.0f   /* tree stop radius, client pixels     */
+/* TREE_TRUNK_R_PX now defined in cannon_fire.h */
+#define STRUCT_FLOOR_HALF_EXT       25.0f   /* floor tile half-extent (50px tile)  */
+#define STRUCT_WB_HALF_W            22.0f   /* workbench half-width  (44px wide)   */
+#define STRUCT_WB_HALF_H            15.5f   /* workbench half-height (31px tall)   */
+#define STRUCT_WB_BROAD_R           26.5f   /* broad-phase radius (AABB diagonal)  */
+
+void check_projectile_static_collisions(struct Sim* sim) {
+    if (!sim) return;
+    int i = 0;
+    while (i < (int)sim->projectile_count) {
+        struct Projectile* proj = &sim->projectiles[i];
+        /* Convert projectile world position from server units → client pixels */
+        float px = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
+        float py = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
+        bool removed = false;
+
+        /* ── Island broad-phase: skip projectiles that are out at sea ────── */
+        /* Only run structure/tree checks when the cannonball is within the
+         * outer boundary of at least one island (beach_radius + max_bump). */
+        bool near_island = false;
+        for (int ii = 0; ii < ISLAND_COUNT && !near_island; ii++) {
+            const IslandDef* isl = &ISLAND_PRESETS[ii];
+            float broad_r = (isl->vertex_count > 0) ? isl->poly_bound_r
+                                                       : (isl->beach_radius_px + isl->beach_max_bump);
+            float idx = px - isl->x;
+            float idy = py - isl->y;
+            if (idx * idx + idy * idy <= broad_r * broad_r) near_island = true;
+        }
+        if (!near_island) { i++; continue; }
+
+        /* ── Test vs. placed structures ──────────────────────────────────── */
+        /* Pass 0: walls — thin hard barriers, hit before workbenches/floors. */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_WALL) continue;
+            /* OBB test in wall-local space */
+            float wrad = wall_get_rad(s->x, s->y);
+            float wc = cosf(-wrad), wsn = sinf(-wrad);
+            float dx = px - s->x, dy = py - s->y;
+            float lx = dx * wc - dy * wsn;
+            float ly = dx * wsn + dy * wc;
+            if (fabsf(lx) > 25.0f || fabsf(ly) > 5.0f) continue;
+            /* Hit wall */
+            uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
+            s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
+            char msg[192];
+            if (s->hp == 0) {
+                s->active = false;
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_demolished\",\"structure_id\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, s->x, s->y);
+            } else {
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_hp_changed\","
+                         "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
+            }
+            websocket_server_broadcast(msg);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+
+        /* Pass 1: workbenches — checked first so they can be independently
+         * hit and damaged even when a floor tile below overlaps the same area. */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_WORKBENCH) continue;
+            float dx = px - s->x;
+            float dy = py - s->y;
+            /* Broad-phase radial cull, then narrow AABB (44×31px footprint) */
+            if (dx * dx + dy * dy > STRUCT_WB_BROAD_R * STRUCT_WB_BROAD_R) continue;
+            if (!(dx >= -STRUCT_WB_HALF_W && dx <= STRUCT_WB_HALF_W &&
+                  dy >= -STRUCT_WB_HALF_H && dy <= STRUCT_WB_HALF_H)) continue;
+            /* Hit workbench */
+            uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
+            s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
+            char msg[192];
+            if (s->hp == 0) {
+                s->active = false;
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_demolished\",\"structure_id\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, s->x, s->y);
+            } else {
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_hp_changed\","
+                         "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
+            }
+            websocket_server_broadcast(msg);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+
+        /* Pass 2: floors (only if no workbench was hit in Pass 1) */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_WOODEN_FLOOR) continue;
+            float dx = px - s->x;
+            float dy = py - s->y;
+            /* Wooden floor: AABB check (square 50×50 tile, ±25px) */
+            if (!(dx >= -STRUCT_FLOOR_HALF_EXT && dx <= STRUCT_FLOOR_HALF_EXT &&
+                  dy >= -STRUCT_FLOOR_HALF_EXT && dy <= STRUCT_FLOOR_HALF_EXT)) continue;
+            /* Hit floor */
+            uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
+            s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
+            char msg[192];
+            if (s->hp == 0) {
+                float kx = s->x, ky = s->y;
+                s->active = false;
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_demolished\",\"structure_id\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, kx, ky);
+                websocket_server_broadcast(msg);
+                /* Cascade: floor destroyed — demolish workbenches that were resting
+                 * on this floor and have no other active floor still supporting them,
+                 * and demolish walls at its edges with no other supporting floor.
+                 * (The killed floor is already inactive so the inner scan finds only
+                 * surviving floors.) */
+                for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
+                    PlacedStructure* wb = &placed_structures[ci];
+                    if (!wb->active) continue;
+                    if (wb->type == STRUCT_WORKBENCH) {
+                        if (fabsf(wb->x - kx) > 25.0f || fabsf(wb->y - ky) > 25.0f) continue;
+                        bool has_support = false;
+                        for (uint32_t fi = 0; fi < placed_structure_count && !has_support; fi++) {
+                            PlacedStructure* f = &placed_structures[fi];
+                            if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                            if (fabsf(wb->x - f->x) <= 25.0f && fabsf(wb->y - f->y) <= 25.0f)
+                                has_support = true;
+                        }
+                        if (!has_support) {
+                            wb->active = false;
+                            char cwmsg[192];
+                            snprintf(cwmsg, sizeof(cwmsg),
+                                     "{\"type\":\"structure_demolished\","
+                                     "\"structure_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                     wb->id, wb->x, wb->y);
+                            websocket_server_broadcast(cwmsg);
+                        }
+                    } else if (wb->type == STRUCT_WALL || wb->type == STRUCT_DOOR_FRAME) {
+                        /* Is this wall/door_frame adjacent to the demolished floor? */
+                        float _at_dx = wb->x - kx, _at_dy = wb->y - ky;
+                        if (_at_dx*_at_dx + _at_dy*_at_dy > 30.0f * 30.0f) continue;
+                        bool has_support = wall_has_support(wb->x, wb->y);
+                        if (!has_support) {
+                            float dfx = wb->x, dfy = wb->y;
+                            bool is_frame = (wb->type == STRUCT_DOOR_FRAME);
+                            wb->active = false;
+                            char cwmsg[192];
+                            snprintf(cwmsg, sizeof(cwmsg),
+                                     "{\"type\":\"structure_demolished\","
+                                     "\"structure_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                     wb->id, wb->x, wb->y);
+                            websocket_server_broadcast(cwmsg);
+                            /* If a door_frame was lost, cascade any door sitting on it */
+                            if (is_frame) {
+                                for (uint32_t di = 0; di < placed_structure_count; di++) {
+                                    PlacedStructure* dp = &placed_structures[di];
+                                    if (!dp->active || dp->type != STRUCT_DOOR) continue;
+                                    if (fabsf(dp->x - dfx) >= 3.0f || fabsf(dp->y - dfy) >= 3.0f) continue;
+                                    dp->active = false;
+                                    char dmsg[128];
+                                    snprintf(dmsg, sizeof(dmsg),
+                                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}",
+                                             dp->id);
+                                    websocket_server_broadcast(dmsg);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"structure_hp_changed\","
+                         "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
+                         ",\"x\":%.1f,\"y\":%.1f}",
+                         s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
+                websocket_server_broadcast(msg);
+            }
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+
+        /* ── Test vs. island trees (spatial grid lookup) ────────────────── */
+        if (!removed) {
+            for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {
+                IslandDef* isl = &ISLAND_PRESETS[ii];
+                if (isl->grid_w == 0) continue; /* no wood nodes */
+
+                /* Compute the 3×3 neighbourhood of cells around the projectile */
+                int center_col = (int)((px - isl->grid_ox) / ISLAND_GRID_CELL_PX);
+                int center_row = (int)((py - isl->grid_oy) / ISLAND_GRID_CELL_PX);
+
+                for (int dr = -1; dr <= 1 && !removed; dr++) {
+                    int row = center_row + dr;
+                    if (row < 0 || row >= isl->grid_h) continue;
+                    for (int dc = -1; dc <= 1 && !removed; dc++) {
+                        int col = center_col + dc;
+                        if (col < 0 || col >= isl->grid_w) continue;
+                        const IslandGridCell *cell = &isl->wood_grid[row][col];
+                        for (int k = 0; k < cell->count && !removed; k++) {
+                            int ri = cell->ri[k];
+                            IslandResource* res = &isl->resources[ri];
+                            if (res->health <= 0) continue;
+                            float tx = isl->x + res->ox;
+                            float ty = isl->y + res->oy;
+                            float dx = px - tx;
+                            float dy = py - ty;
+                            if (dx * dx + dy * dy <= TREE_COLLISION_R_PX * TREE_COLLISION_R_PX) {
+                                const int CANNON_TREE_DMG = 30;
+                                res->health -= CANNON_TREE_DMG;
+                                if (res->health < 0) res->health = 0;
+                                if (res->health == 0) island_mark_tree_dead(isl, ri);
+                                char tmsg[160];
+                                snprintf(tmsg, sizeof(tmsg),
+                                         "{\"type\":\"resource_damaged\",\"island_id\":%u"
+                                         ",\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
+                                         (unsigned)isl->id, ri, res->ox, res->oy, res->health, res->max_health);
+                                websocket_server_broadcast(tmsg);
+                                char htmsg[96];
+                                snprintf(htmsg, sizeof(htmsg),
+                                         "{\"type\":\"tree_cannonball_hit\",\"x\":%.1f,\"y\":%.1f}",
+                                         tx, ty);
+                                websocket_server_broadcast(htmsg);
+                                memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                                        ((size_t)sim->projectile_count - (size_t)i - 1u)
+                                        * sizeof(struct Projectile));
+                                sim->projectile_count--;
+                                removed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!removed) i++;
+    }
 }

@@ -1,3 +1,5 @@
+#include <string.h>
+#include <stdio.h>
 #include "net/websocket_server_internal.h"
 #include "net/ship_control.h"
 #include "net/npc_world.h"
