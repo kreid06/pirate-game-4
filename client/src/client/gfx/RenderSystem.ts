@@ -89,6 +89,10 @@ export class RenderSystem {
   private _gl: GLWorldRenderer | null = null;
   /** Elapsed time in seconds, passed to GL shaders for animation. */
   private _glTimeSec = 0;
+  /** World-wrap render settings received from NetworkManager via ClientApplication. */
+  private _wrapRenderEnabled = false;
+  private _wrapWorldWidth = 0;
+  private _wrapWorldHeight = 0;
   
   // Render queue for layered rendering (10 pre-allocated buckets: index 0 = layer -1, index 1-9 = layers 1-9)
   private readonly renderBuckets: RenderQueueItem[][] = Array.from({length: 10}, () => []);
@@ -747,6 +751,59 @@ export class RenderSystem {
   /** Returns the live island list (for proximity checks in ClientApplication). */
   getIslands(): RenderIslandInput[] {
     return this.islands;
+  }
+
+  /**
+   * Configure world-wrap rendering. Rendering ghosts are visual-only and do not
+   * affect gameplay state or collision logic.
+   */
+  setWorldWrapConfig(enabled: boolean, worldWidth: number, worldHeight: number): void {
+    this._wrapWorldWidth = Math.max(0, worldWidth || 0);
+    this._wrapWorldHeight = Math.max(0, worldHeight || 0);
+    this._wrapRenderEnabled = !!enabled && this._wrapWorldWidth > 0 && this._wrapWorldHeight > 0;
+  }
+
+  private getWrapRenderOffsets(position: Vec2, camera: Camera, margin: number): Array<{ dx: number; dy: number }> {
+    const offsets: Array<{ dx: number; dy: number }> = [{ dx: 0, dy: 0 }];
+    if (!this._wrapRenderEnabled) return offsets;
+
+    const w = this._wrapWorldWidth;
+    const h = this._wrapWorldHeight;
+    const candidates: Array<{ dx: number; dy: number }> = [
+      { dx: -w, dy: 0 }, { dx: w, dy: 0 },
+      { dx: 0, dy: -h }, { dx: 0, dy: h },
+      { dx: -w, dy: -h }, { dx: -w, dy: h },
+      { dx: w, dy: -h }, { dx: w, dy: h },
+    ];
+
+    for (const off of candidates) {
+      const shifted = Vec2.from(position.x + off.dx, position.y + off.dy);
+      if (camera.isWorldPositionVisible(shifted, margin)) offsets.push(off);
+    }
+    return offsets;
+  }
+
+  private buildWrappedRenderCopies<T extends { position: Vec2 }>(
+    entities: readonly T[],
+    camera: Camera,
+    margin: number,
+    skipGhosts?: (entity: T) => boolean,
+  ): T[] {
+    const out: T[] = [];
+    for (const entity of entities) {
+      out.push(entity);
+      if (skipGhosts?.(entity)) continue;
+
+      const offsets = this.getWrapRenderOffsets(entity.position, camera, margin);
+      for (let i = 1; i < offsets.length; i++) {
+        const off = offsets[i];
+        out.push({
+          ...entity,
+          position: Vec2.from(entity.position.x + off.dx, entity.position.y + off.dy),
+        } as T);
+      }
+    }
+    return out;
   }
 
   /** Active flamethrower wave states keyed by cannonId. Client interpolates between server ticks. */
@@ -3053,6 +3110,16 @@ export class RenderSystem {
     ctx.closePath();
   }
 
+  private offsetVertices(
+    vertices: { x: number; y: number }[] | undefined,
+    dx: number,
+    dy: number,
+  ): { x: number; y: number }[] | undefined {
+    if (!vertices) return undefined;
+    if (dx === 0 && dy === 0) return vertices;
+    return vertices.map((v) => ({ x: v.x + dx, y: v.y + dy }));
+  }
+
   private drawIsland(camera: Camera): void {
     const zoom = camera.getState().zoom;
     // Reset per-frame hovered resource nodes
@@ -3103,9 +3170,18 @@ export class RenderSystem {
       const visR = isl.vertices
         ? Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y))) + 50
         : (preset.beachRadius + Math.max(0, ...preset.beachBumps.map(Math.abs)) + 20);
-      if (!camera.isWorldPositionVisible(Vec2.from(isl.x, isl.y), visR)) continue;
-      const sc  = camera.worldToScreen(Vec2.from(isl.x, isl.y));
-      const ctx = this.ctx;
+      const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, visR + 50);
+      for (const off of wrapOffsets) {
+        const islandX = isl.x + off.dx;
+        const islandY = isl.y + off.dy;
+        if (!camera.isWorldPositionVisible(Vec2.from(islandX, islandY), visR)) continue;
+
+        const shiftedVertices = this.offsetVertices(isl.vertices, off.dx, off.dy);
+        const shiftedGrassVertices = this.offsetVertices(isl.grassVertices, off.dx, off.dy);
+        const shiftedShallowVertices = this.offsetVertices(isl.shallowVertices, off.dx, off.dy);
+
+        const sc  = camera.worldToScreen(Vec2.from(islandX, islandY));
+        const ctx = this.ctx;
 
       // ── Shallow water ring (drawn before island body) ────────────────────
       {
@@ -3116,15 +3192,15 @@ export class RenderSystem {
         const SEG = 64;
         const TWO_PI = Math.PI * 2;
         ctx.save();
-        if (isl.vertices) {
-          const verts = isl.vertices;
+        if (shiftedVertices) {
+          const verts = shiftedVertices;
 
           // Only render shallow zone if explicit shallow vertices are defined
-          if (isl.shallowVertices?.length) {
-            const shallowBoundR = Math.max(...isl.shallowVertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
-            const sandBoundR    = Math.max(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+          if (shiftedShallowVertices?.length) {
+            const shallowBoundR = Math.max(...shiftedShallowVertices.map(v => Math.hypot(v.x - islandX, v.y - islandY)));
+            const sandBoundR    = Math.max(...verts.map(v => Math.hypot(v.x - islandX, v.y - islandY)));
             const shallowW = Math.max(4, (shallowBoundR - sandBoundR) * zoom);
-            const outerScreenVerts = isl.shallowVertices.map(v => camera.worldToScreen(Vec2.from(v.x, v.y)));
+            const outerScreenVerts = shiftedShallowVertices.map(v => camera.worldToScreen(Vec2.from(v.x, v.y)));
             const sandScreenVerts  = verts.map(v => camera.worldToScreen(Vec2.from(v.x, v.y)));
 
             const drawSandPath = () => {
@@ -3173,7 +3249,7 @@ export class RenderSystem {
             const t  = (angle / TWO_PI) * n;
             const i0 = Math.floor(t) % n, i1 = (i0 + 1) % n;
             const r  = outerBase + preset.beachBumps[i0] + (t - Math.floor(t)) * (preset.beachBumps[i1] - preset.beachBumps[i0]);
-            const sp = camera.worldToScreen(Vec2.from(isl.x + Math.cos(angle) * r, isl.y + Math.sin(angle) * r));
+            const sp = camera.worldToScreen(Vec2.from(islandX + Math.cos(angle) * r, islandY + Math.sin(angle) * r));
             i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
           }
           ctx.closePath();
@@ -3183,7 +3259,7 @@ export class RenderSystem {
             const t  = (angle / TWO_PI) * n;
             const i0 = Math.floor(t) % n, i1 = (i0 + 1) % n;
             const r  = preset.beachRadius + preset.beachBumps[i0] + (t - Math.floor(t)) * (preset.beachBumps[i1] - preset.beachBumps[i0]);
-            const sp = camera.worldToScreen(Vec2.from(isl.x + Math.cos(angle) * r, isl.y + Math.sin(angle) * r));
+            const sp = camera.worldToScreen(Vec2.from(islandX + Math.cos(angle) * r, islandY + Math.sin(angle) * r));
             i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
           }
           ctx.closePath();
@@ -3201,12 +3277,12 @@ export class RenderSystem {
 
       ctx.save();
 
-      if (isl.vertices) {
+      if (shiftedVertices) {
         // ── Polygon island ─────────────────────────────────────────────────────
-        const polyBoundR = Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+        const polyBoundR = Math.max(...shiftedVertices.map(v => Math.hypot(v.x - islandX, v.y - islandY)));
 
         // Beach
-        this.traceIslandPolygon(camera, isl.vertices);
+        this.traceIslandPolygon(camera, shiftedVertices);
         const beachGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, polyBoundR * zoom * 1.05);
         beachGrad.addColorStop(0.0,  preset.beachColors[0]);
         beachGrad.addColorStop(0.65, preset.beachColors[1]);
@@ -3218,15 +3294,15 @@ export class RenderSystem {
         ctx.stroke();
 
         // Grass interior (explicit polygon if provided, else scale sand polygon toward centre)
-        const grassVerts = isl.grassVertices ?? (() => {
+        const grassVerts = shiftedGrassVertices ?? (() => {
           const gScale = preset.grassPolyScale ?? 0.78;
-          return isl.vertices.map(v => ({
-            x: isl.x + (v.x - isl.x) * gScale,
-            y: isl.y + (v.y - isl.y) * gScale,
+          return shiftedVertices.map(v => ({
+            x: islandX + (v.x - islandX) * gScale,
+            y: islandY + (v.y - islandY) * gScale,
           }));
         })();
         this.traceIslandPolygon(camera, grassVerts);
-        const grassBoundR = Math.max(...grassVerts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+        const grassBoundR = Math.max(...grassVerts.map(v => Math.hypot(v.x - islandX, v.y - islandY)));
         const grassGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, grassBoundR * zoom);
         grassGrad.addColorStop(0.0, preset.grassColors[0]);
         grassGrad.addColorStop(0.7, preset.grassColors[1]);
@@ -3236,7 +3312,7 @@ export class RenderSystem {
       } else {
         // ── Bump-circle island ────────────────────────────────────────────────
         // Sandy beach
-        this.traceIslandBlob(camera, isl.x, isl.y, preset.beachRadius, preset.beachBumps);
+        this.traceIslandBlob(camera, islandX, islandY, preset.beachRadius, preset.beachBumps);
         const beachGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, preset.beachRadius * zoom * 1.1);
         beachGrad.addColorStop(0.0,  preset.beachColors[0]);
         beachGrad.addColorStop(0.65, preset.beachColors[1]);
@@ -3248,7 +3324,7 @@ export class RenderSystem {
         ctx.stroke();
 
         // Grass interior
-        this.traceIslandBlob(camera, isl.x, isl.y, preset.grassRadius, preset.grassBumps);
+        this.traceIslandBlob(camera, islandX, islandY, preset.grassRadius, preset.grassBumps);
         const grassGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, preset.grassRadius * zoom);
         grassGrad.addColorStop(0.0, preset.grassColors[0]);
         grassGrad.addColorStop(0.7, preset.grassColors[1]);
@@ -3269,19 +3345,19 @@ export class RenderSystem {
 
       const candidateIndices = this.queryResourceIndices(
         isl,
-        worldBounds.min.x - RESOURCE_WORLD_PAD,
-        worldBounds.min.y - RESOURCE_WORLD_PAD,
-        worldBounds.max.x + RESOURCE_WORLD_PAD,
-        worldBounds.max.y + RESOURCE_WORLD_PAD,
+        worldBounds.min.x - RESOURCE_WORLD_PAD - off.dx,
+        worldBounds.min.y - RESOURCE_WORLD_PAD - off.dy,
+        worldBounds.max.x + RESOURCE_WORLD_PAD - off.dx,
+        worldBounds.max.y + RESOURCE_WORLD_PAD - off.dy,
       );
       const hoverCandidateSet = (mwp && msp)
         ? new Set<number>(
             this.queryResourceIndices(
               isl,
-              mwp.x - HOVER_QUERY_WORLD_R,
-              mwp.y - HOVER_QUERY_WORLD_R,
-              mwp.x + HOVER_QUERY_WORLD_R,
-              mwp.y + HOVER_QUERY_WORLD_R,
+              mwp.x - HOVER_QUERY_WORLD_R - off.dx,
+              mwp.y - HOVER_QUERY_WORLD_R - off.dy,
+              mwp.x + HOVER_QUERY_WORLD_R - off.dx,
+              mwp.y + HOVER_QUERY_WORLD_R - off.dy,
             ),
           )
         : null;
@@ -3296,7 +3372,7 @@ export class RenderSystem {
           const elapsed = now - res.depletedAt;
           if (elapsed >= DEATH_FADE_MS) continue; // fully faded, skip
           deathAlpha = 1.0 - elapsed / DEATH_FADE_MS; // 1 → 0 over DEATH_FADE_MS
-          const wx2 = isl.x + res.ox, wy2 = isl.y + res.oy;
+          const wx2 = islandX + res.ox, wy2 = islandY + res.oy;
           if (wx2 < worldBounds.min.x - RESOURCE_WORLD_PAD || wx2 > worldBounds.max.x + RESOURCE_WORLD_PAD ||
               wy2 < worldBounds.min.y - RESOURCE_WORLD_PAD || wy2 > worldBounds.max.y + RESOURCE_WORLD_PAD) continue;
           const sp2 = camera.worldToScreen(Vec2.from(wx2, wy2));
@@ -3306,8 +3382,8 @@ export class RenderSystem {
           visibleRes.push({ res, wx: wx2, wy: wy2, sp: sp2, isHovered: false, inRange: false, playerNear: false, leafAlpha: 1.0, bushAlpha: 1.0, boulderAlpha: 1.0, deathAlpha });
           continue;
         }
-        const wx = isl.x + res.ox;
-        const wy = isl.y + res.oy;
+        const wx = islandX + res.ox;
+        const wy = islandY + res.oy;
         if (wx < worldBounds.min.x - RESOURCE_WORLD_PAD || wx > worldBounds.max.x + RESOURCE_WORLD_PAD ||
             wy < worldBounds.min.y - RESOURCE_WORLD_PAD || wy > worldBounds.max.y + RESOURCE_WORLD_PAD) continue;
         const sp = camera.worldToScreen(Vec2.from(wx, wy));
@@ -3386,6 +3462,7 @@ export class RenderSystem {
         this._pendingBushes.push({ sp: e.sp, isHovered: e.isHovered, bushAlpha: e.bushAlpha, deathAlpha: e.deathAlpha, ox: e.res.ox, oy: e.res.oy, wx: e.wx, wy: e.wy });
       }
       this._pendingAllRes.push(...visibleRes);
+      }
     }
 
     // ── Structures: above trunks, below leaves ────────────────────────────────
@@ -4888,6 +4965,17 @@ export class RenderSystem {
         this.particleSystem.createSinkSplash(Vec2.from(wx, wy), intensity);
       }
     }
+
+    // Visual-only wrap ghosts for seam visibility.
+    // Canonical world objects remain unchanged for collisions and gameplay.
+    const renderShips = this.buildWrappedRenderCopies(worldState.ships, camera, 320);
+    const renderPlayers = this.buildWrappedRenderCopies(
+      worldState.players,
+      camera,
+      80,
+      (p) => p.id === this.localPlayerId,
+    );
+    const renderCannonballs = this.buildWrappedRenderCopies(worldState.cannonballs, camera, 40);
     
     // Render order (from lowest to highest):
     // 0: water, gridlines (drawn before this queue)
@@ -4900,7 +4988,7 @@ export class RenderSystem {
     // 7: sail masts
     
     // Queue ship hulls (layer 1)
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       this.queueRenderItem(1, 'ship-hull', () => this.drawShipHull(ship, camera));
       // Ghost fog aura: drawn at layer 0.5 (below hull, like water surface wisps)
       if (ship.shipType === SHIP_TYPE_GHOST) {
@@ -4914,12 +5002,12 @@ export class RenderSystem {
     }
     
     // Queue players (layer 2)
-    for (const player of worldState.players) {
+    for (const player of renderPlayers) {
       this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
     }
     
     // Queue ship planks (layer 3 — ghost ships have no physical planks, purely hull-fade driven)
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       if (ship.shipType !== SHIP_TYPE_GHOST) {
         this.queueRenderItem(3, 'ship-planks', () => this.drawShipPlanks(ship, camera));
       }
@@ -4937,12 +5025,12 @@ export class RenderSystem {
     }
 
     // Plank status icons — missing (red ✕) and leaking (water waves) — layer 3 priority 2
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       this.queueRenderItem(3, 'plank-status', () => this.drawPlankStatusIcons(ship, camera), 2);
     }
 
     // Burning module fire overlays — drawn above module graphics
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       this.queueRenderItem(4, `fire-modules-${ship.id}`, () => this.drawBurningModules(ship, camera), 5);
     }
 
@@ -4986,7 +5074,7 @@ export class RenderSystem {
     }
     
     // Queue cannons, swivel guns, and steering wheels (layers 4-6)
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
       this.queueRenderItem(4, 'swivel-guns', () => this.drawShipSwivelGuns(ship, camera));
       this.queueRenderItem(4, 'cannon-aim-guides', () => this.drawCannonAimGuides(ship, worldState, camera), 1);
@@ -5003,12 +5091,12 @@ export class RenderSystem {
     }
     
     // Queue sail fibers (layer 6)
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       this.queueRenderItem(6, 'sail-fibers', () => this.drawShipSailFibers(ship, camera));
     }
     
     // Queue sail masts (layer 7)
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       this.queueRenderItem(7, 'sail-masts', () => this.drawShipSailMasts(ship, camera));
     }
     
@@ -5138,6 +5226,8 @@ export class RenderSystem {
           if (start > 0) trail.splice(0, start);
         }
       }
+    }
+    for (const cannonball of renderCannonballs) {
       this.queueRenderItem(8, 'cannonballs', () => this.drawCannonball(cannonball, camera, worldState));
     }
 
@@ -5160,23 +5250,26 @@ export class RenderSystem {
     }
 
     // Queue ship ammo labels (layer 9 - HUD overlay above all ship elements)
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       this.queueRenderItem(9, 'ship-ammo-hud', () => this.drawShipAmmoLabel(ship, camera));
     }
 
     // ── Sinking ghost ships (client-side fade-out after server despawn) ──────
     for (const ghost of this.sinkingGhosts.values()) {
-      const id = ghost.id;
-      this.queueRenderItem(1, `ghost-hull-${id}`,       () => this.drawShipHull(ghost, camera));
-      this.queueRenderItem(3, `ghost-planks-${id}`,     () => this.drawShipPlanks(ghost, camera));
-      this.queueRenderItem(4, `ghost-cannons-${id}`,    () => this.drawShipCannons(ghost, camera));
-      this.queueRenderItem(4, `ghost-swivelguns-${id}`, () => this.drawShipSwivelGuns(ghost, camera));
-      this.queueRenderItem(4, `ghost-rudder-${id}`,     () => this.drawShipRudder(ghost, camera));
-      this.queueRenderItem(5, `ghost-wheels-${id}`,     () => this.drawShipSteeringWheels(ghost, camera));
-      this.queueRenderItem(5, `ghost-ladders-${id}`,    () => this.drawShipLadders(ghost, camera));
-      this.queueRenderItem(5, `ghost-ropes-${id}`,      () => this.drawShipSailRopes(ghost, camera));
-      this.queueRenderItem(6, `ghost-fibers-${id}`,     () => this.drawShipSailFibers(ghost, camera));
-      this.queueRenderItem(7, `ghost-masts-${id}`,      () => this.drawShipSailMasts(ghost, camera));
+      const wrappedGhostCopies = this.buildWrappedRenderCopies([ghost], camera, 320);
+      for (const ghostCopy of wrappedGhostCopies) {
+        const id = ghostCopy.id;
+        this.queueRenderItem(1, `ghost-hull-${id}`,       () => this.drawShipHull(ghostCopy, camera));
+        this.queueRenderItem(3, `ghost-planks-${id}`,     () => this.drawShipPlanks(ghostCopy, camera));
+        this.queueRenderItem(4, `ghost-cannons-${id}`,    () => this.drawShipCannons(ghostCopy, camera));
+        this.queueRenderItem(4, `ghost-swivelguns-${id}`, () => this.drawShipSwivelGuns(ghostCopy, camera));
+        this.queueRenderItem(4, `ghost-rudder-${id}`,     () => this.drawShipRudder(ghostCopy, camera));
+        this.queueRenderItem(5, `ghost-wheels-${id}`,     () => this.drawShipSteeringWheels(ghostCopy, camera));
+        this.queueRenderItem(5, `ghost-ladders-${id}`,    () => this.drawShipLadders(ghostCopy, camera));
+        this.queueRenderItem(5, `ghost-ropes-${id}`,      () => this.drawShipSailRopes(ghostCopy, camera));
+        this.queueRenderItem(6, `ghost-fibers-${id}`,     () => this.drawShipSailFibers(ghostCopy, camera));
+        this.queueRenderItem(7, `ghost-masts-${id}`,      () => this.drawShipSailMasts(ghostCopy, camera));
+      }
     }
   }
   

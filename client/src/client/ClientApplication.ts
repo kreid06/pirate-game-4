@@ -2232,6 +2232,13 @@ export class ClientApplication {
       // Sync dropped items into the render system on every frame
       this.renderSystem.updateDroppedItems(worldToRender.droppedItems ?? []);
 
+      // Keep render-side world-wrap config in sync with authoritative map settings.
+      this.renderSystem.setWorldWrapConfig(
+        this.networkManager.mapWrap,
+        this.networkManager.mapWidth,
+        this.networkManager.mapHeight,
+      );
+
       // Render game world with hybrid state
       if (this._glRenderer) {
         const camState = this.camera.getState();
@@ -2339,14 +2346,29 @@ export class ClientApplication {
       return;
     }
     
-    // Smooth camera follow with lerp for grid stability
-    // Fast lerp keeps camera responsive while smoothing out prediction jitter
+    // Smooth camera follow with lerp for grid stability.
+    // But when world-wrap teleports the player across a seam, snap immediately
+    // so the camera doesn't scroll across the whole map.
     const currentPos = this.camera.getState().position;
-    const lerpFactor = 1.0 - Math.pow(0.001, dt); // Frame-rate independent smoothing
-    const smoothedX = currentPos.x + (player.position.x - currentPos.x) * lerpFactor;
-    const smoothedY = currentPos.y + (player.position.y - currentPos.y) * lerpFactor;
-    
-    this.camera.setPosition(Vec2.from(smoothedX, smoothedY));
+    const mapWrapEnabled = this.networkManager.mapWrap;
+    const mapWidth = this.networkManager.mapWidth;
+    const mapHeight = this.networkManager.mapHeight;
+    const crossedWrapSeam = mapWrapEnabled
+      && mapWidth > 0
+      && mapHeight > 0
+      && (
+        Math.abs(player.position.x - currentPos.x) > mapWidth * 0.5
+        || Math.abs(player.position.y - currentPos.y) > mapHeight * 0.5
+      );
+
+    if (crossedWrapSeam) {
+      this.camera.setPosition(player.position);
+    } else {
+      const lerpFactor = 1.0 - Math.pow(0.001, dt); // Frame-rate independent smoothing
+      const smoothedX = currentPos.x + (player.position.x - currentPos.x) * lerpFactor;
+      const smoothedY = currentPos.y + (player.position.y - currentPos.y) * lerpFactor;
+      this.camera.setPosition(Vec2.from(smoothedX, smoothedY));
+    }
 
     // Smooth zoom toward targetZoom (ease-out, ~0.6 s to settle)
     const currentZoom = this.camera.getState().zoom;

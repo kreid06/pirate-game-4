@@ -215,7 +215,7 @@ static inline bool island_poly_pushout(
  * Defined in server/src/sim/island_data.c so that islands_generate_trees()  *
  * can populate tree positions at startup without const restrictions.          */
 
-#define ISLAND_COUNT 3
+#define ISLAND_COUNT 9
 extern IslandDef ISLAND_PRESETS[];
 
 /** Shallow-water ring width as a multiple of the island's own radius.
