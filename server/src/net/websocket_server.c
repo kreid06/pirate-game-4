@@ -7016,25 +7016,39 @@ void websocket_server_tick(float dt) {
                                         }
                                     }
                                 }
-                                /* Boulder collision — push player out of boulder radius */
+                                /* Boulder collision — push player out of ellipse body */
                                 if (isl_mv) {
                                     const float PLAYER_R = 8.0f;
                                     const float BOULDER_BASE_R = 38.0f;
+                                    static const float BSX[5] = { 1.00f, 0.88f, 1.18f, 0.72f, 1.35f };
+                                    static const float BSY[5] = { 0.72f, 0.88f, 0.60f, 1.00f, 0.50f };
                                     for (int ri = 0; ri < isl_mv->resource_count; ri++) {
                                         const IslandResource *res = &isl_mv->resources[ri];
                                         if (res->type_id != RES_BOULDER) continue;
                                         if (res->health <= 0) continue;
-                                        float combined_r = PLAYER_R + BOULDER_BASE_R * res->size;
+                                        uint32_t bseed = ((uint32_t)((int)res->ox * 73856093)) ^
+                                                         ((uint32_t)((int)res->oy * 19349663));
+                                        int bsi = (int)((bseed >> 4) % 5u);
+                                        float ax = BOULDER_BASE_R * res->size * BSX[bsi];
+                                        float ay = BOULDER_BASE_R * res->size * BSY[bsi];
                                         float bx = isl_mv->x + res->ox;
                                         float by = isl_mv->y + res->oy;
                                         float dx = new_x - bx, dy = new_y - by;
-                                        float dist_sq = dx * dx + dy * dy;
-                                        if (dist_sq < combined_r * combined_r && dist_sq > 0.0001f) {
-                                            float dist = sqrtf(dist_sq);
-                                            float pen  = combined_r - dist;
-                                            new_x += (dx / dist) * pen;
-                                            new_y += (dy / dist) * pen;
-                                        }
+                                        float dist_sq = dx*dx + dy*dy;
+                                        if (dist_sq < 1e-4f) { dx = PLAYER_R; dy = 0.0f; dist_sq = PLAYER_R*PLAYER_R; }
+                                        float dist = sqrtf(dist_sq);
+                                        float unx = dx / dist, uny = dy / dist;
+                                        float inv_ax = unx / ax, inv_ay = uny / ay;
+                                        float r_eff = 1.0f / sqrtf(inv_ax*inv_ax + inv_ay*inv_ay);
+                                        float min_dist = PLAYER_R + r_eff;
+                                        if (dist >= min_dist) continue;
+                                        float gx = dx / (ax*ax), gy = dy / (ay*ay);
+                                        float gn = sqrtf(gx*gx + gy*gy);
+                                        if (gn < 1e-6f) { gx = 1.0f; gn = 1.0f; }
+                                        float nx = gx / gn, ny = gy / gn;
+                                        float pen = min_dist - dist;
+                                        new_x += nx * pen;
+                                        new_y += ny * pen;
                                     }
                                 }
                                 ws_player->x = new_x;

@@ -408,9 +408,11 @@ export class RenderSystem {
     { body: '#585858', shadow: '#303030', hi: '#888888', crack: '#404040', moss: '#4a6038' },
   ];
   private static readonly BOULDER_SHAPES: [number, number, number][] = [
-    [1.00, 0.72, 0.0],  // flat classic
-    [0.88, 0.88, 0.4],  // round
-    [1.18, 0.60, -0.2], // wide flat
+    [1.00, 0.72, 0.0],   // flat classic
+    [0.88, 0.88, 0.4],   // round
+    [1.18, 0.60, -0.2],  // wide flat
+    [0.72, 1.00, 1.2],   // tall upright
+    [1.35, 0.50, 0.15],  // very wide slab
   ];
 
   private static _ensureBoulderSprites(): Map<string, OffscreenCanvas> {
@@ -3169,11 +3171,16 @@ export class RenderSystem {
     const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
     const ti       = hash % RenderSystem.BOULDER_TONES.length;
     const si       = (hash >> 4) % RenderSystem.BOULDER_SHAPES.length;
+    // 16 rotation bins → 22.5° steps, deterministic per boulder position
+    const ri       = (hash >> 8) % 16;
+    const drawRot  = (ri / 16) * Math.PI * 2;
     const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
     const sprite   = RenderSystem._ensureBoulderSprites().get(key)!;
     ctx.save();
     ctx.globalAlpha = alpha;
-    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
+    ctx.translate(sx, sy);
+    ctx.rotate(drawRot);
+    ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
     ctx.restore();
   }
 

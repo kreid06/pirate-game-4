@@ -2669,8 +2669,17 @@ void handle_projectile_collisions(struct Sim* sim) {
                     float by_cli = isl->y + res->oy;
                     float dx_cli = px_cli - bx_cli;
                     float dy_cli = py_cli - by_cli;
-                    float r_cli  = 38.0f * res->size; /* collision radius in client px */
-                    if (dx_cli*dx_cli + dy_cli*dy_cli < r_cli * r_cli) {
+                    /* Ellipse shape for projectile absorption — same hash as client */
+                    static const float BSX[5] = { 1.00f, 0.88f, 1.18f, 0.72f, 1.35f };
+                    static const float BSY[5] = { 0.72f, 0.88f, 0.60f, 1.00f, 0.50f };
+                    uint32_t bseed2 = ((uint32_t)((int)res->ox * 73856093)) ^
+                                     ((uint32_t)((int)res->oy * 19349663));
+                    int bsi2 = (int)((bseed2 >> 4) % 5u);
+                    float ax2 = 38.0f * res->size * BSX[bsi2];
+                    float ay2 = 38.0f * res->size * BSY[bsi2];
+                    /* Point-in-ellipse: (dx/ax)^2 + (dy/ay)^2 < 1 */
+                    float ex = dx_cli / ax2, ey = dy_cli / ay2;
+                    if (ex*ex + ey*ey < 1.0f) {
                         log_info("💥 Proj %u hit boulder at (%.1f, %.1f) — absorbed",
                                  proj->id, bx_cli, by_cli);
                         memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
@@ -2692,6 +2701,10 @@ void handle_projectile_collisions(struct Sim* sim) {
  */
 static void handle_player_boulder_collisions(struct Sim* sim) {
     static const float BAUMGARTE = 0.6f;
+    static const float BOULDER_BASE_R = 38.0f;
+    /* sx/sy shape factors — must match client BOULDER_SHAPES order exactly */
+    static const float BOULDER_SX[5] = { 1.00f, 0.88f, 1.18f, 0.72f, 1.35f };
+    static const float BOULDER_SY[5] = { 0.72f, 0.88f, 0.60f, 1.00f, 0.50f };
 
     for (uint16_t pi = 0; pi < sim->player_count; pi++) {
         struct Player* p = &sim->players[pi];
@@ -2710,22 +2723,37 @@ static void handle_player_boulder_collisions(struct Sim* sim) {
 
                 float bx_cli = isl->x + res->ox;
                 float by_cli = isl->y + res->oy;
-                float br_cli = 38.0f * res->size;
+
+                /* Derive shape index with the same hash as the client renderer */
+                uint32_t bseed = ((uint32_t)((int)res->ox * 73856093)) ^
+                                 ((uint32_t)((int)res->oy * 19349663));
+                int bsi = (int)((bseed >> 4) % 5u);
+                float ax = BOULDER_BASE_R * res->size * BOULDER_SX[bsi]; /* ellipse x semi-axis */
+                float ay = BOULDER_BASE_R * res->size * BOULDER_SY[bsi]; /* ellipse y semi-axis */
 
                 float dx = px_cli - bx_cli;
                 float dy = py_cli - by_cli;
-                float dist_sq = dx*dx + dy*dy;
-                float min_dist = pr_cli + br_cli;
-                if (dist_sq >= min_dist * min_dist) continue;
-
-                float dist = sqrtf(dist_sq);
-                if (dist < 0.1f) {
+                if (dx*dx < 1e-4f && dy*dy < 1e-4f) {
                     /* Perfectly stacked — nudge outward */
-                    dx = pr_cli; dy = 0.0f; dist = pr_cli;
+                    dx = pr_cli; dy = 0.0f;
                 }
+                float dist_sq = dx*dx + dy*dy;
+                float dist = sqrtf(dist_sq);
+                float unx = dx / dist, uny = dy / dist;
 
-                float nx = dx / dist;
-                float ny = dy / dist;
+                /* Effective ellipse radius in the direction toward the player */
+                float inv_ax = unx / ax, inv_ay = uny / ay;
+                float r_eff = 1.0f / sqrtf(inv_ax*inv_ax + inv_ay*inv_ay);
+                float min_dist = pr_cli + r_eff;
+                if (dist >= min_dist) continue;
+
+                /* Ellipse surface normal: gradient of x^2/ax^2 + y^2/ay^2 = 1 */
+                float gx = dx / (ax * ax), gy = dy / (ay * ay);
+                float gn = sqrtf(gx*gx + gy*gy);
+                if (gn < 1e-6f) { gx = 1.0f; gn = 1.0f; }
+                float nx = gx / gn;
+                float ny = gy / gn;
+
                 float pen = min_dist - dist;
                 float corr_cli = BAUMGARTE * pen;
 
