@@ -84,6 +84,20 @@ static const char* company_name(uint8_t id) {
     return "Unknown";
 }
 
+/* Strip bytes outside ASCII printable range (0x20–0x7E) from a player name.
+ * This prevents invalid UTF-8 sequences entering the JSON broadcast when the
+ * name is truncated or originates from a file saved with a different encoding. */
+static void sanitize_player_name(char* name) {
+    unsigned char* r = (unsigned char*)name;
+    char* w = name;
+    while (*r) {
+        if (*r >= 0x20u && *r < 0x7Fu)
+            *w++ = (char)*r;
+        r++;
+    }
+    *w = '\0';
+}
+
 // Helper function to get movement state string
 static const char* get_state_string(PlayerMovementState state) {
     switch (state) {
@@ -1357,6 +1371,10 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                             }
 
+                            // Sanitize the name extracted from JSON — strip non-ASCII-printable bytes
+                            // so that no invalid UTF-8 can reach the JSON broadcast.
+                            sanitize_player_name(player_name);
+
                             // If a JWT token is included, extract display_name from it
                             // (overrides playerName field; verified against JWT_SECRET if set)
                             char* tok_start = strstr(payload, "\"token\":\"");
@@ -1373,6 +1391,7 @@ int websocket_server_update(struct Sim* sim) {
                                         if (jwt_extract_display_name(jwt_buf, jwt_name, sizeof(jwt_name))) {
                                             strncpy(player_name, jwt_name, sizeof(player_name) - 1);
                                             player_name[sizeof(player_name) - 1] = '\0';
+                                            sanitize_player_name(player_name);
                                         }
                                         free(jwt_buf);
                                     }
@@ -1447,6 +1466,7 @@ int websocket_server_update(struct Sim* sim) {
                                     // Set player name first so load can find the save file
                                     strncpy(player->name, player_name, sizeof(player->name) - 1);
                                     player->name[sizeof(player->name) - 1] = '\0';
+                                    sanitize_player_name(player->name);
 
                                     // Restore persistent data (position, XP, inventory, etc.)
                                     bool resumed = load_player_from_file(player);
@@ -5527,7 +5547,8 @@ int websocket_server_update(struct Sim* sim) {
         ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "]");
         
         // Build players JSON array with ship relationship data
-        char players_json[4096];
+        // Static: each entry is ~900 bytes; 64 KB handles up to ~70 active players.
+        static char players_json[65536];
         int players_offset = 0;
         players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "[");
         bool first_player = true;
