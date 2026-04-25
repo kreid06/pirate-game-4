@@ -36,7 +36,7 @@ const COMPANY_COLORS: Record<number, string> = {
 
 const PANEL_W  = 640;
 const TAB_H    = 32;
-const PANEL_H  = 760;
+const PANEL_H  = 900;
 const PAD      = 18;
 const HEADER_H = 40;
 const ROW_H    = 22;
@@ -286,18 +286,18 @@ export class PlayerMenu {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Compact level/XP bar for character tab (upgrade buttons are in Skills tab)
+  // Level/XP bar + stat upgrades inline on the character tab
 
   private _levelXpCompact(
     ctx:    CanvasRenderingContext2D,
     px:     number, py: number,
     player: NonNullable<ReturnType<WorldState['players']['find']>>,
   ): number {
-    const lvl       = player.level ?? 1;
-    const xp        = player.xp ?? 0;
-    const isMax     = lvl >= PLAYER_MAX_LEVEL;
-    const xpToNext  = isMax ? PLAYER_MAX_LEVEL * 100 : lvl * 100;
-    const xpPct     = isMax ? 1 : Math.min(xp / xpToNext, 1);
+    const lvl        = player.level ?? 1;
+    const xp         = player.xp ?? 0;
+    const isMax      = lvl >= PLAYER_MAX_LEVEL;
+    const xpToNext   = isMax ? PLAYER_MAX_LEVEL * 100 : lvl * 100;
+    const xpPct      = isMax ? 1 : Math.min(xp / xpToNext, 1);
     const statPoints = player.statPoints ?? 0;
 
     py = this._sectionHeader(ctx, px, py, 'LEVEL & XP',
@@ -325,21 +325,59 @@ export class PlayerMenu {
     ctx.fillRect(barX, py, barW, BAR_H);
     ctx.fillStyle = '#4488ff';
     ctx.fillRect(barX, py, Math.round(barW * xpPct), BAR_H);
-    py += BAR_H + 8;
+    py += BAR_H + 10;
 
-    if (statPoints > 0) {
+    // ── Stat upgrades inline ────────────────────────────────────────
+    const BTN_W = 80, BTN_H = 22;
+    const ROW   = 44;
+
+    for (const stat of STATS) {
+      const statLvl = (player[stat.key] ?? 0) as number;
+      const afford  = statPoints > 0;
+
+      ctx.fillStyle = 'rgba(255,255,255,0.03)';
+      ctx.fillRect(px + PAD / 2, py, PANEL_W - PAD, ROW - 3);
+
+      ctx.font         = 'bold 13px Consolas, monospace';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = stat.color;
+      ctx.fillText(stat.label, px + PAD, py + 13);
+
       ctx.font      = 'bold 12px Consolas, monospace';
-      ctx.textAlign = 'center';
-      ctx.fillStyle = GOLD;
-      ctx.textBaseline = 'top';
-      ctx.fillText(
-        `★ ${statPoints} stat point${statPoints !== 1 ? 's' : ''} available — open Skills tab`,
-        px + PANEL_W / 2, py
-      );
-      py += 18;
+      ctx.fillStyle = statLvl > 0 ? stat.color : TEXT_DIM;
+      ctx.fillText(`${statLvl}`, px + 90, py + 13);
+
+      ctx.font         = '11px Consolas, monospace';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = TEXT_DIM;
+      ctx.fillText(stat.desc(statLvl), px + PAD, py + ROW - 16);
+
+      const btnX = px + PANEL_W - PAD - BTN_W;
+      const btnY = py + (ROW - 3 - BTN_H) / 2;
+      ctx.fillStyle   = afford ? '#2a4a2a' : '#2a2a2a';
+      ctx.strokeStyle = afford ? '#44aa44' : '#445';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.roundRect(btnX, btnY, BTN_W, BTN_H, 3);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.font         = 'bold 11px Consolas, monospace';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = afford ? '#aaffaa' : '#556';
+      ctx.fillText(afford ? '+1 Point' : 'No Points', btnX + BTN_W / 2, btnY + BTN_H / 2);
+
+      if (afford) {
+        this._btnHits.push({ serverKey: stat.server, x: btnX, y: btnY, w: BTN_W, h: BTN_H, affordable: true });
+      }
+
+      py += ROW;
     }
 
-    return py + 8;
+    return py + 6;
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -527,93 +565,20 @@ export class PlayerMenu {
     px:           number,
     contentTop:   number,
     contentBottom: number,
-    player:       NonNullable<ReturnType<WorldState['players']['find']>> | null,
+    _player:      NonNullable<ReturnType<WorldState['players']['find']>> | null,
   ): void {
-    let py = contentTop;
-    if (!player) {
-      ctx.font = '14px Consolas, monospace';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = TEXT_DIM;
-      ctx.fillText('No player data.', px + PANEL_W / 2, Math.round((contentTop + contentBottom) / 2));
-      return;
-    }
+    const midY = Math.round((contentTop + contentBottom) / 2);
+    const midX = px + PANEL_W / 2;
 
-    const lvl        = player.level ?? 1;
-    const xp         = player.xp ?? 0;
-    const isMax      = lvl >= PLAYER_MAX_LEVEL;
-    const xpToNext   = isMax ? PLAYER_MAX_LEVEL * 100 : lvl * 100;
-    const xpPct      = isMax ? 1 : Math.min(xp / xpToNext, 1);
-    const statPoints = player.statPoints ?? 0;
-
-    py = this._sectionHeader(ctx, px, py, 'LEVEL & XP', '');
-    py += 4;
-    const barX = px + PAD;
-    const barW = PANEL_W - PAD * 2;
-    ctx.font      = 'bold 14px Consolas, monospace';
-    ctx.textAlign = 'left';
+    ctx.font = '14px Consolas, monospace';
+    ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = GOLD;
-    ctx.fillText(`Lv. ${lvl}${isMax ? '  MAX' : ''}`, barX, py + 8);
-    ctx.font      = '12px Consolas, monospace';
-    ctx.textAlign = 'right';
     ctx.fillStyle = TEXT_DIM;
-    ctx.fillText(isMax ? 'MAX LEVEL' : `${xp} / ${xpToNext} XP`, px + PANEL_W - PAD, py + 8);
-    py += 20;
-    ctx.fillStyle = '#1a2040'; ctx.fillRect(barX, py, barW, 7);
-    ctx.fillStyle = '#4488ff'; ctx.fillRect(barX, py, Math.round(barW * xpPct), 7);
-    py += 7 + 10;
+    ctx.fillText('Skill tree — coming soon.', midX, midY - 12);
 
-    if (statPoints > 0) {
-      ctx.font      = 'bold 12px Consolas, monospace';
-      ctx.textAlign = 'center';
-      ctx.fillStyle = GOLD;
-      ctx.fillText(`★ ${statPoints} stat point${statPoints !== 1 ? 's' : ''} available`, px + PANEL_W / 2, py + 6);
-      py += 20;
-    }
-
-    py = this._sectionHeader(ctx, px, py + 4, 'STAT UPGRADES', '');
-    py += 4;
-
-    const BTN_W = 80, BTN_H = 24;
-    const ROW   = 48;
-    for (const stat of STATS) {
-      const statLvl = (player[stat.key] ?? 0) as number;
-      const afford  = statPoints > 0;
-      ctx.fillStyle = 'rgba(255,255,255,0.03)';
-      ctx.fillRect(px + PAD / 2, py, PANEL_W - PAD, ROW - 4);
-      ctx.font         = 'bold 13px Consolas, monospace';
-      ctx.textAlign    = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle    = stat.color;
-      ctx.fillText(stat.label, px + PAD, py + 14);
-      ctx.font      = 'bold 12px Consolas, monospace';
-      ctx.fillStyle = statLvl > 0 ? stat.color : TEXT_DIM;
-      ctx.fillText(`${statLvl}`, px + 90, py + 14);
-      ctx.font         = '11px Consolas, monospace';
-      ctx.textAlign    = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle    = TEXT_DIM;
-      ctx.fillText(stat.desc(statLvl), px + PAD, py + ROW - 18);
-      const btnX = px + PANEL_W - PAD - BTN_W;
-      const btnY = py + (ROW - 4 - BTN_H) / 2;
-      ctx.fillStyle   = afford ? '#2a4a2a' : '#2a2a2a';
-      ctx.strokeStyle = afford ? '#44aa44' : '#445';
-      ctx.lineWidth   = 1;
-      ctx.beginPath();
-      ctx.roundRect(btnX, btnY, BTN_W, BTN_H, 3);
-      ctx.fill();
-      ctx.stroke();
-      ctx.font         = 'bold 11px Consolas, monospace';
-      ctx.textAlign    = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle    = afford ? '#aaffaa' : '#556';
-      ctx.fillText(afford ? '+1 Point' : 'No Points', btnX + BTN_W / 2, btnY + BTN_H / 2);
-      if (afford) {
-        this._btnHits.push({ serverKey: stat.server, x: btnX, y: btnY, w: BTN_W, h: BTN_H, affordable: true });
-      }
-      py += ROW;
-    }
+    ctx.font = '12px Consolas, monospace';
+    ctx.fillStyle = 'rgba(120,120,136,0.5)';
+    ctx.fillText('Active abilities, passives and talent trees will appear here.', midX, midY + 12);
   }
 
   // ─────────────────────────────────────────────────────────────────────────

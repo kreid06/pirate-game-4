@@ -15,7 +15,11 @@
   "stat_weight": 0,
   "company_id": 0,
   "active_slot": 0,
-  "armor": 0,
+  "helm": 0,
+  "torso": 0,
+  "legs": 0,
+  "feet": 0,
+  "hands": 0,
   "shield": 0,
-  "slots": [{"item":14,"qty":3},{"item":6,"qty":1},{"item":4,"qty":1},{"item":15,"qty":1},{"item":22,"qty":69},{"item":0,"qty":0},{"item":18,"qty":17},{"item":23,"qty":30},{"item":22,"qty":99},{"item":0,"qty":0}]
+  "slots": [{"item":14,"qty":3},{"item":6,"qty":1},{"item":4,"qty":1},{"item":15,"qty":1},{"item":22,"qty":69},{"item":0,"qty":0},{"item":18,"qty":17},{"item":23,"qty":30},{"item":22,"qty":99},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0}]
 }
