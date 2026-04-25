@@ -823,6 +823,13 @@ static void handle_collect_tombstone(WebSocketPlayer* player,
 
 /* ── Dropped-item helpers ─────────────────────────────────────────────────── */
 
+/* Helper: frame + send a short text message to one client. */
+static void ws_send_text(int fd, const char* msg) {
+    char frame[256];
+    size_t fl = websocket_create_frame(WS_OPCODE_TEXT, msg, strlen(msg), frame, sizeof(frame));
+    if (fl > 0) send(fd, frame, fl, 0);
+}
+
 static void handle_drop_item(WebSocketPlayer* player,
                               struct WebSocketClient* client,
                               const char* payload)
@@ -831,12 +838,12 @@ static void handle_drop_item(WebSocketPlayer* player,
     const char* ps = strstr(payload, "\"slot\":");
     if (ps) sscanf(ps + 7, "%d", &slot);
     if (slot < 0 || slot >= INVENTORY_SLOTS) {
-        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"invalid_slot\"}");
+        ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"invalid_slot\"}");
         return;
     }
     InventorySlot* isl = &player->inventory.slots[slot];
     if (isl->item == ITEM_NONE || isl->quantity == 0) {
-        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"empty_slot\"}");
+        ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"empty_slot\"}");
         return;
     }
     DroppedItem* di = NULL;
@@ -844,7 +851,7 @@ static void handle_drop_item(WebSocketPlayer* player,
         if (!dropped_items[i].active) { di = &dropped_items[i]; break; }
     }
     if (!di) {
-        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"world_full\"}");
+        ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"world_full\"}");
         return;
     }
     di->id            = next_dropped_item_id++;
@@ -860,7 +867,7 @@ static void handle_drop_item(WebSocketPlayer* player,
     char resp[128];
     snprintf(resp, sizeof(resp),
         "{\"type\":\"message_ack\",\"status\":\"item_dropped\",\"drop_id\":%u}", di->id);
-    websocket_send_text(client->fd, resp);
+    ws_send_text(client->fd, resp);
     log_info("📦  Player %u dropped item %u qty %u at (%.1f,%.1f) id=%u",
              player->player_id, (unsigned)di->item_kind, (unsigned)di->quantity,
              (double)di->x, (double)di->y, di->id);
@@ -874,7 +881,7 @@ static void handle_pickup_item(WebSocketPlayer* player,
     const char* pi = strstr(payload, "\"item_id\":");
     if (pi) sscanf(pi + 10, "%u", &item_id);
     if (item_id == 0) {
-        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"invalid_id\"}");
+        ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"invalid_id\"}");
         return;
     }
     DroppedItem* di = NULL;
@@ -884,13 +891,13 @@ static void handle_pickup_item(WebSocketPlayer* player,
         }
     }
     if (!di) {
-        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"not_found\"}");
+        ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"not_found\"}");
         return;
     }
     float dx = di->x - player->x;
     float dy = di->y - player->y;
     if (dx * dx + dy * dy > 80.0f * 80.0f) {
-        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"too_far\"}");
+        ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"too_far\"}");
         return;
     }
     int free_slot = -1;
@@ -901,7 +908,7 @@ static void handle_pickup_item(WebSocketPlayer* player,
         }
     }
     if (free_slot < 0) {
-        websocket_send_text(client->fd, "{\"type\":\"error\",\"message\":\"inventory_full\"}");
+        ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"inventory_full\"}");
         return;
     }
     player->inventory.slots[free_slot].item     = (ItemKind)di->item_kind;
@@ -910,7 +917,7 @@ static void handle_pickup_item(WebSocketPlayer* player,
     char resp[128];
     snprintf(resp, sizeof(resp),
         "{\"type\":\"message_ack\",\"status\":\"item_picked_up\",\"slot\":%d}", free_slot);
-    websocket_send_text(client->fd, resp);
+    ws_send_text(client->fd, resp);
     log_info("📦  Player %u picked up drop id %u (item %u) into slot %d",
              player->player_id, item_id, (unsigned)di->item_kind, free_slot);
 }
