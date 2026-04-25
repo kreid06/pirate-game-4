@@ -38,7 +38,9 @@ export type ItemKind =
   | 'fiber'
   | 'metal'
   | 'pickaxe'
-  | 'shipyard';
+  | 'shipyard'
+  | 'stone'
+  | 'wood_ceiling';
 
 // ── Category groups ─────────────────────────────────────────────────────────
 export type ItemCategory = 'none' | 'building' | 'repair' | 'ammo' | 'weapon' | 'tool' | 'armor' | 'shield';
@@ -88,6 +90,8 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   metal:         { kind: 'metal',         name: 'Metal',         category: 'none',     maxStack: 99, color: '#8a8a8c', borderColor: '#555558', symbol: 'Fe', description: 'Metal ingots. Used to craft weapons and cannons.' },
   pickaxe:       { kind: 'pickaxe',       name: 'Pickaxe',       category: 'tool',     maxStack: 1,  color: '#7a7a7c', borderColor: '#555558', symbol: '\u26cf', description: 'Mine rock outcroppings on islands to gather metal.' },
   shipyard:      { kind: 'shipyard',      name: 'Shipyard',      category: 'building', maxStack: 1,  color: '#2a5f8a', borderColor: '#14304a', symbol: '\u2693', description: 'Place in shallow water next to an island to build ships.' },
+  stone:         { kind: 'stone',         name: 'Stone',         category: 'none',     maxStack: 99, color: '#9a9a9c', borderColor: '#666668', symbol: 'St', description: 'Raw stone gathered from rocky outcroppings. Used for crafting.' },
+  wood_ceiling:  { kind: 'wood_ceiling',  name: 'Wood Ceiling',  category: 'building', maxStack: 20, color: '#b8832b', borderColor: '#7a5520', symbol: '\u25a6', description: 'A wooden ceiling tile. Fits over a floor section.' },
 };
 
 /**
@@ -123,6 +127,8 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   24: 'metal',
   25: 'pickaxe',
   26: 'shipyard',
+  27: 'stone',
+  28: 'wood_ceiling',
 };
 
 /**

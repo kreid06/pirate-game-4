@@ -30,19 +30,15 @@ const RECIPES: Recipe[] = [
     color: '#b8832b',
     borderColor: '#7a5520',
     ingredients: [
-      { label: 'Wood', count: 20 },
-    ],
-  },
-  {
-    id: 'craft_sail',
+      { label: 'Wood', count: 30 },
     outputName: 'Sail',
     outputCount: 1,
     symbol: '\u26f5',
     color: '#1e8c6e',
     borderColor: '#0f5c48',
     ingredients: [
-      { label: 'Wood',  count: 15 },
-      { label: 'Fiber', count: 50 },
+      { label: 'Wood',  count: 40 },
+      { label: 'Fiber', count: 100 },
     ],
   },
   {
@@ -100,18 +96,14 @@ const RECIPES: Recipe[] = [
     color: '#5c3a1a',
     borderColor: '#2e1a08',
     ingredients: [
-      { label: 'Wood', count: 6 },
-    ],
-  },
-  {
-    id: 'craft_door_frame',
+      { label: 'Wood', count: 10 },
     outputName: 'Door Frame',
     outputCount: 1,
     symbol: 'Fr',
     color: '#7a4820',
     borderColor: '#3e200c',
     ingredients: [
-      { label: 'Wood', count: 4 },
+      { label: 'Wood', count: 6 },
     ],
   },
   {
@@ -135,6 +127,75 @@ const RECIPES: Recipe[] = [
     ingredients: [
       { label: 'Wood',  count: 30 },
       { label: 'Plank', count: 10 },
+    ],
+  },
+  {
+    id: 'craft_floor',
+    outputName: 'Wooden Floor',
+    outputCount: 1,
+    symbol: '\u229f',
+    color: '#b8832b',
+    borderColor: '#7a5520',
+    ingredients: [
+      { label: 'Wood', count: 20 },
+    ],
+  },
+  {
+    id: 'craft_workbench',
+    outputName: 'Workbench',
+    outputCount: 1,
+    symbol: '\u2692',
+    color: '#7a4820',
+    borderColor: '#4a2810',
+    ingredients: [
+      { label: 'Wood',  count: 15 },
+      { label: 'Stone', count: 10 },
+    ],
+  },
+  {
+    id: 'craft_wood_ceiling',
+    outputName: 'Wood Ceiling',
+    outputCount: 1,
+    symbol: '\u25a6',
+    color: '#b8832b',
+    borderColor: '#7a5520',
+    ingredients: [
+      { label: 'Wood', count: 15 },
+    ],
+  },
+  {
+    id: 'craft_stone_axe',
+    outputName: 'Stone Axe',
+    outputCount: 1,
+    symbol: '\uD83E\uDE93',
+    color: '#8b5e2a',
+    borderColor: '#5c3a10',
+    ingredients: [
+      { label: 'Wood',  count: 2 },
+      { label: 'Stone', count: 5 },
+    ],
+  },
+  {
+    id: 'craft_stone_pickaxe',
+    outputName: 'Stone Pickaxe',
+    outputCount: 1,
+    symbol: '\u26cf',
+    color: '#7a7a7c',
+    borderColor: '#555558',
+    ingredients: [
+      { label: 'Wood',  count: 2 },
+      { label: 'Stone', count: 4 },
+    ],
+  },
+  {
+    id: 'craft_hammer',
+    outputName: 'Hammer',
+    outputCount: 1,
+    symbol: 'H',
+    color: '#c07830',
+    borderColor: '#885020',
+    ingredients: [
+      { label: 'Wood', count: 4 },
     ],
   },
 ];

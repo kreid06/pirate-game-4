@@ -93,16 +93,23 @@ void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* client, 
     } CraftRecipe;
 
     static const CraftRecipe recipes[] = {
-        { "craft_plank",  ITEM_PLANK,  1, { {ITEM_WOOD, 20}, {0,0} }, 1 },
-        { "craft_sail",   ITEM_SAIL,   1, { {ITEM_WOOD, 15}, {ITEM_FIBER, 50} }, 2 },
-        { "craft_helm",   ITEM_HELM,   1, { {ITEM_WOOD, 10}, {0,0} }, 1 },
-        { "craft_cannon", ITEM_CANNON, 1, { {ITEM_WOOD,  8}, {ITEM_METAL, 20} }, 2 },
-        { "craft_swivel", ITEM_SWIVEL, 1, { {ITEM_WOOD,  5}, {ITEM_METAL,  8} }, 2 },
-        { "craft_sword",  ITEM_SWORD,  1, { {ITEM_WOOD,  2}, {ITEM_METAL,  5} }, 2 },
-        { "craft_wall",        ITEM_WALL,      4, { {ITEM_WOOD,  6}, {0,0}           }, 1 },
-        { "craft_door_frame",  ITEM_DOOR_FRAME, 1, { {ITEM_WOOD,  4}, {0,0}           }, 1 },
-        { "craft_door",        ITEM_DOOR,       1, { {ITEM_WOOD,  4}, {0,0}           }, 1 },
-        { "craft_shipyard",    ITEM_SHIPYARD,   1, { {ITEM_WOOD, 30}, {ITEM_PLANK, 10} }, 2 },
+        { "craft_plank",         ITEM_PLANK,        1, { {ITEM_WOOD, 30}, {0,0}             }, 1 },
+        { "craft_sail",          ITEM_SAIL,          1, { {ITEM_WOOD, 40}, {ITEM_FIBER, 100} }, 2 },
+        { "craft_helm",          ITEM_HELM,          1, { {ITEM_WOOD, 10}, {0,0}             }, 1 },
+        { "craft_cannon",        ITEM_CANNON,        1, { {ITEM_WOOD,  8}, {ITEM_METAL, 20}  }, 2 },
+        { "craft_swivel",        ITEM_SWIVEL,        1, { {ITEM_WOOD,  5}, {ITEM_METAL,  8}  }, 2 },
+        { "craft_sword",         ITEM_SWORD,         1, { {ITEM_WOOD,  2}, {ITEM_METAL,  5}  }, 2 },
+        { "craft_wall",          ITEM_WALL,          4, { {ITEM_WOOD, 10}, {0,0}             }, 1 },
+        { "craft_door_frame",    ITEM_DOOR_FRAME,    1, { {ITEM_WOOD,  6}, {0,0}             }, 1 },
+        { "craft_door",          ITEM_DOOR,          1, { {ITEM_WOOD,  4}, {0,0}             }, 1 },
+        { "craft_shipyard",      ITEM_SHIPYARD,      1, { {ITEM_WOOD, 30}, {ITEM_PLANK, 10}  }, 2 },
+        /* Workbench-only recipes */
+        { "craft_floor",         ITEM_WOODEN_FLOOR,  1, { {ITEM_WOOD, 20}, {0,0}             }, 1 },
+        { "craft_workbench",     ITEM_WORKBENCH,     1, { {ITEM_WOOD, 15}, {ITEM_STONE, 10}  }, 2 },
+        { "craft_wood_ceiling",  ITEM_WOOD_CEILING,  1, { {ITEM_WOOD, 15}, {0,0}             }, 1 },
+        { "craft_stone_axe",     ITEM_AXE,           1, { {ITEM_WOOD,  2}, {ITEM_STONE,  5}  }, 2 },
+        { "craft_stone_pickaxe", ITEM_PICKAXE,       1, { {ITEM_WOOD,  2}, {ITEM_STONE,  4}  }, 2 },
+        { "craft_hammer",        ITEM_HAMMER,        1, { {ITEM_WOOD,  4}, {0,0}             }, 1 },
     };
     const int num_recipes = (int)(sizeof(recipes) / sizeof(recipes[0]));
 

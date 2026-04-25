@@ -1,7 +1,7 @@
 {
   "name": "test",
-  "x": -5915.494,
-  "y": 1514.555,
+  "x": -1001.999,
+  "y": 1456.798,
   "parent_ship_id": 0,
   "local_x": 0.000,
   "local_y": 0.000,
@@ -14,8 +14,8 @@
   "stat_stamina": 0,
   "stat_weight": 0,
   "company_id": 0,
-  "active_slot": 6,
+  "active_slot": 255,
   "armor": 0,
   "shield": 0,
-  "slots": [{"item":14,"qty":3},{"item":6,"qty":1},{"item":4,"qty":1},{"item":15,"qty":1},{"item":16,"qty":10},{"item":17,"qty":2},{"item":0,"qty":0},{"item":23,"qty":30},{"item":22,"qty":99},{"item":0,"qty":0}]
+  "slots": [{"item":14,"qty":3},{"item":6,"qty":1},{"item":4,"qty":1},{"item":15,"qty":1},{"item":16,"qty":7},{"item":17,"qty":2},{"item":0,"qty":0},{"item":23,"qty":30},{"item":22,"qty":99},{"item":0,"qty":0}]
 }
