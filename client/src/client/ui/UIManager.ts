@@ -18,6 +18,7 @@ import { ShipMenu } from './ShipMenu.js';
 import { CrewLevelMenu } from './CrewLevelMenu.js';
 import { RespawnScreen } from './RespawnScreen.js';
 import { WorldMapScreen } from './WorldMapScreen.js';
+import { TombstoneMenu } from './TombstoneMenu.js';
 
 /**
  * UI render context
@@ -113,6 +114,9 @@ export class UIManager {
 
   // World map screen — toggleable with M
   private worldMapScreen = new WorldMapScreen();
+
+  // Tombstone inventory menu
+  public tombstoneMenu = new TombstoneMenu();
 
   /** Which menu is currently open — null when none. */
   private activeMenuId: MenuId | null = null;
@@ -342,6 +346,7 @@ export class UIManager {
 
   /** Forward mouse-move to the world map or respawn screen for drag-pan. */
   handleWorldMapMouseMove(x: number, y: number): void {
+    if (this.tombstoneMenu.visible) this.tombstoneMenu.handleMouseMove(x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) this.playerMenu.handleMouseMove(x, y);
     if (this.respawnScreen.visible) this.respawnScreen.handleMouseMove(x, y);
     this.worldMapScreen.handleMouseMove(x, y);
@@ -349,6 +354,7 @@ export class UIManager {
 
   /** Notify world map / respawn screen of mouse-up to end drag. */
   handleWorldMapMouseUp(x = 0, y = 0): void {
+    if (this.tombstoneMenu.visible) this.tombstoneMenu.handleMouseUp(x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) this.playerMenu.handleMouseUp(x, y);
     if (this.respawnScreen.visible) this.respawnScreen.handleMouseUp();
     this.worldMapScreen.handleMouseUp();
@@ -357,6 +363,7 @@ export class UIManager {
   /** Forward wheel delta to the respawn screen or world map for zoom. Returns true if consumed. */
   handleWorldMapWheel(deltaY: number, x: number, y: number): boolean {
     if (this._dropPicker.open) return this.handleDropPickerWheel(deltaY);
+    if (this.tombstoneMenu.visible) return this.tombstoneMenu.handleWheel(x, y, deltaY);
     if (this.respawnScreen.visible) return this.respawnScreen.handleWheel(deltaY, x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) return this.playerMenu.handleWheel(deltaY, x, y);
     return this.worldMapScreen.handleWheel(deltaY, x, y);
@@ -369,6 +376,10 @@ export class UIManager {
   handleKeyDown(key: string): boolean {
     if (key === 'Escape' && this._dropPicker.open) {
       this._dropPicker.open = false;
+      return true;
+    }
+    if (key === 'Escape' && this.tombstoneMenu.visible) {
+      this.tombstoneMenu.close();
       return true;
     }
     if (!this.hammerGame.active) return false;
@@ -525,6 +536,11 @@ export class UIManager {
     // Drop picker — topmost overlay
     if (this._dropPicker.open) {
       this._renderDropPicker(ctx);
+    }
+
+    // Tombstone menu — rendered above everything else
+    if (this.tombstoneMenu.visible) {
+      this.tombstoneMenu.render(ctx);
     }
   }
   
@@ -1098,6 +1114,10 @@ export class UIManager {
   }
 
   handleClick(x: number, y: number): boolean {
+    // Tombstone menu takes highest priority
+    if (this.tombstoneMenu.visible) {
+      return this.tombstoneMenu.handleMouseDown(x, y);
+    }
     // Respawn screen takes absolute priority — blocks all game input
     if (this.respawnScreen.visible) {
       return this.respawnScreen.handleClick(x, y);

@@ -625,6 +625,8 @@ export class NetworkManager {
   public onTombstoneCollected: ((id: number, playerId: number) => void) | null = null;
   /** Fired when a tombstone despawns (15-min TTL expired). */
   public onTombstoneDespawned: ((id: number) => void) | null = null;
+  /** Fired when the server sends tombstone item contents (response to tombstone_open). */
+  public onTombstoneItems: ((id: number, ownerName: string, slots: Array<[number, number]>, equip: Record<string, number>) => void) | null = null;
   
   constructor(config: NetworkConfig) {
     this.config = config;
@@ -1267,6 +1269,18 @@ export class NetworkManager {
   sendCollectTombstone(id: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: 'collect_tombstone', id, timestamp: Date.now() }));
+  }
+
+  /** Ask the server to open the tombstone storage menu (sends back tombstone_items). */
+  sendTombstoneOpen(id: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'tombstone_open', id, timestamp: Date.now() }));
+  }
+
+  /** Take one inventory slot from a tombstone. */
+  sendTombstoneTakeSlot(tombstoneId: number, slot: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'tombstone_take_slot', id: tombstoneId, slot, timestamp: Date.now() }));
   }
 
   /**
@@ -2524,6 +2538,15 @@ export class NetworkManager {
 
       case 'tombstone_despawned':
         this.onTombstoneDespawned?.(message.id ?? 0);
+        break;
+
+      case 'tombstone_items':
+        this.onTombstoneItems?.(
+          message.id ?? 0,
+          message.ownerName ?? '',
+          message.slots ?? [],
+          message.equip ?? {}
+        );
         break;
 
       case 'tombstone_collect_fail':

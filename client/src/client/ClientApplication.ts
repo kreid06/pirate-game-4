@@ -780,11 +780,11 @@ export class ClientApplication {
             }
           }
 
-          // Collect tombstone: any player on foot within 80px → press E
+          // Collect tombstone: any player on foot within 80px → press E → open menu
           if (player && player.carrierId === 0) {
             const tomb = this.renderSystem.getHoveredTombstone();
             if (tomb) {
-              this.networkManager.sendCollectTombstone(tomb.id);
+              this.networkManager.sendTombstoneOpen(tomb.id);
               return;
             }
           }
@@ -1649,9 +1649,25 @@ export class ClientApplication {
       };
       this.networkManager.onTombstoneCollected = (id) => {
         this.renderSystem.removeTombstone(id);
+        if (this.uiManager.tombstoneMenu.visible) this.uiManager.tombstoneMenu.close();
       };
       this.networkManager.onTombstoneDespawned = (id) => {
         this.renderSystem.removeTombstone(id);
+        if (this.uiManager.tombstoneMenu.visible) this.uiManager.tombstoneMenu.close();
+      };
+      this.networkManager.onTombstoneItems = (id, ownerName, slots, _equip) => {
+        const menu = this.uiManager.tombstoneMenu;
+        const ws  = this.authoritativeWorldState ?? this.predictedWorldState;
+        const pid = this.networkManager.getAssignedPlayerId();
+        const inv = ws?.players.find(p => p.id === pid)?.inventory ?? null;
+        menu.open(id, ownerName, slots);
+        menu.setPlayerInventory(inv);
+        menu.onTakeSlot = (tombId, slot) => {
+          this.networkManager.sendTombstoneTakeSlot(tombId, slot);
+        };
+        menu.onTakeAll = (tombId) => {
+          this.networkManager.sendCollectTombstone(tombId);
+        };
       };
       this.networkManager.onStructureDemolished = (id, x, y) => {
         this.renderSystem.removePlacedStructure(id);

@@ -357,6 +357,7 @@ export class PredictionEngine {
       })),
       npcs: state.npcs,
       tombstones: state.tombstones,
+      droppedItems: state.droppedItems ?? [],
       carrierDetection: new Map(state.carrierDetection)
     };
   }
@@ -396,6 +397,7 @@ export class PredictionEngine {
       cannonballs: this.interpolateCannonballs(from.cannonballs, to.cannonballs, smoothAlpha),
       npcs: to.npcs,
       tombstones: to.tombstones ?? [],
+      droppedItems: to.droppedItems ?? [],
       carrierDetection: new Map(from.carrierDetection)
     };
   }
@@ -722,6 +724,7 @@ export class PredictionEngine {
       cannonballs: to.cannonballs, // Don't smooth projectiles
       npcs: to.npcs,
       tombstones: to.tombstones ?? [],
+      droppedItems: to.droppedItems ?? [],
       carrierDetection: to.carrierDetection,
     };
   }
@@ -772,6 +775,7 @@ export class PredictionEngine {
       })),
       npcs: worldState.npcs || [],
       tombstones: worldState.tombstones ?? [],
+      droppedItems: worldState.droppedItems ?? [],
       carrierDetection: new Map(worldState.carrierDetection)
     };
   }

@@ -830,6 +830,130 @@ static void ws_send_text(int fd, const char* msg) {
     if (fl > 0) send(fd, frame, fl, 0);
 }
 
+/* Helper: serialize tombstone inventory and send tombstone_items to one client. */
+static void send_tombstone_items(struct WebSocketClient* client, Tombstone* t) {
+    char msg[2048];
+    int off = snprintf(msg, sizeof(msg),
+        "{\"type\":\"tombstone_items\",\"id\":%u,\"ownerName\":\"%s\","
+        "\"equip\":{\"helm\":%d,\"torso\":%d,\"legs\":%d,"
+                   "\"feet\":%d,\"hands\":%d,\"shield\":%d},\"slots\":[",
+        t->id, t->owner_name,
+        (int)t->inventory.equipment.helm,  (int)t->inventory.equipment.torso,
+        (int)t->inventory.equipment.legs,  (int)t->inventory.equipment.feet,
+        (int)t->inventory.equipment.hands, (int)t->inventory.equipment.shield);
+    for (int s = 0; s < INVENTORY_SLOTS && off < (int)sizeof(msg) - 16; s++) {
+        if (s > 0) msg[off++] = ',';
+        off += snprintf(msg + off, sizeof(msg) - off, "[%d,%d]",
+            (int)t->inventory.slots[s].item,
+            (int)t->inventory.slots[s].quantity);
+    }
+    off += snprintf(msg + off, sizeof(msg) - off, "]}");
+    char frame[2200];
+    size_t fl = websocket_create_frame(WS_OPCODE_TEXT, msg, (size_t)off, frame, sizeof(frame));
+    if (fl > 0) send(client->fd, frame, fl, 0);
+}
+
+/**
+ * Handle tombstone_open: player opened the tombstone menu.
+ * Range-checks and sends back tombstone_items to just this client.
+ */
+static void handle_tombstone_open(WebSocketPlayer* player,
+                                   struct WebSocketClient* client,
+                                   const char* payload) {
+    uint32_t tomb_id = 0;
+    const char* p_id = strstr(payload, "\"id\":");
+    if (p_id) tomb_id = (uint32_t)atoi(p_id + 5);
+
+    Tombstone* t = NULL;
+    for (int i = 0; i < (int)MAX_TOMBSTONES; i++) {
+        if (tombstones[i].active && tombstones[i].id == tomb_id) {
+            t = &tombstones[i]; break;
+        }
+    }
+    if (!t) {
+        char resp[128];
+        snprintf(resp, sizeof(resp),
+            "{\"type\":\"tombstone_collect_fail\",\"reason\":\"not_found\",\"id\":%u}", tomb_id);
+        ws_send_text(client->fd, resp);
+        return;
+    }
+    float dx = player->x - t->x, dy = player->y - t->y;
+    if (dx * dx + dy * dy > 80.0f * 80.0f) {
+        char resp[128];
+        snprintf(resp, sizeof(resp),
+            "{\"type\":\"tombstone_collect_fail\",\"reason\":\"too_far\",\"id\":%u}", tomb_id);
+        ws_send_text(client->fd, resp);
+        return;
+    }
+    send_tombstone_items(client, t);
+}
+
+/**
+ * Handle tombstone_take_slot: player dragged one slot out of the tombstone.
+ * Grants that item to the player, clears the tombstone slot.
+ * If tombstone becomes empty, removes it and broadcasts tombstone_collected.
+ * Otherwise sends updated tombstone_items back to the requesting client.
+ */
+static void handle_tombstone_take_slot(WebSocketPlayer* player,
+                                        struct WebSocketClient* client,
+                                        const char* payload) {
+    uint32_t tomb_id = 0;
+    int slot = -1;
+    const char* p_id = strstr(payload, "\"id\":");
+    const char* p_sl = strstr(payload, "\"slot\":");
+    if (p_id) tomb_id = (uint32_t)atoi(p_id + 5);
+    if (p_sl) slot    = atoi(p_sl + 7);
+
+    if (slot < 0 || slot >= INVENTORY_SLOTS) return;
+
+    Tombstone* t = NULL;
+    for (int i = 0; i < (int)MAX_TOMBSTONES; i++) {
+        if (tombstones[i].active && tombstones[i].id == tomb_id) {
+            t = &tombstones[i]; break;
+        }
+    }
+    if (!t) return;
+    float dx = player->x - t->x, dy = player->y - t->y;
+    if (dx * dx + dy * dy > 80.0f * 80.0f) return;
+
+    InventorySlot* isl = &t->inventory.slots[slot];
+    if (isl->item == ITEM_NONE || isl->quantity == 0) return;
+
+    craft_grant(player, isl->item, (int)isl->quantity);
+    isl->item     = ITEM_NONE;
+    isl->quantity = 0;
+
+    /* Check if tombstone is now completely empty */
+    bool any_left = false;
+    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+        if (t->inventory.slots[s].item != ITEM_NONE && t->inventory.slots[s].quantity > 0)
+            { any_left = true; break; }
+    }
+    if (!any_left) {
+        if (t->inventory.equipment.helm   != ITEM_NONE ||
+            t->inventory.equipment.torso  != ITEM_NONE ||
+            t->inventory.equipment.legs   != ITEM_NONE ||
+            t->inventory.equipment.feet   != ITEM_NONE ||
+            t->inventory.equipment.hands  != ITEM_NONE ||
+            t->inventory.equipment.shield != ITEM_NONE)
+            any_left = true;
+    }
+
+    if (!any_left) {
+        t->active = false;
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+            "{\"type\":\"tombstone_collected\",\"id\":%u,\"playerId\":%u}",
+            tomb_id, player->player_id);
+        websocket_server_broadcast(msg);
+        log_info("⚰️  Tombstone %u emptied slot-by-slot by player %u", tomb_id, player->player_id);
+        return;
+    }
+
+    /* Send refreshed tombstone contents back to this client */
+    send_tombstone_items(client, t);
+}
+
 static void handle_drop_item(WebSocketPlayer* player,
                               struct WebSocketClient* client,
                               const char* payload)
@@ -2260,10 +2384,26 @@ int websocket_server_update(struct Sim* sim) {
                             handled = true;
 
                         } else if (strcmp(msg_type, "collect_tombstone") == 0) {
-                            // TOMBSTONE: player presses E near a tombstone item cache
+                            // TOMBSTONE: take-all (legacy / "Take All" button)
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) handle_collect_tombstone(player, client, payload);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "tombstone_open") == 0) {
+                            // TOMBSTONE MENU: player opened the tombstone storage UI
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_tombstone_open(player, client, payload);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "tombstone_take_slot") == 0) {
+                            // TOMBSTONE MENU: player dragged/clicked one slot from the tombstone
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_tombstone_take_slot(player, client, payload);
                             }
                             handled = true;
 

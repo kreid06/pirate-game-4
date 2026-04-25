@@ -2550,12 +2550,6 @@ export class RenderSystem {
       o.ship.rotation = o.origRot;
     }
 
-    // ── Tombstones (above ground, below UI) ───────────────────────────────────
-    this.drawTombstones(this.ctx, camera.getState());
-
-    // ── Dropped items (bags on the ground) ────────────────────────────────────
-    this.drawDroppedItems(this.ctx, camera.getState());
-
     // Draw explicit B-key build mode ghost (always on top of world objects)
     if (this.explicitBuildState) {
       this.drawExplicitBuildGhost(worldState, camera);
@@ -3248,6 +3242,9 @@ export class RenderSystem {
 
     // ── Structures: above trunks, below leaves ────────────────────────────────
     this.drawPlacedStructures(camera);
+    // ── Dropped items then tombstones (above boulders, below players) ─────────
+    this.drawDroppedItems(this.ctx, camera.getState());
+    this.drawTombstones(this.ctx, camera.getState());
     // Tree leaves and prompts are drawn in renderWorld after bushes (player → bushes → leaves)
   }
 
