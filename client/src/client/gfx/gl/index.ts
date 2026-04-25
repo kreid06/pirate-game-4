@@ -23,3 +23,6 @@ export { SpriteAtlas }                       from './SpriteAtlas.js';
 export type { UVRect }                       from './SpriteAtlas.js';
 
 export { OceanRenderer }                     from './OceanRenderer.js';
+
+export { GLWorldRenderer }                   from './GLWorldRenderer.js';
+export type { PlayerColorState }             from './GLWorldRenderer.js';

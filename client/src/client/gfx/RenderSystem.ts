@@ -15,6 +15,7 @@ import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
 import { RadialMenu } from '../ui/RadialMenu.js';
+import { GLWorldRenderer, PlayerColorState } from './gl/GLWorldRenderer.js';
 
 /** Max hull HP for ghost (Phantom Brig) ships — server uses raw HP scale, not 0-100. */
 const GHOST_MAX_HULL_HP = 60000;
@@ -55,6 +56,11 @@ export class RenderSystem {
   // Sub-systems
   private particleSystem: ParticleSystem;
   private effectRenderer: EffectRenderer;
+
+  /** WebGL2 world renderer — null when WebGL2 is unavailable or disabled. */
+  private _gl: GLWorldRenderer | null = null;
+  /** Elapsed time in seconds, passed to GL shaders for animation. */
+  private _glTimeSec = 0;
   
   // Render queue for layered rendering (10 pre-allocated buckets: index 0 = layer -1, index 1-9 = layers 1-9)
   private readonly renderBuckets: RenderQueueItem[][] = Array.from({length: 10}, () => []);
@@ -130,6 +136,7 @@ export class RenderSystem {
     sp: { x: number; y: number };
     isHovered: boolean; bushAlpha: number; deathAlpha: number;
     ox: number; oy: number;
+    wx: number; wy: number;
   }> = [];
   /** All visible resources — populated by drawIsland, leaves+prompts drawn after bushes in renderWorld. */
   private _pendingAllRes: Array<{
@@ -712,6 +719,38 @@ export class RenderSystem {
     
     console.log('✅ Render system initialized');
   }
+
+  // ── GL world renderer integration ─────────────────────────────────────────
+
+  /**
+   * Attach a GLWorldRenderer. Call once after the GL canvas is created.
+   * Pass null to fall back to Canvas 2D-only rendering.
+   */
+  setGLRenderer(gl: GLWorldRenderer | null): void {
+    this._gl = gl;
+    console.log(gl ? '[GL] RenderSystem using WebGL2 world renderer' : '[GL] Falling back to Canvas 2D');
+  }
+
+  /**
+   * Begin a GL frame — call BEFORE renderWorld() each frame when GL is active.
+   * @param camX      Camera world X
+   * @param camY      Camera world Y
+   * @param zoom      Pixels per world unit
+   * @param deltaMs   Frame delta in milliseconds (for time accumulation)
+   */
+  beginGLFrame(camX: number, camY: number, zoom: number, deltaMs: number): void {
+    if (!this._gl) return;
+    this._glTimeSec += deltaMs / 1000;
+    this._gl.beginFrame(camX, camY, zoom, this._glTimeSec);
+  }
+
+  /** Flush the GL batcher — call AFTER renderWorld() each frame when GL is active. */
+  endGLFrame(): void {
+    this._gl?.endFrame();
+  }
+
+  /** GL draw-call count from the last frame (for perf HUD). 0 if GL is not active. */
+  get glDrawCallCount(): number { return this._gl?.drawCallCount ?? 0; }
   
   /**
    * Spawn a floating damage number at a world position
@@ -2516,13 +2555,13 @@ export class RenderSystem {
     // ── Fiber bushes — above players, below tree leaves ──────────────────────
     const zoom = camera.getState().zoom;
     for (const b of this._pendingBushes) {
-      this.drawIslandFiberPlant(b.sp.x, b.sp.y, zoom, b.isHovered, b.bushAlpha * b.deathAlpha, b.ox, b.oy);
+      this.drawIslandFiberPlant(b.sp.x, b.sp.y, zoom, b.isHovered, b.bushAlpha * b.deathAlpha, b.ox, b.oy, b.wx, b.wy);
     }
 
     // ── Tree leaves — above bushes and players ────────────────────────────────
     for (const e of this._pendingAllRes) {
       if (e.res.type !== 'wood') continue;
-      this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha);
+      this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha, e.wx, e.wy);
     }
 
     // ── Hover prompts + health bars (always on top) ───────────────────────────
@@ -2840,6 +2879,10 @@ export class RenderSystem {
   }
   
   private drawWater(camera: Camera): void {
+    if (this._gl) {
+      // GL ocean renderer already drew the background — Canvas 2D stays transparent
+      return;
+    }
     // Simple solid water color
     this.ctx.fillStyle = '#1e90ff'; // Ocean blue
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
@@ -3216,12 +3259,12 @@ export class RenderSystem {
       // Pass 1 – rocks (below structures)
       for (const e of visibleRes) {
         if (e.res.type !== 'rock') continue;
-        this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha, e.res.ox, e.res.oy);
+        this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha, e.res.ox, e.res.oy, e.wx, e.wy);
       }
       // Pass 2 – boulders (above rocks, below players)
       for (const e of visibleRes) {
         if (e.res.type !== 'boulder') continue;
-        this.drawIslandBoulder(e.sp.x, e.sp.y, zoom, e.isHovered, e.boulderAlpha * e.deathAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0);
+        this.drawIslandBoulder(e.sp.x, e.sp.y, zoom, e.isHovered, e.boulderAlpha * e.deathAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.wx, e.wy);
       }
       // Pass 3 – tree trunks (only visible when player is near or hovering)
       for (const e of visibleRes) {
@@ -3230,12 +3273,12 @@ export class RenderSystem {
         // Trunk fades IN as leaves fade OUT — inverse of leafAlpha
         const trunkAlpha = (1.0 - e.leafAlpha) * e.deathAlpha;
         if (trunkAlpha < 0.01) continue;
-        this.drawIslandTreeTrunk(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.playerNear, e.res.size ?? 1.0, trunkAlpha);
+        this.drawIslandTreeTrunk(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.playerNear, e.res.size ?? 1.0, trunkAlpha, e.wx, e.wy);
       }
       // Fiber bushes deferred to _pendingBushes — drawn above players after render queue
       for (const e of visibleRes) {
         if (e.res.type !== 'fiber') continue;
-        this._pendingBushes.push({ sp: e.sp, isHovered: e.isHovered, bushAlpha: e.bushAlpha, deathAlpha: e.deathAlpha, ox: e.res.ox, oy: e.res.oy });
+        this._pendingBushes.push({ sp: e.sp, isHovered: e.isHovered, bushAlpha: e.bushAlpha, deathAlpha: e.deathAlpha, ox: e.res.ox, oy: e.res.oy, wx: e.wx, wy: e.wy });
       }
       this._pendingAllRes.push(...visibleRes);
     }
@@ -3307,7 +3350,7 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandTreeLeaves(sx: number, sy: number, zoom: number, hovered = false, inRange = false, leafAlpha = 1.0, seedX = 0, seedY = 0, size = 1.0, deathAlpha = 1.0): void {
+  private drawIslandTreeLeaves(sx: number, sy: number, zoom: number, hovered = false, inRange = false, leafAlpha = 1.0, seedX = 0, seedY = 0, size = 1.0, deathAlpha = 1.0, wx?: number, wy?: number): void {
     const ctx = this.ctx;
     const h  = (Math.imul(seedX | 0, 2654435761) ^ Math.imul(seedY | 0, 1664525)) >>> 0;
     const h2 = (Math.imul(h, 2246822519) ^ Math.imul(h >>> 13, 2654435761)) >>> 0;
@@ -3321,12 +3364,8 @@ export class RenderSystem {
     const rotBin    = Math.max(0, Math.min(BINS - 1,
       Math.round(((clusterRot + ROT_RANGE) / (2 * ROT_RANGE)) * (BINS - 1))));
 
-    const sprite     = RenderSystem._ensureTreeSprites().get(`${tintIdx}_${rotBin}`)!;
-    const spriteCanopy = RenderSystem.TREE_SPRITE_SIZE * 0.38; // matches bake
-    const drawSize   = RenderSystem.TREE_SPRITE_SIZE * (canopy / spriteCanopy);
-
     ctx.save();
-    // Hover glow (cheap direct draw — changes each frame)
+    // Hover glow (always Canvas 2D — drawn on the overlay canvas on top of GL sprite)
     if (hovered) {
       const glowColor = inRange ? 'rgba(255,230,80,0.22)' : 'rgba(180,180,180,0.15)';
       ctx.beginPath();
@@ -3334,10 +3373,20 @@ export class RenderSystem {
       ctx.fillStyle = glowColor;
       ctx.fill();
     }
-    // Sprite blit — single drawImage replaces 20 arc fills
-    ctx.globalAlpha = leafAlpha * deathAlpha;
-    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
-    // Hover ring
+
+    if (this._gl && wx !== undefined && wy !== undefined) {
+      // GL path: submit to batcher (drawn on the GL canvas beneath the 2D overlay)
+      this._gl.drawTreeLeaves(wx, wy, size, tintIdx, rotBin, leafAlpha * deathAlpha);
+    } else {
+      // Canvas 2D fallback
+      const sprite     = RenderSystem._ensureTreeSprites().get(`${tintIdx}_${rotBin}`)!;
+      const spriteCanopy = RenderSystem.TREE_SPRITE_SIZE * 0.38;
+      const drawSize   = RenderSystem.TREE_SPRITE_SIZE * (canopy / spriteCanopy);
+      ctx.globalAlpha = leafAlpha * deathAlpha;
+      ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
+    }
+
+    // Hover ring (always Canvas 2D)
     ctx.globalAlpha = deathAlpha;
     if (hovered) {
       ctx.beginPath();
@@ -3349,78 +3398,91 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandTreeTrunk(sx: number, sy: number, zoom: number, hovered = false, inRange = false, playerNear = false, size = 1.0, alpha = 1.0): void {
+  private drawIslandTreeTrunk(sx: number, sy: number, zoom: number, hovered = false, inRange = false, playerNear = false, size = 1.0, alpha = 1.0, wx?: number, wy?: number): void {
     const ctx      = this.ctx;
     const trunk    = 18 * zoom * size;
-    const spriteR  = RenderSystem.TRUNK_SPRITE_R;
-    const SIZE     = RenderSystem.TRUNK_SPRITE_SIZE;
-    const drawSize = SIZE * (trunk / spriteR);
-    // Caller only invokes this when playerNear || hovered, so show ring whenever hovered
-    const key    = hovered ? (inRange ? 'inrange' : 'hovered') : 'normal';
-    const sprite = RenderSystem._ensureTrunkSprites().get(key)!;
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
-    ctx.restore();
+    const key      = hovered ? (inRange ? 'inrange' : 'hovered') : 'normal';
+    if (this._gl && wx !== undefined && wy !== undefined) {
+      this._gl.drawTreeTrunk(wx, wy, size, key as 'normal' | 'hovered' | 'inrange', alpha);
+    } else {
+      const spriteR  = RenderSystem.TRUNK_SPRITE_R;
+      const SIZE     = RenderSystem.TRUNK_SPRITE_SIZE;
+      const drawSize = SIZE * (trunk / spriteR);
+      const sprite   = RenderSystem._ensureTrunkSprites().get(key)!;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
+      ctx.restore();
+    }
   }
 
-  private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0): void {
-    const ctx      = this.ctx;
-    const h        = 60 * zoom;
-    const spriteH  = RenderSystem.FIBER_SPRITE_H;
-    const SIZE     = RenderSystem.FIBER_SPRITE_SIZE;
-    const drawSize = SIZE * (h / spriteH);
-    const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
-    const ti       = hash % RenderSystem.FIBER_TINTS.length;
-    const bin      = (hash >> 4) % RenderSystem.FIBER_ROT_BINS;
-    const key      = `${ti}_${bin}_${hovered ? 'h' : 'n'}`;
-    const sprite   = RenderSystem._ensureFiberSprites().get(key)!;
-    // Full 360° rotation derived from a different hash bit-range
-    const rot      = ((hash >> 8) % 360) * Math.PI / 180;
-    ctx.save();
-    ctx.globalAlpha = deathAlpha;
-    ctx.translate(sx, sy);
-    ctx.rotate(rot);
-    ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
-    ctx.restore();
-  }
-
-  private drawIslandRock(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0): void {
+  private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0, wx?: number, wy?: number): void {
     const ctx  = this.ctx;
-    const R    = RenderSystem.ROCK_SPRITE_R;
-    const SIZE = RenderSystem.ROCK_SPRITE_SIZE;
-    const r    = 6 * zoom; // 50% smaller than original 12
-    const drawSize = SIZE * (r / R);
+    const hash = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
+    const ti   = hash % RenderSystem.FIBER_TINTS.length;
+    const bin  = (hash >> 4) % RenderSystem.FIBER_ROT_BINS;
+    const rot  = ((hash >> 8) % 360) * Math.PI / 180;
+    if (this._gl && wx !== undefined && wy !== undefined) {
+      this._gl.drawFiber(wx, wy, ti, bin, hovered, rot, deathAlpha);
+    } else {
+      const h        = 60 * zoom;
+      const spriteH  = RenderSystem.FIBER_SPRITE_H;
+      const SIZE     = RenderSystem.FIBER_SPRITE_SIZE;
+      const drawSize = SIZE * (h / spriteH);
+      const key      = `${ti}_${bin}_${hovered ? 'h' : 'n'}`;
+      const sprite   = RenderSystem._ensureFiberSprites().get(key)!;
+      ctx.save();
+      ctx.globalAlpha = deathAlpha;
+      ctx.translate(sx, sy);
+      ctx.rotate(rot);
+      ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
+      ctx.restore();
+    }
+  }
+
+  private drawIslandRock(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0, wx?: number, wy?: number): void {
+    const ctx  = this.ctx;
     const hash = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
     const ti   = hash % RenderSystem.ROCK_TONES.length;
     const si   = (hash >> 4) % RenderSystem.ROCK_SHAPES.length;
-    const key  = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
-    const sprite = RenderSystem._ensureRockSprites().get(key)!;
-    ctx.save();
-    ctx.globalAlpha = deathAlpha;
-    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
-    ctx.restore();
+    if (this._gl && wx !== undefined && wy !== undefined) {
+      this._gl.drawRock(wx, wy, ti, si, hovered, deathAlpha);
+    } else {
+      const R        = RenderSystem.ROCK_SPRITE_R;
+      const SIZE     = RenderSystem.ROCK_SPRITE_SIZE;
+      const r        = 6 * zoom;
+      const drawSize = SIZE * (r / R);
+      const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
+      const sprite   = RenderSystem._ensureRockSprites().get(key)!;
+      ctx.save();
+      ctx.globalAlpha = deathAlpha;
+      ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
+      ctx.restore();
+    }
   }
 
-  private drawIslandBoulder(sx: number, sy: number, zoom: number, hovered = false, alpha = 1.0, ox = 0, oy = 0, size = 1.0): void {
-    const ctx      = this.ctx;
-    const R        = RenderSystem.BOULDER_SPRITE_R;
-    const SIZE     = RenderSystem.BOULDER_SPRITE_SIZE;
-    const r        = 40 * zoom * size;
-    const drawSize = SIZE * (r / R);
-    const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
-    const ti       = hash % RenderSystem.BOULDER_TONES.length;
-    const si       = (hash >> 4) % RenderSystem.BOULDER_SHAPES.length;
-    // 256 rotation levels from bits 8–15 → ~1.4° granularity, essentially continuous
-    const drawRot  = ((hash >> 8) & 0xFF) / 256 * Math.PI * 2;
-    const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
-    const sprite   = RenderSystem._ensureBoulderSprites().get(key)!;
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.translate(sx, sy);
-    ctx.rotate(drawRot);
-    ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
-    ctx.restore();
+  private drawIslandBoulder(sx: number, sy: number, zoom: number, hovered = false, alpha = 1.0, ox = 0, oy = 0, size = 1.0, wx?: number, wy?: number): void {
+    const ctx  = this.ctx;
+    const hash = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
+    const ti   = hash % RenderSystem.BOULDER_TONES.length;
+    const si   = (hash >> 4) % RenderSystem.BOULDER_SHAPES.length;
+    const drawRot = ((hash >> 8) & 0xFF) / 256 * Math.PI * 2;
+    if (this._gl && wx !== undefined && wy !== undefined) {
+      this._gl.drawBoulder(wx, wy, size, ti, si, hovered, drawRot, alpha);
+    } else {
+      const R        = RenderSystem.BOULDER_SPRITE_R;
+      const SIZE     = RenderSystem.BOULDER_SPRITE_SIZE;
+      const r        = 40 * zoom * size;
+      const drawSize = SIZE * (r / R);
+      const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
+      const sprite   = RenderSystem._ensureBoulderSprites().get(key)!;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(sx, sy);
+      ctx.rotate(drawRot);
+      ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
+      ctx.restore();
+    }
   }
 
   /** Draw a floating "[E] action" or "Too far" prompt above a resource node. */
