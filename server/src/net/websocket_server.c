@@ -1100,10 +1100,10 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].player_id = player_id;
             players[i].sim_entity_id = 0; // Will be set when added to simulation
             
-            // Spawn player in water well above the ship for testing collision
+            // Spawn player at map centre
             players[i].parent_ship_id = 0;
-            players[i].x = 100.0f;  // Directly above the ship at (100, 100) in client coords
-            players[i].y = 600.0f;  // 500 units above in client coords
+            players[i].x = MAP_CENTER_X;
+            players[i].y = MAP_CENTER_Y;
             players[i].local_x = 0.0f;
             players[i].local_y = 0.0f;
             players[i].movement_state = PLAYER_STATE_SWIMMING;
@@ -2004,6 +2004,20 @@ int websocket_server_update(struct Sim* sim) {
                                         // Sent initial game state
                                     }
 
+                                    // Send MAP_INFO so the client knows world bounds and wrap behaviour
+                                    {
+                                        char mi_buf[256];
+                                        snprintf(mi_buf, sizeof(mi_buf),
+                                            "{\"type\":\"MAP_INFO\","
+                                            "\"width\":%.0f,\"height\":%.0f,"
+                                            "\"centerX\":%.0f,\"centerY\":%.0f,"
+                                            "\"wrap\":true}",
+                                            MAP_WIDTH, MAP_HEIGHT, MAP_CENTER_X, MAP_CENTER_Y);
+                                        char mi_frame[280];
+                                        size_t mi_fl = websocket_create_frame(WS_OPCODE_TEXT, mi_buf, strlen(mi_buf), mi_frame, sizeof(mi_frame));
+                                        if (mi_fl > 0) send(client->fd, mi_frame, mi_fl, 0);
+                                    }
+
                                     // Send ISLANDS so client can render island geometry
                                     {
                                         static char hs_islands_buf[600000];
@@ -2469,9 +2483,9 @@ int websocket_server_update(struct Sim* sim) {
                                             board_player_on_ship(player, target_ship, 0.0f, 0.0f);
                                             log_info("⚔️  Player %u respawned on ship %u", player->player_id, ship_id);
                                         } else {
-                                            // Ship not found — fall back to world spawn
-                                            player->x = 800.0f;
-                                            player->y = 600.0f;
+                                            // Ship not found — fall back to Island 1 shore
+                                            player->x = 50800.0f;
+                                            player->y = 50600.0f;
                                             player->parent_ship_id = 0;
                                             player->movement_state = PLAYER_STATE_SWIMMING;
                                             // Sync sim entity so the tick loop doesn't snap the player back
@@ -2487,8 +2501,7 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                     } else {
                                         // Spawn at provided world coordinates, island, or default
-                                        float spawn_x = 800.0f, spawn_y = 600.0f;
-
+                                        float spawn_x = MAP_CENTER_X, spawn_y = MAP_CENTER_Y;
                                         // Check for islandId — pick a random point on that island
                                         const char* p_iid = strstr(payload, "\"islandId\":");
                                         if (p_iid) {
@@ -7776,6 +7789,12 @@ void websocket_server_tick(float dt) {
                 if (!on_ship) {
                     ws_player->x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->position.x));
                     ws_player->y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->position.y));
+                    /* ── World wrap (toroidal map) ──────────────────────────────────── */
+                    ws_player->x = WORLD_WRAP(ws_player->x, MAP_WIDTH);
+                    ws_player->y = WORLD_WRAP(ws_player->y, MAP_HEIGHT);
+                    sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->x));
+                    sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->y));
+                    /* ────────────────────────────────────────────────────────────────── */
                     ws_player->velocity_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->velocity.x));
                     ws_player->velocity_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->velocity.y));
                     /* Island enter/leave detection (every tick, all non-ship players) */

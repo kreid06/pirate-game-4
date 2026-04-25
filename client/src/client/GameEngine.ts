@@ -128,6 +128,10 @@ export class GameEngine {
       tombstones: [],
       droppedItems: [],
       carrierDetection: new Map()
+    };
+  }
+
+  /**
    * Set up keyboard input handling
    */
   private setupInputHandlers(): void {

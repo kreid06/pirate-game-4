@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
@@ -632,7 +632,7 @@ export class RenderSystem {
   }
 
   private static readonly DEFAULT_ISLAND = {
-    id: 0, x: 800, y: 600, preset: 'tropical' as const,
+    id: 0, x: 50800, y: 50600, preset: 'tropical' as const,
     resources: [
       { ox: -65, oy: -55, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
       { ox:  85, oy: -25, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
@@ -645,19 +645,15 @@ export class RenderSystem {
   };
 
   /** Live island list — replaced by server ISLANDS message when received. */
-  private islands: Array<{
-    id: number; x: number; y: number; preset: string;
-    resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number }>;
-    vertices?: { x: number; y: number }[];
-  }> = [RenderSystem.DEFAULT_ISLAND];
+  private islands: IslandDef[] = [RenderSystem.DEFAULT_ISLAND as unknown as IslandDef];
 
   /** Called by ClientApplication when the server sends the ISLANDS message. */
-  setIslands(islands: Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number }>; vertices?: { x: number; y: number }[] }>): void {
+  setIslands(islands: IslandDef[]): void {
     this.islands = islands;
   }
 
   /** Returns the live island list (for proximity checks in ClientApplication). */
-  getIslands(): Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number }>; vertices?: { x: number; y: number }[] }> {
+  getIslands(): IslandDef[] {
     return this.islands;
   }
 
@@ -1153,7 +1149,7 @@ export class RenderSystem {
       if (this.axeEquipped && mod.kind !== 'plank') {
         const modWorldX = modShip.position.x + mod.localPos.x * Math.cos(modShip.rotation) - mod.localPos.y * Math.sin(modShip.rotation);
         const modWorldY = modShip.position.y + mod.localPos.x * Math.sin(modShip.rotation) + mod.localPos.y * Math.cos(modShip.rotation);
-        const hintScreen = camera.worldToScreen({ x: modWorldX, y: modWorldY });
+        const hintScreen = camera.worldToScreen(Vec2.from(modWorldX, modWorldY));
         const label = `🪓 E – Demolish ${mod.kind}`;
         const labelX = hintScreen.x;
         const labelY = hintScreen.y - 42;
