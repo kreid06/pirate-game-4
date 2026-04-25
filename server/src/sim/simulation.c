@@ -2669,7 +2669,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                     float by_cli = isl->y + res->oy;
                     float dx_cli = px_cli - bx_cli;
                     float dy_cli = py_cli - by_cli;
-                    /* Ellipse shape for projectile absorption — same hash as client */
+                    /* Rotated ellipse for projectile absorption — same hash as client */
                     static const float BSX[5] = { 1.00f, 0.88f, 1.18f, 0.72f, 1.35f };
                     static const float BSY[5] = { 0.72f, 0.88f, 0.60f, 1.00f, 0.50f };
                     uint32_t bseed2 = ((uint32_t)((int)res->ox * 73856093)) ^
@@ -2677,8 +2677,12 @@ void handle_projectile_collisions(struct Sim* sim) {
                     int bsi2 = (int)((bseed2 >> 4) % 5u);
                     float ax2 = 38.0f * res->size * BSX[bsi2];
                     float ay2 = 38.0f * res->size * BSY[bsi2];
-                    /* Point-in-ellipse: (dx/ax)^2 + (dy/ay)^2 < 1 */
-                    float ex = dx_cli / ax2, ey = dy_cli / ay2;
+                    float theta2 = ((float)((bseed2 >> 8) & 0xFFu) / 256.0f) * (2.0f * 3.14159265f);
+                    float c2 = cosf(theta2), s2 = sinf(theta2);
+                    /* Rotate delta into ellipse local frame, then point-in-ellipse test */
+                    float lx2 =  dx_cli * c2 + dy_cli * s2;
+                    float ly2 = -dx_cli * s2 + dy_cli * c2;
+                    float ex = lx2 / ax2, ey = ly2 / ay2;
                     if (ex*ex + ey*ey < 1.0f) {
                         log_info("💥 Proj %u hit boulder at (%.1f, %.1f) — absorbed",
                                  proj->id, bx_cli, by_cli);
@@ -2724,35 +2728,43 @@ static void handle_player_boulder_collisions(struct Sim* sim) {
                 float bx_cli = isl->x + res->ox;
                 float by_cli = isl->y + res->oy;
 
-                /* Derive shape index with the same hash as the client renderer */
+                /* Derive shape + rotation from same hash as client renderer */
                 uint32_t bseed = ((uint32_t)((int)res->ox * 73856093)) ^
                                  ((uint32_t)((int)res->oy * 19349663));
                 int bsi = (int)((bseed >> 4) % 5u);
-                float ax = BOULDER_BASE_R * res->size * BOULDER_SX[bsi]; /* ellipse x semi-axis */
-                float ay = BOULDER_BASE_R * res->size * BOULDER_SY[bsi]; /* ellipse y semi-axis */
+                float ax = BOULDER_BASE_R * res->size * BOULDER_SX[bsi];
+                float ay = BOULDER_BASE_R * res->size * BOULDER_SY[bsi];
+                float theta = ((float)((bseed >> 8) & 0xFFu) / 256.0f) * (2.0f * 3.14159265f);
+                float cos_t = cosf(theta), sin_t = sinf(theta);
 
                 float dx = px_cli - bx_cli;
                 float dy = py_cli - by_cli;
                 if (dx*dx < 1e-4f && dy*dy < 1e-4f) {
-                    /* Perfectly stacked — nudge outward */
                     dx = pr_cli; dy = 0.0f;
                 }
+                /* Rotate delta into ellipse local frame */
+                float dx_l =  dx * cos_t + dy * sin_t;
+                float dy_l = -dx * sin_t + dy * cos_t;
+
                 float dist_sq = dx*dx + dy*dy;
                 float dist = sqrtf(dist_sq);
                 float unx = dx / dist, uny = dy / dist;
 
-                /* Effective ellipse radius in the direction toward the player */
-                float inv_ax = unx / ax, inv_ay = uny / ay;
+                /* Effective ellipse radius along approach direction (in local frame) */
+                float unx_l =  unx * cos_t + uny * sin_t;
+                float uny_l = -unx * sin_t + uny * cos_t;
+                float inv_ax = unx_l / ax, inv_ay = uny_l / ay;
                 float r_eff = 1.0f / sqrtf(inv_ax*inv_ax + inv_ay*inv_ay);
                 float min_dist = pr_cli + r_eff;
                 if (dist >= min_dist) continue;
 
-                /* Ellipse surface normal: gradient of x^2/ax^2 + y^2/ay^2 = 1 */
-                float gx = dx / (ax * ax), gy = dy / (ay * ay);
-                float gn = sqrtf(gx*gx + gy*gy);
-                if (gn < 1e-6f) { gx = 1.0f; gn = 1.0f; }
-                float nx = gx / gn;
-                float ny = gy / gn;
+                /* Ellipse surface normal in local frame, rotated back to world */
+                float gx_l = dx_l / (ax * ax), gy_l = dy_l / (ay * ay);
+                float gn = sqrtf(gx_l*gx_l + gy_l*gy_l);
+                if (gn < 1e-6f) { gx_l = 1.0f; gn = 1.0f; }
+                float nx_l = gx_l / gn, ny_l = gy_l / gn;
+                float nx = nx_l * cos_t - ny_l * sin_t;
+                float ny = nx_l * sin_t + ny_l * cos_t;
 
                 float pen = min_dist - dist;
                 float corr_cli = BAUMGARTE * pen;

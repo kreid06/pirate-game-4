@@ -3171,9 +3171,8 @@ export class RenderSystem {
     const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
     const ti       = hash % RenderSystem.BOULDER_TONES.length;
     const si       = (hash >> 4) % RenderSystem.BOULDER_SHAPES.length;
-    // 16 rotation bins → 22.5° steps, deterministic per boulder position
-    const ri       = (hash >> 8) % 16;
-    const drawRot  = (ri / 16) * Math.PI * 2;
+    // 256 rotation levels from bits 8–15 → ~1.4° granularity, essentially continuous
+    const drawRot  = ((hash >> 8) & 0xFF) / 256 * Math.PI * 2;
     const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
     const sprite   = RenderSystem._ensureBoulderSprites().get(key)!;
     ctx.save();

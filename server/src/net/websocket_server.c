@@ -7031,21 +7031,31 @@ void websocket_server_tick(float dt) {
                                         int bsi = (int)((bseed >> 4) % 5u);
                                         float ax = BOULDER_BASE_R * res->size * BSX[bsi];
                                         float ay = BOULDER_BASE_R * res->size * BSY[bsi];
+                                        float theta = ((float)((bseed >> 8) & 0xFFu) / 256.0f) * (2.0f * 3.14159265f);
+                                        float cos_t = cosf(theta), sin_t = sinf(theta);
                                         float bx = isl_mv->x + res->ox;
                                         float by = isl_mv->y + res->oy;
                                         float dx = new_x - bx, dy = new_y - by;
                                         float dist_sq = dx*dx + dy*dy;
                                         if (dist_sq < 1e-4f) { dx = PLAYER_R; dy = 0.0f; dist_sq = PLAYER_R*PLAYER_R; }
                                         float dist = sqrtf(dist_sq);
+                                        /* Rotate into ellipse local frame */
+                                        float dx_l =  dx * cos_t + dy * sin_t;
+                                        float dy_l = -dx * sin_t + dy * cos_t;
                                         float unx = dx / dist, uny = dy / dist;
-                                        float inv_ax = unx / ax, inv_ay = uny / ay;
+                                        float unx_l =  unx * cos_t + uny * sin_t;
+                                        float uny_l = -unx * sin_t + uny * cos_t;
+                                        float inv_ax = unx_l / ax, inv_ay = uny_l / ay;
                                         float r_eff = 1.0f / sqrtf(inv_ax*inv_ax + inv_ay*inv_ay);
                                         float min_dist = PLAYER_R + r_eff;
                                         if (dist >= min_dist) continue;
-                                        float gx = dx / (ax*ax), gy = dy / (ay*ay);
-                                        float gn = sqrtf(gx*gx + gy*gy);
-                                        if (gn < 1e-6f) { gx = 1.0f; gn = 1.0f; }
-                                        float nx = gx / gn, ny = gy / gn;
+                                        /* Normal in local frame → rotate back to world */
+                                        float gx_l = dx_l / (ax*ax), gy_l = dy_l / (ay*ay);
+                                        float gn = sqrtf(gx_l*gx_l + gy_l*gy_l);
+                                        if (gn < 1e-6f) { gx_l = 1.0f; gn = 1.0f; }
+                                        float nx_l = gx_l / gn, ny_l = gy_l / gn;
+                                        float nx = nx_l * cos_t - ny_l * sin_t;
+                                        float ny = nx_l * sin_t + ny_l * cos_t;
                                         float pen = min_dist - dist;
                                         new_x += nx * pen;
                                         new_y += ny * pen;
