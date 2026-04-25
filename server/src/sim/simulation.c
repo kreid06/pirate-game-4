@@ -2672,12 +2672,13 @@ void handle_projectile_collisions(struct Sim* sim) {
                     /* Rotated ellipse for projectile absorption — same hash as client */
                     static const float BSX[5] = { 1.00f, 0.88f, 1.18f, 0.72f, 1.35f };
                     static const float BSY[5] = { 0.72f, 0.88f, 0.60f, 1.00f, 0.50f };
+                    static const float BSR[5] = { 0.00f, 0.40f, -0.20f, 1.20f, 0.15f };
                     uint32_t bseed2 = ((uint32_t)((int)res->ox * 73856093)) ^
                                      ((uint32_t)((int)res->oy * 19349663));
                     int bsi2 = (int)((bseed2 >> 4) % 5u);
                     float ax2 = 38.0f * res->size * BSX[bsi2];
                     float ay2 = 38.0f * res->size * BSY[bsi2];
-                    float theta2 = ((float)((bseed2 >> 8) & 0xFFu) / 256.0f) * (2.0f * 3.14159265f);
+                    float theta2 = BSR[bsi2] + ((float)((bseed2 >> 8) & 0xFFu) / 256.0f) * (2.0f * 3.14159265f);
                     float c2 = cosf(theta2), s2 = sinf(theta2);
                     /* Rotate delta into ellipse local frame, then point-in-ellipse test */
                     float lx2 =  dx_cli * c2 + dy_cli * s2;
@@ -2706,9 +2707,10 @@ void handle_projectile_collisions(struct Sim* sim) {
 static void handle_player_boulder_collisions(struct Sim* sim) {
     static const float BAUMGARTE = 0.6f;
     static const float BOULDER_BASE_R = 38.0f;
-    /* sx/sy shape factors — must match client BOULDER_SHAPES order exactly */
-    static const float BOULDER_SX[5] = { 1.00f, 0.88f, 1.18f, 0.72f, 1.35f };
-    static const float BOULDER_SY[5] = { 0.72f, 0.88f, 0.60f, 1.00f, 0.50f };
+    /* sx/sy/rot shape factors — must match client BOULDER_SHAPES order exactly */
+    static const float BOULDER_SX[5]  = { 1.00f, 0.88f, 1.18f, 0.72f, 1.35f };
+    static const float BOULDER_SY[5]  = { 0.72f, 0.88f, 0.60f, 1.00f, 0.50f };
+    static const float BOULDER_ROT[5] = { 0.00f, 0.40f, -0.20f, 1.20f, 0.15f };
 
     for (uint16_t pi = 0; pi < sim->player_count; pi++) {
         struct Player* p = &sim->players[pi];
@@ -2734,7 +2736,7 @@ static void handle_player_boulder_collisions(struct Sim* sim) {
                 int bsi = (int)((bseed >> 4) % 5u);
                 float ax = BOULDER_BASE_R * res->size * BOULDER_SX[bsi];
                 float ay = BOULDER_BASE_R * res->size * BOULDER_SY[bsi];
-                float theta = ((float)((bseed >> 8) & 0xFFu) / 256.0f) * (2.0f * 3.14159265f);
+                float theta = BOULDER_ROT[bsi] + ((float)((bseed >> 8) & 0xFFu) / 256.0f) * (2.0f * 3.14159265f);
                 float cos_t = cosf(theta), sin_t = sinf(theta);
 
                 float dx = px_cli - bx_cli;

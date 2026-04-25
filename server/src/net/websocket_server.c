@@ -7022,6 +7022,7 @@ void websocket_server_tick(float dt) {
                                     const float BOULDER_BASE_R = 38.0f;
                                     static const float BSX[5] = { 1.00f, 0.88f, 1.18f, 0.72f, 1.35f };
                                     static const float BSY[5] = { 0.72f, 0.88f, 0.60f, 1.00f, 0.50f };
+                                    static const float BSR[5] = { 0.00f, 0.40f, -0.20f, 1.20f, 0.15f };
                                     for (int ri = 0; ri < isl_mv->resource_count; ri++) {
                                         const IslandResource *res = &isl_mv->resources[ri];
                                         if (res->type_id != RES_BOULDER) continue;
@@ -7031,7 +7032,7 @@ void websocket_server_tick(float dt) {
                                         int bsi = (int)((bseed >> 4) % 5u);
                                         float ax = BOULDER_BASE_R * res->size * BSX[bsi];
                                         float ay = BOULDER_BASE_R * res->size * BSY[bsi];
-                                        float theta = ((float)((bseed >> 8) & 0xFFu) / 256.0f) * (2.0f * 3.14159265f);
+                                        float theta = BSR[bsi] + ((float)((bseed >> 8) & 0xFFu) / 256.0f) * (2.0f * 3.14159265f);
                                         float cos_t = cosf(theta), sin_t = sinf(theta);
                                         float bx = isl_mv->x + res->ox;
                                         float by = isl_mv->y + res->oy;
