@@ -2545,11 +2545,6 @@ export class NetworkManager {
     // Send ping every heartbeat interval
     this.pingTimer = setInterval(() => {
       this.sendPing();
-      
-      // Also periodically request game state to keep world updated
-      if (Math.random() < 0.3) { // 30% chance each heartbeat to avoid spam
-        this.requestGameState();
-      }
     }, this.config.heartbeatInterval);
   }
   
