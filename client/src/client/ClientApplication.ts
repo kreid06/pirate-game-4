@@ -1502,11 +1502,11 @@ export class ClientApplication {
       this.networkManager.onPlayerTeleported = (playerId, x, y, parentShip, localX, localY) => {
         // Snap the local player position if it's us being teleported
         for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
-          if (!ws?.player) continue;
-          if (ws.player.id !== playerId) continue;
-          ws.player.position = { x, y };
-          ws.player.carrierId = parentShip;
-          ws.player.localPosition = { x: localX, y: localY };
+          const p = ws?.players.find(pl => pl.id === playerId);
+          if (!p) continue;
+          p.position = Vec2.from(x, y);
+          p.carrierId = parentShip;
+          p.localPosition = Vec2.from(localX, localY);
         }
       };
       

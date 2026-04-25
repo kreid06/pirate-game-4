@@ -393,22 +393,22 @@ static void init_simulation(struct ServerContext* ctx) {
     ctx->simulation.wind_power = 0.5f;      // 50% wind power
     ctx->simulation.wind_direction = 0.0f;  // East direction (for future use)
     
-    // Create the starting brigantine ship at spawn point (scaled from client coords)
+    // Create the starting brigantine ship at map centre
     Vec2Q16 ship_spawn = {
-        Q16_FROM_FLOAT(CLIENT_TO_SERVER(100.0f)), 
-        Q16_FROM_FLOAT(CLIENT_TO_SERVER(100.0f))
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(MAP_CENTER_X)), 
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(MAP_CENTER_Y))
     };
     entity_id ship_id = sim_create_ship(&ctx->simulation, ship_spawn, Q16_FROM_INT(0), 0xFF, 1);
     log_info("Simulation initialized with RNG seed: %u", rng->seed);
-    log_info("Created brigantine ship 1 (ID: %u) at spawn point (10, 10) server units [client: (100, 100)]", ship_id);
+    log_info("Created brigantine ship 1 (ID: %u) at map centre (%.0f, %.0f) client px", ship_id, MAP_CENTER_X, MAP_CENTER_Y);
 
-    // Create second brigantine ship 600px south for damage testing
+    // Create second brigantine ship 600px south of centre for damage testing
     Vec2Q16 ship2_spawn = {
-        Q16_FROM_FLOAT(CLIENT_TO_SERVER(100.0f)),
-        Q16_FROM_FLOAT(CLIENT_TO_SERVER(700.0f))
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(MAP_CENTER_X)),
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(MAP_CENTER_Y + 600.0f))
     };
     entity_id ship2_id = sim_create_ship(&ctx->simulation, ship2_spawn, Q16_FROM_INT(0), 0xFF, 2);
-    log_info("Created brigantine ship 2 (ID: %u) at (10, 70) server units [client: (100, 700)]", ship2_id);
+    log_info("Created brigantine ship 2 (ID: %u) at (%.0f, %.0f) client px", ship2_id, MAP_CENTER_X, MAP_CENTER_Y + 600.0f);
 }
 
 static void step_simulation(struct ServerContext* ctx) {
@@ -421,4 +421,16 @@ static void step_simulation(struct ServerContext* ctx) {
     // Run the full simulation step (physics, collisions, etc.)
     q16_t dt = Q16_FROM_FLOAT(TICK_DURATION_MS / 1000.0f); // Convert ms to seconds
     sim_step(sim, dt);
+
+    // ── World wrap: keep ships inside the toroidal 100 000×100 000 px map ──
+    // Operates in server units (MAP_WIDTH_SRV = 10 000).
+    for (uint32_t s = 0; s < sim->ship_count; s++) {
+        struct Ship* ship = &sim->ships[s];
+        float px = Q16_TO_FLOAT(ship->position.x);
+        float py = Q16_TO_FLOAT(ship->position.y);
+        px = WORLD_WRAP(px, MAP_WIDTH_SRV);
+        py = WORLD_WRAP(py, MAP_HEIGHT_SRV);
+        ship->position.x = Q16_FROM_FLOAT(px);
+        ship->position.y = Q16_FROM_FLOAT(py);
+    }
 }

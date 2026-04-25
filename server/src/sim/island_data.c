@@ -23,8 +23,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
     /* ── Island 1: Tropical bump-circle island ─────────────────────────── */
     {
         .id              = 1,
-        .x               = 800.0f,
-        .y               = 600.0f,
+        .x               = 50800.0f,
+        .y               = 50600.0f,
         .beach_radius_px = 185.0f,
         .grass_radius_px = 148.0f,
         /* Mirror of client RenderSystem.ISLAND_PRESETS['tropical'].beachBumps */
@@ -55,8 +55,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
      * them procedurally at startup.                                         */
     {
         .id               = 2,
-        .x                = 6000.0f,
-        .y                = 5000.0f,
+        .x                = 56000.0f,
+        .y                = 55000.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -109,8 +109,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
      * CW winding in screen-space (y-down).                                  */
     {
         .id               = 3,
-        .x                = -2500.0f,
-        .y                =  2500.0f,
+        .x                = 47500.0f,
+        .y                = 52500.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
