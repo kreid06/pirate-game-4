@@ -139,6 +139,22 @@ PlacedStructure placed_structures[MAX_PLACED_STRUCTURES];
 uint32_t placed_structure_count = 0;
 uint16_t next_structure_id = 1;
 
+// ── Tombstone item caches (dropped on player death) ──────────────────────────
+#define MAX_TOMBSTONES    64u
+#define TOMBSTONE_TTL_MS  900000u   /* 15 minutes */
+
+typedef struct {
+    uint32_t        id;
+    float           x, y;
+    char            owner_name[64];
+    PlayerInventory inventory;      /* full copy of player inventory at time of death */
+    uint32_t        spawn_time_ms;
+    bool            active;
+} Tombstone;
+
+static Tombstone tombstones[MAX_TOMBSTONES];
+static uint32_t  next_tombstone_id = 1;
+
 int websocket_server_get_placed_structures(PlacedStructure **out_structs, uint32_t *out_count) {
     if (!out_structs || !out_count) return -1;
     *out_structs = placed_structures;
@@ -649,6 +665,147 @@ static bool websocket_handshake(int client_fd, const char* request) {
 WebSocketPlayer* find_player(uint32_t player_id);
 static WebSocketPlayer* create_player(uint32_t player_id);
 static void remove_player(uint32_t player_id);
+
+/* ── Tombstone helpers ────────────────────────────────────────────────────── */
+
+/**
+ * Called on every authoritative player death.
+ * 1. Copies all inventory items into a new tombstone.
+ * 2. Wipes the player's inventory.
+ * 3. Broadcasts tombstone_spawned to all clients.
+ */
+static void player_die(WebSocketPlayer* player) {
+    /* Check whether the player has any items worth dropping */
+    bool has_items = false;
+    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+        if (player->inventory.slots[s].item != ITEM_NONE &&
+            player->inventory.slots[s].quantity > 0) { has_items = true; break; }
+    }
+    if (!has_items) {
+        /* also check worn equipment */
+        has_items = (player->inventory.equipment.helm   != ITEM_NONE ||
+                     player->inventory.equipment.torso  != ITEM_NONE ||
+                     player->inventory.equipment.legs   != ITEM_NONE ||
+                     player->inventory.equipment.feet   != ITEM_NONE ||
+                     player->inventory.equipment.hands  != ITEM_NONE ||
+                     player->inventory.equipment.shield != ITEM_NONE);
+    }
+
+    /* Find a free tombstone slot */
+    Tombstone* t = NULL;
+    if (has_items) {
+        for (int i = 0; i < (int)MAX_TOMBSTONES; i++) {
+            if (!tombstones[i].active) { t = &tombstones[i]; break; }
+        }
+    }
+
+    if (t) {
+        t->id = next_tombstone_id++;
+        if (next_tombstone_id == 0) next_tombstone_id = 1;
+        t->x = player->x;
+        t->y = player->y;
+        strncpy(t->owner_name, player->name, sizeof(t->owner_name) - 1);
+        t->owner_name[sizeof(t->owner_name) - 1] = '\0';
+        t->inventory      = player->inventory;  /* full struct copy */
+        t->spawn_time_ms  = get_time_ms();
+        t->active         = true;
+
+        /* Broadcast tombstone_spawned ─────────────────────────────────── */
+        char msg[1024];
+        int off = snprintf(msg, sizeof(msg),
+            "{\"type\":\"tombstone_spawned\",\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
+            "\"ownerName\":\"%s\",\"ttlMs\":%u,"
+            "\"equip\":{\"helm\":%d,\"torso\":%d,\"legs\":%d,"
+                       "\"feet\":%d,\"hands\":%d,\"shield\":%d},\"slots\":[",
+            t->id, t->x, t->y, t->owner_name, TOMBSTONE_TTL_MS,
+            (int)t->inventory.equipment.helm,  (int)t->inventory.equipment.torso,
+            (int)t->inventory.equipment.legs,  (int)t->inventory.equipment.feet,
+            (int)t->inventory.equipment.hands, (int)t->inventory.equipment.shield);
+        for (int s = 0; s < INVENTORY_SLOTS && off < (int)sizeof(msg) - 8; s++) {
+            if (s > 0) msg[off++] = ',';
+            off += snprintf(msg + off, sizeof(msg) - off, "[%d,%d]",
+                (int)t->inventory.slots[s].item,
+                (int)t->inventory.slots[s].quantity);
+        }
+        off += snprintf(msg + off, sizeof(msg) - off, "]}");
+        websocket_server_broadcast(msg);
+        log_info("⚰️  Tombstone %u spawned for %s at (%.1f,%.1f)",
+                 t->id, t->owner_name, t->x, t->y);
+    }
+
+    /* Wipe player inventory regardless of whether a tombstone was created */
+    memset(&player->inventory, 0, sizeof(PlayerInventory));
+    player->inventory.active_slot = 255; /* sentinel: nothing equipped */
+}
+
+/**
+ * Handle a collect_tombstone request from a client.
+ * Player must be within 80 px of the tombstone.
+ * Items are transferred into the player's inventory; tombstone is removed.
+ */
+static void handle_collect_tombstone(WebSocketPlayer* player,
+                                     struct WebSocketClient* client,
+                                     const char* payload) {
+    uint32_t tomb_id = 0;
+    const char* p_id = strstr(payload, "\"id\":");
+    if (p_id) tomb_id = (uint32_t)atoi(p_id + 5);
+
+    /* Locate tombstone */
+    Tombstone* t = NULL;
+    for (int i = 0; i < (int)MAX_TOMBSTONES; i++) {
+        if (tombstones[i].active && tombstones[i].id == tomb_id) {
+            t = &tombstones[i]; break;
+        }
+    }
+    if (!t) {
+        char resp[128];
+        snprintf(resp, sizeof(resp),
+            "{\"type\":\"tombstone_collect_fail\",\"reason\":\"not_found\",\"id\":%u}", tomb_id);
+        char frame[192];
+        size_t fl = websocket_create_frame(WS_OPCODE_TEXT, resp, strlen(resp), frame, sizeof(frame));
+        if (fl > 0) send(client->fd, frame, fl, 0);
+        return;
+    }
+
+    /* Range check: 80 px */
+    float dx = player->x - t->x;
+    float dy = player->y - t->y;
+    if (dx * dx + dy * dy > 80.0f * 80.0f) {
+        char resp[128];
+        snprintf(resp, sizeof(resp),
+            "{\"type\":\"tombstone_collect_fail\",\"reason\":\"too_far\",\"id\":%u}", tomb_id);
+        char frame[192];
+        size_t fl = websocket_create_frame(WS_OPCODE_TEXT, resp, strlen(resp), frame, sizeof(frame));
+        if (fl > 0) send(client->fd, frame, fl, 0);
+        return;
+    }
+
+    /* Transfer hotbar slots */
+    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+        if (t->inventory.slots[s].item != ITEM_NONE && t->inventory.slots[s].quantity > 0)
+            craft_grant(player, t->inventory.slots[s].item,
+                        (int)t->inventory.slots[s].quantity);
+    }
+    /* Transfer worn equipment */
+    if (t->inventory.equipment.helm   != ITEM_NONE) craft_grant(player, t->inventory.equipment.helm,   1);
+    if (t->inventory.equipment.torso  != ITEM_NONE) craft_grant(player, t->inventory.equipment.torso,  1);
+    if (t->inventory.equipment.legs   != ITEM_NONE) craft_grant(player, t->inventory.equipment.legs,   1);
+    if (t->inventory.equipment.feet   != ITEM_NONE) craft_grant(player, t->inventory.equipment.feet,   1);
+    if (t->inventory.equipment.hands  != ITEM_NONE) craft_grant(player, t->inventory.equipment.hands,  1);
+    if (t->inventory.equipment.shield != ITEM_NONE) craft_grant(player, t->inventory.equipment.shield, 1);
+
+    /* Remove tombstone and broadcast */
+    t->active = false;
+    char msg[128];
+    snprintf(msg, sizeof(msg),
+        "{\"type\":\"tombstone_collected\",\"id\":%u,\"playerId\":%u}",
+        tomb_id, player->player_id);
+    websocket_server_broadcast(msg);
+    log_info("⚰️  Tombstone %u collected by player %u (%s)",
+             tomb_id, player->player_id, player->name);
+}
+
+
 
 // ── Player persistence ──────────────────────────────────────────────────────
 #include "net/player_persistence.h"
@@ -1985,6 +2142,14 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "collect_tombstone") == 0) {
+                            // TOMBSTONE: player presses E near a tombstone item cache
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_collect_tombstone(player, client, payload);
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "place_structure") == 0) {
                             // ISLAND BUILDING: place a floor tile or workbench
                             if (client->player_id == 0) {
@@ -2398,8 +2563,10 @@ int websocket_server_update(struct Sim* sim) {
                                                     if (killed_player) tp->health = 0;
                                                     else tp->health -= dmg16;
                                                     // Award XP to the attacker on kill
-                                                    if (killed_player)
+                                                    if (killed_player) {
                                                         player_apply_xp(player, PLAYER_XP_PER_PLAYER_KILL);
+                                                        player_die(tp);  /* drop tombstone, wipe inv */
+                                                    }
 
                                                     char hit_msg[256];
                                                     snprintf(hit_msg, sizeof(hit_msg),
@@ -4866,6 +5033,7 @@ int websocket_server_update(struct Sim* sim) {
                                             kp_name);
                                     } else {
                                         kp_player->health = 0;
+                                        player_die(kp_player);  /* drop tombstone, wipe inv */
 
                                         /* Broadcast ENTITY_HIT with killed=true so all clients see it
                                          * and the dead player's client opens the respawn screen. */
@@ -5561,7 +5729,7 @@ int websocket_server_update(struct Sim* sim) {
                 }
 
                 // Build inventory JSON
-                char inv_buf[220];
+                char inv_buf[1024];
                 int inv_off = 0;
                 inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
                                     ",\"inventory\":{\"slots\":[");
@@ -5574,12 +5742,18 @@ int websocket_server_update(struct Sim* sim) {
                                         (int)players[p].inventory.slots[s].quantity);
                 }
                 inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
-                                    "],\"armor\":%d,\"shield\":%d,\"activeSlot\":%d}",
-                                    (int)players[p].inventory.armor,
-                                    (int)players[p].inventory.shield,
+                                    "],\"equip\":{\"helm\":%d,\"torso\":%d,\"legs\":%d,"
+                                    "\"feet\":%d,\"hands\":%d,\"shield\":%d},"
+                                    "\"activeSlot\":%d}",
+                                    (int)players[p].inventory.equipment.helm,
+                                    (int)players[p].inventory.equipment.torso,
+                                    (int)players[p].inventory.equipment.legs,
+                                    (int)players[p].inventory.equipment.feet,
+                                    (int)players[p].inventory.equipment.hands,
+                                    (int)players[p].inventory.equipment.shield,
                                     (int)players[p].inventory.active_slot);
 
-                char player_entry[900];
+                char player_entry[3072];
                 snprintf(player_entry, sizeof(player_entry),
                         "{\"id\":%u,\"name\":\"%s\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
@@ -5743,6 +5917,25 @@ int websocket_server_update(struct Sim* sim) {
             memcpy(game_state + gs_off, npcs_json, (size_t)npcs_offset);
             gs_off += npcs_offset;
         }
+        /* ── Tombstones ───────────────────────────────────────────────────── */
+        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
+                           ",\"tombstones\":[");
+        {
+            bool first_tomb = true;
+            for (int ti = 0; ti < (int)MAX_TOMBSTONES; ti++) {
+                if (!tombstones[ti].active) continue;
+                uint32_t age = current_time - tombstones[ti].spawn_time_ms;
+                uint32_t rem = (age < TOMBSTONE_TTL_MS) ? (TOMBSTONE_TTL_MS - age) : 0u;
+                if (!first_tomb && gs_off < (int)sizeof(game_state) - 2)
+                    game_state[gs_off++] = ',';
+                gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
+                    "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"ownerName\":\"%s\",\"remainingMs\":%u}",
+                    tombstones[ti].id, tombstones[ti].x, tombstones[ti].y,
+                    tombstones[ti].owner_name, rem);
+                first_tomb = false;
+            }
+        }
+        if (gs_off < (int)sizeof(game_state) - 1) game_state[gs_off++] = ']';
         if (gs_off < (int)sizeof(game_state) - 1) {
             game_state[gs_off++] = '}';
             game_state[gs_off]   = '\0';
@@ -6394,7 +6587,7 @@ void websocket_server_tick(float dt) {
                     }
                 } else {
                     uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
-                    if (wp->health <= dmg16) { wp->health = 0; } else { wp->health -= dmg16; }
+                    if (wp->health <= dmg16) { wp->health = 0; player_die(wp); } else { wp->health -= dmg16; }
                     if (!wp->is_mounted) {
                         float dist = sqrtf(dx * dx + dy * dy);
                         float kx   = (dist > 0.1f) ? (dx / dist) : 1.0f;
@@ -7616,7 +7809,7 @@ void websocket_server_tick(float dt) {
                 continue;
             }
             uint16_t pl_fire_dmg = 5u + (uint16_t)(wp->max_health / 80u);
-            if (wp->health > pl_fire_dmg) wp->health -= pl_fire_dmg; else wp->health = 0;
+            if (wp->health > pl_fire_dmg) { wp->health -= pl_fire_dmg; } else { wp->health = 0; player_die(wp); }
             if (wp->fire_timer_ms > dot_elapsed) {
                 wp->fire_timer_ms -= dot_elapsed;
             } else {
@@ -7885,7 +8078,28 @@ void websocket_server_tick(float dt) {
         }
         } /* end FIRE DOT TICK 500ms */
     }
-    
+
+    /* ===== TOMBSTONE EXPIRY TICK (every 10 s) ================================
+       Walk active tombstones and despawn any that have exceeded TOMBSTONE_TTL_MS.  */
+    {
+        static uint32_t last_tombstone_tick = 0;
+        if (current_time - last_tombstone_tick >= 10000u) {
+            last_tombstone_tick = current_time;
+            for (int ti = 0; ti < (int)MAX_TOMBSTONES; ti++) {
+                if (!tombstones[ti].active) continue;
+                uint32_t age = current_time - tombstones[ti].spawn_time_ms;
+                if (age >= TOMBSTONE_TTL_MS) {
+                    tombstones[ti].active = false;
+                    char dm[128];
+                    snprintf(dm, sizeof(dm),
+                        "{\"type\":\"tombstone_despawned\",\"id\":%u}", tombstones[ti].id);
+                    websocket_server_broadcast(dm);
+                    log_info("⚰️  Tombstone %u expired (15-min TTL)", tombstones[ti].id);
+                }
+            }
+        }
+    }
+
     // ===== APPLY WIND-BASED SHIP MOVEMENT =====
     static uint32_t last_movement_log = 0;
     if (global_sim && global_sim->ship_count > 0) {

@@ -222,7 +222,8 @@ typedef struct WorldNpc {
 // ────────────────────────────────────────────────────────────────────────────
 
 // ── Player Inventory ────────────────────────────────────────────────────────
-#define INVENTORY_SLOTS 10
+#define INVENTORY_SLOTS 58   /* total regular inventory slots per player      */
+#define HOTBAR_SLOTS    10   /* first HOTBAR_SLOTS of slots[] shown on hotbar */
 
 typedef enum {
     ITEM_NONE          = 0,
@@ -309,11 +310,20 @@ typedef struct {
     uint8_t  quantity; // 0 = empty; 1 for weapons/tools; 1-99 for stackables
 } InventorySlot;
 
+/** Equipment worn by a player — one item per body slot. */
 typedef struct {
-    InventorySlot slots[INVENTORY_SLOTS];
-    ItemKind armor;       // Equipped armor (ITEM_NONE if bare)
-    ItemKind shield;      // Equipped shield (ITEM_NONE if none)
-    uint8_t  active_slot; // Currently selected hotbar slot (0-9)
+    ItemKind helm;    /* head armour            */
+    ItemKind torso;   /* chest armour           */
+    ItemKind legs;    /* leg armour             */
+    ItemKind feet;    /* boot armour            */
+    ItemKind hands;   /* glove armour           */
+    ItemKind shield;  /* off-hand shield        */
+} PlayerEquipment;
+
+typedef struct {
+    InventorySlot   slots[INVENTORY_SLOTS]; /* regular bag slots 0..57       */
+    PlayerEquipment equipment;              /* 6 body-slot items             */
+    uint8_t         active_slot;            /* hotbar selection 0-9; 255=off */
 } PlayerInventory;
 // ────────────────────────────────────────────────────────────────────────────
 

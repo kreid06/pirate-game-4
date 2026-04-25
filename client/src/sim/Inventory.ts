@@ -7,7 +7,8 @@
  */
 
 // ── Slot count ──────────────────────────────────────────────────────────────
-export const INVENTORY_SLOTS = 10;
+export const INVENTORY_SLOTS = 58;  /** total regular bag slots per player */
+export const HOTBAR_SLOTS    = 10;  /** first N slots shown on the hotbar  */
 
 // ── Item identifiers (must match server ItemKind enum) ─────────────────────
 export type ItemKind =
@@ -148,7 +149,11 @@ export interface InventorySlot {
 }
 
 export interface PlayerEquipment {
-  armor: ItemKind;
+  helm:   ItemKind;
+  torso:  ItemKind;
+  legs:   ItemKind;
+  feet:   ItemKind;
+  hands:  ItemKind;
   shield: ItemKind;
 }
 
@@ -165,19 +170,24 @@ export interface PlayerInventory {
 export function createEmptyInventory(): PlayerInventory {
   return {
     slots: Array.from({ length: INVENTORY_SLOTS }, () => ({ item: 'none' as ItemKind, quantity: 0 })),
-    equipment: { armor: 'none', shield: 'none' },
+    equipment: { helm: 'none', torso: 'none', legs: 'none', feet: 'none', hands: 'none', shield: 'none' },
     activeSlot: 0,
   };
 }
 
 /**
  * Parse inventory from the compact server wire format.
- * `rawSlots` is a 10-element array of [itemId, quantity] pairs.
+ * `rawSlots` is a 58-element array of [itemId, quantity] pairs.
+ * Equipment IDs are the numeric ItemKind values from the server.
  */
 export function parseInventoryFromServer(
   rawSlots: Array<[number, number]> | undefined,
   activeSlot: number,
-  armorId: number,
+  helmId:  number,
+  torsoId: number,
+  legsId:  number,
+  feetId:  number,
+  handsId: number,
   shieldId: number,
 ): PlayerInventory {
   const inv = createEmptyInventory();
@@ -191,7 +201,11 @@ export function parseInventoryFromServer(
 
   // 255 = unequipped sentinel; 0-9 = valid hotbar slots; anything else clamp to 0
   inv.activeSlot = (activeSlot === 255 || (activeSlot >= 0 && activeSlot < INVENTORY_SLOTS)) ? activeSlot : 0;
-  inv.equipment.armor  = ITEM_ID_MAP[armorId]  ?? 'none';
+  inv.equipment.helm   = ITEM_ID_MAP[helmId]   ?? 'none';
+  inv.equipment.torso  = ITEM_ID_MAP[torsoId]  ?? 'none';
+  inv.equipment.legs   = ITEM_ID_MAP[legsId]   ?? 'none';
+  inv.equipment.feet   = ITEM_ID_MAP[feetId]   ?? 'none';
+  inv.equipment.hands  = ITEM_ID_MAP[handsId]  ?? 'none';
   inv.equipment.shield = ITEM_ID_MAP[shieldId] ?? 'none';
 
   return inv;

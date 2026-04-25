@@ -113,6 +113,8 @@ export class RenderSystem {
   private _cachedLocalPlayer: Player | null = null;
   /** Placed island structures — updated via addPlacedStructure / setPlacedStructures. */
   private placedStructures: PlacedStructure[] = [];
+  /** Active tombstone item caches in the world. */
+  private _tombstones: import('../../sim/Types').Tombstone[] = [];
   /** Maps scaffolded ship entity IDs to the shipyard structure that owns them. */
   private _scaffoldedShips: Map<number, PlacedStructure> = new Map();
   /** Structure currently under the cursor (within hover range of the local player). */
@@ -1802,6 +1804,117 @@ export class RenderSystem {
     return dx * dx + dy * dy <= range * range ? this._hoveredRock : null;
   }
 
+  // ── Tombstone API ─────────────────────────────────────────────────────────
+
+  /** Replace the full tombstone list (called on every GAME_STATE). */
+  updateTombstones(list: import('../../sim/Types').Tombstone[]): void {
+    this._tombstones = list;
+  }
+
+  /** Add or update a single tombstone (called on tombstone_spawned). */
+  addTombstone(t: import('../../sim/Types').Tombstone): void {
+    const idx = this._tombstones.findIndex(x => x.id === t.id);
+    if (idx >= 0) this._tombstones[idx] = t;
+    else this._tombstones.push(t);
+  }
+
+  /** Remove a tombstone by id (collected or despawned). */
+  removeTombstone(id: number): void {
+    this._tombstones = this._tombstones.filter(t => t.id !== id);
+  }
+
+  /**
+   * Returns the nearest tombstone within `range` px of the local player cursor,
+   * or null if none. Used for E-key interaction.
+   */
+  getHoveredTombstone(range: number = 80): import('../../sim/Types').Tombstone | null {
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return null;
+    let best: import('../../sim/Types').Tombstone | null = null;
+    let bestDist2 = range * range;
+    for (const t of this._tombstones) {
+      const dx = t.x - player.position.x;
+      const dy = t.y - player.position.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= bestDist2) { best = t; bestDist2 = d2; }
+    }
+    return best;
+  }
+
+  /** Draw all active tombstones in world-space. Call during the world render pass. */
+  private drawTombstones(ctx: CanvasRenderingContext2D, camera: import('./Camera').CameraState): void {
+    if (this._tombstones.length === 0) return;
+    const player = this._cachedLocalPlayer;
+    for (const t of this._tombstones) {
+      const sx = (t.x - camera.position.x) * camera.zoom + ctx.canvas.width  / 2;
+      const sy = (t.y - camera.position.y) * camera.zoom + ctx.canvas.height / 2;
+      const sz = Math.max(0.4, Math.min(1.0, camera.zoom));
+
+      const HOVER_RANGE = 80;
+      const isNear = player != null &&
+        player.carrierId === 0 &&
+        (t.x - player.position.x) ** 2 + (t.y - player.position.y) ** 2 <= HOVER_RANGE * HOVER_RANGE;
+
+      ctx.save();
+      ctx.translate(sx, sy);
+
+      /* Shadow */
+      ctx.beginPath();
+      ctx.ellipse(0, 6 * sz, 14 * sz, 5 * sz, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.fill();
+
+      /* Stone body */
+      const w = 22 * sz, h = 28 * sz;
+      ctx.beginPath();
+      ctx.roundRect(-w / 2, -h, w, h, [6 * sz, 6 * sz, 2 * sz, 2 * sz]);
+      ctx.fillStyle = isNear ? '#c9c9d4' : '#8a8a96';
+      ctx.strokeStyle = '#555560';
+      ctx.lineWidth = 1.5 * sz;
+      ctx.fill();
+      ctx.stroke();
+
+      /* Cross carved into the stone */
+      ctx.strokeStyle = isNear ? '#ffffff' : '#aaaabc';
+      ctx.lineWidth = 2 * sz;
+      ctx.beginPath();
+      ctx.moveTo(0, -h * 0.8);
+      ctx.lineTo(0, -h * 0.35);
+      ctx.moveTo(-w * 0.3, -h * 0.65);
+      ctx.lineTo( w * 0.3, -h * 0.65);
+      ctx.stroke();
+
+      /* Owner name above */
+      const fontSize = Math.round(10 * sz);
+      ctx.font = `bold ${fontSize}px monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillStyle = isNear ? '#ffe97a' : '#dddddd';
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.lineWidth = 3 * sz;
+      const label = t.ownerName || '???';
+      ctx.strokeText(label, 0, -h - 4 * sz);
+      ctx.fillText(label, 0, -h - 4 * sz);
+
+      /* Remaining time */
+      const minLeft = Math.ceil(t.remainingMs / 60000);
+      const timerText = `${minLeft}m`;
+      ctx.font = `${Math.round(8 * sz)}px monospace`;
+      ctx.fillStyle = minLeft <= 2 ? '#ff7070' : (isNear ? '#aaffaa' : '#aaaaaa');
+      ctx.strokeText(timerText, 0, -h - 4 * sz - fontSize - 2 * sz);
+      ctx.fillText(timerText, 0, -h - 4 * sz - fontSize - 2 * sz);
+
+      /* Interact hint */
+      if (isNear) {
+        ctx.font = `${Math.round(9 * sz)}px monospace`;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText('[E] Collect', 0, 14 * sz);
+      }
+
+      ctx.restore();
+    }
+  }
+
   /**
    * Whether cannon build mode is currently active
    */
@@ -2303,6 +2416,9 @@ export class RenderSystem {
       o.ship.position = o.origPos;
       o.ship.rotation = o.origRot;
     }
+
+    // ── Tombstones (above ground, below UI) ───────────────────────────────────
+    this.drawTombstones(this.ctx, camera.getState());
 
     // Draw explicit B-key build mode ghost (always on top of world objects)
     if (this.explicitBuildState) {

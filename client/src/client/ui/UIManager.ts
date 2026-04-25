@@ -10,7 +10,7 @@ import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState } from '../../
 import { GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
-import { ITEM_DEFS, INVENTORY_SLOTS, ItemKind, ITEM_KIND_ID } from '../../sim/Inventory.js';
+import { ITEM_DEFS, INVENTORY_SLOTS, HOTBAR_SLOTS, ItemKind, ITEM_KIND_ID } from '../../sim/Inventory.js';
 import { ManningPriorityPanel } from './ManningPriorityPanel.js';
 import { CompanyMenu } from './CompanyMenu.js';
 import { PlayerMenu } from './PlayerMenu.js';
@@ -369,12 +369,12 @@ export class UIManager {
   handleRightClick(x: number, y: number): boolean {
     if (!this._cachedControlGroups) return false;
     const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
-    const totalW = INVENTORY_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
     const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
     const startX = Math.round((this.canvas.width - totalW) / 2);
     const startY = this.canvas.height - totalH - 8;
     if (y < startY || y > startY + PADDING + SLOT_SIZE) return false;
-    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+    for (let i = 0; i < HOTBAR_SLOTS; i++) {
       const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
       if (x >= sx && x <= sx + SLOT_SIZE) {
         const groupIdx = (i + 1) % 10; // slot 0→G1, …, slot 8→G9, slot 9→G0
@@ -1108,12 +1108,12 @@ export class UIManager {
     // Hotbar left-click slot selection (only when no menu/build mode is consuming)
     if (this.onHotbarSlotClick && !this._cachedControlGroups) {
       const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
-      const totalW = INVENTORY_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+      const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
       const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
       const startX = Math.round((this.canvas.width - totalW) / 2);
       const startY = this.canvas.height - totalH - 8;
       if (y >= startY + PADDING && y <= startY + PADDING + SLOT_SIZE) {
-        for (let i = 0; i < INVENTORY_SLOTS; i++) {
+        for (let i = 0; i < HOTBAR_SLOTS; i++) {
           const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
           if (x >= sx && x <= sx + SLOT_SIZE) {
             this.onHotbarSlotClick(i);
@@ -1869,7 +1869,7 @@ class HUDElement implements UIElement {
     this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot, helmMode);
 
     // Equipment panel (armor + shield)
-    this.renderEquipmentPanel(ctx, ctx.canvas, player.inventory.equipment.armor, player.inventory.equipment.shield);
+    this.renderEquipmentPanel(ctx, ctx.canvas, player.inventory.equipment.torso, player.inventory.equipment.shield);
   }
 
   private renderHotbar(
@@ -1883,7 +1883,7 @@ class HUDElement implements UIElement {
     const SLOT_GAP = 4;
     const PADDING = 6;
     const LABEL_H = 16;
-    const totalW = INVENTORY_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
     const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
     const startX = Math.round((canvas.width - totalW) / 2);
     const startY = canvas.height - totalH - 8;
@@ -1911,7 +1911,7 @@ class HUDElement implements UIElement {
     ctx.lineWidth = 1;
     ctx.strokeRect(startX, startY, totalW, totalH);
 
-    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+    for (let i = 0; i < HOTBAR_SLOTS; i++) {
       const slot = slots[i] ?? { item: 'none' as ItemKind, quantity: 0 };
       const def  = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
       const sx   = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
@@ -2017,7 +2017,7 @@ class HUDElement implements UIElement {
     }
 
     // Tooltip: check which slot (if any) the mouse is hovering
-    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+    for (let i = 0; i < HOTBAR_SLOTS; i++) {
       const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
       const sy = startY + PADDING;
       if (

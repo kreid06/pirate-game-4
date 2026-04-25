@@ -125,6 +125,7 @@ export class GameEngine {
       }],
       cannonballs: [],
       npcs: [],
+      tombstones: [],
       carrierDetection: new Map()
     };
   }

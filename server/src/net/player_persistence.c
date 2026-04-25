@@ -57,7 +57,11 @@ void save_player_to_file(const WebSocketPlayer *p) {
         "  \"stat_weight\": %u,\n"
         "  \"company_id\": %u,\n"
         "  \"active_slot\": %u,\n"
-        "  \"armor\": %u,\n"
+        "  \"helm\": %u,\n"
+        "  \"torso\": %u,\n"
+        "  \"legs\": %u,\n"
+        "  \"feet\": %u,\n"
+        "  \"hands\": %u,\n"
         "  \"shield\": %u,\n"
         "  \"slots\": [",
         p->name,
@@ -70,8 +74,12 @@ void save_player_to_file(const WebSocketPlayer *p) {
         (unsigned)p->stat_stamina, (unsigned)p->stat_weight,
         (unsigned)p->company_id,
         (unsigned)p->inventory.active_slot,
-        (unsigned)p->inventory.armor,
-        (unsigned)p->inventory.shield
+        (unsigned)p->inventory.equipment.helm,
+        (unsigned)p->inventory.equipment.torso,
+        (unsigned)p->inventory.equipment.legs,
+        (unsigned)p->inventory.equipment.feet,
+        (unsigned)p->inventory.equipment.hands,
+        (unsigned)p->inventory.equipment.shield
     );
 
     for (int s = 0; s < INVENTORY_SLOTS; s++) {
@@ -151,8 +159,14 @@ bool load_player_from_file(WebSocketPlayer *p) {
     if (json_parse_uint_field(buf, "stat_weight", &tmp))  p->stat_weight   = (uint8_t)tmp;
     if (json_parse_uint_field(buf, "company_id", &tmp))   p->company_id    = (uint8_t)tmp;
     if (json_parse_uint_field(buf, "active_slot", &tmp))  p->inventory.active_slot = (uint8_t)tmp;
-    if (json_parse_uint_field(buf, "armor", &tmp))        p->inventory.armor  = (ItemKind)tmp;
-    if (json_parse_uint_field(buf, "shield", &tmp))       p->inventory.shield = (ItemKind)tmp;
+    if (json_parse_uint_field(buf, "helm",  &tmp))        p->inventory.equipment.helm   = (ItemKind)tmp;
+    /* "torso" is the canonical field; fall back to legacy "armor" key */
+    if (json_parse_uint_field(buf, "torso", &tmp))        p->inventory.equipment.torso  = (ItemKind)tmp;
+    else if (json_parse_uint_field(buf, "armor", &tmp))   p->inventory.equipment.torso  = (ItemKind)tmp;
+    if (json_parse_uint_field(buf, "legs",  &tmp))        p->inventory.equipment.legs   = (ItemKind)tmp;
+    if (json_parse_uint_field(buf, "feet",  &tmp))        p->inventory.equipment.feet   = (ItemKind)tmp;
+    if (json_parse_uint_field(buf, "hands", &tmp))        p->inventory.equipment.hands  = (ItemKind)tmp;
+    if (json_parse_uint_field(buf, "shield",&tmp))        p->inventory.equipment.shield = (ItemKind)tmp;
 
     // If the player was on a ship and it still exists, restore local position
     if (saved_ship_id != 0) {

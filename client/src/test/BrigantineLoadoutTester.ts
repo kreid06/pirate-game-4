@@ -55,6 +55,7 @@ export class BrigantineLoadoutTester {
       players: [],
       cannonballs: [],
       npcs: [],
+      tombstones: [],
       carrierDetection: new Map()
     };
     
@@ -88,6 +89,7 @@ export class BrigantineLoadoutTester {
       players: [],
       cannonballs: [],
       npcs: [],
+      tombstones: [],
       carrierDetection: new Map()
     };
     

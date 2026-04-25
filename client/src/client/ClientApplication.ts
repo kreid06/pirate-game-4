@@ -778,6 +778,15 @@ export class ClientApplication {
             }
           }
 
+          // Collect tombstone: any player on foot within 80px → press E
+          if (player && player.carrierId === 0) {
+            const tomb = this.renderSystem.getHoveredTombstone();
+            if (tomb) {
+              this.networkManager.sendCollectTombstone(tomb.id);
+              return;
+            }
+          }
+
           // Workbench interaction: player on island, workbench under cursor and within range → open crafting
           if (player && player.carrierId === 0) {
             if (this.craftingMenu.visible) {
@@ -1585,6 +1594,17 @@ export class ClientApplication {
       this.networkManager.onStructuresList = (structs) => {
         this.renderSystem.setPlacedStructures(structs);
       };
+
+      // Tombstone lifecycle
+      this.networkManager.onTombstoneSpawned = (t) => {
+        this.renderSystem.addTombstone(t);
+      };
+      this.networkManager.onTombstoneCollected = (id) => {
+        this.renderSystem.removeTombstone(id);
+      };
+      this.networkManager.onTombstoneDespawned = (id) => {
+        this.renderSystem.removeTombstone(id);
+      };
       this.networkManager.onStructureDemolished = (id, x, y) => {
         this.renderSystem.removePlacedStructure(id);
         if (x !== undefined && y !== undefined) {
@@ -2094,6 +2114,9 @@ export class ClientApplication {
         (localPlayer?.inventory?.slots[_activeSlot]?.item === 'axe') &&
         !(localPlayer?.isMounted ?? false);
       if (this.explicitBuildMode) this.syncBuildModeState();
+
+      // Sync tombstones into the render system on every frame
+      this.renderSystem.updateTombstones(worldToRender.tombstones ?? []);
 
       // Render game world with hybrid state
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
@@ -3847,6 +3870,7 @@ export class ClientApplication {
       ],
       cannonballs: [],
       npcs: [],
+      tombstones: [],
       carrierDetection: new Map()
     };
   }

@@ -596,6 +596,13 @@ export class NetworkManager {
     waveDist: number, retreating: boolean, retreatDist: number,
     dead: boolean
   ) => void) | null = null;
+
+  /** Fired when a new tombstone is spawned (player death). */
+  public onTombstoneSpawned: ((tombstone: import('../sim/Types').Tombstone) => void) | null = null;
+  /** Fired when a tombstone is collected by a player. */
+  public onTombstoneCollected: ((id: number, playerId: number) => void) | null = null;
+  /** Fired when a tombstone despawns (15-min TTL expired). */
+  public onTombstoneDespawned: ((id: number) => void) | null = null;
   
   constructor(config: NetworkConfig) {
     this.config = config;
@@ -1217,6 +1224,11 @@ export class NetworkManager {
   sendHarvestRock(): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: 'harvest_rock', timestamp: Date.now() }));
+  }
+
+  sendCollectTombstone(id: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'collect_tombstone', id, timestamp: Date.now() }));
   }
 
   /**
@@ -1896,8 +1908,12 @@ export class NetworkManager {
               ? parseInventoryFromServer(
                   player.inventory.slots,
                   player.inventory.activeSlot ?? 0,
-                  player.inventory.armor ?? 0,
-                  player.inventory.shield ?? 0,
+                  player.inventory.equip?.helm   ?? 0,
+                  player.inventory.equip?.torso  ?? 0,
+                  player.inventory.equip?.legs   ?? 0,
+                  player.inventory.equip?.feet   ?? 0,
+                  player.inventory.equip?.hands  ?? 0,
+                  player.inventory.equip?.shield ?? 0,
                 )
               : createEmptyInventory(),
 
@@ -1951,7 +1967,14 @@ export class NetworkManager {
             statPoints:  n.stat_points  ?? 0,
             locked:      !!(n.locked),
           })),
-          carrierDetection: new Map() // Will be populated as needed
+          carrierDetection: new Map(), // Will be populated as needed
+          tombstones: (message.tombstones ?? []).map((t: any) => ({
+            id:          t.id          ?? 0,
+            x:           t.x           ?? 0,
+            y:           t.y           ?? 0,
+            ownerName:   t.ownerName   ?? '',
+            remainingMs: t.remainingMs ?? 0,
+          })),
         };
         
         this.onWorldStateReceived?.(worldState);
@@ -2434,6 +2457,32 @@ export class NetworkManager {
           message.structure_type ?? '',
           message.blocker_id != null ? (message.blocker_id as number) : null,
         );
+        break;
+
+      case 'tombstone_spawned': {
+        this.onTombstoneSpawned?.({
+          id:          message.id          ?? 0,
+          x:           message.x           ?? 0,
+          y:           message.y           ?? 0,
+          ownerName:   message.ownerName   ?? '',
+          remainingMs: message.ttlMs       ?? 900000,
+          slots:       message.slots,
+          armor:       message.armor,
+          shield:      message.shield,
+        });
+        break;
+      }
+
+      case 'tombstone_collected':
+        this.onTombstoneCollected?.(message.id ?? 0, message.playerId ?? 0);
+        break;
+
+      case 'tombstone_despawned':
+        this.onTombstoneDespawned?.(message.id ?? 0);
+        break;
+
+      case 'tombstone_collect_fail':
+        // silently ignore — server already sent reason
         break;
 
       default:

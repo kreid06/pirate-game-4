@@ -315,12 +315,25 @@ export interface IslandDef {
 /**
  * Complete world state for deterministic simulation
  */
+export interface Tombstone {
+  id: number;
+  x: number;
+  y: number;
+  ownerName: string;
+  remainingMs: number;
+  /** Present on tombstone_spawned event only */
+  slots?: Array<[number, number]>;
+  armor?: number;
+  shield?: number;
+}
+
 export interface WorldState {
   tick: number;
   ships: Ship[];
   players: Player[];
   cannonballs: Cannonball[];
   npcs: Npc[];
+  tombstones: Tombstone[];
   timestamp: number;
   // Phase 2: Add carrier detection state per player
   carrierDetection: Map<number, CarrierDetectionState>; // playerId -> detection state
