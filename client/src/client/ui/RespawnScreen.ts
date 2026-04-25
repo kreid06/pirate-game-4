@@ -1,9 +1,18 @@
 /**
- * RespawnScreen — full-screen overlay shown when the player dies or first spawns.
- * Displays a minimap with world islands and friendly ships as selectable spawn points.
+ * RespawnScreen — full-screen scrollable/zoomable map overlay shown when the player dies.
+ * Styled identically to WorldMapScreen, with selectable spawn points and a RESPAWN button.
  */
 
 import { Ship, IslandDef } from '../../sim/Types.js';
+
+const WORLD_MIN_X = -500;
+const WORLD_MIN_Y = -500;
+const WORLD_MAX_X = 9500;
+const WORLD_MAX_Y = 8500;
+const WORLD_W = WORLD_MAX_X - WORLD_MIN_X;
+const WORLD_H = WORLD_MAX_Y - WORLD_MIN_Y;
+const FULL_WORLD_HALF = 327679;
+const FULL_WORLD_SIZE = FULL_WORLD_HALF * 2;
 
 interface SpawnOption {
   type: 'ship' | 'island';
@@ -17,26 +26,33 @@ interface SpawnOption {
 export class RespawnScreen {
   public visible: boolean = false;
 
-  /** Called when the player confirms a respawn location.
-   *  shipId is set when spawning on a ship, islandId when spawning on an island,
-   *  otherwise worldX/worldY are used. */
+  /** Called when the player confirms a respawn location. */
   public onRespawnConfirmed: ((shipId?: number, worldX?: number, worldY?: number, islandId?: number) => void) | null = null;
 
   private selectedOption: SpawnOption | null = null;
   private spawnOptions: SpawnOption[] = [];
 
-  // World bounds (pixels) — covers both islands with margin.
-  // Island 1 (tropical): centre (800, 600).
-  // Island 2 (continental): centre (6000, 5000), vertices ±3100 X, ±3050 Y → edges ~2900–9100 X, ~2000–8050 Y.
-  // MIN values allow for negative-coordinate content (physics can push entities below 0).
-  private readonly WORLD_MIN_X = -500;
-  private readonly WORLD_MIN_Y = -500;
-  private readonly WORLD_MAX_X = 9500;
-  private readonly WORLD_MAX_Y = 8500;
+  // Pan/zoom (same convention as WorldMapScreen — world px per screen px)
+  private panX = WORLD_MIN_X + WORLD_W / 2;
+  private panY = WORLD_MIN_Y + WORLD_H / 2;
+  private zoom = 0; // 0 = sentinel for "auto-fit on first render"
 
-  // Cached render bounds for click hit-testing
+  // Drag state
+  private dragging = false;
+  private dragStartX = 0;
+  private dragStartY = 0;
+  private dragPanStartX = 0;
+  private dragPanStartY = 0;
+
+  // Cached canvas size for hit-testing
+  private _cw = 0;
+  private _ch = 0;
+
+  // Cached button bounds for click-testing
   private _btnBounds: { x: number; y: number; w: number; h: number } | null = null;
-  private _mapBounds: { x: number; y: number; w: number; h: number } | null = null;
+
+  // Pulse animation time
+  private _pulseT = 0;
 
   open(ships: Ship[], islands: IslandDef[], localCompanyId: number): void {
     this.visible = true;
@@ -68,195 +84,21 @@ export class RespawnScreen {
     }
 
     this.selectedOption = this.spawnOptions[0] ?? null;
+
+    // Reset zoom to auto-fit on open
+    this.zoom = 0;
+    this._btnBounds = null;
   }
 
   close(): void {
     this.visible = false;
+    this.dragging = false;
     this._btnBounds = null;
-    this._mapBounds = null;
   }
 
-  render(ctx: CanvasRenderingContext2D, ships: Ship[], islands: IslandDef[], localCompanyId: number): void {
-    if (!this.visible) return;
+  // ── Input handlers (same API as WorldMapScreen) ─────────────────────────────
 
-    // Keep spawn option positions fresh (ships move)
-    for (const opt of this.spawnOptions) {
-      if (opt.type === 'ship' && opt.shipId !== undefined) {
-        const ship = ships.find(s => s.id === opt.shipId);
-        if (ship) { opt.x = ship.position.x; opt.y = ship.position.y; }
-      }
-    }
-
-    const cw = ctx.canvas.width;
-    const ch = ctx.canvas.height;
-
-    // Dark overlay
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.88)';
-    ctx.fillRect(0, 0, cw, ch);
-
-    // Title
-    ctx.textAlign = 'center';
-    ctx.font = 'bold 60px serif';
-    ctx.fillStyle = '#cc2233';
-    ctx.fillText('YOU DIED', cw / 2, ch * 0.14);
-
-    ctx.font = '20px Consolas, monospace';
-    ctx.fillStyle = '#999999';
-    ctx.fillText('Select a spawn location and press RESPAWN', cw / 2, ch * 0.14 + 38);
-
-    // ── Minimap panel — fills available space maintaining world aspect ratio ──
-    const worldW = this.WORLD_MAX_X - this.WORLD_MIN_X;
-    const worldH = this.WORLD_MAX_Y - this.WORLD_MIN_Y;
-    const worldAspect = worldW / worldH;
-    const maxMapW = cw - 64;
-    const maxMapH = ch * 0.72;
-    let mapW = maxMapW;
-    let mapH = mapW / worldAspect;
-    if (mapH > maxMapH) { mapH = maxMapH; mapW = mapH * worldAspect; }
-    mapW = Math.floor(mapW); mapH = Math.floor(mapH);
-    const mapX = (cw - mapW) / 2;
-    const mapY = ch * 0.20;
-
-    ctx.fillStyle = '#071420';
-    ctx.strokeStyle = '#335566';
-    ctx.lineWidth = 2;
-    ctx.fillRect(mapX, mapY, mapW, mapH);
-    ctx.strokeRect(mapX, mapY, mapW, mapH);
-
-    // World-space → map-pixel helpers (supports negative coordinates via MIN offset)
-    const toMapX = (wx: number) => mapX + ((wx - this.WORLD_MIN_X) / worldW) * mapW;
-    const toMapY = (wy: number) => mapY + ((wy - this.WORLD_MIN_Y) / worldH) * mapH;
-
-    // Draw islands
-    for (const isl of islands) {
-      const mx = toMapX(isl.x);
-      const my = toMapY(isl.y);
-
-      ctx.save();
-      ctx.beginPath();
-      if (isl.vertices && isl.vertices.length > 2) {
-        // vertices are already absolute world coordinates (server sends isl.x + vx[i])
-        ctx.moveTo(toMapX(isl.vertices[0].x), toMapY(isl.vertices[0].y));
-        for (let i = 1; i < isl.vertices.length; i++) {
-          ctx.lineTo(toMapX(isl.vertices[i].x), toMapY(isl.vertices[i].y));
-        }
-        ctx.closePath();
-      } else {
-        // Circular island — use beach_radius if available
-        const r = Math.max(3, (((isl as any).beach_radius ?? 120) / worldW) * mapW);
-        ctx.arc(mx, my, r, 0, Math.PI * 2);
-      }
-      ctx.fillStyle = '#1e4a12';
-      ctx.strokeStyle = '#3a7a20';
-      ctx.lineWidth = 1.5;
-      ctx.fill();
-      ctx.stroke();
-      ctx.restore();
-
-      ctx.textAlign = 'center';
-      ctx.font = '10px Consolas, monospace';
-      ctx.fillStyle = '#88cc66';
-      ctx.fillText(`Isle ${isl.id ?? '?'}`, mx, my - 6);
-    }
-
-    // Draw all friendly ships on the map (even non-spawn ships for context)
-    for (const ship of ships) {
-      if (ship.companyId !== localCompanyId || localCompanyId === 0) continue;
-      const mx = toMapX(ship.position.x);
-      const my = toMapY(ship.position.y);
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(mx, my, 3.5, 0, Math.PI * 2);
-      ctx.fillStyle = '#8888ff';
-      ctx.fill();
-      ctx.restore();
-    }
-
-    // Draw selectable spawn options
-    for (const opt of this.spawnOptions) {
-      const mx = toMapX(opt.x);
-      const my = toMapY(opt.y);
-      const selected = opt === this.selectedOption;
-
-      ctx.save();
-      if (opt.type === 'ship') {
-        // Ship icon: filled circle with glow when selected
-        if (selected) {
-          ctx.beginPath();
-          ctx.arc(mx, my, 11, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255, 238, 68, 0.25)';
-          ctx.fill();
-        }
-        ctx.beginPath();
-        ctx.arc(mx, my, selected ? 7 : 5, 0, Math.PI * 2);
-        ctx.fillStyle = selected ? '#ffee44' : '#aaaaff';
-        ctx.strokeStyle = selected ? '#ffffff' : '#6666cc';
-        ctx.lineWidth = 1.5;
-        ctx.fill();
-        ctx.stroke();
-      } else {
-        // Island icon: small square
-        if (selected) {
-          ctx.beginPath();
-          ctx.arc(mx, my, 10, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(68, 255, 160, 0.20)';
-          ctx.fill();
-        }
-        ctx.beginPath();
-        ctx.arc(mx, my, selected ? 6 : 4, 0, Math.PI * 2);
-        ctx.fillStyle = selected ? '#44ffaa' : '#44aa66';
-        ctx.strokeStyle = selected ? '#ffffff' : '#226644';
-        ctx.lineWidth = 1;
-        ctx.fill();
-        ctx.stroke();
-      }
-      ctx.restore();
-
-      ctx.textAlign = 'center';
-      ctx.font = `${selected ? 'bold ' : ''}11px Consolas, monospace`;
-      ctx.fillStyle = selected ? '#ffffff' : '#999999';
-      ctx.fillText(opt.label, mx, my - 11);
-    }
-
-    // ── Respawn button ────────────────────────────────────────────────────────
-    const btnW = 220;
-    const btnH = 50;
-    const btnX = cw / 2 - btnW / 2;
-    const btnY = mapY + mapH + 20;
-    const enabled = this.selectedOption !== null;
-
-    ctx.save();
-    ctx.fillStyle = enabled ? '#881a0e' : '#3a1a14';
-    ctx.strokeStyle = enabled ? '#dd5533' : '#5a2a22';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    if (ctx.roundRect) {
-      ctx.roundRect(btnX, btnY, btnW, btnH, 7);
-    } else {
-      ctx.rect(btnX, btnY, btnW, btnH);
-    }
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-
-    ctx.textAlign = 'center';
-    ctx.font = 'bold 22px sans-serif';
-    ctx.fillStyle = enabled ? '#ffffff' : '#555555';
-    ctx.fillText('RESPAWN', cw / 2, btnY + 34);
-
-    // Hint text
-    if (this.selectedOption) {
-      ctx.textAlign = 'center';
-      ctx.font = '14px Consolas, monospace';
-      ctx.fillStyle = '#888888';
-      ctx.fillText(`Spawn: ${this.selectedOption.label}`, cw / 2, btnY + btnH + 20);
-    }
-
-    this._btnBounds = { x: btnX, y: btnY, w: btnW, h: btnH };
-    this._mapBounds = { x: mapX, y: mapY, w: mapW, h: mapH };
-  }
-
-  handleClick(x: number, y: number): boolean {
+  handleMouseDown(x: number, y: number): boolean {
     if (!this.visible) return false;
 
     // Respawn button
@@ -275,24 +117,338 @@ export class RespawnScreen {
       }
     }
 
-    // Map area — select nearest spawn option
-    if (this._mapBounds) {
-      const m = this._mapBounds;
-      if (x >= m.x && x <= m.x + m.w && y >= m.y && y <= m.y + m.h) {
-        const wx = this.WORLD_MIN_X + ((x - m.x) / m.w) * (this.WORLD_MAX_X - this.WORLD_MIN_X);
-        const wy = this.WORLD_MIN_Y + ((y - m.y) / m.h) * (this.WORLD_MAX_Y - this.WORLD_MIN_Y);
-        let best: SpawnOption | null = null;
-        let bestDist = Infinity;
-        for (const opt of this.spawnOptions) {
-          const d = Math.hypot(opt.x - wx, opt.y - wy);
-          if (d < bestDist) { bestDist = d; best = opt; }
-        }
-        if (best) this.selectedOption = best;
-        return true;
+    // Try to select a spawn option near click, else start drag
+    const clicked = this._trySelectNearClick(x, y);
+    if (!clicked) {
+      this.dragging = true;
+      this.dragStartX = x;
+      this.dragStartY = y;
+      this.dragPanStartX = this.panX;
+      this.dragPanStartY = this.panY;
+    }
+    return true;
+  }
+
+  /** Alias for backwards-compat with UIManager.handleClick */
+  handleClick(x: number, y: number): boolean {
+    return this.handleMouseDown(x, y);
+  }
+
+  handleMouseMove(x: number, y: number): void {
+    if (!this.visible || !this.dragging) return;
+    const dx = x - this.dragStartX;
+    const dy = y - this.dragStartY;
+    this.panX = this.dragPanStartX - dx * this.zoom;
+    this.panY = this.dragPanStartY - dy * this.zoom;
+    this._clampPan();
+  }
+
+  handleMouseUp(): void {
+    this.dragging = false;
+  }
+
+  handleWheel(deltaY: number, x: number, y: number): boolean {
+    if (!this.visible) return false;
+    const factor = deltaY > 0 ? 1.15 : 1 / 1.15;
+    const zoomOutMax = this._fitZoom();
+    const zoomInMax = 0.15;
+    const worldX = this.panX + (x - this._cw / 2) * this.zoom;
+    const worldY = this.panY + (y - this._ch / 2) * this.zoom;
+    this.zoom = Math.min(zoomOutMax, Math.max(zoomInMax, this.zoom * factor));
+    this.panX = worldX - (x - this._cw / 2) * this.zoom;
+    this.panY = worldY - (y - this._ch / 2) * this.zoom;
+    this._clampPan();
+    return true;
+  }
+
+  // ── Render ──────────────────────────────────────────────────────────────────
+
+  render(ctx: CanvasRenderingContext2D, ships: Ship[], islands: IslandDef[], localCompanyId: number): void {
+    if (!this.visible) return;
+
+    // Keep ship spawn option positions fresh
+    for (const opt of this.spawnOptions) {
+      if (opt.type === 'ship' && opt.shipId !== undefined) {
+        const ship = ships.find(s => s.id === opt.shipId);
+        if (ship) { opt.x = ship.position.x; opt.y = ship.position.y; }
       }
     }
 
-    // Consume all clicks while visible so nothing behind fires
-    return true;
+    const cw = ctx.canvas.width;
+    const ch = ctx.canvas.height;
+    this._cw = cw;
+    this._ch = ch;
+    this._pulseT = Date.now() / 1000;
+
+    if (this.zoom === 0) {
+      this.zoom = this._fitZoom();
+      // Pan to selected option if one exists
+      if (this.selectedOption) {
+        this.panX = this.selectedOption.x;
+        this.panY = this.selectedOption.y;
+      }
+    }
+
+    // ── Dark overlay ──────────────────────────────────────────────────────────
+    ctx.fillStyle = 'rgba(2, 10, 20, 0.92)';
+    ctx.fillRect(0, 0, cw, ch);
+
+    // World-space → screen helpers
+    const toScreenX = (wx: number) => (wx - this.panX) / this.zoom + cw / 2;
+    const toScreenY = (wy: number) => (wy - this.panY) / this.zoom + ch / 2;
+    const toScreenLen = (wl: number) => wl / this.zoom;
+
+    // ── Grid lines ────────────────────────────────────────────────────────────
+    {
+      const GRID = 100_000;
+      const gridStart = Math.ceil(-FULL_WORLD_HALF / GRID) * GRID;
+      const gridEnd   = Math.floor( FULL_WORLD_HALF / GRID) * GRID;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+      ctx.lineWidth = 1;
+      for (let g = gridStart; g <= gridEnd; g += GRID) {
+        const sx = toScreenX(g);
+        const sy = toScreenY(g);
+        if (sx >= 0 && sx <= cw) { ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, ch); ctx.stroke(); }
+        if (sy >= 0 && sy <= ch) { ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(cw, sy); ctx.stroke(); }
+      }
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+      const ox = toScreenX(0), oy = toScreenY(0);
+      if (ox >= 0 && ox <= cw) { ctx.beginPath(); ctx.moveTo(ox, 0); ctx.lineTo(ox, ch); ctx.stroke(); }
+      if (oy >= 0 && oy <= ch) { ctx.beginPath(); ctx.moveTo(0, oy); ctx.lineTo(cw, oy); ctx.stroke(); }
+      ctx.restore();
+    }
+
+    // ── Ocean boundary ────────────────────────────────────────────────────────
+    const bx = toScreenX(WORLD_MIN_X);
+    const by = toScreenY(WORLD_MIN_Y);
+    const bw = toScreenLen(WORLD_W);
+    const bh = toScreenLen(WORLD_H);
+    ctx.fillStyle = '#071830';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.strokeStyle = '#1a4466';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(bx, by, bw, bh);
+
+    // ── Islands ───────────────────────────────────────────────────────────────
+    for (const isl of islands) {
+      ctx.save();
+      ctx.beginPath();
+      if (isl.vertices && isl.vertices.length > 2) {
+        ctx.moveTo(toScreenX(isl.vertices[0].x), toScreenY(isl.vertices[0].y));
+        for (let i = 1; i < isl.vertices.length; i++) {
+          ctx.lineTo(toScreenX(isl.vertices[i].x), toScreenY(isl.vertices[i].y));
+        }
+        ctx.closePath();
+      } else {
+        const baseR = (isl as any).beach_radius ?? 185;
+        const sr = Math.max(2, toScreenLen(baseR));
+        ctx.arc(toScreenX(isl.x), toScreenY(isl.y), sr, 0, Math.PI * 2);
+      }
+      ctx.fillStyle = '#1a4a10';
+      ctx.strokeStyle = '#2a7a18';
+      ctx.lineWidth = 1;
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+
+      const lx = toScreenX(isl.x);
+      const ly = toScreenY(isl.y);
+      if (lx > -50 && lx < cw + 50 && ly > -50 && ly < ch + 50) {
+        ctx.textAlign = 'center';
+        ctx.font = `${Math.max(9, Math.min(14, toScreenLen(80)))}px Consolas, monospace`;
+        ctx.fillStyle = '#55aa44';
+        ctx.fillText(`Isle ${isl.id ?? '?'}`, lx, ly - toScreenLen(30) - 4);
+      }
+    }
+
+    // ── All ships (context) ───────────────────────────────────────────────────
+    for (const ship of ships) {
+      const sx = toScreenX(ship.position.x);
+      const sy = toScreenY(ship.position.y);
+      if (sx < -20 || sx > cw + 20 || sy < -20 || sy > ch + 20) continue;
+      const isFriendly = localCompanyId !== 0 && ship.companyId === localCompanyId;
+      const r = Math.max(4, toScreenLen(40));
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.rotate((ship.rotation ?? 0) + Math.PI / 2);
+      ctx.beginPath();
+      ctx.moveTo(0, -r * 1.4);
+      ctx.lineTo(r * 0.7, r);
+      ctx.lineTo(-r * 0.7, r);
+      ctx.closePath();
+      ctx.fillStyle = isFriendly ? '#4488ff' : '#ff4444';
+      ctx.strokeStyle = isFriendly ? '#aaccff' : '#ffaaaa';
+      ctx.lineWidth = 1;
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // ── Spawn options (selectable) ────────────────────────────────────────────
+    const pulse = 0.5 + 0.5 * Math.sin(this._pulseT * 3.5);
+    for (const opt of this.spawnOptions) {
+      const mx = toScreenX(opt.x);
+      const my = toScreenY(opt.y);
+      const selected = opt === this.selectedOption;
+
+      ctx.save();
+      if (opt.type === 'ship') {
+        if (selected) {
+          // Pulsing glow ring
+          ctx.beginPath();
+          ctx.arc(mx, my, 14 + pulse * 4, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255, 238, 68, ${0.15 + pulse * 0.1})`;
+          ctx.fill();
+        }
+        ctx.beginPath();
+        ctx.arc(mx, my, selected ? 8 : 5, 0, Math.PI * 2);
+        ctx.fillStyle = selected ? '#ffee44' : '#aaaaff';
+        ctx.strokeStyle = selected ? '#ffffff' : '#6666cc';
+        ctx.lineWidth = selected ? 2 : 1.5;
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        if (selected) {
+          ctx.beginPath();
+          ctx.arc(mx, my, 14 + pulse * 4, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(68, 255, 160, ${0.15 + pulse * 0.1})`;
+          ctx.fill();
+        }
+        ctx.beginPath();
+        ctx.arc(mx, my, selected ? 7 : 4.5, 0, Math.PI * 2);
+        ctx.fillStyle = selected ? '#44ffaa' : '#44aa66';
+        ctx.strokeStyle = selected ? '#ffffff' : '#226644';
+        ctx.lineWidth = selected ? 2 : 1;
+        ctx.fill();
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      ctx.textAlign = 'center';
+      ctx.font = `${selected ? 'bold ' : ''}${Math.max(9, Math.min(13, toScreenLen(70)))}px Consolas, monospace`;
+      ctx.fillStyle = selected ? '#ffffff' : '#999999';
+      ctx.fillText(opt.label, mx, my - (selected ? 13 : 9));
+    }
+
+    // ── Scale bar ─────────────────────────────────────────────────────────────
+    this._renderScaleBar(ctx, cw, ch);
+
+    // ── HUD header ────────────────────────────────────────────────────────────
+    // Red "YOU DIED" banner at top
+    const bannerH = 64;
+    ctx.fillStyle = 'rgba(80, 0, 0, 0.72)';
+    ctx.fillRect(0, 0, cw, bannerH);
+
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 32px serif';
+    ctx.fillStyle = '#dd2233';
+    ctx.fillText('YOU DIED', 16, 42);
+
+    ctx.font = '13px Consolas, monospace';
+    ctx.fillStyle = '#778899';
+    ctx.fillText('Click a spawn point  •  Drag to pan  •  Scroll to zoom', 16, bannerH - 8);
+
+    // Selected spawn info (top right)
+    if (this.selectedOption) {
+      ctx.textAlign = 'right';
+      ctx.font = '13px Consolas, monospace';
+      ctx.fillStyle = '#aabbcc';
+      ctx.fillText(`Selected: ${this.selectedOption.label}`, cw - 16, 30);
+    }
+
+    ctx.textAlign = 'right';
+    ctx.font = '11px Consolas, monospace';
+    ctx.fillStyle = '#445566';
+    ctx.fillText(`zoom ×${(1 / this.zoom * 100).toFixed(0)}%`, cw - 16, bannerH - 8);
+
+    // ── RESPAWN button ────────────────────────────────────────────────────────
+    const btnW = 200, btnH = 48;
+    const btnX = cw - btnW - 16;
+    const btnY = ch - btnH - 16;
+    const enabled = this.selectedOption !== null;
+
+    ctx.save();
+    // Pulsing glow on button when enabled
+    if (enabled) {
+      ctx.shadowColor = '#dd5533';
+      ctx.shadowBlur = 10 + pulse * 8;
+    }
+    ctx.fillStyle = enabled ? '#881a0e' : '#2a1a14';
+    ctx.strokeStyle = enabled ? '#dd5533' : '#4a2a22';
+    ctx.lineWidth = 2;
+    if (ctx.roundRect) ctx.roundRect(btnX, btnY, btnW, btnH, 8);
+    else ctx.rect(btnX, btnY, btnW, btnH);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillStyle = enabled ? '#ffffff' : '#444444';
+    ctx.fillText('RESPAWN', btnX + btnW / 2, btnY + 31);
+
+    this._btnBounds = { x: btnX, y: btnY, w: btnW, h: btnH };
+  }
+
+  // ── Private helpers ─────────────────────────────────────────────────────────
+
+  /** Try to select a spawn option within ~20px of the click. Returns true if one was found. */
+  private _trySelectNearClick(x: number, y: number): boolean {
+    if (this.zoom === 0) return false;
+    const wx = this.panX + (x - this._cw / 2) * this.zoom;
+    const wy = this.panY + (y - this._ch / 2) * this.zoom;
+    // Threshold: 20 screen px converted to world units
+    const threshold = 20 * this.zoom;
+    let best: SpawnOption | null = null;
+    let bestDist = threshold;
+    for (const opt of this.spawnOptions) {
+      const d = Math.hypot(opt.x - wx, opt.y - wy);
+      if (d < bestDist) { bestDist = d; best = opt; }
+    }
+    if (best) {
+      this.selectedOption = best;
+      return true;
+    }
+    return false;
+  }
+
+  private _fitZoom(): number {
+    if (this._cw === 0 || this._ch === 0) return 800;
+    return Math.max(FULL_WORLD_SIZE / (this._cw * 0.92), FULL_WORLD_SIZE / (this._ch * 0.92));
+  }
+
+  private _clampPan(): void {
+    const hw = (this._cw / 2) * this.zoom;
+    const hh = (this._ch / 2) * this.zoom;
+    const fullMin = -FULL_WORLD_HALF;
+    const fullMax =  FULL_WORLD_HALF;
+    const fullSize = FULL_WORLD_SIZE;
+    if (hw * 2 >= fullSize) this.panX = 0;
+    else this.panX = Math.max(fullMin + hw, Math.min(fullMax - hw, this.panX));
+    if (hh * 2 >= fullSize) this.panY = 0;
+    else this.panY = Math.max(fullMin + hh, Math.min(fullMax - hh, this.panY));
+  }
+
+  private _renderScaleBar(ctx: CanvasRenderingContext2D, cw: number, ch: number): void {
+    const targetScreenPx = 120;
+    const rawWorld = targetScreenPx * this.zoom;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(rawWorld)));
+    const nice = [1, 2, 5, 10].map(m => m * magnitude).find(v => v >= rawWorld) ?? magnitude * 10;
+    const barPx = nice / this.zoom;
+    const x = 16, y = ch - 24;
+    ctx.save();
+    ctx.strokeStyle = '#aabbcc';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, y); ctx.lineTo(x + barPx, y);
+    ctx.moveTo(x, y - 5); ctx.lineTo(x, y + 5);
+    ctx.moveTo(x + barPx, y - 5); ctx.lineTo(x + barPx, y + 5);
+    ctx.stroke();
+    ctx.textAlign = 'center';
+    ctx.font = '11px Consolas, monospace';
+    ctx.fillStyle = '#aabbcc';
+    ctx.fillText(`${nice.toFixed(0)} px`, x + barPx / 2, y - 8);
+    ctx.restore();
   }
 }

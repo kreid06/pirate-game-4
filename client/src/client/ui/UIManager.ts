@@ -314,18 +314,21 @@ export class UIManager {
     return this.worldMapScreen.handleMouseDown(x, y);
   }
 
-  /** Forward mouse-move to the world map for drag-pan. */
+  /** Forward mouse-move to the world map or respawn screen for drag-pan. */
   handleWorldMapMouseMove(x: number, y: number): void {
+    if (this.respawnScreen.visible) this.respawnScreen.handleMouseMove(x, y);
     this.worldMapScreen.handleMouseMove(x, y);
   }
 
-  /** Notify world map of mouse-up to end drag. */
+  /** Notify world map / respawn screen of mouse-up to end drag. */
   handleWorldMapMouseUp(): void {
+    if (this.respawnScreen.visible) this.respawnScreen.handleMouseUp();
     this.worldMapScreen.handleMouseUp();
   }
 
-  /** Forward wheel delta to the world map for zoom. Returns true if consumed. */
+  /** Forward wheel delta to the respawn screen or world map for zoom. Returns true if consumed. */
   handleWorldMapWheel(deltaY: number, x: number, y: number): boolean {
+    if (this.respawnScreen.visible) return this.respawnScreen.handleWheel(deltaY, x, y);
     return this.worldMapScreen.handleWheel(deltaY, x, y);
   }
 
