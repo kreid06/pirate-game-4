@@ -23,8 +23,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
     /* ── Island 1: Tropical bump-circle island ─────────────────────────── */
     {
         .id              = 1,
-        .x               = 50800.0f,
-        .y               = 50600.0f,
+        .x               = 45720.0f,
+        .y               = 45540.0f,
         .beach_radius_px = 185.0f,
         .grass_radius_px = 148.0f,
         /* Mirror of client RenderSystem.ISLAND_PRESETS['tropical'].beachBumps */
@@ -55,8 +55,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
      * them procedurally at startup.                                         */
     {
         .id               = 2,
-        .x                = 22000.0f,
-        .y                = 50000.0f,
+        .x                = 19800.0f,
+        .y                = 45000.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -109,8 +109,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
      * CW winding in screen-space (y-down).                                  */
     {
         .id               = 3,
-        .x                = 78000.0f,
-        .y                = 72000.0f,
+        .x                = 70200.0f,
+        .y                = 64800.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -196,11 +196,11 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
     },
 
     /* ── Island 4: Crescent — rotated 47° ─────────────────────────────────
-     * World centre (22000, 28000). */
+     * World centre (19800, 25200). */
     {
         .id               = 4,
-        .x                = 22000.0f,
-        .y                = 28000.0f,
+        .x                = 19800.0f,
+        .y                = 25200.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -286,11 +286,11 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
     },
 
     /* ── Island 5: Crescent — rotated 163° ─────────────────────────────────
-     * World centre (78000, 28000). */
+     * World centre (70200, 25200). */
     {
         .id               = 5,
-        .x                = 78000.0f,
-        .y                = 28000.0f,
+        .x                = 70200.0f,
+        .y                = 25200.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -376,11 +376,11 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
     },
 
     /* ── Island 6: Crescent — rotated 251° ─────────────────────────────────
-     * World centre (22000, 76000). */
+     * World centre (19800, 68400). */
     {
         .id               = 6,
-        .x                = 22000.0f,
-        .y                = 76000.0f,
+        .x                = 19800.0f,
+        .y                = 68400.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -466,11 +466,11 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
     },
 
     /* ── Island 7: Continental — rotated 78° ────────────────────────────────
-     * World centre (72000, 42000). */
+     * World centre (64800, 37800). */
     {
         .id               = 7,
-        .x                = 72000.0f,
-        .y                = 42000.0f,
+        .x                = 64800.0f,
+        .y                = 37800.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -508,11 +508,11 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
     },
 
     /* ── Island 8: Continental — rotated 197° ────────────────────────────────
-     * World centre (48000, 76000). */
+     * World centre (43200, 68400). */
     {
         .id               = 8,
-        .x                = 48000.0f,
-        .y                = 76000.0f,
+        .x                = 43200.0f,
+        .y                = 68400.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -550,11 +550,11 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
     },
 
     /* ── Island 9: Continental — rotated 324° ────────────────────────────────
-     * World centre (50000, 22000). */
+     * World centre (45000, 19800). */
     {
         .id               = 9,
-        .x                = 50000.0f,
-        .y                = 22000.0f,
+        .x                = 45000.0f,
+        .y                = 19800.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},

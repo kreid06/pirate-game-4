@@ -579,10 +579,10 @@ export class NetworkManager {
   public onIslands: ((islands: IslandDef[]) => void) | null = null;
 
   /** World map dimensions received from the server via MAP_INFO. */
-  public mapWidth: number = 100000;
-  public mapHeight: number = 100000;
-  public mapCenterX: number = 50000;
-  public mapCenterY: number = 50000;
+  public mapWidth: number = 90000;
+  public mapHeight: number = 90000;
+  public mapCenterX: number = 45000;
+  public mapCenterY: number = 45000;
   public mapWrap: boolean = true;
   /** Fired when the server broadcasts a resource_damaged event. */
   public onResourceDamaged: ((islandId: number, ox: number, oy: number, hp: number, maxHp: number) => void) | null = null;
@@ -2288,8 +2288,8 @@ export class NetworkManager {
       }
 
       case 'MAP_INFO': {
-        this.mapWidth   = message.width   ?? 100000;
-        this.mapHeight  = message.height  ?? 100000;
+        this.mapWidth   = message.width   ?? 90000;
+        this.mapHeight  = message.height  ?? 90000;
         this.mapCenterX = message.centerX ?? this.mapWidth  / 2;
         this.mapCenterY = message.centerY ?? this.mapHeight / 2;
         this.mapWrap    = message.wrap    ?? true;

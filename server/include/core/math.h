@@ -12,10 +12,10 @@
 
 // World map dimensions (client pixels).  One 100 000 × 100 000 grid cell.
 // Future expansion: add more grid cells adjacent to this one on demand.
-#define MAP_WIDTH      100000.0f
-#define MAP_HEIGHT     100000.0f
-#define MAP_CENTER_X   (MAP_WIDTH  * 0.5f)   /* 50 000 */
-#define MAP_CENTER_Y   (MAP_HEIGHT * 0.5f)   /* 50 000 */
+#define MAP_WIDTH      90000.0f
+#define MAP_HEIGHT     90000.0f
+#define MAP_CENTER_X   (MAP_WIDTH  * 0.5f)   /* 45 000 */
+#define MAP_CENTER_Y   (MAP_HEIGHT * 0.5f)   /* 45 000 */
 // Server-unit (Q16) equivalents
 #define MAP_WIDTH_SRV  (MAP_WIDTH  / WORLD_SCALE_FACTOR)   /* 10 000 */
 #define MAP_HEIGHT_SRV (MAP_HEIGHT / WORLD_SCALE_FACTOR)   /* 10 000 */
