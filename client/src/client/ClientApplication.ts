@@ -178,12 +178,83 @@ export class ClientApplication {
   /** Timestamp (ms) of the last sword swing, for cursor cooldown ring. */
   private swordLastAttackMs = 0;
   
+  // Loading overlay DOM state
+  private _loadingOverlay: HTMLElement | null = null;
+  private _loadingBar: HTMLElement | null = null;
+  private _loadingSteps: Array<HTMLElement | null> = [];
+  private _loadingShownAt = 0;
+  private _loadingHidden = false;
+  private static readonly LOADING_MIN_MS = 2000; // minimum time overlay is visible
+
   constructor(canvas: HTMLCanvasElement, config: ClientConfig) {
     this.canvas = canvas;
     this.config = config;
     this.clientTickDuration = 1000 / config.prediction.clientTickRate; // e.g., ~8.33ms for 120Hz
-    
+
+    this._loadingOverlay = document.getElementById('loading-overlay');
+    this._loadingBar = document.getElementById('loading-bar');
+    this._loadingSteps = [
+      document.getElementById('step-init'),
+      document.getElementById('step-connect'),
+      document.getElementById('step-world'),
+      document.getElementById('step-enter'),
+    ];
+    this._loadingShownAt = Date.now();
+
     console.log(`🎮 Client initialized with ${config.prediction.clientTickRate}Hz tick rate`);
+  }
+
+  /** Advance the loading overlay to the given step index (0–3) and update the progress bar. */
+  private setLoadingStep(step: number): void {
+    if (!this._loadingOverlay || this._loadingHidden) return;
+    const pct = [10, 35, 60, 90][step] ?? 100;
+    if (this._loadingBar) this._loadingBar.style.width = `${pct}%`;
+
+    this._loadingSteps.forEach((el, i) => {
+      if (!el) return;
+      const icon = el.querySelector('.step-icon') as HTMLElement | null;
+      if (i < step) {
+        el.classList.add('done');
+        el.classList.remove('active');
+        if (icon) icon.textContent = '✓';
+      } else if (i === step) {
+        el.classList.add('active');
+        el.classList.remove('done');
+        if (icon) icon.innerHTML = '<span class="step-spinner"></span>';
+      } else {
+        el.classList.remove('active', 'done');
+        if (icon) icon.textContent = '⏳';
+      }
+    });
+  }
+
+  /** Fade out then hide the loading overlay. Respects minimum display time. Idempotent. */
+  private hideLoadingOverlay(): void {
+    if (this._loadingHidden) return;
+    this._loadingHidden = true;
+
+    const overlay = this._loadingOverlay;
+    if (!overlay) return;
+
+    // Mark all steps done
+    if (this._loadingBar) this._loadingBar.style.width = '100%';
+    this._loadingSteps.forEach(el => {
+      if (!el) return;
+      el.classList.add('done');
+      el.classList.remove('active');
+      const icon = el.querySelector('.step-icon') as HTMLElement | null;
+      if (icon) icon.textContent = '✓';
+    });
+
+    const elapsed = Date.now() - this._loadingShownAt;
+    const delay = Math.max(0, ClientApplication.LOADING_MIN_MS - elapsed) + 300;
+
+    setTimeout(() => {
+      overlay.classList.add('fade-out');
+      overlay.addEventListener('transitionend', () => {
+        overlay.classList.add('hidden');
+      }, { once: true });
+    }, delay);
   }
   
   /**
@@ -192,6 +263,7 @@ export class ClientApplication {
   async initialize(): Promise<void> {
     try {
       this.state = ClientState.INITIALIZING;
+      this.setLoadingStep(0);
       console.log('⚡ Initializing client systems...');
       
       // Initialize Camera first (needed by other systems)
@@ -1754,8 +1826,10 @@ export class ClientApplication {
       
       // Try to connect to server, but continue even if it fails
       this.state = ClientState.CONNECTING;
+      this.setLoadingStep(1);
       try {
         await this.networkManager.connect(playerName ?? 'Player', accessToken);
+        this.setLoadingStep(2);
         console.log('✅ Connected to physics server');
       } catch (serverError) {
         console.warn('⚠️ Could not connect to physics server:', serverError);
@@ -1763,6 +1837,7 @@ export class ClientApplication {
         this.state = ClientState.DISCONNECTED;
         // Create demo world state for offline testing
         this.demoWorldState = this.createDemoWorldState();
+        this.hideLoadingOverlay();
         // Continue execution - we can still show UI and test locally
       }
       
@@ -2253,6 +2328,8 @@ export class ClientApplication {
     // Update game state if we just entered the game
     if (this.state === ClientState.CONNECTED) {
       this.state = ClientState.IN_GAME;
+      this.setLoadingStep(3);
+      this.hideLoadingOverlay();
       console.log('🎮 Entered game world');
     }
   }

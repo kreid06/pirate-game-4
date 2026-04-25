@@ -37,8 +37,247 @@
         z-index: 10;
       }
     </style>
+    <!-- Loading Overlay -->
+    <style>
+      #loading-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        background: #050d1a;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        transition: opacity 0.7s ease;
+        overflow: hidden;
+        user-select: none;
+      }
+      #loading-overlay.fade-out {
+        opacity: 0;
+        pointer-events: none;
+      }
+      #loading-overlay.hidden {
+        display: none;
+      }
+
+      /* Animated ocean at the bottom */
+      .ocean {
+        position: absolute;
+        bottom: 0;
+        left: -10%;
+        width: 120%;
+        height: 160px;
+        pointer-events: none;
+      }
+      .wave {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 200%;
+        height: 100%;
+        background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 120'%3E%3Cpath d='M0,60 C150,100 350,0 600,60 C850,120 1050,20 1200,60 L1200,120 L0,120 Z' fill='%230a2a4a'/%3E%3C/svg%3E") repeat-x bottom;
+        background-size: 600px 120px;
+        animation: wave-drift 6s linear infinite;
+        opacity: 0.7;
+      }
+      .wave:nth-child(2) {
+        background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 120'%3E%3Cpath d='M0,80 C200,20 400,110 600,70 C800,30 1000,100 1200,60 L1200,120 L0,120 Z' fill='%230d3860'/%3E%3C/svg%3E") repeat-x bottom;
+        background-size: 800px 120px;
+        animation: wave-drift 9s linear infinite reverse;
+        opacity: 0.5;
+        bottom: 0px;
+      }
+      .wave:nth-child(3) {
+        background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 120'%3E%3Cpath d='M0,50 C300,110 500,10 700,70 C900,130 1100,30 1200,80 L1200,120 L0,120 Z' fill='%23112d4e'/%3E%3C/svg%3E") repeat-x bottom;
+        background-size: 1000px 120px;
+        animation: wave-drift 12s linear infinite;
+        opacity: 0.6;
+        bottom: 10px;
+      }
+      @keyframes wave-drift {
+        0%   { transform: translateX(0); }
+        100% { transform: translateX(-50%); }
+      }
+
+      /* Stars */
+      .stars {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      .star {
+        position: absolute;
+        background: #fff;
+        border-radius: 50%;
+        animation: twinkle var(--dur, 3s) ease-in-out infinite var(--delay, 0s);
+      }
+      @keyframes twinkle {
+        0%, 100% { opacity: 0.2; transform: scale(1); }
+        50%       { opacity: 1;   transform: scale(1.4); }
+      }
+
+      /* Main content */
+      .loading-content {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 28px;
+        padding-bottom: 80px;
+      }
+
+      /* Skull icon */
+      .skull-icon {
+        font-size: 80px;
+        line-height: 1;
+        animation: skull-bob 2.4s ease-in-out infinite;
+        filter: drop-shadow(0 0 18px rgba(255,200,60,0.4));
+      }
+      @keyframes skull-bob {
+        0%, 100% { transform: translateY(0) rotate(-4deg); }
+        50%       { transform: translateY(-10px) rotate(4deg); }
+      }
+
+      /* Title */
+      .loading-title {
+        font-family: Georgia, 'Times New Roman', serif;
+        font-size: clamp(28px, 5vw, 52px);
+        font-weight: bold;
+        color: #f0c040;
+        text-shadow: 0 0 20px rgba(240,192,64,0.5), 2px 2px 0 #4a2a00;
+        letter-spacing: 3px;
+        text-align: center;
+      }
+      .loading-subtitle {
+        font-family: Georgia, serif;
+        font-size: clamp(13px, 2vw, 16px);
+        color: #8ab4d0;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        margin-top: -18px;
+      }
+
+      /* Progress steps */
+      .loading-steps {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        min-width: 280px;
+      }
+      .loading-step {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-family: monospace;
+        font-size: 14px;
+        color: #4a6a80;
+        transition: color 0.3s;
+      }
+      .loading-step.active {
+        color: #8ab4d0;
+      }
+      .loading-step.done {
+        color: #5cb85c;
+      }
+      .step-icon {
+        width: 18px;
+        text-align: center;
+        font-size: 16px;
+        flex-shrink: 0;
+      }
+      .step-spinner {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        border: 2px solid #4a6a80;
+        border-top-color: #8ab4d0;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+
+      /* Progress bar */
+      .loading-bar-track {
+        width: 280px;
+        height: 4px;
+        background: rgba(255,255,255,0.08);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      .loading-bar-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #1a6a9a, #f0c040);
+        border-radius: 2px;
+        width: 0%;
+        transition: width 0.5s ease;
+      }
+
+      /* Tip text */
+      .loading-tip {
+        font-family: Georgia, serif;
+        font-size: 13px;
+        color: #4a6a80;
+        text-align: center;
+        max-width: 360px;
+        font-style: italic;
+        line-height: 1.5;
+        min-height: 40px;
+        transition: opacity 0.4s;
+      }
+    </style>
   </head>
   <body>
+    <!-- Loading overlay — shown until first world state received -->
+    <div id="loading-overlay">
+      <!-- Stars background -->
+      <div class="stars" id="loading-stars"></div>
+
+      <!-- Animated ocean -->
+      <div class="ocean">
+        <div class="wave"></div>
+        <div class="wave"></div>
+        <div class="wave"></div>
+      </div>
+
+      <!-- Main content -->
+      <div class="loading-content">
+        <div class="skull-icon">💀</div>
+        <div>
+          <div class="loading-title">Pirate Seas</div>
+          <div class="loading-subtitle">Setting sail...</div>
+        </div>
+
+        <div class="loading-steps" id="loading-steps">
+          <div class="loading-step" id="step-init">
+            <span class="step-icon">⏳</span>
+            <span>Initializing systems</span>
+          </div>
+          <div class="loading-step" id="step-connect">
+            <span class="step-icon">⏳</span>
+            <span>Connecting to server</span>
+          </div>
+          <div class="loading-step" id="step-world">
+            <span class="step-icon">⏳</span>
+            <span>Loading world</span>
+          </div>
+          <div class="loading-step" id="step-enter">
+            <span class="step-icon">⏳</span>
+            <span>Entering seas</span>
+          </div>
+        </div>
+
+        <div class="loading-bar-track">
+          <div class="loading-bar-fill" id="loading-bar"></div>
+        </div>
+
+        <div class="loading-tip" id="loading-tip">
+          Every pirate needs a crew. Recruit sailors from neutral ships.
+        </div>
+      </div>
+    </div>
+
     <div id="canvas-wrapper">
       <canvas id="gameCanvas"></canvas>
       <div id="zoom-controls">
@@ -46,6 +285,50 @@
         <button id="zoom-out-btn" title="Zoom Out" style="width:36px;height:36px;font-size:20px;font-weight:bold;background:rgba(0,0,0,0.65);color:#fff;border:1px solid #666;border-radius:6px;cursor:pointer;line-height:1;">−</button>
       </div>
     </div>
+
+    <script>
+      // Generate random stars
+      (function() {
+        const container = document.getElementById('loading-stars');
+        for (let i = 0; i < 80; i++) {
+          const s = document.createElement('div');
+          s.className = 'star';
+          const sz = Math.random() * 2 + 1;
+          s.style.cssText = `
+            width:${sz}px; height:${sz}px;
+            left:${Math.random()*100}%;
+            top:${Math.random()*70}%;
+            --dur:${2 + Math.random()*4}s;
+            --delay:${Math.random()*4}s;
+          `;
+          container.appendChild(s);
+        }
+      })();
+
+      // Cycle loading tips
+      const TIPS = [
+        'Every pirate needs a crew. Recruit sailors from neutral ships.',
+        'Cannons reload automatically — aim before firing for best accuracy.',
+        'Use the pickaxe to mine large boulders for stone resources.',
+        'Sprinting drains stamina — pace yourself across open islands.',
+        'Fiber bushes grow along the shore. Pick them to craft sail repairs.',
+        'Dead trees still count as cover. Use them wisely in a firefight.',
+        'Assign crew to Sails for faster speeds, or Cannons for auto-fire.',
+        'Board enemy ships by swimming to their hull and climbing the ladder.',
+      ];
+      let tipIdx = 0;
+      const tipEl = document.getElementById('loading-tip');
+      setInterval(function() {
+        if (!tipEl || !document.getElementById('loading-overlay')) return;
+        tipEl.style.opacity = '0';
+        setTimeout(function() {
+          tipIdx = (tipIdx + 1) % TIPS.length;
+          tipEl.textContent = TIPS[tipIdx];
+          tipEl.style.opacity = '1';
+        }, 400);
+      }, 4000);
+    </script>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
