@@ -1148,8 +1148,8 @@ export class ClientApplication {
         if (this.craftingMenu.visible) this.craftingMenu.handleMouseMove(x, y);
         this.uiManager?.handleWorldMapMouseMove(x, y);
       };
-      this.inputManager.onUIMouseUp = () => {
-        this.uiManager?.handleWorldMapMouseUp();
+      this.inputManager.onUIMouseUp = (x, y) => {
+        this.uiManager?.handleWorldMapMouseUp(x, y);
       };
       // Forward wheel to world map zoom (returns true when map is visible)
       this.inputManager.onUIWheel = (deltaY, x, y) => {
@@ -1486,6 +1486,27 @@ export class ClientApplication {
       // Hotbar left-click slot selection
       this.uiManager.onHotbarSlotClick = (slot) => {
         this.inputManager.onSlotSelect?.(slot);
+      };
+
+      // Supply inventory data for drag-and-drop in the player menu
+      this.uiManager.getPlayerInventory = () => {
+        const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        const pid = this.networkManager.getAssignedPlayerId();
+        return ws?.players.find(p => p.id === pid)?.inventory ?? null;
+      };
+
+      // Inventory drag-and-drop swap
+      this.uiManager.playerMenu.onSwapRequest = (fromSlot, toSlot) => {
+        const pid = this.networkManager.getAssignedPlayerId();
+        for (const w of [this.authoritativeWorldState, this.predictedWorldState]) {
+          const p = w?.players.find(pl => pl.id === pid);
+          if (!p) continue;
+          // Optimistic local swap
+          const tmp = { ...p.inventory.slots[fromSlot] };
+          p.inventory.slots[fromSlot] = { ...p.inventory.slots[toSlot] };
+          p.inventory.slots[toSlot] = tmp;
+        }
+        this.networkManager.sendInvSwap(fromSlot, toSlot);
       };
 
       // Handle NPC_STAT_UP broadcast: refresh world-state NPC fields

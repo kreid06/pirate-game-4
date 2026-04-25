@@ -100,7 +100,7 @@ export class UIManager {
   // Company menu (toggled by [K])
   private companyMenu = new CompanyMenu();
   // Player character menu (toggled by [E] when menu is open)
-  private playerMenu = new PlayerMenu();
+  public readonly playerMenu = new PlayerMenu();
   // Ship status menu (toggled by [F])
   private shipMenu = new ShipMenu();
   // Crew level / upgrade panel (opened by clicking an NPC)
@@ -148,6 +148,8 @@ export class UIManager {
   public onGroupModeChange: ((groupIndex: number, mode: WeaponGroupMode) => void) | null = null;
   /** Called when the player left-clicks a hotbar slot. */
   public onHotbarSlotClick: ((slot: number) => void) | null = null;
+  /** Supplier for current player inventory — used for drag-and-drop in player menu. */
+  public getPlayerInventory: (() => { slots: { item: ItemKind; quantity: number }[] } | null) | null = null;
   /** Cached from last render frame — used by handleRightClick for hotbar hit-testing. */
   private _cachedHelmActiveGroup: number = -1;
   private _cachedControlGroups: Map<number, WeaponGroupState> | null = null;
@@ -318,12 +320,14 @@ export class UIManager {
 
   /** Forward mouse-move to the world map or respawn screen for drag-pan. */
   handleWorldMapMouseMove(x: number, y: number): void {
+    if (this.activeMenuId === MENU_ID.PLAYER) this.playerMenu.handleMouseMove(x, y);
     if (this.respawnScreen.visible) this.respawnScreen.handleMouseMove(x, y);
     this.worldMapScreen.handleMouseMove(x, y);
   }
 
   /** Notify world map / respawn screen of mouse-up to end drag. */
-  handleWorldMapMouseUp(): void {
+  handleWorldMapMouseUp(x = 0, y = 0): void {
+    if (this.activeMenuId === MENU_ID.PLAYER) this.playerMenu.handleMouseUp(x, y);
     if (this.respawnScreen.visible) this.respawnScreen.handleMouseUp();
     this.worldMapScreen.handleMouseUp();
   }
@@ -331,6 +335,7 @@ export class UIManager {
   /** Forward wheel delta to the respawn screen or world map for zoom. Returns true if consumed. */
   handleWorldMapWheel(deltaY: number, x: number, y: number): boolean {
     if (this.respawnScreen.visible) return this.respawnScreen.handleWheel(deltaY, x, y);
+    if (this.activeMenuId === MENU_ID.PLAYER) return this.playerMenu.handleWheel(deltaY, x, y);
     return this.worldMapScreen.handleWheel(deltaY, x, y);
   }
 
@@ -445,7 +450,7 @@ export class UIManager {
 
     // Company menu renders last so it sits above all other UI
     this.companyMenu.render(ctx, context.worldState, context.assignedPlayerId);
-    this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId);
+    this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId, this.mouseX, this.mouseY);
     this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
     // Crew level menu — update live NPC data before rendering
     if (this.activeMenuId === MENU_ID.CREW && this.crewMenu.npcId) {
@@ -1090,6 +1095,11 @@ export class UIManager {
       return true;
     }
     if (this.activeMenuId === MENU_ID.PLAYER) {
+      // Try to start a drag first
+      const inv = this.getPlayerInventory?.() ?? null;
+      if (inv && this.playerMenu.handleMouseDown(x, y, inv)) {
+        return true; // drag started — don't process as a normal click
+      }
       const consumed = this.playerMenu.handleClick(x, y);
       if (!consumed) this.closeActiveMenu();
       return true;

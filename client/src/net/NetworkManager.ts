@@ -65,6 +65,7 @@ export enum MessageType {
   SWIVEL_AIM = 'swivel_aim',
 
   SLOT_SELECT = 'slot_select',
+  INV_SWAP = 'inv_swap',
   UNEQUIP = 'unequip',
   GIVE_ITEM = 'give_item',
   PLACE_PLANK = 'place_plank',
@@ -1156,6 +1157,12 @@ export class NetworkManager {
   sendSlotSelect(slot: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.SLOT_SELECT, timestamp: Date.now(), slot });
+  }
+
+  /** Swap two inventory slots. Server will swap items and broadcast updated inventory. */
+  sendInvSwap(slotA: number, slotB: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.INV_SWAP, timestamp: Date.now(), slot_a: slotA, slot_b: slotB });
   }
 
   /**

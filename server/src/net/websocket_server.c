@@ -2958,6 +2958,34 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "inv_swap") == 0) {
+                            // INVENTORY: swap two slots {"type":"inv_swap","slot_a":0,"slot_b":5}
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    int slot_a = -1, slot_b = -1;
+                                    char* pa = strstr(payload, "\"slot_a\":");
+                                    char* pb = strstr(payload, "\"slot_b\":");
+                                    if (pa) sscanf(pa + 9, "%d", &slot_a);
+                                    if (pb) sscanf(pb + 9, "%d", &slot_b);
+                                    if (slot_a >= 0 && slot_a < INVENTORY_SLOTS &&
+                                        slot_b >= 0 && slot_b < INVENTORY_SLOTS &&
+                                        slot_a != slot_b) {
+                                        InventorySlot tmp = player->inventory.slots[slot_a];
+                                        player->inventory.slots[slot_a] = player->inventory.slots[slot_b];
+                                        player->inventory.slots[slot_b] = tmp;
+                                        strcpy(response, "{\"type\":\"message_ack\",\"status\":\"inv_swapped\"}");
+                                    } else {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"invalid_slots\"}");
+                                    }
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "give_item") == 0) {
                             // INVENTORY: server-side item grant (used by admin/tests)
                             // {"type":"give_item","slot":0,"item":1,"quantity":10}

@@ -16,7 +16,7 @@ import {
   COMPANY_PIRATES,
   COMPANY_NAVY,
 } from '../../sim/Types.js';
-import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS } from '../../sim/Inventory.js';
+import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, ITEM_KIND_ID } from '../../sim/Inventory.js';
 
 // ── Shared palette (mirrors CompanyMenu) ─────────────────────────────────────
 
@@ -95,6 +95,23 @@ export class PlayerMenu {
   private _panelY = 0;
   private _btnHits: BtnHit[] = [];
 
+  // Inventory grid scroll state
+  private _invScrollY    = 0;
+  private _invGridY      = 0;   // canvas-y where the grid slots start
+  private _invContentH   = 0;   // total pixel height of all rows
+  private _invViewportH  = 0;   // clipped viewport height
+
+  // Drag-and-drop state
+  private _dragSlot    = -1;   // source slot index, -1 = not dragging
+  private _dragX       = 0;
+  private _dragY       = 0;
+  private _dragISZ     = 0;    // slot size at drag start (for ghost sizing)
+  private _dragStartIX = 0;    // startIX at drag start
+  private _dragStride  = 0;    // STRIDE at drag start
+
+  /** Called when the player drags a slot onto another; args are (fromSlot, toSlot). */
+  public onSwapRequest: ((fromSlot: number, toSlot: number) => void) | null = null;
+
   toggle(): void { this.visible = !this.visible; }
   open():   void { this.visible = true; this.activeTab = 'character'; }
   close():  void { this.visible = false; }
@@ -134,10 +151,78 @@ export class PlayerMenu {
     return true; // click inside panel — consume to avoid accidental close
   }
 
+  /** Handle mouse-wheel over the inventory grid. Returns true if consumed. */
+  handleWheel(deltaY: number, _x: number, y: number): boolean {
+    if (!this.visible || this.activeTab !== 'character') return false;
+    if (y < this._invGridY || y > this._invGridY + this._invViewportH) return false;
+    const maxScroll = Math.max(0, this._invContentH - this._invViewportH);
+    if (maxScroll === 0) return false;
+    this._invScrollY = Math.max(0, Math.min(maxScroll, this._invScrollY + deltaY * 0.4));
+    return true;
+  }
+
+  /** Begin a drag if the mousedown lands on an inventory slot. Returns true if consumed. */
+  handleMouseDown(x: number, y: number, inv: { slots: { item: ItemKind; quantity: number }[] }): boolean {
+    if (!this.visible || this.activeTab !== 'character') return false;
+    const slot = this._slotAt(x, y);
+    if (slot === -1) return false;
+    if ((inv.slots[slot]?.item ?? 'none') === 'none') return false;
+    this._dragSlot = slot;
+    this._dragX    = x;
+    this._dragY    = y;
+    return true;
+  }
+
+  /** Update drag ghost position. */
+  handleMouseMove(x: number, y: number): void {
+    if (this._dragSlot !== -1) {
+      this._dragX = x;
+      this._dragY = y;
+    }
+  }
+
+  /**
+   * End the drag — if dropped on a different slot, fires onSwapRequest.
+   * Returns true if consumed.
+   */
+  handleMouseUp(x: number, y: number): boolean {
+    if (this._dragSlot === -1) return false;
+    const fromSlot = this._dragSlot;
+    this._dragSlot = -1;
+    const toSlot = this._slotAt(x, y);
+    if (toSlot !== -1 && toSlot !== fromSlot) {
+      this.onSwapRequest?.(fromSlot, toSlot);
+    }
+    return true;
+  }
+
+  /** Returns the inventory slot index under (x, y), or -1 if none. */
+  private _slotAt(x: number, y: number): number {
+    if (!this._dragISZ) return -1; // grid not rendered yet
+    const ISZ    = this._dragISZ;
+    const STRIDE = this._dragStride;
+    const COLS   = 10;
+    const ROWS   = 6;
+    // must be inside the viewport
+    if (y < this._invGridY || y > this._invGridY + this._invViewportH) return -1;
+    for (let row = 0; row < ROWS; row++) {
+      for (let col = 0; col < COLS; col++) {
+        const i  = row * COLS + col;
+        if (i >= 58) break;
+        const sx = this._dragStartIX + col * STRIDE;
+        const sy = this._invGridY + row * STRIDE - this._invScrollY;
+        if (x >= sx && x <= sx + ISZ && y >= sy && y <= sy + ISZ) return i;
+      }
+    }
+    return -1;
+  }
+
   render(
     ctx:             CanvasRenderingContext2D,
     worldState:      WorldState,
     assignedId:      number | null | undefined,
+    mouseX = 0,
+    mouseY = 0,
   ): void {
     if (!this.visible) return;
 
@@ -194,7 +279,7 @@ export class PlayerMenu {
     cur = this._equipmentSection(ctx, px, cur, player);
     cur = this._status(ctx, px, cur, player, ship, worldState);
     cur = this._levelXpCompact(ctx, px, cur, player);
-    cur = this._inventoryGrid(ctx, px, cur, player);
+    cur = this._inventoryGrid(ctx, px, cur, player, mouseX, mouseY);
 
     ctx.restore();
   }
@@ -387,13 +472,16 @@ export class PlayerMenu {
     ctx:    CanvasRenderingContext2D,
     px:     number, py: number,
     player: NonNullable<ReturnType<WorldState['players']['find']>>,
+    mouseX = 0, mouseY = 0,
   ): number {
-    const inv   = player.inventory;
-    const COLS  = 10;
-    const ISZ   = 36;
-    const IGAP  = 4;
+    const inv    = player.inventory;
+    const COLS   = 10;
+    const IGAP   = 6;
+    // Slots expand to fill the inner content width
+    const ISZ    = Math.floor((PANEL_W - 2 * PAD - (COLS - 1) * IGAP) / COLS); // 55
     const STRIDE = ISZ + IGAP;
-    const ROWS  = Math.ceil(58 / COLS);   // 6
+    const ROWS   = Math.ceil(58 / COLS);  // 6
+    const LABEL_ROW_H = 14; // hotbar key-number row height
 
     const activeSlot = inv.activeSlot;
     const slotLabel  = (activeSlot === 255 || activeSlot >= 10)
@@ -403,8 +491,37 @@ export class PlayerMenu {
     py = this._sectionHeader(ctx, px, py, 'INVENTORY  (58 slots)', slotLabel);
     py += 6;
 
-    const totalIW = COLS * STRIDE - IGAP;
-    const startIX = px + Math.round((PANEL_W - totalIW) / 2);
+    const startIX  = px + PAD;
+    const contentH = ROWS * STRIDE - IGAP + LABEL_ROW_H + 4;
+    // Viewport: whatever is left inside the panel minus a small bottom margin
+    const panelBottom  = this._panelY + PANEL_H - PAD;
+    const viewportH    = Math.min(contentH, Math.max(0, panelBottom - py));
+
+    // Cache for handleWheel
+    this._invGridY     = py;
+    this._invContentH  = contentH;
+    this._invViewportH = viewportH;
+
+    // Cache for drag hit-testing
+    this._dragISZ     = ISZ;
+    this._dragStride  = STRIDE;
+    this._dragStartIX = startIX;
+
+    // Clamp scroll
+    const maxScroll = Math.max(0, contentH - viewportH);
+    if (this._invScrollY > maxScroll) this._invScrollY = maxScroll;
+
+    // Clip to viewport
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px, py, PANEL_W, viewportH);
+    ctx.clip();
+
+    const scrollY = this._invScrollY;
+
+    let hoveredSlot = -1;
+    let hoveredSX   = 0;
+    let hoveredSY   = 0;
 
     for (let row = 0; row < ROWS; row++) {
       for (let col = 0; col < COLS; col++) {
@@ -414,52 +531,241 @@ export class PlayerMenu {
         const slot     = inv.slots[i] ?? { item: 'none' as ItemKind, quantity: 0 };
         const def      = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
         const sx       = startIX + col * STRIDE;
-        const sy       = py + row * STRIDE;
+        const sy       = py + row * STRIDE - scrollY;
         const isActive = i === activeSlot;
         const isHotbar = i < HOTBAR_SLOTS;
 
-        ctx.fillStyle = isActive
+        // Hover detection (only within visible viewport, skip if dragging this slot)
+        const isDragSource = i === this._dragSlot;
+        if (
+          slot.item !== 'none' &&
+          !isDragSource &&
+          mouseX >= sx && mouseX <= sx + ISZ &&
+          mouseY >= sy && mouseY <= sy + ISZ &&
+          mouseY >= py && mouseY <= py + viewportH
+        ) {
+          hoveredSlot = i;
+          hoveredSX   = sx;
+          hoveredSY   = sy;
+        }
+
+        // Drop-target highlight
+        const isDropTarget = this._dragSlot !== -1 && i === this._slotAt(mouseX, mouseY) && i !== this._dragSlot;
+
+        ctx.fillStyle = isDropTarget
+          ? 'rgba(100,200,255,0.25)'
+          : isActive
           ? 'rgba(255,215,0,0.20)'
           : isHotbar ? 'rgba(30,35,50,0.92)' : 'rgba(22,22,35,0.85)';
         ctx.fillRect(sx, sy, ISZ, ISZ);
 
-        ctx.strokeStyle = isActive ? GOLD : isHotbar ? '#446' : '#334';
-        ctx.lineWidth   = isActive ? 2 : 1;
+        ctx.strokeStyle = isDropTarget ? '#64c8ff' : isActive ? GOLD : isHotbar ? '#446' : '#334';
+        ctx.lineWidth   = (isDropTarget || isActive) ? 2 : 1;
         ctx.strokeRect(sx, sy, ISZ, ISZ);
 
+        // Draw item (dimmed if it's the drag source)
         if (slot.item !== 'none') {
-          const pad = 5;
+          ctx.globalAlpha = isDragSource ? 0.3 : 1.0;
+          const pad = 6;
           ctx.fillStyle = def.color;
           ctx.fillRect(sx + pad, sy + pad, ISZ - pad * 2, ISZ - pad * 2);
-          ctx.font         = 'bold 14px Consolas, monospace';
+          ctx.font         = 'bold 16px Consolas, monospace';
           ctx.fillStyle    = '#fff';
           ctx.textAlign    = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(def.symbol, sx + ISZ / 2, sy + ISZ / 2);
 
           if (slot.quantity > 1) {
-            ctx.font         = '9px Consolas, monospace';
+            ctx.font         = '10px Consolas, monospace';
             ctx.textAlign    = 'right';
             ctx.textBaseline = 'bottom';
             ctx.fillStyle    = '#fff';
-            ctx.fillText(String(slot.quantity), sx + ISZ - 2, sy + ISZ - 1);
+            ctx.fillText(String(slot.quantity), sx + ISZ - 3, sy + ISZ - 2);
           }
+          ctx.globalAlpha = 1.0;
         }
       }
     }
 
     // Hotbar key-number labels below first row
-    ctx.font         = '9px Consolas, monospace';
+    ctx.font         = '10px Consolas, monospace';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'top';
     for (let i = 0; i < HOTBAR_SLOTS; i++) {
       const sx = startIX + i * STRIDE;
       ctx.fillStyle = i === activeSlot ? GOLD : TEXT_DIM;
-      ctx.fillText(String(i === 9 ? 0 : i + 1), sx + ISZ / 2, py + ISZ + 2);
+      ctx.fillText(String(i === 9 ? 0 : i + 1), sx + ISZ / 2, py + ISZ + 3 - scrollY);
     }
 
-    py += ROWS * STRIDE - IGAP + 16;
-    return py + 8;
+    ctx.restore();
+
+    // Tooltip — drawn unclipped so it can overlap above/outside the grid
+    if (hoveredSlot !== -1 && this._dragSlot === -1) {
+      const slot = inv.slots[hoveredSlot]!;
+      this._invTooltip(ctx, slot, hoveredSX, hoveredSY, ISZ);
+    }
+
+    // Drag ghost — follows cursor
+    if (this._dragSlot !== -1) {
+      const dragSlotData = inv.slots[this._dragSlot];
+      if (dragSlotData && dragSlotData.item !== 'none') {
+        const def = ITEM_DEFS[dragSlotData.item] ?? ITEM_DEFS['none'];
+        const gx  = this._dragX - ISZ / 2;
+        const gy  = this._dragY - ISZ / 2;
+        ctx.save();
+        ctx.globalAlpha = 0.85;
+        ctx.fillStyle = 'rgba(12,12,24,0.75)';
+        ctx.fillRect(gx, gy, ISZ, ISZ);
+        ctx.strokeStyle = GOLD;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(gx, gy, ISZ, ISZ);
+        const pad = 6;
+        ctx.fillStyle = def.color;
+        ctx.fillRect(gx + pad, gy + pad, ISZ - pad * 2, ISZ - pad * 2);
+        ctx.font = 'bold 16px Consolas, monospace';
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(def.symbol, gx + ISZ / 2, gy + ISZ / 2);
+        ctx.globalAlpha = 1.0;
+        ctx.restore();
+      }
+    }
+
+    // Scrollbar (only visible when content overflows)
+    if (maxScroll > 0) {
+      const SB_W  = 4;
+      const sbX   = px + PANEL_W - PAD / 2 - SB_W;
+      const track = viewportH;
+      const thumb = Math.max(20, (viewportH / contentH) * track);
+      const thumbY = py + (scrollY / maxScroll) * (track - thumb);
+      ctx.fillStyle = 'rgba(255,255,255,0.1)';
+      ctx.fillRect(sbX, py, SB_W, track);
+      ctx.fillStyle = 'rgba(255,215,0,0.5)';
+      ctx.fillRect(sbX, thumbY, SB_W, thumb);
+    }
+
+    return py + viewportH + 8;
+  }
+
+  /** Draw tooltip for a hovered inventory slot. */
+  private _invTooltip(
+    ctx:  CanvasRenderingContext2D,
+    slot: { item: ItemKind; quantity: number },
+    sx: number, sy: number,
+    slotSize: number,
+  ): void {
+    const def    = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
+    const itemId = ITEM_KIND_ID[slot.item] ?? 0;
+
+    const PAD_T  = 10;
+    const W      = 220;
+    const LINE   = 16;
+    const nameH  = 18;
+    const descLines = this._wrapText(ctx, def.description, W - PAD_T * 2, '12px Consolas, monospace');
+    const quantityLine = slot.quantity > 1 ? 1 : 0;
+    const totalH = PAD_T + nameH + 4 + LINE + 4 + descLines.length * LINE + quantityLine * LINE + PAD_T;
+
+    // Position above slot, clamped to canvas
+    const cw = ctx.canvas.width;
+    const ch = ctx.canvas.height;
+    let tx = sx + slotSize / 2 - W / 2;
+    let ty = sy - totalH - 6;
+    tx = Math.max(4, Math.min(cw - W - 4, tx));
+    if (ty < 4) ty = sy + slotSize + 6;
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur  = 8;
+    ctx.fillStyle   = 'rgba(12,12,20,0.94)';
+    ctx.strokeStyle = def.borderColor;
+    ctx.lineWidth   = 1.5;
+    this._roundRect(ctx, tx, ty, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Colour accent bar
+    ctx.fillStyle = def.color;
+    this._roundRect(ctx, tx, ty, 4, totalH, { tl: 6, tr: 0, br: 0, bl: 6 });
+    ctx.fill();
+
+    let cy = ty + PAD_T;
+
+    ctx.fillStyle    = '#ffffff';
+    ctx.font         = 'bold 14px Consolas, monospace';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(def.name, tx + PAD_T + 4, cy);
+    cy += nameH + 4;
+
+    ctx.fillStyle = '#888';
+    ctx.font      = '11px Consolas, monospace';
+    ctx.fillText(`ID: ${itemId}   [${def.category}]`, tx + PAD_T + 4, cy);
+    cy += LINE + 4;
+
+    ctx.fillStyle = '#ccc';
+    ctx.font      = '12px Consolas, monospace';
+    for (const line of descLines) {
+      ctx.fillText(line, tx + PAD_T + 4, cy);
+      cy += LINE;
+    }
+
+    if (slot.quantity > 1) {
+      ctx.fillStyle = '#aaa';
+      ctx.fillText(`Qty: ${slot.quantity}`, tx + PAD_T + 4, cy);
+    }
+
+    ctx.restore();
+  }
+
+  /** Word-wrap helper. */
+  private _wrapText(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    maxWidth: number,
+    font: string,
+  ): string[] {
+    ctx.save();
+    ctx.font = font;
+    const words = text.split(' ');
+    const lines: string[] = [];
+    let line = '';
+    for (const word of words) {
+      const test = line ? `${line} ${word}` : word;
+      if (ctx.measureText(test).width > maxWidth && line) {
+        lines.push(line);
+        line = word;
+      } else {
+        line = test;
+      }
+    }
+    if (line) lines.push(line);
+    ctx.restore();
+    return lines;
+  }
+
+  /** Draw a rounded rectangle path. Radii can be a number or per-corner object. */
+  private _roundRect(
+    ctx: CanvasRenderingContext2D,
+    x: number, y: number, w: number, h: number,
+    r: number | { tl: number; tr: number; br: number; bl: number },
+  ): void {
+    const tl = typeof r === 'number' ? r : r.tl;
+    const tr = typeof r === 'number' ? r : r.tr;
+    const br = typeof r === 'number' ? r : r.br;
+    const bl = typeof r === 'number' ? r : r.bl;
+    ctx.beginPath();
+    ctx.moveTo(x + tl, y);
+    ctx.lineTo(x + w - tr, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + tr);
+    ctx.lineTo(x + w, y + h - br);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - br, y + h);
+    ctx.lineTo(x + bl, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - bl);
+    ctx.lineTo(x, y + tl);
+    ctx.quadraticCurveTo(x, y, x + tl, y);
+    ctx.closePath();
   }
 
   // ─────────────────────────────────────────────────────────────────────────

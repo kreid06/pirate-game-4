@@ -158,7 +158,7 @@ export class InputManager {
   /** Called on every mousemove so overlays (e.g. world map) can update drag state. */
   public onUIMouseMove: ((x: number, y: number) => void) | null = null;
   /** Called on left mouse-up so overlays can end drag. */
-  public onUIMouseUp: (() => void) | null = null;
+  public onUIMouseUp: ((x: number, y: number) => void) | null = null;
   /** Called before onZoom — if returns true, zoom is consumed by UI (e.g. world map). */
   public onUIWheel: ((deltaY: number, x: number, y: number) => boolean) | null = null;
   
@@ -1366,7 +1366,7 @@ export class InputManager {
     if (event.button === 0) { // Left mouse button
       this.inputState.leftMouseDown = false;
       this.inputState.leftMouseReleased = true;
-      if (this.onUIMouseUp) this.onUIMouseUp();
+      if (this.onUIMouseUp) this.onUIMouseUp(event.offsetX, event.offsetY);
       // Stop liquid flame stream if running
       if (this.flameStreamTimer !== null) {
         clearInterval(this.flameStreamTimer);
