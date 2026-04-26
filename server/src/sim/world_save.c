@@ -255,11 +255,15 @@ int world_save(const char *path) {
 
     /* ── placed_structures ── */
     fprintf(f, "  \"placed_structures\": [");
+    bool first_struct = true;
     for (uint32_t i = 0; i < placed_structure_count; i++) {
         const PlacedStructure *ps = &placed_structures[i];
         if (!ps->active) continue;
+        /* Wrecks are transient; do not persist across restarts */
+        if (ps->type == STRUCT_WRECK) continue;
 
-        if (i > 0) fprintf(f, ",");
+        if (!first_struct) fprintf(f, ",");
+        first_struct = false;
         fprintf(f,
             "\n    {\n"
             "      \"id\": %u,\n"

@@ -266,6 +266,7 @@ typedef enum {
     STRUCT_DOOR_FRAME   = 3,  /* posts with open centre, always passable */
     STRUCT_DOOR         = 4,  /* panel that snaps onto a door frame */
     STRUCT_SHIPYARD     = 5,  /* placed in shallow water near island — used to build ships */
+    STRUCT_WRECK        = 6,  /* spawns at sea when a ship sinks — can be salvaged */
 } PlacedStructureType;
 
 /** Shallow-water ring width as a multiple of the island's own radius.
@@ -299,6 +300,11 @@ typedef struct {
     /* bool fields */
     bool     active;
     bool     open;                /* doors only: true = open (passable) */
+    /* Wreck-only salvage loot (STRUCT_WRECK); unused for other types */
+    uint8_t  wreck_items[6];     /* ItemKind as uint8_t, 0 = empty slot   */
+    uint8_t  wreck_qtys[6];      /* quantity per loot slot                */
+    uint8_t  wreck_loot_count;   /* number of remaining non-empty slots   */
+    uint32_t wreck_expires_ms;   /* wall-clock ms for auto-despawn; 0 = persist */
     /* 64-byte string last (avoids breaking alignment of above) */
     char     placer_name[64];     /* display name of builder */
 } PlacedStructure;

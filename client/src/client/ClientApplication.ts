@@ -495,6 +495,18 @@ export class ClientApplication {
         }
       };
 
+      this.networkManager.onShipUnclaimed = (shipId) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const ship = ws.ships.find(s => s.id === shipId);
+          if (ship) ship.companyId = 0; // COMPANY_NEUTRAL
+          // Also clear company for any player/NPC on that ship
+          for (const p of ws.players) { if (p.carrierId === shipId) p.companyId = 0; }
+          for (const n of ws.npcs)    { if (n.shipId    === shipId) n.companyId = 0; }
+        }
+        console.log(`⚓ Ship ${shipId} unclaimed — set to Neutral`);
+      };
+
       // When the server confirms a ladder board, record the ship ID so that the
       // cannon_group_state that follows can be accepted before the world-state tick
       // updates the player's carrierId.
@@ -1521,6 +1533,11 @@ export class ClientApplication {
       // Wire ship attribute upgrade requests from the ship status menu to the server
       this.uiManager.setShipUpgradeCallback((shipId, attribute) => {
         this.networkManager.sendUpgradeShipAttribute(shipId, attribute);
+      });
+
+      // Wire ship unclaim requests from the settings panel to the server
+      this.uiManager.setShipUnclaimCallback((shipId) => {
+        this.networkManager.sendUnclaimShip(shipId);
       });
 
       // Wire NPC stat upgrade requests from the crew level menu to the server

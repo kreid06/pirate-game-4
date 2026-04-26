@@ -4757,6 +4757,58 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "unclaim_ship") == 0) {
+                            // UNCLAIM SHIP: remove company ownership, setting company_id to COMPANY_NEUTRAL.
+                            // {"type":"unclaim_ship","shipId":N}
+                            WebSocketPlayer* player = find_player(client->player_id);
+                            uint16_t unc_ship_id = 0;
+                            { char* p2 = strstr(payload, "\"shipId\":"); if (p2) { uint32_t _tmp = 0; sscanf(p2 + 9, "%u", &_tmp); unc_ship_id = (uint16_t)_tmp; } }
+
+                            SimpleShip* unc_ship = find_ship(unc_ship_id);
+                            if (!unc_ship) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                            } else if (unc_ship->company_id != 0 &&
+                                       unc_ship->company_id != player->company_id) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"not_your_ship\"}");
+                            } else {
+                                unc_ship->company_id = COMPANY_NEUTRAL;
+                                struct Ship* unc_sim = find_sim_ship(unc_ship_id);
+                                if (unc_sim) unc_sim->company_id = COMPANY_NEUTRAL;
+
+                                /* Unclaim all NPCs aboard this ship */
+                                for (int ni = 0; ni < world_npc_count; ni++) {
+                                    if (world_npcs[ni].active &&
+                                        world_npcs[ni].ship_id == unc_ship_id)
+                                        world_npcs[ni].company_id = COMPANY_NEUTRAL;
+                                }
+                                /* Unclaim the player themselves if they were the owner */
+                                if (player->company_id == unc_ship->company_id || player->company_id != 0) {
+                                    /* Only reset if no other ship remains in their company */
+                                    bool still_owns = false;
+                                    for (int si = 0; si < ship_count; si++) {
+                                        if (ships[si].active &&
+                                            ships[si].ship_id != unc_ship_id &&
+                                            ships[si].company_id == player->company_id) {
+                                            still_owns = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!still_owns) player->company_id = COMPANY_NEUTRAL;
+                                }
+
+                                log_info("⚓ Ship %u unclaimed by player %u — company reset to neutral",
+                                         unc_ship_id, player->player_id);
+
+                                /* Broadcast so all clients update their ship company colour */
+                                char unc_bcast[96];
+                                snprintf(unc_bcast, sizeof(unc_bcast),
+                                    "{\"type\":\"ship_unclaimed\",\"shipId\":%u}", (unsigned)unc_ship_id);
+                                websocket_server_broadcast(unc_bcast);
+
+                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"unclaimed\"}");
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "upgrade_crew_stat") == 0) {
                             // UPGRADE CREW STAT: spend an earned stat point to level one stat.
                             // {"type":"upgrade_crew_stat","npcId":N,"stat":"health"}
@@ -7214,6 +7266,7 @@ void websocket_server_tick(float dt) {
 
     // ===== TICK SINKING SHIPS (velocity=0, despawn after 8s) =====
     tick_sinking_ships();
+    tick_wrecks();
 
     // ===== TICK GHOST SHIPS (wander + attack AI) =====
     tick_ghost_ships(dt);

@@ -70,6 +70,78 @@ void tick_sinking_ships(void) {
             sunk_id, SERVER_TO_CLIENT(CLIENT_TO_SERVER(wx)), SERVER_TO_CLIENT(CLIENT_TO_SERVER(wy)));
         websocket_server_broadcast(msg);
         log_info("⚓ Ship %u fully despawned after sinking", sunk_id);
+
+        /* ── Spawn shipwreck ────────────────────────────────────────────────
+         * Build a loot table from the sunk ship's modules + ammo, then place
+         * a STRUCT_WRECK at the same world position.  Players can swim out
+         * and E-interact to salvage one slot at a time.                   */
+        if (placed_structure_count < MAX_PLACED_STRUCTURES) {
+            /* -- Build loot -- */
+            uint8_t l_items[6] = {0};
+            uint8_t l_qtys[6]  = {0};
+            int     l_count    = 0;
+
+            /* Always drop some planks (2-6) */
+            l_items[l_count] = (uint8_t)ITEM_PLANK;
+            l_qtys[l_count]  = 2 + (uint8_t)(sunk_id % 5);  /* deterministic 2-6 */
+            l_count++;
+
+            /* Count cannon modules on the sunk ship and add loot.
+             * The sim entity is already destroyed by this point, so use
+             * ship_id as a deterministic seed for loot quantities.       */
+            {
+                /* Seed cannonballs 1-8 based on ship_id */
+                uint8_t ball_qty = (uint8_t)((sunk_id * 7 + 3) % 8 + 1);
+                if (l_count < 6) {
+                    l_items[l_count] = (uint8_t)ITEM_CANNON_BALL;
+                    l_qtys[l_count]  = ball_qty;
+                    l_count++;
+                }
+                /* 50% chance of a salvageable cannon */
+                if (l_count < 6 && (sunk_id % 2) == 0) {
+                    l_items[l_count] = (uint8_t)ITEM_CANNON;
+                    l_qtys[l_count]  = 1;
+                    l_count++;
+                }
+                /* 33% chance of a sail */
+                if (l_count < 6 && (sunk_id % 3) == 0) {
+                    l_items[l_count] = (uint8_t)ITEM_SAIL;
+                    l_qtys[l_count]  = 1;
+                    l_count++;
+                }
+            }
+
+            /* -- Place wreck -- */
+            PlacedStructure *w = &placed_structures[placed_structure_count];
+            memset(w, 0, sizeof(*w));
+            w->active           = true;
+            w->id               = next_structure_id++;
+            w->type             = STRUCT_WRECK;
+            w->x                = wx;
+            w->y                = wy;
+            w->island_id        = 0;          /* at sea */
+            w->hp               = (uint16_t)l_count;
+            w->max_hp           = (uint16_t)l_count;
+            w->wreck_loot_count = (uint8_t)l_count;
+            w->wreck_expires_ms = get_time_ms() + 300000; /* 5 min auto-despawn */
+            for (int li = 0; li < l_count; li++) {
+                w->wreck_items[li] = l_items[li];
+                w->wreck_qtys[li]  = l_qtys[li];
+            }
+            strncpy(w->placer_name, "shipwreck", sizeof(w->placer_name) - 1);
+            placed_structure_count++;
+
+            /* Broadcast so clients can render the wreck */
+            char wbcast[256];
+            snprintf(wbcast, sizeof(wbcast),
+                "{\"type\":\"wreck_spawned\",\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                "\"loot_count\":%u,\"expires_ms\":%u}",
+                (unsigned)w->id, wx, wy,
+                (unsigned)l_count, (unsigned)w->wreck_expires_ms);
+            websocket_server_broadcast(wbcast);
+            log_info("🪵 Wreck %u spawned at (%.0f,%.0f) with %d loot slots",
+                     (unsigned)w->id, wx, wy, l_count);
+        }
     }
 }
 
@@ -722,6 +794,25 @@ void tick_ghost_ships(float dt) {
                 _gs->velocity.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ship->velocity_x));
                 _gs->velocity.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ship->velocity_y));
             }
+        }
+    }
+}
+
+/* ── Wreck auto-despawn ───────────────────────────────────────────────────
+ * Called every tick.  Removes STRUCT_WRECK entries whose expiry time has
+ * passed, broadcasting a wreck_removed message for each.                */
+void tick_wrecks(void) {
+    uint32_t now = get_time_ms();
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *w = &placed_structures[i];
+        if (!w->active || w->type != STRUCT_WRECK) continue;
+        if (w->wreck_expires_ms != 0 && now >= w->wreck_expires_ms) {
+            w->active = false;
+            char bcast[64];
+            snprintf(bcast, sizeof(bcast),
+                     "{\"type\":\"wreck_removed\",\"id\":%u}", (unsigned)w->id);
+            websocket_server_broadcast(bcast);
+            log_info("🪵 Wreck %u expired and was removed", (unsigned)w->id);
         }
     }
 }

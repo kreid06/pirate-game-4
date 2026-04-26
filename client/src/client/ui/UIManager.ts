@@ -1048,6 +1048,11 @@ export class UIManager {
     this.shipMenu.onUpgradeRequest = cb;
   }
 
+  /** Set callback for the "Unclaim Ship" action from the ship settings panel. */
+  setShipUnclaimCallback(cb: (shipId: number) => void): void {
+    this.shipMenu.onUnclaimShip = cb;
+  }
+
   /**
    * Set callback for NPC stat upgrades from the crew level menu.
    * Called when the player clicks an affordable upgrade button.

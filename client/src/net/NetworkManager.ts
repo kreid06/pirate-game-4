@@ -527,6 +527,7 @@ export class NetworkManager {
   public onShipSunk: ((shipId: number) => void) | null = null;
   public onShipSinking: ((shipId: number) => void) | null = null;
   public onShipLevelUp: ((shipId: number, attribute: string, attrLevel: number, xp: number, shipLevel: number, totalCap: number, nextUpgradeCost: number) => void) | null = null;
+  public onShipUnclaimed: ((shipId: number) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
   /**
    * Fired when the server accepts or rejects a Move To module command.
@@ -1499,6 +1500,11 @@ export class NetworkManager {
   sendUpgradeShipAttribute(shipId: number, attribute: string): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: 'upgrade_ship', shipId, attribute }));
+  }
+
+  sendUnclaimShip(shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'unclaim_ship', shipId }));
   }
 
   /**
@@ -2520,6 +2526,18 @@ export class NetworkManager {
         const lvlNextCost:       number = message.nextUpgradeCost  ?? 0;
         console.log(`⬆️  SHIP_LEVEL_UP: ship ${lvlShipId} ${lvlAttribute} → L${lvlAttrLevel} | ship level ${lvlShipLevel}/${lvlTotalCap} | next cost ${lvlNextCost} | ${lvlXp} XP left`);
         this.onShipLevelUp?.(lvlShipId, lvlAttribute, lvlAttrLevel, lvlXp, lvlShipLevel, lvlTotalCap, lvlNextCost);
+        break;
+      }
+
+      case 'ship_unclaimed': {
+        const unclaimedShipId: number = message.shipId || 0;
+        console.log(`⚓ ship_unclaimed: ship ${unclaimedShipId} is now neutral`);
+        // Update companyId in both world states if available
+        for (const ws of [this.onWorldStateReceived]) {
+          // The handler will pick up the change on the next full snapshot;
+          // for now patch any locally cached world state via a callback if provided
+        }
+        this.onShipUnclaimed?.(unclaimedShipId);
         break;
       }
 

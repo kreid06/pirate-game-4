@@ -530,15 +530,100 @@ ps_send:;
 void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
     char response[256];
 
+    /* Parse structure_id first — needed for the wreck path which works at sea */
+    uint32_t sid = 0;
+    {
+        char* sp = strstr(payload, "\"structure_id\":");
+        if (sp) sscanf(sp + 15, "%u", &sid);
+    }
+
+    /* ── Wreck salvage (works anywhere in the sea, not island-gated) ─────── */
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *w = &placed_structures[i];
+        if (!w->active || w->type != STRUCT_WRECK || w->id != sid) continue;
+
+        /* Range check — must be within 400 client units to salvage */
+        float dx = player->x - w->x;
+        float dy = player->y - w->y;
+        if (dx*dx + dy*dy > 400.0f * 400.0f) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"salvage_fail\",\"reason\":\"too_far\"}");
+            goto si_send;
+        }
+
+        if (w->wreck_loot_count == 0) {
+            /* Empty wreck — remove it */
+            w->active = false;
+            char bcast[64];
+            snprintf(bcast, sizeof(bcast),
+                     "{\"type\":\"wreck_removed\",\"id\":%u}", (unsigned)w->id);
+            websocket_server_broadcast(bcast);
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"salvage_fail\",\"reason\":\"empty\"}");
+            goto si_send;
+        }
+
+        /* Find the first non-empty loot slot */
+        int slot = -1;
+        for (int li = 0; li < 6; li++) {
+            if (w->wreck_items[li] != 0 && w->wreck_qtys[li] > 0) {
+                slot = li;
+                break;
+            }
+        }
+        if (slot < 0) {
+            w->wreck_loot_count = 0;
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"salvage_fail\",\"reason\":\"empty\"}");
+            goto si_send;
+        }
+
+        ItemKind item = (ItemKind)w->wreck_items[slot];
+        uint8_t  qty  = w->wreck_qtys[slot];
+
+        if (!craft_grant(player, item, (int)qty)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"salvage_fail\",\"reason\":\"inventory_full\"}");
+            goto si_send;
+        }
+
+        /* Consume the loot slot */
+        w->wreck_items[slot] = 0;
+        w->wreck_qtys[slot]  = 0;
+        w->wreck_loot_count--;
+        w->hp = w->wreck_loot_count;
+
+        log_info("🪵 Player %u salvaged item %u x%u from wreck %u (%u slots remain)",
+                 player->player_id, (unsigned)item, (unsigned)qty,
+                 (unsigned)w->id, (unsigned)w->wreck_loot_count);
+
+        /* Broadcast wreck state update */
+        char bcast[96];
+        if (w->wreck_loot_count == 0) {
+            w->active = false;
+            snprintf(bcast, sizeof(bcast),
+                     "{\"type\":\"wreck_removed\",\"id\":%u}", (unsigned)w->id);
+        } else {
+            snprintf(bcast, sizeof(bcast),
+                     "{\"type\":\"wreck_updated\",\"id\":%u,\"loot_count\":%u}",
+                     (unsigned)w->id, (unsigned)w->wreck_loot_count);
+        }
+        websocket_server_broadcast(bcast);
+
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"salvage_success\",\"item\":%u,\"quantity\":%u,"
+                 "\"wreck_id\":%u,\"remaining\":%u}",
+                 (unsigned)item, (unsigned)qty,
+                 (unsigned)w->id, (unsigned)w->wreck_loot_count);
+        goto si_send;
+    }
+
+    /* ── Island-gated structures ─────────────────────────────────────────── */
     if (player->on_island_id == 0) {
         snprintf(response, sizeof(response),
                  "{\"type\":\"structure_interact_fail\",\"reason\":\"not_on_island\"}");
         goto si_send;
     }
-
-    uint32_t sid = 0;
-    char* sp = strstr(payload, "\"structure_id\":");
-    if (sp) sscanf(sp + 15, "%u", &sid);
 
     for (uint32_t i = 0; i < placed_structure_count; i++) {
         if (!placed_structures[i].active || placed_structures[i].id != sid) continue;

@@ -86,6 +86,9 @@ export class ShipMenu {
   /** Called when the player clicks an NPC row in the crew section. */
   public onNpcClick?: (npc: import('../../sim/Types.js').Npc) => void;
 
+  /** Called when the player confirms "Unclaim Ship" from the settings panel. */
+  public onUnclaimShip?: (shipId: number) => void;
+
   /** Hit areas for attribute rows populated each render frame. */
   private _upgradeHitAreas: Array<{ attr: number; serverName: string; x: number; y: number; w: number; h: number; affordable: boolean }> = [];
   private _npcHitAreas: Array<{ npc: import('../../sim/Types.js').Npc; x: number; y: number; w: number; h: number }> = [];
@@ -93,9 +96,14 @@ export class ShipMenu {
   private _panelY = 0;
   private _currentShipId = 0;
 
-  toggle(): void { this.visible = !this.visible; }
+  /** Whether the settings sub-panel is currently open. */
+  private _settingsOpen = false;
+  private _gearBtnArea:   { x: number; y: number; w: number; h: number } | null = null;
+  private _unclaimBtnArea: { x: number; y: number; w: number; h: number } | null = null;
+
+  toggle(): void { this.visible = !this.visible; if (!this.visible) this._settingsOpen = false; }
   open():   void { this.visible = true;  }
-  close():  void { this.visible = false; }
+  close():  void { this.visible = false; this._settingsOpen = false; }
 
   /**
    * Handle a canvas click while the menu is visible.
@@ -103,6 +111,30 @@ export class ShipMenu {
    */
   handleClick(x: number, y: number): boolean {
     if (!this.visible) return false;
+
+    // Gear button — always checked first
+    if (this._gearBtnArea) {
+      const g = this._gearBtnArea;
+      if (x >= g.x && x <= g.x + g.w && y >= g.y && y <= g.y + g.h) {
+        this._settingsOpen = !this._settingsOpen;
+        return true;
+      }
+    }
+
+    // Settings panel is open — handle its buttons
+    if (this._settingsOpen) {
+      if (this._unclaimBtnArea) {
+        const u = this._unclaimBtnArea;
+        if (x >= u.x && x <= u.x + u.w && y >= u.y && y <= u.y + u.h) {
+          this.onUnclaimShip?.(this._currentShipId);
+          this._settingsOpen = false;
+          return true;
+        }
+      }
+      // Any click while settings open — close settings if outside overlay, consume otherwise
+      return true;
+    }
+
     // Check NPC row hit areas
     for (const area of this._npcHitAreas) {
       if (x >= area.x && x <= area.x + area.w &&
@@ -184,6 +216,11 @@ export class ShipMenu {
     cur = this._progressionSection(ctx, px, cur, ship.id, ship.levelStats);
     this._crewSection(ctx, px, cur, worldState, ship.id, ship.shipType ?? 3);
 
+    // Render settings overlay on top if open
+    if (this._settingsOpen) {
+      this._settingsPanel(ctx, px, py, ship.id);
+    }
+
     ctx.restore();
   }
 
@@ -199,6 +236,24 @@ export class ShipMenu {
     ctx.fillStyle = GOLD;
     ctx.fillText('⛵  SHIP STATUS', px + PAD, py + HEADER_H / 2);
 
+    // Gear / settings button
+    const gearW = 28;
+    const gearH = 24;
+    const gearX = px + PANEL_W - PAD - 100 - gearW - 8;
+    const gearY = py + (HEADER_H - gearH) / 2;
+    const gearActive = this._settingsOpen;
+    ctx.fillStyle = gearActive ? 'rgba(255,215,0,0.18)' : 'rgba(255,255,255,0.07)';
+    ctx.fillRect(gearX, gearY, gearW, gearH);
+    ctx.strokeStyle = gearActive ? GOLD : BORDER;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(gearX, gearY, gearW, gearH);
+    ctx.font = '16px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = gearActive ? GOLD : TEXT_DIM;
+    ctx.fillText('⚙', gearX + gearW / 2, gearY + gearH / 2);
+    this._gearBtnArea = { x: gearX, y: gearY, w: gearW, h: gearH };
+
     ctx.font = '12px Consolas, monospace';
     ctx.textAlign = 'right';
     ctx.fillStyle = TEXT_DIM;
@@ -212,6 +267,68 @@ export class ShipMenu {
     ctx.stroke();
 
     return py + HEADER_H;
+  }
+
+  private _settingsPanel(
+    ctx:    CanvasRenderingContext2D,
+    px:     number, py: number,
+    shipId: number,
+  ): void {
+    const OW = 320;
+    const OH = 160;
+    const ox = px + Math.round((PANEL_W - OW) / 2);
+    const oy = py + Math.round((PANEL_H - OH) / 2);
+
+    // Backdrop
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(px, py, PANEL_W, PANEL_H);
+
+    // Panel
+    ctx.fillStyle = 'rgba(14,18,30,0.99)';
+    ctx.fillRect(ox, oy, OW, OH);
+    ctx.strokeStyle = GOLD;
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(ox, oy, OW, OH);
+
+    // Title
+    ctx.font = 'bold 15px Consolas, monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = GOLD;
+    ctx.fillText('⚙  SHIP SETTINGS', ox + 14, oy + 22);
+
+    // Divider
+    ctx.strokeStyle = BORDER;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(ox, oy + 38);
+    ctx.lineTo(ox + OW, oy + 38);
+    ctx.stroke();
+
+    // Info text
+    ctx.font = '12px Consolas, monospace';
+    ctx.fillStyle = TEXT_DIM;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('Remove faction ownership from this ship.', ox + 14, oy + 48);
+    ctx.fillText('Ship and crew will become Neutral.', ox + 14, oy + 64);
+
+    // Unclaim button
+    const btnW = OW - 28;
+    const btnH = 30;
+    const btnX = ox + 14;
+    const btnY = oy + OH - btnH - 14;
+    ctx.fillStyle = 'rgba(255,85,68,0.15)';
+    ctx.fillRect(btnX, btnY, btnW, btnH);
+    ctx.strokeStyle = '#ff5544';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(btnX, btnY, btnW, btnH);
+    ctx.font = 'bold 13px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ff8877';
+    ctx.fillText('⚓  UNCLAIM SHIP', btnX + btnW / 2, btnY + btnH / 2);
+    this._unclaimBtnArea = { x: btnX, y: btnY, w: btnW, h: btnH };
   }
 
   private _identity(
