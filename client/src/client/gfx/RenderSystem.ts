@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_UNCLAIMED, COMPANY_NEUTRAL, COMPANY_SOLO, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
@@ -9485,7 +9485,7 @@ export class RenderSystem {
     // Colour NPC by company then task assignment (darkened via globalAlpha when moving)
     const npcTask = this.npcTaskMap.get(npc.id) ?? 'Idle';
     const _npcIsEnemy   = this._localCompanyId !== 0 && npc.companyId !== 0 && npc.companyId !== this._localCompanyId;
-    const _npcIsNeutral = npc.companyId === COMPANY_NEUTRAL;
+    const _npcIsNeutral = npc.companyId === COMPANY_UNCLAIMED;
     this.ctx.fillStyle = _npcIsNeutral ? '#222222' : _npcIsEnemy ? '#cc2222' : (NPC_TASK_COLORS[npcTask] ?? '#DAA520');
     this.ctx.strokeStyle = '#ffffff';
     this.ctx.lineWidth = 2;
@@ -10064,10 +10064,11 @@ export class RenderSystem {
 
     const ship = this.hoveredShip;
     const COMPANY_NAMES: Record<number, string> = {
-      [COMPANY_NEUTRAL]: 'Neutral',
-      [COMPANY_PIRATES]: 'Pirates',
-      [COMPANY_NAVY]:    'Navy',
-      [COMPANY_GHOST]:   'Ghost Ships',
+      [COMPANY_UNCLAIMED]: 'Unclaimed',
+      [COMPANY_SOLO]:      'Solo',
+      [COMPANY_PIRATES]:   'Pirates',
+      [COMPANY_NAVY]:      'Navy',
+      [COMPANY_GHOST]:     'Ghost Ships',
     };
     const companyName = COMPANY_NAMES[ship.companyId] ?? `#${ship.companyId}`;
     const shipTitle   = ship.shipType === SHIP_TYPE_GHOST
@@ -10213,7 +10214,7 @@ export class RenderSystem {
     this.ctx.textAlign = 'left';
     this.ctx.textBaseline = 'top';
 
-    const COMPANY_NAMES: Record<number, string> = { [COMPANY_NEUTRAL]: 'Neutral', [COMPANY_PIRATES]: 'Pirates', [COMPANY_NAVY]: 'Navy', [COMPANY_GHOST]: 'Ghost Ships' };
+    const COMPANY_NAMES: Record<number, string> = { [COMPANY_UNCLAIMED]: 'Unclaimed', [COMPANY_SOLO]: 'Solo', [COMPANY_PIRATES]: 'Pirates', [COMPANY_NAVY]: 'Navy', [COMPANY_GHOST]: 'Ghost Ships' };
     const titleText   = `${npc.name}  Lv.${npc.npcLevel}${npc.locked ? '  🔒' : ''}`;
     const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
     const companyText = `Company: ${COMPANY_NAMES[npc.companyId] ?? `#${npc.companyId}`}`;

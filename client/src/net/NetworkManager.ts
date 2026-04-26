@@ -528,6 +528,8 @@ export class NetworkManager {
   public onShipSinking: ((shipId: number) => void) | null = null;
   public onShipLevelUp: ((shipId: number, attribute: string, attrLevel: number, xp: number, shipLevel: number, totalCap: number, nextUpgradeCost: number) => void) | null = null;
   public onShipUnclaimed: ((shipId: number) => void) | null = null;
+  public onShipClaimed: ((shipId: number, companyId: number) => void) | null = null;
+  public onNpcUnclaimed: ((npcId: number) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
   /**
    * Fired when the server accepts or rejects a Move To module command.
@@ -1505,6 +1507,16 @@ export class NetworkManager {
   sendUnclaimShip(shipId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: 'unclaim_ship', shipId }));
+  }
+
+  sendClaimShip(shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'claim_ship', shipId }));
+  }
+
+  sendNpcUnclaim(npcId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'npc_unclaim', npcId }));
   }
 
   /**
@@ -2531,13 +2543,23 @@ export class NetworkManager {
 
       case 'ship_unclaimed': {
         const unclaimedShipId: number = message.shipId || 0;
-        console.log(`⚓ ship_unclaimed: ship ${unclaimedShipId} is now neutral`);
-        // Update companyId in both world states if available
-        for (const ws of [this.onWorldStateReceived]) {
-          // The handler will pick up the change on the next full snapshot;
-          // for now patch any locally cached world state via a callback if provided
-        }
+        console.log(`⚓ ship_unclaimed: ship ${unclaimedShipId} is now unclaimed`);
         this.onShipUnclaimed?.(unclaimedShipId);
+        break;
+      }
+
+      case 'ship_claimed': {
+        const claimedShipId: number  = message.shipId    || 0;
+        const claimedCompany: number = message.companyId ?? 0;
+        console.log(`⚓ ship_claimed: ship ${claimedShipId} → company ${claimedCompany}`);
+        this.onShipClaimed?.(claimedShipId, claimedCompany);
+        break;
+      }
+
+      case 'npc_unclaimed': {
+        const unclaimedNpcId: number = message.npcId || 0;
+        console.log(`⚓ npc_unclaimed: NPC ${unclaimedNpcId} is now unclaimed`);
+        this.onNpcUnclaimed?.(unclaimedNpcId);
         break;
       }
 

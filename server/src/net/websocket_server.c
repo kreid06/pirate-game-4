@@ -65,23 +65,25 @@ struct Sim* global_sim = NULL;
 // ── Company / Alliance registry ───────────────────────────────────────────
 typedef struct { uint8_t id; const char* name; uint8_t alliance_id; } Company;
 static const Company g_companies[] = {
-    { COMPANY_NEUTRAL, "Neutral", 0 },
-    { COMPANY_PIRATES, "Pirates", 1 },
-    { COMPANY_NAVY,    "Navy",    2 },
+    { COMPANY_UNCLAIMED, "Unclaimed", 0 },
+    { COMPANY_SOLO,      "Solo",      1 },
+    { COMPANY_PIRATES,   "Pirates",   2 },
+    { COMPANY_NAVY,      "Navy",      3 },
 };
+#define G_COMPANIES_COUNT 4
 // Returns true if companies a and b are in the same non-zero alliance (i.e. friendly).
 bool is_allied(uint8_t a, uint8_t b) {
-    if (a == COMPANY_NEUTRAL || b == COMPANY_NEUTRAL) return false;
+    if (a == COMPANY_UNCLAIMED || b == COMPANY_UNCLAIMED) return false;
     if (a == b) return true;
     uint8_t a_al = 0, b_al = 0;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < G_COMPANIES_COUNT; i++) {
         if (g_companies[i].id == a) a_al = g_companies[i].alliance_id;
         if (g_companies[i].id == b) b_al = g_companies[i].alliance_id;
     }
     return a_al != 0 && a_al == b_al;
 }
 static const char* company_name(uint8_t id) {
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < G_COMPANIES_COUNT; i++)
         if (g_companies[i].id == id) return g_companies[i].name;
     return "Unknown";
 }
@@ -1146,6 +1148,7 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             
             players[i].player_id = player_id;
             players[i].sim_entity_id = 0; // Will be set when added to simulation
+            players[i].company_id = COMPANY_SOLO; // Default: player-owned, no guild
             
             // Spawn player at map centre
             players[i].parent_ship_id = 0;
@@ -4758,7 +4761,8 @@ int websocket_server_update(struct Sim* sim) {
                             handled = true;
 
                         } else if (strcmp(msg_type, "unclaim_ship") == 0) {
-                            // UNCLAIM SHIP: remove company ownership, setting company_id to COMPANY_NEUTRAL.
+                            // UNCLAIM SHIP: remove company ownership, setting company_id to COMPANY_UNCLAIMED.
+                            // NPCs on the ship keep their current company — player must unclaim them separately.
                             // {"type":"unclaim_ship","shipId":N}
                             WebSocketPlayer* player = find_player(client->player_id);
                             uint16_t unc_ship_id = 0;
@@ -4767,36 +4771,18 @@ int websocket_server_update(struct Sim* sim) {
                             SimpleShip* unc_ship = find_ship(unc_ship_id);
                             if (!unc_ship) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
-                            } else if (unc_ship->company_id != 0 &&
+                            } else if (unc_ship->company_id != COMPANY_UNCLAIMED &&
                                        unc_ship->company_id != player->company_id) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"not_your_ship\"}");
                             } else {
-                                unc_ship->company_id = COMPANY_NEUTRAL;
+                                unc_ship->company_id = COMPANY_UNCLAIMED;
                                 struct Ship* unc_sim = find_sim_ship(unc_ship_id);
-                                if (unc_sim) unc_sim->company_id = COMPANY_NEUTRAL;
+                                if (unc_sim) unc_sim->company_id = COMPANY_UNCLAIMED;
 
-                                /* Unclaim all NPCs aboard this ship */
-                                for (int ni = 0; ni < world_npc_count; ni++) {
-                                    if (world_npcs[ni].active &&
-                                        world_npcs[ni].ship_id == unc_ship_id)
-                                        world_npcs[ni].company_id = COMPANY_NEUTRAL;
-                                }
-                                /* Unclaim the player themselves if they were the owner */
-                                if (player->company_id == unc_ship->company_id || player->company_id != 0) {
-                                    /* Only reset if no other ship remains in their company */
-                                    bool still_owns = false;
-                                    for (int si = 0; si < ship_count; si++) {
-                                        if (ships[si].active &&
-                                            ships[si].ship_id != unc_ship_id &&
-                                            ships[si].company_id == player->company_id) {
-                                            still_owns = true;
-                                            break;
-                                        }
-                                    }
-                                    if (!still_owns) player->company_id = COMPANY_NEUTRAL;
-                                }
+                                /* NPCs aboard the ship are intentionally NOT touched —
+                                 * they retain their previous company until individually unclaimed. */
 
-                                log_info("⚓ Ship %u unclaimed by player %u — company reset to neutral",
+                                log_info("⚓ Ship %u unclaimed by player %u — company reset to unclaimed",
                                          unc_ship_id, player->player_id);
 
                                 /* Broadcast so all clients update their ship company colour */
@@ -4806,6 +4792,65 @@ int websocket_server_update(struct Sim* sim) {
                                 websocket_server_broadcast(unc_bcast);
 
                                 strcpy(response, "{\"type\":\"message_ack\",\"status\":\"unclaimed\"}");
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "claim_ship") == 0) {
+                            // CLAIM SHIP: player claims an unclaimed ship (company_id == COMPANY_UNCLAIMED).
+                            // The ship's company becomes the player's current company.
+                            // {"type":"claim_ship","shipId":N}
+                            WebSocketPlayer* cl_player = find_player(client->player_id);
+                            uint16_t cl_ship_id = 0;
+                            { char* p2 = strstr(payload, "\"shipId\":"); if (p2) { uint32_t _tmp = 0; sscanf(p2 + 9, "%u", &_tmp); cl_ship_id = (uint16_t)_tmp; } }
+
+                            SimpleShip* cl_ship = find_ship(cl_ship_id);
+                            if (!cl_ship) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                            } else if (cl_ship->company_id != COMPANY_UNCLAIMED) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"ship_already_owned\"}");
+                            } else {
+                                cl_ship->company_id = cl_player->company_id;
+                                struct Ship* cl_sim = find_sim_ship(cl_ship_id);
+                                if (cl_sim) cl_sim->company_id = cl_player->company_id;
+
+                                log_info("⚓ Ship %u claimed by player %u (company %u)",
+                                         cl_ship_id, cl_player->player_id, cl_player->company_id);
+
+                                char cl_bcast[128];
+                                snprintf(cl_bcast, sizeof(cl_bcast),
+                                    "{\"type\":\"ship_claimed\",\"shipId\":%u,\"companyId\":%u}",
+                                    (unsigned)cl_ship_id, (unsigned)cl_player->company_id);
+                                websocket_server_broadcast(cl_bcast);
+
+                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"claimed\"}");
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "npc_unclaim") == 0) {
+                            // NPC UNCLAIM: player removes their company ownership from an NPC.
+                            // The NPC's company_id is set to COMPANY_UNCLAIMED (0).
+                            // {"type":"npc_unclaim","npcId":N}
+                            WebSocketPlayer* nu_player = find_player(client->player_id);
+                            uint32_t nu_npc_id = 0;
+                            { char* p2 = strstr(payload, "\"npcId\":"); if (p2) sscanf(p2 + 8, "%u", &nu_npc_id); }
+
+                            WorldNpc* nu_npc = NULL;
+                            for (int ni = 0; ni < world_npc_count; ni++) {
+                                if (world_npcs[ni].active && world_npcs[ni].id == nu_npc_id) {
+                                    nu_npc = &world_npcs[ni]; break;
+                                }
+                            }
+                            if (nu_npc && nu_npc->company_id == nu_player->company_id) {
+                                nu_npc->company_id = COMPANY_UNCLAIMED;
+                                log_info("⚓ NPC %u '%s' unclaimed by player %u",
+                                         nu_npc_id, nu_npc->name, nu_player->player_id);
+                                char nu_bcast[96];
+                                snprintf(nu_bcast, sizeof(nu_bcast),
+                                    "{\"type\":\"npc_unclaimed\",\"npcId\":%u}", nu_npc_id);
+                                websocket_server_broadcast(nu_bcast);
+                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_unclaimed\"}");
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_unclaim_npc\"}");
                             }
                             handled = true;
 
@@ -5095,23 +5140,25 @@ int websocket_server_update(struct Sim* sim) {
                             if (strcmp(cmd_name, "addplayertocompany") == 0) {
                                 uint8_t new_company = 0;
                                 bool company_valid = true;
-                                if (strcmp(cmd_arg1, "pirates") == 0)       new_company = 1;
-                                else if (strcmp(cmd_arg1, "navy") == 0)     new_company = 2;
-                                else if (strcmp(cmd_arg1, "neutral") == 0)  new_company = 0;
+                                if (strcmp(cmd_arg1, "solo") == 0)          new_company = COMPANY_SOLO;
+                                else if (strcmp(cmd_arg1, "pirates") == 0)  new_company = COMPANY_PIRATES;
+                                else if (strcmp(cmd_arg1, "navy") == 0)     new_company = COMPANY_NAVY;
+                                else if (strcmp(cmd_arg1, "unclaimed") == 0 || strcmp(cmd_arg1, "neutral") == 0)
+                                                                            new_company = COMPANY_UNCLAIMED;
                                 else company_valid = false;
 
                                 if (!company_valid) {
                                     snprintf(response, sizeof(response),
                                         "{\"type\":\"command_response\","
                                         "\"success\":false,"
-                                        "\"text\":\"Unknown company '%s'. Use: pirates, navy, neutral\"}",
+                                        "\"text\":\"Unknown company '%s'. Use: solo, pirates, navy, unclaimed\"}",
                                         cmd_arg1);
                                 } else {
                                     int res = websocket_server_set_player_company(
                                         client->player_id, new_company);
                                     if (res == 0) {
-                                        const char *company_names[] = {"Neutral","Pirates","Navy"};
-                                        const char *cname = (new_company < 3)
+                                        const char *company_names[] = {"Unclaimed","Solo","Pirates","Navy"};
+                                        const char *cname = (new_company < 4)
                                             ? company_names[new_company] : "Unknown";
                                         log_info("🏴 Player %u joined company %u (%s) via command",
                                                  client->player_id, new_company, cname);
@@ -5307,8 +5354,8 @@ int websocket_server_update(struct Sim* sim) {
                                     strncpy(npc->dialogue, "Aye aye, Captain!",  sizeof(npc->dialogue) - 1);
                                     g_npcs_dirty = true;
 
-                                    const char *company_names[] = {"Neutral","Pirates","Navy"};
-                                    const char *cname = (spawn_company < 3) ? company_names[spawn_company] : "Unknown";
+                                    const char *company_names[] = {"Unclaimed","Solo","Pirates","Navy"};
+                                    const char *cname = (spawn_company < 4) ? company_names[spawn_company] : "Unknown";
                                     log_info("👤 Spawned crewmember (id %u, company %s) at (%.0f,%.0f) by player %u",
                                              npc->id, cname, npc->x, npc->y, client->player_id);
                                     snprintf(response, sizeof(response),

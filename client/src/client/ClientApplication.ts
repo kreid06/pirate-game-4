@@ -445,7 +445,7 @@ export class ClientApplication {
         const myPlayer    = myPlayerId !== null ? ws?.players.find(p => p.id === myPlayerId) : null;
         const sinkingShip = ws?.ships.find(s => s.id === shipId);
         if (sinkingShip) {
-          const FACTION: Record<number, string> = { 0: 'Neutral', 1: 'Pirates', 2: 'Navy', 99: 'Phantom Brig' };
+          const FACTION: Record<number, string> = { 0: 'Unclaimed', 1: 'Solo', 2: 'Pirates', 3: 'Navy', 99: 'Phantom Brig' };
           const shipLabel = (s: Ship) => FACTION[s.companyId] ?? `Ship #${s.id}`;
           const sinkLabel  = shipLabel(sinkingShip);
           const isOwnShip  = myPlayer?.carrierId === shipId;
@@ -499,12 +499,28 @@ export class ClientApplication {
         for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
           if (!ws) continue;
           const ship = ws.ships.find(s => s.id === shipId);
-          if (ship) ship.companyId = 0; // COMPANY_NEUTRAL
-          // Also clear company for any player/NPC on that ship
-          for (const p of ws.players) { if (p.carrierId === shipId) p.companyId = 0; }
-          for (const n of ws.npcs)    { if (n.shipId    === shipId) n.companyId = 0; }
+          if (ship) ship.companyId = 0; // COMPANY_UNCLAIMED
+          // NPCs and players keep their own company — NOT reset here
         }
-        console.log(`⚓ Ship ${shipId} unclaimed — set to Neutral`);
+        console.log(`⚓ Ship ${shipId} unclaimed`);
+      };
+
+      this.networkManager.onShipClaimed = (shipId, companyId) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const ship = ws.ships.find(s => s.id === shipId);
+          if (ship) ship.companyId = companyId;
+        }
+        console.log(`⚓ Ship ${shipId} claimed — company ${companyId}`);
+      };
+
+      this.networkManager.onNpcUnclaimed = (npcId) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const npc = ws.npcs.find(n => n.id === npcId);
+          if (npc) npc.companyId = 0; // COMPANY_UNCLAIMED
+        }
+        console.log(`⚓ NPC ${npcId} unclaimed`);
       };
 
       // When the server confirms a ladder board, record the ship ID so that the
@@ -1538,6 +1554,11 @@ export class ClientApplication {
       // Wire ship unclaim requests from the settings panel to the server
       this.uiManager.setShipUnclaimCallback((shipId) => {
         this.networkManager.sendUnclaimShip(shipId);
+      });
+
+      // Wire ship claim requests from the settings panel to the server
+      this.uiManager.setShipClaimCallback((shipId) => {
+        this.networkManager.sendClaimShip(shipId);
       });
 
       // Wire NPC stat upgrade requests from the crew level menu to the server
@@ -3355,10 +3376,10 @@ export class ClientApplication {
               if (npcCompanyE === 0) {
                 npcOpts = [{ id: 'recruit', label: 'Recruit to Company' }];
               } else if (npcCompanyE === myCompanyE && hovNpcE.shipId !== meE.carrierId) {
-                npcOpts = [{ id: 'move_aboard', label: 'Move Aboard' }];
+                npcOpts = [{ id: 'move_aboard', label: 'Move Aboard' }, { id: 'unclaim_npc', label: 'Unclaim NPC' }];
               } else {
                 // Same company, same ship
-                npcOpts = [{ id: 'crew_menu', label: 'Manage Crew' }];
+                npcOpts = [{ id: 'crew_menu', label: 'Manage Crew' }, { id: 'unclaim_npc', label: 'Unclaim NPC' }];
               }
               const npcOptsSnap = npcOpts;
 
@@ -3754,6 +3775,10 @@ export class ClientApplication {
           } else if (actionId === 'crew_menu' && npc.companyId === myCompany) {
             this.uiManager?.openCrewMenuForNpc(npc);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          } else if (actionId === 'unclaim_npc' && npc.companyId === myCompany) {
+            this.networkManager.sendNpcUnclaim(npc.id);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`⚓ Unclaiming NPC ${npc.id} (${npc.name})`);
           }
         };
 

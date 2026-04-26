@@ -9,11 +9,13 @@
 // A company groups ships, players, and NPCs into a faction.
 // Two companies that share an alliance_id are friendly to each other;
 // entities of different companies are hostile.
-#define COMPANY_NEUTRAL  0   // Unclaimed/neutral — no friendly-fire protection
-#define COMPANY_PIRATES  1   // Player's company
-#define COMPANY_NAVY     2   // Enemy AI company
-#define COMPANY_GHOST   99   // Phantom Brig faction — hostile to all
-#define MAX_COMPANIES    3   // Total number of distinct company slots (neutral + pirates + navy)
+#define COMPANY_UNCLAIMED 0  // No owner — ship/NPC has no faction
+#define COMPANY_NEUTRAL   0  // Alias for COMPANY_UNCLAIMED (backward compat)
+#define COMPANY_SOLO      1  // Player-owned, no guild affiliation
+#define COMPANY_PIRATES   2  // Pirates guild faction
+#define COMPANY_NAVY      3  // Navy faction — enemy AI
+#define COMPANY_GHOST    99  // Phantom Brig faction — hostile to all
+#define MAX_COMPANIES     4  // Total number of distinct company slots (0–3)
 
 // ── Ship type identifiers ─────────────────────────────────────────────────
 #define SHIP_TYPE_SLOOP      1   // Small, fast sloop
@@ -92,7 +94,7 @@ typedef struct SimpleShip {
     uint32_t cannon_last_needed_ms[MAX_MODULES_PER_SHIP];
     /* Per-ship weapon control groups — isolated per company so that enemy
      * boarders cannot read or sabotage the original crew's group config.
-     * Index 0 = COMPANY_NEUTRAL, 1 = COMPANY_PIRATES, 2 = COMPANY_NAVY.
+     * Index 0 = COMPANY_UNCLAIMED, 1 = COMPANY_SOLO, 2 = COMPANY_PIRATES, 3 = COMPANY_NAVY.
      * NPC/tick code always accesses [ship->company_id]; player config
      * writes to [player->company_id]. */
     WeaponGroup weapon_groups[MAX_COMPANIES][MAX_WEAPON_GROUPS];

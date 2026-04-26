@@ -162,10 +162,12 @@ export interface PlacedStructure {
 }
 
 // Company identifiers (mirror server COMPANY_* constants)
-export const COMPANY_NEUTRAL = 0;
-export const COMPANY_PIRATES = 1;
-export const COMPANY_NAVY    = 2;
-export const COMPANY_GHOST   = 99; // Phantom Brig faction — hostile to all
+export const COMPANY_UNCLAIMED = 0; // No owner — ship/NPC has no faction
+export const COMPANY_NEUTRAL   = 0; // Alias for COMPANY_UNCLAIMED (backward compat)
+export const COMPANY_SOLO      = 1; // Player-owned, no guild affiliation
+export const COMPANY_PIRATES   = 2; // Pirates guild faction
+export const COMPANY_NAVY      = 3; // Navy faction
+export const COMPANY_GHOST     = 99; // Phantom Brig faction — hostile to all
 
 // Ship type identifiers (mirror server SHIP_TYPE_* constants)
 export const SHIP_TYPE_BRIGANTINE = 3;

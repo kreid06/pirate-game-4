@@ -14,7 +14,9 @@
 
 import {
   WorldState,
+  COMPANY_UNCLAIMED,
   COMPANY_NEUTRAL,
+  COMPANY_SOLO,
   COMPANY_PIRATES,
   COMPANY_NAVY,
   SHIP_TYPE_GHOST,
@@ -36,15 +38,17 @@ import { ShipModule, CannonModuleData, MastModuleData, PlankModuleData } from '.
 // ── Shared palette ────────────────────────────────────────────────────────────
 
 const COMPANY_NAMES: Record<number, string> = {
-  [COMPANY_NEUTRAL]: 'Neutral',
-  [COMPANY_PIRATES]: 'Pirates',
-  [COMPANY_NAVY]:    'Navy',
+  [COMPANY_UNCLAIMED]: 'Unclaimed',
+  [COMPANY_SOLO]:      'Solo',
+  [COMPANY_PIRATES]:   'Pirates',
+  [COMPANY_NAVY]:      'Navy',
 };
 
 const COMPANY_COLORS: Record<number, string> = {
-  [COMPANY_NEUTRAL]: '#aaaaaa',
-  [COMPANY_PIRATES]: '#ff6644',
-  [COMPANY_NAVY]:    '#4488ff',
+  [COMPANY_UNCLAIMED]: '#aaaaaa',
+  [COMPANY_SOLO]:      '#ddaa44',
+  [COMPANY_PIRATES]:   '#ff6644',
+  [COMPANY_NAVY]:      '#4488ff',
 };
 
 /** Attribute index → server-side string name used in upgrade_ship messages */
@@ -89,6 +93,9 @@ export class ShipMenu {
   /** Called when the player confirms "Unclaim Ship" from the settings panel. */
   public onUnclaimShip?: (shipId: number) => void;
 
+  /** Called when the player confirms "Claim Ship" from the settings panel. */
+  public onClaimShip?: (shipId: number) => void;
+
   /** Hit areas for attribute rows populated each render frame. */
   private _upgradeHitAreas: Array<{ attr: number; serverName: string; x: number; y: number; w: number; h: number; affordable: boolean }> = [];
   private _npcHitAreas: Array<{ npc: import('../../sim/Types.js').Npc; x: number; y: number; w: number; h: number }> = [];
@@ -98,8 +105,9 @@ export class ShipMenu {
 
   /** Whether the settings sub-panel is currently open. */
   private _settingsOpen = false;
-  private _gearBtnArea:   { x: number; y: number; w: number; h: number } | null = null;
+  private _gearBtnArea:    { x: number; y: number; w: number; h: number } | null = null;
   private _unclaimBtnArea: { x: number; y: number; w: number; h: number } | null = null;
+  private _claimBtnArea:   { x: number; y: number; w: number; h: number } | null = null;
 
   toggle(): void { this.visible = !this.visible; if (!this.visible) this._settingsOpen = false; }
   open():   void { this.visible = true;  }
@@ -131,7 +139,15 @@ export class ShipMenu {
           return true;
         }
       }
-      // Any click while settings open — close settings if outside overlay, consume otherwise
+      if (this._claimBtnArea) {
+        const c = this._claimBtnArea;
+        if (x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h) {
+          this.onClaimShip?.(this._currentShipId);
+          this._settingsOpen = false;
+          return true;
+        }
+      }
+      // Any click while settings open — consume
       return true;
     }
 
@@ -218,7 +234,7 @@ export class ShipMenu {
 
     // Render settings overlay on top if open
     if (this._settingsOpen) {
-      this._settingsPanel(ctx, px, py, ship.id);
+      this._settingsPanel(ctx, px, py, ship.id, ship.companyId ?? COMPANY_UNCLAIMED, player?.companyId ?? COMPANY_UNCLAIMED);
     }
 
     ctx.restore();
@@ -270,9 +286,11 @@ export class ShipMenu {
   }
 
   private _settingsPanel(
-    ctx:    CanvasRenderingContext2D,
-    px:     number, py: number,
-    shipId: number,
+    ctx:          CanvasRenderingContext2D,
+    px:           number, py: number,
+    shipId:       number,
+    shipCompany:  number,
+    myCompany:    number,
   ): void {
     const OW = 320;
     const OH = 160;
@@ -305,30 +323,60 @@ export class ShipMenu {
     ctx.lineTo(ox + OW, oy + 38);
     ctx.stroke();
 
+    const isUnclaimed = shipCompany === COMPANY_UNCLAIMED;
+    const isOwnShip   = !isUnclaimed && shipCompany === myCompany;
+
     // Info text
     ctx.font = '12px Consolas, monospace';
     ctx.fillStyle = TEXT_DIM;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    ctx.fillText('Remove faction ownership from this ship.', ox + 14, oy + 48);
-    ctx.fillText('Ship and crew will become Neutral.', ox + 14, oy + 64);
+    if (isUnclaimed) {
+      ctx.fillText('This ship has no owner.', ox + 14, oy + 48);
+      ctx.fillText('Claim it to bring it under your flag.', ox + 14, oy + 64);
+    } else if (isOwnShip) {
+      ctx.fillText('Remove faction ownership from this ship.', ox + 14, oy + 48);
+      ctx.fillText('NPCs aboard keep their current company.', ox + 14, oy + 64);
+    } else {
+      ctx.fillText('You do not own this ship.', ox + 14, oy + 48);
+    }
 
-    // Unclaim button
     const btnW = OW - 28;
     const btnH = 30;
     const btnX = ox + 14;
     const btnY = oy + OH - btnH - 14;
-    ctx.fillStyle = 'rgba(255,85,68,0.15)';
-    ctx.fillRect(btnX, btnY, btnW, btnH);
-    ctx.strokeStyle = '#ff5544';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(btnX, btnY, btnW, btnH);
-    ctx.font = 'bold 13px Consolas, monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#ff8877';
-    ctx.fillText('⚓  UNCLAIM SHIP', btnX + btnW / 2, btnY + btnH / 2);
-    this._unclaimBtnArea = { x: btnX, y: btnY, w: btnW, h: btnH };
+
+    // Reset hit areas
+    this._unclaimBtnArea = null;
+    this._claimBtnArea   = null;
+
+    if (isUnclaimed) {
+      // CLAIM SHIP button (green)
+      ctx.fillStyle = 'rgba(68,204,102,0.15)';
+      ctx.fillRect(btnX, btnY, btnW, btnH);
+      ctx.strokeStyle = '#44cc66';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(btnX, btnY, btnW, btnH);
+      ctx.font = 'bold 13px Consolas, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#88ffaa';
+      ctx.fillText('⚓  CLAIM SHIP', btnX + btnW / 2, btnY + btnH / 2);
+      this._claimBtnArea = { x: btnX, y: btnY, w: btnW, h: btnH };
+    } else if (isOwnShip) {
+      // UNCLAIM SHIP button (red)
+      ctx.fillStyle = 'rgba(255,85,68,0.15)';
+      ctx.fillRect(btnX, btnY, btnW, btnH);
+      ctx.strokeStyle = '#ff5544';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(btnX, btnY, btnW, btnH);
+      ctx.font = 'bold 13px Consolas, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ff8877';
+      ctx.fillText('⚓  UNCLAIM SHIP', btnX + btnW / 2, btnY + btnH / 2);
+      this._unclaimBtnArea = { x: btnX, y: btnY, w: btnW, h: btnH };
+    }
   }
 
   private _identity(
@@ -342,7 +390,7 @@ export class ShipMenu {
     ctx.fillStyle = BG_DARK;
     ctx.fillRect(px + PAD, py, PANEL_W - PAD * 2, sectionH);
 
-    const co = ship.companyId ?? COMPANY_NEUTRAL;
+    const co = ship.companyId ?? COMPANY_UNCLAIMED;
 
     // Company swatch
     ctx.fillStyle = COMPANY_COLORS[co] ?? '#aaa';
