@@ -1,0 +1,6 @@
+{
+  "next_id": 101,
+  "companies": [
+    {"id":100,"name":"Bobs","founderId":1000}
+  ]
+}

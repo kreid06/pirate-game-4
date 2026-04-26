@@ -605,6 +605,10 @@ export class NetworkManager {
   public onTreeHit: ((x: number, y: number) => void) | null = null;
   /** Fired when the server sends the full list of existing placed structures on join. */
   public onStructuresList: ((structures: PlacedStructure[]) => void) | null = null;
+  /** Fired when a shipwreck spawns at sea (after a ship sinks). */
+  public onWreckSpawned: ((wreck: PlacedStructure) => void) | null = null;
+  /** Fired when a shipwreck is removed (salvaged or auto-despawned). */
+  public onWreckRemoved: ((id: number) => void) | null = null;
   /** Fired when the server confirms a workbench can be opened (E-key interact). */
   public onCraftingOpen: ((structureId: number, structureType: string) => void) | null = null;
   /** Fired when the server confirms a craft_item request. */
@@ -2389,6 +2393,7 @@ export class NetworkManager {
                    : s.structure_type === 'door_frame' ? 'door_frame'
                    : s.structure_type === 'door'       ? 'door'
                    : s.structure_type === 'shipyard'   ? 'shipyard'
+                   : s.structure_type === 'wreck'      ? 'wreck'
                    : 'wooden_floor',
           islandId:  s.island_id ?? 0,
           x:         s.x ?? 0,
@@ -2416,6 +2421,7 @@ export class NetworkManager {
                    : message.structure_type === 'door_frame' ? 'door_frame'
                    : message.structure_type === 'door'       ? 'door'
                    : message.structure_type === 'shipyard'   ? 'shipyard'
+                   : message.structure_type === 'wreck'      ? 'wreck'
                    : 'wooden_floor',
           islandId:  message.island_id ?? 0,
           x:         message.x ?? 0,
@@ -2430,6 +2436,28 @@ export class NetworkManager {
         this.onStructurePlaced?.(sp);
         break;
       }
+
+      case 'wreck_spawned': {
+        const w: PlacedStructure = {
+          id:        message.id       ?? 0,
+          type:      'wreck',
+          islandId:  0,
+          x:         message.x        ?? 0,
+          y:         message.y        ?? 0,
+          companyId: 0,
+          hp:        message.loot_count ?? 1,
+          maxHp:     message.loot_count ?? 1,
+          placerName: 'shipwreck',
+        };
+        this.onWreckSpawned?.(w);
+        this.onStructurePlaced?.(w);
+        break;
+      }
+
+      case 'wreck_removed':
+        this.onWreckRemoved?.(message.id ?? 0);
+        this.onStructureDemolished?.(message.id ?? 0);
+        break;
 
       case 'door_toggled':
         this.onDoorToggled?.(message.id ?? 0, message.open === true);

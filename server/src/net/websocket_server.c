@@ -1985,11 +1985,12 @@ int websocket_server_update(struct Sim* sim) {
                                     for (int s = 0; s < ship_count && ships_offset < (int)sizeof(ships_str) - 512; s++) {
                                         if (ships[s].active) {
                                             ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
-                                                    "%s{\"id\":%u,\"seq\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
+                                                    "%s{\"id\":%u,\"seq\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"company\":%u,\"shipType\":%u,\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                                                     first_ship ? "" : ",",
                                                     ships[s].ship_id, ships[s].ship_seq,
                                                     ships[s].x, ships[s].y, ships[s].rotation,
                                                     ships[s].velocity_x, ships[s].velocity_y,
+                                                    ships[s].company_id, ships[s].ship_type,
                                                     ships[s].cannon_ammo, ships[s].infinite_ammo ? "true" : "false");
                                             
                                             // Add modules
@@ -2184,7 +2185,8 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_WALL         ? "wall" :
                                             placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
                                             placed_structures[si].type == STRUCT_DOOR         ? "door" :
-                                            placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" : "unknown";
+                                            placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
+                                            placed_structures[si].type == STRUCT_WRECK        ? "wreck" : "unknown";
                                         bool hs_is_door = (placed_structures[si].type == STRUCT_DOOR);
                                         bool hs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
                                         /* Build extra fields for shipyard construction state */
@@ -5997,7 +5999,8 @@ int websocket_server_update(struct Sim* sim) {
                                         placed_structures[si].type == STRUCT_WALL         ? "wall" :
                                         placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
                                         placed_structures[si].type == STRUCT_DOOR         ? "door" :
-                                        placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" : "unknown";
+                                        placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
+                                        placed_structures[si].type == STRUCT_WRECK        ? "wreck" : "unknown";
                                     bool gs_is_door = (placed_structures[si].type == STRUCT_DOOR);
                                     bool gs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
                                     char gs_sy_extra[256] = "";
@@ -6375,11 +6378,13 @@ int websocket_server_update(struct Sim* sim) {
                             "{\"id\":%u,\"seq\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                             "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                             "\"rudder_angle\":%.3f,"
+                            "\"company\":%u,\"shipType\":%u,"
                             "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                             ships[s].ship_id, ships[s].ship_seq,
                             ships[s].x, ships[s].y, ships[s].rotation,
                             ships[s].velocity_x, ships[s].velocity_y, ships[s].angular_velocity,
                             0.0f,
+                            ships[s].company_id, ships[s].ship_type,
                             ships[s].cannon_ammo, ships[s].infinite_ammo ? "true" : "false");
                     
                     // Add modules from simple ships

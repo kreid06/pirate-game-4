@@ -4268,6 +4268,64 @@ export class RenderSystem {
           ctx.fill();
         }
         ctx.restore();
+      } else if (s.type === 'wreck') {
+        // ── Shipwreck — broken hull timbers at sea ──────────────────────────
+        const wrsz = Math.max(6, 60 * zoom);
+        ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        // Tilted broken planks (cross shape, rotated 35°)
+        ctx.rotate(0.61); // ~35 degrees
+        const alpha = isHovered ? 1.0 : 0.88;
+        ctx.globalAlpha = alpha;
+        // Hull outline (irregular pentagon for a battered ship)
+        ctx.fillStyle = '#5a3a18';
+        ctx.strokeStyle = '#2e1a08';
+        ctx.lineWidth = Math.max(1, 1.5 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(-wrsz * 0.55, -wrsz * 0.25);
+        ctx.lineTo( wrsz * 0.50, -wrsz * 0.30);
+        ctx.lineTo( wrsz * 0.65,  wrsz * 0.10);
+        ctx.lineTo( wrsz * 0.20,  wrsz * 0.35);
+        ctx.lineTo(-wrsz * 0.60,  wrsz * 0.25);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        // Broken plank lines
+        ctx.strokeStyle = '#2e1a08';
+        ctx.lineWidth = Math.max(0.5, 1 * zoom);
+        for (let i = -1; i <= 1; i++) {
+          ctx.beginPath();
+          ctx.moveTo(-wrsz * 0.5, i * wrsz * 0.12);
+          ctx.lineTo( wrsz * 0.5, i * wrsz * 0.12);
+          ctx.stroke();
+        }
+        // Mast stub
+        ctx.strokeStyle = '#7a5520';
+        ctx.lineWidth = Math.max(1.5, 2.5 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(-wrsz * 0.1, -wrsz * 0.05);
+        ctx.lineTo(-wrsz * 0.1 + wrsz * 0.05, -wrsz * 0.5);
+        ctx.stroke();
+        // Salvage indicator: small glint if hp > 0
+        if (s.hp > 0) {
+          ctx.fillStyle = 'rgba(255, 220, 80, 0.85)';
+          ctx.beginPath();
+          ctx.arc(0, 0, Math.max(3, 5 * zoom), 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        ctx.restore();
+        // Label "WRECK" when hovered
+        if (isHovered) {
+          ctx.save();
+          ctx.font = `bold ${Math.max(10, 12 * zoom)}px monospace`;
+          ctx.textAlign = 'center';
+          ctx.fillStyle = 'rgba(0,0,0,0.6)';
+          ctx.fillText(`⚓ Wreck (${s.hp} loot)`, ssp.x + 1, ssp.y - wrsz * 0.7 + 1);
+          ctx.fillStyle = '#ffd050';
+          ctx.fillText(`⚓ Wreck (${s.hp} loot)`, ssp.x, ssp.y - wrsz * 0.7);
+          ctx.restore();
+        }
       }
     } // end for sorted
 
@@ -4353,6 +4411,7 @@ export class RenderSystem {
                  : s.type === 'door_frame' ? 'Door Frame'
                  : s.type === 'door' ? (s.doorOpen ? 'Door (Open)' : 'Door (Closed)')
                  : s.type === 'shipyard' ? 'Shipyard'
+                 : s.type === 'wreck' ? 'Shipwreck'
                  : 'Workbench';
 
       // Determine ownership line text + color
@@ -4386,6 +4445,7 @@ export class RenderSystem {
         const interactHint = s.type === 'door' ? 'Tap [E] to open/close'
                            : s.type === 'door_frame' ? 'Hold [E] to demolish'
                            : s.type === 'shipyard' ? 'Hold [E] to build ships'
+                           : s.type === 'wreck' ? '[E] to salvage loot'
                            : 'Hold [E] to interact';
         ctx.fillText(interactHint, ssp.x, tipY - lineH * 2);
       } else {
