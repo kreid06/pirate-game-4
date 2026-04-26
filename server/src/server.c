@@ -130,7 +130,21 @@ int server_init(struct ServerContext** out_ctx) {
     // Link WebSocket server to simulation for collision detection
     websocket_server_set_simulation(&ctx->simulation);
     log_info("WebSocket server linked to simulation");
-    
+
+    /* ── Auto-load world state if a save file exists ── */
+    {
+        FILE *wf = fopen(WORLD_SAVE_DEFAULT_PATH, "r");
+        if (wf) {
+            fclose(wf);
+            log_info("💾 Found save file — loading world state from '%s'",
+                     WORLD_SAVE_DEFAULT_PATH);
+            world_load(WORLD_SAVE_DEFAULT_PATH);
+        } else {
+            log_info("💾 No save file found at '%s' — starting fresh world",
+                     WORLD_SAVE_DEFAULT_PATH);
+        }
+    }
+
     // Mark as initialized
     ctx->initialized = true;
     ctx->should_run = true;
