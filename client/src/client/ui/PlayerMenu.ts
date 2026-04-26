@@ -56,25 +56,35 @@ const SLOT_SZ  = 40;
 const SLOT_GAP = 5;
 
 // ── Player stat configuration (mirrors CrewLevelMenu STATS) ──────────────────
+type AnyPlayer = NonNullable<ReturnType<WorldState['players']['find']>>;
 interface StatDef {
-  key:    'statHealth' | 'statDamage' | 'statStamina' | 'statWeight';
-  server: string;
-  label:  string;
-  desc:   (lvl: number) => string;
-  color:  string;
+  key:        'statHealth' | 'statDamage' | 'statStamina' | 'statWeight';
+  server:     string;
+  label:      string;
+  currentVal: (player: AnyPlayer, statLvl: number) => string; // actual current value
+  gainPerPt:  string;  // gain shown per stat point (e.g. "+20 HP")
+  color:      string;
 }
 
 const PLAYER_MAX_LEVEL = 120;
 
 const STATS: StatDef[] = [
   { key: 'statHealth',  server: 'health',  label: 'Health',
-    desc: (l) => l > 0 ? `+${l * 20} max HP` : 'No bonus', color: '#44cc66' },
+    currentVal: (p, _l) => `${p.maxHealth} HP`,
+    gainPerPt:  '+20 HP',
+    color: '#44cc66' },
   { key: 'statDamage',  server: 'damage',  label: 'Damage',
-    desc: (l) => l > 0 ? `+${l * 10}% weapon dmg` : 'No bonus', color: '#ff5544' },
+    currentVal: (_p, l) => l > 0 ? `+${l * 10}% dmg` : 'base',
+    gainPerPt:  '+10% dmg',
+    color: '#ff5544' },
   { key: 'statStamina', server: 'stamina', label: 'Stamina',
-    desc: (l) => l > 0 ? `+${l * 10}% speed` : 'No bonus', color: '#ffaa44' },
+    currentVal: (p, _l) => `${p.maxStamina ?? 100} ST`,
+    gainPerPt:  '+10% spd',
+    color: '#ffaa44' },
   { key: 'statWeight',  server: 'weight',  label: 'Weight',
-    desc: (l) => l > 0 ? `+${l * 10}% carry` : 'No bonus', color: '#88ccff' },
+    currentVal: (_p, l) => l > 0 ? `+${l * 10}% carry` : 'base',
+    gainPerPt:  '+10% carry',
+    color: '#88ccff' },
 ];
 
 interface BtnHit {
@@ -92,17 +102,21 @@ interface HandRecipe {
   output: ItemKind;
   outputQty: number;
   cost: Array<{ item: ItemKind; qty: number }>;
+  category: string;
 }
 
 const HAND_RECIPES: HandRecipe[] = [
-  { output: 'repair_kit',    outputQty: 1, cost: [{ item: 'wood',  qty: 4  }] },
-  { output: 'plank',         outputQty: 2, cost: [{ item: 'wood',  qty: 3  }] },
-  { output: 'cloth_armor',   outputQty: 1, cost: [{ item: 'fiber', qty: 8  }] },
-  { output: 'wooden_shield', outputQty: 1, cost: [{ item: 'wood',  qty: 6  }] },
-  { output: 'axe',           outputQty: 1, cost: [{ item: 'wood',  qty: 3  }, { item: 'stone', qty: 2 }] },
-  { output: 'pickaxe',       outputQty: 1, cost: [{ item: 'wood',  qty: 2  }, { item: 'stone', qty: 4 }] },
-  { output: 'wooden_floor',  outputQty: 2, cost: [{ item: 'wood',  qty: 4  }] },
-  { output: 'workbench',     outputQty: 1, cost: [{ item: 'wood',  qty: 10 }] },
+  // Survival
+  { output: 'repair_kit',    outputQty: 1, cost: [{ item: 'wood',  qty: 4  }],                                    category: 'SURVIVAL'     },
+  // Armor
+  { output: 'cloth_armor',   outputQty: 1, cost: [{ item: 'fiber', qty: 8  }],                                    category: 'ARMOR'        },
+  { output: 'wooden_shield', outputQty: 1, cost: [{ item: 'wood',  qty: 6  }],                                    category: 'ARMOR'        },
+  // Tools
+  { output: 'axe',           outputQty: 1, cost: [{ item: 'wood',  qty: 3  }, { item: 'stone', qty: 2 }],         category: 'TOOLS'        },
+  { output: 'pickaxe',       outputQty: 1, cost: [{ item: 'wood',  qty: 2  }, { item: 'stone', qty: 4 }],         category: 'TOOLS'        },
+  // Construction
+  { output: 'wooden_floor',  outputQty: 2, cost: [{ item: 'wood',  qty: 4  }],                                    category: 'CONSTRUCTION' },
+  { output: 'workbench',     outputQty: 1, cost: [{ item: 'wood',  qty: 10 }],                                    category: 'CONSTRUCTION' },
 ];
 
 export class PlayerMenu {
@@ -117,6 +131,8 @@ export class PlayerMenu {
   private _panelY = 0;
   private _btnHits: BtnHit[] = [];
   private _craftBtnHits: CraftHit[] = [];
+  private _craftTab = 'SURVIVAL';
+  private _craftTabHits: Array<{ label: string; x: number; y: number; w: number; h: number }> = [];
 
   /** Called when player clicks an affordable CRAFT button. */
   public onCraftRequest: ((outputItem: ItemKind, qty: number) => void) | null = null;
@@ -173,6 +189,15 @@ export class PlayerMenu {
           x >= btn.x && x <= btn.x + btn.w &&
           y >= btn.y && y <= btn.y + btn.h) {
         this.onUpgradeRequest?.(btn.serverKey);
+        return true;
+      }
+    }
+
+    // Craft category tabs
+    for (const tab of this._craftTabHits) {
+      if (x >= tab.x && x <= tab.x + tab.w &&
+          y >= tab.y && y <= tab.y + tab.h) {
+        this._craftTab = tab.label;
         return true;
       }
     }
@@ -301,6 +326,7 @@ export class PlayerMenu {
 
     this._btnHits = [];
     this._craftBtnHits = [];
+    this._craftTabHits = [];
 
     const player = assignedId != null
       ? worldState.players.find(p => p.id === assignedId)
@@ -326,7 +352,7 @@ export class PlayerMenu {
       ? worldState.ships.find(s => s.id === player.carrierId) ?? null
       : null;
 
-    cur = this._equipmentAndStatus(ctx, px, cur, player, ship, worldState);
+    cur = this._equipmentAndStatus(ctx, px, cur, player, ship, worldState, mouseX, mouseY);
     cur = this._playerCrafting(ctx, px, cur, player);
     cur = this._inventoryGrid(ctx, px, cur, player, mouseX, mouseY);
 
@@ -369,6 +395,7 @@ export class PlayerMenu {
     player:      NonNullable<ReturnType<WorldState['players']['find']>>,
     ship:        ReturnType<WorldState['ships']['find']> | null,
     _worldState: WorldState,
+    mouseX = 0, mouseY = 0,
   ): number {
     py = this._sectionHeader(ctx, px, py, 'EQUIPMENT & STATUS', '');
     py += 8;
@@ -538,35 +565,44 @@ export class PlayerMenu {
     // Compact stat rows with small + button
     const STAT_ROW_H = 28;
     const SBTN_W = 24, SBTN_H = 20;
+    let hoveredStat: { stat: StatDef; sbtnX: number; sbtnY: number } | null = null;
 
     for (let si = 0; si < STATS.length; si++) {
       const stat    = STATS[si];
       const statLvl = (player[stat.key] ?? 0) as number;
       const afford  = statPoints > 0;
+      const sbtnX   = statusX + statusW - SBTN_W;
+      const sbtnY   = sty + (STAT_ROW_H - SBTN_H) / 2;
+      const hovering = afford &&
+        mouseX >= sbtnX && mouseX <= sbtnX + SBTN_W &&
+        mouseY >= sbtnY && mouseY <= sbtnY + SBTN_H;
+      if (hovering) hoveredStat = { stat, sbtnX, sbtnY };
 
       if (si % 2 === 1) {
         ctx.fillStyle = BG_STRIPE;
         ctx.fillRect(statusX, sty, statusW, STAT_ROW_H);
       }
 
+      // Label
       ctx.font         = 'bold 12px Consolas, monospace';
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = stat.color;
       ctx.fillText(stat.label, statusX + 4, sty + STAT_ROW_H / 2);
 
+      // Current actual value (e.g. "140 HP")
       ctx.font      = 'bold 11px Consolas, monospace';
       ctx.fillStyle = statLvl > 0 ? stat.color : TEXT_DIM;
-      ctx.fillText(`${statLvl}`, statusX + 70, sty + STAT_ROW_H / 2);
+      ctx.fillText(stat.currentVal(player, statLvl), statusX + 70, sty + STAT_ROW_H / 2);
 
+      // Per-point gain — green if can afford, grey if not
       ctx.font      = '10px Consolas, monospace';
-      ctx.fillStyle = TEXT_DIM;
-      ctx.fillText(stat.desc(statLvl), statusX + 96, sty + STAT_ROW_H / 2);
+      ctx.fillStyle = afford ? '#66dd88' : TEXT_DIM;
+      ctx.fillText(stat.gainPerPt, statusX + 160, sty + STAT_ROW_H / 2);
 
-      const sbtnX = statusX + statusW - SBTN_W;
-      const sbtnY = sty + (STAT_ROW_H - SBTN_H) / 2;
-      ctx.fillStyle   = afford ? '#2a4a2a' : '#1e1e2c';
-      ctx.strokeStyle = afford ? '#44aa44' : '#445';
+      // + button
+      ctx.fillStyle   = afford ? (hovering ? '#3a6a3a' : '#2a4a2a') : '#1e1e2c';
+      ctx.strokeStyle = afford ? (hovering ? '#66ee66' : '#44aa44') : '#445';
       ctx.lineWidth   = 1;
       ctx.beginPath();
       ctx.roundRect(sbtnX, sbtnY, SBTN_W, SBTN_H, 3);
@@ -583,6 +619,30 @@ export class PlayerMenu {
       }
 
       sty += STAT_ROW_H;
+    }
+
+    // Hover tooltip — shows what next point gives
+    if (hoveredStat) {
+      const { stat, sbtnX, sbtnY } = hoveredStat;
+      const tipText = `next: ${stat.gainPerPt}`;
+      const TIP_PAD = 6;
+      ctx.font = 'bold 10px Consolas, monospace';
+      const tipW = ctx.measureText(tipText).width + TIP_PAD * 2;
+      const tipH = 18;
+      const tipX = Math.min(sbtnX + SBTN_W / 2 - tipW / 2, statusX + statusW - tipW);
+      const tipY = sbtnY - tipH - 4;
+
+      ctx.fillStyle   = '#1a2a1a';
+      ctx.strokeStyle = '#44cc44';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.roundRect(tipX, tipY, tipW, tipH, 3);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle    = '#aaffaa';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(tipText, tipX + TIP_PAD, tipY + tipH / 2);
     }
 
     // Vertical divider spanning full right-column height
@@ -605,7 +665,7 @@ export class PlayerMenu {
     player: NonNullable<ReturnType<WorldState['players']['find']>>,
   ): number {
     py = this._sectionHeader(ctx, px, py, 'HAND CRAFTING', 'no workbench required');
-    py += 6;
+    py += 4;
 
     // Count materials in player inventory
     const counts: Partial<Record<ItemKind, number>> = {};
@@ -623,84 +683,144 @@ export class PlayerMenu {
     const BTN_W  = 52;
     const BTN_H  = 20;
 
+    // Build category list (preserving order)
+    const categories: Array<{ label: string; indices: number[] }> = [];
     for (let i = 0; i < HAND_RECIPES.length; i++) {
-      const recipe    = HAND_RECIPES[i];
-      const col       = i % COLS;
-      const row       = Math.floor(i / COLS);
-      const rx        = px + PAD + col * (CELL_W + GAP);
-      const ry        = py + row * (CELL_H + CELL_V);
-      const canAfford = recipe.cost.every(c => (counts[c.item] ?? 0) >= c.qty);
-      const outDef    = ITEM_DEFS[recipe.output];
-
-      // Cell background
-      ctx.fillStyle   = canAfford ? 'rgba(28,54,28,0.75)' : 'rgba(20,20,34,0.80)';
-      ctx.strokeStyle = canAfford ? '#3a8a3a' : '#334';
-      ctx.lineWidth   = 1;
-      ctx.beginPath();
-      ctx.roundRect(rx, ry, CELL_W, CELL_H, 4);
-      ctx.fill();
-      ctx.stroke();
-
-      // Output icon
-      const ICON = 34;
-      const iconX = rx + 6;
-      const iconY = ry + (CELL_H - ICON) / 2;
-      ctx.fillStyle   = outDef.color;
-      ctx.fillRect(iconX, iconY, ICON, ICON);
-      ctx.strokeStyle = outDef.borderColor;
-      ctx.lineWidth   = 1;
-      ctx.strokeRect(iconX, iconY, ICON, ICON);
-      ctx.font         = 'bold 14px Consolas, monospace';
-      ctx.fillStyle    = '#fff';
-      ctx.textAlign    = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(outDef.symbol, iconX + ICON / 2, iconY + ICON / 2);
-
-      // Output name + qty
-      const textX = iconX + ICON + 6;
-      ctx.font         = 'bold 12px Consolas, monospace';
-      ctx.textAlign    = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillStyle    = canAfford ? TEXT_HEAD : TEXT_DIM;
-      const nameStr = outDef.name + (recipe.outputQty > 1 ? ` x${recipe.outputQty}` : '');
-      ctx.fillText(nameStr, textX, ry + 7);
-
-      // Ingredients with per-item colour
-      ctx.font = '10px Consolas, monospace';
-      ctx.textBaseline = 'top';
-      let ix = textX;
-      const ingY = ry + 23;
-      for (const c of recipe.cost) {
-        const ok  = (counts[c.item] ?? 0) >= c.qty;
-        ctx.fillStyle = ok ? GREEN : '#cc4444';
-        const txt = `${c.qty}${ITEM_DEFS[c.item].symbol} `;
-        ctx.fillText(txt, ix, ingY);
-        ix += ctx.measureText(txt).width;
-      }
-
-      // CRAFT button
-      const btnX = rx + CELL_W - BTN_W - 4;
-      const btnY = ry + (CELL_H - BTN_H) / 2;
-      ctx.fillStyle   = canAfford ? '#2a5a2a' : '#1e1e2e';
-      ctx.strokeStyle = canAfford ? '#44cc44' : '#445';
-      ctx.lineWidth   = 1;
-      ctx.beginPath();
-      ctx.roundRect(btnX, btnY, BTN_W, BTN_H, 3);
-      ctx.fill();
-      ctx.stroke();
-      ctx.font         = 'bold 11px Consolas, monospace';
-      ctx.textAlign    = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle    = canAfford ? '#aaffaa' : '#556';
-      ctx.fillText('CRAFT', btnX + BTN_W / 2, btnY + BTN_H / 2);
-
-      if (canAfford) {
-        this._craftBtnHits.push({ recipeIdx: i, x: btnX, y: btnY, w: BTN_W, h: BTN_H });
-      }
+      const cat = HAND_RECIPES[i].category;
+      const existing = categories.find(c => c.label === cat);
+      if (existing) existing.indices.push(i);
+      else categories.push({ label: cat, indices: [i] });
     }
 
-    const rows = Math.ceil(HAND_RECIPES.length / COLS);
-    return py + rows * (CELL_H + CELL_V) + 4;
+    // Ensure _craftTab is valid
+    if (!categories.find(c => c.label === this._craftTab)) {
+      this._craftTab = categories[0]?.label ?? '';
+    }
+
+    // Tab bar
+    const TAB_BAR_H = 26;
+    const tabW = Math.floor((PANEL_W - PAD * 2) / categories.length);
+    for (let ti = 0; ti < categories.length; ti++) {
+      const { label } = categories[ti];
+      const tx = px + PAD + ti * tabW;
+      const isActive = label === this._craftTab;
+
+      ctx.fillStyle = isActive ? 'rgba(255,215,0,0.10)' : 'rgba(0,0,0,0.30)';
+      ctx.fillRect(tx, py, tabW, TAB_BAR_H);
+
+      // Bottom border
+      ctx.strokeStyle = isActive ? GOLD : BORDER;
+      ctx.lineWidth   = isActive ? 2 : 1;
+      ctx.beginPath();
+      ctx.moveTo(tx, py + TAB_BAR_H);
+      ctx.lineTo(tx + tabW, py + TAB_BAR_H);
+      ctx.stroke();
+
+      // Divider between tabs
+      if (ti < categories.length - 1) {
+        ctx.strokeStyle = BORDER;
+        ctx.lineWidth   = 1;
+        ctx.beginPath();
+        ctx.moveTo(tx + tabW, py);
+        ctx.lineTo(tx + tabW, py + TAB_BAR_H);
+        ctx.stroke();
+      }
+
+      ctx.font         = `${isActive ? 'bold ' : ''}10px Consolas, monospace`;
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = isActive ? GOLD : TEXT_DIM;
+      ctx.fillText(label, tx + tabW / 2, py + TAB_BAR_H / 2);
+
+      this._craftTabHits.push({ label, x: tx, y: py, w: tabW, h: TAB_BAR_H });
+    }
+    py += TAB_BAR_H + 6;
+
+    // Recipes for active tab
+    const active = categories.find(c => c.label === this._craftTab);
+    if (active) {
+      for (let ci = 0; ci < active.indices.length; ci++) {
+        const i      = active.indices[ci];
+        const recipe = HAND_RECIPES[i];
+        const col    = ci % COLS;
+        const row    = Math.floor(ci / COLS);
+        const rx     = px + PAD + col * (CELL_W + GAP);
+        const ry     = py + row * (CELL_H + CELL_V);
+        const canAfford = recipe.cost.every(c => (counts[c.item] ?? 0) >= c.qty);
+        const outDef    = ITEM_DEFS[recipe.output];
+
+        // Cell background
+        ctx.fillStyle   = canAfford ? 'rgba(28,54,28,0.75)' : 'rgba(20,20,34,0.80)';
+        ctx.strokeStyle = canAfford ? '#3a8a3a' : '#334';
+        ctx.lineWidth   = 1;
+        ctx.beginPath();
+        ctx.roundRect(rx, ry, CELL_W, CELL_H, 4);
+        ctx.fill();
+        ctx.stroke();
+
+        // Output icon
+        const ICON = 34;
+        const iconX = rx + 6;
+        const iconY = ry + (CELL_H - ICON) / 2;
+        ctx.fillStyle   = outDef.color;
+        ctx.fillRect(iconX, iconY, ICON, ICON);
+        ctx.strokeStyle = outDef.borderColor;
+        ctx.lineWidth   = 1;
+        ctx.strokeRect(iconX, iconY, ICON, ICON);
+        ctx.font         = 'bold 14px Consolas, monospace';
+        ctx.fillStyle    = '#fff';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(outDef.symbol, iconX + ICON / 2, iconY + ICON / 2);
+
+        // Output name + qty
+        const textX = iconX + ICON + 6;
+        ctx.font         = 'bold 12px Consolas, monospace';
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle    = canAfford ? TEXT_HEAD : TEXT_DIM;
+        const nameStr = outDef.name + (recipe.outputQty > 1 ? ` x${recipe.outputQty}` : '');
+        ctx.fillText(nameStr, textX, ry + 7);
+
+        // Ingredients with per-item colour
+        ctx.font = '10px Consolas, monospace';
+        ctx.textBaseline = 'top';
+        let ix = textX;
+        const ingY = ry + 23;
+        for (const c of recipe.cost) {
+          const ok  = (counts[c.item] ?? 0) >= c.qty;
+          ctx.fillStyle = ok ? GREEN : '#cc4444';
+          const txt = `${c.qty}${ITEM_DEFS[c.item].symbol} `;
+          ctx.fillText(txt, ix, ingY);
+          ix += ctx.measureText(txt).width;
+        }
+
+        // CRAFT button
+        const btnX = rx + CELL_W - BTN_W - 4;
+        const btnY = ry + (CELL_H - BTN_H) / 2;
+        ctx.fillStyle   = canAfford ? '#2a5a2a' : '#1e1e2e';
+        ctx.strokeStyle = canAfford ? '#44cc44' : '#445';
+        ctx.lineWidth   = 1;
+        ctx.beginPath();
+        ctx.roundRect(btnX, btnY, BTN_W, BTN_H, 3);
+        ctx.fill();
+        ctx.stroke();
+        ctx.font         = 'bold 11px Consolas, monospace';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = canAfford ? '#aaffaa' : '#556';
+        ctx.fillText('CRAFT', btnX + BTN_W / 2, btnY + BTN_H / 2);
+
+        if (canAfford) {
+          this._craftBtnHits.push({ recipeIdx: i, x: btnX, y: btnY, w: BTN_W, h: BTN_H });
+        }
+      }
+
+      const catRows = Math.ceil(active.indices.length / COLS);
+      py += catRows * (CELL_H + CELL_V) + 4;
+    }
+
+    return py;
   }
 
   // ─────────────────────────────────────────────────────────────────────────
