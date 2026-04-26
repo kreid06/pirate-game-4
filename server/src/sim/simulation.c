@@ -1260,7 +1260,7 @@ void sim_process_input(struct Sim* sim, const struct InputCmd* cmd) {
              * F = thrust_scalar * forward_unit * 5000 N
              * Clamped so multiple inputs or exploits can't exceed the cap. */
             static const float MAX_THRUST_FORCE = 5000.0f;  /* Newtons         */
-            static const float MAX_TURN_TORQUE  = 10000.0f; /* Newton⋅metres   */
+            static const float MAX_TURN_TORQUE  = 20000.0f; /* Newton⋅metres   */
 
             Vec2Q16 forward = {q16_cos(ship->rotation), q16_sin(ship->rotation)};
             Vec2Q16 thrust_force = vec2_mul_scalar(forward,

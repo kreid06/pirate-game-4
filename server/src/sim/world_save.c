@@ -383,13 +383,21 @@ int world_load(const char *path) {
 
     /* ── ships ── */
     {
-        /* Clear existing ships first */
+        /* Clear existing ships first (both SimpleShip and sim layers) */
         for (int i = 0; i < ship_count; i++) {
             ships[i].active = false;
             ships[i].module_count = 0;
         }
         ship_count   = 0;
         next_ship_seq = 1;
+
+        /* Also wipe the authoritative sim-layer ships so init_simulation's
+         * two default ships don't survive alongside the loaded ones. */
+        if (global_sim) {
+            memset(global_sim->ships, 0,
+                   sizeof(global_sim->ships[0]) * global_sim->ship_count);
+            global_sim->ship_count = 0;
+        }
 
         const char *arr = find_array(buf, "ships");
         if (arr) {
