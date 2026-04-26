@@ -5143,15 +5143,14 @@ int websocket_server_update(struct Sim* sim) {
                                 if (strcmp(cmd_arg1, "solo") == 0)          new_company = COMPANY_SOLO;
                                 else if (strcmp(cmd_arg1, "pirates") == 0)  new_company = COMPANY_PIRATES;
                                 else if (strcmp(cmd_arg1, "navy") == 0)     new_company = COMPANY_NAVY;
-                                else if (strcmp(cmd_arg1, "unclaimed") == 0 || strcmp(cmd_arg1, "neutral") == 0)
-                                                                            new_company = COMPANY_UNCLAIMED;
                                 else company_valid = false;
+                                /* Players cannot be set to company 0 (unclaimed) */
 
                                 if (!company_valid) {
                                     snprintf(response, sizeof(response),
                                         "{\"type\":\"command_response\","
                                         "\"success\":false,"
-                                        "\"text\":\"Unknown company '%s'. Use: solo, pirates, navy, unclaimed\"}",
+                                        "\"text\":\"Unknown company '%s'. Use: solo, pirates, navy\"}",
                                         cmd_arg1);
                                 } else {
                                     int res = websocket_server_set_player_company(
@@ -6687,6 +6686,8 @@ int websocket_server_get_players(WebSocketPlayer** out_players, int* out_count) 
 }
 
 int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id) {
+    /* Players must always have a non-zero company; clamp 0 to COMPANY_SOLO. */
+    if (company_id < COMPANY_SOLO) company_id = COMPANY_SOLO;
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (players[i].active && players[i].player_id == player_id) {
             players[i].company_id = company_id;

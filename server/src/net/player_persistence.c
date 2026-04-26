@@ -157,7 +157,7 @@ bool load_player_from_file(WebSocketPlayer *p) {
     if (json_parse_uint_field(buf, "stat_damage", &tmp))  p->stat_damage   = (uint8_t)tmp;
     if (json_parse_uint_field(buf, "stat_stamina", &tmp)) p->stat_stamina  = (uint8_t)tmp;
     if (json_parse_uint_field(buf, "stat_weight", &tmp))  p->stat_weight   = (uint8_t)tmp;
-    if (json_parse_uint_field(buf, "company_id", &tmp))   p->company_id    = (uint8_t)tmp;
+    if (json_parse_uint_field(buf, "company_id", &tmp))   p->company_id    = (uint8_t)(tmp < COMPANY_SOLO ? COMPANY_SOLO : tmp); /* players never in company 0 */
     if (json_parse_uint_field(buf, "active_slot", &tmp))  p->inventory.active_slot = (uint8_t)tmp;
     if (json_parse_uint_field(buf, "helm",  &tmp))        p->inventory.equipment.helm   = (ItemKind)tmp;
     /* "torso" is the canonical field; fall back to legacy "armor" key */
