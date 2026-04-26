@@ -153,6 +153,10 @@ export class RenderSystem {
   private placedStructures: PlacedStructure[] = [];
   /** Active tombstone item caches in the world. */
   private _tombstones: import('../../sim/Types').Tombstone[] = [];
+  /** Ship-local attachment data for tombstones that spawned on a ship. */
+  private _tombstoneShipAttach: Map<number, { shipId: number; localX: number; localY: number }> = new Map();
+  /** Ships from the last rendered frame — used for tombstone ship-tracking. */
+  private _cachedWorldShips: Ship[] = [];
   /** Dropped items in the world (player-dropped inventory items). */
   private _droppedItems: import('../../sim/Types').DroppedItem[] = [];
   /** Maps scaffolded ship entity IDs to the shipyard structure that owns them. */
@@ -2003,8 +2007,41 @@ export class RenderSystem {
     this._tombstones = list;
   }
 
+  /** Resolve the current world-space position of a tombstone, accounting for ship movement. */
+  private _resolveTombstonePos(t: import('../../sim/Types').Tombstone): { x: number; y: number } {
+    const attach = this._tombstoneShipAttach.get(t.id);
+    if (attach) {
+      const ship = this._cachedWorldShips.find(s => s.id === attach.shipId);
+      if (ship) {
+        const cos = Math.cos(ship.rotation);
+        const sin = Math.sin(ship.rotation);
+        return {
+          x: ship.position.x + attach.localX * cos - attach.localY * sin,
+          y: ship.position.y + attach.localX * sin + attach.localY * cos,
+        };
+      }
+    }
+    return { x: t.x, y: t.y };
+  }
+
   /** Add or update a single tombstone (called on tombstone_spawned). */
   addTombstone(t: import('../../sim/Types').Tombstone): void {
+    // If the tombstone spawns within 500px of a ship centre, attach it so it
+    // tracks the ship as it moves.
+    for (const ship of this._cachedWorldShips) {
+      const dx = t.x - ship.position.x;
+      const dy = t.y - ship.position.y;
+      if (dx * dx + dy * dy <= 500 * 500) {
+        const cos = Math.cos(-ship.rotation);
+        const sin = Math.sin(-ship.rotation);
+        this._tombstoneShipAttach.set(t.id, {
+          shipId: ship.id,
+          localX: dx * cos - dy * sin,
+          localY: dx * sin + dy * cos,
+        });
+        break;
+      }
+    }
     const idx = this._tombstones.findIndex(x => x.id === t.id);
     if (idx >= 0) this._tombstones[idx] = t;
     else this._tombstones.push(t);
@@ -2013,6 +2050,7 @@ export class RenderSystem {
   /** Remove a tombstone by id (collected or despawned). */
   removeTombstone(id: number): void {
     this._tombstones = this._tombstones.filter(t => t.id !== id);
+    this._tombstoneShipAttach.delete(id);
   }
 
   /**
@@ -2025,8 +2063,9 @@ export class RenderSystem {
     let best: import('../../sim/Types').Tombstone | null = null;
     let bestDist2 = range * range;
     for (const t of this._tombstones) {
-      const dx = t.x - player.position.x;
-      const dy = t.y - player.position.y;
+      const pos = this._resolveTombstonePos(t);
+      const dx = pos.x - player.position.x;
+      const dy = pos.y - player.position.y;
       const d2 = dx * dx + dy * dy;
       if (d2 <= bestDist2) { best = t; bestDist2 = d2; }
     }
@@ -2038,14 +2077,15 @@ export class RenderSystem {
     if (this._tombstones.length === 0) return;
     const player = this._cachedLocalPlayer;
     for (const t of this._tombstones) {
-      const sx = (t.x - camera.position.x) * camera.zoom + ctx.canvas.width  / 2;
-      const sy = (t.y - camera.position.y) * camera.zoom + ctx.canvas.height / 2;
+      const pos = this._resolveTombstonePos(t);
+      const sx = (pos.x - camera.position.x) * camera.zoom + ctx.canvas.width  / 2;
+      const sy = (pos.y - camera.position.y) * camera.zoom + ctx.canvas.height / 2;
       const sz = Math.max(0.4, Math.min(1.0, camera.zoom));
 
       const HOVER_RANGE = 80;
       const isNear = player != null &&
         player.carrierId === 0 &&
-        (t.x - player.position.x) ** 2 + (t.y - player.position.y) ** 2 <= HOVER_RANGE * HOVER_RANGE;
+        (pos.x - player.position.x) ** 2 + (pos.y - player.position.y) ** 2 <= HOVER_RANGE * HOVER_RANGE;
 
       ctx.save();
       ctx.translate(sx, sy);
@@ -2620,11 +2660,12 @@ export class RenderSystem {
     // Clear canvas
     this.clearCanvas();
 
-    // Cache local player once for the entire frame — shared by all detect* and draw* methods.
+    // Cache local player and ships once per frame — shared by all detect* and draw* methods.
     this._cachedLocalPlayer = this.localPlayerId != null
       ? worldState.players.find(p => p.id === this.localPlayerId) ?? null
       : null;
     this._localCompanyId = this._cachedLocalPlayer?.companyId ?? 0;
+    this._cachedWorldShips = worldState.ships;
 
     // Rebuild scaffolded ship lookup: maps ship entity ID → owning shipyard structure
     this._scaffoldedShips.clear();

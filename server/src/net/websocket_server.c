@@ -145,7 +145,9 @@ uint16_t next_structure_id = 1;
 
 typedef struct {
     uint32_t        id;
-    float           x, y;
+    float           x, y;          /* world position at spawn (or static if not on ship) */
+    uint16_t        ship_id;        /* 0 = not on a ship; else tracks the carrying ship */
+    float           local_x, local_y; /* ship-local offset when ship_id != 0 */
     char            owner_name[64];
     PlayerInventory inventory;      /* full copy of player inventory at time of death */
     uint32_t        spawn_time_ms;
@@ -685,6 +687,23 @@ static void remove_player(uint32_t player_id);
 /* ── Tombstone helpers ────────────────────────────────────────────────────── */
 
 /**
+ * Resolve the current world position of a tombstone.
+ * If it was spawned on a ship, transform local coords via the ship's
+ * current position and rotation; otherwise return the static spawn coords.
+ */
+static void tombstone_world_pos(const Tombstone* t, float* wx, float* wy) {
+    if (t->ship_id != 0) {
+        const SimpleShip* ship = find_ship(t->ship_id);
+        if (ship && ship->active) {
+            ship_local_to_world(ship, t->local_x, t->local_y, wx, wy);
+            return;
+        }
+    }
+    *wx = t->x;
+    *wy = t->y;
+}
+
+/**
  * Called on every authoritative player death.
  * 1. Copies all inventory items into a new tombstone.
  * 2. Wipes the player's inventory.
@@ -720,6 +739,20 @@ static void player_die(WebSocketPlayer* player) {
         if (next_tombstone_id == 0) next_tombstone_id = 1;
         t->x = player->x;
         t->y = player->y;
+        /* Attach to ship if player is currently aboard one */
+        if (player->parent_ship_id != 0) {
+            const SimpleShip* ship = find_ship(player->parent_ship_id);
+            if (ship && ship->active) {
+                t->ship_id = player->parent_ship_id;
+                ship_world_to_local(ship, player->x, player->y, &t->local_x, &t->local_y);
+            } else {
+                t->ship_id = 0;
+                t->local_x = t->local_y = 0.0f;
+            }
+        } else {
+            t->ship_id = 0;
+            t->local_x = t->local_y = 0.0f;
+        }
         strncpy(t->owner_name, player->name, sizeof(t->owner_name) - 1);
         t->owner_name[sizeof(t->owner_name) - 1] = '\0';
         t->inventory      = player->inventory;  /* full struct copy */
@@ -784,8 +817,10 @@ static void handle_collect_tombstone(WebSocketPlayer* player,
     }
 
     /* Range check: 80 px */
-    float dx = player->x - t->x;
-    float dy = player->y - t->y;
+    float tx, ty;
+    tombstone_world_pos(t, &tx, &ty);
+    float dx = player->x - tx;
+    float dy = player->y - ty;
     if (dx * dx + dy * dy > 80.0f * 80.0f) {
         char resp[128];
         snprintf(resp, sizeof(resp),
@@ -878,6 +913,12 @@ static void handle_tombstone_open(WebSocketPlayer* player,
         return;
     }
     float dx = player->x - t->x, dy = player->y - t->y;
+    {
+        float tx, ty;
+        tombstone_world_pos(t, &tx, &ty);
+        dx = player->x - tx;
+        dy = player->y - ty;
+    }
     if (dx * dx + dy * dy > 80.0f * 80.0f) {
         char resp[128];
         snprintf(resp, sizeof(resp),
@@ -913,8 +954,12 @@ static void handle_tombstone_take_slot(WebSocketPlayer* player,
         }
     }
     if (!t) return;
-    float dx = player->x - t->x, dy = player->y - t->y;
-    if (dx * dx + dy * dy > 80.0f * 80.0f) return;
+    {
+        float tx, ty;
+        tombstone_world_pos(t, &tx, &ty);
+        float dx = player->x - tx, dy = player->y - ty;
+        if (dx * dx + dy * dy > 80.0f * 80.0f) return;
+    }
 
     InventorySlot* isl = &t->inventory.slots[slot];
     if (isl->item == ITEM_NONE || isl->quantity == 0) return;
@@ -6254,11 +6299,13 @@ int websocket_server_update(struct Sim* sim) {
                 if (!tombstones[ti].active) continue;
                 uint32_t age = current_time - tombstones[ti].spawn_time_ms;
                 uint32_t rem = (age < TOMBSTONE_TTL_MS) ? (TOMBSTONE_TTL_MS - age) : 0u;
+                float tx, ty;
+                tombstone_world_pos(&tombstones[ti], &tx, &ty);
                 if (!first_tomb && gs_off < (int)sizeof(game_state) - 2)
                     game_state[gs_off++] = ',';
                 gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
                     "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"ownerName\":\"%s\",\"remainingMs\":%u}",
-                    tombstones[ti].id, tombstones[ti].x, tombstones[ti].y,
+                    tombstones[ti].id, tx, ty,
                     tombstones[ti].owner_name, rem);
                 first_tomb = false;
             }
