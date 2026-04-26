@@ -10252,8 +10252,8 @@ export class RenderSystem {
     const titleText   = `${npc.name}  Lv.${npc.npcLevel}${npc.locked ? '  🔒' : ''}`;
     const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
     const companyLabel = COMPANY_NAMES[npc.companyId] ?? `#${npc.companyId}`;
-    const companyText = ownerName
-      ? `Owner: ${ownerName}  (${companyLabel})`
+    const companyText = (npc.companyId === COMPANY_SOLO)
+      ? `Company of ${ownerName ?? `Player #${npc.ownerId || '?'}`}`
       : `Company: ${companyLabel}`;
     const hpText      = `HP ${npc.health}/${npc.maxHealth} (${Math.round(hpPct * 100)}%)`;
 
