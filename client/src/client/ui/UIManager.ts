@@ -380,10 +380,8 @@ export class UIManager {
    * Call this from the application keydown handler before processing game input.
    */
   handleKeyDown(key: string): boolean {
-    // Let the company menu consume keys when its name-entry form is active
-    if (this.activeMenuId === MENU_ID.COMPANY && this.companyMenu.handleKeyDown(key)) {
-      return true;
-    }
+    // Company menu key routing is handled exclusively by onKeyDown (the window listener)
+    // to avoid double-processing. Only handle non-company-menu cases here.
     if (key === 'Escape' && this._dropPicker.open) {
       this._dropPicker.open = false;
       return true;
