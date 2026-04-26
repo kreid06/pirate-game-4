@@ -5754,6 +5754,16 @@ export class RenderSystem {
         this.ctx.globalAlpha = phase1Alpha * healthFade;
       }
 
+      // Darken hull fill colour to reflect deck damage (mirrors plank darkenByDamage).
+      if (!isGhost && hasDeck) {
+        const deckMod = ship.modules.find(m => m.kind === 'deck');
+        const dmd = deckMod?.moduleData as any;
+        if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number' && dmd.maxHealth > 0) {
+          const deckHealthRatio = Math.max(0, dmd.health / dmd.maxHealth);
+          this.ctx.fillStyle = this.darkenByDamage('#DEB887', deckHealthRatio);
+        }
+      }
+
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
       for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
