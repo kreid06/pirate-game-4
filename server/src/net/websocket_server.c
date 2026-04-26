@@ -1912,7 +1912,19 @@ int websocket_server_update(struct Sim* sim) {
                             
                             if (client->player_id == 0 && !handled) {
                                 // Handshake message - create new player
-                                uint32_t player_id = next_player_id++;
+                                // Check if this player has a saved permanent ID first
+                                uint32_t saved_id = peek_saved_player_id(player_name);
+                                uint32_t player_id;
+                                if (saved_id != 0 && find_player(saved_id) == NULL) {
+                                    // Restore their permanent ID
+                                    player_id = saved_id;
+                                    // Keep next_player_id ahead of any restored IDs
+                                    if (player_id >= (uint32_t)next_player_id)
+                                        next_player_id = (int)(player_id + 1);
+                                    log_info("🔁 Restoring permanent player_id %u for '%s'", player_id, player_name);
+                                } else {
+                                    player_id = (uint32_t)(next_player_id++);
+                                }
                                 client->player_id = player_id;
                                 
                                 // Create player for this client
@@ -6772,6 +6784,28 @@ int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id) 
         if (players[i].active && players[i].player_id == player_id) {
             players[i].company_id = company_id;
             log_info("🏴 Admin set player %u company → %u", player_id, company_id);
+
+            /* Re-assign all NPCs owned by this player to the new company.
+             * For guild companies (pirates/navy), clear owner_player_id — the NPC
+             * now belongs to the guild, not the individual.
+             * For COMPANY_SOLO, keep owner_player_id so NPCs stay personal. */
+            for (int ni = 0; ni < world_npc_count; ni++) {
+                WorldNpc *npc = &world_npcs[ni];
+                if (!npc->active) continue;
+                /* Match: previously owned by this player (solo) or same guild */
+                bool owned = (npc->owner_player_id == player_id) ||
+                             (!npc->owner_player_id && npc->company_id == players[i].company_id
+                              && players[i].company_id != COMPANY_SOLO);
+                if (!owned) continue;
+                npc->company_id = company_id;
+                if (company_id == COMPANY_SOLO) {
+                    npc->owner_player_id = player_id; /* re-bind to player */
+                } else {
+                    npc->owner_player_id = 0;          /* guild-owned, no individual */
+                }
+                log_info("🏴 NPC %u '%s' re-assigned to company %u (player %u changed company)",
+                         npc->id, npc->name, company_id, player_id);
+            }
 
             /* One-way structure promotion: if the new company is non-neutral,
              * upgrade every neutral structure this player placed to that company.

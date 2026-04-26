@@ -77,8 +77,14 @@ export class CompanyMenu {
   /** Fired when the player clicks the Leave Company button. */
   public onLeaveCompany: (() => void) | null = null;
 
+  /** Fired when the player clicks a Join Company button (passes the company id). */
+  public onJoinCompany: ((companyId: number) => void) | null = null;
+
   /** Hit area of the Leave Company button — refreshed each render. */
   private _leaveBtnArea: { x: number; y: number; w: number; h: number } | null = null;
+
+  /** Hit areas for join buttons [{ companyId, x, y, w, h }] — refreshed each render. */
+  private _joinBtnAreas: { companyId: number; x: number; y: number; w: number; h: number }[] = [];
 
   // ── Toggle ──────────────────────────────────────────────────────────────────
   toggle(): void {
@@ -92,6 +98,12 @@ export class CompanyMenu {
       const b = this._leaveBtnArea;
       if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
         this.onLeaveCompany?.();
+        return true;
+      }
+    }
+    for (const jb of this._joinBtnAreas) {
+      if (x >= jb.x && x <= jb.x + jb.w && y >= jb.y && y <= jb.y + jb.h) {
+        this.onJoinCompany?.(jb.companyId);
         return true;
       }
     }
@@ -210,9 +222,11 @@ export class CompanyMenu {
     const name = COMPANY_NAMES[playerCompany] ?? `Company ${playerCompany}`;
     ctx.fillText(name.toUpperCase(), swatchX + 26, py + sectionH / 2);
 
-    // Player ID tag (only when not showing the leave button)
+    // Player ID tag (only when not showing the leave or join buttons)
     const canLeave = playerCompany !== COMPANY_SOLO && playerCompany !== COMPANY_NEUTRAL;
-    if (!canLeave && playerId != null) {
+    const isSolo   = playerCompany === COMPANY_SOLO;
+
+    if (!canLeave && !isSolo && playerId != null) {
       ctx.font      = '13px Consolas, monospace';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'right';
@@ -240,6 +254,34 @@ export class CompanyMenu {
       ctx.fillText('LEAVE COMPANY', btnX + btnW / 2, btnY + btnH / 2);
     } else {
       this._leaveBtnArea = null;
+    }
+
+    // Join Company buttons — only shown when COMPANY_SOLO
+    this._joinBtnAreas = [];
+    if (isSolo) {
+      const btnH  = 22;
+      const btnW  = 90;
+      const gap   = 6;
+      const joins = [
+        { id: COMPANY_PIRATES, label: 'JOIN PIRATES', color: '#7a3310', border: '#ff6644', text: '#ffaa88' },
+        { id: COMPANY_NAVY,    label: 'JOIN NAVY',    color: '#0e2b5e', border: '#4488ff', text: '#88bbff' },
+      ];
+      let bx = px + PANEL_W - PAD - (btnW + gap) * joins.length + gap;
+      const btnY = py + (sectionH - btnH) / 2;
+      for (const j of joins) {
+        ctx.fillStyle   = j.color;
+        ctx.fillRect(bx, btnY, btnW, btnH);
+        ctx.strokeStyle = j.border;
+        ctx.lineWidth   = 1;
+        ctx.strokeRect(bx, btnY, btnW, btnH);
+        ctx.font         = 'bold 11px Consolas, monospace';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = j.text;
+        ctx.fillText(j.label, bx + btnW / 2, btnY + btnH / 2);
+        this._joinBtnAreas.push({ companyId: j.id, x: bx, y: btnY, w: btnW, h: btnH });
+        bx += btnW + gap;
+      }
     }
 
     return py + sectionH + 8;

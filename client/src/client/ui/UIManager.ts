@@ -1063,6 +1063,11 @@ export class UIManager {
     this.companyMenu.onLeaveCompany = cb;
   }
 
+  /** Set callback for the Join Company buttons in the company menu. */
+  setJoinCompanyCallback(cb: (companyId: number) => void): void {
+    this.companyMenu.onJoinCompany = cb;
+  }
+
   /**
    * Set callback for NPC stat upgrades from the crew level menu.
    * Called when the player clicks an affordable upgrade button.

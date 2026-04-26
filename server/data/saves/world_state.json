@@ -1,6 +1,6 @@
 {
   "meta": {
-    "timestamp": 1777223373,
+    "timestamp": 1777224417,
     "ship_count": 1,
     "npc_count": 18,
     "structure_count": 0
@@ -13,7 +13,7 @@
       "company": 0,
       "x": 45638.703,
       "y": 45206.008,
-      "rot": 4.828339,
+      "rot": 4.365295,
       "vx": 0.000,
       "vy": 0.000,
       "av": -0.000351,
@@ -70,7 +70,8 @@
       "stat_weight": 0,
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
-      "npc_state": 0
+      "npc_state": 0,
+      "owner_player_id": 0
     },
     {
       "id": 9001,
@@ -93,7 +94,8 @@
       "stat_weight": 0,
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
-      "npc_state": 0
+      "npc_state": 0,
+      "owner_player_id": 0
     },
     {
       "id": 9002,
@@ -116,7 +118,8 @@
       "stat_weight": 0,
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
-      "npc_state": 0
+      "npc_state": 0,
+      "owner_player_id": 0
     },
     {
       "id": 9003,
@@ -139,7 +142,8 @@
       "stat_weight": 0,
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
-      "npc_state": 0
+      "npc_state": 0,
+      "owner_player_id": 0
     },
     {
       "id": 9004,
@@ -162,7 +166,8 @@
       "stat_weight": 0,
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
-      "npc_state": 0
+      "npc_state": 0,
+      "owner_player_id": 0
     },
     {
       "id": 9005,
@@ -185,7 +190,8 @@
       "stat_weight": 0,
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
-      "npc_state": 0
+      "npc_state": 0,
+      "owner_player_id": 0
     },
     {
       "id": 9006,
@@ -208,7 +214,8 @@
       "stat_weight": 0,
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
-      "npc_state": 0
+      "npc_state": 0,
+      "owner_player_id": 0
     },
     {
       "id": 9007,
@@ -231,7 +238,8 @@
       "stat_weight": 0,
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
-      "npc_state": 0
+      "npc_state": 0,
+      "owner_player_id": 0
     },
     {
       "id": 9008,
@@ -254,15 +262,16 @@
       "stat_weight": 0,
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
-      "npc_state": 0
+      "npc_state": 0,
+      "owner_player_id": 1013
     },
     {
       "id": 9009,
       "name": "Dirk",
       "role": 3,
       "company": 3,
-      "x": 45677.656,
-      "y": 45044.430,
+      "x": 45601.383,
+      "y": 45044.043,
       "rot": 0.120624,
       "ship_id": 3,
       "lx": 165.000,
@@ -277,15 +286,16 @@
       "stat_weight": 0,
       "assigned_weapon_id": 265,
       "wants_cannon": 0,
-      "npc_state": 2
+      "npc_state": 2,
+      "owner_player_id": 0
     },
     {
       "id": 9010,
       "name": "Walt",
       "role": 3,
       "company": 3,
-      "x": 45654.520,
-      "y": 45243.086,
+      "x": 45669.418,
+      "y": 45232.117,
       "rot": 2.622447,
       "ship_id": 3,
       "lx": -35.000,
@@ -300,15 +310,16 @@
       "stat_weight": 0,
       "assigned_weapon_id": 266,
       "wants_cannon": 0,
-      "npc_state": 2
+      "npc_state": 2,
+      "owner_player_id": 0
     },
     {
       "id": 9011,
       "name": "Hal",
       "role": 3,
       "company": 3,
-      "x": 45631.383,
-      "y": 45441.742,
+      "x": 45737.449,
+      "y": 45420.191,
       "rot": 3.056690,
       "ship_id": 3,
       "lx": -235.000,
@@ -323,15 +334,16 @@
       "stat_weight": 0,
       "assigned_weapon_id": 267,
       "wants_cannon": 0,
-      "npc_state": 2
+      "npc_state": 2,
+      "owner_player_id": 0
     },
     {
       "id": 9012,
       "name": "Cruz",
       "role": 4,
       "company": 3,
-      "x": 45613.828,
-      "y": 45419.562,
+      "x": 45711.840,
+      "y": 45408.188,
       "rot": 2.187993,
       "ship_id": 3,
       "lx": -215.000,
@@ -346,15 +358,16 @@
       "stat_weight": 0,
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
-      "npc_state": 0
+      "npc_state": 0,
+      "owner_player_id": 0
     },
     {
       "id": 9013,
       "name": "Ike",
       "role": 4,
       "company": 3,
-      "x": 45605.961,
-      "y": 45487.109,
+      "x": 45734.969,
+      "y": 45472.133,
       "rot": -2.950465,
       "ship_id": 3,
       "lx": -283.000,
@@ -369,15 +382,16 @@
       "stat_weight": 0,
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
-      "npc_state": 0
+      "npc_state": 0,
+      "owner_player_id": 0
     },
     {
       "id": 9014,
       "name": "Rex",
       "role": 0,
       "company": 1,
-      "x": 45604.230,
-      "y": 45271.648,
+      "x": 45637.180,
+      "y": 45280.133,
       "rot": 0.340991,
       "ship_id": 3,
       "lx": -69.187,
@@ -392,15 +406,16 @@
       "stat_weight": 0,
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
-      "npc_state": 0
+      "npc_state": 0,
+      "owner_player_id": 0
     },
     {
       "id": 9015,
       "name": "Lars",
       "role": 1,
       "company": 3,
-      "x": 45584.988,
-      "y": 45234.988,
+      "x": 45603.590,
+      "y": 45255.930,
       "rot": -2.181522,
       "ship_id": 3,
       "lx": -35.000,
@@ -415,15 +430,16 @@
       "stat_weight": 0,
       "assigned_weapon_id": 262,
       "wants_cannon": 1,
-      "npc_state": 2
+      "npc_state": 2,
+      "owner_player_id": 0
     },
     {
       "id": 9016,
       "name": "Tam",
       "role": 1,
       "company": 3,
-      "x": 45596.559,
-      "y": 45135.660,
+      "x": 45569.574,
+      "y": 45161.891,
       "rot": -0.655696,
       "ship_id": 3,
       "lx": 65.000,
@@ -438,15 +454,16 @@
       "stat_weight": 0,
       "assigned_weapon_id": 263,
       "wants_cannon": 1,
-      "npc_state": 2
+      "npc_state": 2,
+      "owner_player_id": 0
     },
     {
       "id": 9017,
       "name": "Bren",
       "role": 1,
       "company": 3,
-      "x": 45573.422,
-      "y": 45334.316,
+      "x": 45637.605,
+      "y": 45349.965,
       "rot": -2.786887,
       "ship_id": 3,
       "lx": -135.000,
@@ -461,7 +478,8 @@
       "stat_weight": 0,
       "assigned_weapon_id": 264,
       "wants_cannon": 1,
-      "npc_state": 2
+      "npc_state": 2,
+      "owner_player_id": 0
     }
   ],
   "placed_structures": [

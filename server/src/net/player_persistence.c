@@ -42,6 +42,7 @@ void save_player_to_file(const WebSocketPlayer *p) {
     fprintf(f,
         "{\n"
         "  \"name\": \"%s\",\n"
+        "  \"player_id\": %u,\n"
         "  \"x\": %.3f,\n"
         "  \"y\": %.3f,\n"
         "  \"parent_ship_id\": %u,\n"
@@ -65,6 +66,7 @@ void save_player_to_file(const WebSocketPlayer *p) {
         "  \"shield\": %u,\n"
         "  \"slots\": [",
         p->name,
+        (unsigned)p->player_id,
         (double)p->x, (double)p->y,
         (unsigned)p->parent_ship_id,
         (double)p->local_x, (double)p->local_y,
@@ -144,6 +146,7 @@ bool load_player_from_file(WebSocketPlayer *p) {
 
     if (json_parse_float_field(buf, "x", &ftmp)) p->x = ftmp;
     if (json_parse_float_field(buf, "y", &ftmp)) p->y = ftmp;
+    if (json_parse_uint_field(buf, "player_id", &tmp) && tmp != 0) p->player_id = (uint32_t)tmp;
     unsigned saved_ship_id = 0;
     float saved_lx = 0.f, saved_ly = 0.f;
     json_parse_uint_field(buf, "parent_ship_id", &saved_ship_id);
@@ -213,7 +216,24 @@ bool load_player_from_file(WebSocketPlayer *p) {
     }
 
     free(buf);
-    log_info("💾 Loaded player '%s' (lvl %u, xp %u) from %s",
-             p->name, p->player_level, p->player_xp, path);
+    log_info("💾 Loaded player '%s' (id %u, lvl %u, xp %u) from %s",
+             p->name, p->player_id, p->player_level, p->player_xp, path);
     return true;
+}
+
+uint32_t peek_saved_player_id(const char *name) {
+    if (!name || name[0] == '\0') return 0;
+    char safe[64];
+    sanitize_filename(name, safe, sizeof(safe));
+    char path[128];
+    snprintf(path, sizeof(path), "player_saves/%s.json", safe);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char buf[256];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    unsigned id = 0;
+    json_parse_uint_field(buf, "player_id", &id);
+    return (uint32_t)id;
 }

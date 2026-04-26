@@ -9501,10 +9501,10 @@ export class RenderSystem {
 
     // Colour NPC by company then task assignment (darkened via globalAlpha when moving)
     const npcTask = this.npcTaskMap.get(npc.id) ?? 'Idle';
-    // For COMPANY_SOLO NPCs, treat as enemy if they belong to a different player
+    // For COMPANY_SOLO NPCs: enemy if owner unknown (ownerId=0) OR owned by a different player
     const _npcIsEnemy = this._localCompanyId !== 0 && npc.companyId !== 0 && (
       npc.companyId === COMPANY_SOLO
-        ? (npc.ownerId !== 0 && npc.ownerId !== this.localPlayerId)
+        ? (npc.ownerId === 0 || npc.ownerId !== this.localPlayerId)
         : npc.companyId !== this._localCompanyId
     );
     const _npcIsNeutral = npc.companyId === COMPANY_UNCLAIMED;

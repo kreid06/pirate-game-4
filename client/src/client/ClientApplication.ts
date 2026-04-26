@@ -1572,6 +1572,12 @@ export class ClientApplication {
         this.networkManager.sendCommand('/AddPlayerToCompany solo');
       });
 
+      // Wire Join Company buttons in the company menu — moves player (and their NPCs) to the chosen guild
+      this.uiManager.setJoinCompanyCallback((companyId: number) => {
+        const companyName = companyId === 2 ? 'pirates' : companyId === 3 ? 'navy' : 'solo';
+        this.networkManager.sendCommand(`/AddPlayerToCompany ${companyName}`);
+      });
+
       // Wire NPC stat upgrade requests from the crew level menu to the server
       this.uiManager.setCrewUpgradeCallback((npcId, stat) => {
         this.networkManager.sendCrewUpgrade(npcId, stat);
