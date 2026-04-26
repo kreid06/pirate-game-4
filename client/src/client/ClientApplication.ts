@@ -39,7 +39,7 @@ import { AudioManager } from './audio/AudioManager.js';
 // Core Simulation Types
 import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED } from '../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../sim/Types.js';
-import { createEmptyInventory, ITEM_KIND_ID } from '../sim/Inventory.js';
+import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils, ShipModule, getModuleFootprint, footprintsOverlap } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
@@ -820,10 +820,11 @@ export class ClientApplication {
             }
           }
 
-          // Demolish mode: axe + on ship + hovering a non-plank module → demolish
-          if (activeItem === 'axe' && player && player.carrierId !== 0) {
+          // Demolish mode: on own ship, hovering a non-plank module → hold [E] to demolish
+          if (player && player.carrierId !== 0) {
             const hoveredDemolish = this.renderSystem.getHoveredModule();
             if (hoveredDemolish && hoveredDemolish.module.kind !== 'plank' &&
+                hoveredDemolish.module.kind !== 'deck' &&
                 hoveredDemolish.ship.id === player.carrierId) {
               const modLx = hoveredDemolish.module.localPos.x;
               const modLy = hoveredDemolish.module.localPos.y;
@@ -838,10 +839,30 @@ export class ClientApplication {
                 demolishDist = player.position.sub(Vec2.from(wx, wy)).length();
               }
               if (demolishDist <= 120) {
-                console.log(`🪓 [DEMOLISH] Sending demolish_module for module ${hoveredDemolish.module.id} on ship ${player.carrierId}`);
-                this.networkManager.sendDemolishModule(player.carrierId, hoveredDemolish.module.id);
+                // Hold E to confirm demolish
+                this._interactKind       = 'structure'; // reuse structure keyup path
+                this._hoveredStructureId = hoveredDemolish.module.id;
+                this._hoveredStructureType = 'wooden_floor' as any; // sentinel — handled below
+                this._ladderHoldModuleId = hoveredDemolish.module.id;
+                this._ladderHoldShipId   = hoveredDemolish.ship.id;
+                this._suppressLadderInteract = true;
+                this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mid   = this._ladderHoldModuleId;
+                  const sid   = this._ladderHoldShipId;
+                  this._ladderHoldModuleId = null;
+                  this._ladderHoldShipId   = null;
+                  this._interactKind       = null;
+                  if (mid && sid) {
+                    console.log(`🪓 [DEMOLISH] Hold complete — demolishing module ${mid} on ship ${sid}`);
+                    this.networkManager.sendDemolishModule(sid, mid);
+                  }
+                }, 500);
               } else {
-                console.log(`🪓 [DEMOLISH] Module too far (${demolishDist.toFixed(1)}px) — get closer`);
+                this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+                console.log(`🪓 [DEMOLISH] Module too far (${demolishDist.toFixed(1)}px)`);
               }
               return;
             }
@@ -1657,6 +1678,21 @@ export class ClientApplication {
       this.uiManager.playerMenu.onCraftRequest = (outputItem) => {
         const recipeId = `craft_${outputItem.replace(/-/g, '_')}`;
         this.networkManager.sendCraftItem(recipeId);
+      };
+
+      // Wreck salvage menu
+      this.uiManager.salvageMenu.onTakeItem = (wreckId) => {
+        this.networkManager.sendStructureInteract(wreckId);
+      };
+      this.networkManager.onSalvageSuccess = (_item, qty) => {
+        const kind = ITEM_ID_MAP[_item];
+        const label = kind ? (ITEM_DEFS[kind]?.symbol ?? kind) : `item #${_item}`;
+        this.renderSystem.showAnnouncement(`🪵 Salvaged ×${qty} ${label}`, 'info', 2.5);
+        this.uiManager.salvageMenu.onItemTaken();
+        if (this.uiManager.salvageMenu.lootCount <= 0) {
+          this.uiManager.salvageMenu.close();
+          this.uiManager.setActiveMenuId(null);
+        }
       };
 
       // Handle drop picker item selection (hold-E near pile)
@@ -3329,6 +3365,12 @@ export class ClientApplication {
 
         case 'e':
         case 'E': {
+          // Salvage menu intercepts E entirely when visible
+          if (this.uiManager?.salvageMenu.visible) {
+            if (!e.repeat) this.uiManager.salvageMenu.handleEKeyDown();
+            e.preventDefault();
+            break;
+          }
           if (e.repeat) {
             // Hold-E: check if we should open the item picker
             if (this._holdEDropTimer > 0 && Date.now() - this._holdEDropTimer >= 500) {
@@ -3535,6 +3577,14 @@ export class ClientApplication {
                     this._radialMenu.open(mp2.x, mp2.y, opts);
                   }
                 }, 500);
+              } else if (struct.type === 'wreck') {
+                // Wreck: tap or hold E → open salvage menu
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  this.uiManager.setActiveMenuId(MENU_ID.SALVAGE);
+                  this.uiManager.salvageMenu.open(struct.id, struct.hp ?? 1);
+                }, 400);
               } else {
                 this._ladderHoldTimer = setTimeout(() => {
                   this._ladderHoldTimer = null;
@@ -3722,6 +3772,12 @@ export class ClientApplication {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key !== 'e' && e.key !== 'E') return;
 
+      // Let salvage menu consume keyup when visible
+      if (this.uiManager?.salvageMenu.visible) {
+        this.uiManager.salvageMenu.handleEKeyUp();
+        return;
+      }
+
       // Clear hold-E drop timer
       this._holdEDropTimer = -1;
 
@@ -3819,6 +3875,12 @@ export class ClientApplication {
           } else if (structType === 'door') {
             // Tap E on door panel = toggle open/closed
             doUse();
+          } else if (structType === 'wreck' && structId !== null) {
+            // Tap E on wreck = open salvage menu (loot count from render system)
+            const wreckStruct = this.renderSystem.getHoveredStructure(500);
+            const loot = wreckStruct?.hp ?? 1;
+            this.uiManager.setActiveMenuId(MENU_ID.SALVAGE);
+            this.uiManager.salvageMenu.open(structId, loot);
           }
           // Tap E on floor/wall/door_frame = nothing (user must hold to demolish)
         } else if (this._radialMenu.isOpen) {

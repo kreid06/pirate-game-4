@@ -534,6 +534,7 @@ export class NetworkManager {
   public onFlagUpdate: ((shipId: number, planterId: number, planterCompany: number, progressMs: number, totalMs: number, contested: boolean) => void) | null = null;
   public onFlagRemoved: ((shipId: number) => void) | null = null;
   public onFlagCaptureComplete: ((shipId: number, planterCompany: number) => void) | null = null;
+  public onSalvageSuccess: ((item: number, quantity: number) => void) | null = null;
   public onNpcUnclaimed: ((npcId: number) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
   /**
@@ -1261,6 +1262,13 @@ export class NetworkManager {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: MessageType.DEMOLISH_MODULE, timestamp: Date.now(), shipId, moduleId }));
     console.log(`🪓 Demolish module ${moduleId} on ship ${shipId}`);
+  }
+
+  /** Request server to salvage a ship module and grant loot. */
+  sendSalvageModule(shipId: number, moduleId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'salvage_module', timestamp: Date.now(), shipId, moduleId }));
+    console.log(`🪓 Salvage module ${moduleId} on ship ${shipId}`);
   }
 
   /**
@@ -2657,6 +2665,14 @@ export class NetworkManager {
       case 'flag_capture_complete': {
         console.log(`🚩 flag_capture_complete: ship ${message.shipId} → company ${message.planterCompany}`);
         this.onFlagCaptureComplete?.(message.shipId ?? 0, message.planterCompany ?? 0);
+        break;
+      }
+
+      case 'salvage_success': {
+        const salvageItem: number = message.item     ?? 0;
+        const salvageQty:  number = message.quantity ?? 1;
+        console.log(`🪵 salvage_success: item ${salvageItem} ×${salvageQty} (wreck_id=${message.wreck_id ?? '?'}, remaining=${message.remaining ?? '?'})`);
+        this.onSalvageSuccess?.(salvageItem, salvageQty);
         break;
       }
 

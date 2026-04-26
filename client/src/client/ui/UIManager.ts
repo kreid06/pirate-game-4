@@ -19,6 +19,7 @@ import { CrewLevelMenu } from './CrewLevelMenu.js';
 import { RespawnScreen } from './RespawnScreen.js';
 import { WorldMapScreen } from './WorldMapScreen.js';
 import { TombstoneMenu } from './TombstoneMenu.js';
+import { SalvageMenu } from './SalvageMenu.js';
 
 /**
  * UI render context
@@ -79,6 +80,7 @@ export const MENU_ID = {
   CONSOLE:   'console',
   RESPAWN:   'respawn',
   MAP:       'map',
+  SALVAGE:   'salvage',
 } as const;
 export type MenuId = typeof MENU_ID[keyof typeof MENU_ID];
 
@@ -108,8 +110,10 @@ export class UIManager {
   private companyMenu = new CompanyMenu();
   // Player character menu (toggled by [E] when menu is open)
   public readonly playerMenu = new PlayerMenu();
-  // Ship status menu (toggled by [F])
+  // Ship status menu (toggled by [G])
   private shipMenu = new ShipMenu();
+  // Shipwreck salvage menu (opened by pressing E on a wreck)
+  public readonly salvageMenu = new SalvageMenu();
   // Crew level / upgrade panel (opened by clicking an NPC)
   private crewMenu = new CrewLevelMenu();
 
@@ -275,6 +279,7 @@ export class UIManager {
       case MENU_ID.PLAYER:  this.playerMenu.open();  break;
       case MENU_ID.SHIP:    this.shipMenu.open();     break;
       case MENU_ID.CREW:    /* opened externally via openCrewMenu() */ break;
+      case MENU_ID.SALVAGE: /* opened externally with salvageMenu.open(wreckId, count) */ break;
       // CRAFTING / SHIPYARD / PAUSE are owned by ClientApplication — ID is set here,
       // but the actual DOM/canvas open call happens in ClientApplication.
     }
@@ -287,6 +292,7 @@ export class UIManager {
       case MENU_ID.PLAYER:  this.playerMenu.close();  break;
       case MENU_ID.SHIP:    this.shipMenu.close();     break;
       case MENU_ID.CREW:    this.crewMenu.close();     break;
+      case MENU_ID.SALVAGE: this.salvageMenu.close();  break;
     }
     this.activeMenuId = null;
   }
@@ -354,6 +360,7 @@ export class UIManager {
   handleWorldMapMouseMove(x: number, y: number): void {
     if (this.tombstoneMenu.visible) this.tombstoneMenu.handleMouseMove(x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) this.playerMenu.handleMouseMove(x, y);
+    if (this.salvageMenu.visible) this.salvageMenu.handleMouseMove(x, y);
     if (this.respawnScreen.visible) this.respawnScreen.handleMouseMove(x, y);
     this.worldMapScreen.handleMouseMove(x, y);
   }
@@ -498,6 +505,7 @@ export class UIManager {
     this.companyMenu.render(ctx, context.worldState, context.assignedPlayerId);
     this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId, this.mouseX, this.mouseY);
     this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
+    this.salvageMenu.render(ctx, ctx.canvas.width, ctx.canvas.height);
     // Crew level menu — update live NPC data before rendering
     if (this.activeMenuId === MENU_ID.CREW && this.crewMenu.npcId) {
       const liveNpc = context.worldState.npcs.find(n => n.id === this.crewMenu.npcId);

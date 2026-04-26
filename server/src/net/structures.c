@@ -1146,3 +1146,148 @@ dm_send:;
     if (dm_flen > 0 && dm_flen < sizeof(dm_frame))
         send(client->fd, dm_frame, dm_flen, 0);
 }
+
+/* ── Salvage a ship module for loot ──────────────────────────────────────────
+ * Player must be aboard the ship (no range check — opened via menu).
+ * Same-company or unclaimed ship only.
+ * Planks and decks cannot be salvaged here.
+ * Grants loot based on module type, removes module, broadcasts module_demolished.
+ */
+void handle_salvage_module(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    uint32_t ship_id   = 0;
+    uint32_t module_id = 0;
+    const char* sp = strstr(payload, "\"shipId\":");
+    if (sp) sscanf(sp + 9, "%u", &ship_id);
+    const char* mp = strstr(payload, "\"moduleId\":");
+    if (mp) sscanf(mp + 11, "%u", &module_id);
+
+    char response[256];
+
+    if (ship_id == 0 || module_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"salvage_fail\",\"reason\":\"missing_ids\"}");
+        goto sv_send;
+    }
+
+    /* Player must be aboard the target ship */
+    if (player->parent_ship_id != (uint16_t)ship_id) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"salvage_fail\",\"reason\":\"not_on_ship\"}");
+        goto sv_send;
+    }
+
+    {
+        SimpleShip* ship = find_ship((uint16_t)ship_id);
+        if (!ship || !ship->active) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"salvage_fail\",\"reason\":\"ship_not_found\"}");
+            goto sv_send;
+        }
+
+        /* Company check: only same-company members (or unclaimed ship) may salvage */
+        if (ship->company_id != 0 && ship->company_id != (uint8_t)player->company_id) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"salvage_fail\",\"reason\":\"wrong_company\"}");
+            goto sv_send;
+        }
+
+        /* Find the module */
+        int mod_idx = -1;
+        for (int i = 0; i < (int)ship->module_count; i++) {
+            if (ship->modules[i].id == (uint16_t)module_id) {
+                mod_idx = i;
+                break;
+            }
+        }
+        if (mod_idx < 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"salvage_fail\",\"reason\":\"module_not_found\"}");
+            goto sv_send;
+        }
+
+        ShipModule* mod = &ship->modules[mod_idx];
+
+        /* Planks and decks use the placement/repair system — not salvageable */
+        if (mod->type_id == MODULE_TYPE_PLANK || mod->type_id == MODULE_TYPE_DECK) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"salvage_fail\",\"reason\":\"cant_salvage_planks\"}");
+            goto sv_send;
+        }
+
+        /* Loot table: item kind and quantity by module type */
+        ItemKind loot_item = ITEM_PLANK;
+        int      loot_qty  = 1;
+        switch (mod->type_id) {
+            case MODULE_TYPE_HELM:
+            case MODULE_TYPE_STEERING_WHEEL: loot_item = ITEM_HELM;   loot_qty = 1; break;
+            case MODULE_TYPE_CANNON:         loot_item = ITEM_CANNON; loot_qty = 1; break;
+            case MODULE_TYPE_MAST:           loot_item = ITEM_SAIL;   loot_qty = 1; break;
+            case MODULE_TYPE_SWIVEL:         loot_item = ITEM_SWIVEL; loot_qty = 1; break;
+            case MODULE_TYPE_LADDER:         loot_item = ITEM_PLANK;  loot_qty = 2; break;
+            case MODULE_TYPE_SEAT:           loot_item = ITEM_PLANK;  loot_qty = 1; break;
+            default:                         loot_item = ITEM_PLANK;  loot_qty = 1; break;
+        }
+
+        /* Dismount anyone occupying this module */
+        for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+            if (!players[pi].active) continue;
+            if (players[pi].is_mounted &&
+                players[pi].mounted_module_id == (module_id_t)module_id) {
+                players[pi].is_mounted          = false;
+                players[pi].mounted_module_id   = 0;
+                players[pi].controlling_ship_id = 0;
+            }
+        }
+
+        /* Grant loot — ignore inventory-full for now, item is lost silently */
+        craft_grant(player, loot_item, loot_qty);
+
+        log_info("🪓 Player %u salvaged module %u (type %u) on ship %u — loot item %u x%d",
+                 player->player_id, module_id, (unsigned)mod->type_id, ship_id,
+                 (unsigned)loot_item, loot_qty);
+
+        /* Remove from SimpleShip */
+        memmove(&ship->modules[mod_idx],
+                &ship->modules[mod_idx + 1],
+                ((size_t)ship->module_count - (size_t)mod_idx - 1) * sizeof(ShipModule));
+        ship->module_count--;
+
+        /* Remove from global_sim counterpart */
+        if (global_sim) {
+            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                if (global_sim->ships[si].id != (entity_id)ship_id) continue;
+                struct Ship* sim_ship = &global_sim->ships[si];
+                for (int mi = 0; mi < (int)sim_ship->module_count; mi++) {
+                    if (sim_ship->modules[mi].id != (uint16_t)module_id) continue;
+                    memmove(&sim_ship->modules[mi],
+                            &sim_ship->modules[mi + 1],
+                            ((size_t)sim_ship->module_count - (size_t)mi - 1) * sizeof(ShipModule));
+                    sim_ship->module_count--;
+                    break;
+                }
+                break;
+            }
+        }
+
+        /* Broadcast removal to all clients (reuse module_demolished message) */
+        {
+            char bcast[128];
+            snprintf(bcast, sizeof(bcast),
+                     "{\"type\":\"module_demolished\",\"shipId\":%u,\"moduleId\":%u}",
+                     ship_id, module_id);
+            websocket_server_broadcast(bcast);
+        }
+
+        /* Send salvage success response to the requesting client */
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"salvage_success\",\"moduleId\":%u,\"item\":%u,\"quantity\":%d}",
+                 module_id, (unsigned)loot_item, loot_qty);
+    }
+
+sv_send:;
+    char sv_frame[256];
+    size_t sv_flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), sv_frame, sizeof(sv_frame));
+    if (sv_flen > 0 && sv_flen < sizeof(sv_frame))
+        send(client->fd, sv_frame, sv_flen, 0);
+}

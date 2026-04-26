@@ -2545,6 +2545,14 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "salvage_module") == 0) {
+                            // Salvage menu: remove a module and grant loot
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_salvage_module(player, client, payload);
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "respawn_request") == 0) {
                             // Player chose a spawn location on the respawn screen
                             if (client->player_id != 0) {
