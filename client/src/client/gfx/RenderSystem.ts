@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_UNCLAIMED, COMPANY_NEUTRAL, COMPANY_SOLO, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_UNCLAIMED, COMPANY_NEUTRAL, COMPANY_SOLO, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef, Company } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
@@ -159,6 +159,8 @@ export class RenderSystem {
   private _cachedWorldShips: Ship[] = [];
   /** Players from the last rendered frame — used for NPC owner resolution in tooltips. */
   private _cachedWorldPlayers: Player[] = [];
+  /** Dynamic companies from the last rendered frame — used for name resolution in tooltips. */
+  private _cachedCompanies: Company[] = [];
   /** Dropped items in the world (player-dropped inventory items). */
   private _droppedItems: import('../../sim/Types').DroppedItem[] = [];
   /** Maps scaffolded ship entity IDs to the shipyard structure that owns them. */
@@ -2669,6 +2671,7 @@ export class RenderSystem {
     this._localCompanyId = this._cachedLocalPlayer?.companyId ?? 0;
     this._cachedWorldShips   = worldState.ships;
     this._cachedWorldPlayers  = worldState.players;
+    this._cachedCompanies     = worldState.companies ?? [];
 
     // Rebuild scaffolded ship lookup: maps ship entity ID → owning shipyard structure
     this._scaffoldedShips.clear();
@@ -4419,6 +4422,8 @@ export class RenderSystem {
       let ownerText: string;
       if (s.companyId !== 0 && COMPANY_NAMES[s.companyId]) {
         ownerText = COMPANY_NAMES[s.companyId];
+      } else if (s.companyId !== 0 && s.companyId >= 100) {
+        ownerText = this._cachedCompanies.find(c => c.id === s.companyId)?.name ?? `Company #${s.companyId}`;
       } else if (s.placerName) {
         ownerText = `Player: ${s.placerName}`;
       } else {
@@ -10152,7 +10157,9 @@ export class RenderSystem {
       [COMPANY_NAVY]:      'Navy',
       [COMPANY_GHOST]:     'Ghost Ships',
     };
-    const companyName = COMPANY_NAMES[ship.companyId] ?? `#${ship.companyId}`;
+    const companyName = COMPANY_NAMES[ship.companyId]
+      ?? this._cachedCompanies.find(c => c.id === ship.companyId)?.name
+      ?? `#${ship.companyId}`;
     const shipTitle   = ship.shipType === SHIP_TYPE_GHOST
       ? 'Phantom Brig'
       : `${companyName} Brigantine`;
@@ -10311,7 +10318,9 @@ export class RenderSystem {
 
     const titleText   = `${npc.name}  Lv.${npc.npcLevel}${npc.locked ? '  🔒' : ''}`;
     const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
-    const companyLabel = COMPANY_NAMES[npc.companyId] ?? `#${npc.companyId}`;
+    const companyLabel = COMPANY_NAMES[npc.companyId]
+      ?? this._cachedCompanies.find(c => c.id === npc.companyId)?.name
+      ?? `#${npc.companyId}`;
     const companyText = (npc.companyId === COMPANY_SOLO)
       ? `Company of ${ownerName ?? `Player #${npc.ownerId || '?'}`}`
       : `Company: ${companyLabel}`;

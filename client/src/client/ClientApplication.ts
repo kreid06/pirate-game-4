@@ -446,7 +446,8 @@ export class ClientApplication {
         const sinkingShip = ws?.ships.find(s => s.id === shipId);
         if (sinkingShip) {
           const FACTION: Record<number, string> = { 0: 'Unclaimed', 1: 'Solo', 2: 'Pirates', 3: 'Navy', 99: 'Phantom Brig' };
-          const shipLabel = (s: Ship) => FACTION[s.companyId] ?? `Ship #${s.id}`;
+          const dynCompanies = ws?.companies ?? [];
+          const shipLabel = (s: Ship) => FACTION[s.companyId] ?? dynCompanies.find(c => c.id === s.companyId)?.name ?? `Ship #${s.id}`;
           const sinkLabel  = shipLabel(sinkingShip);
           const isOwnShip  = myPlayer?.carrierId === shipId;
           if (isOwnShip) {
