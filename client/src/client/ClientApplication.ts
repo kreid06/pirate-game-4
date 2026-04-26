@@ -37,7 +37,7 @@ import { logout } from './auth/AuthService.js';
 import { AudioManager } from './audio/AudioManager.js';
 
 // Core Simulation Types
-import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode } from '../sim/Types.js';
+import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED } from '../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../sim/Types.js';
 import { createEmptyInventory } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
@@ -1251,8 +1251,14 @@ export class ClientApplication {
           const myId = this.networkManager.getAssignedPlayerId();
           const me = (myId !== null ? ws?.players.find(p => p.id === myId) : null) ?? ws?.players[0] ?? null;
           const myCompany = me?.companyId ?? 0;
-          // Only command your own crew
-          if (hovNpcCtrl.companyId !== myCompany || myCompany === 0) return;
+          const myIdCtrl = myId;
+          // Only command your own crew (for COMPANY_SOLO NPCs check ownerId)
+          const isMyNpcCtrl = hovNpcCtrl.companyId !== COMPANY_UNCLAIMED && (
+            hovNpcCtrl.companyId === COMPANY_SOLO
+              ? hovNpcCtrl.ownerId === myIdCtrl
+              : hovNpcCtrl.companyId === myCompany && myCompany !== 0
+          );
+          if (!isMyNpcCtrl) return;
 
           // Build radial options
           const cmdOpts: Array<{ id: string; label: string }> = [];
@@ -3365,10 +3371,18 @@ export class ClientApplication {
               this._npcInteractId = hovNpcE.id;
 
               const myCompanyE = meE.companyId ?? 0;
+              const myIdE = this.networkManager.getAssignedPlayerId();
               const npcCompanyE = hovNpcE.companyId;
 
+              // Determine if this NPC belongs to the local player
+              const isMyNpcE = npcCompanyE !== COMPANY_UNCLAIMED && (
+                npcCompanyE === COMPANY_SOLO
+                  ? hovNpcE.ownerId === myIdE
+                  : npcCompanyE === myCompanyE && myCompanyE !== 0
+              );
+
               // Enemy-company NPC: no interaction
-              if (npcCompanyE !== 0 && npcCompanyE !== myCompanyE) {
+              if (!isMyNpcE && npcCompanyE !== COMPANY_UNCLAIMED) {
                 console.log(`🚫 E: NPC ${hovNpcE.id} belongs to enemy company ${npcCompanyE}`);
                 this._interactKind = null;
                 this._suppressLadderInteract = false;
@@ -3378,12 +3392,12 @@ export class ClientApplication {
               }
 
               let npcOpts: { id: string; label: string }[];
-              if (npcCompanyE === 0) {
+              if (npcCompanyE === COMPANY_UNCLAIMED) {
                 npcOpts = [{ id: 'recruit', label: 'Recruit to Company' }];
-              } else if (npcCompanyE === myCompanyE && hovNpcE.shipId !== meE.carrierId) {
+              } else if (isMyNpcE && hovNpcE.shipId !== meE.carrierId) {
                 npcOpts = [{ id: 'move_aboard', label: 'Move Aboard' }, { id: 'unclaim_npc', label: 'Unclaim NPC' }];
               } else {
-                // Same company, same ship
+                // My NPC, same ship
                 npcOpts = [{ id: 'crew_menu', label: 'Manage Crew' }, { id: 'unclaim_npc', label: 'Unclaim NPC' }];
               }
               const npcOptsSnap = npcOpts;
@@ -3769,18 +3783,24 @@ export class ClientApplication {
           const npc = npcId != null ? ws?.npcs.find(n => n.id === npcId) : null;
           if (!npc) { console.warn(`🤝 NPC ${npcId} not found in world state`); return; }
           const myCompany = me?.companyId ?? 0;
-          if (actionId === 'recruit' && npc.companyId === 0) {
+          const myIdAct = myId;
+          const isMyNpc = npc.companyId !== COMPANY_UNCLAIMED && (
+            npc.companyId === COMPANY_SOLO
+              ? npc.ownerId === myIdAct
+              : npc.companyId === myCompany && myCompany !== 0
+          );
+          if (actionId === 'recruit' && npc.companyId === COMPANY_UNCLAIMED) {
             this.networkManager.sendNpcRecruit(npc.id);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             console.log(`🤝 Recruiting NPC ${npc.id} (${npc.name})`);
-          } else if (actionId === 'move_aboard' && npc.companyId === myCompany) {
+          } else if (actionId === 'move_aboard' && isMyNpc) {
             this.networkManager.sendNpcMoveAboard(npc.id);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             console.log(`⚓ Moving NPC ${npc.id} (${npc.name}) aboard`);
-          } else if (actionId === 'crew_menu' && npc.companyId === myCompany) {
+          } else if (actionId === 'crew_menu' && isMyNpc) {
             this.uiManager?.openCrewMenuForNpc(npc);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
-          } else if (actionId === 'unclaim_npc' && npc.companyId === myCompany) {
+          } else if (actionId === 'unclaim_npc' && isMyNpc) {
             this.networkManager.sendNpcUnclaim(npc.id);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             console.log(`⚓ Unclaiming NPC ${npc.id} (${npc.name})`);
@@ -3791,14 +3811,19 @@ export class ClientApplication {
           const npc = npcId != null ? ws?.npcs.find(n => n.id === npcId) : null;
           if (!npc) return;
           const myCompany = me?.companyId ?? 0;
-          if (npc.companyId === 0) {
+          const isMyNpc = npc.companyId !== COMPANY_UNCLAIMED && (
+            npc.companyId === COMPANY_SOLO
+              ? npc.ownerId === myId
+              : npc.companyId === myCompany && myCompany !== 0
+          );
+          if (npc.companyId === COMPANY_UNCLAIMED) {
             executeNpcAction('recruit');
-          } else if (npc.companyId === myCompany && npc.shipId !== me?.carrierId) {
+          } else if (isMyNpc && npc.shipId !== me?.carrierId) {
             executeNpcAction('move_aboard');
-          } else if (npc.companyId === myCompany) {
+          } else if (isMyNpc) {
             executeNpcAction('crew_menu');
           }
-          // else: enemy company — no action
+          // else: enemy/other player's NPC — no action
         };
 
         if (this._ladderHoldTimer !== null) {

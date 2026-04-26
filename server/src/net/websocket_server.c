@@ -4414,6 +4414,14 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        /* Helper: true if player owns an NPC (handles COMPANY_SOLO per-player binding) */
+                        #define NPC_OWNED_BY(npc_ptr, plr_ptr) \
+                            ((npc_ptr)->company_id != COMPANY_UNCLAIMED && ( \
+                                (npc_ptr)->company_id == COMPANY_SOLO \
+                                    ? (npc_ptr)->owner_player_id == (plr_ptr)->player_id \
+                                    : (npc_ptr)->company_id == (plr_ptr)->company_id \
+                            ))
+
                         } else if (strcmp(msg_type, "npc_recruit") == 0) {
                             // NPC RECRUIT: player claims a neutral (company 0) NPC into their company.
                             // {"type":"npc_recruit","npcId":N}
@@ -4455,7 +4463,7 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 SimpleShip* ma_ship = find_ship(ma_player->parent_ship_id);
                                 if (ma_npc_ptr && ma_ship &&
-                                    ma_npc_ptr->company_id == ma_player->company_id) {
+                                    NPC_OWNED_BY(ma_npc_ptr, ma_player)) {
                                     ma_npc_ptr->ship_id        = ma_player->parent_ship_id;
                                     ma_npc_ptr->in_water       = false;
                                     int slot_idx = (int)(ma_npc_ptr->id % 9);
@@ -4494,7 +4502,7 @@ int websocket_server_update(struct Sim* sim) {
                                         lk_npc = &world_npcs[_ni]; break;
                                     }
                                 }
-                                if (lk_npc && lk_npc->company_id == lk_player->company_id) {
+                                if (lk_npc && NPC_OWNED_BY(lk_npc, lk_player)) {
                                     lk_npc->task_locked = (bool)lk_locked;
                                     log_info("%s NPC %u (%s) by player %u",
                                              lk_locked ? "🔒 Locked" : "🔓 Unlocked",
@@ -4526,7 +4534,7 @@ int websocket_server_update(struct Sim* sim) {
                                 SimpleShip* gm_ship = gm_npc ? find_ship(gm_npc->ship_id) : NULL;
                                 ShipModule*  gm_mod  = gm_ship ? find_module_by_id(gm_ship, gm_mod_id) : NULL;
                                 if (gm_npc && gm_ship && gm_mod &&
-                                    gm_npc->company_id == gm_player->company_id) {
+                                    NPC_OWNED_BY(gm_npc, gm_player)) {
                                     /* ── Occupancy check: single-occupancy modules only ──────────────────── */
                                     /* Cannon, swivel, mast and helm each hold exactly one NPC.              */
                                     /* If another NPC is already assigned there, reject the command.         */
@@ -4608,7 +4616,7 @@ int websocket_server_update(struct Sim* sim) {
                                         tp_npc = &world_npcs[_ni]; break;
                                     }
                                 }
-                                if (tp_npc && tp_npc->company_id == tp_player->company_id) {
+                                if (tp_npc && NPC_OWNED_BY(tp_npc, tp_player)) {
                                     /* Dismount from current post first */
                                     SimpleShip* tp_old_ship = find_ship(tp_npc->ship_id);
                                     dismount_npc(tp_npc, tp_old_ship);
@@ -4841,7 +4849,7 @@ int websocket_server_update(struct Sim* sim) {
                                     nu_npc = &world_npcs[ni]; break;
                                 }
                             }
-                            if (nu_npc && nu_npc->company_id == nu_player->company_id) {
+                            if (nu_npc && NPC_OWNED_BY(nu_npc, nu_player)) {
                                 nu_npc->company_id      = COMPANY_UNCLAIMED;
                                 nu_npc->owner_player_id = 0;
                                 log_info("⚓ NPC %u '%s' unclaimed by player %u",
@@ -4878,11 +4886,10 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             if (!uc_npc) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"npc_not_found\"}");
-                            } else if (uc_npc->company_id != 0 &&
-                                       uc_npc->company_id != player->company_id) {
-                                log_warn("⛔ Player %u (company %u) cannot upgrade NPC %u (company %u)",
+                            } else if (!NPC_OWNED_BY(uc_npc, player)) {
+                                log_warn("⛔ Player %u (company %u) cannot upgrade NPC %u (company %u, owner %u)",
                                          player->player_id, player->company_id,
-                                         uc_npc->id, uc_npc->company_id);
+                                         uc_npc->id, uc_npc->company_id, uc_npc->owner_player_id);
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"company_mismatch\"}");
                             } else {
                                 uint8_t* stat_ptr = NULL;
