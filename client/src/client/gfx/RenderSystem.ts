@@ -5630,6 +5630,9 @@ export class RenderSystem {
 
     // Ghost ship: dark spectral hull with cyan edge glow
     const isGhost = ship.shipType === SHIP_TYPE_GHOST;
+    // Enemy ship: different non-zero company to the local player
+    const isEnemyShip = !isGhost && this._localCompanyId !== 0
+      && ship.companyId !== 0 && ship.companyId !== this._localCompanyId;
     if (isGhost) {
       this.ctx.fillStyle   = '#0f0f1a';
       this.ctx.strokeStyle = '#0a0a16';
@@ -5722,6 +5725,17 @@ export class RenderSystem {
         this.ctx.closePath();
         this.ctx.fill();
       }
+    }
+
+    // Enemy faction: semi-transparent red overlay for hostile ships
+    if (isEnemyShip && ship.hull.length > 0) {
+      this.ctx.globalAlpha = 0.35 * (phase1Alpha < 1 ? phase1Alpha : 1);
+      this.ctx.fillStyle = '#cc2222';
+      this.ctx.beginPath();
+      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+      this.ctx.closePath();
+      this.ctx.fill();
     }
 
     // Draw ship direction indicator
