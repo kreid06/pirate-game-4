@@ -83,6 +83,28 @@ interface BtnHit {
   affordable: boolean;
 }
 
+interface CraftHit {
+  recipeIdx: number;
+  x: number; y: number; w: number; h: number;
+}
+
+interface HandRecipe {
+  output: ItemKind;
+  outputQty: number;
+  cost: Array<{ item: ItemKind; qty: number }>;
+}
+
+const HAND_RECIPES: HandRecipe[] = [
+  { output: 'repair_kit',    outputQty: 1, cost: [{ item: 'wood',  qty: 4  }] },
+  { output: 'plank',         outputQty: 2, cost: [{ item: 'wood',  qty: 3  }] },
+  { output: 'cloth_armor',   outputQty: 1, cost: [{ item: 'fiber', qty: 8  }] },
+  { output: 'wooden_shield', outputQty: 1, cost: [{ item: 'wood',  qty: 6  }] },
+  { output: 'axe',           outputQty: 1, cost: [{ item: 'wood',  qty: 3  }, { item: 'stone', qty: 2 }] },
+  { output: 'pickaxe',       outputQty: 1, cost: [{ item: 'wood',  qty: 2  }, { item: 'stone', qty: 4 }] },
+  { output: 'wooden_floor',  outputQty: 2, cost: [{ item: 'wood',  qty: 4  }] },
+  { output: 'workbench',     outputQty: 1, cost: [{ item: 'wood',  qty: 10 }] },
+];
+
 export class PlayerMenu {
   public visible = false;
   private activeTab: 'character' | 'skills' = 'character';
@@ -94,6 +116,10 @@ export class PlayerMenu {
   private _panelX = 0;
   private _panelY = 0;
   private _btnHits: BtnHit[] = [];
+  private _craftBtnHits: CraftHit[] = [];
+
+  /** Called when player clicks an affordable CRAFT button. */
+  public onCraftRequest: ((outputItem: ItemKind, qty: number) => void) | null = null;
 
   // Inventory grid scroll state
   private _invScrollY    = 0;
@@ -147,6 +173,16 @@ export class PlayerMenu {
           x >= btn.x && x <= btn.x + btn.w &&
           y >= btn.y && y <= btn.y + btn.h) {
         this.onUpgradeRequest?.(btn.serverKey);
+        return true;
+      }
+    }
+
+    // Craft buttons
+    for (const btn of this._craftBtnHits) {
+      if (x >= btn.x && x <= btn.x + btn.w &&
+          y >= btn.y && y <= btn.y + btn.h) {
+        const r = HAND_RECIPES[btn.recipeIdx];
+        this.onCraftRequest?.(r.output, r.outputQty);
         return true;
       }
     }
@@ -264,6 +300,7 @@ export class PlayerMenu {
     cur = this._tabBar(ctx, px, cur);
 
     this._btnHits = [];
+    this._craftBtnHits = [];
 
     const player = assignedId != null
       ? worldState.players.find(p => p.id === assignedId)
@@ -289,9 +326,8 @@ export class PlayerMenu {
       ? worldState.ships.find(s => s.id === player.carrierId) ?? null
       : null;
 
-    cur = this._equipmentSection(ctx, px, cur, player);
-    cur = this._status(ctx, px, cur, player, ship, worldState);
-    cur = this._levelXpCompact(ctx, px, cur, player);
+    cur = this._equipmentAndStatus(ctx, px, cur, player, ship, worldState);
+    cur = this._playerCrafting(ctx, px, cur, player);
     cur = this._inventoryGrid(ctx, px, cur, player, mouseX, mouseY);
 
     ctx.restore();
@@ -325,72 +361,133 @@ export class PlayerMenu {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Equipment section — 6 body slots at top of character tab
+  // Equipment grid (left) + Status rows (right) side by side
 
-  private _equipmentSection(
-    ctx:    CanvasRenderingContext2D,
-    px:     number, py: number,
-    player: NonNullable<ReturnType<WorldState['players']['find']>>,
+  private _equipmentAndStatus(
+    ctx:         CanvasRenderingContext2D,
+    px:          number, py: number,
+    player:      NonNullable<ReturnType<WorldState['players']['find']>>,
+    ship:        ReturnType<WorldState['ships']['find']> | null,
+    _worldState: WorldState,
   ): number {
-    const equip = player.inventory.equipment;
-    py = this._sectionHeader(ctx, px, py, 'EQUIPMENT', '');
+    py = this._sectionHeader(ctx, px, py, 'EQUIPMENT & STATUS', '');
     py += 8;
 
-    const ESLOTSZ = 46;
-    const ESGAP   = 8;
-    const equipSlots: Array<{ label: string; item: ItemKind }> = [
-      { label: 'Helm',   item: equip.helm   },
-      { label: 'Torso',  item: equip.torso  },
-      { label: 'Legs',   item: equip.legs   },
-      { label: 'Feet',   item: equip.feet   },
-      { label: 'Hands',  item: equip.hands  },
-      { label: 'Shield', item: equip.shield },
+    const ESLOTSZ    = 46;
+    const ESGAP      = 8;
+    const LABEL_H    = 14;                          // label text row below each slot
+    const ROW_STRIDE = ESLOTSZ + LABEL_H + ESGAP;  // per grid row
+    const equip      = player.inventory.equipment;
+    const equipX     = px + PAD;
+    const equipTop   = py;
+
+    // ── Equipment grid ──────────────────────────────────────────────────────
+    // row 0:  [  –  ] [ Helm ] [  –  ]
+    // row 1:  [Gloves] [Chest] [Shield]
+    // row 2:  [  –  ] [ Legs ] [  –  ]
+    // row 3:  [  –  ] [ Boots] [  –  ]
+    type SlotSpec = { label: string; item: ItemKind } | null;
+    const grid: SlotSpec[][] = [
+      [null,                                   { label: 'Helm',   item: equip.helm   }, null],
+      [{ label: 'Gloves', item: equip.hands }, { label: 'Chest',  item: equip.torso  }, { label: 'Shield', item: equip.shield }],
+      [null,                                   { label: 'Legs',   item: equip.legs   }, null],
+      [null,                                   { label: 'Boots',  item: equip.feet   }, null],
     ];
 
-    const totalEW = 6 * ESLOTSZ + 5 * ESGAP;
-    const startEX = px + Math.round((PANEL_W - totalEW) / 2);
+    for (let row = 0; row < grid.length; row++) {
+      for (let col = 0; col < 3; col++) {
+        const spec = grid[row][col];
+        if (!spec) continue;
+        const { label, item } = spec;
+        const def = ITEM_DEFS[item] ?? ITEM_DEFS['none'];
+        const sx  = equipX + col * (ESLOTSZ + ESGAP);
+        const sy  = equipTop + row * ROW_STRIDE;
 
-    for (let i = 0; i < 6; i++) {
-      const { label, item } = equipSlots[i];
-      const def = ITEM_DEFS[item] ?? ITEM_DEFS['none'];
-      const sx  = startEX + i * (ESLOTSZ + ESGAP);
+        ctx.fillStyle   = item !== 'none' ? 'rgba(60,50,25,0.95)' : 'rgba(25,25,38,0.9)';
+        ctx.fillRect(sx, sy, ESLOTSZ, ESLOTSZ);
+        ctx.strokeStyle = item !== 'none' ? def.borderColor : '#445';
+        ctx.lineWidth   = 1;
+        ctx.strokeRect(sx, sy, ESLOTSZ, ESLOTSZ);
 
-      ctx.fillStyle = item !== 'none' ? 'rgba(60,50,25,0.95)' : 'rgba(25,25,38,0.9)';
-      ctx.fillRect(sx, py, ESLOTSZ, ESLOTSZ);
-      ctx.strokeStyle = item !== 'none' ? def.borderColor : '#445';
-      ctx.lineWidth   = 1;
-      ctx.strokeRect(sx, py, ESLOTSZ, ESLOTSZ);
+        if (item !== 'none') {
+          const pad = 7;
+          ctx.fillStyle    = def.color;
+          ctx.fillRect(sx + pad, sy + pad, ESLOTSZ - pad * 2, ESLOTSZ - pad * 2);
+          ctx.font         = 'bold 18px Consolas, monospace';
+          ctx.fillStyle    = '#fff';
+          ctx.textAlign    = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(def.symbol, sx + ESLOTSZ / 2, sy + ESLOTSZ / 2);
+        }
 
-      if (item !== 'none') {
-        const pad = 7;
-        ctx.fillStyle = def.color;
-        ctx.fillRect(sx + pad, py + pad, ESLOTSZ - pad * 2, ESLOTSZ - pad * 2);
-        ctx.font         = 'bold 18px Consolas, monospace';
-        ctx.fillStyle    = '#fff';
+        ctx.font         = '10px Consolas, monospace';
         ctx.textAlign    = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(def.symbol, sx + ESLOTSZ / 2, py + ESLOTSZ / 2);
+        ctx.textBaseline = 'top';
+        ctx.fillStyle    = item !== 'none' ? TEXT_HEAD : TEXT_DIM;
+        ctx.fillText(label, sx + ESLOTSZ / 2, sy + ESLOTSZ + 2);
       }
-
-      // Label below slot
-      ctx.font         = '10px Consolas, monospace';
-      ctx.textAlign    = 'center';
-      ctx.textBaseline = 'top';
-      ctx.fillStyle    = item !== 'none' ? TEXT_HEAD : TEXT_DIM;
-      ctx.fillText(label, sx + ESLOTSZ / 2, py + ESLOTSZ + 3);
     }
 
-    return py + ESLOTSZ + 20;
-  }
+    const equipBlockH = 4 * ROW_STRIDE - ESGAP;
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Level/XP bar + stat upgrades inline on the character tab
+    // Right column setup
+    const divX = equipX + 3 * ESLOTSZ + 2 * ESGAP + 8;
 
-  private _levelXpCompact(
-    ctx:    CanvasRenderingContext2D,
-    px:     number, py: number,
-    player: NonNullable<ReturnType<WorldState['players']['find']>>,
-  ): number {
+    // Status column
+    const statusX  = divX + 8;
+    const statusW  = px + PANEL_W - PAD - statusX;
+    const STATUS_R = 22;
+    const LCOL     = 72;
+    let sty = equipTop;
+
+    // Sub-label
+    ctx.font         = 'bold 11px Consolas, monospace';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle    = GOLD;
+    ctx.fillText('STATUS', statusX, sty + 7);
+    sty += 18;
+    ctx.strokeStyle = 'rgba(255,215,0,0.25)';
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.moveTo(statusX, sty);
+    ctx.lineTo(statusX + statusW, sty);
+    ctx.stroke();
+    sty += 5;
+
+    const statusRows: Array<[string, string, string?]> = [];
+    statusRows.push(['Location', ship ? `Ship #${ship.id}` : 'At sea']);
+    if (player.isMounted && player.mountedModuleId != null) {
+      const mod     = ship?.modules.find(m => m.id === player.mountedModuleId);
+      const modKind = mod ? mod.kind.replace('-', ' ') : `Mod #${player.mountedModuleId}`;
+      statusRows.push(['Mounted', modKind, ORANGE]);
+    } else {
+      statusRows.push(['Mounted', 'None', TEXT_DIM]);
+    }
+    statusRows.push(['On Deck', player.onDeck ? 'Yes' : 'No']);
+    const spd = Math.sqrt(player.velocity.x ** 2 + player.velocity.y ** 2);
+    statusRows.push(['Speed', spd.toFixed(2) + ' u/s']);
+    const deg = ((player.rotation * 180 / Math.PI) % 360 + 360) % 360;
+    statusRows.push(['Facing', deg.toFixed(1) + '°']);
+
+    for (let i = 0; i < statusRows.length; i++) {
+      const [label, value, valColor] = statusRows[i];
+      if (i % 2 === 1) {
+        ctx.fillStyle = BG_STRIPE;
+        ctx.fillRect(statusX, sty, statusW, STATUS_R);
+      }
+      ctx.font         = '12px Consolas, monospace';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = TEXT_DIM;
+      ctx.fillText(label, statusX + 4, sty + STATUS_R / 2);
+      ctx.fillStyle    = valColor ?? TEXT_HEAD;
+      ctx.fillText(value, statusX + LCOL, sty + STATUS_R / 2);
+      sty += STATUS_R;
+    }
+
+    // LEVEL & XP sub-label in right column
+    sty += 8;
     const lvl        = player.level ?? 1;
     const xp         = player.xp ?? 0;
     const isMax      = lvl >= PLAYER_MAX_LEVEL;
@@ -398,84 +495,212 @@ export class PlayerMenu {
     const xpPct      = isMax ? 1 : Math.min(xp / xpToNext, 1);
     const statPoints = player.statPoints ?? 0;
 
-    py = this._sectionHeader(ctx, px, py, 'LEVEL & XP',
-      statPoints > 0 ? `★ ${statPoints} pts avail` : '');
-    py += 6;
-
-    const barX = px + PAD;
-    const barW = PANEL_W - PAD * 2;
-    const BAR_H = 8;
-
-    ctx.font         = 'bold 14px Consolas, monospace';
+    ctx.font         = 'bold 11px Consolas, monospace';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = GOLD;
-    ctx.fillText(`Lv. ${lvl}${isMax ? '  MAX' : ''}`, barX, py + 8);
+    ctx.fillText(`LEVEL & XP${statPoints > 0 ? `  \u2605 ${statPoints} pts` : ''}`, statusX, sty + 7);
+    sty += 18;
+    ctx.strokeStyle = 'rgba(255,215,0,0.25)';
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.moveTo(statusX, sty);
+    ctx.lineTo(statusX + statusW, sty);
+    ctx.stroke();
+    sty += 6;
+
+    // Level label + XP bar on one line
+    const BAR_H = 7;
+    const LVL_W = 54;
+    ctx.font         = 'bold 12px Consolas, monospace';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle    = GOLD;
+    ctx.fillText(`Lv.${lvl}${isMax ? ' MAX' : ''}`, statusX + 4, sty + BAR_H / 2 + 1);
+    const xpBarX = statusX + LVL_W;
+    const xpBarW = statusW - LVL_W;
+    ctx.fillStyle = '#1a2040';
+    ctx.fillRect(xpBarX, sty, xpBarW, BAR_H);
+    ctx.fillStyle = '#4488ff';
+    ctx.fillRect(xpBarX, sty, Math.round(xpBarW * xpPct), BAR_H);
+    ctx.strokeStyle = '#2a3060';
+    ctx.lineWidth   = 1;
+    ctx.strokeRect(xpBarX, sty, xpBarW, BAR_H);
+    sty += BAR_H + 3;
 
     const xpLabel = isMax ? 'MAX LEVEL' : `${xp} / ${xpToNext} XP`;
-    ctx.font      = '12px Consolas, monospace';
+    ctx.font      = '10px Consolas, monospace';
     ctx.textAlign = 'right';
     ctx.fillStyle = TEXT_DIM;
-    ctx.fillText(xpLabel, px + PANEL_W - PAD, py + 8);
-    py += 18;
+    ctx.fillText(xpLabel, statusX + statusW, sty);
+    sty += 14;
 
-    ctx.fillStyle = '#1a2040';
-    ctx.fillRect(barX, py, barW, BAR_H);
-    ctx.fillStyle = '#4488ff';
-    ctx.fillRect(barX, py, Math.round(barW * xpPct), BAR_H);
-    py += BAR_H + 10;
+    // Compact stat rows with small + button
+    const STAT_ROW_H = 28;
+    const SBTN_W = 24, SBTN_H = 20;
 
-    // ── Stat upgrades inline ────────────────────────────────────────
-    const BTN_W = 80, BTN_H = 22;
-    const ROW   = 44;
-
-    for (const stat of STATS) {
+    for (let si = 0; si < STATS.length; si++) {
+      const stat    = STATS[si];
       const statLvl = (player[stat.key] ?? 0) as number;
       const afford  = statPoints > 0;
 
-      ctx.fillStyle = 'rgba(255,255,255,0.03)';
-      ctx.fillRect(px + PAD / 2, py, PANEL_W - PAD, ROW - 3);
+      if (si % 2 === 1) {
+        ctx.fillStyle = BG_STRIPE;
+        ctx.fillRect(statusX, sty, statusW, STAT_ROW_H);
+      }
 
-      ctx.font         = 'bold 13px Consolas, monospace';
+      ctx.font         = 'bold 12px Consolas, monospace';
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = stat.color;
-      ctx.fillText(stat.label, px + PAD, py + 13);
+      ctx.fillText(stat.label, statusX + 4, sty + STAT_ROW_H / 2);
 
-      ctx.font      = 'bold 12px Consolas, monospace';
+      ctx.font      = 'bold 11px Consolas, monospace';
       ctx.fillStyle = statLvl > 0 ? stat.color : TEXT_DIM;
-      ctx.fillText(`${statLvl}`, px + 90, py + 13);
+      ctx.fillText(`${statLvl}`, statusX + 70, sty + STAT_ROW_H / 2);
 
-      ctx.font         = '11px Consolas, monospace';
-      ctx.textAlign    = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle    = TEXT_DIM;
-      ctx.fillText(stat.desc(statLvl), px + PAD, py + ROW - 16);
+      ctx.font      = '10px Consolas, monospace';
+      ctx.fillStyle = TEXT_DIM;
+      ctx.fillText(stat.desc(statLvl), statusX + 96, sty + STAT_ROW_H / 2);
 
-      const btnX = px + PANEL_W - PAD - BTN_W;
-      const btnY = py + (ROW - 3 - BTN_H) / 2;
-      ctx.fillStyle   = afford ? '#2a4a2a' : '#2a2a2a';
+      const sbtnX = statusX + statusW - SBTN_W;
+      const sbtnY = sty + (STAT_ROW_H - SBTN_H) / 2;
+      ctx.fillStyle   = afford ? '#2a4a2a' : '#1e1e2c';
       ctx.strokeStyle = afford ? '#44aa44' : '#445';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.roundRect(sbtnX, sbtnY, SBTN_W, SBTN_H, 3);
+      ctx.fill();
+      ctx.stroke();
+      ctx.font         = 'bold 14px Consolas, monospace';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = afford ? '#aaffaa' : '#445';
+      ctx.fillText('+', sbtnX + SBTN_W / 2, sbtnY + SBTN_H / 2);
+
+      if (afford) {
+        this._btnHits.push({ serverKey: stat.server, x: sbtnX, y: sbtnY, w: SBTN_W, h: SBTN_H, affordable: true });
+      }
+
+      sty += STAT_ROW_H;
+    }
+
+    // Vertical divider spanning full right-column height
+    const totalH = Math.max(equipBlockH, sty - equipTop);
+    ctx.strokeStyle = BORDER;
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.moveTo(divX, equipTop - 4);
+    ctx.lineTo(divX, equipTop + totalH + 4);
+    ctx.stroke();
+
+    return equipTop + totalH + 12;
+  }
+
+  // Hand-crafting panel (pre-workbench recipes)
+
+  private _playerCrafting(
+    ctx:    CanvasRenderingContext2D,
+    px:     number, py: number,
+    player: NonNullable<ReturnType<WorldState['players']['find']>>,
+  ): number {
+    py = this._sectionHeader(ctx, px, py, 'HAND CRAFTING', 'no workbench required');
+    py += 6;
+
+    // Count materials in player inventory
+    const counts: Partial<Record<ItemKind, number>> = {};
+    for (const slot of player.inventory.slots) {
+      if (slot.item !== 'none') {
+        counts[slot.item] = (counts[slot.item] ?? 0) + slot.quantity;
+      }
+    }
+
+    const COLS   = 2;
+    const GAP    = 8;
+    const CELL_W = Math.floor((PANEL_W - PAD * 2 - GAP) / COLS);
+    const CELL_H = 54;
+    const CELL_V = 4;
+    const BTN_W  = 52;
+    const BTN_H  = 20;
+
+    for (let i = 0; i < HAND_RECIPES.length; i++) {
+      const recipe    = HAND_RECIPES[i];
+      const col       = i % COLS;
+      const row       = Math.floor(i / COLS);
+      const rx        = px + PAD + col * (CELL_W + GAP);
+      const ry        = py + row * (CELL_H + CELL_V);
+      const canAfford = recipe.cost.every(c => (counts[c.item] ?? 0) >= c.qty);
+      const outDef    = ITEM_DEFS[recipe.output];
+
+      // Cell background
+      ctx.fillStyle   = canAfford ? 'rgba(28,54,28,0.75)' : 'rgba(20,20,34,0.80)';
+      ctx.strokeStyle = canAfford ? '#3a8a3a' : '#334';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.roundRect(rx, ry, CELL_W, CELL_H, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      // Output icon
+      const ICON = 34;
+      const iconX = rx + 6;
+      const iconY = ry + (CELL_H - ICON) / 2;
+      ctx.fillStyle   = outDef.color;
+      ctx.fillRect(iconX, iconY, ICON, ICON);
+      ctx.strokeStyle = outDef.borderColor;
+      ctx.lineWidth   = 1;
+      ctx.strokeRect(iconX, iconY, ICON, ICON);
+      ctx.font         = 'bold 14px Consolas, monospace';
+      ctx.fillStyle    = '#fff';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(outDef.symbol, iconX + ICON / 2, iconY + ICON / 2);
+
+      // Output name + qty
+      const textX = iconX + ICON + 6;
+      ctx.font         = 'bold 12px Consolas, monospace';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle    = canAfford ? TEXT_HEAD : TEXT_DIM;
+      const nameStr = outDef.name + (recipe.outputQty > 1 ? ` x${recipe.outputQty}` : '');
+      ctx.fillText(nameStr, textX, ry + 7);
+
+      // Ingredients with per-item colour
+      ctx.font = '10px Consolas, monospace';
+      ctx.textBaseline = 'top';
+      let ix = textX;
+      const ingY = ry + 23;
+      for (const c of recipe.cost) {
+        const ok  = (counts[c.item] ?? 0) >= c.qty;
+        ctx.fillStyle = ok ? GREEN : '#cc4444';
+        const txt = `${c.qty}${ITEM_DEFS[c.item].symbol} `;
+        ctx.fillText(txt, ix, ingY);
+        ix += ctx.measureText(txt).width;
+      }
+
+      // CRAFT button
+      const btnX = rx + CELL_W - BTN_W - 4;
+      const btnY = ry + (CELL_H - BTN_H) / 2;
+      ctx.fillStyle   = canAfford ? '#2a5a2a' : '#1e1e2e';
+      ctx.strokeStyle = canAfford ? '#44cc44' : '#445';
       ctx.lineWidth   = 1;
       ctx.beginPath();
       ctx.roundRect(btnX, btnY, BTN_W, BTN_H, 3);
       ctx.fill();
       ctx.stroke();
-
       ctx.font         = 'bold 11px Consolas, monospace';
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle    = afford ? '#aaffaa' : '#556';
-      ctx.fillText(afford ? '+1 Point' : 'No Points', btnX + BTN_W / 2, btnY + BTN_H / 2);
+      ctx.fillStyle    = canAfford ? '#aaffaa' : '#556';
+      ctx.fillText('CRAFT', btnX + BTN_W / 2, btnY + BTN_H / 2);
 
-      if (afford) {
-        this._btnHits.push({ serverKey: stat.server, x: btnX, y: btnY, w: BTN_W, h: BTN_H, affordable: true });
+      if (canAfford) {
+        this._craftBtnHits.push({ recipeIdx: i, x: btnX, y: btnY, w: BTN_W, h: BTN_H });
       }
-
-      py += ROW;
     }
 
-    return py + 6;
+    const rows = Math.ceil(HAND_RECIPES.length / COLS);
+    return py + rows * (CELL_H + CELL_V) + 4;
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -779,59 +1004,6 @@ export class PlayerMenu {
     ctx.lineTo(x, y + tl);
     ctx.quadraticCurveTo(x, y, x + tl, y);
     ctx.closePath();
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────
-
-  private _status(
-    ctx:        CanvasRenderingContext2D,
-    px:         number, py: number,
-    player:     NonNullable<ReturnType<WorldState['players']['find']>>,
-    ship:       ReturnType<WorldState['ships']['find']> | null,
-    worldState: WorldState,
-  ): number {
-    py = this._sectionHeader(ctx, px, py, 'STATUS', '');
-
-    const rows: Array<[string, string, string?]> = [];
-
-    // Aboard / at sea
-    rows.push(['Location', ship ? `Aboard Ship #${ship.id}` : 'At sea']);
-
-    // Mount state
-    if (player.isMounted && player.mountedModuleId != null) {
-      const mod = ship?.modules.find(m => m.id === player.mountedModuleId);
-      const modKind = mod ? mod.kind.replace('-', ' ') : `Module #${player.mountedModuleId}`;
-      rows.push(['Mounted', `${modKind} (ID ${player.mountedModuleId})`, ORANGE]);
-    } else {
-      rows.push(['Mounted', 'None', TEXT_DIM]);
-    }
-
-    rows.push(['On Deck', player.onDeck ? 'Yes' : 'No']);
-
-    const spd = Math.sqrt(player.velocity.x ** 2 + player.velocity.y ** 2);
-    rows.push(['Speed', spd.toFixed(2) + ' u/s']);
-
-    // Facing
-    const deg = ((player.rotation * 180 / Math.PI) % 360 + 360) % 360;
-    rows.push(['Facing', deg.toFixed(1) + '°']);
-
-    for (let i = 0; i < rows.length; i++) {
-      const [label, value, col3Color] = rows[i];
-      if (i % 2 === 1) {
-        ctx.fillStyle = BG_STRIPE;
-        ctx.fillRect(px + PAD, py, PANEL_W - PAD * 2, ROW_H);
-      }
-      ctx.font = '13px Consolas, monospace';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = TEXT_DIM;
-      ctx.fillText(label, px + PAD + 8, py + ROW_H / 2);
-      ctx.fillStyle = col3Color ?? TEXT_HEAD;
-      ctx.fillText(value, px + PAD + 150, py + ROW_H / 2);
-      py += ROW_H;
-    }
-
-    return py + 8;
   }
 
   // ────────────────────────────────────────────────────────────────────────────

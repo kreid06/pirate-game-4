@@ -2103,7 +2103,7 @@ class HUDElement implements UIElement {
     // Health / stamina bars above hotbar
     const maxSt = player.maxStamina ?? 100;
     const st    = player.stamina    ?? maxSt;
-    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt);
+    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, player.level ?? 1, player.xp ?? 0);
 
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
     const helmMode = context.mountKind === 'helm'
@@ -2122,7 +2122,10 @@ class HUDElement implements UIElement {
     maxHealth: number,
     stamina: number,
     maxStamina: number,
+    level = 1,
+    xp = 0,
   ): void {
+    const PLAYER_MAX_LEVEL = 66;
     const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
     const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
     const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
@@ -2130,15 +2133,19 @@ class HUDElement implements UIElement {
     const hotbarY = canvas.height - totalH - 8;
 
     const BAR_H    = 10;
+    const XP_BAR_H = 6;
     const GAP      = 3;
     const PANEL_PAD = 4;
-    const panelH   = PANEL_PAD * 2 + BAR_H * 2 + GAP;
+    const panelH   = PANEL_PAD * 2 + XP_BAR_H + GAP + BAR_H * 2 + GAP;
     const panelY   = hotbarY - panelH - 4;
     const barX     = startX + PANEL_PAD;
     const barW     = totalW - PANEL_PAD * 2;
 
     const hpRatio = maxHealth > 0 ? Math.max(0, Math.min(1, health / maxHealth)) : 1;
     const stRatio = maxStamina > 0 ? Math.max(0, Math.min(1, stamina / maxStamina)) : 1;
+    const isMaxLevel = level >= PLAYER_MAX_LEVEL;
+    const xpToNext  = isMaxLevel ? PLAYER_MAX_LEVEL * 100 : level * 100;
+    const xpRatio   = isMaxLevel ? 1 : Math.min(xp / xpToNext, 1);
 
     ctx.save();
 
@@ -2149,8 +2156,27 @@ class HUDElement implements UIElement {
     ctx.lineWidth = 1;
     ctx.strokeRect(startX, panelY, totalW, panelH);
 
-    // ── Health bar ─────────────────────────────────────────────────────────
-    const hpY    = panelY + PANEL_PAD;
+    // XP bar
+    const xpY = panelY + PANEL_PAD;
+    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    ctx.fillRect(barX, xpY, barW, XP_BAR_H);
+    ctx.fillStyle = isMaxLevel ? '#ffdd44' : '#4488ff';
+    ctx.fillRect(barX, xpY, Math.round(barW * xpRatio), XP_BAR_H);
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX, xpY, barW, XP_BAR_H);
+
+    ctx.font = 'bold 8px Consolas, monospace';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(255,255,255,0.70)';
+    ctx.fillText(`Lv.${level}${isMaxLevel ? ' MAX' : ''}`, barX + 3, xpY + XP_BAR_H / 2);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(180,200,255,0.65)';
+    ctx.fillText(isMaxLevel ? 'MAX' : `${xp}/${xpToNext} XP`, barX + barW - 3, xpY + XP_BAR_H / 2);
+
+    // Health bar
+    const hpY    = xpY + XP_BAR_H + GAP;
     const hpCrit = hpRatio < 0.25;
     const hpWarn = hpRatio < 0.50;
     const hpColor = hpCrit ? '#cc2222' : hpWarn ? '#cc8822' : '#22aa44';
