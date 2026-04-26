@@ -39,7 +39,7 @@ import { AudioManager } from './audio/AudioManager.js';
 // Core Simulation Types
 import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED } from '../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../sim/Types.js';
-import { createEmptyInventory } from '../sim/Inventory.js';
+import { createEmptyInventory, ITEM_KIND_ID } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils, ShipModule, getModuleFootprint, footprintsOverlap } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
@@ -3572,6 +3572,38 @@ export class ClientApplication {
 
           const MOUNTABLE = new Set(['helm', 'cannon', 'mast', 'swivel']);
 
+          // ── Claim flag: plant on enemy helm, or remove from any ship ──────
+          {
+            const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+            const myCompany = meE.companyId ?? 0;
+            const targetShipCompany = hov.ship.companyId ?? 0;
+            const isEnemyShip = targetShipCompany !== myCompany && targetShipCompany !== 0;
+
+            // Player must be on the ship for both plant and remove
+            if (meE.carrierId === hov.ship.id) {
+              // Remove flag: if ship already has a claim flag, offer to remove it
+              if (hov.ship.claimFlag) {
+                this._interactKind = null;
+                const mp = this.inputManager.getMouseScreenPosition();
+                this._radialMenu.open(mp.x, mp.y, [
+                  { id: `remove_flag_${hov.ship.id}`, label: '⛳ Remove Flag' },
+                ]);
+                break;
+              }
+
+              // Plant flag: helm module, enemy ship, player has claim_flag item
+              if (hov.module.kind === 'helm' && isEnemyShip) {
+                const inv = ws?.players?.find(p => p.id === meE.id)?.inventory ?? meE.inventory;
+                const hasCF = inv?.slots?.some(s => s.item === 'claim_flag' && s.quantity > 0);
+                if (hasCF) {
+                  this.networkManager.sendPlantClaimFlag(hov.ship.id);
+                  console.log(`🚩 Planting claim flag on ship ${hov.ship.id}`);
+                  break;
+                }
+              }
+            }
+          }
+
           if (MOUNTABLE.has(hov.module.kind)) {
             // ── Mount ──────────────────────────────────────────────────────────
             // Player must be on the ship — can't mount a helm/cannon/mast from off-ship.
@@ -3967,6 +3999,14 @@ export class ClientApplication {
           // extend always uses toggle_ladder — module_interact on retracted = climb attempt
           this.networkManager.sendToggleLadder(moduleId);
           this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+        } else if (selected?.startsWith('remove_flag_')) {
+          // ── Remove claim flag from ship ──────────────────────────────────
+          const flagShipId = parseInt(selected.replace('remove_flag_', ''), 10);
+          if (!isNaN(flagShipId)) {
+            this.networkManager.sendRemoveClaimFlag(flagShipId);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`🚩 Removing claim flag from ship ${flagShipId}`);
+          }
         }
       }
     });

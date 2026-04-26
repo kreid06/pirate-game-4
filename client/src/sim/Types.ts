@@ -49,6 +49,17 @@ export interface Ship {
 
   // Ship progression (from server levelStats; optional until server sends it)
   levelStats?: ShipLevelStats;
+
+  // Claim flag — present if an enemy is attempting to capture this ship
+  claimFlag?: {
+    planterId: number;
+    planterCompany: number;
+    progressMs: number;
+    totalMs: number;
+    contested: boolean;
+    localX: number;
+    localY: number;
+  };
 }
 
 /**

@@ -41,7 +41,8 @@ export type ItemKind =
   | 'pickaxe'
   | 'shipyard'
   | 'stone'
-  | 'wood_ceiling';
+  | 'wood_ceiling'
+  | 'claim_flag';
 
 // ── Category groups ─────────────────────────────────────────────────────────
 export type ItemCategory = 'none' | 'building' | 'repair' | 'ammo' | 'weapon' | 'tool' | 'armor' | 'shield';
@@ -93,6 +94,7 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   shipyard:      { kind: 'shipyard',      name: 'Shipyard',      category: 'building', maxStack: 1,  color: '#2a5f8a', borderColor: '#14304a', symbol: '\u2693', description: 'Place in shallow water next to an island to build ships.' },
   stone:         { kind: 'stone',         name: 'Stone',         category: 'none',     maxStack: 99, color: '#9a9a9c', borderColor: '#666668', symbol: 'St', description: 'Raw stone gathered from rocky outcroppings. Used for crafting.' },
   wood_ceiling:  { kind: 'wood_ceiling',  name: 'Wood Ceiling',  category: 'building', maxStack: 20, color: '#b8832b', borderColor: '#7a5520', symbol: '\u25a6', description: 'A wooden ceiling tile. Fits over a floor section.' },
+  claim_flag:    { kind: 'claim_flag',    name: 'Claiming Flag', category: 'building', maxStack: 5,  color: '#dd3333', borderColor: '#991111', symbol: '\uD83D\uDEA9', description: 'Plant on an enemy ship\'s helm to capture it over 5 minutes.' },
 };
 
 /**
@@ -130,6 +132,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   26: 'shipyard',
   27: 'stone',
   28: 'wood_ceiling',
+  29: 'claim_flag',
 };
 
 /**

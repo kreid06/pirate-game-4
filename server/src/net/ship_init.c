@@ -817,3 +817,105 @@ void tick_wrecks(void) {
     }
 }
 
+/* ── Ship Claiming Flag tick ────────────────────────────────────────────────
+ * Called each server tick (dt in seconds).
+ * - Checks if enemy players/NPCs are on the flagged ship's deck (contested).
+ * - If contested: reverses progress at FLAG_REVERSE_SPEED x normal rate.
+ * - If uncontested: advances progress normally.
+ * - When progress reaches FLAG_CLAIM_DURATION_MS: claim the ship and remove flag.
+ * ----------------------------------------------------------------------- */
+void tick_claim_flags(float dt) {
+    float dt_ms = dt * 1000.0f;
+
+    for (int fi = 0; fi < MAX_CLAIM_FLAGS; fi++) {
+        ClaimFlag* flag = &claim_flags[fi];
+        if (!flag->active) continue;
+
+        SimpleShip* ship = find_ship(flag->ship_id);
+        if (!ship || !ship->active || ship->is_sinking) {
+            /* Ship gone — remove flag silently */
+            flag->active = false;
+            char bcast[80];
+            snprintf(bcast, sizeof(bcast),
+                "{\"type\":\"flag_removed\",\"shipId\":%u,\"removerId\":0}", (unsigned)flag->ship_id);
+            websocket_server_broadcast(bcast);
+            continue;
+        }
+
+        /* Check contestation: any player or NPC on the ship with a DIFFERENT company */
+        bool contested = false;
+        for (int pi = 0; pi < MAX_PLAYERS; pi++) {
+            WebSocketPlayer* p = &players[pi];
+            if (!p->active) continue;
+            if (p->parent_ship_id != flag->ship_id) continue;
+            if (p->company_id == flag->planter_company) continue; /* friendly */
+            contested = true;
+            break;
+        }
+        if (!contested) {
+            for (int ni = 0; ni < world_npc_count; ni++) {
+                WorldNpc* npc = &world_npcs[ni];
+                if (!npc->active) continue;
+                if (npc->ship_id != flag->ship_id) continue;
+                if (npc->company_id == flag->planter_company) continue; /* friendly */
+                contested = true;
+                break;
+            }
+        }
+        flag->contested = contested;
+
+        if (contested) {
+            /* Reverse at 10x speed */
+            flag->progress_ms -= dt_ms * FLAG_REVERSE_SPEED;
+            if (flag->progress_ms < 0.0f) flag->progress_ms = 0.0f;
+        } else {
+            flag->progress_ms += dt_ms;
+        }
+
+        /* Broadcast progress update every second (approx) — clients interpolate */
+        {
+            static uint32_t last_flag_broadcast = 0;
+            uint32_t now = get_time_ms();
+            if (now - last_flag_broadcast >= 1000) {
+                last_flag_broadcast = now;
+                char fbcast[192];
+                snprintf(fbcast, sizeof(fbcast),
+                    "{\"type\":\"flag_update\",\"shipId\":%u,\"planterId\":%u,"
+                    "\"planterCompany\":%u,\"progressMs\":%.0f,\"totalMs\":%u,\"contested\":%s}",
+                    (unsigned)flag->ship_id, (unsigned)flag->planter_id,
+                    (unsigned)flag->planter_company, flag->progress_ms,
+                    FLAG_CLAIM_DURATION_MS,
+                    flag->contested ? "true" : "false");
+                websocket_server_broadcast(fbcast);
+            }
+        }
+
+        /* Check completion */
+        if (flag->progress_ms >= (float)FLAG_CLAIM_DURATION_MS) {
+            flag->active = false;
+
+            /* Claim the ship */
+            uint8_t prev_company = ship->company_id;
+            ship->company_id = flag->planter_company;
+            struct Ship* sim_ship = find_sim_ship(flag->ship_id);
+            if (sim_ship) sim_ship->company_id = flag->planter_company;
+
+            log_info("🚩 Ship %u captured! Company %u → %u by player %u",
+                     flag->ship_id, (unsigned)prev_company,
+                     (unsigned)flag->planter_company, (unsigned)flag->planter_id);
+
+            char cbcast[128];
+            snprintf(cbcast, sizeof(cbcast),
+                "{\"type\":\"ship_claimed\",\"shipId\":%u,\"companyId\":%u}",
+                (unsigned)flag->ship_id, (unsigned)flag->planter_company);
+            websocket_server_broadcast(cbcast);
+
+            /* Also announce the capture */
+            char abcast[160];
+            snprintf(abcast, sizeof(abcast),
+                "{\"type\":\"flag_capture_complete\",\"shipId\":%u,\"planterCompany\":%u}",
+                (unsigned)flag->ship_id, (unsigned)flag->planter_company);
+            websocket_server_broadcast(abcast);
+        }
+    }
+}

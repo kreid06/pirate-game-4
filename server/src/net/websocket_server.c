@@ -149,6 +149,10 @@ PlacedStructure placed_structures[MAX_PLACED_STRUCTURES];
 uint32_t placed_structure_count = 0;
 uint16_t next_structure_id = 1;
 
+// ── Ship claiming flags ──────────────────────────────────────────────────────
+ClaimFlag claim_flags[MAX_CLAIM_FLAGS] = {0};
+int       claim_flag_count = 0;
+
 // ── Tombstone item caches (dropped on player death) ──────────────────────────
 #define MAX_TOMBSTONES    64u
 #define TOMBSTONE_TTL_MS  900000u   /* 15 minutes */
@@ -4855,6 +4859,139 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "plant_claim_flag") == 0) {
+                            // PLANT CLAIM FLAG: player plants a flag on an enemy ship to capture it.
+                            // Costs 1 ITEM_CLAIM_FLAG (5 wood crafted). Ship must be a different company.
+                            // {"type":"plant_claim_flag","shipId":N}
+                            WebSocketPlayer* pcf_player = find_player(client->player_id);
+                            uint16_t pcf_ship_id = 0;
+                            { char* p2 = strstr(payload, "\"shipId\":"); if (p2) { uint32_t _tmp = 0; sscanf(p2 + 9, "%u", &_tmp); pcf_ship_id = (uint16_t)_tmp; } }
+
+                            SimpleShip* pcf_ship = find_ship(pcf_ship_id);
+                            if (!pcf_player) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else if (!pcf_ship || !pcf_ship->active) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                            } else if (pcf_player->parent_ship_id != pcf_ship_id) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                            } else if (pcf_ship->company_id == pcf_player->company_id &&
+                                       pcf_ship->company_id != COMPANY_UNCLAIMED) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"already_own_ship\"}");
+                            } else {
+                                // Check player has ITEM_CLAIM_FLAG in inventory
+                                int pcf_inv_slot = -1;
+                                for (int _s = 0; _s < INVENTORY_SLOTS; _s++) {
+                                    if (pcf_player->inventory.slots[_s].item == ITEM_CLAIM_FLAG &&
+                                        pcf_player->inventory.slots[_s].quantity > 0) {
+                                        pcf_inv_slot = _s; break;
+                                    }
+                                }
+                                if (pcf_inv_slot < 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_claim_flag\"}");
+                                } else {
+                                    // Check for existing flag on this ship (one flag per ship max)
+                                    int pcf_existing = -1;
+                                    for (int _f = 0; _f < MAX_CLAIM_FLAGS; _f++) {
+                                        if (claim_flags[_f].active && claim_flags[_f].ship_id == pcf_ship_id) {
+                                            pcf_existing = _f; break;
+                                        }
+                                    }
+                                    if (pcf_existing >= 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"flag_already_planted\"}");
+                                    } else {
+                                        // Find a free slot
+                                        int pcf_slot = -1;
+                                        for (int _f = 0; _f < MAX_CLAIM_FLAGS; _f++) {
+                                            if (!claim_flags[_f].active) { pcf_slot = _f; break; }
+                                        }
+                                        if (pcf_slot < 0) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"too_many_flags\"}");
+                                        } else {
+                                            // Consume the item
+                                            pcf_player->inventory.slots[pcf_inv_slot].quantity--;
+                                            if (pcf_player->inventory.slots[pcf_inv_slot].quantity == 0)
+                                                pcf_player->inventory.slots[pcf_inv_slot].item = ITEM_NONE;
+
+                                            // Plant the flag at ship-local (0, -100) — near helm area
+                                            claim_flags[pcf_slot].active           = true;
+                                            claim_flags[pcf_slot].ship_id          = pcf_ship_id;
+                                            claim_flags[pcf_slot].planter_id       = pcf_player->player_id;
+                                            claim_flags[pcf_slot].planter_company  = pcf_player->company_id;
+                                            claim_flags[pcf_slot].progress_ms      = 0.0f;
+                                            claim_flags[pcf_slot].contested        = false;
+                                            claim_flags[pcf_slot].local_x          = 0.0f;
+                                            claim_flags[pcf_slot].local_y          = -100.0f;
+                                            if (claim_flag_count <= pcf_slot) claim_flag_count = pcf_slot + 1;
+
+                                            log_info("🚩 Player %u planted claim flag on ship %u (company %u→%u)",
+                                                     pcf_player->player_id, pcf_ship_id,
+                                                     pcf_ship->company_id, pcf_player->company_id);
+
+                                            // Broadcast flag planted
+                                            char pcf_bcast[128];
+                                            snprintf(pcf_bcast, sizeof(pcf_bcast),
+                                                "{\"type\":\"flag_planted\",\"shipId\":%u,\"planterId\":%u,\"planterCompany\":%u}",
+                                                (unsigned)pcf_ship_id, (unsigned)pcf_player->player_id,
+                                                (unsigned)pcf_player->company_id);
+                                            websocket_server_broadcast(pcf_bcast);
+
+                                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"flag_planted\"}");
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "remove_claim_flag") == 0) {
+                            // REMOVE CLAIM FLAG: any player on the ship can remove a planted flag.
+                            // {"type":"remove_claim_flag","shipId":N}
+                            WebSocketPlayer* rcf_player = find_player(client->player_id);
+                            uint16_t rcf_ship_id = 0;
+                            { char* p2 = strstr(payload, "\"shipId\":"); if (p2) { uint32_t _tmp = 0; sscanf(p2 + 9, "%u", &_tmp); rcf_ship_id = (uint16_t)_tmp; } }
+
+                            if (!rcf_player) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else if (rcf_player->parent_ship_id != rcf_ship_id) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                            } else {
+                                // Find the flag on this ship
+                                int rcf_slot = -1;
+                                for (int _f = 0; _f < MAX_CLAIM_FLAGS; _f++) {
+                                    if (claim_flags[_f].active && claim_flags[_f].ship_id == rcf_ship_id) {
+                                        rcf_slot = _f; break;
+                                    }
+                                }
+                                if (rcf_slot < 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_flag\"}");
+                                } else {
+                                    claim_flags[rcf_slot].active = false;
+                                    log_info("🚩 Player %u removed claim flag from ship %u",
+                                             rcf_player->player_id, rcf_ship_id);
+
+                                    // Return the flag item to the remover (or drop it)
+                                    // Give the item back to the remover
+                                    for (int _s = 0; _s < INVENTORY_SLOTS; _s++) {
+                                        if (rcf_player->inventory.slots[_s].item == ITEM_NONE ||
+                                            (rcf_player->inventory.slots[_s].item == ITEM_CLAIM_FLAG &&
+                                             rcf_player->inventory.slots[_s].quantity < 99)) {
+                                            if (rcf_player->inventory.slots[_s].item == ITEM_NONE)
+                                                rcf_player->inventory.slots[_s].item = ITEM_CLAIM_FLAG;
+                                            rcf_player->inventory.slots[_s].quantity++;
+                                            break;
+                                        }
+                                    }
+
+                                    char rcf_bcast[96];
+                                    snprintf(rcf_bcast, sizeof(rcf_bcast),
+                                        "{\"type\":\"flag_removed\",\"shipId\":%u,\"removerId\":%u}",
+                                        (unsigned)rcf_ship_id, (unsigned)rcf_player->player_id);
+                                    websocket_server_broadcast(rcf_bcast);
+
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"flag_removed\"}");
+                                }
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "npc_unclaim") == 0) {
                             // NPC UNCLAIM: player removes their company ownership from an NPC.
                             // The NPC's company_id is set to COMPANY_UNCLAIMED (0).
@@ -6356,6 +6493,28 @@ int websocket_server_update(struct Sim* sim) {
                     // levelStats unchanged — close the modules array and ship object
                     offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
                 }
+
+                /* Append claimFlag field if a flag is planted on this ship */
+                {
+                    ClaimFlag* cf = NULL;
+                    for (int _fi = 0; _fi < MAX_CLAIM_FLAGS; _fi++) {
+                        if (claim_flags[_fi].active && claim_flags[_fi].ship_id == ship->id) {
+                            cf = &claim_flags[_fi]; break;
+                        }
+                    }
+                    if (cf && offset < (int)sizeof(ship_entry) - 200) {
+                        /* Remove trailing '}' and append claimFlag then re-close */
+                        if (offset > 0 && ship_entry[offset - 1] == '}') offset--;
+                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                            ",\"claimFlag\":{\"planterId\":%u,\"planterCompany\":%u,"
+                            "\"progressMs\":%.0f,\"totalMs\":%u,\"contested\":%s,"
+                            "\"localX\":%.1f,\"localY\":%.1f}}",
+                            (unsigned)cf->planter_id, (unsigned)cf->planter_company,
+                            cf->progress_ms, FLAG_CLAIM_DURATION_MS,
+                            cf->contested ? "true" : "false",
+                            cf->local_x, cf->local_y);
+                    }
+                }
                 {
                     int n = snprintf(ships_json + ships_offset, sizeof(ships_json) - (size_t)(ships_offset < (int)sizeof(ships_json) ? ships_offset : (int)sizeof(ships_json)-1), "%s", ship_entry);
                     if (n > 0) ships_offset += n;
@@ -7550,6 +7709,7 @@ void websocket_server_tick(float dt) {
     // ===== TICK SINKING SHIPS (velocity=0, despawn after 8s) =====
     tick_sinking_ships();
     tick_wrecks();
+    tick_claim_flags(dt);
 
     // ===== TICK GHOST SHIPS (wander + attack AI) =====
     tick_ghost_ships(dt);

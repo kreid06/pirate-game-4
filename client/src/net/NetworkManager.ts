@@ -530,6 +530,10 @@ export class NetworkManager {
   public onShipLevelUp: ((shipId: number, attribute: string, attrLevel: number, xp: number, shipLevel: number, totalCap: number, nextUpgradeCost: number) => void) | null = null;
   public onShipUnclaimed: ((shipId: number) => void) | null = null;
   public onShipClaimed: ((shipId: number, companyId: number) => void) | null = null;
+  public onFlagPlanted: ((shipId: number, planterId: number, planterCompany: number) => void) | null = null;
+  public onFlagUpdate: ((shipId: number, planterId: number, planterCompany: number, progressMs: number, totalMs: number, contested: boolean) => void) | null = null;
+  public onFlagRemoved: ((shipId: number) => void) | null = null;
+  public onFlagCaptureComplete: ((shipId: number, planterCompany: number) => void) | null = null;
   public onNpcUnclaimed: ((npcId: number) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
   /**
@@ -1519,6 +1523,16 @@ export class NetworkManager {
     this.socket.send(JSON.stringify({ type: 'claim_ship', shipId }));
   }
 
+  sendPlantClaimFlag(shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'plant_claim_flag', shipId }));
+  }
+
+  sendRemoveClaimFlag(shipId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'remove_claim_flag', shipId }));
+  }
+
   sendNpcUnclaim(npcId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: 'npc_unclaim', npcId }));
@@ -1962,6 +1976,15 @@ export class NetworkManager {
                   ship.levelStats.attrCaps?.sturdiness ?? 25,
                 ],
               } : tmpl.ship.levelStats,
+              claimFlag: ship.claimFlag ? {
+                planterId:      ship.claimFlag.planterId      ?? 0,
+                planterCompany: ship.claimFlag.planterCompany ?? 0,
+                progressMs:     ship.claimFlag.progressMs     ?? 0,
+                totalMs:        ship.claimFlag.totalMs        ?? 300000,
+                contested:      ship.claimFlag.contested      ?? false,
+                localX:         ship.claimFlag.localX         ?? 0,
+                localY:         ship.claimFlag.localY         ?? -100,
+              } : undefined,
             };
           }),
           players: (message.players || []).map((player: any) => ({
@@ -2609,6 +2632,31 @@ export class NetworkManager {
         const claimedCompany: number = message.companyId ?? 0;
         console.log(`⚓ ship_claimed: ship ${claimedShipId} → company ${claimedCompany}`);
         this.onShipClaimed?.(claimedShipId, claimedCompany);
+        break;
+      }
+
+      case 'flag_planted': {
+        console.log(`🚩 flag_planted: ship ${message.shipId} by player ${message.planterId} (company ${message.planterCompany})`);
+        this.onFlagPlanted?.(message.shipId ?? 0, message.planterId ?? 0, message.planterCompany ?? 0);
+        break;
+      }
+
+      case 'flag_update': {
+        // Keep ship claimFlag state in sync (ship broadcast already has it, but this is a faster path)
+        this.onFlagUpdate?.(message.shipId ?? 0, message.planterId ?? 0, message.planterCompany ?? 0,
+          message.progressMs ?? 0, message.totalMs ?? 300000, message.contested ?? false);
+        break;
+      }
+
+      case 'flag_removed': {
+        console.log(`🚩 flag_removed: ship ${message.shipId} by player ${message.removerId}`);
+        this.onFlagRemoved?.(message.shipId ?? 0);
+        break;
+      }
+
+      case 'flag_capture_complete': {
+        console.log(`🚩 flag_capture_complete: ship ${message.shipId} → company ${message.planterCompany}`);
+        this.onFlagCaptureComplete?.(message.shipId ?? 0, message.planterCompany ?? 0);
         break;
       }
 

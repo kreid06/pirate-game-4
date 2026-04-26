@@ -270,7 +270,26 @@ typedef enum {
     ITEM_SHIPYARD      = 26,
     ITEM_STONE         = 27,
     ITEM_WOOD_CEILING  = 28,
+    ITEM_CLAIM_FLAG    = 29,  /* Claiming flag — plant on an enemy ship to capture it */
 } ItemKind;
+
+/* ── Ship Claiming Flag ────────────────────────────────────────────────────── */
+#define FLAG_CLAIM_DURATION_MS    300000u  /* 5 minutes to capture (300 s) */
+#define FLAG_REVERSE_SPEED         10.0f   /* Countdown reverses 10x speed when contested */
+#define MAX_CLAIM_FLAGS            16      /* Max simultaneous flags across all ships */
+
+typedef struct {
+    bool     active;
+    uint16_t ship_id;           /* Target ship being claimed */
+    uint32_t planter_id;        /* Player who planted the flag */
+    uint8_t  planter_company;   /* Company that will gain the ship on capture */
+    float    progress_ms;       /* 0 = just planted, FLAG_CLAIM_DURATION_MS = claimed */
+    bool     contested;         /* true = enemy players/NPCs on deck — timer reverses */
+    float    local_x, local_y;  /* Ship-local position of the flag pole */
+} ClaimFlag;
+
+extern ClaimFlag claim_flags[MAX_CLAIM_FLAGS];
+extern int       claim_flag_count;
 
 /* ── Island structures ────────────────────────────────────────────────────── */
 typedef enum {

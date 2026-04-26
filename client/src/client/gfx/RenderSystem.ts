@@ -5412,6 +5412,9 @@ export class RenderSystem {
     // Queue ship ammo labels (layer 9 - HUD overlay above all ship elements)
     for (const ship of renderShips) {
       this.queueRenderItem(9, 'ship-ammo-hud', () => this.drawShipAmmoLabel(ship, camera));
+      if (ship.claimFlag) {
+        this.queueRenderItem(9, `ship-flag-${ship.id}`, () => this.drawShipClaimFlag(ship, camera));
+      }
     }
 
     // ── Sinking ghost ships (client-side fade-out after server despawn) ──────
@@ -9053,6 +9056,102 @@ export class RenderSystem {
 
     this.ctx.fillStyle = ship.infiniteAmmo ? '#aaffaa' : '#ffdd88';
     this.ctx.fillText(ammoText, screenPos.x, labelY);
+    this.ctx.restore();
+  }
+
+  private drawShipClaimFlag(ship: Ship, camera: Camera): void {
+    const cf = ship.claimFlag;
+    if (!cf) return;
+    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+
+    const zoom = camera.getState().zoom;
+    const cos = Math.cos(ship.rotation);
+    const sin = Math.sin(ship.rotation);
+
+    // Transform ship-local flag position to world coords
+    const wx = ship.position.x + cos * cf.localX - sin * cf.localY;
+    const wy = ship.position.y + sin * cf.localX + cos * cf.localY;
+    const sp = camera.worldToScreen(Vec2.from(wx, wy));
+
+    const poleH  = 32 * zoom;
+    const poleW  = 2.5 * zoom;
+    const flagW  = 18 * zoom;
+    const flagH  = 12 * zoom;
+
+    const progress = Math.min(1, cf.progressMs / cf.totalMs);
+    const t = Date.now() / 1000;
+    const pulse = cf.contested ? 0.55 + 0.45 * Math.sin(t * 6) : 1;
+
+    this.ctx.save();
+
+    // Glow behind pole when contested
+    if (cf.contested) {
+      this.ctx.shadowColor = `rgba(255,60,60,${0.4 * pulse})`;
+      this.ctx.shadowBlur  = 14 * zoom;
+    }
+
+    // Pole
+    this.ctx.strokeStyle = '#5c3a1a';
+    this.ctx.lineWidth   = poleW;
+    this.ctx.beginPath();
+    this.ctx.moveTo(sp.x, sp.y);
+    this.ctx.lineTo(sp.x, sp.y - poleH);
+    this.ctx.stroke();
+
+    this.ctx.shadowBlur = 0;
+
+    // Flag cloth — derive company color from planterCompany
+    const COMPANY_COLORS: Record<number, string> = {
+      1: '#2266aa',  // Solo → blue
+      2: '#cc2222',  // Pirates → red
+      3: '#2299aa',  // Navy → teal
+      99: '#556b2f', // Ghost → dark-olive
+    };
+    const clothColor = COMPANY_COLORS[cf.planterCompany] ?? '#cc2222';
+    const topX = sp.x;
+    const topY = sp.y - poleH;
+    this.ctx.fillStyle = clothColor;
+    this.ctx.beginPath();
+    this.ctx.moveTo(topX, topY);
+    this.ctx.lineTo(topX + flagW, topY + flagH * 0.4);
+    this.ctx.lineTo(topX, topY + flagH);
+    this.ctx.closePath();
+    this.ctx.fill();
+
+    // Progress arc ring below the pole tip
+    const arcR = 10 * zoom;
+    const arcCx = sp.x;
+    const arcCy = sp.y - poleH - arcR * 1.5;
+    const arcColor = cf.contested ? `rgba(255,60,60,${pulse})` : '#44ff88';
+
+    this.ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    this.ctx.lineWidth = 3 * zoom;
+    this.ctx.beginPath();
+    this.ctx.arc(arcCx, arcCy, arcR, 0, Math.PI * 2);
+    this.ctx.stroke();
+
+    this.ctx.strokeStyle = arcColor;
+    this.ctx.lineWidth = 3 * zoom;
+    this.ctx.lineCap = 'round';
+    this.ctx.beginPath();
+    this.ctx.arc(arcCx, arcCy, arcR, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress);
+    this.ctx.stroke();
+
+    // Label text above arc
+    const fontSize = Math.max(10, 11 * zoom);
+    this.ctx.font = `bold ${fontSize}px Arial`;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'bottom';
+    const label = cf.contested ? 'CONTESTED' : `${Math.round(progress * 100)}%`;
+    const labelY2 = arcCy - arcR - 4 * zoom;
+
+    this.ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    const mw = this.ctx.measureText(label).width;
+    this.ctx.fillRect(arcCx - mw / 2 - 3, labelY2 - fontSize, mw + 6, fontSize + 2);
+
+    this.ctx.fillStyle = cf.contested ? '#ff6666' : '#aaffaa';
+    this.ctx.fillText(label, arcCx, labelY2);
+
     this.ctx.restore();
   }
 
