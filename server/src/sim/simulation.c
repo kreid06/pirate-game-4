@@ -1568,8 +1568,10 @@ static bool point_in_polygon(Vec2Q16 point, const struct Ship* ship);
  * All arithmetic in float using server-unit space to avoid Q16 overflow of the
  * large mass/inertia values (mass=1000 kg, I=SHIP_INERTIA server_unit²·kg). */
 #define SHIP_RESTITUTION  0.3f
-/* Moment of inertia in server-unit²·kg.  Tunable: larger = less spin on hit. */
-#define SHIP_INERTIA      8000.0f
+/* Coulomb friction coefficient for ship-ship tangential impulse (spin from glancing blows). */
+#define SHIP_FRICTION     0.35f
+/* Fallback moment of inertia used only if ship->moment_inertia is uninitialised (server-unit²·kg). */
+#define SHIP_INERTIA      50000.0f
 /* Baumgarte position-correction factor [0,1].  Applied as a velocity bias that
  * drives remaining penetration to zero over ~1/β ticks without teleporting.
  * 0.4 → ~60% of residual error corrected each tick; feels smooth but firm. */
@@ -1674,7 +1676,12 @@ static void handle_ship_collisions(struct Sim* sim) {
             float w1  = Q16_TO_FLOAT(ship1->angular_velocity);
             float w2  = Q16_TO_FLOAT(ship2->angular_velocity);
             float m1  = Q16_TO_FLOAT(ship1->mass), m2 = Q16_TO_FLOAT(ship2->mass);
-            float I   = SHIP_INERTIA;
+            /* Per-ship moment of inertia from the physics layer; fall back to the
+             * tuned constant if the field is zero (uninitialised ship). */
+            float I1  = Q16_TO_FLOAT(ship1->moment_inertia);
+            float I2  = Q16_TO_FLOAT(ship2->moment_inertia);
+            if (I1 < 1.0f) I1 = SHIP_INERTIA;
+            if (I2 < 1.0f) I2 = SHIP_INERTIA;
 
             /* Limit manifold to MAX_CONTACT_POINTS for cache coherence */
             if (n_contacts > MAX_CONTACT_POINTS) n_contacts = MAX_CONTACT_POINTS;
@@ -1696,8 +1703,8 @@ static void handle_ship_collisions(struct Sim* sim) {
                     float r2x = cpx[ci] - p2x, r2y = cpy[ci] - p2y;
                     float r1xn = r1x*ny - r1y*nx;
                     float r2xn = r2x*ny - r2y*nx;
-                    dv1x += Jw*nx/m1;   dv1y += Jw*ny/m1;   dw1 += Jw*r1xn/I;
-                    dv2x -= Jw*nx/m2;   dv2y -= Jw*ny/m2;   dw2 -= Jw*r2xn/I;
+                    dv1x += Jw*nx/m1;   dv1y += Jw*ny/m1;   dw1 += Jw*r1xn/I1;
+                    dv2x -= Jw*nx/m2;   dv2y -= Jw*ny/m2;   dw2 -= Jw*r2xn/I2;
                 }
                 /* Apply warm-start to working velocities */
                 v1x += dv1x; v1y += dv1y; w1 += dw1;
@@ -1722,7 +1729,8 @@ static void handle_ship_collisions(struct Sim* sim) {
                 if (vrel_n >= 0.0f) continue;  /* separating at this point */
                 float r1xn = r1x*ny - r1y*nx;
                 float r2xn = r2x*ny - r2y*nx;
-                float denom = 1.0f/m1 + 1.0f/m2 + (r1xn*r1xn + r2xn*r2xn)/I;
+                /* Correct per-ship denominator: r²/I terms are separate */
+                float denom = 1.0f/m1 + 1.0f/m2 + r1xn*r1xn/I1 + r2xn*r2xn/I2;
                 if (denom < 1e-10f) continue;
                 float dt_f  = Q16_TO_FLOAT(FIXED_DT_Q16);
                 float pen_f = Q16_TO_FLOAT(overlap_depth);
@@ -1730,8 +1738,43 @@ static void handle_ship_collisions(struct Sim* sim) {
                 float J = (-(1.0f + SHIP_RESTITUTION) * vrel_n + bias) / denom;
                 if (J < 0.0f) J = 0.0f;  /* normal impulse can only push */
                 P_n_acc[ci] = J;
-                dv1x += J*nx/m1;   dv1y += J*ny/m1;   dw1 += J*r1xn/I;
-                dv2x -= J*nx/m2;   dv2y -= J*ny/m2;   dw2 -= J*r2xn/I;
+                dv1x += J*nx/m1;   dv1y += J*ny/m1;   dw1 += J*r1xn/I1;
+                dv2x -= J*nx/m2;   dv2y -= J*ny/m2;   dw2 -= J*r2xn/I2;
+            }
+
+            /* ── Friction impulse: tangential spin from glancing blows ──────────
+             * After the normal impulse has pushed the ships apart, compute the
+             * remaining tangential relative velocity at each contact and apply a
+             * Coulomb-capped friction impulse.  This is what makes a ship that
+             * clips another's bow rotate sideways rather than just sliding past. */
+            for (int ci = 0; ci < n_contacts; ci++) {
+                if (P_n_acc[ci] <= 0.0f) continue;  /* no normal force → no friction */
+                float r1x = cpx[ci] - p1x, r1y = cpy[ci] - p1y;
+                float r2x = cpx[ci] - p2x, r2y = cpy[ci] - p2y;
+                /* Contact velocity using post-normal-impulse state */
+                float cv1x = (v1x + dv1x) + (w1 + dw1)*(-r1y);
+                float cv1y = (v1y + dv1y) + (w1 + dw1)*(r1x);
+                float cv2x = (v2x + dv2x) + (w2 + dw2)*(-r2y);
+                float cv2y = (v2y + dv2y) + (w2 + dw2)*(r2x);
+                float vrel_x = cv1x - cv2x;
+                float vrel_y = cv1y - cv2y;
+                /* Tangential component (subtract normal projection) */
+                float vn     = vrel_x*nx + vrel_y*ny;
+                float vt_x   = vrel_x - vn*nx;
+                float vt_y   = vrel_y - vn*ny;
+                float vt_len = sqrtf(vt_x*vt_x + vt_y*vt_y);
+                if (vt_len < 0.001f) continue;
+                float tx = vt_x / vt_len, ty = vt_y / vt_len;
+                float r1xt = r1x*ty - r1y*tx;
+                float r2xt = r2x*ty - r2y*tx;
+                float denom_f = 1.0f/m1 + 1.0f/m2 + r1xt*r1xt/I1 + r2xt*r2xt/I2;
+                if (denom_f < 1e-10f) continue;
+                float Jf     = -vt_len / denom_f;
+                float Jf_max =  SHIP_FRICTION * P_n_acc[ci];
+                if (Jf < -Jf_max) Jf = -Jf_max;
+                if (Jf >  Jf_max) Jf =  Jf_max;
+                dv1x += Jf*tx/m1;   dv1y += Jf*ty/m1;   dw1 += Jf*r1xt/I1;
+                dv2x -= Jf*tx/m2;   dv2y -= Jf*ty/m2;   dw2 -= Jf*r2xt/I2;
             }
 
             ship1->velocity.x = Q16_FROM_FLOAT(v1x + dv1x);
