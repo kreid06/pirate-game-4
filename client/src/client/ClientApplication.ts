@@ -1653,6 +1653,12 @@ export class ClientApplication {
         this.networkManager.sendDropItem(fromSlot);
       };
 
+      // Hand-craft from inventory (no workbench needed)
+      this.uiManager.playerMenu.onCraftRequest = (outputItem) => {
+        const recipeId = `craft_${outputItem.replace(/-/g, '_')}`;
+        this.networkManager.sendCraftItem(recipeId);
+      };
+
       // Handle drop picker item selection (hold-E near pile)
       this.uiManager.onDropPickerPick = (itemId) => {
         this.networkManager.sendPickupItem(itemId);

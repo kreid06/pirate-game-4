@@ -197,6 +197,18 @@ const RECIPES: Recipe[] = [
       { label: 'Stone', count: 4 },
     ],
   },
+  {
+    id: 'craft_claim_flag',
+    category: 'Tools',
+    outputName: 'Claiming Flag',
+    outputCount: 1,
+    symbol: '🚩',
+    color: '#dd3333',
+    borderColor: '#991111',
+    ingredients: [
+      { label: 'Wood', count: 5 },
+    ],
+  },
   // ── Ship ──────────────────────────────────────────────────────────────────
   {
     id: 'craft_plank',
