@@ -24,8 +24,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
     /* ── Island 1: Tropical bump-circle island ─────────────────────────── */
     {
         .id              = 1,
-        .x               = 45000.0f,
-        .y               = 45000.0f,
+        .x               = 9000.0f,
+        .y               = 62000.0f,
         .beach_radius_px = 185.0f,
         .grass_radius_px = 148.0f,
         /* Mirror of client RenderSystem.ISLAND_PRESETS['tropical'].beachBumps */
@@ -56,8 +56,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
      * them procedurally at startup.                                         */
     {
         .id               = 2,
-        .x                = 14500.0f,
-        .y                = 51000.0f,
+        .x                = 9000.0f,
+        .y                = 52000.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -133,8 +133,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
      * CW winding in screen-space (y-down).                                  */
     {
         .id               = 3,
-        .x                = 73000.0f,
-        .y                = 67000.0f,
+        .x                = 79000.0f,
+        .y                = 68000.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -223,8 +223,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
      * World centre (19800, 25200). */
     {
         .id               = 4,
-        .x                = 19000.0f,
-        .y                = 27000.0f,
+        .x                = 16000.0f,
+        .y                = 15000.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -313,8 +313,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
      * World centre (70200, 25200). */
     {
         .id               = 5,
-        .x                = 74000.0f,
-        .y                = 35000.0f,
+        .x                = 75000.0f,
+        .y                = 23000.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -403,8 +403,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
      * World centre (19800, 68400). */
     {
         .id               = 6,
-        .x                = 18000.0f,
-        .y                = 72000.0f,
+        .x                = 11000.0f,
+        .y                = 78000.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -493,8 +493,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
      * World centre (64800, 37800). */
     {
         .id               = 7,
-        .x                = 70000.0f,
-        .y                = 17000.0f,
+        .x                = 82000.0f,
+        .y                = 45000.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -549,8 +549,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
      * World centre (43200, 68400). */
     {
         .id               = 8,
-        .x                = 40000.0f,
-        .y                = 75000.0f,
+        .x                = 48000.0f,
+        .y                = 82000.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},
@@ -605,8 +605,8 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
      * World centre (45000, 19800). */
     {
         .id               = 9,
-        .x                = 25000.0f,
-        .y                = 16000.0f,
+        .x                = 45000.0f,
+        .y                = 11000.0f,
         .beach_radius_px  = 0.0f,
         .grass_radius_px  = 0.0f,
         .beach_bumps      = {0},

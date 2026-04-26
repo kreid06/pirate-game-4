@@ -2531,8 +2531,8 @@ int websocket_server_update(struct Sim* sim) {
                                             log_info("⚔️  Player %u respawned on ship %u", player->player_id, ship_id);
                                         } else {
                                             // Ship not found — fall back to Island 1 shore
-                                            player->x = 45000.0f;
-                                            player->y = 45000.0f;
+                                            player->x = 9000.0f;
+                                            player->y = 62000.0f;
                                             player->parent_ship_id = 0;
                                             player->movement_state = PLAYER_STATE_SWIMMING;
                                             // Sync sim entity so the tick loop doesn't snap the player back
