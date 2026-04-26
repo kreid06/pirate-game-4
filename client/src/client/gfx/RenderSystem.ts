@@ -5416,7 +5416,7 @@ export class RenderSystem {
     ctx.scale(cameraState.zoom, cameraState.zoom);
     ctx.rotate(ship.rotation - cameraState.rotation);
 
-    const wakeAlpha = (0.08 + wakeFactor * 0.22) * phase1Alpha;
+    const wakeAlpha = (0.15 + wakeFactor * 0.42) * phase1Alpha;
     // Bow is at local +X (max hull X), stern at -X (min hull X).
     // Physics convention: signedForwardSpeed >= 0 maps to BACKWARD motion in this client,
     // so leadSign is intentionally inverted.
@@ -5427,14 +5427,14 @@ export class RenderSystem {
       : 150;
     const leadX = (bowLocalX - 80) * -leadSign;
     const bowGlow = ctx.createRadialGradient(leadX, 0, 12, leadX, 0, 170 + wakeFactor * 65);
-    bowGlow.addColorStop(0, `rgba(235,245,255,${(wakeAlpha * (0.8 + 0.2 * pulse)).toFixed(3)})`);
+    bowGlow.addColorStop(0, `rgba(248,252,255,${(wakeAlpha * (1.0 + 0.25 * pulse)).toFixed(3)})`);  
     bowGlow.addColorStop(1, 'rgba(180,210,245,0)');
     ctx.fillStyle = bowGlow;
     ctx.beginPath();
     ctx.ellipse(leadX, 0, 140 + wakeFactor * 65, 54 + wakeFactor * 28, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.strokeStyle = `rgba(225,240,255,${(wakeAlpha * 1.1).toFixed(3)})`;
+    ctx.strokeStyle = `rgba(245,252,255,${(wakeAlpha * 1.4).toFixed(3)})`;  
     ctx.lineWidth = 2.6;
     ctx.beginPath();
     ctx.moveTo(bowLocalX * -leadSign, -10);
@@ -5533,12 +5533,12 @@ export class RenderSystem {
     ctx.lineJoin = 'round';
 
     // Pass A – Wash (core foam stripe, 4 fade buckets).
-    const washBaseW = Math.min(80, Math.max(2, (24 + wakeFactor * 18) * z));
+    const washBaseW = Math.min(100, Math.max(3, (34 + wakeFactor * 28) * z));
     for (let b = 0; b < 4; b++) {
       const fadeMin = b / 4, fadeMax = (b + 1) / 4, fadeMid = (fadeMin + fadeMax) / 2;
-      const alpha = wakeAlpha * 0.9 * fadeMid;
+      const alpha = wakeAlpha * 1.2 * fadeMid;
       if (alpha <= 0.01) continue;
-      ctx.strokeStyle = `rgba(230,242,255,${alpha.toFixed(3)})`;
+      ctx.strokeStyle = `rgba(248,252,255,${alpha.toFixed(3)})`;
       ctx.lineWidth   = washBaseW * fadeMid;
       ctx.beginPath();
       let drew = false;
@@ -5559,12 +5559,12 @@ export class RenderSystem {
     for (let i = 1; i < N; i++) {
       const fade = fades[i];
       if (fade <= 0) continue;
-      const alpha = wakeAlpha * 0.85 * fade;
+      const alpha = wakeAlpha * 1.1 * fade;
       if (alpha <= 0.01) continue;
       const qa = Math.round(alpha / 0.05) * 0.05;
       if (qa !== lastAlpha) {
         if (lastAlpha >= 0) ctx.stroke();
-        ctx.strokeStyle = `rgba(215,235,255,${qa.toFixed(2)})`;
+        ctx.strokeStyle = `rgba(238,250,255,${qa.toFixed(2)})`;
         ctx.beginPath();
         lastAlpha = qa;
       }

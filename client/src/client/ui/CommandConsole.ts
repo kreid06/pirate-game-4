@@ -68,6 +68,21 @@ const COMMANDS: CommandDef[] = [
     ],
   },
   {
+    name: 'forcesave',
+    description: 'Immediately save the world state to disk.',
+    args: [],
+  },
+  {
+    name: 'shutdown',
+    description: 'Broadcast server_shutdown and stop the server.',
+    args: [{ name: 'save', values: ['true', 'false'] }],
+  },
+  {
+    name: 'restart',
+    description: 'Save, broadcast server_shutdown, then re-launch the server binary.',
+    args: [{ name: 'save', values: ['true', 'false'] }],
+  },
+  {
     name: 'help',
     description: 'List available commands.',
     args: [],
