@@ -3,6 +3,7 @@
 #include "net/network.h"
 #include "util/log.h"
 #include "util/time.h"
+#include "sim/world_save.h"
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
@@ -777,6 +778,24 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                         admin_api_websocket_entities(&resp);
                     } else if (strcmp(path_start, "/api/islands") == 0) {
                         admin_api_islands(&resp);
+                    } else if (strcmp(path_start, "/api/world/state") == 0) {
+                        /* Return the current save file as JSON */
+                        static char world_state_buf[524288]; /* 512 KB */
+                        FILE *wf = fopen(WORLD_SAVE_DEFAULT_PATH, "r");
+                        if (wf) {
+                            size_t n = fread(world_state_buf,
+                                             1, sizeof(world_state_buf) - 1, wf);
+                            fclose(wf);
+                            world_state_buf[n] = '\0';
+                            resp.status_code   = 200;
+                            resp.content_type  = "application/json";
+                            resp.body          = world_state_buf;
+                            resp.body_length   = n;
+                        } else {
+                            resp.status_code  = 404;
+                            resp.body         = "{\"error\":\"No save file found\"}";
+                            resp.body_length  = 30;
+                        }
                     } else {
                         resp.status_code = 404;
                         resp.body = "Not Found";
@@ -797,7 +816,31 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                     *path_end = '\0';
 
                     struct HttpResponse resp = {0};
-                    if (strcmp(post_start, "/api/islands/save") == 0) {
+                    if (strcmp(post_start, "/api/world/save") == 0) {
+                        int sr = world_save(WORLD_SAVE_DEFAULT_PATH);
+                        if (sr == 0) {
+                            resp.status_code = 200;
+                            resp.content_type = "application/json";
+                            resp.body = "{\"ok\":true,\"path\":\"" WORLD_SAVE_DEFAULT_PATH "\"}";
+                            resp.body_length = strlen(resp.body);
+                        } else {
+                            resp.status_code = 500;
+                            resp.body = "{\"ok\":false,\"error\":\"save failed\"}";
+                            resp.body_length = strlen(resp.body);
+                        }
+                    } else if (strcmp(post_start, "/api/world/load") == 0) {
+                        int lr = world_load(WORLD_SAVE_DEFAULT_PATH);
+                        if (lr == 0) {
+                            resp.status_code = 200;
+                            resp.content_type = "application/json";
+                            resp.body = "{\"ok\":true}";
+                            resp.body_length = 12;
+                        } else {
+                            resp.status_code = 500;
+                            resp.body = "{\"ok\":false,\"error\":\"load failed\"}";
+                            resp.body_length = strlen(resp.body);
+                        }
+                    } else if (strcmp(post_start, "/api/islands/save") == 0) {
                         size_t blen = body ? strlen(body) : 0;
                         admin_api_islands_save(&resp, body, blen);
                     } else if (strcmp(post_start, "/api/admin/ship") == 0) {

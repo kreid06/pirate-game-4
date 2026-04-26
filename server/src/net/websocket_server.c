@@ -2,6 +2,8 @@
 #include "net/websocket_server_internal.h"
 #include "sim/ship_level.h"
 #include "sim/island.h"
+#include "sim/world_save.h"
+#include "server.h"
 #include "net/websocket_protocol.h"
 #include "net/network.h"
 #include "sim/simulation.h"
@@ -5428,6 +5430,67 @@ int websocket_server_update(struct Sim* sim) {
                                             kp_player->name);
                                     }
                                 }
+
+                            } else if (strcmp(cmd_name, "forcesave") == 0) {
+                                /* /forcesave
+                                 * Immediately writes world_state.json. */
+                                int fs_r = world_save(WORLD_SAVE_DEFAULT_PATH);
+                                if (fs_r == 0) {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\","
+                                        "\"success\":true,"
+                                        "\"text\":\"World saved to %s.\"}",
+                                        WORLD_SAVE_DEFAULT_PATH);
+                                } else {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\","
+                                        "\"success\":false,"
+                                        "\"text\":\"Save failed \u2014 check server logs.\"}");
+                                }
+                                log_info("💾 Player %u issued /forcesave", client->player_id);
+
+                            } else if (strcmp(cmd_name, "shutdown") == 0) {
+                                /* /shutdown [true|false]   (default: save=true)
+                                 * Saves the world (unless arg is "false") then stops the server. */
+                                bool do_save = (cmd_arg1[0] == '\0'
+                                    || strcmp(cmd_arg1, "true") == 0
+                                    || strcmp(cmd_arg1, "1")    == 0);
+                                if (do_save) world_save(WORLD_SAVE_DEFAULT_PATH);
+
+                                /* Broadcast warning to all clients */
+                                websocket_server_broadcast(
+                                    "{\"type\":\"server_shutdown\","
+                                    "\"message\":\"Server is shutting down.\"}");
+
+                                snprintf(response, sizeof(response),
+                                    "{\"type\":\"command_response\","
+                                    "\"success\":true,"
+                                    "\"text\":\"Server shutting down (save=%s).\"}",
+                                    do_save ? "true" : "false");
+                                log_info("🛑 Player %u issued /shutdown (save=%s)",
+                                         client->player_id, do_save ? "yes" : "no");
+                                g_server_shutdown_requested = 1;
+
+                            } else if (strcmp(cmd_name, "restart") == 0) {
+                                /* /restart [true|false]    (default: save=true)
+                                 * Saves the world (unless arg is "false") then re-execs the binary. */
+                                bool do_save = (cmd_arg1[0] == '\0'
+                                    || strcmp(cmd_arg1, "true") == 0
+                                    || strcmp(cmd_arg1, "1")    == 0);
+                                if (do_save) world_save(WORLD_SAVE_DEFAULT_PATH);
+
+                                websocket_server_broadcast(
+                                    "{\"type\":\"server_shutdown\","
+                                    "\"message\":\"Server is restarting.\"}");
+
+                                snprintf(response, sizeof(response),
+                                    "{\"type\":\"command_response\","
+                                    "\"success\":true,"
+                                    "\"text\":\"Server restarting (save=%s).\"}",
+                                    do_save ? "true" : "false");
+                                log_info("♻️  Player %u issued /restart (save=%s)",
+                                         client->player_id, do_save ? "yes" : "no");
+                                g_server_restart_requested = 1;
 
                             } else {
                                 snprintf(response, sizeof(response),

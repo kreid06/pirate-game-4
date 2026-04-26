@@ -8,6 +8,15 @@
 #include "util/time.h"
 #include "util/log.h"
 #include "core/rng.h"
+#include "sim/world_save.h"
+
+volatile int g_server_shutdown_requested = 0;
+volatile int g_server_restart_requested  = 0;
+
+/* Auto-save every 15 minutes: 15 * 60 * TICK_RATE_HZ ticks */
+#define AUTOSAVE_INTERVAL_TICKS  (15 * 60 * TICK_RATE_HZ)
+/* Hourly archive snapshot: 60 * 60 * TICK_RATE_HZ ticks */
+#define ARCHIVE_INTERVAL_TICKS   (60 * 60 * TICK_RATE_HZ)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -178,9 +187,16 @@ int server_run(struct ServerContext* ctx) {
     
     uint64_t next_tick_time = ctx->tick_start_time;
     uint32_t shutdown_countdown = 0;
-    
+    uint32_t last_autosave_tick = 0;
+    uint32_t last_archive_tick  = 0;
+
     while (ctx->should_run) {
         uint64_t tick_start = get_time_us();
+
+        /* ── Poll global command flags (set by chat command handler) ── */
+        if (g_server_shutdown_requested || g_server_restart_requested) {
+            ctx->should_run = false;
+        }
         
         // Process incoming network packets
         process_network_input(ctx);
@@ -199,7 +215,19 @@ int server_run(struct ServerContext* ctx) {
         
         // Send state updates to clients
         send_snapshots(ctx);
-        
+
+        /* ── Auto-save every 15 minutes ── */
+        if (ctx->current_tick - last_autosave_tick >= AUTOSAVE_INTERVAL_TICKS) {
+            world_save(WORLD_SAVE_DEFAULT_PATH);
+            last_autosave_tick = ctx->current_tick;
+        }
+
+        /* ── Hourly archive snapshot (kept for 48 h) ── */
+        if (ctx->current_tick - last_archive_tick >= ARCHIVE_INTERVAL_TICKS) {
+            world_save_archive();
+            last_archive_tick = ctx->current_tick;
+        }
+
         // Update tick counter
         ctx->current_tick++;
         
