@@ -16,6 +16,7 @@ import {
   Npc,
   Ship,
   COMPANY_NEUTRAL,
+  COMPANY_SOLO,
   COMPANY_PIRATES,
   COMPANY_NAVY,
   NPC_STATE_IDLE,
@@ -73,9 +74,28 @@ const GOLD      = '#ffd700';
 export class CompanyMenu {
   public visible = false;
 
+  /** Fired when the player clicks the Leave Company button. */
+  public onLeaveCompany: (() => void) | null = null;
+
+  /** Hit area of the Leave Company button — refreshed each render. */
+  private _leaveBtnArea: { x: number; y: number; w: number; h: number } | null = null;
+
   // ── Toggle ──────────────────────────────────────────────────────────────────
   toggle(): void {
     this.visible = !this.visible;
+  }
+
+  /** Returns true if the click landed on a button inside the menu. */
+  handleClick(x: number, y: number): boolean {
+    if (!this.visible) return false;
+    if (this._leaveBtnArea) {
+      const b = this._leaveBtnArea;
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+        this.onLeaveCompany?.();
+        return true;
+      }
+    }
+    return false;
   }
 
   open():  void { this.visible = true;  }
@@ -190,12 +210,36 @@ export class CompanyMenu {
     const name = COMPANY_NAMES[playerCompany] ?? `Company ${playerCompany}`;
     ctx.fillText(name.toUpperCase(), swatchX + 26, py + sectionH / 2);
 
-    // Player ID tag
-    if (playerId != null) {
+    // Player ID tag (only when not showing the leave button)
+    const canLeave = playerCompany !== COMPANY_SOLO && playerCompany !== COMPANY_NEUTRAL;
+    if (!canLeave && playerId != null) {
       ctx.font      = '13px Consolas, monospace';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'right';
       ctx.fillText(`Player #${playerId}`, px + PANEL_W - PAD - 8, py + sectionH / 2);
+    }
+
+    // Leave Company button — only shown when in a guild company
+    if (canLeave) {
+      const btnW = 120;
+      const btnH = 22;
+      const btnX = px + PANEL_W - PAD - btnW;
+      const btnY = py + (sectionH - btnH) / 2;
+      this._leaveBtnArea = { x: btnX, y: btnY, w: btnW, h: btnH };
+
+      ctx.fillStyle = '#7a1a1a';
+      ctx.fillRect(btnX, btnY, btnW, btnH);
+      ctx.strokeStyle = '#cc4444';
+      ctx.lineWidth   = 1;
+      ctx.strokeRect(btnX, btnY, btnW, btnH);
+
+      ctx.font         = 'bold 12px Consolas, monospace';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = '#ff8888';
+      ctx.fillText('LEAVE COMPANY', btnX + btnW / 2, btnY + btnH / 2);
+    } else {
+      this._leaveBtnArea = null;
     }
 
     return py + sectionH + 8;

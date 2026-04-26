@@ -1561,6 +1561,11 @@ export class ClientApplication {
         this.networkManager.sendClaimShip(shipId);
       });
 
+      // Wire Leave Company button in the company menu — moves player back to Solo
+      this.uiManager.setLeaveCompanyCallback(() => {
+        this.networkManager.sendCommand('/AddPlayerToCompany solo');
+      });
+
       // Wire NPC stat upgrade requests from the crew level menu to the server
       this.uiManager.setCrewUpgradeCallback((npcId, stat) => {
         this.networkManager.sendCrewUpgrade(npcId, stat);

@@ -1058,6 +1058,11 @@ export class UIManager {
     this.shipMenu.onClaimShip = cb;
   }
 
+  /** Set callback for the Leave Company button in the company menu. */
+  setLeaveCompanyCallback(cb: () => void): void {
+    this.companyMenu.onLeaveCompany = cb;
+  }
+
   /**
    * Set callback for NPC stat upgrades from the crew level menu.
    * Called when the player clicks an affordable upgrade button.
@@ -1172,9 +1177,9 @@ export class UIManager {
       const consumed = this.handleBuildModeClick(x, y);
       if (consumed) return true;
     }
-    // If company menu is open, clicks anywhere close it (the menu itself has no buttons yet).
-    // Log-term: route internal clicks to menu sub-elements here.
+    // If company menu is open, try internal buttons first, then close on outside click.
     if (this.activeMenuId === MENU_ID.COMPANY) {
+      if (this.companyMenu.handleClick(x, y)) return true;
       this.closeActiveMenu();
       return true;
     }

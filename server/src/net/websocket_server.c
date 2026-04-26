@@ -5090,9 +5090,10 @@ int websocket_server_update(struct Sim* sim) {
                             /* Player-typed console command.
                              * {"type":"command","command":"/AddPlayerToCompany pirates"}
                              * Supported commands:
-                             *   /AddPlayerToCompany <pirates|navy|neutral>
+                             *   /AddPlayerToCompany <pirates|navy|solo>
                              *   /TpPlayerToShip <playername> <ship_id>
                              *   /SpawnEntity <crewmember> [neutral|pirates|navy]
+                             *   /SpawnShip [brigantine|ghost|sloop|cutter]
                              */
                             char cmd_str[256] = "";
                             char *p_cmd = strstr(payload, "\"command\":");
@@ -5601,6 +5602,71 @@ int websocket_server_update(struct Sim* sim) {
                                 log_info("♻️  Player %u issued /restart (save=%s)",
                                          client->player_id, do_save ? "yes" : "no");
                                 g_server_restart_requested = 1;
+
+                            } else if (strcmp(cmd_name, "spawnship") == 0) {
+                                /* /SpawnShip [brigantine|ghost|sloop|cutter]
+                                 * Spawns a ship at the issuing player's world position.
+                                 * Defaults to brigantine if no type given. */
+
+                                /* Resolve ship type */
+                                bool ss_ghost = false;
+                                bool ss_valid = true;
+                                const char *ss_type_name = "Brigantine";
+                                if (cmd_arg1[0] == '\0'
+                                    || strcmp(cmd_arg1, "brigantine") == 0) {
+                                    ss_type_name = "Brigantine";
+                                } else if (strcmp(cmd_arg1, "ghost") == 0) {
+                                    ss_ghost = true;
+                                    ss_type_name = "Ghost Ship";
+                                } else if (strcmp(cmd_arg1, "sloop") == 0) {
+                                    ss_type_name = "Sloop";
+                                } else if (strcmp(cmd_arg1, "cutter") == 0) {
+                                    ss_type_name = "Cutter";
+                                } else {
+                                    ss_valid = false;
+                                }
+
+                                if (!ss_valid) {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\","
+                                        "\"success\":false,"
+                                        "\"text\":\"Unknown ship type '%s'. Use: brigantine, ghost, sloop, cutter\"}",
+                                        cmd_arg1);
+                                } else if (ship_count >= MAX_SIMPLE_SHIPS) {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\","
+                                        "\"success\":false,"
+                                        "\"text\":\"Cannot spawn: ship cap reached.\"}");
+                                } else {
+                                    WebSocketPlayer *ss_issuer = find_player(client->player_id);
+                                    float ss_x = ss_issuer ? ss_issuer->x + 200.0f : 0.0f;
+                                    float ss_y = ss_issuer ? ss_issuer->y : 0.0f;
+                                    uint32_t ss_id = 0;
+
+                                    if (ss_ghost) {
+                                        ss_id = websocket_server_create_ghost_ship(ss_x, ss_y);
+                                    } else {
+                                        uint8_t ss_company = ss_issuer
+                                            ? ss_issuer->company_id : COMPANY_SOLO;
+                                        ss_id = websocket_server_create_ship(
+                                            ss_x, ss_y, ss_company, 0xFF);
+                                    }
+
+                                    if (ss_id == 0) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":false,"
+                                            "\"text\":\"Failed to spawn ship — check server logs.\"}");
+                                    } else {
+                                        log_info("🚢 Player %u spawned %s (id %u) at (%.0f, %.0f) via /SpawnShip",
+                                                 client->player_id, ss_type_name, ss_id, ss_x, ss_y);
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":true,"
+                                            "\"text\":\"Spawned %s (id %u) ahead of you.\"}",
+                                            ss_type_name, ss_id);
+                                    }
+                                }
 
                             } else {
                                 snprintf(response, sizeof(response),

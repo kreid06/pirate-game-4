@@ -35,7 +35,7 @@ const COMMANDS: CommandDef[] = [
   {
     name: 'AddPlayerToCompany',
     description: 'Join a company (faction).',
-    args: [{ name: 'company', values: ['pirates', 'navy', 'neutral'] }],
+    args: [{ name: 'company', values: ['solo', 'pirates', 'navy'] }],
   },
   {
     name: 'TpPlayerToShip',
@@ -44,6 +44,11 @@ const COMMANDS: CommandDef[] = [
       { name: 'playername' },
       { name: 'ship_id' },
     ],
+  },
+  {
+    name: 'SpawnShip',
+    description: 'Spawn a ship ahead of you.',
+    args: [{ name: 'type', values: ['brigantine', 'ghost', 'sloop', 'cutter'] }],
   },
   {
     name: 'SpawnEntity',
