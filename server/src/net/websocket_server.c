@@ -4428,7 +4428,8 @@ int websocket_server_update(struct Sim* sim) {
                                     }
                                 }
                                 if (rn_npc_ptr && rn_npc_ptr->company_id == 0) {
-                                    rn_npc_ptr->company_id = rn_player->company_id;
+                                    rn_npc_ptr->company_id      = rn_player->company_id;
+                                    rn_npc_ptr->owner_player_id = rn_player->player_id;
                                     log_info("🤝 Player %u recruited NPC %u '%s' (company %u)",
                                              rn_player->player_id, rn_npc_id,
                                              rn_npc_ptr->name, rn_player->company_id);
@@ -4841,7 +4842,8 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                             }
                             if (nu_npc && nu_npc->company_id == nu_player->company_id) {
-                                nu_npc->company_id = COMPANY_UNCLAIMED;
+                                nu_npc->company_id      = COMPANY_UNCLAIMED;
+                                nu_npc->owner_player_id = 0;
                                 log_info("⚓ NPC %u '%s' unclaimed by player %u",
                                          nu_npc_id, nu_npc->name, nu_player->player_id);
                                 char nu_bcast[96];
@@ -5336,6 +5338,9 @@ int websocket_server_update(struct Sim* sim) {
                                     npc->role            = NPC_ROLE_NONE;
                                     npc->ship_id         = 0;
                                     npc->company_id      = spawn_company;
+                                    /* For solo spawns, bind to the issuing player */
+                                    npc->owner_player_id = (spawn_company == COMPANY_SOLO && issuer)
+                                        ? issuer->player_id : 0;
                                     npc->move_speed      = 80.0f;
                                     npc->interact_radius = 40.0f;
                                     npc->state           = WORLD_NPC_STATE_IDLE;
@@ -6465,6 +6470,7 @@ int websocket_server_update(struct Sim* sim) {
                     "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                     "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
                     "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u,"
+                    "\"owner_id\":%u,"
                     "\"assigned_weapon_id\":%u,"
                     "\"npc_level\":%u,\"health\":%u,\"max_health\":%u,\"xp\":%u,"
                     "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
@@ -6473,6 +6479,7 @@ int websocket_server_update(struct Sim* sim) {
                     npc->x, npc->y, npc->rotation,
                     npc->ship_id, npc->local_x, npc->local_y,
                     npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id,
+                    npc->owner_player_id,
                     npc->assigned_weapon_id,
                     (unsigned)npc->npc_level, (unsigned)npc->health, (unsigned)npc->max_health, npc->xp,
                     (unsigned)npc->stat_health, (unsigned)npc->stat_damage, (unsigned)npc->stat_stamina, (unsigned)npc->stat_weight,

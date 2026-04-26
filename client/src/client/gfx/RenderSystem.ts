@@ -157,6 +157,8 @@ export class RenderSystem {
   private _tombstoneShipAttach: Map<number, { shipId: number; localX: number; localY: number }> = new Map();
   /** Ships from the last rendered frame — used for tombstone ship-tracking. */
   private _cachedWorldShips: Ship[] = [];
+  /** Players from the last rendered frame — used for NPC owner resolution in tooltips. */
+  private _cachedWorldPlayers: Player[] = [];
   /** Dropped items in the world (player-dropped inventory items). */
   private _droppedItems: import('../../sim/Types').DroppedItem[] = [];
   /** Maps scaffolded ship entity IDs to the shipyard structure that owns them. */
@@ -2665,7 +2667,8 @@ export class RenderSystem {
       ? worldState.players.find(p => p.id === this.localPlayerId) ?? null
       : null;
     this._localCompanyId = this._cachedLocalPlayer?.companyId ?? 0;
-    this._cachedWorldShips = worldState.ships;
+    this._cachedWorldShips   = worldState.ships;
+    this._cachedWorldPlayers  = worldState.players;
 
     // Rebuild scaffolded ship lookup: maps ship entity ID → owning shipyard structure
     this._scaffoldedShips.clear();
@@ -9498,7 +9501,12 @@ export class RenderSystem {
 
     // Colour NPC by company then task assignment (darkened via globalAlpha when moving)
     const npcTask = this.npcTaskMap.get(npc.id) ?? 'Idle';
-    const _npcIsEnemy   = this._localCompanyId !== 0 && npc.companyId !== 0 && npc.companyId !== this._localCompanyId;
+    // For COMPANY_SOLO NPCs, treat as enemy if they belong to a different player
+    const _npcIsEnemy = this._localCompanyId !== 0 && npc.companyId !== 0 && (
+      npc.companyId === COMPANY_SOLO
+        ? (npc.ownerId !== 0 && npc.ownerId !== this.localPlayerId)
+        : npc.companyId !== this._localCompanyId
+    );
     const _npcIsNeutral = npc.companyId === COMPANY_UNCLAIMED;
     this.ctx.fillStyle = _npcIsNeutral ? '#222222' : _npcIsEnemy ? '#cc2222' : (NPC_TASK_COLORS[npcTask] ?? '#DAA520');
     this.ctx.strokeStyle = '#ffffff';
@@ -10213,7 +10221,10 @@ export class RenderSystem {
       0: 'Idle', 1: 'Moving', 2: 'At Station', 3: 'Repairing',
     };
 
-    const sameCompany = this._localCompanyId !== 0 && npc.companyId === this._localCompanyId;
+    // For COMPANY_SOLO NPCs, same-company only if this player owns them
+    const sameCompany = npc.companyId === COMPANY_SOLO
+      ? (npc.ownerId !== 0 && npc.ownerId === this.localPlayerId)
+      : (this._localCompanyId !== 0 && npc.companyId === this._localCompanyId);
     const hpPct = npc.maxHealth > 0 ? npc.health / npc.maxHealth : 1;
     const xpToNext = npc.npcLevel * 100;
     const xpPct    = Math.min(npc.xp / xpToNext, 1);
@@ -10229,9 +10240,21 @@ export class RenderSystem {
     this.ctx.textBaseline = 'top';
 
     const COMPANY_NAMES: Record<number, string> = { [COMPANY_UNCLAIMED]: 'Unclaimed', [COMPANY_SOLO]: 'Solo', [COMPANY_PIRATES]: 'Pirates', [COMPANY_NAVY]: 'Navy', [COMPANY_GHOST]: 'Ghost Ships' };
+    const COMPANY_COLORS_MAP: Record<number, string> = { [COMPANY_UNCLAIMED]: '#888888', [COMPANY_SOLO]: '#ffcc44', [COMPANY_PIRATES]: '#ff6644', [COMPANY_NAVY]: '#4488ff', [COMPANY_GHOST]: '#00eeff' };
+
+    // Resolve owner name: for solo NPCs use the ownerId field directly
+    let ownerName: string | null = null;
+    if (npc.companyId === COMPANY_SOLO && npc.ownerId !== 0) {
+      const ownerPlayer = this._cachedWorldPlayers.find(p => p.id === npc.ownerId);
+      ownerName = ownerPlayer?.name ?? `Player #${npc.ownerId}`;
+    }
+
     const titleText   = `${npc.name}  Lv.${npc.npcLevel}${npc.locked ? '  🔒' : ''}`;
     const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
-    const companyText = `Company: ${COMPANY_NAMES[npc.companyId] ?? `#${npc.companyId}`}`;
+    const companyLabel = COMPANY_NAMES[npc.companyId] ?? `#${npc.companyId}`;
+    const companyText = ownerName
+      ? `Owner: ${ownerName}  (${companyLabel})`
+      : `Company: ${companyLabel}`;
     const hpText      = `HP ${npc.health}/${npc.maxHealth} (${Math.round(hpPct * 100)}%)`;
 
     const lines = [titleText, subText, companyText, hpText];
@@ -10265,6 +10288,15 @@ export class RenderSystem {
     this.ctx.fillStyle = '#9ab';
     this.ctx.font = '12px monospace';
     this.ctx.fillText(subText, tx + padding, cy);  cy += lineH;
+
+    // Company / owner line — color swatch + text
+    const swatchSz = 10;
+    const swatchColor = COMPANY_COLORS_MAP[npc.companyId] ?? '#aaa';
+    this.ctx.fillStyle = swatchColor;
+    this.ctx.fillRect(tx + padding, cy + 3, swatchSz, swatchSz);
+    this.ctx.fillStyle = sameCompany ? '#ffe066' : '#ccc';
+    this.ctx.font = '12px monospace';
+    this.ctx.fillText(companyText, tx + padding + swatchSz + 5, cy);  cy += lineH;
 
     // HP label
     this.ctx.font = '12px monospace';

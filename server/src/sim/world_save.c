@@ -226,7 +226,8 @@ int world_save(const char *path) {
             "      \"stat_weight\": %u,\n"
             "      \"assigned_weapon_id\": %u,\n"
             "      \"wants_cannon\": %u,\n"
-            "      \"npc_state\": %u\n"
+            "      \"npc_state\": %u,\n"
+            "      \"owner_player_id\": %u\n"
             "    }",
             (unsigned)n->id,
             n->name,
@@ -248,7 +249,8 @@ int world_save(const char *path) {
             (unsigned)n->stat_weight,
             (unsigned)n->assigned_weapon_id,
             (unsigned)n->wants_cannon,
-            (unsigned)n->state
+            (unsigned)n->state,
+            (unsigned)n->owner_player_id
         );
     }
     fprintf(f, "\n  ],\n");
@@ -565,6 +567,8 @@ int world_load(const char *path) {
                 ws_json_uint(obj,  "assigned_weapon_id", &assigned_weapon_id);
                 ws_json_uint(obj,  "wants_cannon",       &wants_cannon);
                 ws_json_uint(obj,  "npc_state",          &npc_state);
+                uint32_t owner_player_id = 0;
+                ws_json_uint(obj,  "owner_player_id",    &owner_player_id);
 
                 n->id         = id ? (uint16_t)id : next_world_npc_id;
                 n->role       = (NpcRole)role;
@@ -588,6 +592,7 @@ int world_load(const char *path) {
                 n->assigned_weapon_id = (module_id_t)assigned_weapon_id;
                 n->wants_cannon       = (bool)wants_cannon;
                 n->state              = (WorldNpcState)npc_state;
+                n->owner_player_id    = owner_player_id;
                 n->active     = true;
 
                 /* Remap ship_id from the saved entity ID to the newly

@@ -264,6 +264,7 @@ export interface Npc {
   state: number;          // NPC_STATE_* — used for movement animation
   role: number;           // NPC_ROLE_* — 1=gunner, 3=rigger
   companyId: number;      // COMPANY_* — faction this NPC belongs to
+  ownerId: number;        // For COMPANY_SOLO NPCs: player_id of the owner (0 = none)
   assignedWeaponId: number; // Module ID of cannon/swivel/mast this NPC is stationed at (0 if none)
 
   // Crew levelling

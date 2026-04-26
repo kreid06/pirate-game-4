@@ -186,6 +186,7 @@ typedef struct WorldNpc {
     char          dialogue[64];
 
     uint8_t       company_id;     // Inherited from ship at spawn time (COMPANY_*)
+    uint32_t      owner_player_id; // For COMPANY_SOLO NPCs: the player who recruited/owns them (0 = none)
 
     // Knockback velocity (client units/s, decays each tick)
     float         velocity_x, velocity_y;
