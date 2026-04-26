@@ -2100,6 +2100,11 @@ class HUDElement implements UIElement {
       this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, plankRatio);
     }
 
+    // Health / stamina bars above hotbar
+    const maxSt = player.maxStamina ?? 100;
+    const st    = player.stamina    ?? maxSt;
+    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt);
+
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
     const helmMode = context.mountKind === 'helm'
       ? { activeGroup: context.activeWeaponGroup ?? -1, activeGroups: context.activeWeaponGroups ?? new Set<number>(), playerShip: context.playerShip ?? null, controlGroups: context.controlGroups }
@@ -2108,6 +2113,88 @@ class HUDElement implements UIElement {
 
     // Equipment panel (armor + shield)
     this.renderEquipmentPanel(ctx, ctx.canvas, player.inventory.equipment.torso, player.inventory.equipment.shield);
+  }
+
+  private renderPlayerBars(
+    ctx: CanvasRenderingContext2D,
+    canvas: HTMLCanvasElement,
+    health: number,
+    maxHealth: number,
+    stamina: number,
+    maxStamina: number,
+  ): void {
+    const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+    const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+    const startX = Math.round((canvas.width - totalW) / 2);
+    const hotbarY = canvas.height - totalH - 8;
+
+    const BAR_H    = 10;
+    const GAP      = 3;
+    const PANEL_PAD = 4;
+    const panelH   = PANEL_PAD * 2 + BAR_H * 2 + GAP;
+    const panelY   = hotbarY - panelH - 4;
+    const barX     = startX + PANEL_PAD;
+    const barW     = totalW - PANEL_PAD * 2;
+
+    const hpRatio = maxHealth > 0 ? Math.max(0, Math.min(1, health / maxHealth)) : 1;
+    const stRatio = maxStamina > 0 ? Math.max(0, Math.min(1, stamina / maxStamina)) : 1;
+
+    ctx.save();
+
+    // Background panel
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.fillRect(startX, panelY, totalW, panelH);
+    ctx.strokeStyle = '#556';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(startX, panelY, totalW, panelH);
+
+    // ── Health bar ─────────────────────────────────────────────────────────
+    const hpY    = panelY + PANEL_PAD;
+    const hpCrit = hpRatio < 0.25;
+    const hpWarn = hpRatio < 0.50;
+    const hpColor = hpCrit ? '#cc2222' : hpWarn ? '#cc8822' : '#22aa44';
+
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(barX, hpY, barW, BAR_H);
+    ctx.fillStyle = hpColor;
+    ctx.fillRect(barX, hpY, Math.round(barW * hpRatio), BAR_H);
+    ctx.strokeStyle = hpCrit ? '#ff4444' : 'rgba(255,255,255,0.20)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX, hpY, barW, BAR_H);
+
+    ctx.font = 'bold 9px Consolas, monospace';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(255,255,255,0.80)';
+    ctx.fillText('HP', barX + 4, hpY + BAR_H / 2);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = hpCrit ? '#ff6666' : 'rgba(255,255,255,0.70)';
+    ctx.fillText(`${Math.ceil(health)}/${maxHealth}`, barX + barW - 4, hpY + BAR_H / 2);
+
+    // ── Stamina bar ────────────────────────────────────────────────────────
+    const stY   = hpY + BAR_H + GAP;
+    const stLow = stRatio < 0.25;
+    const stColor = stLow ? '#cc9900' : '#ddbb00';
+
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(barX, stY, barW, BAR_H);
+    ctx.fillStyle = stColor;
+    ctx.fillRect(barX, stY, Math.round(barW * stRatio), BAR_H);
+    ctx.strokeStyle = 'rgba(255,255,255,0.20)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX, stY, barW, BAR_H);
+
+    ctx.font = 'bold 9px Consolas, monospace';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(255,255,255,0.80)';
+    ctx.fillText('ST', barX + 4, stY + BAR_H / 2);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(255,255,255,0.70)';
+    ctx.fillText(`${Math.ceil(stamina)}/${maxStamina}`, barX + barW - 4, stY + BAR_H / 2);
+
+    ctx.restore();
   }
 
   private renderHotbar(

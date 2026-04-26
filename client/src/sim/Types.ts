@@ -87,6 +87,10 @@ export interface Player {
   health: number;      // current HP
   maxHealth: number;   // max HP (default 100)
 
+  // Stamina
+  stamina?: number;    // current stamina (absent = full)
+  maxStamina?: number; // max stamina (default 100)
+
   // Island presence (0 = not on island)
   onIslandId: number;
 
