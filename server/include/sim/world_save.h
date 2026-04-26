@@ -2,15 +2,15 @@
 /* world_save.h — Save and load complete world state to/from JSON.
  *
  * Saved:  ships, world_npcs, placed_structures, island resources.
- * Format: human-readable JSON written to data/world_state.json by default.
+ * Format: human-readable JSON written to data/saves/world_state.json by default.
  *
- * Hourly archive copies are stored under data/world_saves/ as
+ * Hourly archive copies are stored under data/saves/archive/ as
  *   world_YYYY-MM-DD_HH-MM-SS.json
  * keeping at most WORLD_ARCHIVE_MAX_FILES files (oldest pruned first).
  */
 
-#define WORLD_SAVE_DEFAULT_PATH  "data/world_state.json"
-#define WORLD_SAVE_ARCHIVE_DIR   "data/world_saves"
+#define WORLD_SAVE_DEFAULT_PATH  "data/saves/world_state.json"
+#define WORLD_SAVE_ARCHIVE_DIR   "data/saves/archive"
 #define WORLD_ARCHIVE_MAX_FILES  48   /* 48 hourlies = 48 h of history */
 
 /** Serialise the current world state to the given path.

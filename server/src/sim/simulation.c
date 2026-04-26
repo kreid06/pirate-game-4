@@ -933,7 +933,8 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
     ship->angular_velocity = 0;
     ship->mass = Q16_FROM_FLOAT(1000.0f); // 1000 kg default
     ship->moment_inertia = Q16_FROM_FLOAT(50000.0f); // kg⋅m²
-    ship->bounding_radius = Q16_FROM_FLOAT(10.0f); // 10m radius
+    /* Hull extends ~42.3 server units to the bow tip; use 45 for safe broad-phase margin. */
+    ship->bounding_radius = Q16_FROM_FLOAT(45.0f);
     ship->hull_health = Q16_FROM_INT(100);
     ship->desired_sail_openness = 0;  // Sails start closed
     ship->rudder_angle = 0.0f;        // Rudder centered
@@ -1376,8 +1377,8 @@ static void update_ship_physics(struct Ship* ship, q16_t dt) {
     {
         static const float C_LIN_V  = 0.02f;   /* 2 % base linear drag     */
         static const float C_QUAD_V = 0.008f;   /* quadratic drag coeff     */
-        static const float C_LIN_W  = 0.03f;   /* angular linear drag      */
-        static const float C_QUAD_W = 0.06f;    /* angular quadratic coeff  */
+        static const float C_LIN_W  = 0.04f;   /* angular linear drag — heavy water resistance */
+        static const float C_QUAD_W = 0.06f;   /* angular quadratic coeff  */
         static const float MIN_DRAG = 0.60f;    /* safety floor             */
 
         float spd = Q16_TO_FLOAT(vec2_length(ship->velocity));
@@ -1599,24 +1600,9 @@ static void handle_ship_collisions(struct Sim* sim) {
             q16_t overlap_depth;
             if (!check_polygon_collision(ship1, ship2, &collision_normal, &overlap_depth)) continue;
 
-            /* ── Positional separation: Baumgarte-style ──────────────────────────
-             * Instead of teleporting the full penetration away in one tick, apply
-             * a fraction β of the error that exceeds SLOP.  The velocity bias below
-             * drives out residual error over subsequent ticks.  This prevents the
-             * harsh pop of full-correction while still converging quickly. */
-            {
-                float pen     = Q16_TO_FLOAT(overlap_depth);
-                float corr    = SHIP_BAUMGARTE * fmaxf(pen - SHIP_SLOP, 0.0f) * 0.5f;
-                Vec2Q16 sep   = vec2_mul_scalar(collision_normal, Q16_FROM_FLOAT(corr));
-                ship1->position = vec2_sub(ship1->position, sep);
-                ship2->position = vec2_add(ship2->position, sep);
-            }
-
-            /* ── Build contact manifold ── */
-            /* After separation the hulls are just touching; penetrating vertices
-             * are found in the pre-separation positions.  The positions have
-             * already been updated, but the SAT depth is small so the manifold
-             * is still valid.  Use world-space point_in_polygon. */
+            /* ── Build contact manifold (before positional correction) ── */
+            /* Find penetrating vertices while ships still overlap — this gives
+             * the best lever arms for angular impulse calculation. */
             float cpx[94], cpy[94];  /* max 47+47 contact points */
             int n_contacts = 0;
 
@@ -1641,29 +1627,40 @@ static void handle_ship_collisions(struct Sim* sim) {
                 }
             }
 
-            /* Fallback: no penetrating vertices found — use support-edge midpoint */
+            /* Fallback: no penetrating vertices — use both support vertices as contacts.
+             * Using TWO separate support points (rather than their midpoint) gives
+             * non-zero lever arms on glancing hits and lets friction generate spin. */
             if (n_contacts == 0) {
-                float nx = Q16_TO_FLOAT(collision_normal.x);
-                float ny = Q16_TO_FLOAT(collision_normal.y);
-                /* Support vertex of ship1 along +n */
-                float best1 = -1e30f, sx1 = 0, sy1 = 0;
+                float fnx = Q16_TO_FLOAT(collision_normal.x);
+                float fny = Q16_TO_FLOAT(collision_normal.y);
+                /* Support vertex of ship1 furthest along +n */
+                float best1 = -1e30f;
                 for (uint8_t vi = 0; vi < ship1->hull_vertex_count; vi++) {
                     Vec2Q16 wv = transform_hull_vertex(ship1->hull_vertices[vi],
                                                        ship1->position, ship1->rotation);
-                    float p = Q16_TO_FLOAT(wv.x)*nx + Q16_TO_FLOAT(wv.y)*ny;
-                    if (p > best1) { best1=p; sx1=Q16_TO_FLOAT(wv.x); sy1=Q16_TO_FLOAT(wv.y); }
+                    float p = Q16_TO_FLOAT(wv.x)*fnx + Q16_TO_FLOAT(wv.y)*fny;
+                    if (p > best1) { best1=p; cpx[0]=Q16_TO_FLOAT(wv.x); cpy[0]=Q16_TO_FLOAT(wv.y); }
                 }
-                /* Support vertex of ship2 along -n */
-                float best2 = 1e30f, sx2 = 0, sy2 = 0;
+                /* Support vertex of ship2 furthest along -n */
+                float best2 = 1e30f;
                 for (uint8_t vi = 0; vi < ship2->hull_vertex_count; vi++) {
                     Vec2Q16 wv = transform_hull_vertex(ship2->hull_vertices[vi],
                                                        ship2->position, ship2->rotation);
-                    float p = Q16_TO_FLOAT(wv.x)*nx + Q16_TO_FLOAT(wv.y)*ny;
-                    if (p < best2) { best2=p; sx2=Q16_TO_FLOAT(wv.x); sy2=Q16_TO_FLOAT(wv.y); }
+                    float p = Q16_TO_FLOAT(wv.x)*fnx + Q16_TO_FLOAT(wv.y)*fny;
+                    if (p < best2) { best2=p; cpx[1]=Q16_TO_FLOAT(wv.x); cpy[1]=Q16_TO_FLOAT(wv.y); }
                 }
-                cpx[0] = (sx1 + sx2) * 0.5f;
-                cpy[0] = (sy1 + sy2) * 0.5f;
-                n_contacts = 1;
+                n_contacts = 2;
+            }
+
+            /* ── Positional separation: Baumgarte-style ──────────────────────────
+             * Manifold is built; now move ships apart so the velocity bias below
+             * drives residual penetration to zero over subsequent ticks. */
+            {
+                float pen     = Q16_TO_FLOAT(overlap_depth);
+                float corr    = SHIP_BAUMGARTE * fmaxf(pen - SHIP_SLOP, 0.0f) * 0.5f;
+                Vec2Q16 sep   = vec2_mul_scalar(collision_normal, Q16_FROM_FLOAT(corr));
+                ship1->position = vec2_sub(ship1->position, sep);
+                ship2->position = vec2_add(ship2->position, sep);
             }
 
             /* ── Multipoint impulse with warm starting ── */
@@ -1698,7 +1695,7 @@ static void handle_ship_collisions(struct Sim* sim) {
             if (ce && ce->n_contacts > 0) {
                 for (int ci = 0; ci < n_contacts && ci < (int)ce->n_contacts; ci++) {
                     float Jw = ce->P_n[ci] * 0.8f;  /* 80% of last tick's impulse */
-                    if (Jw <= 0.0f) continue;
+                    if (Jw >= 0.0f) continue;  /* no useful cached impulse */
                     float r1x = cpx[ci] - p1x, r1y = cpy[ci] - p1y;
                     float r2x = cpx[ci] - p2x, r2y = cpy[ci] - p2y;
                     float r1xn = r1x*ny - r1y*nx;
@@ -1725,8 +1722,11 @@ static void handle_ship_collisions(struct Sim* sim) {
                 /* Velocity at contact point (includes warm-start) */
                 float vc1x = v1x + w1*(-r1y),  vc1y = v1y + w1*r1x;
                 float vc2x = v2x + w2*(-r2y),  vc2y = v2y + w2*r2x;
+                /* n points FROM ship1 TO ship2.
+                 * With this convention vrel_n = (vc1−vc2)·n > 0 means the
+                 * gap is CLOSING (approaching); < 0 means separating.
+                 * Apply impulse only when approaching (vrel_n > 0).         */
                 float vrel_n = (vc1x - vc2x)*nx + (vc1y - vc2y)*ny;
-                if (vrel_n >= 0.0f) continue;  /* separating at this point */
                 float r1xn = r1x*ny - r1y*nx;
                 float r2xn = r2x*ny - r2y*nx;
                 /* Correct per-ship denominator: r²/I terms are separate */
@@ -1735,8 +1735,10 @@ static void handle_ship_collisions(struct Sim* sim) {
                 float dt_f  = Q16_TO_FLOAT(FIXED_DT_Q16);
                 float pen_f = Q16_TO_FLOAT(overlap_depth);
                 float bias  = (SHIP_BAUMGARTE / dt_f) * fmaxf(pen_f - SHIP_SLOP, 0.0f);
-                float J = (-(1.0f + SHIP_RESTITUTION) * vrel_n + bias) / denom;
-                if (J < 0.0f) J = 0.0f;  /* normal impulse can only push */
+                /* Skip only if separating AND no penetration to resolve */
+                if (vrel_n <= 0.0f && bias < 1e-4f) continue;
+                float J = (-(1.0f + SHIP_RESTITUTION) * vrel_n - bias) / denom;
+                if (J > 0.0f) J = 0.0f;  /* J must be ≤ 0 (compression only) */
                 P_n_acc[ci] = J;
                 dv1x += J*nx/m1;   dv1y += J*ny/m1;   dw1 += J*r1xn/I1;
                 dv2x -= J*nx/m2;   dv2y -= J*ny/m2;   dw2 -= J*r2xn/I2;
@@ -1748,7 +1750,7 @@ static void handle_ship_collisions(struct Sim* sim) {
              * Coulomb-capped friction impulse.  This is what makes a ship that
              * clips another's bow rotate sideways rather than just sliding past. */
             for (int ci = 0; ci < n_contacts; ci++) {
-                if (P_n_acc[ci] <= 0.0f) continue;  /* no normal force → no friction */
+                if (P_n_acc[ci] >= 0.0f) continue;  /* no normal impulse — no friction */
                 float r1x = cpx[ci] - p1x, r1y = cpy[ci] - p1y;
                 float r2x = cpx[ci] - p2x, r2y = cpy[ci] - p2y;
                 /* Contact velocity using post-normal-impulse state */
@@ -1770,7 +1772,7 @@ static void handle_ship_collisions(struct Sim* sim) {
                 float denom_f = 1.0f/m1 + 1.0f/m2 + r1xt*r1xt/I1 + r2xt*r2xt/I2;
                 if (denom_f < 1e-10f) continue;
                 float Jf     = -vt_len / denom_f;
-                float Jf_max =  SHIP_FRICTION * P_n_acc[ci];
+                float Jf_max =  SHIP_FRICTION * fabsf(P_n_acc[ci]);
                 if (Jf < -Jf_max) Jf = -Jf_max;
                 if (Jf >  Jf_max) Jf =  Jf_max;
                 dv1x += Jf*tx/m1;   dv1y += Jf*ty/m1;   dw1 += Jf*r1xt/I1;
@@ -1796,9 +1798,9 @@ static void handle_ship_collisions(struct Sim* sim) {
                 }
             }
 
-            log_info("⚓ Ship hull collision: %u <-> %u (overlap: %.2f, contacts: %d, warm: %s)",
+            log_info("⚓ Ship hull collision: %u <-> %u (overlap: %.2f, contacts: %d, warm: %s, dw1: %.4f, dw2: %.4f)",
                      ship1->id, ship2->id, Q16_TO_FLOAT(overlap_depth), n_contacts,
-                     ce ? "yes" : "no");
+                     ce ? "yes" : "no", dw1, dw2);
         }
     }
 }

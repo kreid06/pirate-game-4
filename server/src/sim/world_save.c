@@ -26,6 +26,7 @@
 
 #include "sim/world_save.h"
 #include "net/websocket_server_internal.h"
+#include "net/module_interactions.h"
 #include "sim/island.h"
 #include "util/log.h"
 
@@ -89,8 +90,9 @@ static bool ws_json_str(const char *json, const char *key,
 int world_save(const char *path) {
     if (!path) path = WORLD_SAVE_DEFAULT_PATH;
 
-    /* Ensure parent directory exists */
-    mkdir("data", 0755);
+    /* Ensure parent directories exist */
+    mkdir("data",       0755);
+    mkdir("data/saves", 0755);
 
     FILE *f = fopen(path, "w");
     if (!f) {
@@ -221,7 +223,10 @@ int world_save(const char *path) {
             "      \"stat_health\": %u,\n"
             "      \"stat_damage\": %u,\n"
             "      \"stat_stamina\": %u,\n"
-            "      \"stat_weight\": %u\n"
+            "      \"stat_weight\": %u,\n"
+            "      \"assigned_weapon_id\": %u,\n"
+            "      \"wants_cannon\": %u,\n"
+            "      \"npc_state\": %u\n"
             "    }",
             (unsigned)n->id,
             n->name,
@@ -240,7 +245,10 @@ int world_save(const char *path) {
             (unsigned)n->stat_health,
             (unsigned)n->stat_damage,
             (unsigned)n->stat_stamina,
-            (unsigned)n->stat_weight
+            (unsigned)n->stat_weight,
+            (unsigned)n->assigned_weapon_id,
+            (unsigned)n->wants_cannon,
+            (unsigned)n->state
         );
     }
     fprintf(f, "\n  ],\n");
@@ -382,6 +390,11 @@ int world_load(const char *path) {
     }
 
     /* ── ships ── */
+    /* Remap table: saved entity IDs → newly allocated entity IDs.  Used below
+     * to fix up NPC ship_id references that pointed to old IDs.           */
+    uint32_t id_remap_old[MAX_SIMPLE_SHIPS];
+    uint32_t id_remap_new[MAX_SIMPLE_SHIPS];
+    int      id_remap_count = 0;
     {
         /* Clear existing ships first (both SimpleShip and sim layers) */
         for (int i = 0; i < ship_count; i++) {
@@ -429,6 +442,12 @@ int world_load(const char *path) {
                 if (ship_count < MAX_SIMPLE_SHIPS) {
                     uint32_t new_id = websocket_server_create_ship(
                         x, y, (uint8_t)company, 0xFF);
+                    /* Record old→new mapping so NPC ship_ids can be patched */
+                    if (new_id && id && id_remap_count < MAX_SIMPLE_SHIPS) {
+                        id_remap_old[id_remap_count] = (uint32_t)id;
+                        id_remap_new[id_remap_count] = new_id;
+                        id_remap_count++;
+                    }
                     if (new_id) {
                         SimpleShip *s = find_ship((uint16_t)new_id);
                         if (s) {
@@ -441,6 +460,24 @@ int world_load(const char *path) {
                             s->cannon_ammo        = (uint16_t)ammo;
                             s->infinite_ammo      = infinite_ammo;
                             s->is_sinking         = is_sinking;
+                        }
+
+                        /* Also restore rotation/velocity on the sim layer so that
+                         * sync_simple_ships_from_simulation() doesn't overwrite the
+                         * SimpleShip values with the zero-rotation spawn defaults. */
+                        if (global_sim) {
+                            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                if ((uint32_t)global_sim->ships[si].id != new_id) continue;
+                                global_sim->ships[si].rotation =
+                                    Q16_FROM_FLOAT(rot);
+                                global_sim->ships[si].velocity.x =
+                                    Q16_FROM_FLOAT(CLIENT_TO_SERVER(vx));
+                                global_sim->ships[si].velocity.y =
+                                    Q16_FROM_FLOAT(CLIENT_TO_SERVER(vy));
+                                global_sim->ships[si].angular_velocity =
+                                    Q16_FROM_FLOAT(av);
+                                break;
+                            }
                         }
 
                         /* Restore module health states */
@@ -500,26 +537,30 @@ int world_load(const char *path) {
                 unsigned health = 100, max_health = 100, level = 1;
                 unsigned xp = 0;
                 unsigned sh = 0, sd = 0, ss = 0, sw = 0;
+                unsigned assigned_weapon_id = 0, wants_cannon = 0, npc_state = 0;
                 float x = 0, y = 0, rot = 0, lx = 0, ly = 0;
 
-                ws_json_uint(obj,  "id",          &id);
-                ws_json_str (obj,  "name",        n->name, sizeof(n->name));
-                ws_json_uint(obj,  "role",        &role);
-                ws_json_uint(obj,  "company",     &company);
-                ws_json_float(obj, "x",           &x);
-                ws_json_float(obj, "y",           &y);
-                ws_json_float(obj, "rot",         &rot);
-                ws_json_uint(obj,  "ship_id",     &ship_id);
-                ws_json_float(obj, "lx",          &lx);
-                ws_json_float(obj, "ly",          &ly);
-                ws_json_uint(obj,  "health",      &health);
-                ws_json_uint(obj,  "max_health",  &max_health);
-                ws_json_uint(obj,  "level",       &level);
-                ws_json_uint(obj,  "xp",          &xp);
-                ws_json_uint(obj,  "stat_health", &sh);
-                ws_json_uint(obj,  "stat_damage", &sd);
-                ws_json_uint(obj,  "stat_stamina",&ss);
-                ws_json_uint(obj,  "stat_weight", &sw);
+                ws_json_uint(obj,  "id",                 &id);
+                ws_json_str (obj,  "name",               n->name, sizeof(n->name));
+                ws_json_uint(obj,  "role",               &role);
+                ws_json_uint(obj,  "company",            &company);
+                ws_json_float(obj, "x",                  &x);
+                ws_json_float(obj, "y",                  &y);
+                ws_json_float(obj, "rot",                &rot);
+                ws_json_uint(obj,  "ship_id",            &ship_id);
+                ws_json_float(obj, "lx",                 &lx);
+                ws_json_float(obj, "ly",                 &ly);
+                ws_json_uint(obj,  "health",             &health);
+                ws_json_uint(obj,  "max_health",         &max_health);
+                ws_json_uint(obj,  "level",              &level);
+                ws_json_uint(obj,  "xp",                 &xp);
+                ws_json_uint(obj,  "stat_health",        &sh);
+                ws_json_uint(obj,  "stat_damage",        &sd);
+                ws_json_uint(obj,  "stat_stamina",       &ss);
+                ws_json_uint(obj,  "stat_weight",        &sw);
+                ws_json_uint(obj,  "assigned_weapon_id", &assigned_weapon_id);
+                ws_json_uint(obj,  "wants_cannon",       &wants_cannon);
+                ws_json_uint(obj,  "npc_state",          &npc_state);
 
                 n->id         = id ? (uint16_t)id : next_world_npc_id;
                 n->role       = (NpcRole)role;
@@ -540,7 +581,37 @@ int world_load(const char *path) {
                 n->stat_weight  = (uint8_t)sw;
                 n->move_speed = 80.0f;
                 n->interact_radius = 60.0f;
+                n->assigned_weapon_id = (module_id_t)assigned_weapon_id;
+                n->wants_cannon       = (bool)wants_cannon;
+                n->state              = (WorldNpcState)npc_state;
                 n->active     = true;
+
+                /* Remap ship_id from the saved entity ID to the newly
+                 * allocated one (ships get fresh IDs on every load).     */
+                if (n->ship_id != 0) {
+                    for (int ri = 0; ri < id_remap_count; ri++) {
+                        if (id_remap_old[ri] == (uint32_t)n->ship_id) {
+                            n->ship_id = (uint16_t)id_remap_new[ri];
+                            break;
+                        }
+                    }
+                }
+
+                /* Restore module occupied state so ship logic sees the NPC
+                 * as already at their station on the first tick after load. */
+                if (n->assigned_weapon_id != 0 && n->ship_id != 0
+                    && (n->state == WORLD_NPC_STATE_AT_GUN
+                        || n->state == WORLD_NPC_STATE_IDLE)) {
+                    SimpleShip* ss = find_ship(n->ship_id);
+                    if (ss) {
+                        ShipModule* mod = find_module_by_id(ss, n->assigned_weapon_id);
+                        if (mod) {
+                            mod->state_bits |= MODULE_STATE_OCCUPIED;
+                            log_info("🤖 NPC %u restored to module %u on ship %u",
+                                     n->id, n->assigned_weapon_id, n->ship_id);
+                        }
+                    }
+                }
 
                 if (n->id >= next_world_npc_id) next_world_npc_id = n->id + 1;
                 world_npc_count++;
@@ -659,6 +730,7 @@ static int str_cmp_asc(const void *a, const void *b) {
 int world_save_archive(void) {
     /* 1. Ensure archive directory exists */
     mkdir("data",             0755);
+    mkdir("data/saves",       0755);
     mkdir(WORLD_SAVE_ARCHIVE_DIR, 0755);
 
     /* 2. Build timestamped filename */

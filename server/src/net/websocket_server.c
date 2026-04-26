@@ -1584,6 +1584,18 @@ void websocket_server_cleanup(void) {
     
     log_info("📋 Starting WebSocket server cleanup...");
     
+    /* ── Save all connected players before forcing disconnects ── */
+    int saved_players = 0;
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (players[i].active) {
+            save_player_to_file(&players[i]);
+            saved_players++;
+        }
+    }
+    if (saved_players > 0) {
+        log_info("💾 Saved %d connected player(s) before shutdown", saved_players);
+    }
+
     // Signal shutdown
     ws_server.running = false;
     
@@ -8672,11 +8684,27 @@ void websocket_server_tick(float dt) {
             float rudder_factor = ship->rudder_angle / 50.0f; // -1 to +1
             float turn_rate = rudder_factor * MAX_TURN_RATE * speed_factor;
             
-            // Set angular velocity — sim_step / update_ship_physics will integrate
-            // rotation and position each tick.  Do NOT integrate here; doing so
-            // would double-count every tick (websocket block + sim_step both advance
-            // position/rotation by v*dt, shipping the ship 2× the intended distance).
-            ship->angular_velocity = Q16_FROM_FLOAT(turn_rate);
+            // Set angular velocity toward the desired turn rate, but preserve
+            // collision-induced spin so impacts feel physical across ticks.
+            // The direct-assignment approach was overwriting any dw added by
+            // handle_ship_collisions() the moment the next tick began.
+            {
+                float current_w = Q16_TO_FLOAT(ship->angular_velocity);
+                float new_w;
+                if (turn_rate == 0.0f) {
+                    // No steering input — let drag decay any existing spin naturally
+                    new_w = current_w;
+                } else if ((turn_rate > 0.0f && current_w >= turn_rate) ||
+                           (turn_rate < 0.0f && current_w <= turn_rate)) {
+                    // Collision gave us at least as much spin as the rudder wants
+                    // in the same direction — don't fight it, drag will bring it down
+                    new_w = current_w;
+                } else {
+                    // Rudder needs more spin (or opposite direction) — apply it
+                    new_w = turn_rate;
+                }
+                ship->angular_velocity = Q16_FROM_FLOAT(new_w);
+            }
         }
     }
 

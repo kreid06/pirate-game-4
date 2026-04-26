@@ -20,3 +20,4 @@ server/auth/error.log
 server/data/auth
 server/player_saves
 node_modules
+data/saves/

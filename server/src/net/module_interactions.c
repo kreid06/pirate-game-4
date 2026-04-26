@@ -589,6 +589,15 @@ void handle_module_unmount(WebSocketPlayer* player, struct WebSocketClient* clie
             case MODULE_TYPE_STEERING_WHEEL:
                 module->data.helm.occupied_by = 0;
                 player->controlling_ship_id = 0;
+                /* Reset rudder to center so the ship doesn't keep turning
+                 * after the player leaves the helm. */
+                {
+                    struct Ship* sim_ship = find_sim_ship(target_ship->ship_id);
+                    if (sim_ship) {
+                        sim_ship->rudder_angle        = 0.0f;
+                        sim_ship->target_rudder_angle = 0.0f;
+                    }
+                }
                 break;
             case MODULE_TYPE_SEAT:
                 module->data.seat.occupied_by = 0;
