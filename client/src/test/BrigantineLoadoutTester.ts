@@ -57,10 +57,9 @@ export class BrigantineLoadoutTester {
       npcs: [],
       tombstones: [],
       droppedItems: [],
+      companies: [],
       carrierDetection: new Map()
     };
-    
-    // Initialize with combat loadout
     this.loadCurrentLoadout();
     
     // Create UI
@@ -92,6 +91,7 @@ export class BrigantineLoadoutTester {
       npcs: [],
       tombstones: [],
       droppedItems: [],
+      companies: [],
       carrierDetection: new Map()
     };
     

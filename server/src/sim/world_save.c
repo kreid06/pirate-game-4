@@ -319,8 +319,28 @@ int world_save(const char *path) {
         fprintf(f, "\n      ]\n    }");
     }
     fprintf(f, "\n  ]\n}\n");
-
     fclose(f);
+
+    /* ── dynamic_companies: saved to data/dynamic_companies.json ── */
+    {
+        char dcp[256];
+        snprintf(dcp, sizeof(dcp), "data/dynamic_companies.json");
+        FILE *fc = fopen(dcp, "w");
+        if (fc) {
+            fprintf(fc, "{\n  \"next_id\": %u,\n  \"companies\": [", next_dynamic_company_id);
+            bool first_co = true;
+            for (int ci = 0; ci < dynamic_company_count; ci++) {
+                const DynamicCompany *dc = &dynamic_companies[ci];
+                if (!dc->active) continue;
+                if (!first_co) fprintf(fc, ",");
+                first_co = false;
+                fprintf(fc, "\n    {\"id\":%u,\"name\":\"%s\",\"founderId\":%u}",
+                        dc->id, dc->name, dc->founder_id);
+            }
+            fprintf(fc, "\n  ]\n}\n");
+            fclose(fc);
+        }
+    }
     log_info("💾 World saved to '%s' (%d ships, %d NPCs, %d structures)",
              path, active_ships, active_npcs, active_structs);
     return 0;
@@ -722,6 +742,55 @@ int world_load(const char *path) {
     free(buf);
     log_info("🌍 World loaded from '%s' (%d ships, %d NPCs, %d structures)",
              path, ship_count, world_npc_count, (int)placed_structure_count);
+
+    /* ── Load dynamic companies ── */
+    {
+        FILE *fc = fopen("data/dynamic_companies.json", "r");
+        if (fc) {
+            fseek(fc, 0, SEEK_END);
+            long csz = ftell(fc); rewind(fc);
+            if (csz > 0 && csz < 32768) {
+                char *cbuf = (char *)malloc((size_t)csz + 1);
+                if (cbuf) {
+                    fread(cbuf, 1, (size_t)csz, fc);
+                    cbuf[csz] = '\0';
+                    /* Parse next_id */
+                    unsigned nid = 0;
+                    const char *np = strstr(cbuf, "\"next_id\"");
+                    if (np) { np = strchr(np, ':'); if (np) sscanf(np+1, " %u", &nid); }
+                    if (nid >= COMPANY_DYNAMIC_BASE) next_dynamic_company_id = nid;
+                    /* Parse companies array */
+                    const char *arr = strstr(cbuf, "\"companies\"");
+                    if (arr) arr = strchr(arr, '[');
+                    dynamic_company_count = 0;
+                    while (arr && (arr = strchr(arr, '{')) != NULL
+                           && dynamic_company_count < MAX_DYNAMIC_COMPANIES) {
+                        DynamicCompany *dc = &dynamic_companies[dynamic_company_count];
+                        memset(dc, 0, sizeof(*dc));
+                        unsigned cid = 0, fid = 0;
+                        char cname[32] = "";
+                        const char *ip = strstr(arr, "\"id\":"); if (ip) sscanf(ip+5, " %u", &cid);
+                        const char *fp = strstr(arr, "\"founderId\":"); if (fp) sscanf(fp+12, " %u", &fid);
+                        const char *nn = strstr(arr, "\"name\":\"");
+                        if (nn) { nn += 8; sscanf(nn, "%31[^\"]", cname); }
+                        if (cid >= COMPANY_DYNAMIC_BASE) {
+                            dc->id = cid;
+                            dc->founder_id = fid;
+                            dc->active = true;
+                            strncpy(dc->name, cname, sizeof(dc->name)-1);
+                            dynamic_company_count++;
+                        }
+                        arr = strchr(arr, '}');
+                        if (arr) arr++;
+                    }
+                    free(cbuf);
+                    log_info("🏴 Loaded %d dynamic companies", dynamic_company_count);
+                }
+            }
+            fclose(fc);
+        }
+    }
+
     return 0;
 }
 

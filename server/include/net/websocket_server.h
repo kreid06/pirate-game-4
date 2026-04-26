@@ -15,7 +15,18 @@
 #define COMPANY_PIRATES   2  // Pirates guild faction
 #define COMPANY_NAVY      3  // Navy faction — enemy AI
 #define COMPANY_GHOST    99  // Phantom Brig faction — hostile to all
-#define MAX_COMPANIES     4  // Total number of distinct company slots (0–3)
+#define MAX_COMPANIES     4  // Total number of distinct built-in company slots (0–3)
+#define COMPANY_DYNAMIC_BASE 100  // Player-created companies start here
+
+#define MAX_DYNAMIC_COMPANIES 64  // Max number of player-created companies
+
+/** A player-created company (id >= COMPANY_DYNAMIC_BASE). */
+typedef struct {
+    uint32_t id;              // Unique company ID (>= COMPANY_DYNAMIC_BASE)
+    char     name[32];        // Display name chosen by founder
+    uint32_t founder_id;      // player_id of the founding player
+    bool     active;
+} DynamicCompany;
 
 // ── Ship type identifiers ─────────────────────────────────────────────────
 #define SHIP_TYPE_SLOOP      1   // Small, fast sloop

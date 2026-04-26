@@ -127,6 +127,7 @@ export class GameEngine {
       npcs: [],
       tombstones: [],
       droppedItems: [],
+      companies: [],
       carrierDetection: new Map()
     };
   }

@@ -36,6 +36,7 @@ export function simulate(prevWorld: WorldState, inputFrame: InputFrame, dt: numb
     npcs: prevWorld.npcs ?? [],
     tombstones: prevWorld.tombstones ?? [],
     droppedItems: prevWorld.droppedItems ?? [],
+    companies: prevWorld.companies ?? [],
     timestamp: prevWorld.timestamp + dt * 1000,
     carrierDetection: new Map(prevWorld.carrierDetection)
   };

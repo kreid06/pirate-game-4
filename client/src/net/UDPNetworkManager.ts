@@ -680,6 +680,7 @@ export class UDPNetworkManager {
       npcs: [],
       tombstones: [],
       droppedItems: [],
+      companies: [],
       timestamp: header.serverTime,
       carrierDetection: new Map()
     };

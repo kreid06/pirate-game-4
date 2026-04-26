@@ -358,6 +358,7 @@ export class PredictionEngine {
       npcs: state.npcs,
       tombstones: state.tombstones,
       droppedItems: state.droppedItems ?? [],
+      companies: state.companies ?? [],
       carrierDetection: new Map(state.carrierDetection)
     };
   }
@@ -398,6 +399,7 @@ export class PredictionEngine {
       npcs: to.npcs,
       tombstones: to.tombstones ?? [],
       droppedItems: to.droppedItems ?? [],
+      companies: to.companies ?? [],
       carrierDetection: new Map(from.carrierDetection)
     };
   }
@@ -725,6 +727,7 @@ export class PredictionEngine {
       npcs: to.npcs,
       tombstones: to.tombstones ?? [],
       droppedItems: to.droppedItems ?? [],
+      companies: to.companies ?? [],
       carrierDetection: to.carrierDetection,
     };
   }
@@ -776,6 +779,7 @@ export class PredictionEngine {
       npcs: worldState.npcs || [],
       tombstones: worldState.tombstones ?? [],
       droppedItems: worldState.droppedItems ?? [],
+      companies: worldState.companies ?? [],
       carrierDetection: new Map(worldState.carrierDetection)
     };
   }

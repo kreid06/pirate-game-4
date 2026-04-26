@@ -1068,6 +1068,11 @@ export class UIManager {
     this.companyMenu.onJoinCompany = cb;
   }
 
+  /** Set callback for the Create Company button in the company menu. */
+  setCreateCompanyCallback(cb: (name: string) => void): void {
+    this.companyMenu.onCreateCompany = cb;
+  }
+
   /**
    * Set callback for NPC stat upgrades from the crew level menu.
    * Called when the player clicks an affordable upgrade button.
@@ -1184,7 +1189,7 @@ export class UIManager {
     }
     // If company menu is open, try internal buttons first, then close on outside click.
     if (this.activeMenuId === MENU_ID.COMPANY) {
-      if (this.companyMenu.handleClick(x, y)) return true;
+      if (this.companyMenu.handleClick(x, y, this.canvas)) return true;
       this.closeActiveMenu();
       return true;
     }

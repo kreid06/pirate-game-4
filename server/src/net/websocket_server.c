@@ -11,6 +11,7 @@
 #include "util/log.h"
 #include "util/time.h"
 #include <string.h>
+#include <strings.h>
 #include <stdbool.h>
 #include <errno.h>
 #include <unistd.h>
@@ -126,6 +127,11 @@ WorldNpc world_npcs[MAX_WORLD_NPCS] = {0};
 int world_npc_count = 0;
 uint16_t next_world_npc_id = 9000;
 bool g_npcs_dirty = true; // set whenever NPC state changes; cleared after JSON rebuild
+
+// Player-created dynamic companies
+DynamicCompany dynamic_companies[MAX_DYNAMIC_COMPANIES] = {0};
+int dynamic_company_count = 0;
+uint32_t next_dynamic_company_id = COMPANY_DYNAMIC_BASE;
 
 // Global ship data (simple ships for testing)
 #define MAX_SIMPLE_SHIPS 50
@@ -4876,6 +4882,96 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "create_company") == 0) {
+                            // CREATE COMPANY: player founds a new named company.
+                            // {"type":"create_company","name":"My Fleet"}
+                            // Player is moved into the new company; their NPCs follow.
+                            char cc_name[32] = "";
+                            { char* p = strstr(payload, "\"name\":\""); if (p) sscanf(p + 8, "%31[^\"]", cc_name); }
+
+                            // Sanitise name: strip leading/trailing spaces
+                            char *ns = cc_name;
+                            while (*ns == ' ') ns++;
+                            size_t nl = strlen(ns);
+                            while (nl > 0 && ns[nl-1] == ' ') ns[--nl] = '\0';
+
+                            if (ns[0] == '\0') {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"Company name cannot be empty\"}");
+                            } else if (dynamic_company_count >= MAX_DYNAMIC_COMPANIES) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"Company limit reached\"}");
+                            } else {
+                                // Check for duplicate name (case-insensitive)
+                                bool dupe = false;
+                                for (int ci = 0; ci < dynamic_company_count && !dupe; ci++) {
+                                    if (dynamic_companies[ci].active &&
+                                        strncasecmp(dynamic_companies[ci].name, ns, 32) == 0)
+                                        dupe = true;
+                                }
+                                if (dupe) {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"error\",\"message\":\"Company name '%s' already exists\"}", ns);
+                                } else {
+                                    DynamicCompany *dc = &dynamic_companies[dynamic_company_count++];
+                                    dc->id         = next_dynamic_company_id++;
+                                    dc->founder_id = client->player_id;
+                                    dc->active     = true;
+                                    strncpy(dc->name, ns, sizeof(dc->name) - 1);
+                                    dc->name[sizeof(dc->name) - 1] = '\0';
+
+                                    // Move the player (and their NPCs) into the new company
+                                    websocket_server_set_player_company(client->player_id, (uint8_t)(dc->id > 255 ? 255 : dc->id));
+                                    /* For ids >255 we store as a 32-bit value in a side table;
+                                     * the company_id field stays within uint8 range for now by
+                                     * using the low byte — dynamic IDs start at 100 which fits. */
+                                    log_info("🏴 Player %u founded company %u ('%s')",
+                                             client->player_id, dc->id, dc->name);
+
+                                    // Broadcast the new company list to all clients
+                                    char nc_msg[128];
+                                    snprintf(nc_msg, sizeof(nc_msg),
+                                        "{\"type\":\"company_created\",\"id\":%u,\"name\":\"%s\",\"founderId\":%u}",
+                                        dc->id, dc->name, dc->founder_id);
+                                    websocket_server_broadcast(nc_msg);
+
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"message_ack\",\"status\":\"company_created\","
+                                        "\"companyId\":%u,\"name\":\"%s\"}",
+                                        dc->id, dc->name);
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "join_company") == 0) {
+                            // JOIN COMPANY: player joins an existing dynamic company by id.
+                            // {"type":"join_company","companyId":N}
+                            uint32_t jc_id = 0;
+                            { char* p = strstr(payload, "\"companyId\":"); if (p) sscanf(p + 12, "%u", &jc_id); }
+
+                            DynamicCompany *jc_dc = NULL;
+                            for (int ci = 0; ci < dynamic_company_count; ci++) {
+                                if (dynamic_companies[ci].active && dynamic_companies[ci].id == jc_id) {
+                                    jc_dc = &dynamic_companies[ci]; break;
+                                }
+                            }
+                            // Also allow built-in companies (pirates=2, navy=3) via this path
+                            bool builtin = (jc_id == COMPANY_PIRATES || jc_id == COMPANY_NAVY || jc_id == COMPANY_SOLO);
+                            if (jc_dc == NULL && !builtin) {
+                                snprintf(response, sizeof(response),
+                                    "{\"type\":\"error\",\"message\":\"Company %u not found\"}", jc_id);
+                            } else {
+                                uint8_t new_cid = (uint8_t)(jc_id > 255 ? 255 : jc_id);
+                                websocket_server_set_player_company(client->player_id, new_cid);
+                                const char *cname = jc_dc ? jc_dc->name :
+                                    (jc_id == COMPANY_PIRATES ? "Pirates" :
+                                     jc_id == COMPANY_NAVY    ? "Navy"    : "Solo");
+                                log_info("🏴 Player %u joined company %u ('%s')",
+                                         client->player_id, jc_id, cname);
+                                snprintf(response, sizeof(response),
+                                    "{\"type\":\"message_ack\",\"status\":\"joined_company\","
+                                    "\"companyId\":%u,\"name\":\"%s\"}", jc_id, cname);
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "upgrade_crew_stat") == 0) {
                             // UPGRADE CREW STAT: spend an earned stat point to level one stat.
                             // {"type":"upgrade_crew_stat","npcId":N,"stat":"health"}
@@ -6596,6 +6692,26 @@ int websocket_server_update(struct Sim* sim) {
             }
         }
         if (gs_off < (int)sizeof(game_state) - 1) game_state[gs_off++] = ']';
+
+        /* ── Dynamic Companies ──────────────────────────────────────────── */
+        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
+                           ",\"companies\":[");
+        {
+            bool first_co = true;
+            for (int ci = 0; ci < dynamic_company_count; ci++) {
+                if (!dynamic_companies[ci].active) continue;
+                if (!first_co && gs_off < (int)sizeof(game_state) - 2)
+                    game_state[gs_off++] = ',';
+                gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
+                    "{\"id\":%u,\"name\":\"%s\",\"founderId\":%u}",
+                    dynamic_companies[ci].id,
+                    dynamic_companies[ci].name,
+                    dynamic_companies[ci].founder_id);
+                first_co = false;
+            }
+        }
+        if (gs_off < (int)sizeof(game_state) - 1) game_state[gs_off++] = ']';
+
         if (gs_off < (int)sizeof(game_state) - 1) {
             game_state[gs_off++] = '}';
             game_state[gs_off]   = '\0';

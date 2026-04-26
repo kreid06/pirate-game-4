@@ -72,6 +72,10 @@ extern int world_npc_count;
 extern uint16_t next_world_npc_id;
 extern bool g_npcs_dirty;
 
+extern DynamicCompany dynamic_companies[];
+extern int dynamic_company_count;
+extern uint32_t next_dynamic_company_id;
+
 extern SimpleShip ships[];
 extern int ship_count;
 extern uint8_t next_ship_seq;

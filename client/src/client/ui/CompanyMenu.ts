@@ -15,6 +15,7 @@ import {
   WorldState,
   Npc,
   Ship,
+  Company,
   COMPANY_NEUTRAL,
   COMPANY_SOLO,
   COMPANY_PIRATES,
@@ -29,12 +30,14 @@ import {
 
 const COMPANY_NAMES: Record<number, string> = {
   [COMPANY_NEUTRAL]: 'Neutral',
+  [COMPANY_SOLO]:    'Solo',
   [COMPANY_PIRATES]: 'Pirates',
   [COMPANY_NAVY]:    'Navy',
 };
 
 const COMPANY_COLORS: Record<number, string> = {
   [COMPANY_NEUTRAL]: '#aaaaaa',
+  [COMPANY_SOLO]:    '#ffcc44',
   [COMPANY_PIRATES]: '#ff6644',
   [COMPANY_NAVY]:    '#4488ff',
 };
@@ -80,11 +83,17 @@ export class CompanyMenu {
   /** Fired when the player clicks a Join Company button (passes the company id). */
   public onJoinCompany: ((companyId: number) => void) | null = null;
 
+  /** Fired when the player wants to create a new company with a given name. */
+  public onCreateCompany: ((name: string) => void) | null = null;
+
   /** Hit area of the Leave Company button — refreshed each render. */
   private _leaveBtnArea: { x: number; y: number; w: number; h: number } | null = null;
 
   /** Hit areas for join buttons [{ companyId, x, y, w, h }] — refreshed each render. */
   private _joinBtnAreas: { companyId: number; x: number; y: number; w: number; h: number }[] = [];
+
+  /** Hit area for the Create Company button — refreshed each render. */
+  private _createBtnArea: { x: number; y: number; w: number; h: number } | null = null;
 
   // ── Toggle ──────────────────────────────────────────────────────────────────
   toggle(): void {
@@ -92,7 +101,7 @@ export class CompanyMenu {
   }
 
   /** Returns true if the click landed on a button inside the menu. */
-  handleClick(x: number, y: number): boolean {
+  handleClick(x: number, y: number, canvas: HTMLCanvasElement): boolean {
     if (!this.visible) return false;
     if (this._leaveBtnArea) {
       const b = this._leaveBtnArea;
@@ -104,6 +113,13 @@ export class CompanyMenu {
     for (const jb of this._joinBtnAreas) {
       if (x >= jb.x && x <= jb.x + jb.w && y >= jb.y && y <= jb.y + jb.h) {
         this.onJoinCompany?.(jb.companyId);
+        return true;
+      }
+    }
+    if (this._createBtnArea) {
+      const b = this._createBtnArea;
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+        this._promptCreateCompany(canvas);
         return true;
       }
     }
@@ -154,7 +170,7 @@ export class CompanyMenu {
     let cursor = py;
 
     cursor = this._drawHeader(ctx, px, cursor, playerCompany);
-    cursor = this._drawFactionBadge(ctx, px, cursor, playerCompany, player?.id ?? null);
+    cursor = this._drawFactionBadge(ctx, px, cursor, playerCompany, player?.id ?? null, worldState.companies ?? []);
     cursor = this._drawCrewSection(ctx, px, cursor, worldState.npcs, playerShipId);
     cursor = this._drawFleetSection(ctx, px, cursor, worldState.ships, playerCompany, playerShipId);
     this._drawFooter(ctx, px, py, worldState.npcs, worldState.ships, playerCompany);
@@ -201,6 +217,7 @@ export class CompanyMenu {
     px: number, py: number,
     playerCompany: number,
     playerId: number | null,
+    companies: Company[],
   ): number {
     const sectionH = 46;
     py += 4;
@@ -211,7 +228,9 @@ export class CompanyMenu {
     // Faction color swatch
     const swatchX = px + PAD + 8;
     const swatchY = py + (sectionH - 18) / 2;
-    ctx.fillStyle = COMPANY_COLORS[playerCompany] ?? '#aaa';
+    // For dynamic company, look up its color or use a default
+    const dynCompany = companies.find(c => c.id === playerCompany);
+    ctx.fillStyle = COMPANY_COLORS[playerCompany] ?? '#cc88ff';
     ctx.fillRect(swatchX, swatchY, 18, 18);
 
     // Company name
@@ -219,7 +238,7 @@ export class CompanyMenu {
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = TEXT_HEAD;
-    const name = COMPANY_NAMES[playerCompany] ?? `Company ${playerCompany}`;
+    const name = dynCompany ? dynCompany.name : (COMPANY_NAMES[playerCompany] ?? `Company ${playerCompany}`);
     ctx.fillText(name.toUpperCase(), swatchX + 26, py + sectionH / 2);
 
     // Player ID tag (only when not showing the leave or join buttons)
@@ -233,7 +252,7 @@ export class CompanyMenu {
       ctx.fillText(`Player #${playerId}`, px + PANEL_W - PAD - 8, py + sectionH / 2);
     }
 
-    // Leave Company button — only shown when in a guild company
+    // Leave Company button — only shown when in a guild/dynamic company
     if (canLeave) {
       const btnW = 120;
       const btnH = 22;
@@ -256,9 +275,12 @@ export class CompanyMenu {
       this._leaveBtnArea = null;
     }
 
-    // Join Company buttons — only shown when COMPANY_SOLO
+    // Reset join/create areas
     this._joinBtnAreas = [];
+    this._createBtnArea = null;
+
     if (isSolo) {
+      // ── Row 1: JOIN PIRATES + JOIN NAVY ──────────────────────────────────
       const btnH  = 22;
       const btnW  = 90;
       const gap   = 6;
@@ -282,6 +304,79 @@ export class CompanyMenu {
         this._joinBtnAreas.push({ companyId: j.id, x: bx, y: btnY, w: btnW, h: btnH });
         bx += btnW + gap;
       }
+
+      // ── Dynamic companies list ────────────────────────────────────────────
+      py += sectionH + 4;
+      if (companies.length > 0) {
+        // Section label
+        ctx.font      = 'bold 12px Consolas, monospace';
+        ctx.fillStyle = GOLD;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('PLAYER COMPANIES', px + PAD, py + 11);
+        py += 22;
+
+        const rowH    = 26;
+        const jBtnW   = 70;
+        const maxShow = Math.min(companies.length, 4);
+        for (let ci = 0; ci < maxShow; ci++) {
+          const co = companies[ci];
+          if (ci % 2 === 1) {
+            ctx.fillStyle = BG_STRIPE;
+            ctx.fillRect(px + PAD, py, PANEL_W - PAD * 2, rowH);
+          }
+          // Color swatch
+          ctx.fillStyle = '#cc88ff';
+          ctx.fillRect(px + PAD + 6, py + (rowH - 12) / 2, 12, 12);
+          // Company name
+          ctx.font      = '13px Consolas, monospace';
+          ctx.fillStyle = TEXT_HEAD;
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(co.name, px + PAD + 24, py + rowH / 2);
+          // JOIN button
+          const jBtnX = px + PANEL_W - PAD - jBtnW;
+          const jBtnY = py + (rowH - 20) / 2;
+          ctx.fillStyle = '#1a3a1a';
+          ctx.fillRect(jBtnX, jBtnY, jBtnW, 20);
+          ctx.strokeStyle = '#44cc44';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(jBtnX, jBtnY, jBtnW, 20);
+          ctx.font      = 'bold 11px Consolas, monospace';
+          ctx.fillStyle = '#88ff88';
+          ctx.textAlign = 'center';
+          ctx.fillText('JOIN', jBtnX + jBtnW / 2, jBtnY + 10);
+          this._joinBtnAreas.push({ companyId: co.id, x: jBtnX, y: jBtnY, w: jBtnW, h: 20 });
+          py += rowH;
+        }
+        if (companies.length > maxShow) {
+          ctx.font      = '12px Consolas, monospace';
+          ctx.fillStyle = TEXT_DIM;
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'top';
+          ctx.fillText(`  … and ${companies.length - maxShow} more`, px + PAD, py + 3);
+          py += ROW_H;
+        }
+      }
+
+      // ── CREATE COMPANY button ─────────────────────────────────────────────
+      const cBtnW = 160;
+      const cBtnH = 26;
+      const cBtnX = px + PAD;
+      const cBtnY = py + 6;
+      this._createBtnArea = { x: cBtnX, y: cBtnY, w: cBtnW, h: cBtnH };
+      ctx.fillStyle   = '#1a2a3a';
+      ctx.fillRect(cBtnX, cBtnY, cBtnW, cBtnH);
+      ctx.strokeStyle = '#88aaff';
+      ctx.lineWidth   = 1;
+      ctx.strokeRect(cBtnX, cBtnY, cBtnW, cBtnH);
+      ctx.font         = 'bold 12px Consolas, monospace';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = '#aaccff';
+      ctx.fillText('+ CREATE COMPANY', cBtnX + cBtnW / 2, cBtnY + cBtnH / 2);
+
+      return cBtnY + cBtnH + 8;
     }
 
     return py + sectionH + 8;
@@ -499,5 +594,46 @@ export class CompanyMenu {
     ctx.fillText(col3, c3x, midY);
 
     return py + ROW_H;
+  }
+
+  /** Shows a browser prompt to get the company name, then fires onCreateCompany. */
+  private _promptCreateCompany(canvas: HTMLCanvasElement): void {
+    // Use a temporary overlay <input> positioned over the canvas
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'Enter company name…';
+    input.maxLength = 31;
+    input.style.cssText = [
+      'position:fixed',
+      `left:${canvas.getBoundingClientRect().left + canvas.width / 2 - 160}px`,
+      `top:${canvas.getBoundingClientRect().top + canvas.height / 2 - 18}px`,
+      'width:320px',
+      'height:36px',
+      'background:#0e1420',
+      'color:#e8e0cc',
+      'border:2px solid #88aaff',
+      'border-radius:4px',
+      'padding:0 10px',
+      'font:16px Consolas,monospace',
+      'z-index:9999',
+      'outline:none',
+    ].join(';');
+    document.body.appendChild(input);
+    input.focus();
+
+    const cleanup = () => { if (input.parentNode) document.body.removeChild(input); };
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const name = input.value.trim();
+        cleanup();
+        if (name.length > 0) this.onCreateCompany?.(name);
+      } else if (e.key === 'Escape') {
+        cleanup();
+      }
+      e.stopPropagation();
+    });
+
+    input.addEventListener('blur', () => cleanup());
   }
 }

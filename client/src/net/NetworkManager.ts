@@ -6,7 +6,7 @@
  */
 
 import { NetworkConfig } from '../client/ClientConfig.js';
-import { WorldState, InputFrame, Npc, Ship, IslandDef, IslandResource, IslandPreset, PlacedStructure, ConstructionPhase } from '../sim/Types.js';
+import { WorldState, InputFrame, Npc, Ship, IslandDef, IslandResource, IslandPreset, PlacedStructure, ConstructionPhase, Company } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { createShipAtPosition } from '../sim/ShipUtils.js';
 import { ShipModule, ModuleKind, MODULE_TYPE_MAP } from '../sim/modules.js';
@@ -519,6 +519,7 @@ export class NetworkManager {
 
   // Event callbacks
   public onWorldStateReceived: ((worldState: WorldState) => void) | null = null;
+  public onCompanyCreated: ((company: Company) => void) | null = null;
   public onConnectionStateChanged: ((state: ConnectionState) => void) | null = null;
   public onModuleMountSuccess: ((moduleId: number, moduleKind: string, mountOffset?: Vec2) => void) | null = null;
   public onModuleMountFailure: ((reason: string) => void) | null = null;
@@ -1528,6 +1529,16 @@ export class NetworkManager {
     this.socket.send(JSON.stringify({ type: 'upgrade_crew_stat', npcId, stat }));
   }
 
+  sendCreateCompany(name: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'create_company', name }));
+  }
+
+  sendJoinCompany(companyId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'join_company', companyId }));
+  }
+
   /**
    * Request the server to spend a player stat point upgrading one player stat.
    * stat must be one of: 'health' | 'damage' | 'stamina' | 'weight'
@@ -2060,6 +2071,11 @@ export class NetworkManager {
             x:        d.x        ?? 0,
             y:        d.y        ?? 0,
           })),
+          companies: (message.companies ?? []).map((c: any): Company => ({
+            id:         c.id         ?? 0,
+            name:       c.name       ?? '',
+            founderId:  c.founderId  ?? 0,
+          })),
         };
         
         this.onWorldStateReceived?.(worldState);
@@ -2067,6 +2083,17 @@ export class NetworkManager {
         
       case MessageType.PONG: // Handles both 'pong' enum and text response
         this.handlePong(message);
+        break;
+
+      case 'company_created' as any:
+        if (message.company) {
+          const co: Company = {
+            id:        message.company.id        ?? 0,
+            name:      message.company.name      ?? '',
+            founderId: message.company.founderId ?? 0,
+          };
+          this.onCompanyCreated?.(co);
+        }
         break;
         
       case MessageType.HANDSHAKE_RESPONSE:

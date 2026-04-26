@@ -342,6 +342,7 @@ export interface WorldState {
   npcs: Npc[];
   tombstones: Tombstone[];
   droppedItems: DroppedItem[];
+  companies: Company[];       // Player-created dynamic companies (id >= 100)
   timestamp: number;
   // Phase 2: Add carrier detection state per player
   carrierDetection: Map<number, CarrierDetectionState>; // playerId -> detection state
@@ -353,6 +354,13 @@ export interface DroppedItem {
   quantity: number;
   x: number;
   y: number;
+}
+
+/** A player-created company (id >= 100). */
+export interface Company {
+  id: number;
+  name: string;
+  founderId: number;
 }
 
 /**

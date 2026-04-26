@@ -523,6 +523,17 @@ export class ClientApplication {
         console.log(`⚓ NPC ${npcId} unclaimed`);
       };
 
+      // Append newly created dynamic company to local world state
+      this.networkManager.onCompanyCreated = (company) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          if (!ws.companies.find(c => c.id === company.id)) {
+            ws.companies.push(company);
+          }
+        }
+        console.log(`🏴 Company created: "${company.name}" (id=${company.id})`);
+      };
+
       // When the server confirms a ladder board, record the ship ID so that the
       // cannon_group_state that follows can be accepted before the world-state tick
       // updates the player's carrierId.
@@ -1574,8 +1585,18 @@ export class ClientApplication {
 
       // Wire Join Company buttons in the company menu — moves player (and their NPCs) to the chosen guild
       this.uiManager.setJoinCompanyCallback((companyId: number) => {
-        const companyName = companyId === 2 ? 'pirates' : companyId === 3 ? 'navy' : 'solo';
-        this.networkManager.sendCommand(`/AddPlayerToCompany ${companyName}`);
+        if (companyId >= 100) {
+          // Dynamic player-created company — use JSON protocol message
+          this.networkManager.sendJoinCompany(companyId);
+        } else {
+          const companyName = companyId === 2 ? 'pirates' : companyId === 3 ? 'navy' : 'solo';
+          this.networkManager.sendCommand(`/AddPlayerToCompany ${companyName}`);
+        }
+      });
+
+      // Wire Create Company button in the company menu
+      this.uiManager.setCreateCompanyCallback((name: string) => {
+        this.networkManager.sendCreateCompany(name);
       });
 
       // Wire NPC stat upgrade requests from the crew level menu to the server
@@ -4171,6 +4192,7 @@ export class ClientApplication {
       npcs: [],
       tombstones: [],
       droppedItems: [],
+      companies: [],
       carrierDetection: new Map()
     };
   }
