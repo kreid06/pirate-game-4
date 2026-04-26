@@ -823,6 +823,16 @@ export class RenderSystem {
   private readonly TRAIL_SPACING_MS  = 10;   // min ms between crumbs
   /** Timestamp of last crumb per ball — prevents over-sampling. */
   private trailLastEmit: Map<number, number> = new Map();
+  /**
+   * Combined wake history: ship id -> sampled {ship-center x/y, rotation r, timestamp t}.
+   * Both the stern wash and bow V-lines are derived from this single trail at render time.
+   */
+  private shipWakeTrails: Map<number, Array<{ x: number; y: number; r: number; t: number }>> = new Map();
+  /** Last wake sample time per ship to avoid oversampling history. */
+  private shipWakeLastEmit: Map<number, number> = new Map();
+  private readonly SHIP_WAKE_TRAIL_DURATION_MS = 10000;
+  private readonly SHIP_WAKE_TRAIL_SPACING_MS = 120;
+  private readonly SHIP_WAKE_TRAIL_MIN_DIST = 18;
   
   // Debug flags
   private showHoverBoundaries: boolean = false;
@@ -3030,34 +3040,36 @@ export class RenderSystem {
   }
   
   private drawGrid(camera: Camera): void {
-    const cameraState = camera.getState();
     const bounds = camera.getWorldBounds();
-    
-    this.ctx.strokeStyle = '#ffffff20';
-    this.ctx.lineWidth = 1;
-    
-    const gridSize = 1000; // World units
-    const startX = Math.floor(bounds.min.x / gridSize) * gridSize;
-    const endX = Math.ceil(bounds.max.x / gridSize) * gridSize;
-    const startY = Math.floor(bounds.min.y / gridSize) * gridSize;
-    const endY = Math.ceil(bounds.max.y / gridSize) * gridSize;
-    
-    // Draw vertical lines
-    for (let x = startX; x <= endX; x += gridSize) {
+    const majorStep = 30_000;
+
+    // Active world for now: one 90k x 90k square. Use explicit major lines at
+    // 0, 30k, 60k so players can orient quickly; world border itself provides
+    // the outer 90k edge.
+    const worldW = this._wrapWorldWidth > 0 ? this._wrapWorldWidth : 90_000;
+    const worldH = this._wrapWorldHeight > 0 ? this._wrapWorldHeight : 90_000;
+
+    this.ctx.strokeStyle = '#ffffff26';
+    this.ctx.lineWidth = 1.5;
+
+    const verticalLineCount = Math.max(1, Math.floor(worldW / majorStep));
+    for (let i = 0; i < verticalLineCount; i++) {
+      const x = i * majorStep;
+      if (x < bounds.min.x - majorStep || x > bounds.max.x + majorStep) continue;
       const screenStart = camera.worldToScreen(Vec2.from(x, bounds.min.y));
       const screenEnd = camera.worldToScreen(Vec2.from(x, bounds.max.y));
-      
       this.ctx.beginPath();
       this.ctx.moveTo(screenStart.x, screenStart.y);
       this.ctx.lineTo(screenEnd.x, screenEnd.y);
       this.ctx.stroke();
     }
-    
-    // Draw horizontal lines
-    for (let y = startY; y <= endY; y += gridSize) {
+
+    const horizontalLineCount = Math.max(1, Math.floor(worldH / majorStep));
+    for (let i = 0; i < horizontalLineCount; i++) {
+      const y = i * majorStep;
+      if (y < bounds.min.y - majorStep || y > bounds.max.y + majorStep) continue;
       const screenStart = camera.worldToScreen(Vec2.from(bounds.min.x, y));
       const screenEnd = camera.worldToScreen(Vec2.from(bounds.max.x, y));
-      
       this.ctx.beginPath();
       this.ctx.moveTo(screenStart.x, screenStart.y);
       this.ctx.lineTo(screenEnd.x, screenEnd.y);
@@ -4906,6 +4918,44 @@ export class RenderSystem {
         this.sinkSplashTimers.delete(id);
       }
     }
+
+    // ── Ship wake trail history sampling/pruning ───────────────────────────
+    const wakeNow = performance.now();
+    const wakeCutoff = wakeNow - this.SHIP_WAKE_TRAIL_DURATION_MS;
+    for (const ship of worldState.ships) {
+      if (ship.shipType === SHIP_TYPE_GHOST) continue;
+      const speed = Math.hypot(ship.velocity.x, ship.velocity.y);
+      if (speed < 6) continue;
+
+      const lastEmit = this.shipWakeLastEmit.get(ship.id) ?? 0;
+      if (wakeNow - lastEmit < this.SHIP_WAKE_TRAIL_SPACING_MS) continue;
+
+      let trail = this.shipWakeTrails.get(ship.id);
+      if (!trail) {
+        trail = [];
+        this.shipWakeTrails.set(ship.id, trail);
+      }
+
+      const prev = trail.length > 0 ? trail[trail.length - 1] : null;
+      const movedEnough = !prev || Math.hypot(ship.position.x - prev.x, ship.position.y - prev.y) >= this.SHIP_WAKE_TRAIL_MIN_DIST;
+      if (movedEnough) {
+        // Store ship center + rotation; both wash and bow V-lines are derived from this.
+        trail.push({ x: ship.position.x, y: ship.position.y, r: ship.rotation, t: wakeNow });
+        this.shipWakeLastEmit.set(ship.id, wakeNow);
+      }
+
+      let start = 0;
+      while (start < trail.length && trail[start].t < wakeCutoff) start++;
+      if (start > 0) trail.splice(0, start);
+    }
+
+    // Remove history for ships that no longer exist in the live world set.
+    for (const id of this.shipWakeTrails.keys()) {
+      if (!currentShipIds.has(id)) {
+        this.shipWakeTrails.delete(id);
+        this.shipWakeLastEmit.delete(id);
+      }
+    }
     // ───────────────────────────────────────────────────────────────────────
 
     // ── NPC kill detection ─────────────────────────────────────────────────
@@ -4987,8 +5037,9 @@ export class RenderSystem {
     // 6: sail fibers
     // 7: sail masts
     
-    // Queue ship hulls (layer 1)
+    // Queue ship wakes + hulls (layer 1)
     for (const ship of renderShips) {
+      this.queueRenderItem(1, 'ship-wake', () => this.drawShipWake(ship, camera), -2);
       this.queueRenderItem(1, 'ship-hull', () => this.drawShipHull(ship, camera));
       // Ghost fog aura: drawn at layer 0.5 (below hull, like water surface wisps)
       if (ship.shipType === SHIP_TYPE_GHOST) {
@@ -5259,6 +5310,7 @@ export class RenderSystem {
       const wrappedGhostCopies = this.buildWrappedRenderCopies([ghost], camera, 320);
       for (const ghostCopy of wrappedGhostCopies) {
         const id = ghostCopy.id;
+        this.queueRenderItem(1, `ghost-wake-${id}`,      () => this.drawShipWake(ghostCopy, camera), -2);
         this.queueRenderItem(1, `ghost-hull-${id}`,       () => this.drawShipHull(ghostCopy, camera));
         this.queueRenderItem(3, `ghost-planks-${id}`,     () => this.drawShipPlanks(ghostCopy, camera));
         this.queueRenderItem(4, `ghost-cannons-${id}`,    () => this.drawShipCannons(ghostCopy, camera));
@@ -5292,6 +5344,223 @@ export class RenderSystem {
         }
       }
     }
+  }
+
+  private drawShipWake(ship: Ship, camera: Camera): void {
+    if (ship.shipType === SHIP_TYPE_GHOST) return;
+    if (!camera.isWorldPositionVisible(ship.position, 420)) return;
+
+    const speed = Math.hypot(ship.velocity.x, ship.velocity.y);
+    if (speed < 8) return;
+
+    const forwardX = Math.cos(ship.rotation);
+    const forwardY = Math.sin(ship.rotation);
+    const signedForwardSpeed = ship.velocity.x * forwardX + ship.velocity.y * forwardY;
+
+    // Wake intensity grows with forward/reverse movement along the ship heading.
+    const wakeFactor = Math.min(1, Math.abs(signedForwardSpeed) / 135);
+    if (wakeFactor < 0.06) return;
+
+    const { phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
+
+    const ctx = this.ctx;
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const t = performance.now() / 1000;
+    const pulse = 0.6 + 0.4 * Math.sin(t * 7.5 + ship.id * 0.37);
+
+    ctx.save();
+    ctx.translate(screenPos.x, screenPos.y);
+    ctx.scale(cameraState.zoom, cameraState.zoom);
+    ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const wakeAlpha = (0.08 + wakeFactor * 0.22) * phase1Alpha;
+    // Bow is at local +X (max hull X), stern at -X (min hull X).
+    // Physics convention: signedForwardSpeed >= 0 maps to BACKWARD motion in this client,
+    // so leadSign is intentionally inverted.
+    const leadSign = signedForwardSpeed >= 0 ? -1 : 1;
+
+    const bowLocalX = ship.hull.length > 0
+      ? Math.max(...ship.hull.map(v => v.x))
+      : 150;
+    const leadX = (bowLocalX - 80) * -leadSign;
+    const bowGlow = ctx.createRadialGradient(leadX, 0, 12, leadX, 0, 170 + wakeFactor * 65);
+    bowGlow.addColorStop(0, `rgba(235,245,255,${(wakeAlpha * (0.8 + 0.2 * pulse)).toFixed(3)})`);
+    bowGlow.addColorStop(1, 'rgba(180,210,245,0)');
+    ctx.fillStyle = bowGlow;
+    ctx.beginPath();
+    ctx.ellipse(leadX, 0, 140 + wakeFactor * 65, 54 + wakeFactor * 28, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = `rgba(225,240,255,${(wakeAlpha * 1.1).toFixed(3)})`;
+    ctx.lineWidth = 2.6;
+    ctx.beginPath();
+    ctx.moveTo(bowLocalX * -leadSign, -10);
+    ctx.quadraticCurveTo((bowLocalX - 140) * -leadSign, -88 - wakeFactor * 34, (bowLocalX - 370) * -leadSign, -120 - wakeFactor * 42);
+    ctx.moveTo(bowLocalX * -leadSign, 10);
+    ctx.quadraticCurveTo((bowLocalX - 140) * -leadSign, 88 + wakeFactor * 34, (bowLocalX - 370) * -leadSign, 120 + wakeFactor * 42);
+    ctx.stroke();
+
+    ctx.restore();
+
+    // ── Combined wake trail (wash + Kelvin V-lines + bow wave history) ──────
+    // All three effects share one trail of {x,y,r,t} (ship-center + rotation).
+    // Screen positions are computed once per point and reused across effects.
+    const trail = this.shipWakeTrails.get(ship.id);
+    if (!trail || trail.length < 2) return;
+
+    // Hull extremes (computed with a loop, not spread/map to avoid allocations).
+    let bowLX = -Infinity, sternLX = Infinity;
+    for (let i = 0; i < ship.hull.length; i++) {
+      const vx = ship.hull[i].x;
+      if (vx > bowLX)   bowLX   = vx;
+      if (vx < sternLX) sternLX = vx;
+    }
+    if (!isFinite(bowLX))   bowLX   =  150;
+    if (!isFinite(sternLX)) sternLX = -150;
+
+    const nowMs  = performance.now();
+    const DUR    = this.SHIP_WAKE_TRAIL_DURATION_MS;
+    const z      = cameraState.zoom;
+    const camRot = cameraState.rotation;
+    const kelvinTan = 0.35355; // 1/√8
+
+    // Pre-compute per-point data in one pass (no repeated worldToScreen calls).
+    // ssx/ssy = stern screen x/y; bsx/bsy = bow screen x/y.
+    // We store these in flat arrays to avoid object allocation.
+    const N = trail.length;
+    const ssx = new Float32Array(N);
+    const ssy = new Float32Array(N);
+    const bsx = new Float32Array(N);
+    const bsy = new Float32Array(N);
+    const fades = new Float32Array(N);
+    // Also compute perpendicular unit vector per point for Kelvin lines.
+    const perpX = new Float32Array(N);
+    const perpY = new Float32Array(N);
+    // Cumulative stern-path distance (for Kelvin offset).
+    const cumDist = new Float32Array(N);
+
+    // Shift to anchor trail to current stern world pos.
+    const newest = trail[N - 1];
+    const cosR = Math.cos(ship.rotation), sinR = Math.sin(ship.rotation);
+    const curSternX = ship.position.x + cosR * sternLX;
+    const curSternY = ship.position.y + sinR * sternLX;
+    const shiftX = curSternX - newest.x;
+    const shiftY = curSternY - newest.y;
+
+    // Camera transform constants for worldToScreen inline.
+    const camState = cameraState;
+    // We'll call camera.worldToScreen since it handles any camera projection.
+    // But we compute bow+stern in one shot per point.
+    for (let i = 0; i < N; i++) {
+      const pt = trail[i];
+      const age = (nowMs - pt.t) / DUR;
+      fades[i] = age >= 0 && age <= 1 ? 1 - age : 0;
+      if (fades[i] <= 0) continue;
+
+      const cosPR = Math.cos(pt.r), sinPR = Math.sin(pt.r);
+      // Stern: just shift the stored ship-center position — shiftX already anchors
+      // newest.x → curSternX, so adding sternLX here would double-offset.
+      const sp = camera.worldToScreen(Vec2.from(pt.x + shiftX, pt.y + shiftY));
+      ssx[i] = sp.x; ssy[i] = sp.y;
+
+      // Bow world pos derived from historical rotation (no shift — bow is absolute).
+      const bwx = pt.x + cosPR * bowLX;
+      const bwy = pt.y + sinPR * bowLX;
+      const bp  = camera.worldToScreen(Vec2.from(bwx, bwy));
+      bsx[i] = bp.x; bsy[i] = bp.y;
+    }
+
+    // Cumulative stern-path distances for Kelvin angle.
+    for (let i = N - 2; i >= 0; i--) {
+      const dx = ssx[i + 1] - ssx[i], dy = ssy[i + 1] - ssy[i];
+      cumDist[i] = cumDist[i + 1] + Math.hypot(dx, dy);
+    }
+
+    // Perpendicular to stern segment direction (screen space).
+    for (let i = 1; i < N; i++) {
+      const dx = ssx[i] - ssx[i - 1], dy = ssy[i] - ssy[i - 1];
+      const len = Math.hypot(dx, dy);
+      if (len > 0.5) { perpX[i] = -dy / len; perpY[i] = dx / len; }
+      else           { perpX[i] = perpX[i - 1]; perpY[i] = perpY[i - 1]; }
+    }
+    perpX[0] = perpX[1]; perpY[0] = perpY[1];
+
+    ctx.save();
+    ctx.lineCap  = 'round';
+    ctx.lineJoin = 'round';
+
+    // Pass A – Wash (core foam stripe, 4 fade buckets).
+    const washBaseW = Math.min(80, Math.max(2, (24 + wakeFactor * 18) * z));
+    for (let b = 0; b < 4; b++) {
+      const fadeMin = b / 4, fadeMax = (b + 1) / 4, fadeMid = (fadeMin + fadeMax) / 2;
+      const alpha = wakeAlpha * 0.9 * fadeMid;
+      if (alpha <= 0.01) continue;
+      ctx.strokeStyle = `rgba(230,242,255,${alpha.toFixed(3)})`;
+      ctx.lineWidth   = washBaseW * fadeMid;
+      ctx.beginPath();
+      let drew = false;
+      for (let i = 1; i < N; i++) {
+        const fade = fades[i];
+        if (fade <= 0 || fade < fadeMin || fade >= fadeMax) continue;
+        ctx.moveTo(ssx[i - 1], ssy[i - 1]);
+        ctx.lineTo(ssx[i],     ssy[i]);
+        drew = true;
+      }
+      if (drew) ctx.stroke();
+    }
+
+    // Pass B – Kelvin V-lines + bow wave V-shapes, interleaved in one alpha-bucketed loop.
+    ctx.lineWidth = Math.min(3, Math.max(0.8, 2.2 * z));
+    let lastAlpha = -1;
+    ctx.beginPath();
+    for (let i = 1; i < N; i++) {
+      const fade = fades[i];
+      if (fade <= 0) continue;
+      const alpha = wakeAlpha * 0.85 * fade;
+      if (alpha <= 0.01) continue;
+      const qa = Math.round(alpha / 0.05) * 0.05;
+      if (qa !== lastAlpha) {
+        if (lastAlpha >= 0) ctx.stroke();
+        ctx.strokeStyle = `rgba(215,235,255,${qa.toFixed(2)})`;
+        ctx.beginPath();
+        lastAlpha = qa;
+      }
+
+      // Kelvin V-lines: offset stern points perpendicular by Kelvin angle.
+      const offA = cumDist[i - 1] * kelvinTan;
+      const offB = cumDist[i]     * kelvinTan;
+      ctx.moveTo(ssx[i-1] + perpX[i] * offA, ssy[i-1] + perpY[i] * offA);
+      ctx.lineTo(ssx[i]   + perpX[i] * offB, ssy[i]   + perpY[i] * offB);
+      ctx.moveTo(ssx[i-1] - perpX[i] * offA, ssy[i-1] - perpY[i] * offA);
+      ctx.lineTo(ssx[i]   - perpX[i] * offB, ssy[i]   - perpY[i] * offB);
+
+      // Bow wave V-shape at this historical bow position.
+      // Rotate fan vectors using stored rotation pt.r.
+      const pt  = trail[i];
+      const cosS = Math.cos(pt.r - camRot), sinS = Math.sin(pt.r - camRot);
+      // localToScreen offset: (lx, ly) -> (cosS*lx - sinS*ly, sinS*lx + cosS*ly) * z
+      const spread = (88 + wakeFactor * 34) * fade;
+      const tip    = spread * 1.36;
+      const f140x = (-cosS * 140) * z, f140y = (-sinS * 140) * z;
+      const f370x = (-cosS * 370) * z, f370y = (-sinS * 370) * z;
+      const tpx = (-sinS *  spread) * z, tpy = ( cosS *  spread) * z;
+      const bpx = (-sinS * -spread) * z, bpy = ( cosS * -spread) * z;
+      const tipx = (-sinS *  tip) * z,   tipy = ( cosS *  tip) * z;
+      const btipx = (-sinS * -tip) * z,  btipy = ( cosS * -tip) * z;
+      // Top arm
+      ctx.moveTo(bsx[i], bsy[i]);
+      ctx.quadraticCurveTo(bsx[i] + f140x + tpx,  bsy[i] + f140y + tpy,
+                           bsx[i] + f370x + tipx,  bsy[i] + f370y + tipy);
+      // Bottom arm
+      ctx.moveTo(bsx[i], bsy[i]);
+      ctx.quadraticCurveTo(bsx[i] + f140x + bpx,  bsy[i] + f140y + bpy,
+                           bsx[i] + f370x + btipx, bsy[i] + f370y + btipy);
+    }
+    if (lastAlpha >= 0) ctx.stroke();
+
+    ctx.restore();
   }
   
   private drawShipHull(ship: Ship, camera: Camera): void {
