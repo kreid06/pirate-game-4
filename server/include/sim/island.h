@@ -87,6 +87,13 @@ typedef struct {
     IslandResource resources[ISLAND_MAX_RESOURCES];
     int            resource_count;
 
+    /* ── Rotation applied at startup by islands_apply_rotations() ─────────
+     * Degrees clockwise (screen y-down). 0 = no rotation.
+     * When nonzero, vx/vy, gvx/gvy, and svx/svy are rotated in-place
+     * once before islands_generate_trees() runs.
+     */
+    float rotation_deg;
+
     /* ── Polygon island (vertex_count > 0 overrides bump-circle) ──────────
      * Vertices are offsets from (x, y) in world pixels.  When vertex_count
      * is nonzero the bump-circle fields (beach_radius_px etc.) are ignored
@@ -342,10 +349,17 @@ static inline float island_shallow_water_depth(const IslandDef *isl, float px, f
 /**
  * Load island polygon data (sand/grass/shallow vertices, centre) from JSON
  * files in the given directory.  File names must be island_<id>.json.
- * Call once at server startup BEFORE islands_generate_trees().
+ * Call once at server startup BEFORE islands_apply_rotations().
  * Islands without a matching file keep their compiled-in data.
  */
 void islands_load_from_files(const char *dir);
+
+/**
+ * Rotate vertex arrays (vx/vy, gvx/gvy, svx/svy) in-place for every island
+ * whose rotation_deg field is nonzero.  Call once at startup AFTER
+ * islands_load_from_files() and BEFORE islands_generate_trees().
+ */
+void islands_apply_rotations(void);
 
 /**
  * Procedurally generate tree (wood resource) positions for all polygon
