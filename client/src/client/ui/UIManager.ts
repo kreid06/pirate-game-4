@@ -380,6 +380,10 @@ export class UIManager {
    * Call this from the application keydown handler before processing game input.
    */
   handleKeyDown(key: string): boolean {
+    // Let the company menu consume keys when its name-entry form is active
+    if (this.activeMenuId === MENU_ID.COMPANY && this.companyMenu.handleKeyDown(key)) {
+      return true;
+    }
     if (key === 'Escape' && this._dropPicker.open) {
       this._dropPicker.open = false;
       return true;
@@ -1189,7 +1193,7 @@ export class UIManager {
     }
     // If company menu is open, try internal buttons first, then close on outside click.
     if (this.activeMenuId === MENU_ID.COMPANY) {
-      if (this.companyMenu.handleClick(x, y, this.canvas)) return true;
+      if (this.companyMenu.handleClick(x, y)) return true;
       this.closeActiveMenu();
       return true;
     }
@@ -1695,6 +1699,12 @@ export class UIManager {
   private onKeyDown(event: KeyboardEvent): void {
     // Close any open modal on Escape or backtick
     if (event.code === 'Escape' || event.code === 'Backquote') {
+      // Let the company menu handle ESC first (e.g. cancel name-entry form)
+      if (this.activeMenuId === MENU_ID.COMPANY && this.companyMenu.handleKeyDown('Escape')) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (this.activeMenuId !== null
           && this.activeMenuId !== MENU_ID.CRAFTING
           && this.activeMenuId !== MENU_ID.SHIPYARD
@@ -1705,6 +1715,13 @@ export class UIManager {
         return;
       }
       // Don't stopPropagation here — let ClientApplication handle Escape for pause menu
+      return;
+    }
+
+    // Forward all keys to the company menu while its create form is active
+    if (this.activeMenuId === MENU_ID.COMPANY && this.companyMenu.handleKeyDown(event.key)) {
+      event.preventDefault();
+      event.stopPropagation();
       return;
     }
 

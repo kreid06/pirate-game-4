@@ -93,7 +93,14 @@ export class CompanyMenu {
   private _joinBtnAreas: { companyId: number; x: number; y: number; w: number; h: number }[] = [];
 
   /** Hit area for the Create Company button — refreshed each render. */
-  private _createBtnArea: { x: number; y: number; w: number; h: number } | null = null;
+  private _createBtnArea:  { x: number; y: number; w: number; h: number } | null = null;
+  private _confirmBtnArea: { x: number; y: number; w: number; h: number } | null = null;
+  private _cancelBtnArea:  { x: number; y: number; w: number; h: number } | null = null;
+
+  /** Whether the inline company-name entry form is open. */
+  private _createMode = false;
+  /** Text typed so far for the new company name. */
+  private _createInputText = '';
 
   // ── Toggle ──────────────────────────────────────────────────────────────────
   toggle(): void {
@@ -101,8 +108,29 @@ export class CompanyMenu {
   }
 
   /** Returns true if the click landed on a button inside the menu. */
-  handleClick(x: number, y: number, canvas: HTMLCanvasElement): boolean {
+  handleClick(x: number, y: number): boolean {
     if (!this.visible) return false;
+
+    // Confirm / cancel while name-entry form is open
+    if (this._createMode) {
+      if (this._confirmBtnArea) {
+        const b = this._confirmBtnArea;
+        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+          this._submitCreate();
+          return true;
+        }
+      }
+      if (this._cancelBtnArea) {
+        const b = this._cancelBtnArea;
+        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+          this._createMode = false;
+          this._createInputText = '';
+          return true;
+        }
+      }
+      return true; // swallow all clicks while form is open
+    }
+
     if (this._leaveBtnArea) {
       const b = this._leaveBtnArea;
       if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
@@ -119,15 +147,54 @@ export class CompanyMenu {
     if (this._createBtnArea) {
       const b = this._createBtnArea;
       if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
-        this._promptCreateCompany(canvas);
+        this._createMode = true;
+        this._createInputText = '';
         return true;
       }
     }
     return false;
   }
 
-  open():  void { this.visible = true;  }
-  close(): void { this.visible = false; }
+  /**
+   * Forward keyboard events here when the menu is visible.
+   * Returns true if the key was consumed (caller should not process it further).
+   */
+  handleKeyDown(key: string): boolean {
+    if (!this.visible || !this._createMode) return false;
+    if (key === 'Escape') {
+      this._createMode = false;
+      this._createInputText = '';
+      return true;
+    }
+    if (key === 'Enter') {
+      this._submitCreate();
+      return true;
+    }
+    if (key === 'Backspace') {
+      this._createInputText = this._createInputText.slice(0, -1);
+      return true;
+    }
+    // Printable single character
+    if (key.length === 1 && this._createInputText.length < 31) {
+      this._createInputText += key;
+      return true;
+    }
+    return true; // consume all keys while form is active
+  }
+
+  private _submitCreate(): void {
+    const name = this._createInputText.trim();
+    this._createMode = false;
+    this._createInputText = '';
+    if (name.length > 0) this.onCreateCompany?.(name);
+  }
+
+  open():  void { this.visible = true; }
+  close(): void {
+    this.visible = false;
+    this._createMode = false;
+    this._createInputText = '';
+  }
 
   // ── Render ──────────────────────────────────────────────────────────────────
   render(
@@ -276,39 +343,101 @@ export class CompanyMenu {
     }
 
     // Reset join/create areas
-    this._joinBtnAreas = [];
-    this._createBtnArea = null;
+    this._joinBtnAreas  = [];
+    this._createBtnArea  = null;
+    this._confirmBtnArea = null;
+    this._cancelBtnArea  = null;
 
     if (isSolo) {
-      // ── Row 1: JOIN PIRATES + JOIN NAVY ──────────────────────────────────
-      const btnH  = 22;
-      const btnW  = 90;
-      const gap   = 6;
-      const joins = [
-        { id: COMPANY_PIRATES, label: 'JOIN PIRATES', color: '#7a3310', border: '#ff6644', text: '#ffaa88' },
-        { id: COMPANY_NAVY,    label: 'JOIN NAVY',    color: '#0e2b5e', border: '#4488ff', text: '#88bbff' },
-      ];
-      let bx = px + PANEL_W - PAD - (btnW + gap) * joins.length + gap;
-      const btnY = py + (sectionH - btnH) / 2;
-      for (const j of joins) {
-        ctx.fillStyle   = j.color;
-        ctx.fillRect(bx, btnY, btnW, btnH);
-        ctx.strokeStyle = j.border;
+      py += sectionH + 4;
+
+      // ── Inline create-company form ────────────────────────────────────────
+      if (this._createMode) {
+        const formH   = 36;
+        const formBg  = 'rgba(10,14,26,0.97)';
+        const inputW  = PANEL_W - PAD * 2 - 160; // leave room for buttons
+        const inputX  = px + PAD;
+        const inputY  = py;
+
+        // Background strip
+        ctx.fillStyle = formBg;
+        ctx.fillRect(px + PAD, inputY, PANEL_W - PAD * 2, formH);
+
+        // Label
+        ctx.font         = 'bold 11px Consolas, monospace';
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = TEXT_DIM;
+        ctx.fillText('COMPANY NAME:', inputX + 4, inputY + formH / 2);
+
+        const labelW = 110;
+        const fieldX = inputX + labelW;
+        const fieldW = inputW - labelW;
+        const fieldH = 24;
+        const fieldY = inputY + (formH - fieldH) / 2;
+
+        // Text field box
+        ctx.fillStyle = '#0a0e1a';
+        ctx.fillRect(fieldX, fieldY, fieldW, fieldH);
+        ctx.strokeStyle = '#88aaff';
+        ctx.lineWidth   = 1.5;
+        ctx.strokeRect(fieldX, fieldY, fieldW, fieldH);
+
+        // Typed text + blinking cursor
+        const displayText = this._createInputText + '|';
+        ctx.font         = '13px Consolas, monospace';
+        ctx.fillStyle    = '#e8e0cc';
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'middle';
+        // Clip text to field
+        ctx.save();
+        ctx.rect(fieldX + 4, fieldY, fieldW - 8, fieldH);
+        ctx.clip();
+        ctx.fillText(displayText, fieldX + 6, fieldY + fieldH / 2);
+        ctx.restore();
+
+        // CREATE button
+        const cBtnW = 68;
+        const cBtnH = 26;
+        const cBtnX = fieldX + fieldW + 6;
+        const cBtnY = inputY + (formH - cBtnH) / 2;
+        ctx.fillStyle   = '#0f3a1a';
+        ctx.fillRect(cBtnX, cBtnY, cBtnW, cBtnH);
+        ctx.strokeStyle = '#44cc66';
         ctx.lineWidth   = 1;
-        ctx.strokeRect(bx, btnY, btnW, btnH);
+        ctx.strokeRect(cBtnX, cBtnY, cBtnW, cBtnH);
         ctx.font         = 'bold 11px Consolas, monospace';
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillStyle    = j.text;
-        ctx.fillText(j.label, bx + btnW / 2, btnY + btnH / 2);
-        this._joinBtnAreas.push({ companyId: j.id, x: bx, y: btnY, w: btnW, h: btnH });
-        bx += btnW + gap;
+        ctx.fillStyle    = '#88ffaa';
+        ctx.fillText('CREATE', cBtnX + cBtnW / 2, cBtnY + cBtnH / 2);
+        this._confirmBtnArea = { x: cBtnX, y: cBtnY, w: cBtnW, h: cBtnH };
+
+        // CANCEL button
+        const xBtnW = 64;
+        const xBtnX = cBtnX + cBtnW + 4;
+        const xBtnY = cBtnY;
+        ctx.fillStyle   = '#2a0f0f';
+        ctx.fillRect(xBtnX, xBtnY, xBtnW, cBtnH);
+        ctx.strokeStyle = '#884444';
+        ctx.lineWidth   = 1;
+        ctx.strokeRect(xBtnX, xBtnY, xBtnW, cBtnH);
+        ctx.fillStyle    = '#ffaaaa';
+        ctx.fillText('CANCEL', xBtnX + xBtnW / 2, xBtnY + cBtnH / 2);
+        this._cancelBtnArea = { x: xBtnX, y: xBtnY, w: xBtnW, h: cBtnH };
+
+        // Hint text below
+        ctx.font         = '11px Consolas, monospace';
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle    = TEXT_DIM;
+        ctx.fillText('Type a name and press CREATE or Enter.  ESC to cancel.', inputX + 4, inputY + formH + 4);
+
+        return inputY + formH + 22;
       }
 
       // ── Dynamic companies list ────────────────────────────────────────────
-      py += sectionH + 4;
       if (companies.length > 0) {
-        // Section label
         ctx.font      = 'bold 12px Consolas, monospace';
         ctx.fillStyle = GOLD;
         ctx.textAlign = 'left';
@@ -325,16 +454,13 @@ export class CompanyMenu {
             ctx.fillStyle = BG_STRIPE;
             ctx.fillRect(px + PAD, py, PANEL_W - PAD * 2, rowH);
           }
-          // Color swatch
           ctx.fillStyle = '#cc88ff';
           ctx.fillRect(px + PAD + 6, py + (rowH - 12) / 2, 12, 12);
-          // Company name
           ctx.font      = '13px Consolas, monospace';
           ctx.fillStyle = TEXT_HEAD;
           ctx.textAlign = 'left';
           ctx.textBaseline = 'middle';
           ctx.fillText(co.name, px + PAD + 24, py + rowH / 2);
-          // JOIN button
           const jBtnX = px + PANEL_W - PAD - jBtnW;
           const jBtnY = py + (rowH - 20) / 2;
           ctx.fillStyle = '#1a3a1a';
@@ -594,46 +720,5 @@ export class CompanyMenu {
     ctx.fillText(col3, c3x, midY);
 
     return py + ROW_H;
-  }
-
-  /** Shows a browser prompt to get the company name, then fires onCreateCompany. */
-  private _promptCreateCompany(canvas: HTMLCanvasElement): void {
-    // Use a temporary overlay <input> positioned over the canvas
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.placeholder = 'Enter company name…';
-    input.maxLength = 31;
-    input.style.cssText = [
-      'position:fixed',
-      `left:${canvas.getBoundingClientRect().left + canvas.width / 2 - 160}px`,
-      `top:${canvas.getBoundingClientRect().top + canvas.height / 2 - 18}px`,
-      'width:320px',
-      'height:36px',
-      'background:#0e1420',
-      'color:#e8e0cc',
-      'border:2px solid #88aaff',
-      'border-radius:4px',
-      'padding:0 10px',
-      'font:16px Consolas,monospace',
-      'z-index:9999',
-      'outline:none',
-    ].join(';');
-    document.body.appendChild(input);
-    input.focus();
-
-    const cleanup = () => { if (input.parentNode) document.body.removeChild(input); };
-
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        const name = input.value.trim();
-        cleanup();
-        if (name.length > 0) this.onCreateCompany?.(name);
-      } else if (e.key === 'Escape') {
-        cleanup();
-      }
-      e.stopPropagation();
-    });
-
-    input.addEventListener('blur', () => cleanup());
   }
 }
