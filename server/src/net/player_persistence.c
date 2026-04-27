@@ -154,6 +154,8 @@ bool load_player_from_file(WebSocketPlayer *p) {
     json_parse_float_field(buf, "local_y", &saved_ly);
     if (json_parse_uint_field(buf, "health", &tmp))       p->health        = (uint16_t)tmp;
     if (json_parse_uint_field(buf, "max_health", &tmp))   p->max_health    = (uint16_t)tmp;
+    /* If player was dead when last saved, respawn them at full HP on reconnect */
+    if (p->health == 0) p->health = p->max_health > 0 ? p->max_health : 100;
     if (json_parse_uint_field(buf, "player_level", &tmp)) p->player_level  = (uint8_t)tmp;
     if (json_parse_uint_field(buf, "player_xp", &tmp))    p->player_xp     = (uint32_t)tmp;
     if (json_parse_uint_field(buf, "stat_health", &tmp))  p->stat_health   = (uint8_t)tmp;

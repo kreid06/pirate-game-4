@@ -723,7 +723,7 @@ static void tombstone_world_pos(const Tombstone* t, float* wx, float* wy) {
  * 2. Wipes the player's inventory.
  * 3. Broadcasts tombstone_spawned to all clients.
  */
-static void player_die(WebSocketPlayer* player) {
+void player_die(WebSocketPlayer* player) {
     /* Check whether the player has any items worth dropping */
     bool has_items = false;
     for (int s = 0; s < INVENTORY_SLOTS; s++) {

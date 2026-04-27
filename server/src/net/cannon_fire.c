@@ -1093,7 +1093,8 @@ void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
             float dot = nx * fdir_x + ny * fdir_y;
             if (dot < cosf(half_cone)) continue;
             uint16_t dmg = (uint16_t)GRAPE_DAMAGE;
-            if (wp->health <= dmg) wp->health = 0; else wp->health -= dmg;
+            bool grape_killed = (wp->health <= dmg);
+            if (grape_killed) wp->health = 0; else wp->health -= dmg;
             char hit_msg[256];
             snprintf(hit_msg, sizeof(hit_msg),
                 "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
@@ -1101,8 +1102,12 @@ void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
                 "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
                 wp->player_id, wp->x, wp->y, GRAPE_DAMAGE,
                 (unsigned)wp->health, (unsigned)wp->max_health,
-                wp->health == 0 ? "true" : "false");
+                grape_killed ? "true" : "false");
             broadcast_json_all(hit_msg);
+            if (grape_killed) {
+                player_die(wp);
+                save_player_to_file(wp);
+            }
         }
 
         log_info("Swivel %u fired GRAPESHOT (hit-scan) on ship %u", sw->id, ship->ship_id);

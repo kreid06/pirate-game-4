@@ -104,6 +104,7 @@ void websocket_server_broadcast(const char* message);
 
 // Additional includes needed by extracted modules
 #include "net/websocket_protocol.h"
+#include "net/player_persistence.h"
 #include "sim/module_types.h"
 #include "sim/ship_level.h"
 #include "util/time.h"
@@ -117,3 +118,4 @@ void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw, WebSocketPla
 bool craft_grant(WebSocketPlayer* player, ItemKind item, int amount);
 void broadcast_json_all(const char* json);
 void update_flame_waves(uint32_t time_elapsed);
+void player_die(WebSocketPlayer* player);
