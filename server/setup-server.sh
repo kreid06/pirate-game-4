@@ -101,11 +101,11 @@ if command -v ufw &> /dev/null; then
     # UFW is installed
     echo "Using UFW firewall..."
     sudo ufw allow 22/tcp comment 'SSH'
-    sudo ufw allow 80/tcp comment 'HTTP (nginx / Let'\''s Encrypt)'
-    sudo ufw allow 443/tcp comment 'HTTPS (nginx)'
-    sudo ufw allow 8082/tcp comment 'Pirate Game WebSocket'
-    sudo ufw allow 8081/tcp comment 'Pirate Game Admin Panel'
-    sudo ufw allow 8080/udp comment 'Pirate Game UDP Traffic (future)'
+    sudo ufw allow 80/tcp comment 'HTTP nginx'
+    sudo ufw allow 443/tcp comment 'HTTPS nginx'
+    sudo ufw allow 8082/tcp comment 'Game WebSocket'
+    sudo ufw allow 8081/tcp comment 'Game Admin Panel'
+    sudo ufw allow 8080/udp comment 'Game UDP future'
     # Auth server listens on loopback only — nginx proxies /auth/ to it
     echo "✅ UFW rules added (including SSH)"
 else
@@ -127,11 +127,11 @@ else
         sudo ufw allow 22/tcp comment 'SSH'
         
         # Add game server ports
-        sudo ufw allow 80/tcp comment 'HTTP (nginx / Let'\''s Encrypt)'
-        sudo ufw allow 443/tcp comment 'HTTPS (nginx)'
-        sudo ufw allow 8082/tcp comment 'Pirate Game WebSocket'
-        sudo ufw allow 8081/tcp comment 'Pirate Game Admin Panel'
-        sudo ufw allow 8080/udp comment 'Pirate Game UDP Traffic (future)'
+        sudo ufw allow 80/tcp comment 'HTTP nginx'
+        sudo ufw allow 443/tcp comment 'HTTPS nginx'
+        sudo ufw allow 8082/tcp comment 'Game WebSocket'
+        sudo ufw allow 8081/tcp comment 'Game Admin Panel'
+        sudo ufw allow 8080/udp comment 'Game UDP future'
         # Auth server proxied via nginx — no direct public port needed
         
         echo ""
