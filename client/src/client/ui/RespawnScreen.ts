@@ -235,18 +235,20 @@ export class RespawnScreen {
       }
     }
 
-    // ── Death border frame — drawn UNDER map content so the banner, button,
-    // and YOU DIED text are always readable above it.
+    // ── Map dark background — rendered BEFORE the border so the border sits on top.
+    // Explicit alpha so it doesn't go through globalAlpha and bury the border.
+    if (this._mapAlpha > 0) {
+      ctx.fillStyle = `rgba(2, 10, 20, ${0.92 * this._mapAlpha})`;
+      ctx.fillRect(0, 0, cw, ch);
+    }
+
+    // ── Death border frame — always above the dark overlay ────────────────────
     this._renderDeathBorder(ctx, cw, ch, this._borderAlpha);
 
     // ── Map content (fades in during phase 2) ────────────────────────────────
     if (this._mapAlpha > 0) {
     ctx.save();
     ctx.globalAlpha = this._mapAlpha;
-
-    // ── Dark overlay ──────────────────────────────────────────────────────────
-    ctx.fillStyle = 'rgba(2, 10, 20, 0.92)';
-    ctx.fillRect(0, 0, cw, ch);
 
     // World-space → screen helpers
     const toScreenX = (wx: number) => (wx - this.panX) / this.zoom + cw / 2;
