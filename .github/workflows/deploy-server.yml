@@ -8,6 +8,7 @@ on:
       - 'server/**'
       - 'protocol/**'
       - '.github/workflows/deploy-server.yml'
+      - 'server/auth/**'
   workflow_dispatch:  # Allows manual trigger from GitHub Actions UI
 
 jobs:
@@ -58,6 +59,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake build-essential libssl-dev
           
+      - name: Build auth server
+        run: |
+          cd server/auth
+          npm ci
+          npm run build
+          
       - name: Build server
         run: |
           cd server
@@ -74,7 +81,7 @@ jobs:
       - name: Deploy to server
         run: |
           # Create directories
-          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mkdir -p /opt/pirate-game/bin /opt/pirate-game/config"
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mkdir -p /opt/pirate-game/bin /opt/pirate-game/config /opt/pirate-game/auth"
           
           # Copy binary to temp location, then move with sudo
           scp -o StrictHostKeyChecking=no server/build/pirate-server ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/pirate-server
@@ -83,11 +90,24 @@ jobs:
           # Copy config to temp location, then move with sudo
           scp -o StrictHostKeyChecking=no server/config/server.conf ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/server.conf
           ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mv /tmp/server.conf /opt/pirate-game/config/server.conf"
+
+          # Deploy auth server dist + package.json
+          scp -o StrictHostKeyChecking=no -r server/auth/dist ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/auth-dist
+          scp -o StrictHostKeyChecking=no server/auth/package.json ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/auth-package.json
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "
+            sudo rm -rf /opt/pirate-game/auth/dist &&
+            sudo mv /tmp/auth-dist /opt/pirate-game/auth/dist &&
+            sudo mv /tmp/auth-package.json /opt/pirate-game/auth/package.json &&
+            sudo chown -R \$USER:\$USER /opt/pirate-game/auth &&
+            cd /opt/pirate-game/auth && npm ci --omit=dev
+          "
           
-      - name: Restart server service
+      - name: Restart server services
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
-            sudo systemctl restart pirate-server || echo "Service restart failed (may not exist yet)"
+            sudo systemctl restart pirate-server || echo "Game service restart failed (may not exist yet)"
+            sudo systemctl restart pirate-auth   || echo "Auth service restart failed (may not exist yet)"
             sleep 2
-            sudo systemctl status pirate-server || echo "Service not running yet"
+            sudo systemctl status pirate-server || echo "Game service not running yet"
+            sudo systemctl status pirate-auth   || echo "Auth service not running yet"
           EOF

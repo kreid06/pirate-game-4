@@ -1,5 +1,5 @@
 #!/bin/bash
-# One-time setup script for game server
+# One-time setup script for game server + auth server
 # Run this on your VPS/server
 
 set -e
@@ -11,6 +11,7 @@ echo "📁 Creating directories..."
 sudo mkdir -p /opt/pirate-game/bin
 sudo mkdir -p /opt/pirate-game/config
 sudo mkdir -p /opt/pirate-game/logs
+sudo mkdir -p /opt/pirate-game/auth
 sudo chown -R $USER:$USER /opt/pirate-game
 
 # 2. Install dependencies
@@ -18,8 +19,16 @@ echo "📦 Installing dependencies..."
 sudo apt-get update
 sudo apt-get install -y libssl3
 
-# 3. Create config file
-echo "⚙️ Creating config file..."
+# Install Node.js (for auth server) if not present
+if ! command -v node &> /dev/null; then
+    echo "Installing Node.js..."
+    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+    sudo apt-get install -y nodejs
+fi
+echo "Node.js version: $(node --version)"
+
+# 3. Create config files
+echo "⚙️ Creating config files..."
 cat > /opt/pirate-game/config/server.conf << 'EOF'
 port=8082
 max_players=100
@@ -27,8 +36,17 @@ tick_rate=60
 log_level=info
 EOF
 
-# 4. Create systemd service
-echo "🔧 Creating systemd service..."
+cat > /opt/pirate-game/config/auth.env << 'EOF'
+AUTH_PORT=3001
+# IMPORTANT: change this to a long random secret before deploying
+JWT_SECRET=change-me-to-a-long-random-secret
+# Comma-separated allowed origins, e.g.: https://yourdomain.com
+CORS_ORIGINS=
+EOF
+echo "⚠️  Edit /opt/pirate-game/config/auth.env and set JWT_SECRET before starting!"
+
+# 4. Create systemd service for the game server (C binary)
+echo "🔧 Creating game server systemd service..."
 sudo tee /etc/systemd/system/pirate-server.service > /dev/null << EOF
 [Unit]
 Description=Pirate Game Server
@@ -48,12 +66,35 @@ StandardError=append:/opt/pirate-game/logs/error.log
 WantedBy=multi-user.target
 EOF
 
-# 5. Enable service
-echo "✅ Enabling service..."
+# 5. Create systemd service for the auth server (Node.js)
+echo "🔧 Creating auth server systemd service..."
+sudo tee /etc/systemd/system/pirate-auth.service > /dev/null << EOF
+[Unit]
+Description=Pirate Auth Server
+After=network.target
+
+[Service]
+Type=simple
+User=$USER
+WorkingDirectory=/opt/pirate-game/auth
+EnvironmentFile=/opt/pirate-game/config/auth.env
+ExecStart=$(which node) dist/index.js
+Restart=always
+RestartSec=10
+StandardOutput=append:/opt/pirate-game/logs/auth.log
+StandardError=append:/opt/pirate-game/logs/auth-error.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 6. Enable both services
+echo "✅ Enabling services..."
 sudo systemctl daemon-reload
 sudo systemctl enable pirate-server
+sudo systemctl enable pirate-auth
 
-# 6. Configure firewall
+# 7. Configure firewall
 echo "🔥 Configuring firewall..."
 
 if command -v ufw &> /dev/null; then
@@ -63,6 +104,9 @@ if command -v ufw &> /dev/null; then
     sudo ufw allow 8082/tcp comment 'Pirate Game WebSocket'
     sudo ufw allow 8081/tcp comment 'Pirate Game Admin Panel'
     sudo ufw allow 8080/udp comment 'Pirate Game UDP Traffic (future)'
+    # Auth server listens on loopback only — no public firewall rule needed
+    # If you expose it directly, uncomment the line below:
+    # sudo ufw allow 3001/tcp comment 'Pirate Auth Server'
     echo "✅ UFW rules added (including SSH)"
 else
     # UFW not installed - offer to install or use iptables
@@ -86,6 +130,8 @@ else
         sudo ufw allow 8082/tcp comment 'Pirate Game WebSocket'
         sudo ufw allow 8081/tcp comment 'Pirate Game Admin Panel'
         sudo ufw allow 8080/udp comment 'Pirate Game UDP Traffic (future)'
+        # Auth server: expose only if clients hit it directly
+        # sudo ufw allow 3001/tcp comment 'Pirate Auth Server'
         
         echo ""
         echo "⚠️  IMPORTANT: About to enable UFW firewall"
@@ -118,6 +164,8 @@ else
         sudo iptables -A INPUT -p tcp --dport 8082 -j ACCEPT -m comment --comment "Game WebSocket"
         sudo iptables -A INPUT -p tcp --dport 8081 -j ACCEPT -m comment --comment "Admin Panel"
         sudo iptables -A INPUT -p udp --dport 8080 -j ACCEPT -m comment --comment "UDP (future)"
+        # Auth server: expose only if clients hit it directly
+        # sudo iptables -A INPUT -p tcp --dport 3001 -j ACCEPT -m comment --comment "Auth Server"
         
         # Install iptables-persistent to save rules
         echo "Installing iptables-persistent to save rules..."
@@ -134,12 +182,16 @@ echo "Firewall ports opened:"
 echo "  - 8082/tcp: WebSocket (game traffic)"
 echo "  - 8081/tcp: Admin panel"
 echo "  - 8080/udp: UDP traffic (future feature)"
+echo "  - 3001/tcp: Auth server (loopback only by default)"
 echo ""
 echo "Next steps:"
-echo "1. Add GitHub secrets for deployment"
-echo "2. Push code to main branch"
-echo "3. GitHub Actions will deploy the server binary"
-echo "4. Start the service: sudo systemctl start pirate-server"
-echo "5. Check status: sudo systemctl status pirate-server"
-echo "6. View logs: sudo journalctl -u pirate-server -f"
-echo "7. Access admin panel: http://your-server-ip:8081"
+echo "1. Edit /opt/pirate-game/config/auth.env — set JWT_SECRET and CORS_ORIGINS"
+echo "2. Add GitHub secrets for deployment"
+echo "3. Push code to main branch"
+echo "4. GitHub Actions will deploy the server binary and auth server dist/"
+echo "5. Start game server:  sudo systemctl start pirate-server"
+echo "6. Start auth server:  sudo systemctl start pirate-auth"
+echo "7. Check status:       sudo systemctl status pirate-server pirate-auth"
+echo "8. View game logs:     sudo journalctl -u pirate-server -f"
+echo "9. View auth logs:     sudo journalctl -u pirate-auth -f"
+echo "10. Access admin panel: http://your-server-ip:8081"
