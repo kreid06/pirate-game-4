@@ -10,6 +10,19 @@
 #define CLIENT_TO_SERVER(x) ((x) / WORLD_SCALE_FACTOR)
 #define SERVER_TO_CLIENT(x) ((x) * WORLD_SCALE_FACTOR)
 
+// World map dimensions (client pixels).  One 100 000 × 100 000 grid cell.
+// Future expansion: add more grid cells adjacent to this one on demand.
+#define MAP_WIDTH      90000.0f
+#define MAP_HEIGHT     90000.0f
+#define MAP_CENTER_X   (MAP_WIDTH  * 0.5f)   /* 45 000 */
+#define MAP_CENTER_Y   (MAP_HEIGHT * 0.5f)   /* 45 000 */
+// Server-unit (Q16) equivalents
+#define MAP_WIDTH_SRV  (MAP_WIDTH  / WORLD_SCALE_FACTOR)   /* 10 000 */
+#define MAP_HEIGHT_SRV (MAP_HEIGHT / WORLD_SCALE_FACTOR)   /* 10 000 */
+
+/* Wrap a float coordinate into [0, limit).  Use for both client-px and srv-unit coords. */
+#define WORLD_WRAP(v, limit) ((v) < 0 ? (v) + (limit) : ((v) >= (limit) ? (v) - (limit) : (v)))
+
 // Q16.16 Fixed-point math for determinism
 typedef int32_t q16_t;
 typedef int64_t q32_t;

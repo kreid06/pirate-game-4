@@ -3,6 +3,7 @@
 #include "net/network.h"
 #include "util/log.h"
 #include "util/time.h"
+#include "sim/world_save.h"
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
@@ -111,6 +112,9 @@ static const char* dashboard_html =
 "function initMap() {\n"
 "mapCanvas = document.getElementById('map-canvas');\n"
 "mapCtx = mapCanvas.getContext('2d');\n"
+"// Size canvas pixel buffer to match its container\n"
+"const mc = document.getElementById('map-container');\n"
+"if (mc) { mapCanvas.width = mc.offsetWidth; mapCanvas.height = mc.offsetHeight; }\n"
 "// Add mouse event listeners for panning\n"
 "mapCanvas.addEventListener('mousedown', (e) => {\n"
 "if (e.button === 2) { // Right mouse button\n"
@@ -153,17 +157,40 @@ static const char* dashboard_html =
 "}, { passive: false });\n"
 "updateMap();\n"
 "}\n"
+"// Auto-fit viewport to encompass all islands and structures\n"
+"function fitAll() {\n"
+"if (!mapData || !mapData.islands || !mapCanvas) return;\n"
+"let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;\n"
+"mapData.islands.forEach(isl => {\n"
+"const pad=(isl.vertices&&isl.vertices.length)?3600:((isl.beachRadius||200)+(isl.beachMaxBump||25)+150);\n"
+"minX=Math.min(minX,isl.x-pad); minY=Math.min(minY,isl.y-pad);\n"
+"maxX=Math.max(maxX,isl.x+pad); maxY=Math.max(maxY,isl.y+pad);\n"
+"});\n"
+"if (mapData.structures) mapData.structures.forEach(s => {\n"
+"minX=Math.min(minX,s.x-700); minY=Math.min(minY,s.y-700);\n"
+"maxX=Math.max(maxX,s.x+700); maxY=Math.max(maxY,s.y+700);\n"
+"});\n"
+"if (!isFinite(minX)) return;\n"
+"const worldW=maxX-minX, worldH=maxY-minY;\n"
+"const scaleX=mapCanvas.width/worldW, scaleY=mapCanvas.height/worldH;\n"
+"mapScale=Math.min(scaleX,scaleY)*0.88;\n"
+"mapOffsetX=mapCanvas.width/2-(minX+maxX)/2*mapScale;\n"
+"mapOffsetY=mapCanvas.height/2-(minY+maxY)/2*mapScale;\n"
+"}\n"
 "async function updateMap() {\n"
 "if (!mapCanvas) return;\n"
 "const data = await fetchJson('/api/map');\n"
 "if (!data) return;\n"
-"mapData = data; drawMap();\n"
+"const firstLoad = !mapData;\n"
+"mapData = data;\n"
+"if (firstLoad) fitAll();\n"
+"drawMap();\n"
 "}\n"
 "function drawMap() {\n"
 "if (!mapData || !mapCtx) return;\n"
 "const ctx = mapCtx;\n"
 "// Clear canvas with ocean blue\n"
-"ctx.fillStyle = '#2c5aa0'; ctx.fillRect(0, 0, 800, 400);\n"
+"ctx.fillStyle = '#2c5aa0'; ctx.fillRect(0, 0, mapCanvas.width, mapCanvas.height);\n"
 "ctx.save();\n"
 "// Apply pan + zoom\n"
 "ctx.translate(mapOffsetX, mapOffsetY);\n"
@@ -171,11 +198,11 @@ static const char* dashboard_html =
 "// Draw grid for reference\n"
 "ctx.strokeStyle = 'rgba(255,255,255,0.1)';\n"
 "ctx.lineWidth = 1;\n"
-"for (let i = -1000; i < 2000; i += 50) {\n"
-"ctx.beginPath(); ctx.moveTo(i, -1000); ctx.lineTo(i, 1000); ctx.stroke();\n"
+"for (let i = -500; i < 12000; i += 250) {\n"
+"ctx.beginPath(); ctx.moveTo(i, -500); ctx.lineTo(i, 12000); ctx.stroke();\n"
 "}\n"
-"for (let i = -1000; i < 1000; i += 50) {\n"
-"ctx.beginPath(); ctx.moveTo(-1000, i); ctx.lineTo(2000, i); ctx.stroke();\n"
+"for (let i = -500; i < 12000; i += 250) {\n"
+"ctx.beginPath(); ctx.moveTo(-500, i); ctx.lineTo(12000, i); ctx.stroke();\n"
 "}\n"
 "// Helper: sample bumpy island boundary (mirrors server island_boundary_r)\n"
 "function islandBndR(bumps, baseR, angle) {\n"
@@ -190,8 +217,26 @@ static const char* dashboard_html =
 "// Draw islands (behind ships)\n"
 "if (mapData.islands) {\n"
 "const N = 64;\n"
+"const GRASS_POLY_SCALE = 0.82;\n"
 "mapData.islands.forEach(isl => {\n"
-"// Beach (sandy)\n"
+"if (isl.vertices && isl.vertices.length >= 3) {\n"
+"// ── Polygon island (e.g. continental) ──\n"
+"// Beach polygon (sand fill)\n"
+"ctx.fillStyle = '#c8a85c';\n"
+"ctx.beginPath();\n"
+"isl.vertices.forEach((v, vi) => { vi===0 ? ctx.moveTo(v.x,v.y) : ctx.lineTo(v.x,v.y); });\n"
+"ctx.closePath(); ctx.fill();\n"
+"// Grass (scaled inward polygon)\n"
+"ctx.fillStyle = '#4a7a3a';\n"
+"ctx.beginPath();\n"
+"isl.vertices.forEach((v, vi) => {\n"
+"const gx = isl.x + (v.x - isl.x) * GRASS_POLY_SCALE;\n"
+"const gy = isl.y + (v.y - isl.y) * GRASS_POLY_SCALE;\n"
+"vi===0 ? ctx.moveTo(gx,gy) : ctx.lineTo(gx,gy);\n"
+"});\n"
+"ctx.closePath(); ctx.fill();\n"
+"} else {\n"
+"// ── Bumpy-circle island ──\n"
 "ctx.fillStyle = '#c8a85c';\n"
 "ctx.beginPath();\n"
 "for (let k = 0; k < N; k++) {\n"
@@ -202,7 +247,6 @@ static const char* dashboard_html =
 "k === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);\n"
 "}\n"
 "ctx.closePath(); ctx.fill();\n"
-"// Grass (green)\n"
 "ctx.fillStyle = '#4a7a3a';\n"
 "ctx.beginPath();\n"
 "for (let k = 0; k < N; k++) {\n"
@@ -213,11 +257,54 @@ static const char* dashboard_html =
 "k === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);\n"
 "}\n"
 "ctx.closePath(); ctx.fill();\n"
+"}\n"
 "// Island label\n"
 "ctx.fillStyle = 'rgba(255,255,255,0.85)';\n"
 "ctx.font = 'bold 12px sans-serif';\n"
 "ctx.textAlign = 'center';\n"
 "ctx.fillText('Island ' + isl.id, isl.x, isl.y + 4);\n"
+"});\n"
+"}\n"
+"// Draw shipyards\n"
+"if (mapData.structures) {\n"
+"// Dock OBBs in local space (client px, mirror of server DOCK_* constants)\n"
+"const DOCK_OBBS = [\n"
+"// [local_cx, local_cy, half_w, half_h, fill, stroke]\n"
+"[-145, 0,   25, 445, 'rgba(80,160,255,0.25)', 'rgba(80,160,255,0.9)'], // left arm\n"
+"[ 145, 0,   25, 445, 'rgba(80,160,255,0.25)', 'rgba(80,160,255,0.9)'], // right arm\n"
+"[   0,-420, 170,  25, 'rgba(80,220,130,0.25)', 'rgba(80,220,130,0.9)'], // back wall\n"
+"];\n"
+"function drawDockedOBB(ox, oy, rotDeg, lcx, lcy, hw, hh, fill, stroke) {\n"
+"const rad = rotDeg * Math.PI / 180;\n"
+"const c = Math.cos(rad), s = Math.sin(rad);\n"
+"// Standard matrix matching ctx.rotate(): wx = ox+lx*c-ly*s, wy = oy+lx*s+ly*c\n"
+"function lw(lx,ly) {\n"
+"return {x: ox + lx*c - ly*s, y: oy + lx*s + ly*c};\n"
+"}\n"
+"const corners = [lw(lcx-hw,lcy-hh),lw(lcx+hw,lcy-hh),lw(lcx+hw,lcy+hh),lw(lcx-hw,lcy+hh)];\n"
+"ctx.fillStyle = fill;\n"
+"ctx.strokeStyle = stroke;\n"
+"ctx.lineWidth = 2;\n"
+"ctx.beginPath();\n"
+"ctx.moveTo(corners[0].x, corners[0].y);\n"
+"corners.slice(1).forEach(p => ctx.lineTo(p.x, p.y));\n"
+"ctx.closePath();\n"
+"ctx.fill();\n"
+"ctx.stroke();\n"
+"}\n"
+"mapData.structures.forEach(s => {\n"
+"if (s.type !== 'shipyard') return;\n"
+"const rot = s.rotation || 0;\n"
+"DOCK_OBBS.forEach(([lcx,lcy,hw,hh,fill,stroke]) => {\n"
+"drawDockedOBB(s.x, s.y, rot, lcx, lcy, hw, hh, fill, stroke);\n"
+"});\n"
+"// Centre dot + label\n"
+"ctx.fillStyle = '#ffd700';\n"
+"ctx.beginPath(); ctx.arc(s.x, s.y, 5, 0, 2*Math.PI); ctx.fill();\n"
+"ctx.fillStyle = 'rgba(255,215,0,0.9)';\n"
+"ctx.font = '11px sans-serif';\n"
+"ctx.textAlign = 'center';\n"
+"ctx.fillText('Shipyard #' + s.id, s.x, s.y - 12);\n"
 "});\n"
 "}\n"
 "// Draw ships first (background layer)\n"
@@ -364,8 +451,18 @@ static const char* dashboard_html =
 "ctx.fillStyle = '#4a7a3a';\n"
 "ctx.fillRect(20, 134, 8, 8);\n"
 "ctx.fillStyle = 'white';\n"
-"ctx.fillText('Island (grass)', 38, 142);\n"
-"}\n"
+"ctx.fillText('Island (grass)', 38, 142);\n""ctx.fillStyle = 'rgba(80,160,255,0.5)';"
+"ctx.fillRect(20, 148, 8, 8);"
+"ctx.strokeStyle = 'rgba(80,160,255,0.9)'; ctx.lineWidth=1;"
+"ctx.strokeRect(20, 148, 8, 8);"
+"ctx.fillStyle = 'white';"
+"ctx.fillText('Shipyard arms', 38, 156);"
+"ctx.fillStyle = 'rgba(80,220,130,0.5)';"
+"ctx.fillRect(20, 162, 8, 8);"
+"ctx.strokeStyle = 'rgba(80,220,130,0.9)'; ctx.lineWidth=1;"
+"ctx.strokeRect(20, 162, 8, 8);"
+"ctx.fillStyle = 'white';"
+"ctx.fillText('Shipyard back', 38, 170);""}\n"
 "async function fetchJson(url) {\n"
 "try { const r = await fetch(url); return await r.json(); } catch(e) { return null; }\n"
 "}\n"
@@ -640,9 +737,22 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
             buffer[received] = '\0';
             
             // Parse request path for GET
+            char *options_start = strstr(buffer, "OPTIONS ");
             char *path_start = strstr(buffer, "GET ");
             char *post_start = strstr(buffer, "POST ");
-            if (path_start) {
+            if (options_start) {
+                /* CORS preflight — reply with all necessary headers */
+                const char *preflight =
+                    "HTTP/1.1 204 No Content\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                    "Access-Control-Allow-Headers: Content-Type\r\n"
+                    "Access-Control-Max-Age: 86400\r\n"
+                    "Content-Length: 0\r\n"
+                    "Connection: close\r\n"
+                    "\r\n";
+                send(client_fd, preflight, strlen(preflight), 0);
+            } else if (path_start) {
                 path_start += 4;
                 char *path_end = strchr(path_start, ' ');
                 if (path_end) {
@@ -666,6 +776,26 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                         admin_api_input_tiers(&resp);
                     } else if (strcmp(path_start, "/api/websocket") == 0) {
                         admin_api_websocket_entities(&resp);
+                    } else if (strcmp(path_start, "/api/islands") == 0) {
+                        admin_api_islands(&resp);
+                    } else if (strcmp(path_start, "/api/world/state") == 0) {
+                        /* Return the current save file as JSON */
+                        static char world_state_buf[524288]; /* 512 KB */
+                        FILE *wf = fopen(WORLD_SAVE_DEFAULT_PATH, "r");
+                        if (wf) {
+                            size_t n = fread(world_state_buf,
+                                             1, sizeof(world_state_buf) - 1, wf);
+                            fclose(wf);
+                            world_state_buf[n] = '\0';
+                            resp.status_code   = 200;
+                            resp.content_type  = "application/json";
+                            resp.body          = world_state_buf;
+                            resp.body_length   = n;
+                        } else {
+                            resp.status_code  = 404;
+                            resp.body         = "{\"error\":\"No save file found\"}";
+                            resp.body_length  = 30;
+                        }
                     } else {
                         resp.status_code = 404;
                         resp.body = "Not Found";
@@ -686,7 +816,34 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                     *path_end = '\0';
 
                     struct HttpResponse resp = {0};
-                    if (strcmp(post_start, "/api/admin/ship") == 0) {
+                    if (strcmp(post_start, "/api/world/save") == 0) {
+                        int sr = world_save(WORLD_SAVE_DEFAULT_PATH);
+                        if (sr == 0) {
+                            resp.status_code = 200;
+                            resp.content_type = "application/json";
+                            resp.body = "{\"ok\":true,\"path\":\"" WORLD_SAVE_DEFAULT_PATH "\"}";
+                            resp.body_length = strlen(resp.body);
+                        } else {
+                            resp.status_code = 500;
+                            resp.body = "{\"ok\":false,\"error\":\"save failed\"}";
+                            resp.body_length = strlen(resp.body);
+                        }
+                    } else if (strcmp(post_start, "/api/world/load") == 0) {
+                        int lr = world_load(WORLD_SAVE_DEFAULT_PATH);
+                        if (lr == 0) {
+                            resp.status_code = 200;
+                            resp.content_type = "application/json";
+                            resp.body = "{\"ok\":true}";
+                            resp.body_length = 12;
+                        } else {
+                            resp.status_code = 500;
+                            resp.body = "{\"ok\":false,\"error\":\"load failed\"}";
+                            resp.body_length = strlen(resp.body);
+                        }
+                    } else if (strcmp(post_start, "/api/islands/save") == 0) {
+                        size_t blen = body ? strlen(body) : 0;
+                        admin_api_islands_save(&resp, body, blen);
+                    } else if (strcmp(post_start, "/api/admin/ship") == 0) {
                         float x = 400.0f, y = 400.0f;
                         uint8_t company = 1; // COMPANY_PIRATES default
                         if (body) {
@@ -754,10 +911,14 @@ int admin_send_response(int client_fd, const struct HttpResponse* resp) {
         "HTTP/1.1 %d %s\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
         "Connection: close\r\n"
         "\r\n",
         resp->status_code,
-        resp->status_code == 200 ? "OK" : "Not Found",
+        resp->status_code == 200 ? "OK" :
+        resp->status_code == 204 ? "No Content" :
+        resp->status_code == 404 ? "Not Found" :
+        resp->status_code == 503 ? "Service Unavailable" : "Internal Server Error",
         resp->content_type ? resp->content_type : "text/plain",
         resp->body_length
     );

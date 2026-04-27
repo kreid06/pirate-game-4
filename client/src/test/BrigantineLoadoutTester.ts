@@ -55,10 +55,11 @@ export class BrigantineLoadoutTester {
       players: [],
       cannonballs: [],
       npcs: [],
+      tombstones: [],
+      droppedItems: [],
+      companies: [],
       carrierDetection: new Map()
     };
-    
-    // Initialize with combat loadout
     this.loadCurrentLoadout();
     
     // Create UI
@@ -88,6 +89,9 @@ export class BrigantineLoadoutTester {
       players: [],
       cannonballs: [],
       npcs: [],
+      tombstones: [],
+      droppedItems: [],
+      companies: [],
       carrierDetection: new Map()
     };
     
@@ -109,7 +113,7 @@ export class BrigantineLoadoutTester {
       color: white;
       padding: 20px;
       border-radius: 8px;
-      font-family: monospace;
+      font-family: Georgia, serif;
       z-index: 1000;
       max-width: 400px;
     `;

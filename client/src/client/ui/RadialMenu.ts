@@ -155,7 +155,7 @@ export class RadialMenu {
       const lx = cx + Math.cos(midAngle) * RING_MID;
       const ly = cy + Math.sin(midAngle) * RING_MID;
 
-      ctx.font         = isHovered ? 'bold 11px sans-serif' : '10px sans-serif';
+      ctx.font         = isHovered ? 'bold 11px Georgia, serif' : '10px Georgia, serif';
       ctx.fillStyle    = isHovered ? '#fff8e0' : 'rgba(200, 185, 140, 0.85)';
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';

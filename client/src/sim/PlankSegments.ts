@@ -122,25 +122,54 @@ export function createStraightSegments(
 }
 
 /**
- * Create all plank segments for a complete ship hull
+ * Create all plank segments for a complete ship hull.
+ *
+ * Produces EXACTLY 10 segments — one per server plank slot — using the same
+ * section names and segment indices as the server's PLANK_KEYS table in
+ * websocket_server.c.  Keeping client and server in sync avoids name-mismatch
+ * fallbacks and prevents the template from stamping more IDs than exist.
+ *
+ * Server slot → client segment mapping:
+ *   0  bow_port,0        → port bow arc     (bow → bowTip → bowBottom)
+ *   1  bow_starboard,1   → stbd bow arc     (bowBottom → bowTip → bow)
+ *   2  starboard_side,0  → stbd side 0/3
+ *   3  starboard_side,1  → stbd side 1/3
+ *   4  starboard_side,2  → stbd side 2/3
+ *   5  stern_starboard,4 → stbd stern arc   (sternBottom → sternTip → stern)
+ *   6  stern_port,5      → port stern arc   (stern → sternTip → sternBottom)
+ *   7  port_side,0       → port side 0/3
+ *   8  port_side,1       → port side 1/3
+ *   9  port_side,2       → port side 2/3
  */
 export function createCompleteHullSegments(plankThickness: number = 10): PlankSegment[] {
   const p = HULL_POINTS;
   const segments: PlankSegment[] = [];
-  
-  // Add bow curves (3 segments each)
-  segments.push(...createCurvedSegments(p.bow, p.bowTip, p.bowBottom, 3, "port_bow", plankThickness));
-  segments.push(...createCurvedSegments(p.bowBottom, p.bowTip, p.bow, 3, "starboard_bow", plankThickness));
-  
-  // Add stern curves (3 segments each)
-  segments.push(...createCurvedSegments(p.stern, p.sternTip, p.sternBottom, 3, "port_stern", plankThickness));
-  segments.push(...createCurvedSegments(p.sternBottom, p.sternTip, p.stern, 3, "starboard_stern", plankThickness));
-  
-  // Add straight sides (6 segments each)
-  segments.push(...createStraightSegments(p.bowBottom, p.sternBottom, 6, "starboard_side", plankThickness));
-  segments.push(...createStraightSegments(p.stern, p.bow, 6, "port_side", plankThickness));
-  
-  return segments;
+
+  // ── Bow curves (1 segment each = full arc, hit-tested as straight chord) ──
+  // slot 0: bow_port — port side of bow
+  segments.push(...createCurvedSegments(p.bow, p.bowTip, p.bowBottom, 1, 'bow_port', plankThickness));
+  // slot 1: bow_starboard — starboard side of bow (index=1 matches server)
+  const bowStbd = createCurvedSegments(p.bowBottom, p.bowTip, p.bow, 1, 'bow_starboard', plankThickness);
+  bowStbd[0].index = 1;
+  segments.push(...bowStbd);
+
+  // ── Starboard straight side (3 segments, indices 0-2) ──
+  segments.push(...createStraightSegments(p.bowBottom, p.sternBottom, 3, 'starboard_side', plankThickness));
+
+  // ── Stern curves (1 segment each, with server's non-zero indices) ──
+  // slot 5: stern_starboard (index=4 matches server PLANK_KEYS)
+  const sternStbd = createCurvedSegments(p.sternBottom, p.sternTip, p.stern, 1, 'stern_starboard', plankThickness);
+  sternStbd[0].index = 4;
+  segments.push(...sternStbd);
+  // slot 6: stern_port (index=5 matches server PLANK_KEYS)
+  const sternPort = createCurvedSegments(p.stern, p.sternTip, p.sternBottom, 1, 'stern_port', plankThickness);
+  sternPort[0].index = 5;
+  segments.push(...sternPort);
+
+  // ── Port straight side (3 segments, indices 0-2) ──
+  segments.push(...createStraightSegments(p.sternBottom, p.bow, 3, 'port_side', plankThickness));
+
+  return segments; // exactly 10
 }
 
 /**
@@ -150,40 +179,34 @@ export function createCompleteHullSegments(plankThickness: number = 10): PlankSe
 export function createShipPlanksFromSegments(startId: number = 100): ShipModule[] {
   const planks: ShipModule[] = [];
   let currentId = startId;
-  
-  // Create hull segments using the precise hull points
-  const segments = createCompleteHullSegments(10); // 10 unit thickness
-  
-  console.log(`Creating ${segments.length} planks from hull segments`);
-  
+
+  const segments = createCompleteHullSegments(10); // 10 unit thickness → 10 planks
+
   for (const segment of segments) {
-    // Calculate segment center position
     const centerX = (segment.start.x + segment.end.x) / 2;
     const centerY = (segment.start.y + segment.end.y) / 2;
     const position = Vec2.from(centerX, centerY);
-    
-    // Calculate segment length and angle
+
     const deltaX = segment.end.x - segment.start.x;
     const deltaY = segment.end.y - segment.start.y;
     const length = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
     const angle = Math.atan2(deltaY, deltaX);
-    
+
     const plank = ModuleUtils.createDefaultModule(currentId++, 'plank', position);
     if (plank.moduleData && plank.moduleData.kind === 'plank') {
       plank.moduleData.length = length;
       plank.moduleData.width = segment.thickness;
       plank.moduleData.health = 10000;
+      plank.moduleData.targetHealth = 10000;
       plank.moduleData.maxHealth = 10000;
       plank.moduleData.material = 'wood';
       plank.moduleData.segmentIndex = segment.index;
+      plank.moduleData.sectionName = segment.sectionName;
       plank.localRot = angle;
     }
-    
+
     planks.push(plank);
-    
-    console.log(`  ${segment.sectionName} plank ${segment.index}: pos=(${centerX.toFixed(1)}, ${centerY.toFixed(1)}), length=${length.toFixed(1)}, angle=${(angle * 180 / Math.PI).toFixed(1)}°`);
   }
-  
-  console.log(`Total planks created: ${planks.length}`);
-  return planks;
+
+  return planks; // exactly 10
 }

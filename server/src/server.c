@@ -8,6 +8,15 @@
 #include "util/time.h"
 #include "util/log.h"
 #include "core/rng.h"
+#include "sim/world_save.h"
+
+volatile int g_server_shutdown_requested = 0;
+volatile int g_server_restart_requested  = 0;
+
+/* Auto-save every 15 minutes: 15 * 60 * TICK_RATE_HZ ticks */
+#define AUTOSAVE_INTERVAL_TICKS  (15 * 60 * TICK_RATE_HZ)
+/* Hourly archive snapshot: 60 * 60 * TICK_RATE_HZ ticks */
+#define ARCHIVE_INTERVAL_TICKS   (60 * 60 * TICK_RATE_HZ)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -121,7 +130,21 @@ int server_init(struct ServerContext** out_ctx) {
     // Link WebSocket server to simulation for collision detection
     websocket_server_set_simulation(&ctx->simulation);
     log_info("WebSocket server linked to simulation");
-    
+
+    /* ── Auto-load world state if a save file exists ── */
+    {
+        FILE *wf = fopen(WORLD_SAVE_DEFAULT_PATH, "r");
+        if (wf) {
+            fclose(wf);
+            log_info("💾 Found save file — loading world state from '%s'",
+                     WORLD_SAVE_DEFAULT_PATH);
+            world_load(WORLD_SAVE_DEFAULT_PATH);
+        } else {
+            log_info("💾 No save file found at '%s' — starting fresh world",
+                     WORLD_SAVE_DEFAULT_PATH);
+        }
+    }
+
     // Mark as initialized
     ctx->initialized = true;
     ctx->should_run = true;
@@ -178,9 +201,16 @@ int server_run(struct ServerContext* ctx) {
     
     uint64_t next_tick_time = ctx->tick_start_time;
     uint32_t shutdown_countdown = 0;
-    
+    uint32_t last_autosave_tick = 0;
+    uint32_t last_archive_tick  = 0;
+
     while (ctx->should_run) {
         uint64_t tick_start = get_time_us();
+
+        /* ── Poll global command flags (set by chat command handler) ── */
+        if (g_server_shutdown_requested || g_server_restart_requested) {
+            ctx->should_run = false;
+        }
         
         // Process incoming network packets
         process_network_input(ctx);
@@ -199,7 +229,19 @@ int server_run(struct ServerContext* ctx) {
         
         // Send state updates to clients
         send_snapshots(ctx);
-        
+
+        /* ── Auto-save every 15 minutes ── */
+        if (ctx->current_tick - last_autosave_tick >= AUTOSAVE_INTERVAL_TICKS) {
+            world_save(WORLD_SAVE_DEFAULT_PATH);
+            last_autosave_tick = ctx->current_tick;
+        }
+
+        /* ── Hourly archive snapshot (kept for 48 h) ── */
+        if (ctx->current_tick - last_archive_tick >= ARCHIVE_INTERVAL_TICKS) {
+            world_save_archive();
+            last_archive_tick = ctx->current_tick;
+        }
+
         // Update tick counter
         ctx->current_tick++;
         
@@ -393,22 +435,22 @@ static void init_simulation(struct ServerContext* ctx) {
     ctx->simulation.wind_power = 0.5f;      // 50% wind power
     ctx->simulation.wind_direction = 0.0f;  // East direction (for future use)
     
-    // Create the starting brigantine ship at spawn point (scaled from client coords)
+    // Create the starting brigantine ship at map centre
     Vec2Q16 ship_spawn = {
-        Q16_FROM_FLOAT(CLIENT_TO_SERVER(100.0f)), 
-        Q16_FROM_FLOAT(CLIENT_TO_SERVER(100.0f))
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(MAP_CENTER_X)), 
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(MAP_CENTER_Y))
     };
-    entity_id ship_id = sim_create_ship(&ctx->simulation, ship_spawn, Q16_FROM_INT(0));
+    entity_id ship_id = sim_create_ship(&ctx->simulation, ship_spawn, Q16_FROM_INT(0), 0xFF, 1);
     log_info("Simulation initialized with RNG seed: %u", rng->seed);
-    log_info("Created brigantine ship 1 (ID: %u) at spawn point (10, 10) server units [client: (100, 100)]", ship_id);
+    log_info("Created brigantine ship 1 (ID: %u) at map centre (%.0f, %.0f) client px", ship_id, MAP_CENTER_X, MAP_CENTER_Y);
 
-    // Create second brigantine ship 600px south for damage testing
+    // Create second brigantine ship 600px south of centre for damage testing
     Vec2Q16 ship2_spawn = {
-        Q16_FROM_FLOAT(CLIENT_TO_SERVER(100.0f)),
-        Q16_FROM_FLOAT(CLIENT_TO_SERVER(700.0f))
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(MAP_CENTER_X)),
+        Q16_FROM_FLOAT(CLIENT_TO_SERVER(MAP_CENTER_Y + 600.0f))
     };
-    entity_id ship2_id = sim_create_ship(&ctx->simulation, ship2_spawn, Q16_FROM_INT(0));
-    log_info("Created brigantine ship 2 (ID: %u) at (10, 70) server units [client: (100, 700)]", ship2_id);
+    entity_id ship2_id = sim_create_ship(&ctx->simulation, ship2_spawn, Q16_FROM_INT(0), 0xFF, 2);
+    log_info("Created brigantine ship 2 (ID: %u) at (%.0f, %.0f) client px", ship2_id, MAP_CENTER_X, MAP_CENTER_Y + 600.0f);
 }
 
 static void step_simulation(struct ServerContext* ctx) {
@@ -421,4 +463,16 @@ static void step_simulation(struct ServerContext* ctx) {
     // Run the full simulation step (physics, collisions, etc.)
     q16_t dt = Q16_FROM_FLOAT(TICK_DURATION_MS / 1000.0f); // Convert ms to seconds
     sim_step(sim, dt);
+
+    // ── World wrap: keep ships inside the toroidal 100 000×100 000 px map ──
+    // Operates in server units (MAP_WIDTH_SRV = 10 000).
+    for (uint32_t s = 0; s < sim->ship_count; s++) {
+        struct Ship* ship = &sim->ships[s];
+        float px = Q16_TO_FLOAT(ship->position.x);
+        float py = Q16_TO_FLOAT(ship->position.y);
+        px = WORLD_WRAP(px, MAP_WIDTH_SRV);
+        py = WORLD_WRAP(py, MAP_HEIGHT_SRV);
+        ship->position.x = Q16_FROM_FLOAT(px);
+        ship->position.y = Q16_FROM_FLOAT(py);
+    }
 }

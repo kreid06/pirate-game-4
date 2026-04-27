@@ -32,6 +32,14 @@ void server_shutdown(struct ServerContext* ctx);
 int server_run(struct ServerContext* ctx);
 void server_request_shutdown(struct ServerContext* ctx);
 
+/* Global flags — set from any module (e.g. command handler) to request an
+ * orderly shutdown or restart.  Checked once per tick in server_run().
+ *   g_server_shutdown_requested : 1 = stop loop and exit
+ *   g_server_restart_requested  : 1 = stop loop then execv to re-launch
+ */
+extern volatile int g_server_shutdown_requested;
+extern volatile int g_server_restart_requested;
+
 // Main loop functions
 void server_tick(struct ServerContext* ctx);
 bool server_should_run(const struct ServerContext* ctx);

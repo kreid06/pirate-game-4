@@ -47,8 +47,22 @@ export interface Ship {
   // Ship type (SHIP_TYPE_* constants); used for spectral/ghost rendering
   shipType: number;
 
+  // Display name set by the crew (empty string = unnamed)
+  shipName?: string;
+
   // Ship progression (from server levelStats; optional until server sends it)
   levelStats?: ShipLevelStats;
+
+  // Claim flag — present if an enemy is attempting to capture this ship
+  claimFlag?: {
+    planterId: number;
+    planterCompany: number;
+    progressMs: number;
+    totalMs: number;
+    contested: boolean;
+    localX: number;
+    localY: number;
+  };
 }
 
 /**
@@ -87,8 +101,21 @@ export interface Player {
   health: number;      // current HP
   maxHealth: number;   // max HP (default 100)
 
+  // Stamina
+  stamina?: number;    // current stamina (absent = full)
+  maxStamina?: number; // max stamina (default 100)
+
   // Island presence (0 = not on island)
   onIslandId: number;
+
+  // Player XP / levelling (optional until server sends it)
+  level?: number;       // player_level (1–66)
+  xp?: number;          // accumulated XP
+  statHealth?: number;  // health stat points spent
+  statDamage?: number;  // damage stat points spent
+  statStamina?: number; // stamina stat points spent
+  statWeight?: number;  // weight stat points spent
+  statPoints?: number;  // unspent stat points
 }
 
 /**
@@ -114,11 +141,27 @@ export interface Cannonball {
 }
 
 /**
+ * Ship construction state tracked inside a Shipyard structure.
+ */
+export type ConstructionPhase = 'empty' | 'building';
+
+export interface ShipConstruction {
+  phase: ConstructionPhase;
+  /**
+   * Module IDs installed so far.
+   * Possible values: 'hull_left' | 'hull_right' | 'deck' | 'mast' | 'cannon_port' | 'cannon_stbd'
+   */
+  modulesPlaced: string[];
+  /** Entity ID of the real ship entity scaffolded at this shipyard. */
+  scaffoldedShipId?: number;
+}
+
+/**
  * A structure placed on an island by a player.
  */
 export interface PlacedStructure {
   id: number;
-  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door';
+  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck';
   islandId: number;
   x: number;
   y: number;
@@ -127,13 +170,18 @@ export interface PlacedStructure {
   maxHp: number;       // maximum hit points
   placerName: string;  // display name of the player who built this
   doorOpen?: boolean;  // doors only: true = open (passable)
+  rotation?: number;   // rotation in degrees (default 0); applies to wooden_floor and workbench
+  /** Shipyard only — current ship under construction. Absent when empty. */
+  construction?: ShipConstruction;
 }
 
 // Company identifiers (mirror server COMPANY_* constants)
-export const COMPANY_NEUTRAL = 0;
-export const COMPANY_PIRATES = 1;
-export const COMPANY_NAVY    = 2;
-export const COMPANY_GHOST   = 99; // Phantom Brig faction — hostile to all
+export const COMPANY_UNCLAIMED = 0; // No owner — ship/NPC has no faction
+export const COMPANY_NEUTRAL   = 0; // Alias for COMPANY_UNCLAIMED (backward compat)
+export const COMPANY_SOLO      = 1; // Player-owned, no guild affiliation
+export const COMPANY_PIRATES   = 2; // Pirates guild faction
+export const COMPANY_NAVY      = 3; // Navy faction
+export const COMPANY_GHOST     = 99; // Phantom Brig faction — hostile to all
 
 // Ship type identifiers (mirror server SHIP_TYPE_* constants)
 export const SHIP_TYPE_BRIGANTINE = 3;
@@ -230,6 +278,7 @@ export interface Npc {
   state: number;          // NPC_STATE_* — used for movement animation
   role: number;           // NPC_ROLE_* — 1=gunner, 3=rigger
   companyId: number;      // COMPANY_* — faction this NPC belongs to
+  ownerId: number;        // For COMPANY_SOLO NPCs: player_id of the owner (0 = none)
   assignedWeaponId: number; // Module ID of cannon/swivel/mast this NPC is stationed at (0 if none)
 
   // Crew levelling
@@ -257,7 +306,13 @@ export type IslandPreset = 'tropical' | 'jungle' | 'desert' | 'rocky' | 'pine' |
 export interface IslandResource {
   ox: number;
   oy: number;
-  type: 'wood' | 'fiber' | 'food' | 'rock';
+  type: 'wood' | 'fiber' | 'food' | 'rock' | 'boulder';
+  /** Deterministic size scale [0.5–1.8]. Derived server-side from hash of ox/oy. */
+  size: number;
+  hp: number;
+  maxHp: number;
+  /** Client-only: timestamp (performance.now()) when hp first reached 0. Used for fade-out. */
+  depletedAt?: number;
 }
 
 /**
@@ -272,20 +327,54 @@ export interface IslandDef {
   resources: IslandResource[];
   /** Polygon coastline vertices in world-space (present for polygon-mode islands). */
   vertices?: { x: number; y: number }[];
+  /** Explicit grass polygon vertices in world-space. When present, used instead of scaling sand vertices. */
+  grassVertices?: { x: number; y: number }[];
+  /** Explicit shallow water polygon vertices in world-space. Defines the outer boundary of the shallow zone. */
+  shallowVertices?: { x: number; y: number }[];
 }
 
 /**
  * Complete world state for deterministic simulation
  */
+export interface Tombstone {
+  id: number;
+  x: number;
+  y: number;
+  ownerName: string;
+  remainingMs: number;
+  /** Present on tombstone_spawned event only */
+  slots?: Array<[number, number]>;
+  armor?: number;
+  shield?: number;
+}
+
 export interface WorldState {
   tick: number;
   ships: Ship[];
   players: Player[];
   cannonballs: Cannonball[];
   npcs: Npc[];
+  tombstones: Tombstone[];
+  droppedItems: DroppedItem[];
+  companies: Company[];       // Player-created dynamic companies (id >= 100)
   timestamp: number;
   // Phase 2: Add carrier detection state per player
   carrierDetection: Map<number, CarrierDetectionState>; // playerId -> detection state
+}
+
+export interface DroppedItem {
+  id: number;
+  itemKind: number;   // ItemKind numeric value
+  quantity: number;
+  x: number;
+  y: number;
+}
+
+/** A player-created company (id >= 100). */
+export interface Company {
+  id: number;
+  name: string;
+  founderId: number;
 }
 
 /**
@@ -314,6 +403,7 @@ export const PhysicsConfig = {
   PLAYER_WALK_SPEED: 1000, // units/second when walking on ship (5x faster: 200 * 5)
   PLAYER_SWIM_SPEED: 140, // units/second when swimming (unchanged)
   PLAYER_SPEED: 200, // Deprecated - use WALK_SPEED or SWIM_SPEED
+  PLAYER_SPRINT_MULT: 1.6, // sprint speed multiplier (deck/land only)
   PLAYER_RADIUS: 8, // Match server radius for collision detection
   
   // Cannonball physics

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sim/types.h"
+#include "sim/module_ids.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -8,11 +9,24 @@
 // A company groups ships, players, and NPCs into a faction.
 // Two companies that share an alliance_id are friendly to each other;
 // entities of different companies are hostile.
-#define COMPANY_NEUTRAL  0   // Unclaimed/neutral — no friendly-fire protection
-#define COMPANY_PIRATES  1   // Player's company
-#define COMPANY_NAVY     2   // Enemy AI company
-#define COMPANY_GHOST   99   // Phantom Brig faction — hostile to all
-#define MAX_COMPANIES    3   // Total number of distinct company slots (neutral + pirates + navy)
+#define COMPANY_UNCLAIMED 0  // No owner — ship/NPC has no faction
+#define COMPANY_NEUTRAL   0  // Alias for COMPANY_UNCLAIMED (backward compat)
+#define COMPANY_SOLO      1  // Player-owned, no guild affiliation
+#define COMPANY_PIRATES   2  // Pirates guild faction
+#define COMPANY_NAVY      3  // Navy faction — enemy AI
+#define COMPANY_GHOST    99  // Phantom Brig faction — hostile to all
+#define MAX_COMPANIES     4  // Total number of distinct built-in company slots (0–3)
+#define COMPANY_DYNAMIC_BASE 100  // Player-created companies start here
+
+#define MAX_DYNAMIC_COMPANIES 64  // Max number of player-created companies
+
+/** A player-created company (id >= COMPANY_DYNAMIC_BASE). */
+typedef struct {
+    uint32_t id;              // Unique company ID (>= COMPANY_DYNAMIC_BASE)
+    char     name[32];        // Display name chosen by founder
+    uint32_t founder_id;      // player_id of the founding player
+    bool     active;
+} DynamicCompany;
 
 // ── Ship type identifiers ─────────────────────────────────────────────────
 #define SHIP_TYPE_SLOOP      1   // Small, fast sloop
@@ -32,18 +46,20 @@ typedef enum {
 #define MAX_WEAPONS_PER_GROUP  16
 
 typedef struct {
-    uint32_t        weapon_ids[MAX_WEAPONS_PER_GROUP];
+    module_id_t     weapon_ids[MAX_WEAPONS_PER_GROUP]; /* module_id_t = MID(ship_seq, offset) */
     uint8_t         weapon_count;
-    WeaponGroupMode mode;
-    uint32_t        target_ship_id;
+    uint8_t         mode;             /* WeaponGroupMode enum value */
+    uint16_t        target_ship_id;
 } WeaponGroup;
 // ────────────────────────────────────────────────────────────────────────────
 
 // Simple ship structure for WebSocket server
 typedef struct SimpleShip {
-    uint32_t ship_id;
-    uint16_t module_id_base;  // ID of the helm module (= module_id_base passed to init_brigantine_ship)
-    uint32_t ship_type;      // Ship type ID (1=sloop, 2=cutter, 3=brigantine, etc.)
+    uint16_t ship_id;
+    uint8_t  ship_seq;        /* 8-bit sequence number — top byte of all module IDs.
+                               * module_id = MID(ship_seq, offset) = (ship_seq<<8)|offset
+                               * See server/include/sim/module_ids.h for offset table. */
+    uint8_t  ship_type;      // Ship type ID (1=sloop, 2=cutter, 3=brigantine, etc.)
     float x, y;              // World position
     float rotation;          // Radians
     float velocity_x, velocity_y;
@@ -89,7 +105,7 @@ typedef struct SimpleShip {
     uint32_t cannon_last_needed_ms[MAX_MODULES_PER_SHIP];
     /* Per-ship weapon control groups — isolated per company so that enemy
      * boarders cannot read or sabotage the original crew's group config.
-     * Index 0 = COMPANY_NEUTRAL, 1 = COMPANY_PIRATES, 2 = COMPANY_NAVY.
+     * Index 0 = COMPANY_UNCLAIMED, 1 = COMPANY_SOLO, 2 = COMPANY_PIRATES, 3 = COMPANY_NAVY.
      * NPC/tick code always accesses [ship->company_id]; player config
      * writes to [player->company_id]. */
     WeaponGroup weapon_groups[MAX_COMPANIES][MAX_WEAPON_GROUPS];
@@ -97,6 +113,12 @@ typedef struct SimpleShip {
     /* Sinking state — entered when hull_health hits 0; ship stays alive for SHIP_SINK_DURATION_MS */
     bool     is_sinking;
     uint32_t sink_start_ms;
+
+    /* Reverse thrust — set when the helmsman holds S; propels the ship slowly backward */
+    bool reverse_thrust;
+
+    /* Display name — set by the owning player; broadcast to all clients */
+    char ship_name[32];
 } SimpleShip;
 
 // NPC behavior types
@@ -110,14 +132,14 @@ typedef enum {
 
 // NPC agent — server-side autonomous crew member mounted to a module
 typedef struct NpcAgent {
-    uint32_t npc_id;             // Unique NPC ID (starts at 5000)
-    uint32_t ship_id;            // Ship this NPC belongs to
-    uint32_t module_id;          // Module this NPC is mounted to (0 = unmounted)
+    uint16_t    npc_id;          // Unique NPC ID (starts at 5000)
+    uint16_t    ship_id;          // Ship this NPC belongs to
+    module_id_t module_id;        // Module this NPC is mounted to (0 = unmounted)
     NpcRole  role;               // What this NPC does each tick
     bool     active;
 
     // Gunner state
-    uint32_t target_ship_id;     // Enemy ship to aim at (0 = no target)
+    uint16_t target_ship_id;     // Enemy ship to aim at (0 = no target)
     float    fire_cooldown;      // Seconds remaining before next shot (counts down each tick)
     float    fire_interval;      // Seconds between shots (default 5.0)
 
@@ -145,7 +167,7 @@ typedef enum {
 } WorldNpcState;
 
 typedef struct WorldNpc {
-    uint32_t      id;
+    uint16_t      id;
     char          name[32];
     bool          active;
     NpcRole       role;          // NPC_ROLE_GUNNER (cannon) or NPC_ROLE_RIGGER (sail)
@@ -155,15 +177,15 @@ typedef struct WorldNpc {
     float         rotation;
 
     // Ship attachment
-    uint32_t      ship_id;         // 0 = free-standing
+    uint16_t      ship_id;         // 0 = free-standing
     float         local_x, local_y; // Ship-local position in CLIENT units
 
     // Module associations
     // Rigger: port_cannon_id = mast module ID (starboard_cannon_id mirrors it).
     // Gunner: port_cannon_id = future locked-cannon preference (0 = any; player-set later).
-    uint32_t      port_cannon_id;       // Rigger: mast ID.  Gunner: locked preference (0=free)
-    uint32_t      starboard_cannon_id;  // Rigger: mast ID (mirrors port).  Gunner: unused (0)
-    uint32_t      assigned_weapon_id;   // Module the NPC is currently heading to / stationed at
+    module_id_t   port_cannon_id;       /* Rigger: mast ID.  Gunner: locked preference (0=free) */
+    module_id_t   starboard_cannon_id;  /* Rigger: mast ID (mirrors port).  Gunner: unused (0) */
+    module_id_t   assigned_weapon_id;   /* Module the NPC is currently heading to / stationed at */
     bool          wants_cannon;         // Gunner: true = on cannon duty via manning panel
 
     // Movement / state machine
@@ -178,6 +200,7 @@ typedef struct WorldNpc {
     char          dialogue[64];
 
     uint8_t       company_id;     // Inherited from ship at spawn time (COMPANY_*)
+    uint32_t      owner_player_id; // For COMPANY_SOLO NPCs: the player who recruited/owns them (0 = none)
 
     // Knockback velocity (client units/s, decays each tick)
     float         velocity_x, velocity_y;
@@ -204,14 +227,20 @@ typedef struct WorldNpc {
     // ── Boarding approach ──────────────────────────────────────────────────
     // When boarding_ship_id != 0 the NPC is swimming (ship_id == 0) toward a hull
     // entry point.  On arrival it snaps aboard and walks to (boarding_local_x/y).
-    uint32_t      boarding_ship_id;  // target ship to board; 0 = not boarding
+    uint16_t      boarding_ship_id;  // target ship to board; 0 = not boarding
     float         boarding_local_x;  // on-deck destination (ship-local) after boarding
     float         boarding_local_y;
+
+    // ── Repairer idle dwell timer ───────────────────────────────────────
+    // When > 0, NPC is dwelling at a roam module; counts down in ms per tick.
+    // Cleared to 0 when any module on the ship takes damage.
+    uint32_t      roam_wait_ms;
 } WorldNpc;
 // ────────────────────────────────────────────────────────────────────────────
 
 // ── Player Inventory ────────────────────────────────────────────────────────
-#define INVENTORY_SLOTS 10
+#define INVENTORY_SLOTS 58   /* total regular inventory slots per player      */
+#define HOTBAR_SLOTS    10   /* first HOTBAR_SLOTS of slots[] shown on hotbar */
 
 typedef enum {
     ITEM_NONE          = 0,
@@ -241,7 +270,29 @@ typedef enum {
     ITEM_FIBER         = 23,
     ITEM_METAL         = 24,
     ITEM_PICKAXE       = 25,
+    ITEM_SHIPYARD      = 26,
+    ITEM_STONE         = 27,
+    ITEM_WOOD_CEILING  = 28,
+    ITEM_CLAIM_FLAG    = 29,  /* Claiming flag — plant on an enemy ship to capture it */
 } ItemKind;
+
+/* ── Ship Claiming Flag ────────────────────────────────────────────────────── */
+#define FLAG_CLAIM_DURATION_MS    300000u  /* 5 minutes to capture (300 s) */
+#define FLAG_REVERSE_SPEED         10.0f   /* Countdown reverses 10x speed when contested */
+#define MAX_CLAIM_FLAGS            16      /* Max simultaneous flags across all ships */
+
+typedef struct {
+    bool     active;
+    uint16_t ship_id;           /* Target ship being claimed */
+    uint32_t planter_id;        /* Player who planted the flag */
+    uint8_t  planter_company;   /* Company that will gain the ship on capture */
+    float    progress_ms;       /* 0 = just planted, FLAG_CLAIM_DURATION_MS = claimed */
+    bool     contested;         /* true = enemy players/NPCs on deck — timer reverses */
+    float    local_x, local_y;  /* Ship-local position of the flag pole */
+} ClaimFlag;
+
+extern ClaimFlag claim_flags[MAX_CLAIM_FLAGS];
+extern int       claim_flag_count;
 
 /* ── Island structures ────────────────────────────────────────────────────── */
 typedef enum {
@@ -250,20 +301,48 @@ typedef enum {
     STRUCT_WALL         = 2,
     STRUCT_DOOR_FRAME   = 3,  /* posts with open centre, always passable */
     STRUCT_DOOR         = 4,  /* panel that snaps onto a door frame */
+    STRUCT_SHIPYARD     = 5,  /* placed in shallow water near island — used to build ships */
+    STRUCT_WRECK        = 6,  /* spawns at sea when a ship sinks — can be salvaged */
 } PlacedStructureType;
 
+/** Shallow-water ring width as a multiple of the island's own radius.
+ *  e.g. 1.5 → a 185 px beach island gets ~278 px of shallow water. */
+
+typedef enum {
+    CONSTRUCTION_EMPTY    = 0,  /* no ship under construction */
+    CONSTRUCTION_BUILDING = 1,  /* skeleton laid; modules can be installed */
+} ShipConstructionPhase;
+
+/* Bitmask values for PlacedStructure.modules_placed — defined in sim/types.h */
+
 typedef struct {
+    /* 4-byte aligned fields first */
+    uint32_t placer_id;           /* player_id who built this — used for company promotion */
+    float    x, y;                /* world position */
+    float    rotation;            /* degrees — 0 = no rotation; only meaningful for floor/workbench */
+    /* enum fields (int-sized = 4 bytes each) */
+    PlacedStructureType   type;
+    ShipConstructionPhase construction_phase; /* Shipyard-only; zero for all other types */
+    /* 2-byte fields */
+    uint16_t id;                  /* unique structure ID (max MAX_PLACED_STRUCTURES=512) */
+    uint16_t hp;                  /* current hit points */
+    uint16_t max_hp;              /* maximum hit points */
+    uint16_t scaffolded_ship_id;  /* ship_id attached to this shipyard (0 = none) */
+    /* 1-byte fields */
+    uint8_t  island_id;           /* which island this structure is on (ISLAND_COUNT=2) */
+    uint8_t  company_id;          /* COMPANY_* — faction that owns this structure */
+    uint8_t  modules_placed;      /* bitmask of MODULE_* bits (legacy) */
+    uint8_t  construction_company; /* company that owns the ship being built */
+    /* bool fields */
     bool     active;
-    uint32_t id;
-    PlacedStructureType type;
-    uint32_t island_id;
-    float    x, y;           /* world position */
-    uint8_t  company_id;     /* COMPANY_* — faction that owns this structure */
-    uint16_t hp;             /* current hit points */
-    uint16_t max_hp;         /* maximum hit points */
-    uint32_t placer_id;      /* player_id who built this — used for company promotion */
-    char     placer_name[64]; /* display name of the player who built this */
-    bool     open;           /* doors only: true = open (passable) */
+    bool     open;                /* doors only: true = open (passable) */
+    /* Wreck-only salvage loot (STRUCT_WRECK); unused for other types */
+    uint8_t  wreck_items[6];     /* ItemKind as uint8_t, 0 = empty slot   */
+    uint8_t  wreck_qtys[6];      /* quantity per loot slot                */
+    uint8_t  wreck_loot_count;   /* number of remaining non-empty slots   */
+    uint32_t wreck_expires_ms;   /* wall-clock ms for auto-despawn; 0 = persist */
+    /* 64-byte string last (avoids breaking alignment of above) */
+    char     placer_name[64];     /* display name of builder */
 } PlacedStructure;
 
 #define MAX_PLACED_STRUCTURES 512
@@ -273,11 +352,20 @@ typedef struct {
     uint8_t  quantity; // 0 = empty; 1 for weapons/tools; 1-99 for stackables
 } InventorySlot;
 
+/** Equipment worn by a player — one item per body slot. */
 typedef struct {
-    InventorySlot slots[INVENTORY_SLOTS];
-    ItemKind armor;       // Equipped armor (ITEM_NONE if bare)
-    ItemKind shield;      // Equipped shield (ITEM_NONE if none)
-    uint8_t  active_slot; // Currently selected hotbar slot (0-9)
+    ItemKind helm;    /* head armour            */
+    ItemKind torso;   /* chest armour           */
+    ItemKind legs;    /* leg armour             */
+    ItemKind feet;    /* boot armour            */
+    ItemKind hands;   /* glove armour           */
+    ItemKind shield;  /* off-hand shield        */
+} PlayerEquipment;
+
+typedef struct {
+    InventorySlot   slots[INVENTORY_SLOTS]; /* regular bag slots 0..57       */
+    PlayerEquipment equipment;              /* 6 body-slot items             */
+    uint8_t         active_slot;            /* hotbar selection 0-9; 255=off */
 } PlayerInventory;
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -291,7 +379,7 @@ typedef enum {
 // WebSocket player structure
 typedef struct WebSocketPlayer {
     uint32_t player_id;          // WebSocket client player ID (e.g., 1000, 1001)
-    uint32_t sim_entity_id;      // Simulation entity ID (e.g., 1, 2, 3)
+    entity_id sim_entity_id;     // Simulation entity ID (e.g., 1, 2, 3)
     char name[64];
     float x, y;
     float velocity_x, velocity_y;
@@ -301,12 +389,13 @@ typedef struct WebSocketPlayer {
     float movement_direction_x;  // -1.0 to 1.0 (normalized)
     float movement_direction_y;  // -1.0 to 1.0 (normalized)
     bool is_moving;              // true if actively moving
+    bool is_sprinting;           // true if Shift+W sprint is active (land/deck only)
     
     // Rotation tracking for interpolation
     float last_rotation;         // Previous rotation value
     uint32_t last_rotation_update_time;
     
-    uint32_t parent_ship_id;
+    uint16_t parent_ship_id;
     float local_x, local_y;
     PlayerMovementState movement_state;
     uint32_t last_input_time;
@@ -314,8 +403,8 @@ typedef struct WebSocketPlayer {
     
     // Module interaction state
     bool is_mounted;               // Is player mounted to a module
-    uint32_t mounted_module_id;    // ID of mounted module (0 if not mounted)
-    uint32_t controlling_ship_id;  // ID of ship being controlled (helm only, 0 if not controlling)
+    module_id_t mounted_module_id; /* ID of mounted module — MID(ship_seq, offset); 0 if not mounted */
+    uint16_t controlling_ship_id;  // ID of ship being controlled (helm only, 0 if not controlling)
     
     // Cannon aiming state
     float cannon_aim_angle;        // World coordinates aim angle (radians)
@@ -326,6 +415,14 @@ typedef struct WebSocketPlayer {
     // Health
     uint16_t health;             // Current HP (0 = dead)
     uint16_t max_health;         // Max HP (default 100)
+
+    // Player XP / levelling (mirrors WorldNpc system)
+    uint8_t  player_level;       // 1–120
+    uint32_t player_xp;          // accumulated XP
+    uint8_t  stat_health;        // health stat points spent
+    uint8_t  stat_damage;        // damage stat points spent
+    uint8_t  stat_stamina;       // stamina stat points spent
+    uint8_t  stat_weight;        // weight stat points spent
 
     // Melee combat
     uint32_t sword_last_attack_ms; // Wall-clock ms of last sword swing (0 = never)
@@ -338,6 +435,8 @@ typedef struct WebSocketPlayer {
 
     /* Island walking — 0 = in water, >0 = on island with that id */
     uint32_t on_island_id;
+    /* Dock walking — 0 = not on shipyard dock, >0 = structure id of the dock */
+    uint32_t on_dock_id;
 } WebSocketPlayer;
 
 struct WebSocketStats {
@@ -372,7 +471,7 @@ void websocket_server_set_simulation(struct Sim* sim);
  * @param company_id  COMPANY_* constant (COMPANY_PIRATES, COMPANY_NAVY, etc.)
  * @return Entity ID of the new ship, or 0 on failure
  */
-uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id);
+uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id, uint8_t modules_placed);
 
 /**
  * Spawn a ghost ship at the given world position (client pixels).
@@ -433,17 +532,17 @@ int websocket_server_get_ships(SimpleShip** out_ships, int* out_count);
  * @param role      NPC_ROLE_GUNNER / NPC_ROLE_HELMSMAN / NPC_ROLE_RIGGER
  * @return NPC ID on success, 0 on failure
  */
-uint32_t websocket_server_create_npc(uint32_t ship_id, uint32_t module_id, NpcRole role);
+uint16_t websocket_server_create_npc(uint16_t ship_id, module_id_t module_id, NpcRole role);
 
 /**
  * Remove an NPC agent by ID.
  */
-void websocket_server_remove_npc(uint32_t npc_id);
+void websocket_server_remove_npc(uint16_t npc_id);
 
 /**
  * Set the target ship for a gunner or helmsman NPC.
  */
-void websocket_server_npc_set_target(uint32_t npc_id, uint32_t target_ship_id);
+void websocket_server_npc_set_target(uint16_t npc_id, uint16_t target_ship_id);
 
 
 /**
@@ -455,3 +554,11 @@ void websocket_server_npc_set_target(uint32_t npc_id, uint32_t target_ship_id);
 int websocket_server_get_players(WebSocketPlayer** out_players, int* out_count);
 /** Set the company of a connected player (admin use). Returns 0 on success, -1 if not found. */
 int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id);
+
+/**
+ * Get placed structures array for admin panel.
+ * @param out_structs  Pointer to receive the array pointer
+ * @param out_count    Pointer to receive the number of used slots (including inactive)
+ * @return 0 on success, -1 on error
+ */
+int websocket_server_get_placed_structures(PlacedStructure **out_structs, uint32_t *out_count);

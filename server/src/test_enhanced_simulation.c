@@ -35,7 +35,7 @@ static void test_entity_creation() {
     
     // Create a ship
     Vec2Q16 ship_pos = {Q16_FROM_INT(100), Q16_FROM_INT(200)};
-    entity_id ship_id = sim_create_ship(&sim, ship_pos, Q16_FROM_FLOAT(1.57f)); // 90 degrees
+    entity_id ship_id = sim_create_ship(&sim, ship_pos, Q16_FROM_FLOAT(1.57f), 0xFF); // 90 degrees
     assert(ship_id != INVALID_ENTITY_ID);
     assert(sim.ship_count == 1);
     
@@ -76,8 +76,8 @@ static void test_spatial_hash() {
     sim_init(&sim, &config);
     
     // Create entities at different positions
-    entity_id ship1 __attribute__((unused)) = sim_create_ship(&sim, (Vec2Q16){Q16_FROM_INT(0), Q16_FROM_INT(0)}, 0);
-    entity_id ship2 __attribute__((unused)) = sim_create_ship(&sim, (Vec2Q16){Q16_FROM_INT(2000), Q16_FROM_INT(2000)}, 0);
+    entity_id ship1 __attribute__((unused)) = sim_create_ship(&sim, (Vec2Q16){Q16_FROM_INT(0), Q16_FROM_INT(0)}, 0, 0xFF);
+    entity_id ship2 __attribute__((unused)) = sim_create_ship(&sim, (Vec2Q16){Q16_FROM_INT(2000), Q16_FROM_INT(2000)}, 0, 0xFF);
     entity_id player1 __attribute__((unused)) = sim_create_player(&sim, (Vec2Q16){Q16_FROM_INT(10), Q16_FROM_INT(10)}, INVALID_ENTITY_ID);
     
     // Update spatial hash
@@ -143,7 +143,7 @@ static void test_collision_detection() {
     
     // Create ship and projectile in same position (collision)
     Vec2Q16 pos = {Q16_FROM_INT(100), Q16_FROM_INT(100)};
-    entity_id ship_id = sim_create_ship(&sim, pos, 0);
+    entity_id ship_id = sim_create_ship(&sim, pos, 0, 0xFF);
     entity_id proj_id = sim_create_projectile(&sim, pos, (Vec2Q16){Q16_FROM_INT(1), 0}, 999); // Different owner
     
     struct Ship* ship = sim_get_ship(&sim, ship_id);
@@ -174,7 +174,7 @@ static void test_performance() {
     
     // Create many entities
     for (int i = 0; i < 20; i++) {
-        sim_create_ship(&sim, (Vec2Q16){Q16_FROM_INT(i * 100), Q16_FROM_INT(i * 50)}, 0);
+        sim_create_ship(&sim, (Vec2Q16){Q16_FROM_INT(i * 100), Q16_FROM_INT(i * 50)}, 0, 0xFF);
         sim_create_player(&sim, (Vec2Q16){Q16_FROM_INT(i * 100 + 10), Q16_FROM_INT(i * 50 + 10)}, INVALID_ENTITY_ID);
     }
     

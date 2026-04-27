@@ -14,7 +14,9 @@
 
 import {
   WorldState,
+  COMPANY_UNCLAIMED,
   COMPANY_NEUTRAL,
+  COMPANY_SOLO,
   COMPANY_PIRATES,
   COMPANY_NAVY,
   SHIP_TYPE_GHOST,
@@ -36,15 +38,17 @@ import { ShipModule, CannonModuleData, MastModuleData, PlankModuleData } from '.
 // ── Shared palette ────────────────────────────────────────────────────────────
 
 const COMPANY_NAMES: Record<number, string> = {
-  [COMPANY_NEUTRAL]: 'Neutral',
-  [COMPANY_PIRATES]: 'Pirates',
-  [COMPANY_NAVY]:    'Navy',
+  [COMPANY_UNCLAIMED]: 'Unclaimed',
+  [COMPANY_SOLO]:      'Solo',
+  [COMPANY_PIRATES]:   'Pirates',
+  [COMPANY_NAVY]:      'Navy',
 };
 
 const COMPANY_COLORS: Record<number, string> = {
-  [COMPANY_NEUTRAL]: '#aaaaaa',
-  [COMPANY_PIRATES]: '#ff6644',
-  [COMPANY_NAVY]:    '#4488ff',
+  [COMPANY_UNCLAIMED]: '#aaaaaa',
+  [COMPANY_SOLO]:      '#ddaa44',
+  [COMPANY_PIRATES]:   '#ff6644',
+  [COMPANY_NAVY]:      '#4488ff',
 };
 
 /** Attribute index → server-side string name used in upgrade_ship messages */
@@ -86,6 +90,15 @@ export class ShipMenu {
   /** Called when the player clicks an NPC row in the crew section. */
   public onNpcClick?: (npc: import('../../sim/Types.js').Npc) => void;
 
+  /** Called when the player confirms "Unclaim Ship" from the settings panel. */
+  public onUnclaimShip?: (shipId: number) => void;
+
+  /** Called when the player confirms "Claim Ship" from the settings panel. */
+  public onClaimShip?: (shipId: number) => void;
+
+  /** Called when the player clicks Rename in settings — opens the rename dialog. */
+  public onRenameRequest?: (shipId: number, currentName: string) => void;
+
   /** Hit areas for attribute rows populated each render frame. */
   private _upgradeHitAreas: Array<{ attr: number; serverName: string; x: number; y: number; w: number; h: number; affordable: boolean }> = [];
   private _npcHitAreas: Array<{ npc: import('../../sim/Types.js').Npc; x: number; y: number; w: number; h: number }> = [];
@@ -93,9 +106,17 @@ export class ShipMenu {
   private _panelY = 0;
   private _currentShipId = 0;
 
-  toggle(): void { this.visible = !this.visible; }
+  /** Whether the settings sub-panel is currently open. */
+  private _settingsOpen = false;
+  private _gearBtnArea:    { x: number; y: number; w: number; h: number } | null = null;
+  private _unclaimBtnArea: { x: number; y: number; w: number; h: number } | null = null;
+  private _claimBtnArea:   { x: number; y: number; w: number; h: number } | null = null;
+  private _renameBtnArea:  { x: number; y: number; w: number; h: number } | null = null;
+  private _currentShipName = '';
+
+  toggle(): void { this.visible = !this.visible; if (!this.visible) this._settingsOpen = false; }
   open():   void { this.visible = true;  }
-  close():  void { this.visible = false; }
+  close():  void { this.visible = false; this._settingsOpen = false; }
 
   /**
    * Handle a canvas click while the menu is visible.
@@ -103,6 +124,46 @@ export class ShipMenu {
    */
   handleClick(x: number, y: number): boolean {
     if (!this.visible) return false;
+
+    // Gear button — always checked first
+    if (this._gearBtnArea) {
+      const g = this._gearBtnArea;
+      if (x >= g.x && x <= g.x + g.w && y >= g.y && y <= g.y + g.h) {
+        this._settingsOpen = !this._settingsOpen;
+        return true;
+      }
+    }
+
+    // Settings panel is open — handle its buttons
+    if (this._settingsOpen) {
+      if (this._renameBtnArea) {
+        const r = this._renameBtnArea;
+        if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+          this._settingsOpen = false;
+          this.onRenameRequest?.(this._currentShipId, this._currentShipName);
+          return true;
+        }
+      }
+      if (this._unclaimBtnArea) {
+        const u = this._unclaimBtnArea;
+        if (x >= u.x && x <= u.x + u.w && y >= u.y && y <= u.y + u.h) {
+          this.onUnclaimShip?.(this._currentShipId);
+          this._settingsOpen = false;
+          return true;
+        }
+      }
+      if (this._claimBtnArea) {
+        const c = this._claimBtnArea;
+        if (x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h) {
+          this.onClaimShip?.(this._currentShipId);
+          this._settingsOpen = false;
+          return true;
+        }
+      }
+      // Any click while settings open — consume
+      return true;
+    }
+
     // Check NPC row hit areas
     for (const area of this._npcHitAreas) {
       if (x >= area.x && x <= area.x + area.w &&
@@ -169,7 +230,7 @@ export class ShipMenu {
       : null;
 
     if (!ship) {
-      ctx.font = '14px Consolas, monospace';
+      ctx.font = '14px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
@@ -178,11 +239,17 @@ export class ShipMenu {
       return;
     }
 
+    this._currentShipName = ship.shipName ?? '';
     cur = this._identity(ctx, px, cur, ship);
     cur = this._hullAmmo(ctx, px, cur, ship);
     cur = this._modulesSection(ctx, px, cur, ship.modules);
     cur = this._progressionSection(ctx, px, cur, ship.id, ship.levelStats);
     this._crewSection(ctx, px, cur, worldState, ship.id, ship.shipType ?? 3);
+
+    // Render settings overlay on top if open
+    if (this._settingsOpen) {
+      this._settingsPanel(ctx, px, py, ship.id, ship.companyId ?? COMPANY_UNCLAIMED, player?.companyId ?? COMPANY_UNCLAIMED);
+    }
 
     ctx.restore();
   }
@@ -193,13 +260,31 @@ export class ShipMenu {
     ctx.fillStyle = 'rgba(255,215,0,0.06)';
     ctx.fillRect(px, py, PANEL_W, HEADER_H);
 
-    ctx.font = 'bold 17px Consolas, monospace';
+    ctx.font = 'bold 17px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = GOLD;
     ctx.fillText('⛵  SHIP STATUS', px + PAD, py + HEADER_H / 2);
 
-    ctx.font = '12px Consolas, monospace';
+    // Gear / settings button
+    const gearW = 28;
+    const gearH = 24;
+    const gearX = px + PANEL_W - PAD - 100 - gearW - 8;
+    const gearY = py + (HEADER_H - gearH) / 2;
+    const gearActive = this._settingsOpen;
+    ctx.fillStyle = gearActive ? 'rgba(255,215,0,0.18)' : 'rgba(255,255,255,0.07)';
+    ctx.fillRect(gearX, gearY, gearW, gearH);
+    ctx.strokeStyle = gearActive ? GOLD : BORDER;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(gearX, gearY, gearW, gearH);
+    ctx.font = '16px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = gearActive ? GOLD : TEXT_DIM;
+    ctx.fillText('⚙', gearX + gearW / 2, gearY + gearH / 2);
+    this._gearBtnArea = { x: gearX, y: gearY, w: gearW, h: gearH };
+
+    ctx.font = '12px Georgia, serif';
     ctx.textAlign = 'right';
     ctx.fillStyle = TEXT_DIM;
     ctx.fillText('[F / ESC] close', px + PANEL_W - PAD, py + HEADER_H / 2);
@@ -214,6 +299,116 @@ export class ShipMenu {
     return py + HEADER_H;
   }
 
+  private _settingsPanel(
+    ctx:          CanvasRenderingContext2D,
+    px:           number, py: number,
+    shipId:       number,
+    shipCompany:  number,
+    myCompany:    number,
+  ): void {
+    const OW = 320;
+    const OH = 220;
+    const ox = px + Math.round((PANEL_W - OW) / 2);
+    const oy = py + Math.round((PANEL_H - OH) / 2);
+
+    // Backdrop
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(px, py, PANEL_W, PANEL_H);
+
+    // Panel
+    ctx.fillStyle = 'rgba(14,18,30,0.99)';
+    ctx.fillRect(ox, oy, OW, OH);
+    ctx.strokeStyle = GOLD;
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(ox, oy, OW, OH);
+
+    // Title
+    ctx.font = 'bold 15px Georgia, serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = GOLD;
+    ctx.fillText('⚙  SHIP SETTINGS', ox + 14, oy + 22);
+
+    // Divider
+    ctx.strokeStyle = BORDER;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(ox, oy + 38);
+    ctx.lineTo(ox + OW, oy + 38);
+    ctx.stroke();
+
+    const isUnclaimed = shipCompany === COMPANY_UNCLAIMED;
+    const isOwnShip   = !isUnclaimed && shipCompany === myCompany;
+
+    // Info text
+    ctx.font = '12px Georgia, serif';
+    ctx.fillStyle = TEXT_DIM;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    if (isUnclaimed) {
+      ctx.fillText('This ship has no owner.', ox + 14, oy + 48);
+      ctx.fillText('Claim it to bring it under your flag.', ox + 14, oy + 64);
+    } else if (isOwnShip) {
+      ctx.fillText('Remove faction ownership from this ship.', ox + 14, oy + 48);
+      ctx.fillText('NPCs aboard keep their current company.', ox + 14, oy + 64);
+    } else {
+      ctx.fillText('You do not own this ship.', ox + 14, oy + 48);
+    }
+
+    const btnW = OW - 28;
+    const btnH = 30;
+    const btnX = ox + 14;
+    const claimBtnY  = oy + OH - btnH - 14;
+    const renameBtnY = claimBtnY - btnH - 8;
+
+    // Reset hit areas
+    this._renameBtnArea  = null;
+    this._unclaimBtnArea = null;
+    this._claimBtnArea   = null;
+
+    // RENAME SHIP button (always shown)
+    const currentName = this._currentShipName || '(unnamed)';
+    ctx.fillStyle = 'rgba(100,140,255,0.15)';
+    ctx.fillRect(btnX, renameBtnY, btnW, btnH);
+    ctx.strokeStyle = '#6699ff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(btnX, renameBtnY, btnW, btnH);
+    ctx.font = 'bold 13px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#aabbff';
+    ctx.fillText(`✏  RENAME SHIP  (${currentName})`, btnX + btnW / 2, renameBtnY + btnH / 2);
+    this._renameBtnArea = { x: btnX, y: renameBtnY, w: btnW, h: btnH };
+
+    if (isUnclaimed) {
+      // CLAIM SHIP button (green)
+      ctx.fillStyle = 'rgba(68,204,102,0.15)';
+      ctx.fillRect(btnX, claimBtnY, btnW, btnH);
+      ctx.strokeStyle = '#44cc66';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(btnX, claimBtnY, btnW, btnH);
+      ctx.font = 'bold 13px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#88ffaa';
+      ctx.fillText('⚓  CLAIM SHIP', btnX + btnW / 2, claimBtnY + btnH / 2);
+      this._claimBtnArea = { x: btnX, y: claimBtnY, w: btnW, h: btnH };
+    } else if (isOwnShip) {
+      // UNCLAIM SHIP button (red)
+      ctx.fillStyle = 'rgba(255,85,68,0.15)';
+      ctx.fillRect(btnX, claimBtnY, btnW, btnH);
+      ctx.strokeStyle = '#ff5544';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(btnX, claimBtnY, btnW, btnH);
+      ctx.font = 'bold 13px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ff8877';
+      ctx.fillText('⚓  UNCLAIM SHIP', btnX + btnW / 2, claimBtnY + btnH / 2);
+      this._unclaimBtnArea = { x: btnX, y: claimBtnY, w: btnW, h: btnH };
+    }
+  }
+
   private _identity(
     ctx:  CanvasRenderingContext2D,
     px:   number, py: number,
@@ -225,13 +420,13 @@ export class ShipMenu {
     ctx.fillStyle = BG_DARK;
     ctx.fillRect(px + PAD, py, PANEL_W - PAD * 2, sectionH);
 
-    const co = ship.companyId ?? COMPANY_NEUTRAL;
+    const co = ship.companyId ?? COMPANY_UNCLAIMED;
 
     // Company swatch
     ctx.fillStyle = COMPANY_COLORS[co] ?? '#aaa';
     ctx.fillRect(px + PAD + 8, py + 10, 14, 14);
 
-    ctx.font = 'bold 15px Consolas, monospace';
+    ctx.font = 'bold 15px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle = TEXT_HEAD;
@@ -240,7 +435,7 @@ export class ShipMenu {
     // Speed + heading
     const spd = Math.sqrt(ship.velocity.x ** 2 + ship.velocity.y ** 2);
     const deg = ((ship.rotation * 180 / Math.PI) % 360 + 360) % 360;
-    ctx.font = '12px Consolas, monospace';
+    ctx.font = '12px Georgia, serif';
     ctx.fillStyle = TEXT_MONO;
     ctx.fillText(
       `Speed: ${spd.toFixed(1)} u/s   Heading: ${deg.toFixed(1)}°`,
@@ -274,7 +469,7 @@ export class ShipMenu {
       const hp      = Math.max(0, Math.min(100, ship.hullHealth));
       const barColor = hp > 60 ? GREEN : hp > 30 ? ORANGE : RED;
 
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = TEXT_DIM;
@@ -296,7 +491,7 @@ export class ShipMenu {
 
     // Ammo row
     {
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = BG_STRIPE;
@@ -366,7 +561,7 @@ export class ShipMenu {
     const colDmg   = px + PAD + 320;
 
     // Column header
-    ctx.font = 'bold 11px Consolas, monospace';
+    ctx.font = 'bold 11px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = TEXT_DIM;
@@ -386,7 +581,7 @@ export class ShipMenu {
       }
 
       const label = kind.replace('-', ' ');
-      ctx.font = '13px Consolas, monospace';
+      ctx.font = '13px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = TEXT_HEAD;
@@ -405,7 +600,7 @@ export class ShipMenu {
     }
 
     if (count > 8) {
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
@@ -430,7 +625,7 @@ export class ShipMenu {
     py = this._sectionHeader(ctx, px, py, 'CREW', `${players.length} player${players.length !== 1 ? 's' : ''}, ${aboard.length} NPC${aboard.length !== 1 ? 's' : ''}`);
 
     if (aboard.length === 0 && players.length === 0) {
-      ctx.font = '13px Consolas, monospace';
+      ctx.font = '13px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
@@ -459,18 +654,18 @@ export class ShipMenu {
       ctx.textBaseline = 'top';
 
       // Name + level
-      ctx.font      = 'bold 13px Consolas, monospace';
+      ctx.font      = 'bold 13px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.fillStyle = TEXT_HEAD;
       ctx.fillText(npc.name, rowX + 4, rowY + 4);
 
-      ctx.font      = '11px Consolas, monospace';
+      ctx.font      = '11px Georgia, serif';
       ctx.fillStyle = GOLD;
       ctx.fillText(`Lv.${npc.npcLevel}`, rowX + 140, rowY + 5);
 
       // Role tag
       const roleStr = ROLE_TAGS[npc.role] ?? 'Crew';
-      ctx.font      = '11px Consolas, monospace';
+      ctx.font      = '11px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'right';
       ctx.fillText(roleStr, rowX + rowW - 4, rowY + 5);
@@ -489,13 +684,13 @@ export class ShipMenu {
       ctx.strokeRect(barX, barY, barW, BAR_H_SM);
 
       // HP text next to bar
-      ctx.font      = '10px Consolas, monospace';
+      ctx.font      = '10px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.fillStyle = TEXT_DIM;
       ctx.fillText(`${npc.health}/${npc.maxHealth}`, barX + barW + 3, barY);
 
       // Click hint (small arrow)
-      ctx.font      = '10px Consolas, monospace';
+      ctx.font      = '10px Georgia, serif';
       ctx.textAlign = 'right';
       ctx.fillStyle = TEXT_DIM;
       ctx.fillText('▸', rowX + rowW, rowY + 4);
@@ -523,7 +718,7 @@ export class ShipMenu {
     if (!ls) {
       // Server hasn't sent level data yet — show a placeholder
       py = this._sectionHeader(ctx, px, py, 'PROGRESSION', 'no data');
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
@@ -547,7 +742,7 @@ export class ShipMenu {
       const fillFrac = Math.min(shipLevel / totalCap, 1);
       const barColor = shipCapped ? GOLD : GREEN;
 
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = TEXT_DIM;
@@ -566,7 +761,7 @@ export class ShipMenu {
 
     // Next upgrade cost row (single cost applies to any attribute)
     if (!shipCapped) {
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = TEXT_DIM;
@@ -580,7 +775,7 @@ export class ShipMenu {
 
     // Header row for attribute table
     {
-      ctx.font = 'bold 11px Consolas, monospace';
+      ctx.font = 'bold 11px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = TEXT_DIM;
@@ -616,7 +811,7 @@ export class ShipMenu {
       }
 
       // Attribute name
-      ctx.font = '13px Consolas, monospace';
+      ctx.font = '13px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = wip ? TEXT_DIM : TEXT_HEAD;
@@ -636,14 +831,14 @@ export class ShipMenu {
         ctx.fillStyle = isMaxed && pts >= attrCap ? GOLD : (wip ? '#556' : GREEN);
         ctx.fillRect(mBarX, py + (ROW_H - 8) / 2, mBarW * frac, 8);
         // pts/cap label
-        ctx.font = '10px Consolas, monospace';
+        ctx.font = '10px Georgia, serif';
         ctx.textAlign = 'right';
         ctx.fillStyle = TEXT_DIM;
         ctx.fillText(`${pts}/${attrCap}`, mBarX + mBarW + 28, py + ROW_H / 2);
       }
 
       // Computed effect
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.fillStyle = wip ? TEXT_DIM : TEXT_MONO;
       let effectStr = '';
@@ -673,12 +868,12 @@ export class ShipMenu {
       if (isMaxed) {
         ctx.textAlign = 'right';
         ctx.fillStyle = TEXT_DIM;
-        ctx.font = '11px Consolas, monospace';
+        ctx.font = '11px Georgia, serif';
         ctx.fillText(attrMaxed ? '— maxed —' : '— capped —', btnX + btnW, py + ROW_H / 2);
       } else if (wip) {
         ctx.textAlign = 'right';
         ctx.fillStyle = TEXT_DIM;
-        ctx.font = '11px Consolas, monospace';
+        ctx.font = '11px Georgia, serif';
         ctx.fillText('— WIP —', btnX + btnW, py + ROW_H / 2);
       } else {
         // + button
@@ -687,7 +882,7 @@ export class ShipMenu {
         ctx.strokeStyle = affordable ? GREEN : '#444';
         ctx.lineWidth = 1;
         ctx.strokeRect(btnX, btnY, btnW, btnH);
-        ctx.font = 'bold 15px Consolas, monospace';
+        ctx.font = 'bold 15px Georgia, serif';
         ctx.textAlign = 'center';
         ctx.fillStyle = affordable ? GREEN : TEXT_DIM;
         ctx.fillText('+', btnX + btnW / 2, py + ROW_H / 2);
@@ -716,7 +911,7 @@ export class ShipMenu {
     ctx.fillStyle = 'rgba(255,215,0,0.08)';
     ctx.fillRect(px, py, PANEL_W, h);
 
-    ctx.font = 'bold 12px Consolas, monospace';
+    ctx.font = 'bold 12px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = GOLD;

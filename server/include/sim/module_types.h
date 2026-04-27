@@ -125,6 +125,8 @@ typedef struct {
     q16_t local_rot;            // Rotation relative to ship
     uint16_t state_bits;        // Compact state flags
     q16_t health;               // Current HP (all module types)
+    q16_t target_health;        // Repair ceiling (planks only) — decreases with damage;
+                                //   player must spend wood to raise it back toward max_health
     q16_t max_health;           // Maximum HP:
                                 //   plank: 10000, cannon: 8000
                                 //   mast: 15000, helm: 10000

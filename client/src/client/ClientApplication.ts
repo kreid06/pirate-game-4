@@ -5,11 +5,13 @@
  * It follows the composition pattern, delegating specific concerns to specialized systems.
  */
 
-import { ClientConfig } from './ClientConfig.js';
+import { ClientConfig, ClientConfigManager } from './ClientConfig.js';
 
 // Graphics System
 import { RenderSystem } from './gfx/RenderSystem.js';
 import { Camera } from './gfx/Camera.js';
+import { GLContext } from './gfx/gl/GLContext.js';
+import { GLWorldRenderer } from './gfx/gl/GLWorldRenderer.js';
 
 // Network System  
 import { NetworkManager, ConnectionState } from '../net/NetworkManager.js';
@@ -22,16 +24,23 @@ import { PhysicsConfig } from '../sim/Types.js';
 
 // UI System
 import { UIManager } from './ui/UIManager.js';
+import { MENU_ID } from './ui/UIManager.js';
 import { RadialMenu } from './ui/RadialMenu.js';
 import { CraftingMenu } from './ui/CraftingMenu.js';
+import { ShipyardMenu } from './ui/ShipyardMenu.js';
+import { ShipRenameDialog } from './ui/ShipRenameDialog.js';
+import { PauseMenu, GameSettings } from './ui/PauseMenu.js';
+import { CommandConsole } from './ui/CommandConsole.js';
+import { IslandEditor } from './gfx/IslandEditor.js';
+import { logout } from './auth/AuthService.js';
 
 // Audio System
 import { AudioManager } from './audio/AudioManager.js';
 
 // Core Simulation Types
-import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode } from '../sim/Types.js';
+import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED } from '../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../sim/Types.js';
-import { createEmptyInventory } from '../sim/Inventory.js';
+import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils, ShipModule, getModuleFootprint, footprintsOverlap } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
@@ -54,6 +63,21 @@ export enum ClientState {
  */
 export class ClientApplication {
   private canvas: HTMLCanvasElement;
+  /** Separate WebGL2 canvas stacked behind the main 2D canvas. Null if WebGL2 is disabled/unavailable. */
+  private _glCanvas: HTMLCanvasElement | null = null;
+  /** GL world renderer — null when WebGL2 is off or init failed. */
+  private _glRenderer: GLWorldRenderer | null = null;
+  /** Delta time from the last game loop tick (ms), stored for GL frame time accumulation. */
+  private _lastDeltaMs = 16;
+  /** Current GL internal render scale (GL canvas pixels / 2D canvas pixels). */
+  private _glScale = 0.40;
+  /** Adaptive GL scale limits. */
+  private readonly _glScaleMin = 0.33;
+  private readonly _glScaleMax = 0.50;
+  /** Adaptive scaler counters and cooldown timestamp. */
+  private _glBadFrameCount = 0;
+  private _glGoodFrameCount = 0;
+  private _glNextScaleAdjustAt = 0;
   private config: ClientConfig;
   private state: ClientState = ClientState.INITIALIZING;
   
@@ -74,9 +98,12 @@ export class ClientApplication {
   private hasReceivedWorldState = false; // Track if we've received at least one world state
   private previousMountState = false;    // Track previous mount state to detect changes
   private previousCarrierId: number | null = null; // Track ship changes for boarding sync
+  private _prevLocalHealth: number | null = null;  // Detect respawn (health ≤0 → >0) for flash
   // Optimistic hotbar slot — held until server confirms the same value so that
   // rapid movement messages (W held) don't let stale world-states flicker the UI back.
   private pendingActiveSlot: number | null = null;
+  /** companyId keyed by structure id — for team-colouring damage numbers on structure hits. */
+  private _structureCompanyMap = new Map<number, number>();
   // Optimistic mount state — held from module_interact_success until the server's
   // world-state echo confirms isMounted=true for the same module.
   private pendingMount: { moduleId: number; moduleKind: string; mountOffset?: Vec2 } | null = null;
@@ -91,6 +118,9 @@ export class ClientApplication {
   private explicitBuildMode = false;
   private buildSelectedItem: 'cannon' | 'sail' | 'swivel' = 'cannon';
   private buildRotationDeg = 0;
+
+  // Island structure build mode (wooden_floor / workbench / wall while off-ship)
+  private islandBuildRotationDeg = 0;
 
   // Ghost placement system — B key opens build menu, player places planning markers
   private buildMenuOpen = false;
@@ -120,7 +150,7 @@ export class ClientApplication {
   private lastFrameTime = 0;
   /** Timestamp (ms) of the last sword attack sent to the server — enforces client-side cooldown matching the server's 600ms. */
   private lastSwordSwingMs = 0;
-  private readonly SWORD_COOLDOWN_MS = 600;
+  private readonly SWORD_COOLDOWN_MS = 1000; // matches server SWORD_COOLDOWN_MS
   /** E-hold interaction state — covers ladders and mountable modules. */
   private _ladderHoldTimer: ReturnType<typeof setTimeout> | null = null;
   private _suppressLadderInteract = false;
@@ -133,13 +163,15 @@ export class ClientApplication {
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
   /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
-  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | null = null;
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
   private _ladderHoldShipId: number | null = null;
   /** NPC id locked in at E-keydown for the NPC radial interact path. */
   private _npcInteractId: number | null = null;
+  /** Hold-E timer: timestamp (ms) when E was pressed near a dropped-item pile; -1 when not pending. */
+  private _holdEDropTimer = -1;
   /** NPC id for the pending "Move To" targeting mode (ctrl+click → Move To → click module). */
   private _moveToNpcId: number | null = null;
   /** Screen-space position to flash once the server confirms (or rejects) a goto-module command. */
@@ -148,6 +180,16 @@ export class ClientApplication {
   private _radialMenu = new RadialMenu();
   /** Crafting panel opened when the player presses E near a workbench. */
   private craftingMenu = new CraftingMenu();
+  /** Ship construction panel opened when the player presses E at a shipyard. */
+  private shipyardMenu = new ShipyardMenu();
+  /** Custom rename dialog — replaces window.prompt() for ship naming. */
+  private renameDialog!: ShipRenameDialog;
+  /** Pause overlay — opened by Escape / ` / P when no other menu is up. */
+  private pauseMenu = new PauseMenu();
+  /** Terminal command bar — opened by / when no other menu is up. */
+  private commandConsole = new CommandConsole();
+  /** Dev tool for editing island polygon layers — opened via /islandEditor. */
+  private islandEditor: IslandEditor | null = null;
   /** True when the player's active slot is wooden_floor or workbench on an island. */
   private islandBuildMode = false;
   private accumulator = 0;
@@ -161,12 +203,89 @@ export class ClientApplication {
   /** Timestamp (ms) of the last sword swing, for cursor cooldown ring. */
   private swordLastAttackMs = 0;
   
+  // Loading overlay DOM state
+  private _loadingOverlay: HTMLElement | null = null;
+  private _loadingBar: HTMLElement | null = null;
+  private _loadingSteps: Array<HTMLElement | null> = [];
+  private _loadingShownAt = 0;
+  private _loadingHidden = false;
+  private static readonly LOADING_MIN_MS = 2000; // minimum time overlay is visible
+  /** Timestamp (ms) when we entered CONNECTED state — used for loading fallback timeout. */
+  private _loadingConnectedAt = 0;
+  /** Set true when the server sends {type:"ack"} — the real ready-to-play signal. */
+  private _playerAckReceived = false;
+  /** Max ms to wait for the server ack before forcing past loading screen. */
+  private static readonly LOADING_PLAYER_TIMEOUT_MS = 10000;
+
   constructor(canvas: HTMLCanvasElement, config: ClientConfig) {
     this.canvas = canvas;
     this.config = config;
     this.clientTickDuration = 1000 / config.prediction.clientTickRate; // e.g., ~8.33ms for 120Hz
-    
+
+    this._loadingOverlay = document.getElementById('loading-overlay');
+    this._loadingBar = document.getElementById('loading-bar');
+    this._loadingSteps = [
+      document.getElementById('step-init'),
+      document.getElementById('step-connect'),
+      document.getElementById('step-world'),
+      document.getElementById('step-enter'),
+    ];
+    this._loadingShownAt = Date.now();
+
     console.log(`🎮 Client initialized with ${config.prediction.clientTickRate}Hz tick rate`);
+  }
+
+  /** Advance the loading overlay to the given step index (0–3) and update the progress bar. */
+  private setLoadingStep(step: number): void {
+    if (!this._loadingOverlay || this._loadingHidden) return;
+    const pct = [10, 35, 60, 90][step] ?? 100;
+    if (this._loadingBar) this._loadingBar.style.width = `${pct}%`;
+
+    this._loadingSteps.forEach((el, i) => {
+      if (!el) return;
+      const icon = el.querySelector('.step-icon') as HTMLElement | null;
+      if (i < step) {
+        el.classList.add('done');
+        el.classList.remove('active');
+        if (icon) icon.textContent = '✓';
+      } else if (i === step) {
+        el.classList.add('active');
+        el.classList.remove('done');
+        if (icon) icon.innerHTML = '<span class="step-spinner"></span>';
+      } else {
+        el.classList.remove('active', 'done');
+        if (icon) icon.textContent = '⏳';
+      }
+    });
+  }
+
+  /** Fade out then hide the loading overlay. Respects minimum display time. Idempotent. */
+  private hideLoadingOverlay(): void {
+    if (this._loadingHidden) return;
+    this._loadingHidden = true;
+
+    const overlay = this._loadingOverlay;
+    if (!overlay) return;
+
+    // Mark all steps done
+    if (this._loadingBar) this._loadingBar.style.width = '100%';
+    this._loadingSteps.forEach(el => {
+      if (!el) return;
+      el.classList.add('done');
+      el.classList.remove('active');
+      const icon = el.querySelector('.step-icon') as HTMLElement | null;
+      if (icon) icon.textContent = '✓';
+    });
+
+    const elapsed = Date.now() - this._loadingShownAt;
+    const delay = Math.max(0, ClientApplication.LOADING_MIN_MS - elapsed) + 300;
+
+    setTimeout(() => {
+      overlay.classList.add('fade-out');
+      overlay.addEventListener('transitionend', () => {
+        overlay.classList.add('hidden');
+      }, { once: true });
+    }, delay);
   }
   
   /**
@@ -175,6 +294,7 @@ export class ClientApplication {
   async initialize(): Promise<void> {
     try {
       this.state = ClientState.INITIALIZING;
+      this.setLoadingStep(0);
       console.log('⚡ Initializing client systems...');
       
       // Initialize Camera first (needed by other systems)
@@ -187,11 +307,54 @@ export class ClientApplication {
       this.renderSystem = new RenderSystem(this.canvas, this.config.graphics);
       await this.renderSystem.initialize();
       this.renderSystem.setRadialMenu(this._radialMenu);
+
+      // Initialize rename dialog (needs canvas to position the HTML input overlay)
+      this.renameDialog = new ShipRenameDialog(this.canvas);
+      this.renameDialog.onConfirm = (shipId, name) => {
+        this.networkManager.sendRenameShip(shipId, name);
+      };
+
+      // Initialize WebGL2 world renderer (dual-canvas setup)
+      if (this.config.graphics.useWebGL2) {
+        try {
+          const glCanvas = document.createElement('canvas');
+          // Render below native resolution to reduce ocean shader fill-rate cost.
+          glCanvas.width  = Math.ceil(this.canvas.width  * this._glScale);
+          glCanvas.height = Math.ceil(this.canvas.height * this._glScale);
+          glCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;image-rendering:auto;';
+          this.canvas.style.position = 'absolute';
+          this.canvas.style.background = 'transparent';
+          this.canvas.parentElement?.insertBefore(glCanvas, this.canvas);
+          const glCtx = GLContext.create(glCanvas);
+          if (!glCtx) throw new Error('WebGL2 context creation failed');
+          this._glCanvas  = glCanvas;
+          this._glRenderer = new GLWorldRenderer(glCtx);
+          this.renderSystem.setGLRenderer(this._glRenderer);
+          // Keep GL canvas pixel dimensions in sync on resize and scale changes.
+          this.applyGLCanvasScale();
+          window.addEventListener('resize', () => this.applyGLCanvasScale());
+          console.log(`✅ WebGL2 world renderer initialized (${Math.round(this._glScale * 100)}% scale)`);
+        } catch (e) {
+          console.warn('[GL] WebGL2 init failed, falling back to Canvas 2D:', e);
+          this._glCanvas?.remove();
+          this._glCanvas   = null;
+          this._glRenderer = null;
+        }
+      }
       
       // Initialize Network System
       this.networkManager = new NetworkManager(this.config.network);
       this.networkManager.setWorldStateHandler(this.onServerWorldState.bind(this));
       this.networkManager.setConnectionStateHandler(this.onConnectionStateChanged.bind(this));
+      this.networkManager.onPlayerAck = () => {
+        this._playerAckReceived = true;
+        if (this.state === ClientState.CONNECTED) {
+          this.state = ClientState.IN_GAME;
+          this.setLoadingStep(3);
+          this.hideLoadingOverlay();
+          console.log('🎮 Entered game world (server ack)');
+        }
+      };
       
       // Module mounting callbacks
       this.networkManager.onModuleMountSuccess = (moduleId, moduleKind, mountOffset) => {
@@ -221,7 +384,14 @@ export class ClientApplication {
         }
 
         if (worldX !== null && worldY !== null) {
-          this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage || 3000, true);
+          // Determine team: hit ship same company as local → we took damage (enemy), else we dealt it (friendly)
+          const _dWs = this.authoritativeWorldState ?? this.predictedWorldState;
+          const _dMyId = this.networkManager.getAssignedPlayerId();
+          const _dMyComp = _dMyId !== null ? (_dWs?.players.find(p => p.id === _dMyId)?.companyId ?? -1) : -1;
+          const _dHitComp = _dWs?.ships.find(s => s.id === shipId)?.companyId ?? -1;
+          const _dTeam: import('../gfx/EffectRenderer.js').DamageTeam =
+            _dMyComp > 0 && _dHitComp === _dMyComp ? 'enemy' : 'friendly';
+          this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage || 3000, true, _dTeam);
           // Mast destroyed: big sail-shred burst
           const ws2 = this.authoritativeWorldState || this.predictedWorldState;
           const hitShip = ws2?.ships.find(s => s.id === shipId);
@@ -266,7 +436,14 @@ export class ClientApplication {
         }
 
         if (worldX !== null && worldY !== null) {
-          this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage, false);
+          // Determine team: hit ship same company as local → we took damage (enemy), else we dealt it (friendly)
+          const _mdWs = this.authoritativeWorldState ?? this.predictedWorldState;
+          const _mdMyId = this.networkManager.getAssignedPlayerId();
+          const _mdMyComp = _mdMyId !== null ? (_mdWs?.players.find(p => p.id === _mdMyId)?.companyId ?? -1) : -1;
+          const _mdHitComp = _mdWs?.ships.find(s => s.id === shipId)?.companyId ?? -1;
+          const _mdTeam: import('../gfx/EffectRenderer.js').DamageTeam =
+            _mdMyComp > 0 && _mdHitComp === _mdMyComp ? 'enemy' : 'friendly';
+          this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage, false, _mdTeam);
           // Impact explosion for hull/plank and cannon hits
           const hitShipDmg = ws?.ships.find(s => s.id === shipId);
           const hitModDmg  = hitShipDmg?.modules.find(m => m.id === moduleId);
@@ -288,6 +465,15 @@ export class ClientApplication {
           ws.ships = ws.ships.filter(s => s.id !== shipId);
         }
       };
+
+      this.networkManager.onModuleDemolished = (shipId, moduleId) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const ship = ws.ships.find(s => s.id === shipId);
+          if (ship) ship.modules = ship.modules.filter(m => m.id !== moduleId);
+        }
+        this.renderSystem.showAnnouncement('🪓 Module demolished', 'info', 2.0);
+      };
       this.networkManager.onShipSinking = (shipId) => {
         // Trigger the client-side fade animation immediately when the server enters sinking state
         this.renderSystem.markShipSinking(shipId);
@@ -300,21 +486,22 @@ export class ClientApplication {
         const myPlayer    = myPlayerId !== null ? ws?.players.find(p => p.id === myPlayerId) : null;
         const sinkingShip = ws?.ships.find(s => s.id === shipId);
         if (sinkingShip) {
-          const FACTION: Record<number, string> = { 0: 'Neutral', 1: 'Pirates', 2: 'Navy', 99: 'Phantom Brig' };
-          const shipLabel = (s: Ship) => FACTION[s.companyId] ?? `Ship #${s.id}`;
-          const sinkLabel  = shipLabel(sinkingShip);
+          const dynCompanies = ws?.companies ?? [];
+          const shipDisplayName = (s: import('./../../sim/Types.js').Ship) =>
+            s.shipName || 'Brigantine';
+          const sinkLabel  = shipDisplayName(sinkingShip);
           const isOwnShip  = myPlayer?.carrierId === shipId;
           if (isOwnShip) {
             const attackerId = this.renderSystem.getLastAttackerOf(shipId);
             const attacker   = attackerId !== null ? ws?.ships.find(s => s.id === attackerId) : null;
             const msg = attacker
-              ? `Your ${sinkLabel} was sunk by ${shipLabel(attacker)}`
-              : `Your s${sinkLabel} was sunk!`;
+              ? `Your ${sinkLabel} was sunk by ${shipDisplayName(attacker)}`
+              : `Your ${sinkLabel} was sunk!`;
             this.renderSystem.showAnnouncement(msg, 'ship_sink', 4.0);
           } else {
             const myShip  = myPlayer?.carrierId ? ws?.ships.find(s => s.id === myPlayer!.carrierId) : null;
-            const myLabel = myShip ? shipLabel(myShip) : 'Our ship';
-            this.renderSystem.showAnnouncement(`Your ${myLabel} sunk ${sinkLabel}`, 'ship_sink', 4.0);
+            const myLabel = myShip ? shipDisplayName(myShip) : 'Our ship';
+            this.renderSystem.showAnnouncement(`${myLabel} sunk ${sinkLabel}`, 'ship_sink', 4.0);
           }
         }
 
@@ -348,6 +535,53 @@ export class ClientApplication {
           ship.levelStats.totalCap        = totalCap;
           ship.levelStats.nextUpgradeCost = nextUpgradeCost;
         }
+      };
+
+      this.networkManager.onShipUnclaimed = (shipId) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const ship = ws.ships.find(s => s.id === shipId);
+          if (ship) ship.companyId = 0; // COMPANY_UNCLAIMED
+          // NPCs and players keep their own company — NOT reset here
+        }
+        console.log(`⚓ Ship ${shipId} unclaimed`);
+      };
+
+      this.networkManager.onShipClaimed = (shipId, companyId) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const ship = ws.ships.find(s => s.id === shipId);
+          if (ship) ship.companyId = companyId;
+        }
+        console.log(`⚓ Ship ${shipId} claimed — company ${companyId}`);
+      };
+
+      this.networkManager.onShipRenamed = (shipId, name) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const ship = ws.ships.find(s => s.id === shipId);
+          if (ship) ship.shipName = name;
+        }
+      };
+
+      this.networkManager.onNpcUnclaimed = (npcId) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const npc = ws.npcs.find(n => n.id === npcId);
+          if (npc) npc.companyId = 0; // COMPANY_UNCLAIMED
+        }
+        console.log(`⚓ NPC ${npcId} unclaimed`);
+      };
+
+      // Append newly created dynamic company to local world state
+      this.networkManager.onCompanyCreated = (company) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          if (!ws.companies.find(c => c.id === company.id)) {
+            ws.companies.push(company);
+          }
+        }
+        console.log(`🏴 Company created: "${company.name}" (id=${company.id})`);
       };
 
       // When the server confirms a ladder board, record the ship ID so that the
@@ -451,8 +685,8 @@ export class ClientApplication {
       this.inputManager.onInputFrame = this.onInputFrame.bind(this);
       
       // HYBRID PROTOCOL: Wire up state change callbacks
-      this.inputManager.onMovementStateChange = (movement, isMoving) => {
-        this.networkManager.sendMovementState(movement, isMoving);
+      this.inputManager.onMovementStateChange = (movement, isMoving, isSprinting) => {
+        this.networkManager.sendMovementState(movement, isMoving, isSprinting);
       };
       this.inputManager.onRotationUpdate = (rotation) => {
         this.networkManager.sendRotationUpdate(rotation);
@@ -524,7 +758,12 @@ export class ClientApplication {
                   const repairable = playerShip.modules.filter(m => m.kind === 'plank' || m.kind === 'deck');
                   const damaged = repairable.filter(m => {
                     const md = m.moduleData as any;
-                    return md && md.health < (md.maxHealth ?? 0);
+                    if (!md) return false;
+                    // For planks, repairable means below target HP (not max HP)
+                    const cap = m.kind === 'plank'
+                      ? (md.targetHealth ?? md.maxHealth ?? 0)
+                      : (md.maxHealth ?? 0);
+                    return md.health < cap;
                   });
                   if (damaged.length === 0) {
                     console.log('🔨 [HAMMER] All planks and deck are at full health');
@@ -564,13 +803,14 @@ export class ClientApplication {
             }
             const shipId   = player.carrierId;
             const moduleId = hoveredForHammer.module.id;
-            // Don't start the minigame if the module is already at full health
+            // Don't start the minigame if the module is already at its repair ceiling
             const md = hoveredForHammer.module.moduleData as any;
-            const poleFullHealth  = !md || md.health >= (md.maxHealth ?? 0);
+            const repairCap = md?.targetHealth ?? md?.maxHealth ?? 0;
+            const poleFullHealth  = !md || md.health >= repairCap;
             const fiberFullHealth = hoveredForHammer.module.kind !== 'mast'
               || (md?.fiberHealth ?? 0) >= (md?.fiberMaxHealth ?? 0);
             if (poleFullHealth && fiberFullHealth) {
-              console.log('🔨 [HAMMER] Module is already at full health');
+              console.log('🔨 [HAMMER] Module is already at its repair ceiling (use wood to raise target HP)');
               return;
             }
             this.uiManager?.startHammerMinigame((won) => {
@@ -612,9 +852,9 @@ export class ClientApplication {
           const activeSlot = player?.inventory?.activeSlot ?? 0;
           const activeItem = player?.inventory?.slots[activeSlot]?.item ?? 'none';
 
-          // Repair mode: active slot = repair_kit → repair most damaged plank on ship
-          if (activeItem === 'repair_kit' && player && player.carrierId !== 0) {
-            console.log(`🔧 [REPAIR] Sending repair_plank for ship ${player.carrierId}`);
+          // Repair mode: active slot = wood → spend 1 wood to raise target_health on worst plank
+          if (activeItem === 'wood' && player && player.carrierId !== 0) {
+            console.log(`🔧 [REPAIR] Sending repair_plank (wood) for ship ${player.carrierId}`);
             this.networkManager.sendRepairPlank(player.carrierId);
             return;
           }
@@ -625,6 +865,54 @@ export class ClientApplication {
             if (tree) {
               console.log(`🪓 [HARVEST] Sending harvest_resource`);
               this.networkManager.sendHarvestResource();
+              return;
+            }
+          }
+
+          // Demolish mode: on own ship, hovering a non-plank module → hold [E] to demolish
+          if (player && player.carrierId !== 0) {
+            const hoveredDemolish = this.renderSystem.getHoveredModule();
+            if (hoveredDemolish && hoveredDemolish.module.kind !== 'plank' &&
+                hoveredDemolish.module.kind !== 'deck' &&
+                hoveredDemolish.ship.id === player.carrierId) {
+              const modLx = hoveredDemolish.module.localPos.x;
+              const modLy = hoveredDemolish.module.localPos.y;
+              let demolishDist: number;
+              if (player.localPosition) {
+                demolishDist = player.localPosition.sub(Vec2.from(modLx, modLy)).length();
+              } else {
+                const cos = Math.cos(hoveredDemolish.ship.rotation);
+                const sin = Math.sin(hoveredDemolish.ship.rotation);
+                const wx = hoveredDemolish.ship.position.x + modLx * cos - modLy * sin;
+                const wy = hoveredDemolish.ship.position.y + modLx * sin + modLy * cos;
+                demolishDist = player.position.sub(Vec2.from(wx, wy)).length();
+              }
+              if (demolishDist <= 120) {
+                // Hold E to confirm demolish
+                this._interactKind       = 'structure'; // reuse structure keyup path
+                this._hoveredStructureId = hoveredDemolish.module.id;
+                this._hoveredStructureType = 'wooden_floor' as any; // sentinel — handled below
+                this._ladderHoldModuleId = hoveredDemolish.module.id;
+                this._ladderHoldShipId   = hoveredDemolish.ship.id;
+                this._suppressLadderInteract = true;
+                this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mid   = this._ladderHoldModuleId;
+                  const sid   = this._ladderHoldShipId;
+                  this._ladderHoldModuleId = null;
+                  this._ladderHoldShipId   = null;
+                  this._interactKind       = null;
+                  if (mid && sid) {
+                    console.log(`🪓 [DEMOLISH] Hold complete — demolishing module ${mid} on ship ${sid}`);
+                    this.networkManager.sendDemolishModule(sid, mid);
+                  }
+                }, 500);
+              } else {
+                this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+                console.log(`🪓 [DEMOLISH] Module too far (${demolishDist.toFixed(1)}px)`);
+              }
               return;
             }
           }
@@ -647,15 +935,39 @@ export class ClientApplication {
             }
           }
 
+          // Collect tombstone: any player on foot within 80px → press E → open menu
+          if (player && player.carrierId === 0) {
+            const tomb = this.renderSystem.getHoveredTombstone();
+            if (tomb) {
+              this.networkManager.sendTombstoneOpen(tomb.id);
+              return;
+            }
+          }
+
+          // Pick up dropped item: player on foot within 80px → press E → nearest item
+          if (player && player.carrierId === 0) {
+            const nearbyDrops = this.renderSystem.getDroppedItemsInRange(80);
+            if (nearbyDrops.length > 0) {
+              this.networkManager.sendPickupItem(nearbyDrops[0].id);
+              return;
+            }
+          }
+
           // Workbench interaction: player on island, workbench under cursor and within range → open crafting
           if (player && player.carrierId === 0) {
             if (this.craftingMenu.visible) {
               this.craftingMenu.close();
+              this.uiManager.setActiveMenuId(null);
+              return;
+            }
+            if (this.shipyardMenu.visible) {
+              this.shipyardMenu.close();
+              this.uiManager.setActiveMenuId(null);
               return;
             }
             const hovered = this.renderSystem.getHoveredStructure();
-            if (hovered?.type === 'workbench') {
-              console.log(`⚒ [INTERACT] Sending structure_interact for workbench ${hovered.id}`);
+            if (hovered?.type === 'workbench' || hovered?.type === 'shipyard') {
+              console.log(`⚒ [INTERACT] Sending structure_interact for ${hovered.type} ${hovered.id}`);
               this.networkManager.sendStructureInteract(hovered.id);
               return;
             }
@@ -766,8 +1078,8 @@ export class ClientApplication {
       this.inputManager.onShipSailControl = (desiredOpenness) => {
         this.networkManager.sendShipSailControl(desiredOpenness);
       };
-      this.inputManager.onShipRudderControl = (turningLeft, turningRight) => {
-        this.networkManager.sendShipRudderControl(turningLeft, turningRight);
+      this.inputManager.onShipRudderControl = (turningLeft, turningRight, movingBackward) => {
+        this.networkManager.sendShipRudderControl(turningLeft, turningRight, movingBackward);
       };
       this.inputManager.onShipSailAngleControl = (desiredAngle) => {
         this.networkManager.sendShipSailAngleControl(desiredAngle);
@@ -859,7 +1171,7 @@ export class ClientApplication {
           const pid = this.networkManager.getAssignedPlayerId();
           const p   = ws?.players.find(pl => pl.id === pid);
           const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
-          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door') {
+          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard') {
             // Compute snap at click time (not from stale render state)
             const pos = kind === 'wooden_floor'
               ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
@@ -868,7 +1180,11 @@ export class ClientApplication {
               : kind === 'door'
               ? this.renderSystem.computeSnappedDoorPos(worldPos.x, worldPos.y)
               : { x: worldPos.x, y: worldPos.y };
-            this.networkManager.sendPlaceStructure(kind, pos.x, pos.y);
+            // Only floors and workbenches carry rotation; walls/doors snap by orientation
+            const rot = kind === 'wooden_floor'
+              ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
+              : (kind === 'workbench' || kind === 'shipyard') ? this.islandBuildRotationDeg : 0;
+            this.networkManager.sendPlaceStructure(kind, pos.x, pos.y, rot);
           }
           return;
         }
@@ -952,10 +1268,15 @@ export class ClientApplication {
         this.syncBuildModeState();
       };
 
-      // Build rotation (R key in explicit build mode or ghost placement)
+      // Build rotation (R/Q key in build modes)
       this.inputManager.onBuildRotate = (deltaDeg: number) => {
-        this.buildRotationDeg = (this.buildRotationDeg + deltaDeg + 360) % 360;
-        this.syncBuildModeState();
+        if (this.inputManager.islandBuildMode) {
+          this.islandBuildRotationDeg = (this.islandBuildRotationDeg + deltaDeg + 360) % 360;
+          this.renderSystem.setIslandBuildRotation(this.islandBuildRotationDeg);
+        } else {
+          this.buildRotationDeg = (this.buildRotationDeg + deltaDeg + 360) % 360;
+          this.syncBuildModeState();
+        }
       };
 
       // Right-click in build menu: cancel pending ghost or remove nearest placed ghost
@@ -979,9 +1300,29 @@ export class ClientApplication {
 
       // Let UI panels (e.g. manning priority panel) consume clicks before game logic
       this.inputManager.onUIClick = (x, y) => {
-        if (this.craftingMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
+        // Rename dialog is topmost — check first
+        if (this.renameDialog?.handleClick(x, y)) return true;
+        if (this.shipyardMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
+        const _wsClick = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+        const _pidClick = this.networkManager.getAssignedPlayerId();
+        const _invClick = _wsClick?.players.find(p => p.id === _pidClick)?.inventory ?? null;
+        if (this.craftingMenu.handleClick(x, y, this.canvas.width, this.canvas.height, _invClick)) return true;
         if (this.uiManager?.handleClick(x, y)) return true;
         return false;
+      };
+
+      // Forward mouse-move/up to world map for drag-pan
+      this.inputManager.onUIMouseMove = (x, y) => {
+        if (this.craftingMenu.visible) this.craftingMenu.handleMouseMove(x, y);
+        this.uiManager?.handleWorldMapMouseMove(x, y);
+      };
+      this.inputManager.onUIMouseUp = (x, y) => {
+        this.uiManager?.handleWorldMapMouseUp(x, y);
+      };
+      // Forward wheel to world map zoom (returns true when map is visible)
+      this.inputManager.onUIWheel = (deltaY, x, y) => {
+        if (this.craftingMenu.visible) return this.craftingMenu.handleWheel(deltaY);
+        return this.uiManager?.handleWorldMapWheel(deltaY, x, y) ?? false;
       };
 
       // Ctrl+left-click: assign/remove cannon from the active weapon group
@@ -994,8 +1335,14 @@ export class ClientApplication {
           const myId = this.networkManager.getAssignedPlayerId();
           const me = (myId !== null ? ws?.players.find(p => p.id === myId) : null) ?? ws?.players[0] ?? null;
           const myCompany = me?.companyId ?? 0;
-          // Only command your own crew
-          if (hovNpcCtrl.companyId !== myCompany || myCompany === 0) return;
+          const myIdCtrl = myId;
+          // Only command your own crew (for COMPANY_SOLO NPCs check ownerId)
+          const isMyNpcCtrl = hovNpcCtrl.companyId !== COMPANY_UNCLAIMED && (
+            hovNpcCtrl.companyId === COMPANY_SOLO
+              ? hovNpcCtrl.ownerId === myIdCtrl
+              : hovNpcCtrl.companyId === myCompany && myCompany !== 0
+          );
+          if (!isMyNpcCtrl) return;
 
           // Build radial options
           const cmdOpts: Array<{ id: string; label: string }> = [];
@@ -1202,6 +1549,84 @@ export class ClientApplication {
       
       // Set up debug keyboard shortcuts
       this.setupDebugKeys();
+
+      // Wire pause menu logout button → revoke token on auth server, clear local storage, reload
+      this.pauseMenu.onLogout = () => {
+        this.shutdown();
+        logout().finally(() => window.location.reload());
+      };
+
+      // Clear the active menu ID when the pause menu closes (Resume, backdrop, Escape)
+      this.pauseMenu.onClose = () => {
+        this.uiManager?.setActiveMenuId(null);
+      };
+
+      // Wire pause menu settings → apply live to running systems
+      this.pauseMenu.onSettingsChange = (settings) => {
+        this.applySettings(settings);
+      };
+
+      // Wire command console
+      this.commandConsole.onCommand = (cmd) => {
+        const parts = cmd.slice(1).trim().split(/\s+/);
+        const name  = parts[0].toLowerCase();
+
+        // Client-side-only commands — do NOT forward to server
+        if (name === 'islandeditor') {
+          if (!this.islandEditor) {
+            this.islandEditor = new IslandEditor(this.canvas, () => this.camera);
+          }
+          // Feed current islands from renderSystem (the authoritative client store)
+          this.islandEditor.setIslands(this.renderSystem.getIslands() as any);
+          const idArg = parseInt(parts[1] ?? '', 10);
+          this.islandEditor.open(isNaN(idArg) ? undefined : idArg);
+          this.commandConsole.pushResponse('Island editor opened.', 'info');
+          return;
+        }
+
+        this.networkManager.sendCommand(cmd);
+      };
+      this.commandConsole.onVisibilityChange = (visible) => {
+        this.uiManager?.setActiveMenuId(visible ? MENU_ID.CONSOLE : null);
+      };
+
+      // Dynamic autocomplete — player names and ship IDs from live world state
+      this.commandConsole.setArgValuesProvider('TpPlayerToShip', 0, () => {
+        const ws = this.authoritativeWorldState;
+        if (!ws) return [];
+        return ws.players
+          .filter(p => p.name)
+          .map(p => p.name as string);
+      });
+      this.commandConsole.setArgValuesProvider('TpPlayerToShip', 1, () => {
+        const ws = this.authoritativeWorldState;
+        if (!ws) return [];
+        return ws.ships.filter(s => s.id).map(s => String(s.id));
+      });
+      this.commandConsole.setArgValuesProvider('KillPlayer', 0, () => {
+        const ws = this.authoritativeWorldState;
+        if (!ws) return [];
+        return ws.players.filter(p => p.name).map(p => p.name as string);
+      });
+      this.commandConsole.setArgValuesProvider('TpPlayerTo', 0, () => {
+        const ws = this.authoritativeWorldState;
+        if (!ws) return [];
+        return ws.players.filter(p => p.name).map(p => p.name as string);
+      });
+      this.networkManager.onCommandResponse = (text, success) => {
+        this.commandConsole.pushResponse(text, success ? 'response' : 'error');
+        // Don't auto-open — the player can re-open with / to see the log
+      };
+      this.networkManager.onPlayerTeleported = (playerId, x, y, parentShip, localX, localY) => {
+        // Snap the local player position if it's us being teleported
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          const p = ws?.players.find(pl => pl.id === playerId);
+          if (!p) continue;
+          p.position = Vec2.from(x, y);
+          p.carrierId = parentShip;
+          p.localPosition = Vec2.from(localX, localY);
+        }
+      };
       
       // Initialize UI System
       this.uiManager = new UIManager(this.canvas, this.config);
@@ -1216,10 +1641,128 @@ export class ClientApplication {
         this.networkManager.sendUpgradeShipAttribute(shipId, attribute);
       });
 
+      // Wire ship unclaim requests from the settings panel to the server
+      this.uiManager.setShipUnclaimCallback((shipId) => {
+        this.networkManager.sendUnclaimShip(shipId);
+      });
+
+      // Wire ship claim requests from the settings panel to the server
+      this.uiManager.setShipClaimCallback((shipId) => {
+        this.networkManager.sendClaimShip(shipId);
+      });
+
+      this.uiManager.setShipRenameRequestCallback((shipId, currentName) => {
+        this.renameDialog.open(shipId, currentName);
+      });
+
+      // Wire Leave Company button in the company menu — moves player back to Solo
+      this.uiManager.setLeaveCompanyCallback(() => {
+        this.networkManager.sendCommand('/AddPlayerToCompany solo');
+      });
+
+      // Wire Join Company buttons in the company menu — moves player (and their NPCs) to the chosen guild
+      this.uiManager.setJoinCompanyCallback((companyId: number) => {
+        if (companyId >= 100) {
+          // Dynamic player-created company — use JSON protocol message
+          this.networkManager.sendJoinCompany(companyId);
+        } else {
+          const companyName = companyId === 2 ? 'pirates' : companyId === 3 ? 'navy' : 'solo';
+          this.networkManager.sendCommand(`/AddPlayerToCompany ${companyName}`);
+        }
+      });
+
+      // Wire Create Company button in the company menu
+      this.uiManager.setCreateCompanyCallback((name: string) => {
+        this.networkManager.sendCreateCompany(name);
+      });
+
       // Wire NPC stat upgrade requests from the crew level menu to the server
       this.uiManager.setCrewUpgradeCallback((npcId, stat) => {
         this.networkManager.sendCrewUpgrade(npcId, stat);
       });
+
+      // Wire player stat upgrade requests from the character menu to the server
+      this.uiManager.setPlayerUpgradeCallback((stat) => {
+        this.networkManager.sendPlayerStatUpgrade(stat);
+      });
+
+      // Wire respawn confirmation: flash white, snap camera, send network request immediately
+      this.uiManager.setRespawnConfirmedCallback((shipId, worldX, worldY, islandId, spawnX, spawnY) => {
+        // 1. Hold screen at full white
+        this.uiManager.triggerWhiteFlash();
+        this.uiManager.closeRespawnScreen();
+
+        // 2. Snap camera to spawn target so it's in the right place when white fades
+        if (spawnX !== undefined && spawnY !== undefined) {
+          this.camera.setPosition(Vec2.from(spawnX, spawnY));
+        }
+
+        // 3. Send network request immediately
+        this.networkManager.sendRespawnRequest(shipId, worldX, worldY, islandId);
+      });
+
+      // Hotbar left-click slot selection
+      this.uiManager.onHotbarSlotClick = (slot) => {
+        this.inputManager.onSlotSelect?.(slot);
+      };
+
+      // Supply inventory data for drag-and-drop in the player menu
+      this.uiManager.getPlayerInventory = () => {
+        const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        const pid = this.networkManager.getAssignedPlayerId();
+        return ws?.players.find(p => p.id === pid)?.inventory ?? null;
+      };
+
+      // Inventory drag-and-drop swap
+      this.uiManager.playerMenu.onSwapRequest = (fromSlot, toSlot) => {
+        const pid = this.networkManager.getAssignedPlayerId();
+        for (const w of [this.authoritativeWorldState, this.predictedWorldState]) {
+          const p = w?.players.find(pl => pl.id === pid);
+          if (!p) continue;
+          // Optimistic local swap
+          const tmp = { ...p.inventory.slots[fromSlot] };
+          p.inventory.slots[fromSlot] = { ...p.inventory.slots[toSlot] };
+          p.inventory.slots[toSlot] = tmp;
+        }
+        this.networkManager.sendInvSwap(fromSlot, toSlot);
+      };
+
+      this.uiManager.playerMenu.onDropItem = (fromSlot) => {
+        const pid = this.networkManager.getAssignedPlayerId();
+        for (const w of [this.authoritativeWorldState, this.predictedWorldState]) {
+          const p = w?.players.find(pl => pl.id === pid);
+          if (!p) continue;
+          // Optimistic local clear
+          p.inventory.slots[fromSlot] = { item: 'none' as any, quantity: 0 };
+        }
+        this.networkManager.sendDropItem(fromSlot);
+      };
+
+      // Hand-craft from inventory (no workbench needed)
+      this.uiManager.playerMenu.onCraftRequest = (outputItem) => {
+        const recipeId = `craft_${outputItem.replace(/-/g, '_')}`;
+        this.networkManager.sendCraftItem(recipeId);
+      };
+
+      // Wreck salvage menu
+      this.uiManager.salvageMenu.onTakeItem = (wreckId) => {
+        this.networkManager.sendStructureInteract(wreckId);
+      };
+      this.networkManager.onSalvageSuccess = (_item, qty) => {
+        const kind = ITEM_ID_MAP[_item];
+        const label = kind ? (ITEM_DEFS[kind]?.symbol ?? kind) : `item #${_item}`;
+        this.renderSystem.showAnnouncement(`🪵 Salvaged ×${qty} ${label}`, 'info', 2.5);
+        this.uiManager.salvageMenu.onItemTaken();
+        if (this.uiManager.salvageMenu.lootCount <= 0) {
+          this.uiManager.salvageMenu.close();
+          this.uiManager.setActiveMenuId(null);
+        }
+      };
+
+      // Handle drop picker item selection (hold-E near pile)
+      this.uiManager.onDropPickerPick = (itemId) => {
+        this.networkManager.sendPickupItem(itemId);
+      };
 
       // Handle NPC_STAT_UP broadcast: refresh world-state NPC fields
       this.networkManager.onNpcStatUp = (npcId, _stat, _statLevel, xp,
@@ -1239,6 +1782,26 @@ export class ClientApplication {
         }
       };
 
+      // Handle PLAYER_STAT_UP broadcast: refresh world-state player fields
+      this.networkManager.onPlayerStatUp = (_stat, _statLevel, xp,
+          maxHealth, playerLevel, statHealth, statDamage, statStamina, statWeight, statPoints) => {
+        const playerId = this.networkManager.getAssignedPlayerId();
+        if (playerId === null) return;
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const p = ws.players.find(pl => pl.id === playerId);
+          if (!p) continue;
+          p.xp         = xp;
+          p.maxHealth  = maxHealth;
+          p.level      = playerLevel;
+          p.statHealth  = statHealth;
+          p.statDamage  = statDamage;
+          p.statStamina = statStamina;
+          p.statWeight  = statWeight;
+          p.statPoints  = statPoints;
+        }
+      };
+
       // Handle npc_goto_module server response — flash green on success, red if occupied/invalid
       this.networkManager.onNpcMoveResult = (ok: boolean) => {
         const pos = this._pendingModuleFlashPos;
@@ -1252,7 +1815,7 @@ export class ClientApplication {
       };
 
       // Handle ENTITY_HIT: update NPC/player health and show floating damage number
-      this.networkManager.onEntityHit = (entityType, id, x, y, damage, health, maxHealth, killed) => {
+      this.networkManager.onEntityHit = (entityType, id, x, y, damage, health, maxHealth, killed, killerShipId) => {
         for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
           if (!ws) continue;
           if (entityType === 'npc') {
@@ -1263,8 +1826,64 @@ export class ClientApplication {
             if (player) { player.health = health; player.maxHealth = maxHealth; }
           }
         }
-        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), damage, killed);
+        // Determine team relationship for damage number colour
+        const _hitWs = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _myId2  = this.networkManager.getAssignedPlayerId();
+        const _myPlayer2 = _myId2 !== null ? _hitWs?.players.find(p => p.id === _myId2) : null;
+        const _myCompany = _myPlayer2?.companyId ?? -1;
+        let _dmgTeam: import('../../net/../client/gfx/EffectRenderer.js').DamageTeam = 'enemy';
+        if (killerShipId > 0 && _hitWs) {
+          const _kShip = _hitWs.ships.find(s => s.id === killerShipId);
+          if (_kShip && _myCompany !== -1 && _kShip.companyId === _myCompany) _dmgTeam = 'friendly';
+        }
+        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), damage, killed, _dmgTeam);
         this.renderSystem.notifyEntityDamaged(id, entityType === 'npc');
+
+        // Kill announcement — skip for the local player's own death (respawn screen handles that)
+        if (killed) {
+          const myId = this.networkManager.getAssignedPlayerId();
+          const isLocalPlayerDeath = entityType === 'player' && myId !== null && id === myId;
+          if (!isLocalPlayerDeath) {
+            const ws = this.authoritativeWorldState ?? this.predictedWorldState;
+            // Resolve killer ship: prefer server-provided ID, fall back to nearest ship
+            let killerShip = killerShipId > 0 ? ws?.ships.find(s => s.id === killerShipId) : undefined;
+            if (!killerShip && ws) {
+              let bestDist = Infinity;
+              for (const s of ws.ships) {
+                const dx = s.position.x - x, dy = s.position.y - y;
+                const d = dx * dx + dy * dy;
+                if (d < bestDist) { bestDist = d; killerShip = s; }
+              }
+            }
+            const killerName = killerShip ? (killerShip.shipName || 'Brigantine') : null;
+            if (killerName) {
+              let targetName: string;
+              if (entityType === 'player') {
+                const p = ws?.players.find(pl => pl.id === id);
+                targetName = p?.name || `Player #${id}`;
+              } else {
+                const npc = ws?.npcs.find(n => n.id === id);
+                targetName = npc?.name || `NPC #${id}`;
+              }
+              this.renderSystem.showAnnouncement(`${killerName} killed ${targetName}`, 'info', 3.0);
+            }
+          }
+        }
+
+        // Detect local player death → show respawn screen
+        if (killed && entityType === 'player') {
+          const myId = this.networkManager.getAssignedPlayerId();
+          if (myId !== null && id === myId) {
+            const ws = this.authoritativeWorldState || this.predictedWorldState;
+            const me = ws?.players.find(p => p.id === myId);
+            const companyId = me?.companyId ?? 0;
+            const islands = this.renderSystem.getIslands();
+            const ships = ws?.ships ?? [];
+            const deathPos = me ? { x: me.position.x, y: me.position.y } : undefined;
+            // Open immediately — the RespawnScreen's own fade-in animation handles the transition.
+            this.uiManager.openRespawnScreen(ships, islands, companyId, deathPos);
+          }
+        }
       };
 
       // Handle FIRE_EFFECT: mark entity/module as burning
@@ -1275,39 +1894,141 @@ export class ClientApplication {
       // Handle ISLANDS: server-defined island layout
       this.networkManager.onIslands = (islands) => {
         this.renderSystem.setIslands(islands);
+        this.uiManager.setIslandsForRespawn(islands);
+        this.islandEditor?.setIslands(islands);
+      };
+
+      // Update a resource's HP when the server broadcasts resource_damaged
+      this.networkManager.onResourceDamaged = (islandId, ox, oy, hp, maxHp) => {
+        const isl = this.renderSystem.getIslands().find(i => i.id === islandId);
+        if (!isl) return;
+        const res = isl.resources.find(r => Math.abs(r.ox - ox) < 0.5 && Math.abs(r.oy - oy) < 0.5);
+        if (res) {
+          res.hp = hp; res.maxHp = maxHp;
+          if (hp <= 0 && !res.depletedAt) res.depletedAt = performance.now();
+        }
       };
 
       // Handle placed structures
       this.networkManager.onStructuresList = (structs) => {
         this.renderSystem.setPlacedStructures(structs);
       };
+
+      // Tombstone lifecycle
+      this.networkManager.onTombstoneSpawned = (t) => {
+        this.renderSystem.addTombstone(t);
+      };
+      this.networkManager.onTombstoneCollected = (id) => {
+        this.renderSystem.removeTombstone(id);
+        if (this.uiManager.tombstoneMenu.visible) this.uiManager.tombstoneMenu.close();
+      };
+      this.networkManager.onTombstoneDespawned = (id) => {
+        this.renderSystem.removeTombstone(id);
+        if (this.uiManager.tombstoneMenu.visible) this.uiManager.tombstoneMenu.close();
+      };
+      this.networkManager.onTombstoneItems = (id, ownerName, slots, _equip) => {
+        const menu = this.uiManager.tombstoneMenu;
+        const ws  = this.authoritativeWorldState ?? this.predictedWorldState;
+        const pid = this.networkManager.getAssignedPlayerId();
+        const inv = ws?.players.find(p => p.id === pid)?.inventory ?? null;
+        menu.open(id, ownerName, slots);
+        menu.setPlayerInventory(inv);
+        menu.onTakeSlot = (tombId, slot) => {
+          this.networkManager.sendTombstoneTakeSlot(tombId, slot);
+        };
+        menu.onTakeAll = (tombId) => {
+          this.networkManager.sendCollectTombstone(tombId);
+        };
+      };
       this.networkManager.onStructureDemolished = (id, x, y) => {
+        const _sdComp = this._structureCompanyMap.get(id) ?? -1;
+        this._structureCompanyMap.delete(id);
         this.renderSystem.removePlacedStructure(id);
         if (x !== undefined && y !== undefined) {
           // Cannonball kill — big explosion
           this.renderSystem.spawnExplosion(Vec2.from(x, y), 1.2);
-          this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, true);
+          const _sdMyId = this.networkManager.getAssignedPlayerId();
+          const _sdWs = this.authoritativeWorldState ?? this.predictedWorldState;
+          const _sdMyComp = _sdMyId !== null ? (_sdWs?.players.find(p => p.id === _sdMyId)?.companyId ?? -1) : -1;
+          const _sdTeam: import('../gfx/EffectRenderer.js').DamageTeam =
+            _sdMyComp > 0 && _sdComp === _sdMyComp ? 'enemy' : 'friendly';
+          this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, true, _sdTeam);
         }
       };
       this.networkManager.onStructureCompanyUpdated = (id, companyId) => {
+        this._structureCompanyMap.set(id, companyId);
         this.renderSystem.updateStructureCompany(id, companyId);
       };
       this.networkManager.onStructureHpChanged = (id, hp, maxHp, x, y) => {
         this.renderSystem.updateStructureHp(id, hp, maxHp);
         this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.6);
-        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, false);
+        const _shComp = this._structureCompanyMap.get(id) ?? -1;
+        const _shMyId = this.networkManager.getAssignedPlayerId();
+        const _shWs = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _shMyComp = _shMyId !== null ? (_shWs?.players.find(p => p.id === _shMyId)?.companyId ?? -1) : -1;
+        const _shTeam: import('../gfx/EffectRenderer.js').DamageTeam =
+          _shMyComp > 0 && _shComp === _shMyComp ? 'enemy' : 'friendly';
+        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, false, _shTeam);
       };
       this.networkManager.onTreeHit = (x, y) => {
         this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.5);
       };
       this.networkManager.onStructurePlaced = (s) => {
+        this._structureCompanyMap.set(s.id, s.companyId ?? 0);
         this.renderSystem.addPlacedStructure(s);
+      };
+      this.networkManager.onPlacementFailed = (reason, _x, _y, _structureType, blockerId) => {
+        const REASONS: Record<string, string> = {
+          occupied:          'Space already occupied',
+          blocked_by_tree:   'Blocked by a tree',
+          needs_floor:       'Must be placed on a floor',
+          needs_floor_edge:  'Must snap to a floor edge',
+          needs_door_frame:  'Requires a door frame',
+          wrong_company:     'Belongs to another company',
+          enemy_territory:   'Enemy territory',
+          blocked_by_player: 'Blocked by a player',
+          too_far:           'Too far away',
+          in_water:          'Cannot place in water',
+          world_full:        'World structure limit reached',
+          missing_item:      'Missing required item',
+        };
+        const msg = REASONS[reason] ?? `Placement failed (${reason})`;
+        this.renderSystem.showAnnouncement(`\u{1F6A7} ${msg}`, 'info', 2.0);
+        this.renderSystem.setBlockerStructure(blockerId ?? null, 2000);
       };
       this.networkManager.onDoorToggled = (id, open) => {
         this.renderSystem.updateStructureDoorOpen(id, open);
       };
-      this.networkManager.onCraftingOpen = (structureId, _structureType) => {
-        this.craftingMenu.open(structureId);
+      this.networkManager.onCraftingOpen = (structureId, structureType) => {
+        if (structureType === 'shipyard') {
+          // Fallback if server still sends crafting_open for shipyard (pre-update)
+          this.shipyardMenu.open(structureId, 'empty', []);
+          this.uiManager.setActiveMenuId(MENU_ID.SHIPYARD);
+        } else {
+          this.craftingMenu.open(structureId);
+          this.uiManager.setActiveMenuId(MENU_ID.CRAFTING);
+        }
+      };
+
+      this.networkManager.onShipyardState = (structureId, phase, modulesPlaced, shipSpawned, scaffoldedShipId) => {
+        this.renderSystem.updateShipyardConstruction(structureId, phase, modulesPlaced, scaffoldedShipId);
+        if (this.shipyardMenu.visible && this.shipyardMenu.structureId === structureId) {
+          this.shipyardMenu.updateState(phase, modulesPlaced);
+        }
+        // Don't auto-open the menu on broadcast — player opens it with E or
+        // installs modules by clicking on the skeleton directly.
+        if (shipSpawned) {
+          this.shipyardMenu.close();
+          this.uiManager.setActiveMenuId(null);
+          this.renderSystem.showAnnouncement('⚓ Ship released!', 'info', 3.5);
+          // Open custom rename dialog for the newly-launched ship
+          this.renameDialog.open(shipSpawned, '');
+        }
+      };
+
+      this.shipyardMenu.onAction = (action, module) => {
+        if (this.shipyardMenu.structureId == null) return;
+        this.networkManager.sendShipyardAction(this.shipyardMenu.structureId, action, module);
       };
 
       this.craftingMenu.onCraft = (recipeId) => {
@@ -1378,11 +2099,17 @@ export class ClientApplication {
         console.log(`🪤 Ladder ${moduleId} on ship ${shipId}: ${retracted ? 'retracted' : 'extended'}`);
       };
 
-      // Handle SWORD_SWING: show arc for other players' sword attacks
+      // Handle SWORD_SWING: show arc for other players' attacks;
+      // for own player use it to re-sync the cooldown ring to the server-confirmed timestamp.
       this.networkManager.onSwordSwing = (playerId, x, y, angle, _range) => {
         const myId = this.networkManager.getAssignedPlayerId();
-        // Skip own swing — already shown optimistically in onActionEvent
-        if (playerId === myId) return;
+        if (playerId === myId) {
+          // Server confirmed the swing — re-anchor cooldown to now so the ring
+          // stays in sync even if there's clock drift or the attack was delayed.
+          this.swordLastAttackMs = performance.now();
+          this.renderSystem.notifySwordSwing(this.SWORD_COOLDOWN_MS);
+          return;
+        }
         this.renderSystem.spawnSwordArc(Vec2.from(x, y), angle);
       };
 
@@ -1463,7 +2190,7 @@ export class ClientApplication {
   /**
    * Start the client application (connect to server and begin game loop)
    */
-  async start(): Promise<void> {
+  async start(playerName?: string, accessToken?: string, guest = false): Promise<void> {
     if (this.running) {
       console.warn('⚠️ Client is already running');
       return;
@@ -1471,11 +2198,21 @@ export class ClientApplication {
     
     try {
       console.log('🚀 Starting client application...');
+
+      // Configure pause menu for guest vs permanent account
+      this.pauseMenu.setGuest(guest);
+      this.pauseMenu.onAccountCreated = (displayName: string) => {
+        console.log(`✅ Guest converted to permanent account: ${displayName}`);
+        this.pauseMenu.setGuest(false);
+      };
       
       // Try to connect to server, but continue even if it fails
       this.state = ClientState.CONNECTING;
+      this.setLoadingStep(1);
       try {
-        await this.networkManager.connect('Player'); // Default player name
+        await this.networkManager.connect(playerName ?? 'Player', accessToken);
+        this._loadingConnectedAt = Date.now();
+        this.setLoadingStep(2);
         console.log('✅ Connected to physics server');
       } catch (serverError) {
         console.warn('⚠️ Could not connect to physics server:', serverError);
@@ -1483,6 +2220,7 @@ export class ClientApplication {
         this.state = ClientState.DISCONNECTED;
         // Create demo world state for offline testing
         this.demoWorldState = this.createDemoWorldState();
+        this.hideLoadingOverlay();
         // Continue execution - we can still show UI and test locally
       }
       
@@ -1500,6 +2238,24 @@ export class ClientApplication {
     }
   }
   
+  /**
+   * Apply live settings changes from the pause menu.
+   * Currently handles audio volume and input bindings; graphics/FPS settings take effect on next load.
+   */
+  private applySettings(settings: GameSettings): void {
+    this.audioManager?.setVolumes(
+      settings.masterVolume,
+      settings.sfxVolume,
+      settings.musicVolume,
+    );
+
+    // Rebuild action mappings so rebound keys take effect immediately
+    if (this.inputManager) {
+      const cfg = ClientConfigManager.load();
+      this.inputManager.updateConfig(cfg.input);
+    }
+  }
+
   /**
    * Shutdown the client application gracefully
    */
@@ -1527,9 +2283,11 @@ export class ClientApplication {
     
     const deltaTime = currentTime - this.lastFrameTime;
     this.lastFrameTime = currentTime;
+    this._lastDeltaMs = deltaTime;
     
     // Cap delta time to prevent spiral of death
     const clampedDelta = Math.min(deltaTime, 100); // Max 100ms
+    this.updateAdaptiveGLScale(clampedDelta, currentTime);
     this.accumulator += clampedDelta;
     
     // Update FPS tracking
@@ -1564,9 +2322,10 @@ export class ClientApplication {
     const mouseScreen = this.inputManager.getMouseScreenPosition();
     const mouseWorld  = this.camera.screenToWorld(mouseScreen);
     this.inputManager.updateMouseWorldPosition(mouseWorld);
-    this.renderSystem.updateMousePosition(mouseWorld);
-
-    // Update input (collect current input state)
+    // Suppress hover detection while the respawn screen is up so modules/resources
+    // don't flicker with highlight glows through the overlay.
+    const _respawnOpen = this.uiManager?.isRespawnScreenVisible() ?? false;
+    this.renderSystem.updateMousePosition(_respawnOpen ? Vec2.from(-999999, -999999) : mouseWorld);
     this.inputManager.update(dt);
     
     // Update prediction engine (client-side simulation)
@@ -1707,10 +2466,38 @@ export class ClientApplication {
       this.renderSystem.swordEquipped =
         (localPlayer?.inventory?.slots[_activeSlot]?.item === 'sword') &&
         !(localPlayer?.isMounted ?? false);
+      this.renderSystem.axeEquipped =
+        (localPlayer?.inventory?.slots[_activeSlot]?.item === 'axe') &&
+        !(localPlayer?.isMounted ?? false);
       if (this.explicitBuildMode) this.syncBuildModeState();
 
+      // Sync tombstones into the render system on every frame
+      this.renderSystem.updateTombstones(worldToRender.tombstones ?? []);
+
+      // Sync dropped items into the render system on every frame
+      this.renderSystem.updateDroppedItems(worldToRender.droppedItems ?? []);
+
+      // Keep render-side world-wrap config in sync with authoritative map settings.
+      this.renderSystem.setWorldWrapConfig(
+        this.networkManager.mapWrap,
+        this.networkManager.mapWidth,
+        this.networkManager.mapHeight,
+      );
+
       // Render game world with hybrid state
+      if (this._glRenderer) {
+        const camState = this.camera.getState();
+        this.renderSystem.beginGLFrame(camState.position.x, camState.position.y, camState.zoom, this._lastDeltaMs);
+      }
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
+      if (this._glRenderer) {
+        this.renderSystem.endGLFrame();
+      }
+
+      // Island editor overlay (dev tool)
+      if (this.islandEditor?.visible) {
+        this.islandEditor.render(this.renderSystem.getContext(), this.camera);
+      }
 
       // Update sword cooldown cursor ring
       if (this.inputManager) {
@@ -1749,6 +2536,9 @@ export class ClientApplication {
         worldState: worldToRender,
         camera: this.camera,
         fps: this.currentFPS,
+        frameMs: this._lastDeltaMs,
+        glDrawCalls: this.renderSystem.glDrawCallCount,
+        glScalePct: this._glRenderer ? Math.round(this._glScale * 100) : 0,
         networkStats: this.networkManager.getStats(),
         config: this.config,
         assignedPlayerId,
@@ -1766,6 +2556,23 @@ export class ClientApplication {
       // Crafting menu (rendered on top of all other UI)
       if (this.craftingMenu.visible) {
         this.craftingMenu.render(
+          this.renderSystem.getContext(),
+          this.canvas.width,
+          this.canvas.height,
+          localPlayer?.inventory ?? null,
+        );
+      }
+      // Shipyard construction menu
+      if (this.shipyardMenu.visible) {
+        this.shipyardMenu.render(
+          this.renderSystem.getContext(),
+          this.canvas.width,
+          this.canvas.height,
+        );
+      }
+      // Rename dialog — topmost overlay
+      if (this.renameDialog?.visible) {
+        this.renameDialog.render(
           this.renderSystem.getContext(),
           this.canvas.width,
           this.canvas.height,
@@ -1792,14 +2599,29 @@ export class ClientApplication {
       return;
     }
     
-    // Smooth camera follow with lerp for grid stability
-    // Fast lerp keeps camera responsive while smoothing out prediction jitter
+    // Smooth camera follow with lerp for grid stability.
+    // But when world-wrap teleports the player across a seam, snap immediately
+    // so the camera doesn't scroll across the whole map.
     const currentPos = this.camera.getState().position;
-    const lerpFactor = 1.0 - Math.pow(0.001, dt); // Frame-rate independent smoothing
-    const smoothedX = currentPos.x + (player.position.x - currentPos.x) * lerpFactor;
-    const smoothedY = currentPos.y + (player.position.y - currentPos.y) * lerpFactor;
-    
-    this.camera.setPosition(Vec2.from(smoothedX, smoothedY));
+    const mapWrapEnabled = this.networkManager.mapWrap;
+    const mapWidth = this.networkManager.mapWidth;
+    const mapHeight = this.networkManager.mapHeight;
+    const crossedWrapSeam = mapWrapEnabled
+      && mapWidth > 0
+      && mapHeight > 0
+      && (
+        Math.abs(player.position.x - currentPos.x) > mapWidth * 0.5
+        || Math.abs(player.position.y - currentPos.y) > mapHeight * 0.5
+      );
+
+    if (crossedWrapSeam) {
+      this.camera.setPosition(player.position);
+    } else {
+      const lerpFactor = 1.0 - Math.pow(0.001, dt); // Frame-rate independent smoothing
+      const smoothedX = currentPos.x + (player.position.x - currentPos.x) * lerpFactor;
+      const smoothedY = currentPos.y + (player.position.y - currentPos.y) * lerpFactor;
+      this.camera.setPosition(Vec2.from(smoothedX, smoothedY));
+    }
 
     // Smooth zoom toward targetZoom (ease-out, ~0.6 s to settle)
     const currentZoom = this.camera.getState().zoom;
@@ -1813,6 +2635,8 @@ export class ClientApplication {
    * Handle input frame from input manager
    */
   private onInputFrame(inputFrame: InputFrame): void {
+    // Don't send input while the player is dead / respawn screen is open.
+    if (this.uiManager?.isRespawnScreenVisible()) return;
     // Send input to server
     this.networkManager.sendInput(inputFrame);
   }
@@ -1822,6 +2646,21 @@ export class ClientApplication {
    */
   private onServerWorldState(worldState: WorldState): void {
     this.authoritativeWorldState = worldState;
+
+    // Detect respawn: local player health transitions from ≤0 to >0 → flash white again
+    const _pid = this.networkManager.getAssignedPlayerId();
+    if (_pid !== null) {
+      const _lp = worldState.players.find(p => p.id === _pid);
+      if (_lp) {
+        const wasDown = this._prevLocalHealth !== null && this._prevLocalHealth <= 0;
+        const nowUp   = _lp.health > 0;
+        if (wasDown && nowUp) {
+          // Server confirmed respawn — start fading the white out
+          this.uiManager.releaseWhiteFlash();
+        }
+        this._prevLocalHealth = _lp.health;
+      }
+    }
 
     // Re-apply optimistic hotbar slot so rapid world-state updates don't flicker it back.
     // Once the server confirms (its activeSlot matches our pending value) we clear pending.
@@ -1936,10 +2775,17 @@ export class ClientApplication {
     // Re-evaluate build mode whenever world state arrives (inventory may have changed)
     this.checkBuildMode();
     
-    // Update game state if we just entered the game
-    if (this.state === ClientState.CONNECTED) {
-      this.state = ClientState.IN_GAME;
-      console.log('🎮 Entered game world');
+    // Fallback: if ack never arrived but 10s passed since connect, force-advance.
+    if (this.state === ClientState.CONNECTED && !this._playerAckReceived) {
+      const timedOut = this._loadingConnectedAt > 0
+        && (Date.now() - this._loadingConnectedAt) > ClientApplication.LOADING_PLAYER_TIMEOUT_MS;
+      if (timedOut) {
+        console.warn('⚠️ Loading timeout — no server ack received, entering game anyway');
+        this.state = ClientState.IN_GAME;
+        this.setLoadingStep(3);
+        this.hideLoadingOverlay();
+        console.log('🎮 Entered game world (timeout fallback)');
+      }
     }
   }
   
@@ -2015,11 +2861,13 @@ export class ClientApplication {
     const inDeckBuildMode   = activeItem === 'deck';
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
-    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door');
+    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard');
     this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
+    this.inputManager.islandBuildMode = this.islandBuildMode;
     this.renderSystem.setIslandBuildItem(
-      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door') : null
+      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard') : null
     );
+    this.renderSystem.setIslandBuildRotation(this.islandBuildMode ? this.islandBuildRotationDeg : 0);
 
     // Track whether the active item changed while in explicit build mode
     if (this.explicitBuildMode) {
@@ -2034,6 +2882,7 @@ export class ClientApplication {
         // (but keep build menu open if it was open)
         this.explicitBuildMode = false;
         this.buildRotationDeg = 0;
+        this.islandBuildRotationDeg = 0;
         this.pendingGhostKind = null;
         this.syncBuildModeState();
         console.log('🔨 [BUILD MODE] EXITED (item changed)');
@@ -2527,8 +3376,10 @@ export class ClientApplication {
       // Update input manager with mouse world position
       this.inputManager.updateMouseWorldPosition(worldPos);
       
-      // Update render system for hover detection
-      this.renderSystem.updateMousePosition(worldPos);
+      // Update render system for hover detection (suppressed during respawn screen)
+      if (!(this.uiManager?.isRespawnScreenVisible() ?? false)) {
+        this.renderSystem.updateMousePosition(worldPos);
+      }
       // Feed radial menu mouse position (screen space)
       this._radialMenu.updateMouse(screenX, screenY);
     });
@@ -2571,13 +3422,100 @@ export class ClientApplication {
 
       switch (e.key) {
         case 'Escape':
-        case 'q':
-        case 'Q': {
+        case '`': { // backtick also closes/cancels
+          // Close world map first
+          if (this.uiManager?.isWorldMapVisible()) {
+            this.uiManager.closeWorldMap();
+            e.preventDefault();
+            break;
+          }
+          // Close command console if open
+          if (this.commandConsole.visible) {
+            this.commandConsole.close();
+            this.uiManager.setActiveMenuId(null);
+            e.preventDefault();
+            break;
+          }
+          // Close pause menu if open
+          if (this.pauseMenu.visible) {
+            this.pauseMenu.close();
+            this.uiManager.setActiveMenuId(null);
+            e.preventDefault();
+            break;
+          }
+          // Close crafting/shipyard menus if open
+          if (this.craftingMenu.visible) {
+            this.craftingMenu.close();
+            this.uiManager.setActiveMenuId(null);
+            e.preventDefault();
+            break;
+          }
+          if (this.shipyardMenu.visible) {
+            this.shipyardMenu.close();
+            this.uiManager.setActiveMenuId(null);
+            e.preventDefault();
+            break;
+          }
+          // Exit any active build mode (ship or island)
+          if (this.buildMenuOpen || this.explicitBuildMode || this.pendingGhostKind !== null || this.islandBuildMode) {
+            this.exitAllBuildModes();
+            // For island build mode (hotbar-driven), also unequip so the ghost preview is dismissed
+            if (this.islandBuildMode) {
+              this.pendingActiveSlot = 255;
+              const playerId = this.networkManager.getAssignedPlayerId();
+              if (playerId !== null) {
+                for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+                  const p = ws?.players.find(pl => pl.id === playerId);
+                  if (p) p.inventory.activeSlot = 255;
+                }
+              }
+              this.networkManager.sendUnequip();
+              this.checkBuildMode();
+            }
+            e.preventDefault();
+            break;
+          }
           // Cancel "Move To" targeting mode if active
           if (this._moveToNpcId !== null) {
             this._moveToNpcId = null;
             this.renderSystem.clearMoveToHint();
             this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            e.preventDefault();
+            break;
+          }
+          // Nothing else to close — open pause menu if no other menu is up
+          if (!this.uiManager.isAnyMenuOpen()) {
+            this.pauseMenu.open();
+            this.uiManager.setActiveMenuId(MENU_ID.PAUSE);
+            e.preventDefault();
+          }
+          break;
+        }
+
+        case 'p':
+        case 'P': {
+          // P toggles pause menu only when no other menu is open
+          if (!this.uiManager.isAnyMenuOpen()
+            && !this.buildMenuOpen
+            && !this.explicitBuildMode) {
+            if (this.pauseMenu.visible) {
+              this.pauseMenu.close();
+              this.uiManager.setActiveMenuId(null);
+            } else {
+              this.pauseMenu.open();
+              this.uiManager.setActiveMenuId(MENU_ID.PAUSE);
+            }
+            e.preventDefault();
+          }
+          break;
+        }
+
+        case '/': {
+          // Open command console if nothing else is open
+          if (!this.uiManager.isAnyMenuOpen()
+            && !this.buildMenuOpen
+            && !this.explicitBuildMode) {
+            this.commandConsole.open();
             e.preventDefault();
           }
           break;
@@ -2585,7 +3523,36 @@ export class ClientApplication {
 
         case 'e':
         case 'E': {
-          if (e.repeat) break; // no auto-repeat for E-hold logic
+          // Salvage menu intercepts E entirely when visible
+          if (this.uiManager?.salvageMenu.visible) {
+            if (!e.repeat) this.uiManager.salvageMenu.handleEKeyDown();
+            e.preventDefault();
+            break;
+          }
+          if (e.repeat) {
+            // Hold-E: check if we should open the item picker
+            if (this._holdEDropTimer > 0 && Date.now() - this._holdEDropTimer >= 500) {
+              this._holdEDropTimer = -1; // prevent repeated opens
+              const drops = this.renderSystem.getDroppedItemsInRange(80);
+              if (drops.length > 1) {
+                this.uiManager.openDropPicker(drops);
+              }
+            }
+            break;
+          }
+          // Start hold-E timer if there are multiple items nearby
+          const wsECheck = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+          const myIdECheck = this.networkManager.getAssignedPlayerId();
+          const meECheck = wsECheck
+            ? (myIdECheck !== null ? wsECheck.players.find(p => p.id === myIdECheck) : null) ?? wsECheck.players[0] ?? null
+            : null;
+          if (meECheck && meECheck.carrierId === 0) {
+            const nearbyDrops = this.renderSystem.getDroppedItemsInRange(80);
+            if (nearbyDrops.length > 1) {
+              this._holdEDropTimer = Date.now();
+            }
+          }
+
           const wsE = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
           const myIdE = this.networkManager.getAssignedPlayerId();
           if (!wsE) { console.warn('🪜 E: no world state'); break; }
@@ -2638,10 +3605,18 @@ export class ClientApplication {
               this._npcInteractId = hovNpcE.id;
 
               const myCompanyE = meE.companyId ?? 0;
+              const myIdE = this.networkManager.getAssignedPlayerId();
               const npcCompanyE = hovNpcE.companyId;
 
+              // Determine if this NPC belongs to the local player
+              const isMyNpcE = npcCompanyE !== COMPANY_UNCLAIMED && (
+                npcCompanyE === COMPANY_SOLO
+                  ? hovNpcE.ownerId === myIdE
+                  : npcCompanyE === myCompanyE && myCompanyE !== 0
+              );
+
               // Enemy-company NPC: no interaction
-              if (npcCompanyE !== 0 && npcCompanyE !== myCompanyE) {
+              if (!isMyNpcE && npcCompanyE !== COMPANY_UNCLAIMED) {
                 console.log(`🚫 E: NPC ${hovNpcE.id} belongs to enemy company ${npcCompanyE}`);
                 this._interactKind = null;
                 this._suppressLadderInteract = false;
@@ -2651,13 +3626,13 @@ export class ClientApplication {
               }
 
               let npcOpts: { id: string; label: string }[];
-              if (npcCompanyE === 0) {
+              if (npcCompanyE === COMPANY_UNCLAIMED) {
                 npcOpts = [{ id: 'recruit', label: 'Recruit to Company' }];
-              } else if (npcCompanyE === myCompanyE && hovNpcE.shipId !== meE.carrierId) {
-                npcOpts = [{ id: 'move_aboard', label: 'Move Aboard' }];
+              } else if (isMyNpcE && hovNpcE.shipId !== meE.carrierId) {
+                npcOpts = [{ id: 'move_aboard', label: 'Move Aboard' }, { id: 'unclaim_npc', label: 'Unclaim NPC' }];
               } else {
-                // Same company, same ship
-                npcOpts = [{ id: 'crew_menu', label: 'Manage Crew' }];
+                // My NPC, same ship
+                npcOpts = [{ id: 'crew_menu', label: 'Manage Crew' }, { id: 'unclaim_npc', label: 'Unclaim NPC' }];
               }
               const npcOptsSnap = npcOpts;
 
@@ -2673,7 +3648,18 @@ export class ClientApplication {
           }
 
           // ── Structure interact: floors and workbenches, only when off-ship ──
-          if (meE.carrierId === 0) {
+          // Skip the structure check when a ship module is within interaction range —
+          // module/ship interactions take priority over the shipyard while hovered.
+          const _hovModPriority = this.renderSystem.getHoveredModule();
+          const _moduleInRange = (() => {
+            if (!_hovModPriority) return false;
+            const _hCos = Math.cos(_hovModPriority.ship.rotation);
+            const _hSin = Math.sin(_hovModPriority.ship.rotation);
+            const _mwx = _hovModPriority.ship.position.x + (_hovModPriority.module.localPos.x * _hCos - _hovModPriority.module.localPos.y * _hSin);
+            const _mwy = _hovModPriority.ship.position.y + (_hovModPriority.module.localPos.x * _hSin + _hovModPriority.module.localPos.y * _hCos);
+            return Math.hypot(meE.position.x - _mwx, meE.position.y - _mwy) <= 200;
+          })();
+          if (meE.carrierId === 0 && !_moduleInRange) {
             const struct = this.renderSystem.getHoveredStructure();
             if (struct) {
               const myCompanyE = meE.companyId ?? 0;
@@ -2733,8 +3719,31 @@ export class ClientApplication {
                   if (isOwnCompany) doorOpts.push({ id: 'demolish', label: 'Demolish' });
                   this._radialMenu.open(mp2.x, mp2.y, doorOpts);
                 }, 400);
+              } else if (struct.type === 'shipyard') {
+                // Shipyard: hold E → radial with Release Ship / Demolish
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  const opts: { id: string; label: string }[] = [];
+                  if (struct.construction?.phase === 'building') {
+                    // Ship can be released at any time — it's a real entity
+                    opts.push({ id: 'release', label: '⚓ Release Ship' });
+                  }
+                  if (isOwnCompany) opts.push({ id: 'demolish', label: 'Demolish Shipyard' });
+                  if (opts.length > 0) {
+                    this._radialMenu.open(mp2.x, mp2.y, opts);
+                  }
+                }, 500);
+              } else if (struct.type === 'wreck') {
+                // Wreck: tap or hold E → open salvage menu
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  this.uiManager.setActiveMenuId(MENU_ID.SALVAGE);
+                  this.uiManager.salvageMenu.open(struct.id, struct.hp ?? 1);
+                }, 400);
               } else {
-                // Floor: hold E = radial with only Demolish (only reachable if isOwnCompany)
                 this._ladderHoldTimer = setTimeout(() => {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
@@ -2776,6 +3785,38 @@ export class ClientApplication {
           }
 
           const MOUNTABLE = new Set(['helm', 'cannon', 'mast', 'swivel']);
+
+          // ── Claim flag: plant on enemy helm, or remove from any ship ──────
+          {
+            const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+            const myCompany = meE.companyId ?? 0;
+            const targetShipCompany = hov.ship.companyId ?? 0;
+            const isEnemyShip = targetShipCompany !== myCompany && targetShipCompany !== 0;
+
+            // Player must be on the ship for both plant and remove
+            if (meE.carrierId === hov.ship.id) {
+              // Remove flag: if ship already has a claim flag, offer to remove it
+              if (hov.ship.claimFlag) {
+                this._interactKind = null;
+                const mp = this.inputManager.getMouseScreenPosition();
+                this._radialMenu.open(mp.x, mp.y, [
+                  { id: `remove_flag_${hov.ship.id}`, label: '⛳ Remove Flag' },
+                ]);
+                break;
+              }
+
+              // Plant flag: helm module, enemy ship, player has claim_flag item
+              if (hov.module.kind === 'helm' && isEnemyShip) {
+                const inv = ws?.players?.find(p => p.id === meE.id)?.inventory ?? meE.inventory;
+                const hasCF = inv?.slots?.some(s => s.item === 'claim_flag' && s.quantity > 0);
+                if (hasCF) {
+                  this.networkManager.sendPlantClaimFlag(hov.ship.id);
+                  console.log(`🚩 Planting claim flag on ship ${hov.ship.id}`);
+                  break;
+                }
+              }
+            }
+          }
 
           if (MOUNTABLE.has(hov.module.kind)) {
             // ── Mount ──────────────────────────────────────────────────────────
@@ -2845,6 +3886,40 @@ export class ClientApplication {
           this.renderSystem.toggleHoverBoundaries();
           e.preventDefault();
           break;
+
+        case 'm':
+        case 'M': {
+          if (e.repeat) break;
+          // Toggle world map — close it if open, otherwise open (centred on local player)
+          if (this.uiManager?.isWorldMapVisible()) {
+            this.uiManager.closeWorldMap();
+          } else if (this.uiManager && !this.uiManager.isRespawnScreenVisible()) {
+            const ws = this.authoritativeWorldState || this.predictedWorldState;
+            const myId = this.networkManager.getAssignedPlayerId();
+            const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
+            const pos = me?.position ? { x: me.position.x, y: me.position.y } : undefined;
+            this.uiManager.openWorldMap(pos);
+          }
+          e.preventDefault();
+          break;
+        }
+
+        case 'n':
+        case 'N': {
+          if (e.repeat) break;
+          // Rename the ship the player is currently aboard
+          const ws = this.authoritativeWorldState || this.predictedWorldState;
+          const myId = this.networkManager.getAssignedPlayerId();
+          const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
+          const shipId = me?.carrierId ?? 0;
+          if (shipId === 0) break; // not on a ship
+          const ship = ws?.ships.find(s => s.id === shipId);
+          const current = ship?.shipName ?? '';
+          // Open the custom rename dialog instead of window.prompt
+          this.renameDialog.open(shipId, current);
+          e.preventDefault();
+          break;
+        }
       }
     });
 
@@ -2871,6 +3946,15 @@ export class ClientApplication {
     window.addEventListener('keyup', (e) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key !== 'e' && e.key !== 'E') return;
+
+      // Let salvage menu consume keyup when visible
+      if (this.uiManager?.salvageMenu.visible) {
+        this.uiManager.salvageMenu.handleEKeyUp();
+        return;
+      }
+
+      // Clear hold-E drop timer
+      this._holdEDropTimer = -1;
 
       const moduleId = this._ladderHoldModuleId;
       const shipId   = this._ladderHoldShipId;
@@ -2955,18 +4039,35 @@ export class ClientApplication {
           this._ladderHoldTimer = null;
           this.renderSystem.stopLadderHoldRing();
           if (structType === 'workbench') {
-            // Tap E on workbench = primary action: open
+            // Tap E on workbench = open crafting menu
+            doUse();
+          } else if (structType === 'shipyard' && structId !== null) {
+            // Tap E on shipyard = open menu with current local state
+            const cst = this.renderSystem.getShipyardConstruction(structId);
+            this.shipyardMenu.open(structId, cst?.phase ?? 'empty', cst?.modulesPlaced ?? []);
+            // Also request latest state from server to keep in sync
             doUse();
           } else if (structType === 'door') {
             // Tap E on door panel = toggle open/closed
             doUse();
+          } else if (structType === 'wreck' && structId !== null) {
+            // Tap E on wreck = open salvage menu (loot count from render system)
+            const wreckStruct = this.renderSystem.getHoveredStructure(500);
+            const loot = wreckStruct?.hp ?? 1;
+            this.uiManager.setActiveMenuId(MENU_ID.SALVAGE);
+            this.uiManager.salvageMenu.open(structId, loot);
           }
           // Tap E on floor/wall/door_frame = nothing (user must hold to demolish)
         } else if (this._radialMenu.isOpen) {
           const selected = this._radialMenu.getHoveredId();
           this._radialMenu.close();
-          if (selected === 'use')      doUse();
+          if (selected === 'use')           doUse();
           else if (selected === 'demolish') doDemolish();
+          else if (selected === 'release' && structId !== null) {
+            this.networkManager.sendShipyardAction(structId, 'release_ship');
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`⚓ [SHIPYARD] Release ship from shipyard ${structId}`);
+          }
           else this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
         }
         return;
@@ -2985,17 +4086,27 @@ export class ClientApplication {
           const npc = npcId != null ? ws?.npcs.find(n => n.id === npcId) : null;
           if (!npc) { console.warn(`🤝 NPC ${npcId} not found in world state`); return; }
           const myCompany = me?.companyId ?? 0;
-          if (actionId === 'recruit' && npc.companyId === 0) {
+          const myIdAct = myId;
+          const isMyNpc = npc.companyId !== COMPANY_UNCLAIMED && (
+            npc.companyId === COMPANY_SOLO
+              ? npc.ownerId === myIdAct
+              : npc.companyId === myCompany && myCompany !== 0
+          );
+          if (actionId === 'recruit' && npc.companyId === COMPANY_UNCLAIMED) {
             this.networkManager.sendNpcRecruit(npc.id);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             console.log(`🤝 Recruiting NPC ${npc.id} (${npc.name})`);
-          } else if (actionId === 'move_aboard' && npc.companyId === myCompany) {
+          } else if (actionId === 'move_aboard' && isMyNpc) {
             this.networkManager.sendNpcMoveAboard(npc.id);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             console.log(`⚓ Moving NPC ${npc.id} (${npc.name}) aboard`);
-          } else if (actionId === 'crew_menu' && npc.companyId === myCompany) {
+          } else if (actionId === 'crew_menu' && isMyNpc) {
             this.uiManager?.openCrewMenuForNpc(npc);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          } else if (actionId === 'unclaim_npc' && isMyNpc) {
+            this.networkManager.sendNpcUnclaim(npc.id);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`⚓ Unclaiming NPC ${npc.id} (${npc.name})`);
           }
         };
 
@@ -3003,14 +4114,19 @@ export class ClientApplication {
           const npc = npcId != null ? ws?.npcs.find(n => n.id === npcId) : null;
           if (!npc) return;
           const myCompany = me?.companyId ?? 0;
-          if (npc.companyId === 0) {
+          const isMyNpc = npc.companyId !== COMPANY_UNCLAIMED && (
+            npc.companyId === COMPANY_SOLO
+              ? npc.ownerId === myId
+              : npc.companyId === myCompany && myCompany !== 0
+          );
+          if (npc.companyId === COMPANY_UNCLAIMED) {
             executeNpcAction('recruit');
-          } else if (npc.companyId === myCompany && npc.shipId !== me?.carrierId) {
+          } else if (isMyNpc && npc.shipId !== me?.carrierId) {
             executeNpcAction('move_aboard');
-          } else if (npc.companyId === myCompany) {
+          } else if (isMyNpc) {
             executeNpcAction('crew_menu');
           }
-          // else: enemy company — no action
+          // else: enemy/other player's NPC — no action
         };
 
         if (this._ladderHoldTimer !== null) {
@@ -3126,6 +4242,14 @@ export class ClientApplication {
           // extend always uses toggle_ladder — module_interact on retracted = climb attempt
           this.networkManager.sendToggleLadder(moduleId);
           this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+        } else if (selected?.startsWith('remove_flag_')) {
+          // ── Remove claim flag from ship ──────────────────────────────────
+          const flagShipId = parseInt(selected.replace('remove_flag_', ''), 10);
+          if (!isNaN(flagShipId)) {
+            this.networkManager.sendRemoveClaimFlag(flagShipId);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`🚩 Removing claim flag from ship ${flagShipId}`);
+          }
         }
       }
     });
@@ -3151,10 +4275,59 @@ export class ClientApplication {
         
         // Update UI system
         this.uiManager.onCanvasResize(width, height);
+
+        // Keep GL canvas resolution in sync with 2D canvas size and current GL scale
+        this.applyGLCanvasScale();
       }
     });
     
     resizeObserver.observe(this.canvas);
+  }
+
+  /** Apply the current GL scale to the back-buffer dimensions. */
+  private applyGLCanvasScale(): void {
+    if (!this._glCanvas) return;
+    this._glCanvas.width  = Math.ceil(this.canvas.width  * this._glScale);
+    this._glCanvas.height = Math.ceil(this.canvas.height * this._glScale);
+  }
+
+  /**
+   * Adaptive dynamic resolution for the GL pass.
+   * Drops internal GL resolution under sustained frame pressure and recovers slowly when stable.
+   */
+  private updateAdaptiveGLScale(frameMs: number, nowMs: number): void {
+    if (!this._glRenderer || !this._glCanvas) return;
+
+    const targetMs = 1000 / Math.max(30, this.config.graphics.targetFPS || 60);
+    const isOverBudget = frameMs > targetMs * 1.18;
+    const isComfortable = frameMs < targetMs * 0.75;
+
+    if (isOverBudget) this._glBadFrameCount++;
+    else this._glBadFrameCount = Math.max(0, this._glBadFrameCount - 1);
+
+    if (isComfortable) this._glGoodFrameCount++;
+    else this._glGoodFrameCount = Math.max(0, this._glGoodFrameCount - 1);
+
+    if (nowMs < this._glNextScaleAdjustAt) return;
+
+    if (this._glBadFrameCount >= 20 && this._glScale > this._glScaleMin) {
+      this._glScale = Math.max(this._glScaleMin, this._glScale - 0.05);
+      this.applyGLCanvasScale();
+      this._glBadFrameCount = 0;
+      this._glGoodFrameCount = 0;
+      this._glNextScaleAdjustAt = nowMs + 1500;
+      console.log(`[GL] Adaptive scale lowered to ${Math.round(this._glScale * 100)}%`);
+      return;
+    }
+
+    if (this._glGoodFrameCount >= 180 && this._glScale < this._glScaleMax) {
+      this._glScale = Math.min(this._glScaleMax, this._glScale + 0.05);
+      this.applyGLCanvasScale();
+      this._glBadFrameCount = 0;
+      this._glGoodFrameCount = 0;
+      this._glNextScaleAdjustAt = nowMs + 2500;
+      console.log(`[GL] Adaptive scale raised to ${Math.round(this._glScale * 100)}%`);
+    }
   }
   
   /**
@@ -3272,8 +4445,8 @@ export class ClientApplication {
         mkCannon(1008,  65,  -75,  0),
         mkCannon(1009, -135, -75,  0),
 
-        // Boarding ladder at stern
-        ModuleUtils.createDefaultModule(1010, 'ladder', Vec2.from(-305, 0)),
+        // Emergency boarding ladder at stern (fixed ID 300 — always present)
+        ModuleUtils.createDefaultModule(300, 'ladder', Vec2.from(-305, 0)),
       ]
     };
 
@@ -3301,6 +4474,9 @@ export class ClientApplication {
       ],
       cannonballs: [],
       npcs: [],
+      tombstones: [],
+      droppedItems: [],
+      companies: [],
       carrierDetection: new Map()
     };
   }

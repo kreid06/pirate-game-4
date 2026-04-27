@@ -24,6 +24,14 @@ export enum EffectType {
 export type AnnouncementKind = 'ship_sink' | 'npc_kill' | 'info';
 
 /**
+ * Relationship of the damage source to the local player.
+ * - 'friendly' = same company → green
+ * - 'enemy'    = different company → red (default)
+ * - 'alliance' = reserved for future all-company feature → light blue
+ */
+export type DamageTeam = 'friendly' | 'enemy' | 'alliance';
+
+/**
  * Base effect interface
  */
 interface Effect {
@@ -72,6 +80,7 @@ interface DamageNumberEffect extends Effect {
   damage: number;
   isKill: boolean;     // true = plank/module destroyed
   floatOffset: number; // pixels floated upward so far (screen space)
+  team: DamageTeam;    // controls text colour
 }
 
 /** Screen-space announcement banner shown at the top-centre of the canvas. */
@@ -210,13 +219,14 @@ export class EffectRenderer {
   /**
    * Create a floating damage number at a world position
    */
-  createDamageNumber(position: Vec2, damage: number, isKill: boolean = false): void {
+  createDamageNumber(position: Vec2, damage: number, isKill: boolean = false, team: DamageTeam = 'enemy'): void {
     const effect: DamageNumberEffect = {
       id: this.nextEffectId++,
       type: EffectType.DAMAGE_NUMBER,
       position: position.clone(),
       damage: Math.round(damage),
       isKill,
+      team,
       floatOffset: 0,
       age: 0,
       maxAge: 3.0,
@@ -253,7 +263,7 @@ export class EffectRenderer {
     const LINE_H = FONT_SIZE + PAD_Y * 2;
 
     ctx.save();
-    ctx.font = `bold ${FONT_SIZE}px Consolas, monospace`;
+    ctx.font = `bold ${FONT_SIZE}px Georgia, serif`;
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'center';
 
@@ -463,7 +473,7 @@ export class EffectRenderer {
 
     this.ctx.save();
     this.ctx.globalAlpha = alpha;
-    this.ctx.font = `bold ${Math.round(fontSize * scale)}px Arial`;
+    this.ctx.font = `bold ${Math.round(fontSize * scale)}px Georgia, serif`;
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'middle';
 
@@ -471,8 +481,16 @@ export class EffectRenderer {
     this.ctx.fillStyle = 'rgba(0,0,0,0.6)';
     this.ctx.fillText(label, x + 1, y + 1);
 
-    // Main text: red for kill, orange for damage
-    this.ctx.fillStyle = effect.isKill ? '#ff3030' : '#ffaa00';
+    // Colour by team relationship
+    let mainColor: string;
+    if (effect.team === 'friendly') {
+      mainColor = effect.isKill ? '#44ff66' : '#22dd44';   // green
+    } else if (effect.team === 'alliance') {
+      mainColor = '#66ccff';                                // light blue (future)
+    } else {
+      mainColor = effect.isKill ? '#ff3030' : '#ffaa00';   // red / orange (enemy, default)
+    }
+    this.ctx.fillStyle = mainColor;
     this.ctx.fillText(label, x, y);
     this.ctx.restore();
   }

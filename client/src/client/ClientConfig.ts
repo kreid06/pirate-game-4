@@ -29,6 +29,8 @@ export interface GraphicsConfig {
   shadowQuality: 'none' | 'low' | 'medium' | 'high';
   textureQuality: 'low' | 'medium' | 'high';
   renderDistance: number; // world units
+  showGrid: boolean;      // render world-space helper grid
+  useWebGL2: boolean;     // enable WebGL2 renderer (falls back to Canvas 2D if unavailable)
 }
 
 /**
@@ -126,10 +128,12 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     targetFPS: 144,
     vsync: false,
     antialiasing: true,
-    particleQuality: 'medium',
-    shadowQuality: 'medium',
-    textureQuality: 'high',
-    renderDistance: 2000
+    particleQuality: 'low',
+    shadowQuality: 'low',
+    textureQuality: 'medium',
+    renderDistance: 1600,
+    showGrid: true,
+    useWebGL2: true
   },
   
   audio: {
@@ -145,19 +149,31 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     mouseSensitivity: 1.0,
     invertMouseY: false,
     keyBindings: new Map([
-      ['move_forward', 'KeyW'],
+      // Player controls
+      ['move_forward',  'KeyW'],
       ['move_backward', 'KeyS'],
-      ['move_left', 'KeyA'],
-      ['move_right', 'KeyD'],
-      ['jump', 'Space'],
-      ['interact', 'KeyE'],
-      ['dismount', 'KeyR'],
-      ['destroy_plank', 'KeyQ'],
-      ['toggle_debug', 'KeyL'],
-      ['toggle_plank_bounds', 'KeyP'],
-      ['toggle_collision_tracker', 'KeyT'],
-      ['toggle_water_mode', 'KeyN'],
+      ['move_left',     'KeyA'],
+      ['move_right',    'KeyD'],
+      ['jump',          'Space'],
+      ['interact',      'KeyE'],
+      ['dismount',      'KeyR'],
+      ['attack',        'MouseLeft'],
+      ['block',         'MouseRight'],
+      ['heavy_attack',  'MouseLeft'],  // placeholder — will require hold/combo logic
+      // Ship controls (independent bindings — same defaults as player WASD)
+      ['ship_move_forward',  'KeyW'],
+      ['ship_move_backward', 'KeyS'],
+      ['ship_move_left',     'KeyA'],
+      ['ship_move_right',    'KeyD'],
+      ['ship_interact',      'KeyE'],
       ['toggle_camera_mode', 'KeyC'],
+      // Build mode
+      ['destroy_plank',      'KeyQ'],
+      ['toggle_plank_bounds','KeyP'],
+      // Debug
+      ['toggle_debug',              'KeyL'],
+      ['toggle_collision_tracker',  'KeyT'],
+      ['toggle_water_mode',         'KeyN'],
     ]),
     gamepadEnabled: true,
     gamepadDeadzone: 0.1,
@@ -244,23 +260,39 @@ export class ClientConfigManager {
    * Merge stored config with defaults to handle new options
    */
   private static mergeWithDefaults(stored: any): ClientConfig {
-    const config = { ...DEFAULT_CLIENT_CONFIG };
+    // Deep-copy each section so we never mutate DEFAULT_CLIENT_CONFIG
+    const config: ClientConfig = {
+      network:    { ...DEFAULT_CLIENT_CONFIG.network },
+      graphics:   { ...DEFAULT_CLIENT_CONFIG.graphics },
+      audio:      { ...DEFAULT_CLIENT_CONFIG.audio },
+      input:      { ...DEFAULT_CLIENT_CONFIG.input, keyBindings: new Map(DEFAULT_CLIENT_CONFIG.input.keyBindings) },
+      prediction: { ...DEFAULT_CLIENT_CONFIG.prediction },
+      debug:      { ...DEFAULT_CLIENT_CONFIG.debug },
+      canvas:     { ...DEFAULT_CLIENT_CONFIG.canvas },
+    };
     
-    // Deep merge each section
-    if (stored.network) Object.assign(config.network, stored.network);
-    if (stored.graphics) Object.assign(config.graphics, stored.graphics);
-    if (stored.audio) Object.assign(config.audio, stored.audio);
+    // Merge each section
+    if (stored.network)    Object.assign(config.network,    stored.network);
+    if (stored.graphics)   Object.assign(config.graphics,   stored.graphics);
+    if (stored.audio)      Object.assign(config.audio,      stored.audio);
     if (stored.prediction) Object.assign(config.prediction, stored.prediction);
-    if (stored.debug) Object.assign(config.debug, stored.debug);
-    if (stored.canvas) Object.assign(config.canvas, stored.canvas);
+    if (stored.debug)      Object.assign(config.debug,      stored.debug);
+    if (stored.canvas)     Object.assign(config.canvas,     stored.canvas);
     
-    // Handle input section with Map conversion
     if (stored.input) {
-      Object.assign(config.input, stored.input);
-      
-      // Convert keyBindings back to Map if it was stored as Object
-      if (stored.input.keyBindings && !(stored.input.keyBindings instanceof Map)) {
-        config.input.keyBindings = new Map(Object.entries(stored.input.keyBindings));
+      // Merge non-keybinding input fields
+      const { keyBindings: _kb, ...restInput } = stored.input;
+      Object.assign(config.input, restInput);
+
+      // Rebuild keyBindings: start from defaults (so new actions always get a key),
+      // then overlay stored values so user customisations are preserved.
+      if (stored.input.keyBindings && typeof stored.input.keyBindings === 'object') {
+        const storedEntries: [string, string][] = stored.input.keyBindings instanceof Map
+          ? [...stored.input.keyBindings.entries()]
+          : Object.entries(stored.input.keyBindings);
+        for (const [action, code] of storedEntries) {
+          config.input.keyBindings.set(action, code as string);
+        }
       }
     }
     

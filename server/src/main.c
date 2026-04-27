@@ -5,11 +5,17 @@
 #include <unistd.h>
 #include <errno.h>
 #include "server.h"
+#include "sim/world_save.h"
 
 static volatile int running = 1;
 static struct ServerContext* server_ctx = NULL;
 
 void signal_handler(int sig) {
+    if (sig == SIGUSR1) {
+        printf("\n💾 SIGUSR1: saving world state...\n");
+        world_save(WORLD_SAVE_DEFAULT_PATH);
+        return;
+    }
     printf("\n🛑 Received signal %d, initiating graceful shutdown...\n", sig);
     running = 0;
     
@@ -25,15 +31,15 @@ void signal_handler(int sig) {
 }
 
 int main(int argc, char *argv[]) {
-    (void)argc; // Unused
-    (void)argv; // Unused
+    (void)argc;
     
     printf("Pirate Game Server v1.0 - Deterministic 30Hz Physics Server\n");
     printf("Built: %s %s\n", __DATE__, __TIME__);
     
     // Setup signal handlers for graceful shutdown
-    signal(SIGINT, signal_handler);
+    signal(SIGINT,  signal_handler);
     signal(SIGTERM, signal_handler);
+    signal(SIGUSR1, signal_handler);  /* kill -USR1 <pid> to save world */
     signal(SIGPIPE, SIG_IGN); // Ignore broken pipe
     
     // Initialize server context
@@ -59,19 +65,32 @@ int main(int argc, char *argv[]) {
     
     // Run main server loop
     result = server_run(server_ctx);
-    
+
     printf("\n🔄 Shutting down server components...\n");
-    
+
+    /* Auto-save world state on clean shutdown */
+    printf("💾 Auto-saving world state...\n");
+    world_save(WORLD_SAVE_DEFAULT_PATH);
+
     // Set alarm for forced shutdown after 5 seconds
     signal(SIGALRM, SIG_DFL);
     alarm(5);
-    
+
     // Cleanup
     server_shutdown(server_ctx);
-    
+
     // Cancel the alarm - we finished cleanup in time
     alarm(0);
-    
+
+    /* ── Restart: re-exec the same binary ── */
+    if (g_server_restart_requested) {
+        printf("♻️  Restarting server...\n");
+        alarm(0);
+        execv("/proc/self/exe", argv);
+        /* execv only returns on error */
+        perror("execv restart failed");
+    }
+
     if (result == 0) {
         printf("✅ Server shut down successfully\n");
         return EXIT_SUCCESS;

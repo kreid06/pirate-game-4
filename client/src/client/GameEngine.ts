@@ -125,6 +125,9 @@ export class GameEngine {
       }],
       cannonballs: [],
       npcs: [],
+      tombstones: [],
+      droppedItems: [],
+      companies: [],
       carrierDetection: new Map()
     };
   }
@@ -228,7 +231,7 @@ export class GameEngine {
     
     // Draw UI
     ctx.fillStyle = 'white';
-    ctx.font = '16px Arial';
+    ctx.font = '16px Georgia, serif';
     ctx.fillText('🏴‍☠️ Pirate Game - Local Test', 10, 30);
     ctx.fillText('WASD to move', 10, 50);
     ctx.fillText(`Tick: ${this.worldState.tick}`, 10, 70);

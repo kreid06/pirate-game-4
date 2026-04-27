@@ -7,6 +7,8 @@
 
 import { ClientApplication } from './ClientApplication.js';
 import { ClientConfig, DEFAULT_CLIENT_CONFIG } from './ClientConfig.js';
+import { AuthScreen } from './auth/AuthScreen.js';
+import { restoreSession } from './auth/AuthService.js';
 
 /**
  * Initialize and start the client application
@@ -15,6 +17,16 @@ export async function main(): Promise<void> {
   try {
     const mainId = Math.random().toString(36).substr(2, 9);
     console.log(`🏴‍☠️ [${mainId}] Pirate MMO Client Starting...`);
+
+    // ── Auth gate ──────────────────────────────────────────────────────────
+    // Try to restore an existing session first (skips the login screen on
+    // page refresh if the tokens are still valid).
+    let session = await restoreSession();
+    if (!session) {
+      const screen = new AuthScreen();
+      session = await screen.waitForAuth();
+    }
+    console.log(`✅ Authenticated as "${session.displayName}" (guest: ${session.guest})`);
     
     // Get canvas element
     const canvas = document.getElementById('gameCanvas') as HTMLCanvasElement;
@@ -47,8 +59,8 @@ export async function main(): Promise<void> {
     const clientApp = new ClientApplication(canvas, config);
     await clientApp.initialize();
     
-    // Start the application
-    clientApp.start();
+    // Start the application, passing auth credentials for the server handshake
+    clientApp.start(session.displayName, session.accessToken, session.guest);
     
     console.log('✅ Pirate MMO Client Started Successfully');
     
@@ -66,7 +78,7 @@ export async function main(): Promise<void> {
     errorDiv.style.cssText = `
       position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
       background: #ff4444; color: white; padding: 20px; border-radius: 10px;
-      font-family: Arial, sans-serif; font-size: 16px; z-index: 10000;
+      font-family: Georgia, serif, Georgia, serif; font-size: 16px; z-index: 10000;
     `;
     errorDiv.textContent = `Failed to start game: ${error instanceof Error ? error.message : 'Unknown error'}`;
     document.body.appendChild(errorDiv);

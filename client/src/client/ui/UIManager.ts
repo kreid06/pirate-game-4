@@ -6,16 +6,20 @@
  */
 
 import { ClientConfig } from '../ClientConfig.js';
-import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState } from '../../sim/Types.js';
+import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState, DroppedItem } from '../../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
-import { ITEM_DEFS, INVENTORY_SLOTS, ItemKind, ITEM_KIND_ID } from '../../sim/Inventory.js';
+import { ITEM_DEFS, INVENTORY_SLOTS, HOTBAR_SLOTS, ItemKind, ITEM_KIND_ID } from '../../sim/Inventory.js';
 import { ManningPriorityPanel } from './ManningPriorityPanel.js';
 import { CompanyMenu } from './CompanyMenu.js';
 import { PlayerMenu } from './PlayerMenu.js';
 import { ShipMenu } from './ShipMenu.js';
 import { CrewLevelMenu } from './CrewLevelMenu.js';
+import { RespawnScreen } from './RespawnScreen.js';
+import { WorldMapScreen } from './WorldMapScreen.js';
+import { TombstoneMenu } from './TombstoneMenu.js';
+import { SalvageMenu } from './SalvageMenu.js';
 
 /**
  * UI render context
@@ -24,6 +28,12 @@ export interface UIRenderContext {
   worldState: WorldState;
   camera: Camera;
   fps: number;
+  /** Last frame duration in milliseconds. */
+  frameMs?: number;
+  /** GL draw calls in the most recent frame (0 when GL is disabled). */
+  glDrawCalls?: number;
+  /** Current GL internal scale percent (e.g. 40 for 40%). */
+  glScalePct?: number;
   networkStats: NetworkStats;
   config: ClientConfig;
   assignedPlayerId?: number | null;
@@ -56,6 +66,25 @@ export enum UIElementType {
 }
 
 /**
+ * All menu identifiers — used to track which menu is currently open.
+ * ClientApplication uses these same IDs for its own menus (crafting, shipyard, pause).
+ */
+export const MENU_ID = {
+  COMPANY:   'company',
+  PLAYER:    'player',
+  SHIP:      'ship',
+  CREW:      'crew',
+  CRAFTING:  'crafting',
+  SHIPYARD:  'shipyard',
+  PAUSE:     'pause',
+  CONSOLE:   'console',
+  RESPAWN:   'respawn',
+  MAP:       'map',
+  SALVAGE:   'salvage',
+} as const;
+export type MenuId = typeof MENU_ID[keyof typeof MENU_ID];
+
+/**
  * Base UI element interface
  */
 interface UIElement {
@@ -80,16 +109,39 @@ export class UIManager {
   // Company menu (toggled by [K])
   private companyMenu = new CompanyMenu();
   // Player character menu (toggled by [E] when menu is open)
-  private playerMenu = new PlayerMenu();
-  // Ship status menu (toggled by [F])
+  public readonly playerMenu = new PlayerMenu();
+  // Ship status menu (toggled by [G])
   private shipMenu = new ShipMenu();
+  // Shipwreck salvage menu (opened by pressing E on a wreck)
+  public readonly salvageMenu = new SalvageMenu();
   // Crew level / upgrade panel (opened by clicking an NPC)
   private crewMenu = new CrewLevelMenu();
+
+  // Respawn screen — shown on player death or first spawn
+  private respawnScreen = new RespawnScreen();
+  // Islands stored for the respawn screen minimap
+  private _islands: import('../../sim/Types.js').IslandDef[] = [];
+
+  // World map screen — toggleable with M
+  private worldMapScreen = new WorldMapScreen();
+
+  // Tombstone inventory menu
+  public tombstoneMenu = new TombstoneMenu();
+
+  /** Which menu is currently open — null when none. */
+  private activeMenuId: MenuId | null = null;
 
   // UI State
   private showDebugOverlay = false;
   private showNetworkStats = false;
   private showControlHints = true;
+
+  // White flash overlay (triggered on respawn)
+  // _flashHolding=true  → fully opaque, waiting for server confirmation
+  // _flashStartTime > 0 → fading out after server confirmed
+  private _flashHolding = false;
+  private _flashStartTime = 0;
+  private static readonly _FLASH_MS = 3000;
 
   // Mouse screen position (updated each frame before render)
   private mouseX = 0;
@@ -115,6 +167,10 @@ export class UIManager {
   public onBuildItemSelect: ((item: 'cannon' | 'sail' | 'swivel') => void) | null = null;
   /** Called when a weapon group has its mode cycled via right-click. */
   public onGroupModeChange: ((groupIndex: number, mode: WeaponGroupMode) => void) | null = null;
+  /** Called when the player left-clicks a hotbar slot. */
+  public onHotbarSlotClick: ((slot: number) => void) | null = null;
+  /** Supplier for current player inventory — used for drag-and-drop in player menu. */
+  public getPlayerInventory: (() => { slots: { item: ItemKind; quantity: number }[] } | null) | null = null;
   /** Cached from last render frame — used by handleRightClick for hotbar hit-testing. */
   private _cachedHelmActiveGroup: number = -1;
   private _cachedControlGroups: Map<number, WeaponGroupState> | null = null;
@@ -156,6 +212,28 @@ export class UIManager {
     sweetspotStart: 0, sweetspotWidth: 0,
     callback: null, resultTime: -1, won: null,
   };
+
+  // ── Drop item picker (hold-E near pile) ───────────────────────────────────
+  private _dropPicker: {
+    open: boolean;
+    items: DroppedItem[];
+    scrollY: number;
+  } = { open: false, items: [], scrollY: 0 };
+
+  /** Called when the player confirms a pickup from the drop picker. */
+  public onDropPickerPick: ((itemId: number) => void) | null = null;
+
+  /** Open the drop-item picker overlay. */
+  openDropPicker(items: DroppedItem[]): void {
+    this._dropPicker = { open: true, items, scrollY: 0 };
+  }
+
+  /** Close the drop-item picker overlay. */
+  closeDropPicker(): void {
+    this._dropPicker.open = false;
+  }
+
+  get isDropPickerOpen(): boolean { return this._dropPicker.open; }
   
   constructor(canvas: HTMLCanvasElement, config: ClientConfig) {
     this.config = config;
@@ -185,11 +263,162 @@ export class UIManager {
     };
   }
 
+  /** Returns which menu is currently open, or null. */
+  getActiveMenuId(): MenuId | null {
+    return this.activeMenuId;
+  }
+
+  /** Returns true if any canvas-side menu/modal is currently open. */
+  isAnyMenuOpen(): boolean {
+    return this.activeMenuId !== null || this.respawnScreen.visible || this.worldMapScreen.visible;
+  }
+
+  /**
+   * Open one of the UIManager-owned menus by ID, closing any currently open menu first.
+   * For menus owned by ClientApplication (crafting, shipyard, pause), call this to keep
+   * activeMenuId in sync — pass the id and handle open/close yourself.
+   */
+  openMenu(id: MenuId): void {
+    this.closeActiveMenu();
+    this.activeMenuId = id;
+    switch (id) {
+      case MENU_ID.COMPANY: this.companyMenu.open(); break;
+      case MENU_ID.PLAYER:  this.playerMenu.open();  break;
+      case MENU_ID.SHIP:    this.shipMenu.open();     break;
+      case MENU_ID.CREW:    /* opened externally via openCrewMenu() */ break;
+      case MENU_ID.SALVAGE: /* opened externally with salvageMenu.open(wreckId, count) */ break;
+      // CRAFTING / SHIPYARD / PAUSE are owned by ClientApplication — ID is set here,
+      // but the actual DOM/canvas open call happens in ClientApplication.
+    }
+  }
+
+  /** Close whichever UIManager-owned menu is active and clear the tracked ID. */
+  closeActiveMenu(): void {
+    switch (this.activeMenuId) {
+      case MENU_ID.COMPANY: this.companyMenu.close(); break;
+      case MENU_ID.PLAYER:  this.playerMenu.close();  break;
+      case MENU_ID.SHIP:    this.shipMenu.close();     break;
+      case MENU_ID.CREW:    this.crewMenu.close();     break;
+      case MENU_ID.SALVAGE: this.salvageMenu.close();  break;
+    }
+    this.activeMenuId = null;
+  }
+
+  /** Notify UIManager that an externally-owned menu (crafting/shipyard/pause) was opened. */
+  setActiveMenuId(id: MenuId | null): void {
+    this.activeMenuId = id;
+  }
+
+  /** Open the respawn screen. Pass the current world ships, islands, local company ID, and death position. */
+  openRespawnScreen(ships: import('../../sim/Types.js').Ship[], islands: import('../../sim/Types.js').IslandDef[], localCompanyId: number, deathPos?: { x: number; y: number }): void {
+    this._islands = islands;
+    this.respawnScreen.open(ships, islands, localCompanyId, deathPos);
+  }
+
+  /** Close the respawn screen (called after the server confirms respawn). */
+  closeRespawnScreen(): void {
+    this.respawnScreen.close();
+  }
+
+  /** Hold screen at full white until releaseWhiteFlash() is called. */
+  triggerWhiteFlash(): void {
+    this._flashHolding = true;
+    this._flashStartTime = 0;
+  }
+
+  /** Start fading the white flash out (call once server confirms new position). */
+  releaseWhiteFlash(): void {
+    if (!this._flashHolding && this._flashStartTime === 0) return; // not active
+    this._flashHolding = false;
+    this._flashStartTime = Date.now();
+  }
+
+  /** True while the respawn screen is showing. */
+  isRespawnScreenVisible(): boolean {
+    return this.respawnScreen.visible;
+  }
+
+  /** Set the callback that fires when the player confirms a respawn location. */
+  setRespawnConfirmedCallback(cb: (shipId?: number, worldX?: number, worldY?: number, islandId?: number, spawnX?: number, spawnY?: number) => void): void {
+    this.respawnScreen.onRespawnConfirmed = cb;
+  }
+
+  /** Store island definitions so the respawn screen minimap can draw them. */
+  setIslandsForRespawn(islands: import('../../sim/Types.js').IslandDef[]): void {
+    this._islands = islands;
+  }
+
+  // ── World map ──────────────────────────────────────────────────────────────
+
+  /** Open the world map screen, optionally centring on the local player's position. */
+  openWorldMap(localPlayerPos?: { x: number; y: number }): void {
+    this.worldMapScreen.open(localPlayerPos);
+  }
+
+  /** Close the world map. */
+  closeWorldMap(): void {
+    this.worldMapScreen.close();
+  }
+
+  /** True while the world map is showing. */
+  isWorldMapVisible(): boolean {
+    return this.worldMapScreen.visible;
+  }
+
+  /** Toggle the world map open/closed. */
+  toggleWorldMap(localPlayerPos?: { x: number; y: number }): void {
+    if (this.worldMapScreen.visible) this.worldMapScreen.close();
+    else this.worldMapScreen.open(localPlayerPos);
+  }
+
+  /** Forward a mouse-down event to the world map (for drag-pan and close-button). */
+  handleWorldMapMouseDown(x: number, y: number): boolean {
+    return this.worldMapScreen.handleMouseDown(x, y);
+  }
+
+  /** Forward mouse-move to the world map or respawn screen for drag-pan. */
+  handleWorldMapMouseMove(x: number, y: number): void {
+    if (this.tombstoneMenu.visible) this.tombstoneMenu.handleMouseMove(x, y);
+    if (this.activeMenuId === MENU_ID.PLAYER) this.playerMenu.handleMouseMove(x, y);
+    if (this.salvageMenu.visible) this.salvageMenu.handleMouseMove(x, y);
+    if (this.respawnScreen.visible) this.respawnScreen.handleMouseMove(x, y);
+    this.manningPanel.handleMouseMove(x, y);
+    this.worldMapScreen.handleMouseMove(x, y);
+  }
+
+  /** Notify world map / respawn screen of mouse-up to end drag. */
+  handleWorldMapMouseUp(x = 0, y = 0): void {
+    if (this.tombstoneMenu.visible) this.tombstoneMenu.handleMouseUp(x, y);
+    if (this.activeMenuId === MENU_ID.PLAYER) this.playerMenu.handleMouseUp(x, y);
+    if (this.respawnScreen.visible) this.respawnScreen.handleMouseUp();
+    this.manningPanel.handleMouseUp();
+    this.worldMapScreen.handleMouseUp();
+  }
+
+  /** Forward wheel delta to the respawn screen or world map for zoom. Returns true if consumed. */
+  handleWorldMapWheel(deltaY: number, x: number, y: number): boolean {
+    if (this._dropPicker.open) return this.handleDropPickerWheel(deltaY);
+    if (this.tombstoneMenu.visible) return this.tombstoneMenu.handleWheel(x, y, deltaY);
+    if (this.respawnScreen.visible) return this.respawnScreen.handleWheel(deltaY, x, y);
+    if (this.activeMenuId === MENU_ID.PLAYER) return this.playerMenu.handleWheel(deltaY, x, y);
+    return this.worldMapScreen.handleWheel(deltaY, x, y);
+  }
+
   /**
    * Route a keydown event.  Returns true if the minigame consumed the key.
    * Call this from the application keydown handler before processing game input.
    */
   handleKeyDown(key: string): boolean {
+    // Company menu key routing is handled exclusively by onKeyDown (the window listener)
+    // to avoid double-processing. Only handle non-company-menu cases here.
+    if (key === 'Escape' && this._dropPicker.open) {
+      this._dropPicker.open = false;
+      return true;
+    }
+    if (key === 'Escape' && this.tombstoneMenu.visible) {
+      this.tombstoneMenu.close();
+      return true;
+    }
     if (!this.hammerGame.active) return false;
     if (key === ' ' || key === 'Enter') {
       if (this.hammerGame.resultTime === -1) this.strikeHammer();
@@ -220,12 +449,12 @@ export class UIManager {
   handleRightClick(x: number, y: number): boolean {
     if (!this._cachedControlGroups) return false;
     const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
-    const totalW = INVENTORY_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
     const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
     const startX = Math.round((this.canvas.width - totalW) / 2);
     const startY = this.canvas.height - totalH - 8;
     if (y < startY || y > startY + PADDING + SLOT_SIZE) return false;
-    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+    for (let i = 0; i < HOTBAR_SLOTS; i++) {
       const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
       if (x >= sx && x <= sx + SLOT_SIZE) {
         const groupIdx = (i + 1) % 10; // slot 0→G1, …, slot 8→G9, slot 9→G0
@@ -273,8 +502,6 @@ export class UIManager {
     const _localCompanyId = _localPlayer?.companyId ?? 0;
     this.manningPanel.render(ctx, context.worldState.npcs ?? [], shipId, _localCompanyId);
     
-    // Always render FPS in top-right corner
-    this.renderFPS(ctx, context);
 
     // Ammo selector widget
     if (context.mountKind === 'cannon') {
@@ -296,10 +523,11 @@ export class UIManager {
 
     // Company menu renders last so it sits above all other UI
     this.companyMenu.render(ctx, context.worldState, context.assignedPlayerId);
-    this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId);
+    this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId, this.mouseX, this.mouseY);
     this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
+    this.salvageMenu.render(ctx, ctx.canvas.width, ctx.canvas.height);
     // Crew level menu — update live NPC data before rendering
-    if (this.crewMenu.visible && this.crewMenu.npcId) {
+    if (this.activeMenuId === MENU_ID.CREW && this.crewMenu.npcId) {
       const liveNpc = context.worldState.npcs.find(n => n.id === this.crewMenu.npcId);
       if (liveNpc) this.crewMenu.update(liveNpc);
     }
@@ -324,45 +552,56 @@ export class UIManager {
     if (this.hammerGame.active) {
       this.renderHammerMinigame(ctx, ctx.canvas);
     }
+
+    // World map — below respawn screen so respawn screen still covers it
+    if (this.worldMapScreen.visible) {
+      const ws = context.worldState;
+      const localPlayer = ws.players.find(p => p.id === context.assignedPlayerId);
+      const companyId = localPlayer?.companyId ?? 0;
+      this.worldMapScreen.render(ctx, ws.ships, this._islands, ws.players, context.assignedPlayerId, companyId);
+    }
+
+    // Respawn screen — rendered last so it covers everything
+    if (this.respawnScreen.visible) {
+      const ws = context.worldState;
+      const localPlayer = ws.players.find(p => p.id === context.assignedPlayerId);
+      const companyId = localPlayer?.companyId ?? 0;
+      this.respawnScreen.render(ctx, ws.ships, this._islands, companyId);
+    }
+
+    // Drop picker — topmost overlay
+    if (this._dropPicker.open) {
+      this._renderDropPicker(ctx);
+    }
+
+    // Tombstone menu — rendered above everything else
+    if (this.tombstoneMenu.visible) {
+      this.tombstoneMenu.render(ctx);
+    }
+
+    // White flash — very topmost, fades out after respawn
+    if (this._flashHolding) {
+      ctx.save();
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      ctx.restore();
+    } else if (this._flashStartTime > 0) {
+      const elapsed = Date.now() - this._flashStartTime;
+      const t = Math.min(1, elapsed / UIManager._FLASH_MS);
+      // Fast-in slow-out: start opaque, decelerate as it fades (ease-out quad)
+      const alpha = Math.max(0, (1 - t) * (1 - t));
+      if (alpha > 0) {
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        ctx.restore();
+      } else {
+        this._flashStartTime = 0;
+      }
+    }
   }
   
-  /**
-   * Render FPS counter in top-right corner
-   */
-  private renderFPS(ctx: CanvasRenderingContext2D, context: UIRenderContext): void {
-    ctx.save();
-    
-    const fps = Math.round(context.fps);
-    const text = `${fps} FPS`;
-    
-    // Measure text width for background
-    ctx.font = 'bold 20px Consolas, monospace';
-    const textMetrics = ctx.measureText(text);
-    const textWidth = textMetrics.width;
-    const textHeight = 24;
-    
-    // Position in top-right corner
-    const padding = 10;
-    const x = ctx.canvas.width - textWidth - padding * 2;
-    const y = padding;
-    
-    // Draw semi-transparent background
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    ctx.fillRect(x, y, textWidth + padding * 2, textHeight + padding);
-    
-    // Draw border
-    ctx.strokeStyle = fps >= 60 ? '#00ff00' : fps >= 30 ? '#ffaa00' : '#ff0000';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x, y, textWidth + padding * 2, textHeight + padding);
-    
-    // Draw FPS text
-    ctx.fillStyle = fps >= 60 ? '#00ff00' : fps >= 30 ? '#ffaa00' : '#ff0000';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    ctx.fillText(text, x + padding, y + padding);
-    
-    ctx.restore();
-  }
 
   /**
    * Helm combined ammo selector — bottom-left corner.
@@ -450,20 +689,20 @@ export class UIManager {
       ctx.strokeRect(slotX, y0, slotW, slotH);
 
       // Icon
-      ctx.font         = '11px Consolas, monospace';
+      ctx.font         = '11px Georgia, serif';
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = iconColor;
       ctx.fillText(ammo.icon, slotX + pad + 1, y0 + slotH / 2 - 4);
 
       // Name
-      ctx.font      = (isLoaded || isPending) ? 'bold 8px Consolas, monospace' : '8px Consolas, monospace';
+      ctx.font      = (isLoaded || isPending) ? 'bold 8px Georgia, serif' : '8px Georgia, serif';
       ctx.fillStyle = textColor;
       ctx.fillText(ammo.name, slotX + pad + 1, y0 + slotH / 2 + 5);
 
       // Desc (swivel only)
       if (ammo.desc) {
-        ctx.font      = '6px Consolas, monospace';
+        ctx.font      = '6px Georgia, serif';
         ctx.fillStyle = (isLoaded || isPending) ? 'rgba(160,200,160,0.65)' : 'rgba(90,100,100,0.50)';
         ctx.fillText(ammo.desc, slotX + pad + 1, y0 + slotH / 2 + 13);
       }
@@ -502,7 +741,7 @@ export class UIManager {
     }
 
     // --- Group labels above each section ---
-    ctx.font         = 'bold 6px Consolas, monospace';
+    ctx.font         = 'bold 6px Georgia, serif';
     ctx.textBaseline = 'bottom';
     ctx.textAlign    = 'center';
 
@@ -519,7 +758,7 @@ export class UIManager {
     ctx.globalAlpha = 1.0;
 
     // --- Hint row ---
-    ctx.font         = '9px Consolas, monospace';
+    ctx.font         = '9px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle    = 'rgba(120,120,140,0.70)';
@@ -608,7 +847,7 @@ export class UIManager {
       ctx.strokeRect(sx, y0, slotW, slotH);
 
       // Icon
-      ctx.font         = '18px Consolas, monospace';
+      ctx.font         = '18px Georgia, serif';
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = iconColor;
@@ -616,19 +855,19 @@ export class UIManager {
 
       // Name
       const highlighted = isLoaded || isPending;
-      ctx.font      = highlighted ? 'bold 11px Consolas, monospace' : '11px Consolas, monospace';
+      ctx.font      = highlighted ? 'bold 11px Georgia, serif' : '11px Georgia, serif';
       ctx.fillStyle = textColor;
       ctx.fillText(ammo.name, sx + pad + 2, y0 + slotH / 2 + 10);
 
       // Small label: LOADED / NEXT
       if (isLoaded && switchPending) {
-        ctx.font      = '9px Consolas, monospace';
+        ctx.font      = '9px Georgia, serif';
         ctx.fillStyle = '#44dd66';
         ctx.textAlign = 'right';
         ctx.fillText('LOADED', sx + slotW - 5, y0 + slotH - 6);
         ctx.textAlign = 'left';
       } else if (isPending && switchPending) {
-        ctx.font      = '9px Consolas, monospace';
+        ctx.font      = '9px Georgia, serif';
         ctx.fillStyle = '#ffd700';
         ctx.textAlign = 'right';
         ctx.fillText('NEXT', sx + slotW - 5, y0 + slotH - 6);
@@ -645,7 +884,7 @@ export class UIManager {
     }
 
     // [X] key hint below the slots
-    ctx.font         = '10px Consolas, monospace';
+    ctx.font         = '10px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle    = 'rgba(120,120,140,0.7)';
@@ -685,7 +924,7 @@ export class UIManager {
     const switchPending = safePending !== safeLoaded;
 
     // Header label
-    ctx.font         = 'bold 9px Consolas, monospace';
+    ctx.font         = 'bold 9px Georgia, serif';
     ctx.fillStyle    = 'rgba(200,160,80,0.80)';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'bottom';
@@ -736,33 +975,33 @@ export class UIManager {
       ctx.strokeRect(sx, y0, slotW, slotH);
 
       // Icon
-      ctx.font         = '17px Consolas, monospace';
+      ctx.font         = '17px Georgia, serif';
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = iconColor;
       ctx.fillText(ammo.icon, sx + pad, y0 + slotH / 2 - 8);
 
       // Name
-      ctx.font         = (isLoaded || isPending) ? 'bold 10px Consolas, monospace' : '10px Consolas, monospace';
+      ctx.font         = (isLoaded || isPending) ? 'bold 10px Georgia, serif' : '10px Georgia, serif';
       ctx.fillStyle    = textColor;
       ctx.textBaseline = 'middle';
       ctx.fillText(ammo.name, sx + pad, y0 + slotH / 2 + 5);
 
       // Desc line
-      ctx.font      = '8px Consolas, monospace';
+      ctx.font      = '8px Georgia, serif';
       ctx.fillStyle = (isLoaded || isPending) ? 'rgba(180,220,180,0.65)' : 'rgba(100,100,120,0.5)';
       ctx.fillText(ammo.desc, sx + pad, y0 + slotH / 2 + 17);
 
       // LOADED / NEXT sub-label
       if (isLoaded && switchPending) {
-        ctx.font         = '8px Consolas, monospace';
+        ctx.font         = '8px Georgia, serif';
         ctx.fillStyle    = '#44dd66';
         ctx.textAlign    = 'right';
         ctx.textBaseline = 'bottom';
         ctx.fillText('LOADED', sx + slotW - 4, y0 + slotH - 3);
         ctx.textAlign = 'left';
       } else if (isPending && switchPending) {
-        ctx.font         = '8px Consolas, monospace';
+        ctx.font         = '8px Georgia, serif';
         ctx.fillStyle    = '#ffd700';
         ctx.textAlign    = 'right';
         ctx.textBaseline = 'bottom';
@@ -780,7 +1019,7 @@ export class UIManager {
     }
 
     // Key hint below the slots
-    ctx.font         = '10px Consolas, monospace';
+    ctx.font         = '10px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle    = 'rgba(120,120,140,0.7)';
@@ -812,6 +1051,37 @@ export class UIManager {
     this.shipMenu.onUpgradeRequest = cb;
   }
 
+  /** Set callback for the "Unclaim Ship" action from the ship settings panel. */
+  setShipUnclaimCallback(cb: (shipId: number) => void): void {
+    this.shipMenu.onUnclaimShip = cb;
+  }
+
+  /** Set callback for the "Claim Ship" action from the ship settings panel. */
+  setShipClaimCallback(cb: (shipId: number) => void): void {
+    this.shipMenu.onClaimShip = cb;
+  }
+
+  /** Set callback for the "Rename Ship" button in the ship settings panel.
+   *  Receives the shipId and current name so a dialog can pre-fill the field. */
+  setShipRenameRequestCallback(cb: (shipId: number, currentName: string) => void): void {
+    this.shipMenu.onRenameRequest = cb;
+  }
+
+  /** Set callback for the Leave Company button in the company menu. */
+  setLeaveCompanyCallback(cb: () => void): void {
+    this.companyMenu.onLeaveCompany = cb;
+  }
+
+  /** Set callback for the Join Company buttons in the company menu. */
+  setJoinCompanyCallback(cb: (companyId: number) => void): void {
+    this.companyMenu.onJoinCompany = cb;
+  }
+
+  /** Set callback for the Create Company button in the company menu. */
+  setCreateCompanyCallback(cb: (name: string) => void): void {
+    this.companyMenu.onCreateCompany = cb;
+  }
+
   /**
    * Set callback for NPC stat upgrades from the crew level menu.
    * Called when the player clicks an affordable upgrade button.
@@ -823,7 +1093,18 @@ export class UIManager {
     // Also wire ShipMenu NPC rows → open crew menu
     this.shipMenu.onNpcClick = (npc) => {
       this.crewMenu.open(npc);
+      this.activeMenuId = MENU_ID.CREW;
     };
+  }
+
+  /**
+   * Set callback for player stat upgrades from the player character menu.
+   * Called when the player clicks an affordable upgrade button in the character tab.
+   */
+  setPlayerUpgradeCallback(
+    cb: (stat: string) => void
+  ): void {
+    this.playerMenu.onUpgradeRequest = cb;
   }
 
   /**
@@ -831,6 +1112,7 @@ export class UIManager {
    */
   openCrewMenuForNpc(npc: Npc): void {
     this.crewMenu.open(npc);
+    this.activeMenuId = MENU_ID.CREW;
   }
 
   /**
@@ -884,10 +1166,26 @@ export class UIManager {
   }
 
   handleClick(x: number, y: number): boolean {
+    // Tombstone menu takes highest priority
+    if (this.tombstoneMenu.visible) {
+      return this.tombstoneMenu.handleMouseDown(x, y);
+    }
+    // Respawn screen takes absolute priority — blocks all game input
+    if (this.respawnScreen.visible) {
+      return this.respawnScreen.handleClick(x, y);
+    }
+    // World map consumes all clicks (mousedown starts drag or closes)
+    if (this.worldMapScreen.visible) {
+      return this.worldMapScreen.handleMouseDown(x, y);
+    }
     // Hammer minigame swallows all clicks while active
     if (this.hammerGame.active) {
       if (this.hammerGame.resultTime === -1) this.strikeHammer();
       return true;
+    }
+    // Drop picker intercepts all clicks when open
+    if (this._dropPicker.open) {
+      return this.handleDropPickerClick(x, y);
     }
     // Build panel (left side) — check before other panels
     if (this.buildMenuOpen) {
@@ -898,28 +1196,51 @@ export class UIManager {
       const consumed = this.handleBuildModeClick(x, y);
       if (consumed) return true;
     }
-    // If company menu is open, clicks anywhere close it (the menu itself has no buttons yet).
-    // Log-term: route internal clicks to menu sub-elements here.
-    if (this.companyMenu.visible) {
-      this.companyMenu.close();
+    // If company menu is open, try internal buttons first, then close on outside click.
+    if (this.activeMenuId === MENU_ID.COMPANY) {
+      if (this.companyMenu.handleClick(x, y)) return true;
+      this.closeActiveMenu();
       return true;
     }
-    if (this.playerMenu.visible) {
-      this.playerMenu.close();
+    if (this.activeMenuId === MENU_ID.PLAYER) {
+      // Try to start a drag first
+      const inv = this.getPlayerInventory?.() ?? null;
+      if (inv && this.playerMenu.handleMouseDown(x, y, inv)) {
+        return true; // drag started — don't process as a normal click
+      }
+      const consumed = this.playerMenu.handleClick(x, y);
+      if (!consumed) this.closeActiveMenu();
       return true;
     }
-    if (this.crewMenu.visible) {
+    if (this.activeMenuId === MENU_ID.CREW) {
       const consumed = this.crewMenu.handleClick(x, y);
-      if (!consumed) this.crewMenu.close();
+      if (!consumed) this.closeActiveMenu();
       return true;
     }
-    if (this.shipMenu.visible) {
+    if (this.activeMenuId === MENU_ID.SHIP) {
       // Forward to shipMenu — returns true if inside panel (upgrade click or panel area)
       const consumed = this.shipMenu.handleClick(x, y);
-      if (!consumed) this.shipMenu.close();
+      if (!consumed) this.closeActiveMenu();
       return true;
     }
-    return this.manningPanel.handleClick(x, y);
+    // Hotbar left-click slot selection (only when no menu/build mode is consuming)
+    if (this.onHotbarSlotClick && !this._cachedControlGroups) {
+      const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+      const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+      const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+      const startX = Math.round((this.canvas.width - totalW) / 2);
+      const startY = this.canvas.height - totalH - 8;
+      if (y >= startY + PADDING && y <= startY + PADDING + SLOT_SIZE) {
+        for (let i = 0; i < HOTBAR_SLOTS; i++) {
+          const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+          if (x >= sx && x <= sx + SLOT_SIZE) {
+            this.onHotbarSlotClick(i);
+            return true;
+          }
+        }
+      }
+    }
+    return this.manningPanel.handleMouseDown(x, y);
   }
 
   /** Returns the current npcId → task name map for colouring NPCs in the render system. */
@@ -1048,7 +1369,7 @@ export class UIManager {
       : selectedItem === 'swivel'
       ? '🔫 SWIVEL'
       : `⛵ SAIL (${sailCount}/${maxSails})`;
-    ctx.font = 'bold 22px Consolas, monospace';
+    ctx.font = 'bold 22px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff8e0';
@@ -1100,7 +1421,7 @@ export class UIManager {
     if (enemyClose) status = '  \u26a0\ufe0f ENEMY NEARBY — retreat to place';
     else if (tooFar) status = '  \u26a0\ufe0f TOO FAR — move closer';
 
-    ctx.font = 'bold 20px Consolas, monospace';
+    ctx.font = 'bold 20px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff8e0';
@@ -1163,7 +1484,7 @@ export class UIManager {
       ctx.stroke();
       if (is45) {
         ctx.fillStyle = '#ffcc44';
-        ctx.font = '9px Consolas, monospace';
+        ctx.font = '9px Georgia, serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'bottom';
         ctx.fillText(`${tickDeg}°`, px, dialY + DIAL_H - 4 - tickH - 1);
@@ -1185,7 +1506,7 @@ export class UIManager {
     ctx.fill();
 
     // Current angle label (centered in dial)
-    ctx.font = 'bold 15px Consolas, monospace';
+    ctx.font = 'bold 15px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillStyle = '#ffffff';
@@ -1226,7 +1547,7 @@ export class UIManager {
       ctx.moveTo(0, BANNER_H);
       ctx.lineTo(cw, BANNER_H);
       ctx.stroke();
-      ctx.font = 'bold 18px Consolas, monospace';
+      ctx.font = 'bold 18px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#66ee99';
@@ -1255,7 +1576,7 @@ export class UIManager {
     ctx.fill();
 
     ctx.fillStyle = '#66ee99';
-    ctx.font = 'bold 12px Consolas, monospace';
+    ctx.font = 'bold 12px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('📋  PLAN MODE  [B]', px + W / 2, py + HH / 2);
@@ -1297,14 +1618,14 @@ export class UIManager {
 
       // Symbol inside swatch
       ctx.fillStyle = '#fff';
-      ctx.font = `${swatchR * 1.1}px sans-serif`;
+      ctx.font = `${swatchR * 1.1}px Georgia, serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(e.symbol, swatchX, swatchY + 1);
 
       // Entry label
       ctx.fillStyle = isPending ? '#88ee99' : isHovered ? '#d0e8ff' : '#c8d8e8';
-      ctx.font = isPending ? 'bold 13px Consolas, monospace' : '13px Consolas, monospace';
+      ctx.font = isPending ? 'bold 13px Georgia, serif' : '13px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillText(e.label, swatchX + swatchR + 8, swatchY);
@@ -1314,7 +1635,7 @@ export class UIManager {
       if (count > 0) {
         const badge = `×${count}`;
         ctx.fillStyle = 'rgba(255,200,50,0.85)';
-        ctx.font = 'bold 11px Consolas, monospace';
+        ctx.font = 'bold 11px Georgia, serif';
         ctx.textAlign = 'right';
         ctx.fillText(badge, px + W - 10, swatchY);
       }
@@ -1322,7 +1643,7 @@ export class UIManager {
       // Pending indicator arrow on the right edge
       if (isPending) {
         ctx.fillStyle = '#55ee88';
-        ctx.font = '13px sans-serif';
+        ctx.font = '13px Georgia, serif';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
         ctx.fillText('▶', px + W - 8, swatchY);
@@ -1341,7 +1662,7 @@ export class UIManager {
 
     // ── Footer hint ────────────────────────────────────────────────────────
     ctx.fillStyle = 'rgba(140,170,200,0.6)';
-    ctx.font = '10px Consolas, monospace';
+    ctx.font = '10px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('[R] rotate  [RMB] cancel', px + W / 2, py + totalH - 6);
@@ -1381,43 +1702,75 @@ export class UIManager {
   }
   
   private onKeyDown(event: KeyboardEvent): void {
-    // Close any open modal on Escape first
-    if (event.code === 'Escape') {
-      if (this.companyMenu.visible) { this.companyMenu.close(); event.preventDefault(); event.stopPropagation(); return; }
-      if (this.playerMenu.visible)  { this.playerMenu.close();  event.preventDefault(); event.stopPropagation(); return; }
-      if (this.shipMenu.visible)    { this.shipMenu.close();    event.preventDefault(); event.stopPropagation(); return; }
+    // Close any open modal on Escape or backtick
+    if (event.code === 'Escape' || event.code === 'Backquote') {
+      // Let the company menu handle ESC first (e.g. cancel name-entry form)
+      if (this.activeMenuId === MENU_ID.COMPANY && this.companyMenu.handleKeyDown('Escape')) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      if (this.activeMenuId !== null
+          && this.activeMenuId !== MENU_ID.CRAFTING
+          && this.activeMenuId !== MENU_ID.SHIPYARD
+          && this.activeMenuId !== MENU_ID.PAUSE) {
+        this.closeActiveMenu();
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      // Don't stopPropagation here — let ClientApplication handle Escape for pause menu
+      return;
+    }
+
+    // Forward all keys to the company menu while its create form is active
+    if (this.activeMenuId === MENU_ID.COMPANY && this.companyMenu.handleKeyDown(event.key)) {
+      event.preventDefault();
+      event.stopPropagation();
       return;
     }
 
     switch (event.code) {
       case 'KeyK':
-        // [K] toggles (opens or closes) the company ledger menu
-        this.companyMenu.toggle();
-        // Close sibling menus so only one is open at a time
-        if (this.companyMenu.visible) { this.playerMenu.close(); this.shipMenu.close(); }
-        if (this.companyMenu.visible) { event.preventDefault(); event.stopPropagation(); }
+        if (this.activeMenuId === MENU_ID.COMPANY) {
+          this.closeActiveMenu();
+        } else {
+          this.openMenu(MENU_ID.COMPANY);
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        break;
+
+      case 'KeyO':
+        if (this.activeMenuId === MENU_ID.PLAYER) {
+          this.closeActiveMenu();
+        } else {
+          this.closeActiveMenu();
+          this.activeMenuId = MENU_ID.PLAYER;
+          this.playerMenu.openSkillsTab();
+        }
+        event.preventDefault();
+        event.stopPropagation();
         break;
 
       case 'KeyI':
-        // [I] opens the player character sheet.
-        // Only intercept if the menu is already open (so normal I key still fires when closed).
-        if (this.playerMenu.visible) {
-          this.playerMenu.close();
-          event.preventDefault();
-          event.stopPropagation();
+        if (this.activeMenuId === MENU_ID.PLAYER) {
+          this.closeActiveMenu();
         } else {
-          this.playerMenu.open();
-          this.companyMenu.close();
-          this.shipMenu.close();
-          event.preventDefault();
-          event.stopPropagation();
+          this.openMenu(MENU_ID.PLAYER);
         }
+        event.preventDefault();
+        event.stopPropagation();
         break;
 
-      case 'KeyF':
-        this.shipMenu.toggle();
-        if (this.shipMenu.visible) { this.companyMenu.close(); this.playerMenu.close(); }
-        if (this.shipMenu.visible) { event.preventDefault(); event.stopPropagation(); }
+      case 'KeyG':
+        if (this.activeMenuId === MENU_ID.SHIP) {
+          this.closeActiveMenu();
+        } else {
+          this.openMenu(MENU_ID.SHIP);
+        }
+        event.preventDefault();
+        event.stopPropagation();
         break;
 
       case 'F1':
@@ -1487,7 +1840,7 @@ export class UIManager {
 
     // Title
     ctx.fillStyle     = '#f0c060';
-    ctx.font          = 'bold 21px Consolas, monospace';
+    ctx.font          = 'bold 21px Georgia, serif';
     ctx.textAlign     = 'center';
     ctx.textBaseline  = 'top';
     ctx.fillText('\uD83D\uDD28  HAMMER REPAIR', cw / 2, py + 16);
@@ -1544,11 +1897,11 @@ export class UIManager {
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'top';
     if (resultElapsed >= 0) {
-      ctx.font      = 'bold 28px Consolas, monospace';
+      ctx.font      = 'bold 28px Georgia, serif';
       ctx.fillStyle = this.hammerGame.won ? '#33ff88' : '#ff5555';
       ctx.fillText(this.hammerGame.won ? 'CRACK! \u2192 +10 000 HP' : 'MISSED!', cw / 2, py + 128);
     } else {
-      ctx.font      = '14px Consolas, monospace';
+      ctx.font      = '14px Georgia, serif';
       ctx.fillStyle = '#aaaacc';
       ctx.fillText('Press [SPACE] or click when the cursor enters the green zone', cw / 2, py + 128);
       // Countdown ticks along the bottom of the track as tiny tick marks
@@ -1559,6 +1912,160 @@ export class UIManager {
 
     ctx.restore();
   }
+
+  // ── Drop item picker overlay ───────────────────────────────────────────────
+
+  private _dropPickerHits: { itemId: number; y: number; h: number }[] = [];
+
+  private _renderDropPicker(ctx: CanvasRenderingContext2D): void {
+    const { items, scrollY } = this._dropPicker;
+    const cw = ctx.canvas.width;
+    const ch = ctx.canvas.height;
+
+    const W = 300, ROW_H = 44, PAD = 12, HEADER_H = 36;
+    const visibleRows = Math.min(items.length, 6);
+    const contentH = items.length * ROW_H;
+    const viewH = visibleRows * ROW_H;
+    const totalH = HEADER_H + viewH + PAD;
+    const px = Math.round((cw - W) / 2);
+    const py = Math.round((ch - totalH) / 2);
+
+    ctx.save();
+
+    // Backdrop
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, cw, ch);
+
+    // Panel
+    ctx.fillStyle = 'rgba(14,18,28,0.97)';
+    ctx.strokeStyle = '#ffd700';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    // Header
+    ctx.fillStyle = '#ffd700';
+    ctx.font = 'bold 13px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Pick Up Item', px + W / 2, py + HEADER_H / 2);
+
+    // Close hint
+    ctx.fillStyle = '#778';
+    ctx.font = '11px Georgia, serif';
+    ctx.textAlign = 'right';
+    ctx.fillText('[Esc]', px + W - PAD, py + HEADER_H / 2);
+
+    // Clip to viewport
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px, py + HEADER_H, W, viewH);
+    ctx.clip();
+
+    this._dropPickerHits = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const ry = py + HEADER_H + i * ROW_H - scrollY;
+      if (ry + ROW_H < py + HEADER_H || ry > py + HEADER_H + viewH) continue;
+
+      this._dropPickerHits.push({ itemId: item.id, y: ry, h: ROW_H });
+
+      const isHovered = this.mouseY >= ry && this.mouseY <= ry + ROW_H &&
+                        this.mouseX >= px && this.mouseX <= px + W;
+      if (isHovered) {
+        ctx.fillStyle = 'rgba(255,215,0,0.10)';
+        ctx.fillRect(px + 2, ry + 2, W - 4, ROW_H - 4);
+      }
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px + PAD, ry + ROW_H);
+      ctx.lineTo(px + W - PAD, ry + ROW_H);
+      ctx.stroke();
+
+      // Resolve item name/symbol from ITEM_DEFS
+      const kindNum = item.itemKind;
+      let name   = `Item #${kindNum}`;
+      let symbol = '?';
+      const kindStr = Object.entries(ITEM_KIND_ID).find(([, v]) => (v as number) === kindNum)?.[0];
+      if (kindStr && (ITEM_DEFS as any)[kindStr]) {
+        const def = (ITEM_DEFS as any)[kindStr];
+        name   = def.name   ?? name;
+        symbol = def.symbol ?? symbol;
+      }
+
+      ctx.font = '18px Georgia, serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(symbol, px + PAD, ry + ROW_H / 2);
+
+      ctx.font = '13px Georgia, serif';
+      ctx.fillStyle = isHovered ? '#ffd700' : '#e8e0cc';
+      ctx.fillText(name, px + PAD + 28, ry + ROW_H / 2);
+
+      if (item.quantity > 1) {
+        ctx.font = 'bold 11px Georgia, serif';
+        ctx.fillStyle = '#aaa';
+        ctx.textAlign = 'right';
+        ctx.fillText(`\u00d7${item.quantity}`, px + W - PAD, ry + ROW_H / 2);
+      }
+    }
+    ctx.restore(); // unclip
+
+    // Scrollbar
+    if (contentH > viewH) {
+      const sbH = Math.max(20, (viewH / contentH) * viewH);
+      const maxScroll = contentH - viewH;
+      const sbY = py + HEADER_H + (scrollY / Math.max(1, maxScroll)) * (viewH - sbH);
+      ctx.fillStyle = 'rgba(255,215,0,0.35)';
+      ctx.beginPath();
+      ctx.roundRect(px + W - 6, sbY, 4, sbH, 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  /** Handle click in the drop picker. Returns true if consumed. */
+  handleDropPickerClick(x: number, y: number): boolean {
+    if (!this._dropPicker.open) return false;
+    for (const hit of this._dropPickerHits) {
+      if (y >= hit.y && y <= hit.y + hit.h) {
+        this.onDropPickerPick?.(hit.itemId);
+        this._dropPicker.open = false;
+        return true;
+      }
+    }
+    // Click outside closes picker
+    const W = 300, ROW_H = 44, PAD = 12, HEADER_H = 36;
+    const visibleRows = Math.min(this._dropPicker.items.length, 6);
+    const viewH = visibleRows * ROW_H;
+    const totalH = HEADER_H + viewH + PAD;
+    const px = Math.round((this.canvas.width  - W) / 2);
+    const py = Math.round((this.canvas.height - totalH) / 2);
+    if (x < px || x > px + W || y < py || y > py + totalH) {
+      this._dropPicker.open = false;
+    }
+    return true;
+  }
+
+  /** Handle wheel scroll in the drop picker. Returns true if consumed. */
+  handleDropPickerWheel(deltaY: number): boolean {
+    if (!this._dropPicker.open) return false;
+    const ROW_H = 44;
+    const visibleRows = Math.min(this._dropPicker.items.length, 6);
+    const viewH = visibleRows * ROW_H;
+    const contentH = this._dropPicker.items.length * ROW_H;
+    const maxScroll = Math.max(0, contentH - viewH);
+    this._dropPicker.scrollY = Math.max(0, Math.min(maxScroll, this._dropPicker.scrollY + deltaY * 0.4));
+    return true;
+  }
+
 }
 
 /**
@@ -1578,44 +2085,62 @@ class HUDElement implements UIElement {
     
     if (!player) return;
     
-    // Set up text rendering with better visibility
+    // ── Top-left stats box ────────────────────────────────────────────────
     ctx.save();
-    
-    // Background for better readability
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    ctx.fillRect(10, 10, 320, 120);
-    
-    // Border for the info box
-    ctx.strokeStyle = '#ffffff';
+
+    const fps      = Math.round(context.fps);
+    const frameMs  = context.frameMs ?? (fps > 0 ? 1000 / fps : 0);
+    const ping     = Math.round(context.networkStats?.ping ?? 0);
+    const glDc     = context.glDrawCalls ?? 0;
+    const glScale  = context.glScalePct ?? 0;
+    const fpsColor = fps >= 60 ? '#44ff66' : fps >= 30 ? '#ffaa00' : '#ff4444';
+
+    const BOX_W = 260;
+    const BOX_H = 118;
+    const BX = 10, BY = 10;
+
+    // Background + border
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
+    ctx.fillRect(BX, BY, BOX_W, BOX_H);
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
     ctx.lineWidth = 1;
-    ctx.strokeRect(10, 10, 320, 120);
-    
-    // Set up text rendering
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 16px Consolas, monospace';
-    ctx.textAlign = 'left';
-    
-    // Player coordinates (prominent display)
-    ctx.fillStyle = '#00ff00'; // Green for coordinates
-    ctx.font = 'bold 18px Consolas, monospace';
-    ctx.fillText(`POSITION: ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`, 20, 35);
-    
-    // Other info in white
-    ctx.fillStyle = '#ffffff';
-    ctx.font = '14px Consolas, monospace';
-    const lines = [
-      `FPS: ${context.fps}`,
-      `On Ship: ${player.onDeck ? 'Yes' : 'No'}`,
-      `Carrier ID: ${player.carrierId}`,
-      `Velocity: ${player.velocity.x.toFixed(1)}, ${player.velocity.y.toFixed(1)}`,
-      `Network: ${context.networkStats.ping.toFixed(0)}ms`
-    ];
-    
-    // Render additional info lines
-    lines.forEach((line, index) => {
-      ctx.fillText(line, 20, 55 + index * 16);
-    });
-    
+    ctx.strokeRect(BX, BY, BOX_W, BOX_H);
+
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+
+    // FPS row — large & colour-coded
+    ctx.font      = 'bold 15px Georgia, serif';
+    ctx.fillStyle = fpsColor;
+    ctx.fillText(`${fps} FPS  ${frameMs.toFixed(1)} ms`, BX + 10, BY + 9);
+
+    // Ping + GL row
+    ctx.font      = '13px Georgia, serif';
+    ctx.fillStyle = ping < 80 ? '#88ddff' : ping < 200 ? '#ffaa00' : '#ff4444';
+    const glText  = glScale > 0 ? `  GL ${glDc} dc @ ${glScale}%` : '  Canvas 2D';
+    ctx.fillText(`Ping ${ping} ms${glText}`, BX + 10, BY + 28);
+
+    // Divider
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.moveTo(BX + 8, BY + 46); ctx.lineTo(BX + BOX_W - 8, BY + 46);
+    ctx.stroke();
+
+    // Position
+    ctx.font      = '13px Georgia, serif';
+    ctx.fillStyle = '#aaffcc';
+    ctx.fillText(`Pos  ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`, BX + 10, BY + 52);
+
+    // Ship / velocity
+    ctx.fillStyle = '#cccccc';
+    ctx.fillText(`Ship ${player.onDeck ? `#${player.carrierId}` : '—'}   Vel ${player.velocity.x.toFixed(1)}, ${player.velocity.y.toFixed(1)}`, BX + 10, BY + 69);
+
+    // Network bandwidth
+    const ns = context.networkStats;
+    ctx.fillStyle = '#aaaaaa';
+    ctx.fillText(`↑ ${(ns.bytesSent / 1024).toFixed(1)} KB  ↓ ${(ns.bytesReceived / 1024).toFixed(1)} KB  loss ${ns.packetLoss.toFixed(1)}%`, BX + 10, BY + 86);
+
     ctx.restore();
 
     // --- Water meter (top-right boat icon) ---
@@ -1625,20 +2150,26 @@ class HUDElement implements UIElement {
       : null;
 
     if (playerShip != null) {
-      // Compute aggregate plank health ratio from the ship's plank modules
-      const planks = playerShip.modules.filter(m => m.kind === 'plank');
-      let plankRatio = 1;
-      if (planks.length > 0) {
+      // Compute deck health ratio from the ship's deck module(s)
+      const decks = playerShip.modules.filter(m => m.kind === 'deck');
+      let deckRatio = 1;
+      if (decks.length > 0) {
         let totalHp = 0, totalMax = 0;
-        for (const m of planks) {
+        for (const m of decks) {
           const d = m.moduleData as { health?: number; maxHealth?: number } | undefined;
           totalHp  += d?.health    ?? 0;
           totalMax += d?.maxHealth ?? 10000;
         }
-        plankRatio = totalMax > 0 ? Math.max(0, Math.min(1, totalHp / totalMax)) : 1;
+        deckRatio = totalMax > 0 ? Math.max(0, Math.min(1, totalHp / totalMax)) : 1;
       }
-      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, plankRatio);
+      const mastModules = playerShip.modules.filter(m => m.kind === 'mast');
+      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? []);
     }
+
+    // Health / stamina bars above hotbar
+    const maxSt = player.maxStamina ?? 100;
+    const st    = player.stamina    ?? maxSt;
+    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, player.level ?? 1, player.xp ?? 0);
 
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
     const helmMode = context.mountKind === 'helm'
@@ -1647,7 +2178,115 @@ class HUDElement implements UIElement {
     this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot, helmMode);
 
     // Equipment panel (armor + shield)
-    this.renderEquipmentPanel(ctx, ctx.canvas, player.inventory.equipment.armor, player.inventory.equipment.shield);
+    this.renderEquipmentPanel(ctx, ctx.canvas, player.inventory.equipment.torso, player.inventory.equipment.shield);
+  }
+
+  private renderPlayerBars(
+    ctx: CanvasRenderingContext2D,
+    canvas: HTMLCanvasElement,
+    health: number,
+    maxHealth: number,
+    stamina: number,
+    maxStamina: number,
+    level = 1,
+    xp = 0,
+  ): void {
+    const PLAYER_MAX_LEVEL = 66;
+    const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+    const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+    const startX = Math.round((canvas.width - totalW) / 2);
+    const hotbarY = canvas.height - totalH - 8;
+
+    const BAR_H    = 10;
+    const XP_BAR_H = 6;
+    const GAP      = 3;
+    const PANEL_PAD = 4;
+    const panelH   = PANEL_PAD * 2 + XP_BAR_H + GAP + BAR_H * 2 + GAP;
+    const panelY   = hotbarY - panelH - 4;
+    const barX     = startX + PANEL_PAD;
+    const barW     = totalW - PANEL_PAD * 2;
+
+    const hpRatio = maxHealth > 0 ? Math.max(0, Math.min(1, health / maxHealth)) : 1;
+    const stRatio = maxStamina > 0 ? Math.max(0, Math.min(1, stamina / maxStamina)) : 1;
+    const isMaxLevel = level >= PLAYER_MAX_LEVEL;
+    const xpToNext  = isMaxLevel ? PLAYER_MAX_LEVEL * 100 : level * 100;
+    const xpRatio   = isMaxLevel ? 1 : Math.min(xp / xpToNext, 1);
+
+    ctx.save();
+
+    // Background panel
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.fillRect(startX, panelY, totalW, panelH);
+    ctx.strokeStyle = '#556';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(startX, panelY, totalW, panelH);
+
+    // XP bar
+    const xpY = panelY + PANEL_PAD;
+    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    ctx.fillRect(barX, xpY, barW, XP_BAR_H);
+    ctx.fillStyle = isMaxLevel ? '#ffdd44' : '#4488ff';
+    ctx.fillRect(barX, xpY, Math.round(barW * xpRatio), XP_BAR_H);
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX, xpY, barW, XP_BAR_H);
+
+    ctx.font = 'bold 8px Georgia, serif';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(255,255,255,0.70)';
+    ctx.fillText(`Lv.${level}${isMaxLevel ? ' MAX' : ''}`, barX + 3, xpY + XP_BAR_H / 2);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(180,200,255,0.65)';
+    ctx.fillText(isMaxLevel ? 'MAX' : `${xp}/${xpToNext} XP`, barX + barW - 3, xpY + XP_BAR_H / 2);
+
+    // Health bar
+    const hpY    = xpY + XP_BAR_H + GAP;
+    const hpCrit = hpRatio < 0.25;
+    const hpWarn = hpRatio < 0.50;
+    const hpColor = hpCrit ? '#cc2222' : hpWarn ? '#cc8822' : '#22aa44';
+
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(barX, hpY, barW, BAR_H);
+    ctx.fillStyle = hpColor;
+    ctx.fillRect(barX, hpY, Math.round(barW * hpRatio), BAR_H);
+    ctx.strokeStyle = hpCrit ? '#ff4444' : 'rgba(255,255,255,0.20)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX, hpY, barW, BAR_H);
+
+    ctx.font = 'bold 9px Georgia, serif';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(255,255,255,0.80)';
+    ctx.fillText('HP', barX + 4, hpY + BAR_H / 2);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = hpCrit ? '#ff6666' : 'rgba(255,255,255,0.70)';
+    ctx.fillText(`${Math.ceil(health)}/${maxHealth}`, barX + barW - 4, hpY + BAR_H / 2);
+
+    // ── Stamina bar ────────────────────────────────────────────────────────
+    const stY   = hpY + BAR_H + GAP;
+    const stLow = stRatio < 0.25;
+    const stColor = stLow ? '#cc9900' : '#ddbb00';
+
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(barX, stY, barW, BAR_H);
+    ctx.fillStyle = stColor;
+    ctx.fillRect(barX, stY, Math.round(barW * stRatio), BAR_H);
+    ctx.strokeStyle = 'rgba(255,255,255,0.20)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX, stY, barW, BAR_H);
+
+    ctx.font = 'bold 9px Georgia, serif';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(255,255,255,0.80)';
+    ctx.fillText('ST', barX + 4, stY + BAR_H / 2);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(255,255,255,0.70)';
+    ctx.fillText(`${Math.ceil(stamina)}/${maxStamina}`, barX + barW - 4, stY + BAR_H / 2);
+
+    ctx.restore();
   }
 
   private renderHotbar(
@@ -1661,7 +2300,7 @@ class HUDElement implements UIElement {
     const SLOT_GAP = 4;
     const PADDING = 6;
     const LABEL_H = 16;
-    const totalW = INVENTORY_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
     const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
     const startX = Math.round((canvas.width - totalW) / 2);
     const startY = canvas.height - totalH - 8;
@@ -1689,7 +2328,7 @@ class HUDElement implements UIElement {
     ctx.lineWidth = 1;
     ctx.strokeRect(startX, startY, totalW, totalH);
 
-    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+    for (let i = 0; i < HOTBAR_SLOTS; i++) {
       const slot = slots[i] ?? { item: 'none' as ItemKind, quantity: 0 };
       const def  = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
       const sx   = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
@@ -1719,7 +2358,7 @@ class HUDElement implements UIElement {
         const hasLock  = mode === 'targetfire' && state != null && state.targetId >= 0;
 
         // Group number label (top-centre)
-        ctx.font         = 'bold 11px Consolas, monospace';
+        ctx.font         = 'bold 11px Georgia, serif';
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'top';
         ctx.fillStyle    = isActive ? '#ffd700' : 'rgba(160,160,180,0.75)';
@@ -1727,15 +2366,15 @@ class HUDElement implements UIElement {
 
         // Cannon count (large, centre)
         if (count > 0) {
-          ctx.font         = 'bold 20px Consolas, monospace';
+          ctx.font         = 'bold 20px Georgia, serif';
           ctx.textBaseline = 'middle';
           ctx.fillStyle    = isActive ? '#ffffff' : 'rgba(200,200,220,0.9)';
           ctx.fillText(String(count), sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2 - 3);
-          ctx.font         = '8px Consolas, monospace';
+          ctx.font         = '8px Georgia, serif';
           ctx.fillStyle    = isActive ? 'rgba(255,255,255,0.65)' : 'rgba(140,140,160,0.6)';
           ctx.fillText(count === 1 ? 'cannon' : 'cannons', sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2 + 10);
         } else {
-          ctx.font         = '10px Consolas, monospace';
+          ctx.font         = '10px Georgia, serif';
           ctx.textBaseline = 'middle';
           ctx.fillStyle    = 'rgba(70,70,80,0.5)';
           ctx.fillText('empty', sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
@@ -1745,7 +2384,7 @@ class HUDElement implements UIElement {
         const BADGE_H = 13;
         ctx.fillStyle = count > 0 ? modeCol : 'rgba(50,50,60,0.85)';
         ctx.fillRect(sx + 1, sy + SLOT_SIZE - BADGE_H - 1, SLOT_SIZE - 2, BADGE_H);
-        ctx.font         = 'bold 8px Consolas, monospace';
+        ctx.font         = 'bold 8px Georgia, serif';
         ctx.textBaseline = 'middle';
         ctx.fillStyle    = '#fff';
         ctx.fillText(count > 0 ? modeLbl : '---', sx + SLOT_SIZE / 2, sy + SLOT_SIZE - BADGE_H / 2 - 1);
@@ -1770,7 +2409,7 @@ class HUDElement implements UIElement {
 
           // Symbol
           ctx.fillStyle = '#fff';
-          ctx.font = 'bold 18px Consolas, monospace';
+          ctx.font = 'bold 18px Georgia, serif';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
@@ -1778,7 +2417,7 @@ class HUDElement implements UIElement {
           // Stack count (bottom-right, only for stackables > 1)
           if (slot.quantity > 1) {
             ctx.fillStyle = '#ffee88';
-            ctx.font = 'bold 11px Consolas, monospace';
+            ctx.font = 'bold 11px Georgia, serif';
             ctx.textAlign = 'right';
             ctx.textBaseline = 'bottom';
             ctx.fillText(String(slot.quantity), sx + SLOT_SIZE - 3, sy + SLOT_SIZE - 3);
@@ -1788,14 +2427,14 @@ class HUDElement implements UIElement {
 
       // Slot number label below slot
       ctx.fillStyle = isActive ? '#ffd700' : '#778';
-      ctx.font = '11px Consolas, monospace';
+      ctx.font = '11px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillText(String(i === 9 ? 0 : i + 1), sx + SLOT_SIZE / 2, sy + SLOT_SIZE + 2);
     }
 
     // Tooltip: check which slot (if any) the mouse is hovering
-    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+    for (let i = 0; i < HOTBAR_SLOTS; i++) {
       const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
       const sy = startY + PADDING;
       if (
@@ -1830,7 +2469,7 @@ class HUDElement implements UIElement {
     const W     = 220;
     const LINE  = 16;
     const nameH = 18;
-    const descLines = this.wrapText(ctx, def.description, W - PAD * 2, '12px Consolas, monospace');
+    const descLines = this.wrapText(ctx, def.description, W - PAD * 2, '12px Georgia, serif');
     const totalH = PAD + nameH + 4 + LINE + 4 + descLines.length * LINE + PAD;
 
     // Position: centred above the slot, clamped to canvas
@@ -1861,7 +2500,7 @@ class HUDElement implements UIElement {
 
     // Item name
     ctx.fillStyle    = '#ffffff';
-    ctx.font         = `bold 14px Consolas, monospace`;
+    ctx.font         = `bold 14px Georgia, serif`;
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillText(def.name, tx + PAD + 4, cy);
@@ -1869,13 +2508,13 @@ class HUDElement implements UIElement {
 
     // ID  +  category
     ctx.fillStyle = '#888';
-    ctx.font      = '11px Consolas, monospace';
+    ctx.font      = '11px Georgia, serif';
     ctx.fillText(`ID: ${itemId}   [${def.category}]`, tx + PAD + 4, cy);
     cy += LINE + 4;
 
     // Description
     ctx.fillStyle = '#ccc';
-    ctx.font      = '12px Consolas, monospace';
+    ctx.font      = '12px Georgia, serif';
     for (const line of descLines) {
       ctx.fillText(line, tx + PAD + 4, cy);
       cy += LINE;
@@ -1958,7 +2597,7 @@ class HUDElement implements UIElement {
 
     // Header
     ctx.fillStyle = '#aaa';
-    ctx.font = 'bold 11px Consolas, monospace';
+    ctx.font = 'bold 11px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillText('EQUIP', px + panelW / 2, py + 4);
@@ -1989,7 +2628,7 @@ class HUDElement implements UIElement {
         ctx.lineWidth = 1;
         ctx.strokeRect(sx + swatchPad, sy + swatchPad, SLOT_SIZE - swatchPad * 2, SLOT_SIZE - swatchPad * 2);
         ctx.fillStyle = '#fff';
-        ctx.font = 'bold 16px Consolas, monospace';
+        ctx.font = 'bold 16px Georgia, serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
@@ -1997,7 +2636,7 @@ class HUDElement implements UIElement {
 
       // Label
       ctx.fillStyle = '#778';
-      ctx.font = '10px Consolas, monospace';
+      ctx.font = '10px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillText(label, sx + SLOT_SIZE / 2, sy + SLOT_SIZE + 3);
@@ -2010,132 +2649,217 @@ class HUDElement implements UIElement {
     ctx: CanvasRenderingContext2D,
     canvas: HTMLCanvasElement,
     hullHealth: number,
-    plankRatio: number = 1
+    plankRatio: number = 1,
+    shipRotation: number = 0,
+    mastModules: import('../../../sim/modules.js').ShipModule[] = [],
+    shipHull: import('../../../common/Vec2.js').Vec2[] = []
   ): void {
-    // waterFill: 0 = completely dry, 1 = ship fully flooded
-    const waterFill = Math.max(0, Math.min(1, 1 - hullHealth / 100));
+    const waterFill  = Math.max(0, Math.min(1, 1 - hullHealth / 100));
     const isCritical = waterFill > 0.9;
 
-    ctx.save();
+    ctx.save(); // OUTER — removed at end; labels drawn after this restore
 
     // ── Dimensions & position (top-right corner) ─────────────────────────
-    const iW   = 88;   // icon width
-    const iH   = 66;   // icon height (hull cross-section)
-    const marg = 14;   // margin from canvas edge
+    const iW   = 44;
+    const iH   = 110;
+    const marg = 28;
     const ix   = canvas.width - iW - marg;
     const iy   = marg;
+    const cx   = ix + iW / 2;
+    const cy   = iy + iH / 2;
+    // Half-diagonal of the icon bounding box: max screen extent after any rotation
+    const halfDiag = Math.ceil(Math.sqrt(iW * iW + iH * iH) / 2) + 4; // ≈62
 
-    // ── Hull cross-section path ───────────────────────────────────────────
-    // Wide at the deck, tapering slightly, with a curved bottom
-    const deckY  = iy + 10;          // y of the deck rail
-    const sideBot = iy + iH - 6;     // y where sides meet the curved keel
-    const hullPath = new Path2D();
-    hullPath.moveTo(ix + 2,      deckY);              // port (left) rail
-    hullPath.lineTo(ix + iW - 2, deckY);              // starboard (right) rail
-    hullPath.lineTo(ix + iW - 9, sideBot);            // starboard lower side
-    // Curved keel bottom
-    hullPath.quadraticCurveTo(
-      ix + iW / 2, iy + iH + 4,                       // control: below center
-      ix + 9,      sideBot                             // port lower side
+    // ── Apply ship rotation around icon centre ────────────────────────────
+    ctx.translate(cx, cy);
+    ctx.rotate(shipRotation + Math.PI / 2);
+    ctx.translate(-cx, -cy);
+
+    // ── Ship silhouette path (defined in rotated space) ───────────────────
+    const bowY   = iy + 4;
+    const sternY = iy + iH - 4;
+    const hw     = iW / 2 - 2;
+
+    const shipPath = new Path2D();
+    shipPath.moveTo(cx, bowY);
+    shipPath.bezierCurveTo(
+      cx + hw * 0.45, iy + iH * 0.14,
+      cx + hw,        iy + iH * 0.38,
+      cx + hw - 1,    iy + iH * 0.65
     );
-    hullPath.closePath();
+    shipPath.quadraticCurveTo(cx + hw - 3, sternY - 5, cx + 7, sternY);
+    shipPath.lineTo(cx - 7, sternY);
+    shipPath.quadraticCurveTo(cx - hw + 3, sternY - 5, cx - hw + 1, iy + iH * 0.65);
+    shipPath.bezierCurveTo(
+      cx - hw,        iy + iH * 0.38,
+      cx - hw * 0.45, iy + iH * 0.14,
+      cx, bowY
+    );
+    shipPath.closePath();
 
-    // ── Water fill (clipped to hull interior) ────────────────────────────
-    ctx.save();
-    ctx.clip(hullPath);
-
-    // Fill water from the bottom of the keel up
-    const interiorH = sideBot - deckY;
-    const fillH     = waterFill * (interiorH + 12); // +12 to cover the curved keel
-    const fillY     = sideBot - waterFill * interiorH;
-
+    // ── Water fill — clipped to ship, drawn in SCREEN space ───────────────
+    // ctx.clip() captures the clip region in screen coords at call time, so
+    // after we undo the rotation the rectangle fills are always horizontal.
     if (waterFill > 0) {
-      // Main water body
-      ctx.fillStyle = isCritical ? '#bb1111' : '#1155cc';
-      ctx.fillRect(ix, fillY, iW, fillH + 8);
+      ctx.save(); // CLIP A
+      ctx.clip(shipPath);
 
-      // Animated-looking wave bands (lighter stripes)
-      const waveColor = isCritical ? 'rgba(255,140,140,0.20)' : 'rgba(120,200,255,0.22)';
-      const bandH = 4;
-      for (let by = fillY + 4; by < sideBot; by += 12) {
-        ctx.fillStyle = waveColor;
-        ctx.fillRect(ix, by, iW, bandH);
+      // Undo rotation → back to screen (unrotated) space
+      ctx.translate(cx, cy);
+      ctx.rotate(-(shipRotation + Math.PI / 2));
+      ctx.translate(-cx, -cy);
+
+      // Water rises from the screen-bottom of the silhouette bounding box upward
+      const shipScreenBottom = cy + halfDiag;
+      const shipScreenTop    = cy - halfDiag;
+      const shipScreenH      = shipScreenBottom - shipScreenTop;
+      const fillH            = waterFill * shipScreenH;
+      const fillY            = shipScreenBottom - fillH;
+      const spanX            = cx - halfDiag - 2;
+      const spanW            = halfDiag * 2 + 4;
+
+      ctx.fillStyle = isCritical ? 'rgba(187,17,17,0.82)' : 'rgba(17,85,204,0.78)';
+      ctx.fillRect(spanX, fillY, spanW, fillH + 4);
+
+      // Shimmer at water surface
+      ctx.fillStyle = isCritical ? 'rgba(255,160,160,0.55)' : 'rgba(170,230,255,0.60)';
+      ctx.fillRect(spanX, fillY, spanW, 2);
+
+      // Wave bands
+      for (let by = fillY + 6; by < shipScreenBottom; by += 9) {
+        ctx.fillStyle = isCritical ? 'rgba(255,80,80,0.14)' : 'rgba(120,200,255,0.18)';
+        ctx.fillRect(spanX, by, spanW, 3);
       }
 
-      // Surface shimmer line at water top
-      ctx.fillStyle = isCritical ? 'rgba(255,160,160,0.50)' : 'rgba(170,230,255,0.55)';
-      ctx.fillRect(ix, fillY, iW, 3);
+      ctx.restore(); // CLIP A — removes clip, restores rotated transform
     }
 
-    ctx.restore(); // remove clip
+    // ── Fore-aft plank lines (clipped, drawn in rotated space) ────────────
+    ctx.save(); // CLIP B
+    ctx.clip(shipPath);
+    ctx.strokeStyle = waterFill > 0.6 ? 'rgba(200,120,120,0.30)' : 'rgba(200,180,140,0.28)';
+    ctx.lineWidth   = 0.8;
+    for (let lx = ix + 8; lx < ix + iW - 4; lx += 8) {
+      ctx.beginPath();
+      ctx.moveTo(lx, bowY + 10);
+      ctx.lineTo(lx, sternY - 4);
+      ctx.stroke();
+    }
+    ctx.restore(); // CLIP B
 
-    // ── Hull outline (white / red-tinted when critical) ───────────────────
-    ctx.strokeStyle = isCritical ? '#ff5555' : '#ffffff';
-    ctx.lineWidth   = isCritical ? 2.5 : 2;
-    ctx.stroke(hullPath);
-
-    // ── Deck rail (horizontal line at top of hull) ────────────────────────
+    // ── Bowsprit ──────────────────────────────────────────────────────────
     ctx.beginPath();
-    ctx.moveTo(ix + 2,      deckY);
-    ctx.lineTo(ix + iW - 2, deckY);
-    ctx.strokeStyle = isCritical ? '#ff8888' : '#dddddd';
+    ctx.moveTo(cx, bowY);
+    ctx.lineTo(cx, bowY - 10);
+    ctx.strokeStyle = isCritical ? '#ff9977' : '#ccbbaa';
     ctx.lineWidth   = 1.5;
     ctx.stroke();
 
-    // Small deck posts / bollards for a nautical feel
-    for (const bx of [ix + 10, ix + iW / 2 - 1, ix + iW - 10]) {
+    // ── Masts + Sails (data-driven from ship modules) ────────────────────
+    // Map mast localPos.x (fore-aft in ship space, +x = bow) onto stencil Y.
+    // Use hull fore/aft extent for normalisation; fall back to mast range.
+    let hullFore = 0, hullAft = 0;
+    if (shipHull.length > 0) {
+      hullFore = Math.max(...shipHull.map(v => v.x));
+      hullAft  = Math.min(...shipHull.map(v => v.x));
+    } else if (mastModules.length > 0) {
+      hullFore = Math.max(...mastModules.map(m => m.localPos.x));
+      hullAft  = Math.min(...mastModules.map(m => m.localPos.x));
+    }
+    const shipLocalLen = hullFore - hullAft || 1;
+    // Map localPos.x → stencil Y: bow (hullFore) → bowY, stern (hullAft) → sternY
+    const toIconY = (lx: number) =>
+      bowY + (hullFore - lx) / shipLocalLen * (sternY - bowY);
+
+    const sailR    = 10;
+
+    // Sort fore → aft so they draw in natural order
+    const sortedMasts = [...mastModules].sort((a, b) => b.localPos.x - a.localPos.x);
+
+    for (const mast of sortedMasts) {
+      const my = toIconY(mast.localPos.x);
+
+      // Mast dot — skip, sail arc already marks the position
+
+      // Sail arc + openness indicator line
+      const md = mast.moduleData as { kind: string; angle?: number; openness?: number } | undefined;
+      const sailAngle = md?.angle ?? 0;   // radians
+      const openness  = (md?.openness ?? 100) / 100;
+
+      ctx.save();
+      ctx.translate(cx, my);
+      ctx.rotate(sailAngle);
+
+      ctx.strokeStyle = '#39ff14';
+      ctx.shadowColor = '#39ff14';
+      ctx.shadowBlur  = 4;
+
+      // Arc — always full size, full opacity
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(bx, deckY);
-      ctx.lineTo(bx, deckY - 5);
-      ctx.strokeStyle = isCritical ? '#ff8888' : '#bbbbbb';
-      ctx.lineWidth   = 1.5;
+      ctx.arc(0, 0, sailR, 0, Math.PI, true); // semicircle, no diameter line
       ctx.stroke();
+
+      // Radius line along the arc's bisector — starts at arc edge, grows inward
+      // Arc midpoint is at (0, -sailR); full openness reaches center (0, 0)
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(0, -sailR);
+      ctx.lineTo(0, -sailR + sailR * openness);
+      ctx.stroke();
+
+      ctx.shadowBlur = 0;
+      ctx.restore();
     }
 
-    // ── Percentage label + "WATER" tag below icon ─────────────────────────
-    const pct       = Math.round(waterFill * 100);
-    const labelY    = iy + iH + 7;
+    // ── Ship outline ──────────────────────────────────────────────────────
+    ctx.strokeStyle = isCritical ? '#ff5555' : '#e0e0e0';
+    ctx.lineWidth   = isCritical ? 2.5 : 1.8;
+    ctx.stroke(shipPath);
+
+    ctx.restore(); // OUTER — removes rotation; labels drawn below in screen space
+
+    // ── Water % label + "WATER" tag ───────────────────────────────────────
+    const pct        = Math.round(waterFill * 100);
+    // labelY is below the maximum rotated extent of the silhouette
+    const labelY     = cy + halfDiag + 6;
     const labelColor = isCritical ? '#ff5555' : '#88bbee';
 
-    ctx.font          = 'bold 12px Consolas, monospace';
-    ctx.textAlign     = 'center';
-    ctx.textBaseline  = 'top';
-    ctx.fillStyle     = labelColor;
-    ctx.fillText(`${pct}%`, ix + iW / 2, labelY);
+    ctx.save();
+    ctx.font         = 'bold 12px Georgia, serif';
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle    = labelColor;
+    ctx.fillText(`${pct}%`, cx, labelY);
 
-    // Tiny "WATER" subtitle
-    ctx.font      = '9px Consolas, monospace';
+    ctx.font      = '9px Georgia, serif';
     ctx.fillStyle = isCritical ? '#ff7777' : '#557799';
-    ctx.fillText('WATER', ix + iW / 2, labelY + 14);
+    ctx.fillText('WATER', cx, labelY + 14);
 
-    // ── Hull (plank) health bar ───────────────────────────────────────────
-    const barY       = labelY + 28;
-    const barW       = iW;
-    const barH       = 8;
-    const plankCrit  = plankRatio < 0.30;
-    const plankWarn  = plankRatio < 0.60;
-    const barColor   = plankCrit ? '#dd3333' : plankWarn ? '#dd9922' : '#33aa55';
+    // ── Deck health bar ───────────────────────────────────────────────────
+    const barY      = labelY + 28;
+    const barW      = iW;
+    const barH      = 8;
+    const plankCrit = plankRatio < 0.30;
+    const plankWarn = plankRatio < 0.60;
+    const barColor  = plankCrit ? '#dd3333' : plankWarn ? '#dd9922' : '#33aa55';
 
-    // Background track
     ctx.fillStyle = 'rgba(255,255,255,0.10)';
     ctx.fillRect(ix, barY, barW, barH);
 
-    // Filled portion
     ctx.fillStyle = barColor;
     ctx.fillRect(ix, barY, Math.round(barW * plankRatio), barH);
 
-    // Border
     ctx.strokeStyle = plankCrit ? '#ff4444' : 'rgba(255,255,255,0.30)';
     ctx.lineWidth   = 1;
     ctx.strokeRect(ix, barY, barW, barH);
 
-    // Label: "HULL  XX%"
     const hullPct = Math.round(plankRatio * 100);
-    ctx.font         = '9px Consolas, monospace';
+    ctx.font         = '9px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle    = plankCrit ? '#ff5555' : '#778866';
-    ctx.fillText('HULL', ix, barY + barH + 3);
+    ctx.fillText('DECK', ix, barY + barH + 3);
     ctx.textAlign = 'right';
     ctx.fillStyle = plankCrit ? '#ff5555' : '#aabbaa';
     ctx.fillText(`${hullPct}%`, ix + barW, barY + barH + 3);
@@ -2167,7 +2891,7 @@ class DebugOverlayElement implements UIElement {
     
     // Debug text
     ctx.fillStyle = '#00ff00';
-    ctx.font = '14px monospace';
+    ctx.font = '14px Georgia, serif';
     ctx.textAlign = 'left';
     
     const debugLines = [
@@ -2211,7 +2935,7 @@ class NetworkStatsElement implements UIElement {
     ctx.fillRect(ctx.canvas.width - 220, 10, 210, 120);
     
     ctx.fillStyle = '#00ffff';
-    ctx.font = '14px monospace';
+    ctx.font = '14px Georgia, serif';
     ctx.textAlign = 'left';
     
     const networkLines = [
@@ -2242,7 +2966,7 @@ class ControlHintsElement implements UIElement {
     ctx.fillRect(10, ctx.canvas.height - 120, 300, 110);
     
     ctx.fillStyle = '#ffff00';
-    ctx.font = '12px Arial';
+    ctx.font = '12px Georgia, serif';
     ctx.textAlign = 'left';
     
     const controlLines = [

@@ -118,7 +118,7 @@ export class DebugOverlay {
   private setupOverlayStyles(ctx: CanvasRenderingContext2D): void {
     ctx.fillStyle = this.config.backgroundColor;
     ctx.globalAlpha = this.config.overlayOpacity;
-    ctx.font = '12px monospace';
+    ctx.font = '12px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
   }

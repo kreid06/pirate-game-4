@@ -11,7 +11,7 @@
 #include <string.h>
 
 // Static buffer for JSON responses (to avoid dynamic allocation)
-static char json_buffer[8192];
+static char json_buffer[32768];
 
 int admin_api_status(struct HttpResponse* resp, const struct Sim* sim,
                     const struct NetworkManager* net_mgr) {
@@ -196,7 +196,7 @@ int admin_api_physics_objects(struct HttpResponse* resp, const struct Sim* sim) 
         total_objects,
         collisions_per_second,
         (float)FIXED_DT_Q16 / Q16_ONE,
-        -4096.0f, -4096.0f, 4096.0f, 4096.0f // World bounds
+        -500.0f, -500.0f, 9500.0f, 8500.0f // World bounds (client pixel space)
     );
     
     if (len >= (int)sizeof(json_buffer)) return -1;
@@ -423,7 +423,7 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
         "  ],\n  \"islands\": [\n");
 
     // Islands (static world data from ISLAND_PRESETS)
-    for (int ii = 0; ii < ISLAND_COUNT && offset < (int)sizeof(json_buffer) - 400; ii++) {
+    for (int ii = 0; ii < ISLAND_COUNT && offset < (int)sizeof(json_buffer) - 2048; ii++) {
         const IslandDef *isl = &ISLAND_PRESETS[ii];
         if (ii > 0)
             offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, ",\n");
@@ -432,7 +432,7 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
             ",\"beachRadius\":%.2f,\"grassRadius\":%.2f"
             ",\"beachMaxBump\":%.2f,\"grassMaxBump\":%.2f"
             ",\"beachBumps\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]"
-            ",\"grassBumps\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]}",
+            ",\"grassBumps\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
             isl->id, isl->x, isl->y,
             isl->beach_radius_px, isl->grass_radius_px,
             isl->beach_max_bump, isl->grass_max_bump,
@@ -445,8 +445,45 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
             isl->grass_bumps[8],  isl->grass_bumps[9],  isl->grass_bumps[10], isl->grass_bumps[11],
             isl->grass_bumps[12], isl->grass_bumps[13], isl->grass_bumps[14], isl->grass_bumps[15]
         );
+        /* Polygon islands: append vertices array */
+        if (isl->vertex_count > 0) {
+            offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, ",\"vertices\":[");
+            for (int vi = 0; vi < isl->vertex_count && offset < (int)sizeof(json_buffer) - 64; vi++) {
+                offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+                    "%s{\"x\":%.1f,\"y\":%.1f}",
+                    vi ? "," : "",
+                    isl->x + isl->vx[vi], isl->y + isl->vy[vi]);
+            }
+            offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, "]");
+        }
+        offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, "}");
     }
 
+    /* Placed structures (shipyards etc.) */
+    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+        "\n  ],\n  \"structures\": [\n");
+    {
+        PlacedStructure *ps = NULL;
+        uint32_t ps_count = 0;
+        bool ps_first = true;
+        if (websocket_server_get_placed_structures(&ps, &ps_count) == 0) {
+            for (uint32_t si = 0; si < ps_count && offset < (int)sizeof(json_buffer) - 256; si++) {
+                if (!ps[si].active) continue;
+                const char *stype =
+                    ps[si].type == STRUCT_WOODEN_FLOOR ? "wooden_floor" :
+                    ps[si].type == STRUCT_WORKBENCH    ? "workbench" :
+                    ps[si].type == STRUCT_WALL         ? "wall" :
+                    ps[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
+                    ps[si].type == STRUCT_DOOR         ? "door" :
+                    ps[si].type == STRUCT_SHIPYARD     ? "shipyard" : "unknown";
+                offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+                    "%s    {\"id\":%u,\"type\":\"%s\",\"x\":%.2f,\"y\":%.2f,\"rotation\":%.2f}",
+                    ps_first ? "" : ",\n",
+                    ps[si].id, stype, ps[si].x, ps[si].y, ps[si].rotation);
+                ps_first = false;
+            }
+        }
+    }
     offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
         "\n  ]\n}\n");
 
@@ -454,7 +491,7 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
     resp->content_type = "application/json";
     resp->body = json_buffer;
     resp->body_length = offset;
-    resp->cache_control = true;
+    resp->cache_control = false;  /* always fresh — map data changes every tick */
     
     return 0;
 }
@@ -681,7 +718,7 @@ int admin_api_input_tiers(struct HttpResponse* resp) {
 int admin_api_create_ship(struct HttpResponse* resp, float x, float y, uint8_t company) {
     if (!resp) return -1;
 
-    uint32_t new_id = websocket_server_create_ship(x, y, company);
+    uint32_t new_id = websocket_server_create_ship(x, y, company, 0xFF);
 
     int len;
     if (new_id == 0) {
@@ -752,5 +789,145 @@ int admin_api_set_player_company(struct HttpResponse* resp, uint32_t player_id, 
     resp->body = json_buffer;
     resp->body_length = (size_t)len;
     resp->cache_control = false;
+    return 0;
+}
+
+/* Island schema endpoint — returns shape vertices + metadata for all islands.
+ * Used by the standalone island editor to keep itself in sync with the server. */
+static char islands_json_buffer[262144]; /* 256KB — accommodates large polygon islands */
+
+int admin_api_islands(struct HttpResponse* resp) {
+    if (!resp) return -1;
+
+#define ISL_APPEND(...) do { \
+    if (pos < buf_size - 1) \
+        pos += snprintf(islands_json_buffer + pos, (size_t)(buf_size - pos), __VA_ARGS__); \
+} while(0)
+
+    int pos = 0;
+    int buf_size = (int)sizeof(islands_json_buffer);
+    ISL_APPEND("{\"islands\":[");
+
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        const IslandDef *isl = &ISLAND_PRESETS[ii];
+        if (pos >= buf_size - 8192) {
+            /* Buffer nearly full — stop safely */
+            break;
+        }
+        if (ii > 0)
+            ISL_APPEND(",");
+
+        ISL_APPEND("{\"id\":%d,\"cx\":%.1f,\"cy\":%.1f,\"preset\":\"%s\"",
+            isl->id, isl->x, isl->y, isl->preset);
+
+        if (isl->vertex_count > 0) {
+            /* Polygon island — emit shape vertices as local offsets from centre */
+            ISL_APPEND(",\"grassPolyScale\":%.4f,\"vertexCount\":%d,\"outerVerts\":[",
+                isl->grass_poly_scale, isl->vertex_count);
+            for (int vi = 0; vi < isl->vertex_count; vi++) {
+                if (vi > 0) ISL_APPEND(",");
+                ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->vx[vi], isl->vy[vi]);
+            }
+            ISL_APPEND("]");
+            if (isl->grass_vertex_count > 0) {
+                ISL_APPEND(",\"grassVertCount\":%d,\"grassVerts\":[", isl->grass_vertex_count);
+                for (int vi = 0; vi < isl->grass_vertex_count; vi++) {
+                    if (vi > 0) ISL_APPEND(",");
+                    ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->gvx[vi], isl->gvy[vi]);
+                }
+                ISL_APPEND("]");
+            }
+            if (isl->shallow_vertex_count > 0) {
+                ISL_APPEND(",\"shallowVertCount\":%d,\"shallowVerts\":[", isl->shallow_vertex_count);
+                for (int vi = 0; vi < isl->shallow_vertex_count; vi++) {
+                    if (vi > 0) ISL_APPEND(",");
+                    ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->svx[vi], isl->svy[vi]);
+                }
+                ISL_APPEND("]");
+            }
+        } else {
+            /* Bump-circle island */
+            ISL_APPEND(",\"beachRadius\":%.1f,\"grassRadius\":%.1f",
+                isl->beach_radius_px, isl->grass_radius_px);
+        }
+
+        ISL_APPEND("}");
+    }
+
+    ISL_APPEND("]}");
+
+#undef ISL_APPEND
+
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = islands_json_buffer;
+    resp->body_length = (size_t)pos;
+    resp->cache_control = false;
+    return 0;
+}
+
+/* ── Island save endpoint ────────────────────────────────────────────────── *
+ * POST /api/islands/save                                                      *
+ * Body: the full island JSON schema (same format as the editor export).       *
+ * Writes to data/islands/island_<id>.json on the server filesystem.          */
+static char save_resp_buf[256];
+
+int admin_api_islands_save(struct HttpResponse *resp, const char *body, size_t body_len)
+{
+    if (!resp || !body || body_len == 0) {
+        resp->status_code = 400;
+        resp->body = (char *)"{\"error\":\"empty body\"}";
+        resp->body_length = 21;
+        resp->content_type = "application/json";
+        return -1;
+    }
+
+    const char *id_ptr = strstr(body, "\"islandId\"");
+    if (!id_ptr) {
+        resp->status_code = 400;
+        resp->body = (char *)"{\"error\":\"missing islandId\"}";
+        resp->body_length = 27;
+        resp->content_type = "application/json";
+        return -1;
+    }
+    id_ptr = strchr(id_ptr, ':');
+    if (!id_ptr) {
+        resp->status_code = 400;
+        resp->body = (char *)"{\"error\":\"malformed islandId\"}";
+        resp->body_length = 29;
+        resp->content_type = "application/json";
+        return -1;
+    }
+    int island_id = atoi(id_ptr + 1);
+    if (island_id <= 0) {
+        resp->status_code = 400;
+        resp->body = (char *)"{\"error\":\"invalid islandId\"}";
+        resp->body_length = 27;
+        resp->content_type = "application/json";
+        return -1;
+    }
+
+    char path[256];
+    snprintf(path, sizeof(path), "data/islands/island_%d.json", island_id);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        int len = snprintf(save_resp_buf, sizeof(save_resp_buf),
+                           "{\"error\":\"cannot write %s\"}", path);
+        resp->status_code = 500;
+        resp->body = save_resp_buf;
+        resp->body_length = (size_t)len;
+        resp->content_type = "application/json";
+        return -1;
+    }
+    fwrite(body, 1, body_len, f);
+    fclose(f);
+
+    int len = snprintf(save_resp_buf, sizeof(save_resp_buf),
+                       "{\"ok\":true,\"file\":\"%s\"}", path);
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = save_resp_buf;
+    resp->body_length = (size_t)len;
     return 0;
 }

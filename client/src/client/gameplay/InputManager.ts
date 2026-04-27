@@ -68,18 +68,36 @@ export class InputManager {
   private currentInputFrame: InputFrame;
   private inputFrameCounter = 0;
   private playerPosition: Vec2 = Vec2.zero();
+
+  // Stored bound handlers so removeEventListeners can actually remove them
+  private boundOnKeyDown!: (e: KeyboardEvent) => void;
+  private boundOnKeyUp!: (e: KeyboardEvent) => void;
+  private boundOnMouseMove!: (e: MouseEvent) => void;
+  private boundOnMouseDown!: (e: MouseEvent) => void;
+  private boundOnMouseUp!: (e: MouseEvent) => void;
+  private boundOnMouseWheel!: (e: WheelEvent) => void;
+  private boundOnContextMenu!: (e: MouseEvent) => void;
+  private boundOnBlur!: () => void;
+  private boundOnVisibilityChange!: () => void;
+  private boundOnGamepadConnected!: (e: GamepadEvent) => void;
+  private boundOnGamepadDisconnected!: (e: GamepadEvent) => void;
+
+  // Movement heartbeat — resend current movement every 150ms while keys are held
+  // so the server's inactivity timeout doesn't fire during sustained keypresses.
+  private movementHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly MOVEMENT_HEARTBEAT_INTERVAL = 150;
   
   // Event callbacks
   public onInputFrame: ((inputFrame: InputFrame) => void) | null = null;
   
   // HYBRID PROTOCOL: Callbacks for state changes
-  public onMovementStateChange: ((movement: Vec2, isMoving: boolean) => void) | null = null;
+  public onMovementStateChange: ((movement: Vec2, isMoving: boolean, isSprinting: boolean) => void) | null = null;
   public onRotationUpdate: ((rotation: number) => void) | null = null;
   public onActionEvent: ((action: string, target?: Vec2) => void) | null = null;
   
   // Ship control callbacks (when mounted to helm)
   public onShipSailControl: ((desiredOpenness: number) => void) | null = null;
-  public onShipRudderControl: ((turningLeft: boolean, turningRight: boolean) => void) | null = null;
+  public onShipRudderControl: ((turningLeft: boolean, turningRight: boolean, movingBackward: boolean) => void) | null = null;
   public onShipSailAngleControl: ((desiredAngle: number) => void) | null = null;
   
   // Cannon control callbacks
@@ -120,6 +138,7 @@ export class InputManager {
 
   // Explicit build mode (toggled with B key — independent of hotbar items)
   public explicitBuildMode: boolean = false;
+  public islandBuildMode: boolean = false;
   public onBuildModeToggle: (() => void) | null = null;
   public onToggleAllLadders: (() => void) | null = null;
   public onBuildRotate: ((deltaDeg: number) => void) | null = null;
@@ -134,9 +153,18 @@ export class InputManager {
 
   // Camera zoom callback
   public onZoom: ((factor: number, screenPoint: Vec2) => void) | null = null;
+
+  // UI overlay input hooks — called before game input is processed
+  /** Called on every mousemove so overlays (e.g. world map) can update drag state. */
+  public onUIMouseMove: ((x: number, y: number) => void) | null = null;
+  /** Called on left mouse-up so overlays can end drag. */
+  public onUIMouseUp: ((x: number, y: number) => void) | null = null;
+  /** Called before onZoom — if returns true, zoom is consumed by UI (e.g. world map). */
+  public onUIWheel: ((deltaY: number, x: number, y: number) => boolean) | null = null;
   
   // HYBRID PROTOCOL: State tracking for change detection
   private previousMovementState: Vec2 = Vec2.zero();
+  private previousSprintState: boolean = false;
   private lastSentRotation: number = 0;
   private readonly ROTATION_THRESHOLD = 0.0524; // 3 degrees in radians
   
@@ -166,7 +194,7 @@ export class InputManager {
   }
   private currentSailOpenness: number = 100; // Start at 100% (full sails)
   private currentSailAngle: number = 0; // Start at 0 degrees
-  private lastRudderState: { left: boolean; right: boolean } = { left: false, right: false };
+  private lastRudderState: { left: boolean; right: boolean; backward: boolean } = { left: false, right: false, backward: false };
   private lastSailOpenness: number = 100;
   private lastSailAngle: number = 0;
   private lastSailOpennessChangeTime: number = 0; // Track last sail openness change
@@ -300,13 +328,24 @@ export class InputManager {
     
     // HYBRID PROTOCOL: Detect movement state changes
     const currentMovement = this.currentInputFrame.movement;
-    if (!currentMovement.equals(this.previousMovementState)) {
+    const isSprinting = this.isShiftHeld() && this.isActionActive('move_forward');
+    const movementChanged = !currentMovement.equals(this.previousMovementState);
+    const sprintChanged = isSprinting !== this.previousSprintState;
+    if (movementChanged || sprintChanged) {
       const isMoving = currentMovement.lengthSq() > 0.01;
       if (this.onMovementStateChange) {
-        this.onMovementStateChange(currentMovement, isMoving);
+        this.onMovementStateChange(currentMovement, isMoving, isSprinting);
         this.lastStopSentTime = Date.now();
       }
       this.previousMovementState = currentMovement.clone();
+      this.previousSprintState = isSprinting;
+
+      // Start or stop heartbeat based on whether we're now moving
+      if (isMoving) {
+        this.startMovementHeartbeat();
+      } else {
+        this.stopMovementHeartbeat();
+      }
     }
     
     // HYBRID PROTOCOL: Detect if player released keys but is still moving (server-side friction)
@@ -318,7 +357,7 @@ export class InputManager {
     if (noInput && stillMoving && timeSinceLastStop > this.STOP_RESEND_INTERVAL) {
       // Player released keys but server hasn't stopped them yet - resend stop
       if (this.onMovementStateChange) {
-        this.onMovementStateChange(Vec2.zero(), false);
+        this.onMovementStateChange(Vec2.zero(), false, false);
         this.lastStopSentTime = Date.now();
       }
     }
@@ -385,7 +424,8 @@ export class InputManager {
    * Set current ship rotation (for ship-relative cannon aiming)
    */
   setCurrentShipRotation(rotation: number): void {
-    this.currentShipRotation = rotation;
+    // Guard against Infinity / -Infinity (|| 0 only catches NaN, not Infinity)
+    this.currentShipRotation = Number.isFinite(rotation) ? rotation : 0;
   }
   
   /**
@@ -454,7 +494,7 @@ export class InputManager {
         this.lastSailOpenness    = seeded;
         this.currentSailAngle = 0;
         this.lastSailAngle = 0;
-        this.lastRudderState = { left: false, right: false };
+        this.lastRudderState = { left: false, right: false, backward: false };
         this.lastSailOpennessChangeTime = 0;
         this.lastSailAngleChangeTime = 0;
         this.activeAmmoGroup = 'cannon';
@@ -488,20 +528,23 @@ export class InputManager {
     
     // Rudder control (A/D without shift)
     if (!shiftPressed) {
-      const turningLeft = this.isActionActive('move_left');   // A key
-      const turningRight = this.isActionActive('move_right'); // D key
+      const turningLeft = this.isActionActive('ship_move_left');
+      const turningRight = this.isActionActive('ship_move_right');
+      const movingBackward = this.isActionActive('ship_move_backward');
       
-      // Send rudder control if state changed
-      if (turningLeft !== this.lastRudderState.left || turningRight !== this.lastRudderState.right) {
+      // Send rudder control if any state changed
+      if (turningLeft !== this.lastRudderState.left ||
+          turningRight !== this.lastRudderState.right ||
+          movingBackward !== this.lastRudderState.backward) {
         if (this.onShipRudderControl) {
-          this.onShipRudderControl(turningLeft, turningRight);
+          this.onShipRudderControl(turningLeft, turningRight, movingBackward);
         }
-        this.lastRudderState = { left: turningLeft, right: turningRight };
+        this.lastRudderState = { left: turningLeft, right: turningRight, backward: movingBackward };
       }
       
       // Sail openness control (W/S without shift)
-      const openSails = this.isActionActive('move_forward');   // W key
-      const closeSails = this.isActionActive('move_backward'); // S key
+      const openSails = this.isActionActive('ship_move_forward');
+      const closeSails = this.isActionActive('ship_move_backward');
       const currentTime = Date.now();
       
       // Check cooldown before allowing sail openness change
@@ -528,8 +571,8 @@ export class InputManager {
       }
     } else {
       // Sail angle control (Shift+A/D)
-      const rotateLeft = this.isActionActive('move_left');   // Shift+A
-      const rotateRight = this.isActionActive('move_right'); // Shift+D
+      const rotateLeft = this.isActionActive('ship_move_left');
+      const rotateRight = this.isActionActive('ship_move_right');
       const currentTime = Date.now();
       
       // Check cooldown before allowing sail angle change
@@ -556,8 +599,8 @@ export class InputManager {
       }
     }
     
-    // Handle interact key (E) to dismount
-    if (this.isActionActive('interact') && this.canInteract()) {
+    // Handle interact key to dismount helm
+    if (this.isActionActive('ship_interact') && this.canInteract()) {
       this.lastInteractionTime = Date.now();
       if (this.onActionEvent) {
         this.onActionEvent('dismount');
@@ -589,23 +632,18 @@ export class InputManager {
     const dx = this.inputState.mouseWorldPosition.x - this.playerPosition.x;
     const dy = this.inputState.mouseWorldPosition.y - this.playerPosition.y;
 
-    // Only rotate cannons when the mouse is within effective cannonball range.
-    // Beyond this distance the aim angle is physically meaningless.
-    const CANNON_AIM_RANGE = 800; // client units — matches CANNONBALL_RANGE
-    if (dx * dx + dy * dy > CANNON_AIM_RANGE * CANNON_AIM_RANGE) {
-      return;
-    }
-
+    // Always aim toward mouse — no range limit (server enforces fire range separately)
     const aimAngleWorld = Math.atan2(dy, dx);
     
     // Convert to ship-relative angle
     // Ship rotation is the direction the ship is facing
     // We want the angle relative to the ship's forward direction
     let aimAngleRelative = aimAngleWorld - this.currentShipRotation;
-    
-    // Normalize to [-π, π] range
-    while (aimAngleRelative > Math.PI) aimAngleRelative -= 2 * Math.PI;
-    while (aimAngleRelative < -Math.PI) aimAngleRelative += 2 * Math.PI;
+
+    // Normalize to [-π, π] — O(1), immune to ±Infinity / NaN
+    if (!Number.isFinite(aimAngleRelative)) return;
+    const TWO_PI = 2 * Math.PI;
+    aimAngleRelative -= TWO_PI * Math.floor((aimAngleRelative + Math.PI) / TWO_PI);
     
     // Only send if aim changed significantly (>1 degree)
     const ANGLE_THRESHOLD = 0.017; // ~1 degree in radians
@@ -729,6 +767,7 @@ export class InputManager {
    * Shutdown input manager
    */
   shutdown(): void {
+    this.stopMovementHeartbeat();
     this.removeEventListeners();
     console.log('🎮 Input manager shutdown');
   }
@@ -736,34 +775,69 @@ export class InputManager {
   // Private methods
   
   private setupEventListeners(): void {
+    // Bind and store handlers so they can be properly removed later
+    this.boundOnKeyDown = this.onKeyDown.bind(this);
+    this.boundOnKeyUp = this.onKeyUp.bind(this);
+    this.boundOnMouseMove = this.onMouseMove.bind(this);
+    this.boundOnMouseDown = this.onMouseDown.bind(this);
+    this.boundOnMouseUp = this.onMouseUp.bind(this);
+    this.boundOnMouseWheel = this.onMouseWheel.bind(this);
+    this.boundOnContextMenu = this.onContextMenu.bind(this);
+    this.boundOnGamepadConnected = this.onGamepadConnected.bind(this);
+    this.boundOnGamepadDisconnected = this.onGamepadDisconnected.bind(this);
+
     // Keyboard events
-    window.addEventListener('keydown', this.onKeyDown.bind(this));
-    window.addEventListener('keyup', this.onKeyUp.bind(this));
+    window.addEventListener('keydown', this.boundOnKeyDown);
+    window.addEventListener('keyup', this.boundOnKeyUp);
     
     // Mouse events
-    this.canvas.addEventListener('mousemove', this.onMouseMove.bind(this));
-    this.canvas.addEventListener('mousedown', this.onMouseDown.bind(this));
-    this.canvas.addEventListener('mouseup', this.onMouseUp.bind(this));
-    this.canvas.addEventListener('wheel', this.onMouseWheel.bind(this));
-    this.canvas.addEventListener('contextmenu', this.onContextMenu.bind(this));
+    this.canvas.addEventListener('mousemove', this.boundOnMouseMove);
+    this.canvas.addEventListener('mousedown', this.boundOnMouseDown);
+    this.canvas.addEventListener('mouseup', this.boundOnMouseUp);
+    this.canvas.addEventListener('wheel', this.boundOnMouseWheel);
+    this.canvas.addEventListener('contextmenu', this.boundOnContextMenu);
     
+    // Clear all input when the window loses focus (prevents stuck keys on tab-out)
+    this.boundOnBlur = () => this.clearAllInput();
+    this.boundOnVisibilityChange = () => { if (document.hidden) this.clearAllInput(); };
+    window.addEventListener('blur', this.boundOnBlur);
+    document.addEventListener('visibilitychange', this.boundOnVisibilityChange);
+
     // Gamepad events (future)
-    window.addEventListener('gamepadconnected', this.onGamepadConnected.bind(this));
-    window.addEventListener('gamepaddisconnected', this.onGamepadDisconnected.bind(this));
+    window.addEventListener('gamepadconnected', this.boundOnGamepadConnected);
+    window.addEventListener('gamepaddisconnected', this.boundOnGamepadDisconnected);
     
     console.log('🎮 Input event listeners setup');
   }
   
   private removeEventListeners(): void {
-    window.removeEventListener('keydown', this.onKeyDown.bind(this));
-    window.removeEventListener('keyup', this.onKeyUp.bind(this));
-    this.canvas.removeEventListener('mousemove', this.onMouseMove.bind(this));
-    this.canvas.removeEventListener('mousedown', this.onMouseDown.bind(this));
-    this.canvas.removeEventListener('mouseup', this.onMouseUp.bind(this));
-    this.canvas.removeEventListener('wheel', this.onMouseWheel.bind(this));
-    this.canvas.removeEventListener('contextmenu', this.onContextMenu.bind(this));
-    window.removeEventListener('gamepadconnected', this.onGamepadConnected.bind(this));
-    window.removeEventListener('gamepaddisconnected', this.onGamepadDisconnected.bind(this));
+    window.removeEventListener('keydown', this.boundOnKeyDown);
+    window.removeEventListener('keyup', this.boundOnKeyUp);
+    this.canvas.removeEventListener('mousemove', this.boundOnMouseMove);
+    this.canvas.removeEventListener('mousedown', this.boundOnMouseDown);
+    this.canvas.removeEventListener('mouseup', this.boundOnMouseUp);
+    this.canvas.removeEventListener('wheel', this.boundOnMouseWheel);
+    this.canvas.removeEventListener('contextmenu', this.boundOnContextMenu);
+    window.removeEventListener('blur', this.boundOnBlur);
+    document.removeEventListener('visibilitychange', this.boundOnVisibilityChange);
+    window.removeEventListener('gamepadconnected', this.boundOnGamepadConnected);
+    window.removeEventListener('gamepaddisconnected', this.boundOnGamepadDisconnected);
+  }
+
+  /** Clear all pressed keys and send a stop — called on blur/visibility-hidden. */
+  private clearAllInput(): void {
+    this.inputState.pressedKeys.clear();
+    this.inputState.leftMouseDown = false;
+    this.inputState.rightMouseDown = false;
+    for (const mapping of this.actionMappings) {
+      mapping.pressed = false;
+    }
+    this.stopMovementHeartbeat();
+    if (this.onMovementStateChange) {
+      this.onMovementStateChange(Vec2.zero(), false, false);
+    }
+    this.previousMovementState = Vec2.zero();
+    this.previousSprintState = false;
   }
   
   private setupActionMappings(): void {
@@ -893,6 +967,11 @@ export class InputManager {
       actions |= PlayerActions.DESTROY_PLANK;
     }
     
+    // Sprint action (Shift + forward key)
+    if (this.isShiftHeld() && this.isActionActive('move_forward')) {
+      actions |= PlayerActions.SPRINT;
+    }
+    
     return actions;
   }
   
@@ -903,6 +982,30 @@ export class InputManager {
   
   private resetFrameFlags(): void {
     this.inputState.leftMouseReleased = false;
+  }
+
+  /** Start a repeating heartbeat that refreshes the server's movement state while keys are held. */
+  private startMovementHeartbeat(): void {
+    if (this.movementHeartbeatTimer !== null) return; // already running
+    this.movementHeartbeatTimer = setInterval(() => {
+      const m = this.previousMovementState;
+      const isMoving = m.lengthSq() > 0.01;
+      if (!isMoving) {
+        this.stopMovementHeartbeat();
+        return;
+      }
+      const sprint = this.previousSprintState;
+      if (this.onMovementStateChange) {
+        this.onMovementStateChange(m, true, sprint);
+      }
+    }, this.MOVEMENT_HEARTBEAT_INTERVAL);
+  }
+
+  private stopMovementHeartbeat(): void {
+    if (this.movementHeartbeatTimer !== null) {
+      clearInterval(this.movementHeartbeatTimer);
+      this.movementHeartbeatTimer = null;
+    }
   }
   
   private updateGamepad(): void {
@@ -963,12 +1066,12 @@ export class InputManager {
         event.preventDefault();
         break;
       case 'KeyR':
-        // In explicit build mode OR plan mode (build menu open): rotate the placement ghost.
+        // In explicit build mode, plan mode, or island build mode: rotate the placement ghost.
         // Otherwise: repair sail fibers on the hovered damaged mast.
-        if ((this.explicitBuildMode || this.buildMenuOpen) && this.onBuildRotate) {
+        if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
           this.onBuildRotate(15);
           event.preventDefault();
-        } else if (!this.explicitBuildMode && !this.buildMenuOpen && this.onRepairSail) {
+        } else if (!this.explicitBuildMode && !this.buildMenuOpen && !this.islandBuildMode && this.onRepairSail) {
           this.onRepairSail();
           event.preventDefault();
         }
@@ -1044,9 +1147,16 @@ export class InputManager {
           event.preventDefault();
         }
         break;
-      case 'KeyQ':
+      case 'KeyF':
         if (this.onUnequip) this.onUnequip();
         event.preventDefault();
+        break;
+      case 'KeyQ':
+        // In build mode or island build mode: rotate ghost left; otherwise no-op
+        if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
+          this.onBuildRotate(-15);
+          event.preventDefault();
+        }
         break;
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
@@ -1147,6 +1257,9 @@ export class InputManager {
       event.clientX - rect.left,
       event.clientY - rect.top
     );
+    if (this.onUIMouseMove) {
+      this.onUIMouseMove(this.inputState.mousePosition.x, this.inputState.mousePosition.y);
+    }
   }
   
   private onMouseDown(event: MouseEvent): void {
@@ -1253,6 +1366,7 @@ export class InputManager {
     if (event.button === 0) { // Left mouse button
       this.inputState.leftMouseDown = false;
       this.inputState.leftMouseReleased = true;
+      if (this.onUIMouseUp) this.onUIMouseUp(event.offsetX, event.offsetY);
       // Stop liquid flame stream if running
       if (this.flameStreamTimer !== null) {
         clearInterval(this.flameStreamTimer);
@@ -1276,14 +1390,17 @@ export class InputManager {
   
   private onMouseWheel(event: WheelEvent): void {
     event.preventDefault();
-    if (!this.onZoom) return;
 
     const rect = this.canvas.getBoundingClientRect();
-    const screenPoint = Vec2.from(
-      event.clientX - rect.left,
-      event.clientY - rect.top
-    );
+    const cx = event.clientX - rect.left;
+    const cy = event.clientY - rect.top;
 
+    // Let UI overlays consume the wheel event first (e.g. world map zoom)
+    if (this.onUIWheel && this.onUIWheel(event.deltaY, cx, cy)) return;
+
+    if (!this.onZoom) return;
+
+    const screenPoint = Vec2.from(cx, cy);
     // deltaY > 0 = scroll down = zoom out, < 0 = scroll up = zoom in
     const zoomFactor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
     this.onZoom(zoomFactor, screenPoint);

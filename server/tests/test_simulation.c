@@ -31,8 +31,8 @@ void test_deterministic_simulation(void) {
     assert(sim_init(&sim2, &config) == 0);
     
     // Create identical test scenarios
-    entity_id ship1_id = sim_create_ship(&sim1, (Vec2Q16){Q16_FROM_FLOAT(0.0f), Q16_FROM_FLOAT(0.0f)}, 0);
-    entity_id ship2_id = sim_create_ship(&sim2, (Vec2Q16){Q16_FROM_FLOAT(0.0f), Q16_FROM_FLOAT(0.0f)}, 0);
+    entity_id ship1_id = sim_create_ship(&sim1, (Vec2Q16){Q16_FROM_FLOAT(0.0f), Q16_FROM_FLOAT(0.0f)}, 0, 0xFF);
+    entity_id ship2_id = sim_create_ship(&sim2, (Vec2Q16){Q16_FROM_FLOAT(0.0f), Q16_FROM_FLOAT(0.0f)}, 0, 0xFF);
     assert(ship1_id == ship2_id);
     
     entity_id player1_id = sim_create_player(&sim1, (Vec2Q16){Q16_FROM_FLOAT(0.0f), Q16_FROM_FLOAT(0.0f)}, ship1_id);
@@ -205,7 +205,7 @@ void test_performance_benchmark(void) {
     
     for (int i = 0; i < NUM_SHIPS; i++) {
         Vec2Q16 pos = {Q16_FROM_FLOAT(i * 50.0f), Q16_FROM_FLOAT(0.0f)};
-        sim_create_ship(&sim, pos, Q16_FROM_FLOAT(i * 0.1f));
+        sim_create_ship(&sim, pos, Q16_FROM_FLOAT(i * 0.1f), 0xFF);
     }
     
     for (int i = 0; i < NUM_PLAYERS; i++) {

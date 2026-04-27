@@ -18,6 +18,7 @@ export const PlayerActions = {
   INTERACT: 1 << 1,      // Interact with modules
   DISMOUNT: 1 << 2,      // Dismount from modules
   DESTROY_PLANK: 1 << 3, // Destroy nearby planks
+  SPRINT: 1 << 4,        // Sprint (Shift+W, land/deck only)
   // Add more actions as needed
 } as const;
 
@@ -33,6 +34,9 @@ export function simulate(prevWorld: WorldState, inputFrame: InputFrame, dt: numb
     players: prevWorld.players.map(player => ({ ...player })),
     cannonballs: prevWorld.cannonballs.map(cb => ({ ...cb })),
     npcs: prevWorld.npcs ?? [],
+    tombstones: prevWorld.tombstones ?? [],
+    droppedItems: prevWorld.droppedItems ?? [],
+    companies: prevWorld.companies ?? [],
     timestamp: prevWorld.timestamp + dt * 1000,
     carrierDetection: new Map(prevWorld.carrierDetection)
   };
@@ -120,13 +124,9 @@ function updateShipPhysics(ship: Ship, dt: number): void {
   // Apply steering force with speed-dependent effectiveness
   const baseAngularAcceleration = 1.5; // Base turning force
   const effectiveSteeringForce = steeringInput * turningEffectiveness;
-  const angularDamping = 0.92; // Damping factor
   
-  // Apply steering force
+  // Apply steering force (drag is handled below in the hydrodynamic section)
   ship.angularVelocity += effectiveSteeringForce * baseAngularAcceleration * dt;
-  
-  // Apply angular damping
-  ship.angularVelocity *= angularDamping;
   
   // Update rotation
   ship.rotation = AngleUtils.wrap(ship.rotation + ship.angularVelocity * dt);
@@ -160,22 +160,30 @@ function updateShipPhysics(ship: Ship, dt: number): void {
   // Apply acceleration to velocity
   ship.velocity = ship.velocity.add(acceleration.mul(dt));
   
-  // Apply water drag (server physics property, typically 0.98)
-  // This must be applied BEFORE integration as per server guide
-  ship.velocity = ship.velocity.mul(ship.waterDrag);
-  
-  // Clamp linear speed to maxSpeed (server physics property)
-  // This must be applied AFTER integration as per server guide
-  const speed = ship.velocity.length();
-  if (speed > ship.maxSpeed) {
-    ship.velocity = ship.velocity.mul(ship.maxSpeed / speed);
+  // ── Hydrodynamic drag (linear + quadratic) ──────────────────────────
+  // Linear term: low-speed hull friction.
+  // Quadratic term: wave-making resistance — dominates at speed and
+  // naturally caps velocity without a hard clamp.
+  //
+  //   drag_factor = 1 − (c_lin + c_quad · |v|)
+  //
+  // At equilibrium, thrust_accel·dt = |v|·(c_lin + c_quad·|v|), giving
+  // a natural top speed the ship can never exceed.
+  {
+    const C_LIN_V  = 0.012;   // base linear drag (~1.2 % per frame)
+    const C_QUAD_V = 0.0006;  // quadratic coefficient (stronger at high speed)
+    const C_LIN_W  = 0.03;    // angular linear drag
+    const C_QUAD_W = 0.10;    // angular quadratic drag
+    const MIN_DRAG = 0.60;    // safety floor
+
+    const spd = ship.velocity.length();
+    const dragV = Math.max(1 - (C_LIN_V + C_QUAD_V * spd), MIN_DRAG);
+    ship.velocity = ship.velocity.mul(dragV);
+
+    const absW = Math.abs(ship.angularVelocity);
+    const dragW = Math.max(1 - (C_LIN_W + C_QUAD_W * absW), MIN_DRAG);
+    ship.angularVelocity *= dragW;
   }
-  
-  // Apply angular drag to rotation velocity (server physics property, typically 0.95)
-  ship.angularVelocity *= ship.angularDrag;
-  
-  // Clamp angular velocity to turnRate (server physics property)
-  ship.angularVelocity = Math.max(-ship.turnRate, Math.min(ship.turnRate, ship.angularVelocity));
   
   // Note: Position integration is now handled separately in the collision loop
 }
@@ -311,7 +319,9 @@ function updatePlayerOnDeck(player: Player, ship: Ship, inputFrame: InputFrame, 
   const carriedPosition = ship.position.add(rotatedRelativePos);
   
   // Step 3: Apply player input (keep in world coordinates - this was working correctly!)
-  const inputLocal = inputFrame.movement.mul(PhysicsConfig.PLAYER_WALK_SPEED);
+  const isSprinting = (inputFrame.actions & PlayerActions.SPRINT) !== 0;
+  const walkSpeed = isSprinting ? PhysicsConfig.PLAYER_WALK_SPEED * PhysicsConfig.PLAYER_SPRINT_MULT : PhysicsConfig.PLAYER_WALK_SPEED;
+  const inputLocal = inputFrame.movement.mul(walkSpeed);
   // Input is already in world coordinates due to camera transformation - don't "enhance" what works!
   const inputWorld = inputLocal;
   
@@ -1067,7 +1077,8 @@ function applyRadialPlankDamage(
   const primaryPlank = planks[primaryPlankIndex];
   if (primaryPlank && primaryPlank.moduleData && primaryPlank.moduleData.kind === 'plank') {
     const plankData = primaryPlank.moduleData;
-    plankData.health = Math.max(0, plankData.health - damage);
+    plankData.health       = Math.max(0, plankData.health       - damage);
+    plankData.targetHealth = Math.max(0, (plankData.targetHealth ?? plankData.maxHealth) - damage);
     
     if (plankData.health <= 0) {
       console.log(`💥 Radial collision destroyed plank ${primaryPlankIndex}! (${damage.toFixed(1)} damage)`);
@@ -1089,14 +1100,16 @@ function applyRadialPlankDamage(
       const leftIndex = (primaryPlankIndex - offset + planks.length) % planks.length;
       const leftPlank = planks[leftIndex];
       if (leftPlank && leftPlank.moduleData && leftPlank.moduleData.kind === 'plank') {
-        leftPlank.moduleData.health = Math.max(0, leftPlank.moduleData.health - spreadDamage);
+        leftPlank.moduleData.health       = Math.max(0, leftPlank.moduleData.health       - spreadDamage);
+        leftPlank.moduleData.targetHealth = Math.max(0, (leftPlank.moduleData.targetHealth ?? leftPlank.moduleData.maxHealth) - spreadDamage);
       }
       
       // Damage plank to the right
       const rightIndex = (primaryPlankIndex + offset) % planks.length;
       const rightPlank = planks[rightIndex];
       if (rightPlank && rightPlank.moduleData && rightPlank.moduleData.kind === 'plank') {
-        rightPlank.moduleData.health = Math.max(0, rightPlank.moduleData.health - spreadDamage);
+        rightPlank.moduleData.health       = Math.max(0, rightPlank.moduleData.health       - spreadDamage);
+        rightPlank.moduleData.targetHealth = Math.max(0, (rightPlank.moduleData.targetHealth ?? rightPlank.moduleData.maxHealth) - spreadDamage);
       }
     }
   }

@@ -15,7 +15,9 @@ import {
   WorldState,
   Npc,
   Ship,
+  Company,
   COMPANY_NEUTRAL,
+  COMPANY_SOLO,
   COMPANY_PIRATES,
   COMPANY_NAVY,
   NPC_STATE_IDLE,
@@ -28,12 +30,14 @@ import {
 
 const COMPANY_NAMES: Record<number, string> = {
   [COMPANY_NEUTRAL]: 'Neutral',
+  [COMPANY_SOLO]:    'Solo',
   [COMPANY_PIRATES]: 'Pirates',
   [COMPANY_NAVY]:    'Navy',
 };
 
 const COMPANY_COLORS: Record<number, string> = {
   [COMPANY_NEUTRAL]: '#aaaaaa',
+  [COMPANY_SOLO]:    '#ffcc44',
   [COMPANY_PIRATES]: '#ff6644',
   [COMPANY_NAVY]:    '#4488ff',
 };
@@ -73,13 +77,124 @@ const GOLD      = '#ffd700';
 export class CompanyMenu {
   public visible = false;
 
+  /** Fired when the player clicks the Leave Company button. */
+  public onLeaveCompany: (() => void) | null = null;
+
+  /** Fired when the player clicks a Join Company button (passes the company id). */
+  public onJoinCompany: ((companyId: number) => void) | null = null;
+
+  /** Fired when the player wants to create a new company with a given name. */
+  public onCreateCompany: ((name: string) => void) | null = null;
+
+  /** Hit area of the Leave Company button — refreshed each render. */
+  private _leaveBtnArea: { x: number; y: number; w: number; h: number } | null = null;
+
+  /** Hit areas for join buttons [{ companyId, x, y, w, h }] — refreshed each render. */
+  private _joinBtnAreas: { companyId: number; x: number; y: number; w: number; h: number }[] = [];
+
+  /** Hit area for the Create Company button — refreshed each render. */
+  private _createBtnArea:  { x: number; y: number; w: number; h: number } | null = null;
+  private _confirmBtnArea: { x: number; y: number; w: number; h: number } | null = null;
+  private _cancelBtnArea:  { x: number; y: number; w: number; h: number } | null = null;
+
+  /** Whether the inline company-name entry form is open. */
+  private _createMode = false;
+  /** Text typed so far for the new company name. */
+  private _createInputText = '';
+
   // ── Toggle ──────────────────────────────────────────────────────────────────
   toggle(): void {
     this.visible = !this.visible;
   }
 
-  open():  void { this.visible = true;  }
-  close(): void { this.visible = false; }
+  /** Returns true if the click landed on a button inside the menu. */
+  handleClick(x: number, y: number): boolean {
+    if (!this.visible) return false;
+
+    // Confirm / cancel while name-entry form is open
+    if (this._createMode) {
+      if (this._confirmBtnArea) {
+        const b = this._confirmBtnArea;
+        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+          this._submitCreate();
+          return true;
+        }
+      }
+      if (this._cancelBtnArea) {
+        const b = this._cancelBtnArea;
+        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+          this._createMode = false;
+          this._createInputText = '';
+          return true;
+        }
+      }
+      return true; // swallow all clicks while form is open
+    }
+
+    if (this._leaveBtnArea) {
+      const b = this._leaveBtnArea;
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+        this.onLeaveCompany?.();
+        return true;
+      }
+    }
+    for (const jb of this._joinBtnAreas) {
+      if (x >= jb.x && x <= jb.x + jb.w && y >= jb.y && y <= jb.y + jb.h) {
+        this.onJoinCompany?.(jb.companyId);
+        return true;
+      }
+    }
+    if (this._createBtnArea) {
+      const b = this._createBtnArea;
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+        this._createMode = true;
+        this._createInputText = '';
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Forward keyboard events here when the menu is visible.
+   * Returns true if the key was consumed (caller should not process it further).
+   */
+  handleKeyDown(key: string): boolean {
+    if (!this.visible || !this._createMode) return false;
+    if (key === 'Escape') {
+      this._createMode = false;
+      this._createInputText = '';
+      return true;
+    }
+    if (key === 'Enter') {
+      this._submitCreate();
+      return true;
+    }
+    if (key === 'Backspace') {
+      this._createInputText = this._createInputText.slice(0, -1);
+      return true;
+    }
+    // Printable single character
+    if (key.length === 1 && this._createInputText.length < 31) {
+      this._createInputText += key;
+      return true;
+    }
+    return true; // consume all keys while form is active
+  }
+
+  private _submitCreate(): void {
+    const name = this._createInputText.trim();
+    this._createMode = false;
+    this._createInputText = '';
+    if (name.length > 0) this.onCreateCompany?.(name);
+  }
+
+  open():  void { this.visible = true; }
+  close(): void {
+    this.visible = false;
+    this._createMode = false;
+    this._createInputText = '';
+  }
 
   // ── Render ──────────────────────────────────────────────────────────────────
   render(
@@ -122,7 +237,7 @@ export class CompanyMenu {
     let cursor = py;
 
     cursor = this._drawHeader(ctx, px, cursor, playerCompany);
-    cursor = this._drawFactionBadge(ctx, px, cursor, playerCompany, player?.id ?? null);
+    cursor = this._drawFactionBadge(ctx, px, cursor, playerCompany, player?.id ?? null, worldState.companies ?? []);
     cursor = this._drawCrewSection(ctx, px, cursor, worldState.npcs, playerShipId);
     cursor = this._drawFleetSection(ctx, px, cursor, worldState.ships, playerCompany, playerShipId);
     this._drawFooter(ctx, px, py, worldState.npcs, worldState.ships, playerCompany);
@@ -149,14 +264,14 @@ export class CompanyMenu {
     ctx.stroke();
 
     // Title
-    ctx.font          = 'bold 17px Consolas, monospace';
+    ctx.font          = 'bold 17px Georgia, serif';
     ctx.textAlign     = 'left';
     ctx.textBaseline  = 'middle';
     ctx.fillStyle     = GOLD;
     ctx.fillText('⚓  COMPANY LEDGER', px + PAD, py + HEADER_H / 2);
 
     // Close hint
-    ctx.font          = '12px Consolas, monospace';
+    ctx.font          = '12px Georgia, serif';
     ctx.textAlign     = 'right';
     ctx.fillStyle     = TEXT_DIM;
     ctx.fillText('[L / ESC] close', px + PANEL_W - PAD, py + HEADER_H / 2);
@@ -169,6 +284,7 @@ export class CompanyMenu {
     px: number, py: number,
     playerCompany: number,
     playerId: number | null,
+    companies: Company[],
   ): number {
     const sectionH = 46;
     py += 4;
@@ -179,23 +295,214 @@ export class CompanyMenu {
     // Faction color swatch
     const swatchX = px + PAD + 8;
     const swatchY = py + (sectionH - 18) / 2;
-    ctx.fillStyle = COMPANY_COLORS[playerCompany] ?? '#aaa';
+    // For dynamic company, look up its color or use a default
+    const dynCompany = companies.find(c => c.id === playerCompany);
+    ctx.fillStyle = COMPANY_COLORS[playerCompany] ?? '#cc88ff';
     ctx.fillRect(swatchX, swatchY, 18, 18);
 
     // Company name
-    ctx.font         = 'bold 16px Consolas, monospace';
+    ctx.font         = 'bold 16px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = TEXT_HEAD;
-    const name = COMPANY_NAMES[playerCompany] ?? `Company ${playerCompany}`;
+    const name = dynCompany ? dynCompany.name : (COMPANY_NAMES[playerCompany] ?? `Company ${playerCompany}`);
     ctx.fillText(name.toUpperCase(), swatchX + 26, py + sectionH / 2);
 
-    // Player ID tag
-    if (playerId != null) {
-      ctx.font      = '13px Consolas, monospace';
+    // Player ID tag (only when not showing the leave or join buttons)
+    const canLeave = playerCompany !== COMPANY_SOLO && playerCompany !== COMPANY_NEUTRAL;
+    const isSolo   = playerCompany === COMPANY_SOLO;
+
+    if (!canLeave && !isSolo && playerId != null) {
+      ctx.font      = '13px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'right';
       ctx.fillText(`Player #${playerId}`, px + PANEL_W - PAD - 8, py + sectionH / 2);
+    }
+
+    // Leave Company button — only shown when in a guild/dynamic company
+    if (canLeave) {
+      const btnW = 120;
+      const btnH = 22;
+      const btnX = px + PANEL_W - PAD - btnW;
+      const btnY = py + (sectionH - btnH) / 2;
+      this._leaveBtnArea = { x: btnX, y: btnY, w: btnW, h: btnH };
+
+      ctx.fillStyle = '#7a1a1a';
+      ctx.fillRect(btnX, btnY, btnW, btnH);
+      ctx.strokeStyle = '#cc4444';
+      ctx.lineWidth   = 1;
+      ctx.strokeRect(btnX, btnY, btnW, btnH);
+
+      ctx.font         = 'bold 12px Georgia, serif';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = '#ff8888';
+      ctx.fillText('LEAVE COMPANY', btnX + btnW / 2, btnY + btnH / 2);
+    } else {
+      this._leaveBtnArea = null;
+    }
+
+    // Reset join/create areas
+    this._joinBtnAreas  = [];
+    this._createBtnArea  = null;
+    this._confirmBtnArea = null;
+    this._cancelBtnArea  = null;
+
+    if (isSolo) {
+      py += sectionH + 4;
+
+      // ── Inline create-company form ────────────────────────────────────────
+      if (this._createMode) {
+        const formH   = 36;
+        const formBg  = 'rgba(10,14,26,0.97)';
+        const inputW  = PANEL_W - PAD * 2 - 160; // leave room for buttons
+        const inputX  = px + PAD;
+        const inputY  = py;
+
+        // Background strip
+        ctx.fillStyle = formBg;
+        ctx.fillRect(px + PAD, inputY, PANEL_W - PAD * 2, formH);
+
+        // Label
+        ctx.font         = 'bold 11px Georgia, serif';
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = TEXT_DIM;
+        ctx.fillText('COMPANY NAME:', inputX + 4, inputY + formH / 2);
+
+        const labelW = 110;
+        const fieldX = inputX + labelW;
+        const fieldW = inputW - labelW;
+        const fieldH = 24;
+        const fieldY = inputY + (formH - fieldH) / 2;
+
+        // Text field box
+        ctx.fillStyle = '#0a0e1a';
+        ctx.fillRect(fieldX, fieldY, fieldW, fieldH);
+        ctx.strokeStyle = '#88aaff';
+        ctx.lineWidth   = 1.5;
+        ctx.strokeRect(fieldX, fieldY, fieldW, fieldH);
+
+        // Typed text + blinking cursor
+        const displayText = this._createInputText + '|';
+        ctx.font         = '13px Georgia, serif';
+        ctx.fillStyle    = '#e8e0cc';
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'middle';
+        // Clip text to field
+        ctx.save();
+        ctx.rect(fieldX + 4, fieldY, fieldW - 8, fieldH);
+        ctx.clip();
+        ctx.fillText(displayText, fieldX + 6, fieldY + fieldH / 2);
+        ctx.restore();
+
+        // CREATE button
+        const cBtnW = 68;
+        const cBtnH = 26;
+        const cBtnX = fieldX + fieldW + 6;
+        const cBtnY = inputY + (formH - cBtnH) / 2;
+        ctx.fillStyle   = '#0f3a1a';
+        ctx.fillRect(cBtnX, cBtnY, cBtnW, cBtnH);
+        ctx.strokeStyle = '#44cc66';
+        ctx.lineWidth   = 1;
+        ctx.strokeRect(cBtnX, cBtnY, cBtnW, cBtnH);
+        ctx.font         = 'bold 11px Georgia, serif';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = '#88ffaa';
+        ctx.fillText('CREATE', cBtnX + cBtnW / 2, cBtnY + cBtnH / 2);
+        this._confirmBtnArea = { x: cBtnX, y: cBtnY, w: cBtnW, h: cBtnH };
+
+        // CANCEL button
+        const xBtnW = 64;
+        const xBtnX = cBtnX + cBtnW + 4;
+        const xBtnY = cBtnY;
+        ctx.fillStyle   = '#2a0f0f';
+        ctx.fillRect(xBtnX, xBtnY, xBtnW, cBtnH);
+        ctx.strokeStyle = '#884444';
+        ctx.lineWidth   = 1;
+        ctx.strokeRect(xBtnX, xBtnY, xBtnW, cBtnH);
+        ctx.fillStyle    = '#ffaaaa';
+        ctx.fillText('CANCEL', xBtnX + xBtnW / 2, xBtnY + cBtnH / 2);
+        this._cancelBtnArea = { x: xBtnX, y: xBtnY, w: xBtnW, h: cBtnH };
+
+        // Hint text below
+        ctx.font         = '11px Georgia, serif';
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle    = TEXT_DIM;
+        ctx.fillText('Type a name and press CREATE or Enter.  ESC to cancel.', inputX + 4, inputY + formH + 4);
+
+        return inputY + formH + 22;
+      }
+
+      // ── Dynamic companies list ────────────────────────────────────────────
+      if (companies.length > 0) {
+        ctx.font      = 'bold 12px Georgia, serif';
+        ctx.fillStyle = GOLD;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('PLAYER COMPANIES', px + PAD, py + 11);
+        py += 22;
+
+        const rowH    = 26;
+        const jBtnW   = 70;
+        const maxShow = Math.min(companies.length, 4);
+        for (let ci = 0; ci < maxShow; ci++) {
+          const co = companies[ci];
+          if (ci % 2 === 1) {
+            ctx.fillStyle = BG_STRIPE;
+            ctx.fillRect(px + PAD, py, PANEL_W - PAD * 2, rowH);
+          }
+          ctx.fillStyle = '#cc88ff';
+          ctx.fillRect(px + PAD + 6, py + (rowH - 12) / 2, 12, 12);
+          ctx.font      = '13px Georgia, serif';
+          ctx.fillStyle = TEXT_HEAD;
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(co.name, px + PAD + 24, py + rowH / 2);
+          const jBtnX = px + PANEL_W - PAD - jBtnW;
+          const jBtnY = py + (rowH - 20) / 2;
+          ctx.fillStyle = '#1a3a1a';
+          ctx.fillRect(jBtnX, jBtnY, jBtnW, 20);
+          ctx.strokeStyle = '#44cc44';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(jBtnX, jBtnY, jBtnW, 20);
+          ctx.font      = 'bold 11px Georgia, serif';
+          ctx.fillStyle = '#88ff88';
+          ctx.textAlign = 'center';
+          ctx.fillText('JOIN', jBtnX + jBtnW / 2, jBtnY + 10);
+          this._joinBtnAreas.push({ companyId: co.id, x: jBtnX, y: jBtnY, w: jBtnW, h: 20 });
+          py += rowH;
+        }
+        if (companies.length > maxShow) {
+          ctx.font      = '12px Georgia, serif';
+          ctx.fillStyle = TEXT_DIM;
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'top';
+          ctx.fillText(`  … and ${companies.length - maxShow} more`, px + PAD, py + 3);
+          py += ROW_H;
+        }
+      }
+
+      // ── CREATE COMPANY button ─────────────────────────────────────────────
+      const cBtnW = 160;
+      const cBtnH = 26;
+      const cBtnX = px + PAD;
+      const cBtnY = py + 6;
+      this._createBtnArea = { x: cBtnX, y: cBtnY, w: cBtnW, h: cBtnH };
+      ctx.fillStyle   = '#1a2a3a';
+      ctx.fillRect(cBtnX, cBtnY, cBtnW, cBtnH);
+      ctx.strokeStyle = '#88aaff';
+      ctx.lineWidth   = 1;
+      ctx.strokeRect(cBtnX, cBtnY, cBtnW, cBtnH);
+      ctx.font         = 'bold 12px Georgia, serif';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = '#aaccff';
+      ctx.fillText('+ CREATE COMPANY', cBtnX + cBtnW / 2, cBtnY + cBtnH / 2);
+
+      return cBtnY + cBtnH + 8;
     }
 
     return py + sectionH + 8;
@@ -212,7 +519,7 @@ export class CompanyMenu {
     py = this._sectionHeader(ctx, px, py, 'YOUR CREW ABOARD', `${crewAboard.length} sailor${crewAboard.length !== 1 ? 's' : ''}`);
 
     if (crewAboard.length === 0) {
-      ctx.font         = '13px Consolas, monospace';
+      ctx.font         = '13px Georgia, serif';
       ctx.fillStyle    = TEXT_DIM;
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'top';
@@ -239,7 +546,7 @@ export class CompanyMenu {
     }
 
     if (crewAboard.length > maxRows) {
-      ctx.font         = '12px Consolas, monospace';
+      ctx.font         = '12px Georgia, serif';
       ctx.fillStyle    = TEXT_DIM;
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'top';
@@ -266,7 +573,7 @@ export class CompanyMenu {
 
     const drawGroup = (label: string, group: Ship[], color: string): number => {
       if (group.length === 0) return py;
-      ctx.font         = 'bold 12px Consolas, monospace';
+      ctx.font         = 'bold 12px Georgia, serif';
       ctx.fillStyle    = color;
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'top';
@@ -289,7 +596,7 @@ export class CompanyMenu {
         ctx.fillStyle = COMPANY_COLORS[ship.companyId] ?? '#aaa';
         ctx.fillRect(px + PAD + 4, py + 6, 10, 10);
 
-        ctx.font         = '13px Consolas, monospace';
+        ctx.font         = '13px Georgia, serif';
         ctx.textAlign    = 'left';
         ctx.textBaseline = 'top';
         ctx.fillStyle    = isYours ? GOLD : TEXT_HEAD;
@@ -308,7 +615,7 @@ export class CompanyMenu {
     py = drawGroup('Enemy',    enemy,   '#ff5555');
 
     if (ships.length === 0) {
-      ctx.font         = '13px Consolas, monospace';
+      ctx.font         = '13px Georgia, serif';
       ctx.fillStyle    = TEXT_DIM;
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'top';
@@ -338,7 +645,7 @@ export class CompanyMenu {
     const allyShips = ships.filter(s => s.companyId === playerCompany).length;
     const allyNpcs  = npcs.filter(n => n.companyId === playerCompany).length;
 
-    ctx.font         = '12px Consolas, monospace';
+    ctx.font         = '12px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = TEXT_DIM;
@@ -360,7 +667,7 @@ export class CompanyMenu {
     ctx.fillStyle = 'rgba(255,215,0,0.08)';
     ctx.fillRect(px, py, PANEL_W, h);
 
-    ctx.font         = 'bold 12px Consolas, monospace';
+    ctx.font         = 'bold 12px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = GOLD;
@@ -393,7 +700,7 @@ export class CompanyMenu {
       ctx.fillRect(px + PAD, py, PANEL_W - PAD * 2, ROW_H);
     }
 
-    ctx.font         = isHeader ? 'bold 12px Consolas, monospace' : '13px Consolas, monospace';
+    ctx.font         = isHeader ? 'bold 12px Georgia, serif' : '13px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     const baseY = py + ROW_H / 2;

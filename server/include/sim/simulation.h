@@ -4,6 +4,7 @@
 #include "types.h"
 #include "core/math.h"
 #include "core/rng.h"
+#include "module_ids.h"
 
 // Forward declarations
 struct CmdPacket;
@@ -21,7 +22,16 @@ void sim_serialize_state(const struct Sim* sim, uint8_t* buffer, size_t* buffer_
 int sim_deserialize_state(struct Sim* sim, const uint8_t* buffer, size_t buffer_size);
 
 // Entity management
-entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation);
+/**
+ * Create a brigantine ship.
+ * ship_seq: 8-bit sequence number — top byte of all module IDs for this ship.
+ *           Pass 0 to auto-allocate (server assigns the next available seq).
+ *           Pass a specific value when the caller needs to own the ID space
+ *           (e.g. websocket_server_create_ship passes the same seq to both
+ *           SimpleShip and the sim ship so IDs are always in sync).
+ */
+entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
+                           uint8_t modules_placed, uint8_t ship_seq);
 entity_id sim_create_player(struct Sim* sim, Vec2Q16 position, entity_id ship_id);
 entity_id sim_create_projectile(struct Sim* sim, Vec2Q16 position, Vec2Q16 velocity, entity_id shooter_id, uint8_t proj_type);
 
@@ -56,5 +66,10 @@ void spatial_hash_add_player(struct Sim* sim, struct Player* player);
 void spatial_hash_add_projectile(struct Sim* sim, struct Projectile* projectile);
 void handle_projectile_collisions(struct Sim* sim);
 void handle_player_ship_collisions(struct Sim* sim);
+
+// Contact cache API (warm starting)
+struct ContactEntry* contact_cache_find(struct ContactCache* cc, entity_id a, entity_id b);
+struct ContactEntry* contact_cache_upsert(struct ContactCache* cc, entity_id a, entity_id b);
+void contact_cache_age(struct ContactCache* cc, uint32_t current_tick);
 
 #endif /* SIM_SIMULATION_H */

@@ -7,7 +7,8 @@
  */
 
 // ── Slot count ──────────────────────────────────────────────────────────────
-export const INVENTORY_SLOTS = 10;
+export const INVENTORY_SLOTS = 58;  /** total regular bag slots per player */
+export const HOTBAR_SLOTS    = 10;  /** first N slots shown on the hotbar  */
 
 // ── Item identifiers (must match server ItemKind enum) ─────────────────────
 export type ItemKind =
@@ -37,7 +38,11 @@ export type ItemKind =
   | 'wood'
   | 'fiber'
   | 'metal'
-  | 'pickaxe';
+  | 'pickaxe'
+  | 'shipyard'
+  | 'stone'
+  | 'wood_ceiling'
+  | 'claim_flag';
 
 // ── Category groups ─────────────────────────────────────────────────────────
 export type ItemCategory = 'none' | 'building' | 'repair' | 'ammo' | 'weapon' | 'tool' | 'armor' | 'shield';
@@ -86,6 +91,10 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   fiber:         { kind: 'fiber',         name: 'Fiber',         category: 'none',     maxStack: 99, color: '#c8a46e', borderColor: '#8a6030', symbol: 'Fi', description: 'Plant fiber from island vegetation. Used to craft sails.' },
   metal:         { kind: 'metal',         name: 'Metal',         category: 'none',     maxStack: 99, color: '#8a8a8c', borderColor: '#555558', symbol: 'Fe', description: 'Metal ingots. Used to craft weapons and cannons.' },
   pickaxe:       { kind: 'pickaxe',       name: 'Pickaxe',       category: 'tool',     maxStack: 1,  color: '#7a7a7c', borderColor: '#555558', symbol: '\u26cf', description: 'Mine rock outcroppings on islands to gather metal.' },
+  shipyard:      { kind: 'shipyard',      name: 'Shipyard',      category: 'building', maxStack: 1,  color: '#2a5f8a', borderColor: '#14304a', symbol: '\u2693', description: 'Place in shallow water next to an island to build ships.' },
+  stone:         { kind: 'stone',         name: 'Stone',         category: 'none',     maxStack: 99, color: '#9a9a9c', borderColor: '#666668', symbol: 'St', description: 'Raw stone gathered from rocky outcroppings. Used for crafting.' },
+  wood_ceiling:  { kind: 'wood_ceiling',  name: 'Wood Ceiling',  category: 'building', maxStack: 20, color: '#b8832b', borderColor: '#7a5520', symbol: '\u25a6', description: 'A wooden ceiling tile. Fits over a floor section.' },
+  claim_flag:    { kind: 'claim_flag',    name: 'Claiming Flag', category: 'building', maxStack: 5,  color: '#dd3333', borderColor: '#991111', symbol: '\uD83D\uDEA9', description: 'Plant on an enemy ship\'s helm to capture it over 5 minutes.' },
 };
 
 /**
@@ -106,7 +115,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   10: 'cloth_armor',
   11: 'leather_armor',
   12: 'iron_armor',
-  20: 'wooden_shield',
+  // Note: server ID 20 collision — ITEM_DOOR wins (ITEM_WOODEN_SHIELD pre-existing duplicate bug)
   21: 'iron_shield',
   13: 'deck',
   14: 'swivel',
@@ -120,6 +129,10 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   23: 'fiber',
   24: 'metal',
   25: 'pickaxe',
+  26: 'shipyard',
+  27: 'stone',
+  28: 'wood_ceiling',
+  29: 'claim_flag',
 };
 
 /**
@@ -139,7 +152,11 @@ export interface InventorySlot {
 }
 
 export interface PlayerEquipment {
-  armor: ItemKind;
+  helm:   ItemKind;
+  torso:  ItemKind;
+  legs:   ItemKind;
+  feet:   ItemKind;
+  hands:  ItemKind;
   shield: ItemKind;
 }
 
@@ -156,19 +173,24 @@ export interface PlayerInventory {
 export function createEmptyInventory(): PlayerInventory {
   return {
     slots: Array.from({ length: INVENTORY_SLOTS }, () => ({ item: 'none' as ItemKind, quantity: 0 })),
-    equipment: { armor: 'none', shield: 'none' },
+    equipment: { helm: 'none', torso: 'none', legs: 'none', feet: 'none', hands: 'none', shield: 'none' },
     activeSlot: 0,
   };
 }
 
 /**
  * Parse inventory from the compact server wire format.
- * `rawSlots` is a 10-element array of [itemId, quantity] pairs.
+ * `rawSlots` is a 58-element array of [itemId, quantity] pairs.
+ * Equipment IDs are the numeric ItemKind values from the server.
  */
 export function parseInventoryFromServer(
   rawSlots: Array<[number, number]> | undefined,
   activeSlot: number,
-  armorId: number,
+  helmId:  number,
+  torsoId: number,
+  legsId:  number,
+  feetId:  number,
+  handsId: number,
   shieldId: number,
 ): PlayerInventory {
   const inv = createEmptyInventory();
@@ -182,7 +204,11 @@ export function parseInventoryFromServer(
 
   // 255 = unequipped sentinel; 0-9 = valid hotbar slots; anything else clamp to 0
   inv.activeSlot = (activeSlot === 255 || (activeSlot >= 0 && activeSlot < INVENTORY_SLOTS)) ? activeSlot : 0;
-  inv.equipment.armor  = ITEM_ID_MAP[armorId]  ?? 'none';
+  inv.equipment.helm   = ITEM_ID_MAP[helmId]   ?? 'none';
+  inv.equipment.torso  = ITEM_ID_MAP[torsoId]  ?? 'none';
+  inv.equipment.legs   = ITEM_ID_MAP[legsId]   ?? 'none';
+  inv.equipment.feet   = ITEM_ID_MAP[feetId]   ?? 'none';
+  inv.equipment.hands  = ITEM_ID_MAP[handsId]  ?? 'none';
   inv.equipment.shield = ITEM_ID_MAP[shieldId] ?? 'none';
 
   return inv;

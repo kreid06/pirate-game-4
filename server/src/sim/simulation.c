@@ -1,5 +1,6 @@
 #include "sim/simulation.h"
 #include "sim/module_types.h"
+#include "sim/module_ids.h"
 #include "sim/ship_level.h"
 #include "sim/island.h"
 #include "net/protocol.h"
@@ -13,12 +14,213 @@
 // Include hash function implementation
 extern uint64_t hash_sim_state(const struct Sim* sim);
 
+/* ══════════════════════════════════════════════════════════════════════════
+ *  Contact cache — warm-starting helpers
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+static inline uint32_t contact_key(entity_id a, entity_id b) {
+    entity_id lo = a < b ? a : b;
+    entity_id hi = a < b ? b : a;
+    return ((uint32_t)lo << 16) | (uint32_t)hi;
+}
+
+/* Look up a pair; returns NULL if not cached. */
+struct ContactEntry* contact_cache_find(struct ContactCache* cc, entity_id a, entity_id b) {
+    uint32_t k = contact_key(a, b);
+    uint32_t idx = k & (CONTACT_CACHE_SIZE - 1);
+    for (uint32_t probe = 0; probe < CONTACT_CACHE_SIZE; probe++) {
+        uint32_t i = (idx + probe) & (CONTACT_CACHE_SIZE - 1);
+        if (cc->entries[i].key == k) return &cc->entries[i];
+        if (cc->entries[i].key == 0) return NULL;  /* empty → miss */
+    }
+    return NULL;
+}
+
+/* Insert or update a pair's entry; returns the slot (never NULL). */
+struct ContactEntry* contact_cache_upsert(struct ContactCache* cc, entity_id a, entity_id b) {
+    uint32_t k = contact_key(a, b);
+    uint32_t idx = k & (CONTACT_CACHE_SIZE - 1);
+    struct ContactEntry* first_empty = NULL;
+    for (uint32_t probe = 0; probe < CONTACT_CACHE_SIZE; probe++) {
+        uint32_t i = (idx + probe) & (CONTACT_CACHE_SIZE - 1);
+        if (cc->entries[i].key == k) return &cc->entries[i];  /* existing */
+        if (cc->entries[i].key == 0) {
+            if (!first_empty) first_empty = &cc->entries[i];
+            break;
+        }
+    }
+    if (first_empty) {
+        memset(first_empty, 0, sizeof(*first_empty));
+        first_empty->key = k;
+        return first_empty;
+    }
+    /* Table full — evict oldest entry at initial slot */
+    struct ContactEntry* victim = &cc->entries[idx];
+    memset(victim, 0, sizeof(*victim));
+    victim->key = k;
+    return victim;
+}
+
+/* Age out stale entries after all collision handlers have run this tick. */
+void contact_cache_age(struct ContactCache* cc, uint32_t current_tick) {
+    for (uint32_t i = 0; i < CONTACT_CACHE_SIZE; i++) {
+        if (cc->entries[i].key != 0 &&
+            current_tick - cc->entries[i].last_tick > MAX_CONTACT_AGE) {
+            cc->entries[i].key = 0;  /* mark empty */
+        }
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  CCD — Continuous Collision Detection helpers
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Swept circle vs. static line segment: given a circle of radius r moving
+ * from A to B, find the earliest time-of-impact t ∈ [0,1] with the segment
+ * P0-P1.  Returns false if no hit.
+ *
+ * Used for fast-moving entities (projectiles, ships at high speed) against
+ * polygon edges to prevent tunnelling.                                     */
+
+static bool ccd_swept_circle_segment(
+    float ax, float ay, float bx, float by, float radius,
+    float p0x, float p0y, float p1x, float p1y,
+    float* out_t, float* out_nx, float* out_ny)
+{
+    /* Direction of motion */
+    float dx = bx - ax, dy = by - ay;
+    float move_len_sq = dx * dx + dy * dy;
+    if (move_len_sq < 1e-12f) return false;  /* stationary */
+
+    /* Edge vector and outward normal (left-hand normal for CCW winding) */
+    float ex = p1x - p0x, ey = p1y - p0y;
+    float edge_len = sqrtf(ex * ex + ey * ey);
+    if (edge_len < 1e-6f) return false;
+    float enx = -ey / edge_len, eny = ex / edge_len;  /* edge normal */
+
+    /* Signed distance of start/end from the infinite edge line */
+    float d0 = (ax - p0x) * enx + (ay - p0y) * eny;
+    float d1 = (bx - p0x) * enx + (by - p0y) * eny;
+
+    /* We want d == ±radius (circle surface touches the line).
+     * Solve d0 + t*(d1-d0) = ±radius for the face closest to approach. */
+    float dd = d1 - d0;
+    if (fabsf(dd) < 1e-10f) return false;  /* parallel motion */
+
+    /* Pick the face we're approaching */
+    float target_d = (d0 > 0) ? radius : -radius;
+    float t = (target_d - d0) / dd;
+    if (t < 0.0f || t > 1.0f) return false;  /* out of sweep range */
+
+    /* Contact point on the edge line at time t */
+    float cx = ax + dx * t;
+    float cy = ay + dy * t;
+
+    /* Project onto edge to check we're within segment bounds */
+    float proj = ((cx - p0x) * ex + (cy - p0y) * ey) / (edge_len * edge_len);
+    if (proj < 0.0f || proj > 1.0f) {
+        /* Missed the segment — check endpoint capsule collisions.
+         * Swept circle vs point: |A + t*D - P|² = r² */
+        float best_t = 2.0f;
+        float best_nx = 0, best_ny = 0;
+        for (int ep = 0; ep < 2; ep++) {
+            float ppx = ep == 0 ? p0x : p1x;
+            float ppy = ep == 0 ? p0y : p1y;
+            float ox = ax - ppx, oy = ay - ppy;
+            float a_coef = move_len_sq;
+            float b_coef = 2.0f * (ox * dx + oy * dy);
+            float c_coef = ox * ox + oy * oy - radius * radius;
+            float disc = b_coef * b_coef - 4.0f * a_coef * c_coef;
+            if (disc < 0.0f) continue;
+            float sq = sqrtf(disc);
+            float t_ep = (-b_coef - sq) / (2.0f * a_coef);
+            if (t_ep >= 0.0f && t_ep <= 1.0f && t_ep < best_t) {
+                best_t = t_ep;
+                float hx = ax + dx * t_ep - ppx;
+                float hy = ay + dy * t_ep - ppy;
+                float hl = sqrtf(hx * hx + hy * hy);
+                if (hl > 1e-6f) { best_nx = hx / hl; best_ny = hy / hl; }
+            }
+        }
+        if (best_t <= 1.0f) {
+            *out_t = best_t; *out_nx = best_nx; *out_ny = best_ny;
+            return true;
+        }
+        return false;
+    }
+
+    /* Hit the edge face */
+    *out_t = t;
+    *out_nx = (d0 > 0) ? enx : -enx;
+    *out_ny = (d0 > 0) ? eny : -eny;
+    return true;
+}
+
+/* Swept circle vs. convex polygon (world-space vertices).
+ * Tests against every edge; returns the earliest t ∈ [0,1].
+ * out_nx/ny is the collision normal pointing away from the polygon. */
+static bool ccd_swept_circle_polygon(
+    float ax, float ay, float bx, float by, float radius,
+    const float* vx, const float* vy, int n_verts,
+    float* out_t, float* out_nx, float* out_ny)
+{
+    float best_t = 2.0f;
+    float best_nx = 0, best_ny = 0;
+    for (int i = 0; i < n_verts; i++) {
+        int j = (i + 1) % n_verts;
+        float t, nx, ny;
+        if (ccd_swept_circle_segment(ax, ay, bx, by, radius,
+                                     vx[i], vy[i], vx[j], vy[j],
+                                     &t, &nx, &ny)) {
+            if (t < best_t) { best_t = t; best_nx = nx; best_ny = ny; }
+        }
+    }
+    if (best_t <= 1.0f) {
+        *out_t = best_t; *out_nx = best_nx; *out_ny = best_ny;
+        return true;
+    }
+    return false;
+}
+
+/* Swept circle vs. circle (two moving entities).
+ * Relative motion: A moves from (ax,ay) to (bx,by), B is static at (sx,sy).
+ * Caller should pre-subtract B's motion from A's to handle both moving. */
+static bool ccd_swept_circle_circle(
+    float ax, float ay, float bx, float by, float ra,
+    float sx, float sy, float rb,
+    float* out_t, float* out_nx, float* out_ny)
+{
+    float R = ra + rb;
+    float ox = ax - sx, oy = ay - sy;
+    float dx = bx - ax, dy = by - ay;
+    float a = dx * dx + dy * dy;
+    if (a < 1e-12f) return false;
+    float b = 2.0f * (ox * dx + oy * dy);
+    float c = ox * ox + oy * oy - R * R;
+    if (c < 0.0f) { /* already overlapping — t=0 */
+        float len = sqrtf(ox * ox + oy * oy);
+        if (len < 1e-6f) { *out_t = 0; *out_nx = 1; *out_ny = 0; return true; }
+        *out_t = 0; *out_nx = ox / len; *out_ny = oy / len; return true;
+    }
+    float disc = b * b - 4.0f * a * c;
+    if (disc < 0.0f) return false;
+    float sq = sqrtf(disc);
+    float t = (-b - sq) / (2.0f * a);
+    if (t < 0.0f || t > 1.0f) return false;
+    float hx = ox + dx * t, hy = oy + dy * t;
+    float hl = sqrtf(hx * hx + hy * hy);
+    if (hl < 1e-6f) { *out_t = t; *out_nx = 1; *out_ny = 0; return true; }
+    *out_t = t; *out_nx = hx / hl; *out_ny = hy / hl;
+    return true;
+}
+
 // Forward declarations
 static void update_ship_physics(struct Ship* ship, q16_t dt);
 static void update_player_physics(struct Player* player, struct Sim* sim, q16_t dt);
 static void update_projectile_physics(struct Projectile* projectile, q16_t dt);
 static void handle_ship_collisions(struct Sim* sim);
 static void handle_player_player_collisions(struct Sim* sim);
+static void handle_player_boulder_collisions(struct Sim* sim);
 static entity_id allocate_entity_id(struct Sim* sim);
 static Vec2Q16 transform_hull_vertex(Vec2Q16 local_vertex, Vec2Q16 position, q16_t rotation);
 
@@ -131,12 +333,40 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
         struct Ship* ship = &sim->ships[i];
         update_ship_physics(ship, dt);
 
+        /* Shallow-water drag — extra friction when ship hull centre is in
+         * the shallow-water ring around any island.  Applied AFTER the base
+         * friction inside update_ship_physics so it multiplies on top.     */
+        {
+            float ship_cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
+            float ship_cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y));
+            float max_depth = 0.0f;
+            for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+                float d = island_shallow_water_depth(&ISLAND_PRESETS[ii], ship_cx, ship_cy);
+                if (d > max_depth) max_depth = d;
+            }
+            if (max_depth > 0.0f) {
+                /* Gradient drag: full penalty (0.90) at island boundary,
+                 * no extra drag (1.0) at the outer shallow-water edge.    */
+                const float MAX_DRAG_COEFF = 0.90f;
+                float drag = 1.0f - max_depth * (1.0f - MAX_DRAG_COEFF);
+                const q16_t shallow_drag = Q16_FROM_FLOAT(drag);
+                ship->velocity = vec2_mul_scalar(ship->velocity, shallow_drag);
+                ship->angular_velocity = q16_mul(ship->angular_velocity, shallow_drag);
+            }
+        }
+
         // Update per-module state (reload timers, etc.)
         for (uint8_t m = 0; m < ship->module_count; m++) {
             module_update(&ship->modules[m], dt);
         }
 
         // ---- Sinking / water mechanic ----
+        // Ships scaffolded in a shipyard are immune to plank-drain sinking
+        if (ship->flags & SHIP_FLAG_SCAFFOLDED) {
+            // Keep hull_health at 100 while scaffolded
+            ship->hull_health = Q16_FROM_INT(100);
+            continue;  // skip entire drain/heal block for this ship
+        }
         // Count remaining planks and detect leaks (< 30% HP).
         // Leaking planks do NOT self-damage — they stay at their current HP but
         // contribute to the hull drain rate at half the missing-plank rate.
@@ -155,30 +385,44 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
             }
             planks_remaining++;
 
-            // Passive healing at 2.5%/s — only while repair has been initiated
-            if ((mod->state_bits & MODULE_STATE_REPAIRING) &&
-                mod->health < (int32_t)mod->max_health) {
-                float heal = (float)mod->max_health * 0.025f * dt_secs;
+            // Passive healing at 3.5%/s toward target_health — always active.
+            // target_health is the repair ceiling; it decreases with damage and
+            // must be raised back by the player spending wood (repair_plank msg).
+            if (mod->health < (int32_t)mod->target_health) {
+                float heal = (float)mod->max_health * 0.035f * dt_secs;
                 mod->health += (int32_t)heal;
-                if (mod->health >= (int32_t)mod->max_health) {
-                    mod->health = (int32_t)mod->max_health;
+                if (mod->health >= (int32_t)mod->target_health) {
+                    mod->health = (int32_t)mod->target_health;
                     mod->state_bits &= (uint16_t)~MODULE_STATE_REPAIRING;
                 }
             }
         }
 
-        // Passive healing for deck at same 2.5%/s rate
+        // Passive healing for all gameplay modules toward target_health (always active)
+        // Rates: deck 3.5%/s, helm 2.0%/s, mast 1.5%/s, cannon/swivel 1.0%/s
         for (uint8_t m = 0; m < ship->module_count; m++) {
             ShipModule* mod = &ship->modules[m];
-            if (mod->type_id != MODULE_TYPE_DECK) continue;
-            if (mod->health <= 0 || mod->health >= (int32_t)mod->max_health) continue;
-            if (!(mod->state_bits & MODULE_STATE_REPAIRING)) continue;
-            float heal = (float)mod->max_health * 0.025f * dt_secs;
+            if (mod->health <= 0 || mod->max_health <= 0) continue;
+            if (mod->type_id == MODULE_TYPE_PLANK) continue; // handled separately above
+            if (mod->health >= (int32_t)mod->target_health) continue;
+
+            float rate;
+            switch (mod->type_id) {
+                case MODULE_TYPE_DECK:           rate = 0.035f; break;
+                case MODULE_TYPE_HELM:
+                case MODULE_TYPE_STEERING_WHEEL: rate = 0.020f; break;
+                case MODULE_TYPE_MAST:           rate = 0.015f; break;
+                case MODULE_TYPE_CANNON:
+                case MODULE_TYPE_SWIVEL:         rate = 0.010f; break;
+                default:                         continue; // no passive heal for ladders etc
+            }
+
+            float heal = (float)mod->max_health * rate * dt_secs;
             mod->health += (int32_t)heal;
-            if (mod->health >= (int32_t)mod->max_health) {
-                mod->health = (int32_t)mod->max_health;
-                mod->state_bits &= (uint16_t)~MODULE_STATE_REPAIRING;
-                mod->state_bits &= (uint16_t)~MODULE_STATE_DAMAGED;
+            if (mod->health >= (int32_t)mod->target_health) {
+                mod->health = (int32_t)mod->target_health;
+                if (mod->health >= (int32_t)mod->max_health)
+                    mod->state_bits &= (uint16_t)~(MODULE_STATE_REPAIRING | MODULE_STATE_DAMAGED);
             }
         }
 
@@ -280,15 +524,37 @@ void sim_update_projectiles(struct Sim* sim, q16_t dt) {
     for (uint16_t i = 0; i < sim->projectile_count; i++) {
         struct Projectile* proj = &sim->projectiles[i];
         
-        // Check lifetime — use proj->lifetime if set, otherwise fall back to 4s default
-        uint32_t lifetime_ms = sim->time_ms - proj->spawn_time;
+        // Rate-based lifetime: 1ms/ms at sea, 2ms/ms over land
+        uint32_t dt_ms = (uint32_t)(Q16_TO_FLOAT(dt) * 1000.0f);
+        {
+            float px_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
+            float py_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
+            bool over_land = false;
+            for (int ii = 0; ii < ISLAND_COUNT && !over_land; ii++) {
+                const IslandDef *isl = &ISLAND_PRESETS[ii];
+                float dx = px_cli - isl->x, dy = py_cli - isl->y;
+                float dist_sq = dx * dx + dy * dy;
+                if (isl->vertex_count > 0) {
+                    over_land = (dist_sq < isl->poly_bound_r * isl->poly_bound_r)
+                             && island_poly_contains(isl, px_cli, py_cli);
+                } else {
+                    float broad_r = isl->beach_radius_px + isl->beach_max_bump;
+                    if (dist_sq < broad_r * broad_r) {
+                        float angle = atan2f(dy, dx);
+                        float r = island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle);
+                        over_land = (dist_sq < r * r);
+                    }
+                }
+            }
+            proj->effective_age_ms += over_land ? dt_ms * 2 : dt_ms;
+        }
         uint32_t max_lifetime = (proj->lifetime > 0)
             ? (uint32_t)(Q16_TO_FLOAT(proj->lifetime) * 1000.0f)
             : 4000;
-        if (lifetime_ms > max_lifetime) {
+        if (proj->effective_age_ms > max_lifetime) {
             // Remove expired projectile
-            log_info("⏱️  Projectile %u expired after %ums (max=%ums) at (%.1f, %.1f)",
-                     proj->id, lifetime_ms, max_lifetime,
+            log_info("⏱️  Projectile %u expired after %ums effective age (max=%ums) at (%.1f, %.1f)",
+                     proj->id, proj->effective_age_ms, max_lifetime,
                      Q16_TO_FLOAT(proj->position.x), Q16_TO_FLOAT(proj->position.y));
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                    (sim->projectile_count - i - 1) * sizeof(struct Projectile));
@@ -301,14 +567,127 @@ void sim_update_projectiles(struct Sim* sim, q16_t dt) {
     }
 }
 
+/* ── Shared rigid-body impulse response: ship vs infinite-mass island ─────
+ * Called after the ship has already been position-corrected (pushed out).
+ * push_nx/push_ny: outward contact normal (unit vector).
+ * cp_wx/cp_wy:     contact point in server world units.               */
+static void apply_island_impulse(struct Ship *ship,
+                                  float push_nx, float push_ny,
+                                  float cp_wx,   float cp_wy)
+{
+    static const float restitution  = 0.15f;
+    static const float isl_friction = 0.75f;
+
+    float vx    = Q16_TO_FLOAT(ship->velocity.x);
+    float vy    = Q16_TO_FLOAT(ship->velocity.y);
+    float omega = Q16_TO_FLOAT(ship->angular_velocity);
+    float rx    = cp_wx - Q16_TO_FLOAT(ship->position.x);
+    float ry    = cp_wy - Q16_TO_FLOAT(ship->position.y);
+    float vc_x  = vx + omega * (-ry);
+    float vc_y  = vy + omega * ( rx);
+    float vc_n  = vc_x * push_nx + vc_y * push_ny;
+    if (vc_n >= 0.0f) return;  /* already separating */
+
+    float mass_f    = Q16_TO_FLOAT(ship->mass);
+    float inertia_f = Q16_TO_FLOAT(ship->moment_inertia);
+    float inv_m = (mass_f    > 0.0f) ? 1.0f / mass_f    : 0.0f;
+    float inv_I = (inertia_f > 0.0f) ? 1.0f / inertia_f : 0.0f;
+
+    /* Normal impulse */
+    float rxn   = rx * push_ny - ry * push_nx;
+    float denom = inv_m + rxn * rxn * inv_I;
+    if (denom <= 1e-10f) return;
+
+    float Jn = -(1.0f + restitution) * vc_n / denom;
+    if (Jn < 0.0f) Jn = 0.0f;
+    vx    += Jn * push_nx * inv_m;
+    vy    += Jn * push_ny * inv_m;
+    omega += rxn * Jn * inv_I;
+
+    /* Friction impulse (Coulomb) */
+    float vc_x2  = vx + omega * (-ry);
+    float vc_y2  = vy + omega * ( rx);
+    float vc_n2  = vc_x2 * push_nx + vc_y2 * push_ny;
+    float vt_x   = vc_x2 - vc_n2 * push_nx;
+    float vt_y   = vc_y2 - vc_n2 * push_ny;
+    float vt_len = sqrtf(vt_x * vt_x + vt_y * vt_y);
+    if (vt_len > 0.001f) {
+        float tx = vt_x / vt_len, ty = vt_y / vt_len;
+        float rxt     = rx * ty - ry * tx;
+        float denom_t = inv_m + rxt * rxt * inv_I;
+        if (denom_t > 1e-10f) {
+            float Jf     = -vt_len / denom_t;
+            float Jf_max =  isl_friction * Jn;
+            if (Jf < -Jf_max) Jf = -Jf_max;
+            if (Jf >  Jf_max) Jf =  Jf_max;
+            vx    += Jf * tx * inv_m;
+            vy    += Jf * ty * inv_m;
+            omega += rxt * Jf * inv_I;
+        }
+    }
+    ship->velocity.x       = Q16_FROM_FLOAT(vx);
+    ship->velocity.y       = Q16_FROM_FLOAT(vy);
+    ship->angular_velocity = Q16_FROM_FLOAT(omega);
+}
+
 static void handle_island_collisions(struct Sim *sim) {
     for (int ii = 0; ii < ISLAND_COUNT; ii++) {
         const IslandDef *isl = &ISLAND_PRESETS[ii];
-        /* TODO: polygon-island ship collision not yet implemented.
-         * Polygon islands use point-in-polygon for player walking and
-         * structure placement; ship hull collision still needs a polygon
-         * push algorithm.  Skip until implemented. */
-        if (isl->vertex_count > 0) continue;
+
+        if (isl->vertex_count > 0) {
+            /* ── Polygon island ─────────────────────────────────────────────
+             * Vertices are in client-pixel offsets from (isl->x, isl->y).
+             * Convert ship hull vertices to client pixels for the polygon
+             * test, then convert the resulting push depth back to server
+             * units.                                                         */
+            float island_cx     = CLIENT_TO_SERVER(isl->x);
+            float island_cy     = CLIENT_TO_SERVER(isl->y);
+            float poly_broad_sv = CLIENT_TO_SERVER(isl->poly_bound_r);
+
+            for (uint16_t si = 0; si < sim->ship_count; si++) {
+                struct Ship *ship = &sim->ships[si];
+                float sx  = Q16_TO_FLOAT(ship->position.x);
+                float sy  = Q16_TO_FLOAT(ship->position.y);
+                float cdx = sx - island_cx, cdy = sy - island_cy;
+                float ship_r     = Q16_TO_FLOAT(ship->bounding_radius);
+                float broad_min  = poly_broad_sv + ship_r;
+                if (cdx*cdx + cdy*cdy >= broad_min*broad_min) continue;
+
+                float max_pen = 0.0f, push_nx = 0.0f, push_ny = 0.0f;
+                float cp_wx = 0.0f, cp_wy = 0.0f; /* contact point world (server units) */
+                bool  hit     = false;
+
+                for (uint8_t vi = 0; vi < ship->hull_vertex_count; vi++) {
+                    Vec2Q16 wv = transform_hull_vertex(ship->hull_vertices[vi],
+                                                       ship->position,
+                                                       ship->rotation);
+                    float wx_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(wv.x));
+                    float wy_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(wv.y));
+                    if (!island_poly_contains(isl, wx_cli, wy_cli)) continue;
+
+                    float nx, ny, depth_cli;
+                    if (!island_poly_pushout(isl, wx_cli, wy_cli, &nx, &ny, &depth_cli)) continue;
+                    float depth_sv = CLIENT_TO_SERVER(depth_cli);
+                    if (depth_sv > max_pen) {
+                        max_pen  = depth_sv;
+                        push_nx  = nx;
+                        push_ny  = ny;
+                        cp_wx    = Q16_TO_FLOAT(wv.x);
+                        cp_wy    = Q16_TO_FLOAT(wv.y);
+                        hit      = true;
+                    }
+                }
+                if (!hit) continue;
+
+                ship->position.x += Q16_FROM_FLOAT(push_nx * max_pen);
+                ship->position.y += Q16_FROM_FLOAT(push_ny * max_pen);
+
+                apply_island_impulse(ship, push_nx, push_ny, cp_wx, cp_wy);
+            }
+            continue;  /* done with this polygon island */
+        }
+
+        /* ── Bump-circle island ─────────────────────────────────────────────── */
         float island_cx = CLIENT_TO_SERVER(isl->x);
         float island_cy = CLIENT_TO_SERVER(isl->y);
         /* Broad-phase radius: island beach + max bump, per-ship bounding radius added below */
@@ -333,6 +712,7 @@ static void handle_island_collisions(struct Sim *sim) {
              * compare it against the bumpy island boundary at that angle.     */
             float max_penetration = 0.0f;
             float push_nx = 0.0f, push_ny = 0.0f;
+            float cp_wx = 0.0f, cp_wy = 0.0f; /* contact point world (server units) */
             bool  hit = false;
 
             for (uint8_t vi = 0; vi < ship->hull_vertex_count; vi++) {
@@ -358,6 +738,8 @@ static void handle_island_collisions(struct Sim *sim) {
                     /* push direction: outward from island at this vertex */
                     push_nx = vdx / vdist;
                     push_ny = vdy / vdist;
+                    cp_wx   = wx;
+                    cp_wy   = wy;
                     hit = true;
                 }
             }
@@ -368,23 +750,136 @@ static void handle_island_collisions(struct Sim *sim) {
             ship->position.x += Q16_FROM_FLOAT(push_nx * max_penetration);
             ship->position.y += Q16_FROM_FLOAT(push_ny * max_penetration);
 
-            /* Reflect velocity along push normal: low restitution + friction */
-            float vx    = Q16_TO_FLOAT(ship->velocity.x);
-            float vy    = Q16_TO_FLOAT(ship->velocity.y);
-            float vdotn = vx * push_nx + vy * push_ny;
-            if (vdotn < 0.0f) {
-                const float restitution = 0.15f;
-                const float friction    = 0.75f;
-                ship->velocity.x = Q16_FROM_FLOAT(
-                    (vx - (1.0f + restitution) * vdotn * push_nx) * friction);
-                ship->velocity.y = Q16_FROM_FLOAT(
-                    (vy - (1.0f + restitution) * vdotn * push_ny) * friction);
-            }
+            apply_island_impulse(ship, push_nx, push_ny, cp_wx, cp_wy);
         }
     }
 }
 
 void sim_handle_collisions(struct Sim* sim) {
+    /* ── CCD pre-pass: prevent tunnelling for fast-moving entities ──────
+     *
+     * For every ship moving faster than CCD_SPEED_THRESHOLD (server units/tick),
+     * sweep its bounding circle forward along this tick's displacement and test
+     * against every other ship's hull polygon.  If a time-of-impact t ∈ [0,1)
+     * is found, rewind the ship to position(t) and reflect velocity.
+     *
+     * Same logic is applied to swimming players vs ship hulls.
+     *
+     * This runs BEFORE the discrete collision handlers so the discrete phase
+     * sees the already-rewound positions and can fine-tune with SAT + impulse. */
+    {
+        /* Speed threshold: only bother with CCD if the entity moves more than
+         * half its bounding radius this tick — below that, discrete is fine. */
+        static const float CCD_MIN_DISP_SQ = 0.5f * 0.5f;  /* server units² */
+
+        /* ── Ship vs Ship CCD ── */
+        for (uint16_t i = 0; i < sim->ship_count; i++) {
+            struct Ship* s = &sim->ships[i];
+            float dt_f = Q16_TO_FLOAT(FIXED_DT_Q16);
+            float s_vx = Q16_TO_FLOAT(s->velocity.x);
+            float s_vy = Q16_TO_FLOAT(s->velocity.y);
+            float disp_x = s_vx * dt_f, disp_y = s_vy * dt_f;
+            if (disp_x * disp_x + disp_y * disp_y < CCD_MIN_DISP_SQ) continue;
+
+            float sx = Q16_TO_FLOAT(s->position.x);
+            float sy = Q16_TO_FLOAT(s->position.y);
+            float sr = Q16_TO_FLOAT(s->bounding_radius);
+            /* Sweep end-point = current pos (already integrated by update_ship_physics).
+             * Start = pos - displacement. */
+            float ax = sx - disp_x, ay = sy - disp_y;
+
+            for (uint16_t j = 0; j < sim->ship_count; j++) {
+                if (i == j) continue;
+                struct Ship* other = &sim->ships[j];
+
+                /* Quick bounding-circle distance check for the sweep */
+                float or2 = Q16_TO_FLOAT(other->bounding_radius);
+                float odx = Q16_TO_FLOAT(other->position.x) - (ax + sx) * 0.5f;
+                float ody = Q16_TO_FLOAT(other->position.y) - (ay + sy) * 0.5f;
+                float sweep_r = sr + or2 + sqrtf(disp_x*disp_x + disp_y*disp_y) * 0.5f;
+                if (odx*odx + ody*ody > sweep_r*sweep_r) continue;
+
+                /* Build other ship's world-space hull */
+                float hvx[64], hvy[64];
+                int nv = (int)other->hull_vertex_count;
+                for (int vi = 0; vi < nv; vi++) {
+                    Vec2Q16 wv = transform_hull_vertex(other->hull_vertices[vi],
+                                                       other->position, other->rotation);
+                    hvx[vi] = Q16_TO_FLOAT(wv.x);
+                    hvy[vi] = Q16_TO_FLOAT(wv.y);
+                }
+
+                float t, cnx, cny;
+                if (ccd_swept_circle_polygon(ax, ay, sx, sy, sr, hvx, hvy, nv,
+                                             &t, &cnx, &cny)) {
+                    /* Rewind to time-of-impact + small epsilon */
+                    float safe_t = fmaxf(t - 0.01f, 0.0f);
+                    float new_x = ax + disp_x * safe_t;
+                    float new_y = ay + disp_y * safe_t;
+                    s->position.x = Q16_FROM_FLOAT(new_x);
+                    s->position.y = Q16_FROM_FLOAT(new_y);
+
+                    /* Reflect velocity along collision normal (e = 0.3) */
+                    float vn = s_vx * cnx + s_vy * cny;
+                    if (vn < 0.0f) {
+                        s->velocity.x = Q16_FROM_FLOAT(s_vx - 1.3f * vn * cnx);
+                        s->velocity.y = Q16_FROM_FLOAT(s_vy - 1.3f * vn * cny);
+                    }
+                    break;  /* one CCD hit per ship per tick is enough */
+                }
+            }
+        }
+
+        /* ── Player vs Ship hull CCD (swimming players only) ── */
+        for (uint16_t pi = 0; pi < sim->player_count; pi++) {
+            struct Player* p = &sim->players[pi];
+            if (p->ship_id != INVALID_ENTITY_ID) continue;  /* on a ship — skip */
+
+            float dt_f = Q16_TO_FLOAT(FIXED_DT_Q16);
+            float pvx = Q16_TO_FLOAT(p->velocity.x);
+            float pvy = Q16_TO_FLOAT(p->velocity.y);
+            float dx = pvx * dt_f, dy = pvy * dt_f;
+            if (dx*dx + dy*dy < CCD_MIN_DISP_SQ) continue;
+
+            float px = Q16_TO_FLOAT(p->position.x);
+            float py = Q16_TO_FLOAT(p->position.y);
+            float pr = Q16_TO_FLOAT(p->radius);
+            float pax = px - dx, pay = py - dy;
+
+            for (uint16_t si = 0; si < sim->ship_count; si++) {
+                struct Ship* ship = &sim->ships[si];
+                float br = Q16_TO_FLOAT(ship->bounding_radius);
+                float sdx = Q16_TO_FLOAT(ship->position.x) - (pax + px) * 0.5f;
+                float sdy = Q16_TO_FLOAT(ship->position.y) - (pay + py) * 0.5f;
+                float sweep_r = pr + br + sqrtf(dx*dx + dy*dy) * 0.5f;
+                if (sdx*sdx + sdy*sdy > sweep_r*sweep_r) continue;
+
+                float hvx[64], hvy[64];
+                int nv = (int)ship->hull_vertex_count;
+                for (int vi = 0; vi < nv; vi++) {
+                    Vec2Q16 wv = transform_hull_vertex(ship->hull_vertices[vi],
+                                                       ship->position, ship->rotation);
+                    hvx[vi] = Q16_TO_FLOAT(wv.x);
+                    hvy[vi] = Q16_TO_FLOAT(wv.y);
+                }
+
+                float t, cnx, cny;
+                if (ccd_swept_circle_polygon(pax, pay, px, py, pr, hvx, hvy, nv,
+                                             &t, &cnx, &cny)) {
+                    float safe_t = fmaxf(t - 0.01f, 0.0f);
+                    p->position.x = Q16_FROM_FLOAT(pax + dx * safe_t);
+                    p->position.y = Q16_FROM_FLOAT(pay + dy * safe_t);
+                    float vn = pvx * cnx + pvy * cny;
+                    if (vn < 0.0f) {
+                        p->velocity.x = Q16_FROM_FLOAT(pvx - 1.15f * vn * cnx);
+                        p->velocity.y = Q16_FROM_FLOAT(pvy - 1.15f * vn * cny);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     // Handle ship-to-ship collisions
     handle_ship_collisions(sim);
     
@@ -393,18 +888,36 @@ void sim_handle_collisions(struct Sim* sim) {
     
     // Handle player-to-player collisions
     handle_player_player_collisions(sim);
+
+    // Handle player-to-boulder collisions
+    handle_player_boulder_collisions(sim);
     
     // Handle projectile collisions with ships and players
     handle_projectile_collisions(sim);
     
     // Handle player-ship collisions (boarding, falling off)
     handle_player_ship_collisions(sim);
+
+    /* Age out stale contact cache entries that weren't touched this tick */
+    contact_cache_age(&sim->contact_cache, sim->tick);
 }
 
+/** Monotonically-incrementing ship sequence counter (shared with websocket_server.c
+ *  via websocket_server_create_ship which passes the seq explicitly).
+ *  Starts at 1; 0 is reserved as MODULE_ID_INVALID's ship. */
+static uint8_t sim_next_ship_seq = 1;
+
 // Entity creation functions
-entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
+entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
+                           uint8_t modules_placed, uint8_t ship_seq) {
     if (!sim || sim->ship_count >= MAX_SHIPS) {
         return INVALID_ENTITY_ID;
+    }
+
+    /* ship_seq == 0 means auto-allocate the next available sequence number. */
+    if (ship_seq == 0) {
+        ship_seq = sim_next_ship_seq++;
+        if (sim_next_ship_seq == 0) sim_next_ship_seq = 1; /* wrap around, skip 0 */
     }
     
     entity_id id = allocate_entity_id(sim);
@@ -420,7 +933,8 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
     ship->angular_velocity = 0;
     ship->mass = Q16_FROM_FLOAT(1000.0f); // 1000 kg default
     ship->moment_inertia = Q16_FROM_FLOAT(50000.0f); // kg⋅m²
-    ship->bounding_radius = Q16_FROM_FLOAT(10.0f); // 10m radius
+    /* Hull extends ~42.3 server units to the bow tip; use 45 for safe broad-phase margin. */
+    ship->bounding_radius = Q16_FROM_FLOAT(45.0f);
     ship->hull_health = Q16_FROM_INT(100);
     ship->desired_sail_openness = 0;  // Sails start closed
     ship->rudder_angle = 0.0f;        // Rudder centered
@@ -503,73 +1017,91 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
     // Matches BrigantineLoadouts.BROADSIDE from BrigantineTestBuilder.ts
     // Module IDs are based on ship entity ID so two ships have distinct IDs
     // (ship 1 → 1000-1010, ship 2 → 2000-2010, etc.)
+    /* ── Module ID space for this ship ─────────────────────────────────────
+     * All module IDs: MID(ship_seq, offset) = (ship_seq << 8) | offset
+     * See server/include/sim/module_ids.h for the full offset table.
+     */
     ship->module_count = 0;
-    uint16_t module_id = (uint16_t)(ship->id * 1000);
-    
-    // Helm
+
+    /* Emergency ladder — offset 0x01 — always present on every ship */
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_HELM,
+        MID(ship_seq, MODULE_OFFSET_LADDER), MODULE_TYPE_LADDER,
+        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-305.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
+        0
+    );
+
+    /* Bare skeleton — hull polygon only, no gameplay modules.
+     * initial_plank_count stays 0 so the drain formula sees missing=0. */
+    if (modules_placed == 0) {
+        ship->initial_plank_count = 0;
+        log_info("⚓ Created skeleton ship %u with emergency ladder only", id);
+        sim->ship_count++;
+        return id;
+    }
+
+    /* Helm — offset 0x02 */
+    ship->modules[ship->module_count++] = module_create(
+        MID(ship_seq, MODULE_OFFSET_HELM), MODULE_TYPE_HELM,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-90.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
     
-    // Port side cannons (3) — local_rot = -PI/2 (barrel faces port/left)
+    // Port side cannons (3) — offsets 0x03..0x05
+    if (modules_placed & MODULE_CANNON_PORT) {
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_CANNON,
+        MID(ship_seq, MODULE_OFFSET_CANNON_PORT_0), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
-        Q16_FROM_FLOAT(3.1415927f) // -PI/2: port barrel faces left
+        Q16_FROM_FLOAT(3.1415927f)
     );
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_CANNON,
+        MID(ship_seq, MODULE_OFFSET_CANNON_PORT_1), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(65.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
         Q16_FROM_FLOAT(3.1415927f)
     );
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_CANNON,
+        MID(ship_seq, MODULE_OFFSET_CANNON_PORT_2), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
         Q16_FROM_FLOAT(3.1415927f)
     );
+    }
     
-    // Starboard side cannons (3) — local_rot = PI/2 (barrel faces starboard/right)
+    // Starboard side cannons (3) — offsets 0x06..0x08
+    if (modules_placed & MODULE_CANNON_STBD) {
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_CANNON,
+        MID(ship_seq, MODULE_OFFSET_CANNON_STBD_0), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
-        Q16_FROM_FLOAT(0.0f) // PI/2: starboard barrel faces right
+        Q16_FROM_FLOAT(0.0f)
     );
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_CANNON,
+        MID(ship_seq, MODULE_OFFSET_CANNON_STBD_1), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(65.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
         Q16_FROM_FLOAT(0.0f)
     );
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_CANNON,
+        MID(ship_seq, MODULE_OFFSET_CANNON_STBD_2), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
         Q16_FROM_FLOAT(0.0f)
     );
+    }
     
-    // Three masts (front, middle, back)
+    // Three masts — offsets 0x09..0x0B (bow, mid, stern)
+    if (modules_placed & MODULE_MAST) {
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_MAST,
+        MID(ship_seq, MODULE_OFFSET_MAST_BOW), MODULE_TYPE_MAST,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(165.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_MAST,
+        MID(ship_seq, MODULE_OFFSET_MAST_MID), MODULE_TYPE_MAST,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
     ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_MAST,
+        MID(ship_seq, MODULE_OFFSET_MAST_STERN), MODULE_TYPE_MAST,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-235.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
-    
-    // Add ladder at specified position (-305, 0 in client coords)
-    ship->modules[ship->module_count++] = module_create(
-        module_id++, MODULE_TYPE_LADDER,
-        (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-305.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
-        0
-    );
+    }
     
     // Initialize 10 hull planks with positions matching client hull geometry.
     // Positions are the segment midpoints derived from createCompleteHullSegments()
@@ -593,20 +1125,21 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation) {
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(plank_cx[i])),
             Q16_FROM_FLOAT(CLIENT_TO_SERVER(plank_cy[i]))
         };
-        ShipModule plank = module_create(100 + i, MODULE_TYPE_PLANK, pos, 0);
+        /* Planks — offsets 0x0C..0x15 (MODULE_OFFSET_PLANK(0..9)) */
+        ShipModule plank = module_create(MID(ship_seq, MODULE_OFFSET_PLANK(i)), MODULE_TYPE_PLANK, pos, 0);
         ship->modules[ship->module_count++] = plank;
     }
     ship->initial_plank_count = 10;
-    
-    // Deck module (ID 200) - position not used, client generates from hull polygon
+
+    /* Deck — offset 0x16 */
     ship->modules[ship->module_count++] = module_create(
-        200, MODULE_TYPE_DECK,
+        MID(ship_seq, MODULE_OFFSET_DECK), MODULE_TYPE_DECK,
         (Vec2Q16){0, 0},
         0
     );
-    
-    log_info("⚓ Created brigantine ship %u with BROADSIDE loadout: %u modules (6 cannons, 3 masts, 1 helm, 1 ladder, 10 planks, 1 deck)",
-             id, ship->module_count);
+
+    log_info("⚓ Created brigantine ship %u (seq=%u) with BROADSIDE loadout: %u modules",
+             id, ship_seq, ship->module_count);
     
     sim->ship_count++;
     
@@ -724,19 +1257,40 @@ void sim_process_input(struct Sim* sim, const struct InputCmd* cmd) {
     if (player->ship_id != 0) {
         struct Ship* ship = sim_get_ship(sim, player->ship_id);
         if (ship) {
-            // Apply thrust in ship's forward direction
+            /* ── Thrust force (clamped to MAX_THRUST_FORCE) ───────────────
+             * F = thrust_scalar * forward_unit * 5000 N
+             * Clamped so multiple inputs or exploits can't exceed the cap. */
+            static const float MAX_THRUST_FORCE = 5000.0f;  /* Newtons         */
+            static const float MAX_TURN_TORQUE  = 20000.0f; /* Newton⋅metres   */
+
             Vec2Q16 forward = {q16_cos(ship->rotation), q16_sin(ship->rotation)};
-            Vec2Q16 thrust_force = vec2_mul_scalar(forward, q16_mul(thrust, Q16_FROM_FLOAT(5000.0f)));
-            
-            // Apply force (F = ma, so a = F/m)
-            Vec2Q16 acceleration = vec2_mul_scalar(thrust_force, q16_div(Q16_ONE, ship->mass));
-            ship->velocity = vec2_add(ship->velocity, vec2_mul_scalar(acceleration, FIXED_DT_Q16));
-            
-            // Apply turn torque
-            q16_t torque = q16_mul(turn, Q16_FROM_FLOAT(10000.0f)); // N⋅m
-            q16_t angular_acc = q16_div(torque, ship->moment_inertia);
-            ship->angular_velocity = q16_add_sat(ship->angular_velocity, 
-                                                q16_mul(angular_acc, FIXED_DT_Q16));
+            Vec2Q16 thrust_force = vec2_mul_scalar(forward,
+                                      q16_mul(thrust, Q16_FROM_FLOAT(MAX_THRUST_FORCE)));
+            ship->net_force = vec2_add(ship->net_force, thrust_force);
+
+            /* Clamp accumulated force magnitude so it never exceeds cap */
+            {
+                float fx = Q16_TO_FLOAT(ship->net_force.x);
+                float fy = Q16_TO_FLOAT(ship->net_force.y);
+                float fmag = sqrtf(fx * fx + fy * fy);
+                if (fmag > MAX_THRUST_FORCE) {
+                    float scale = MAX_THRUST_FORCE / fmag;
+                    ship->net_force.x = Q16_FROM_FLOAT(fx * scale);
+                    ship->net_force.y = Q16_FROM_FLOAT(fy * scale);
+                }
+            }
+
+            /* ── Turn torque (clamped to MAX_TURN_TORQUE) ────────────────
+             * τ = turn_scalar * 10000 N⋅m */
+            q16_t torque = q16_mul(turn, Q16_FROM_FLOAT(MAX_TURN_TORQUE));
+            ship->net_torque = q16_add_sat(ship->net_torque, torque);
+
+            /* Clamp accumulated torque */
+            {
+                float t_val = Q16_TO_FLOAT(ship->net_torque);
+                if (t_val >  MAX_TURN_TORQUE) ship->net_torque = Q16_FROM_FLOAT(MAX_TURN_TORQUE);
+                if (t_val < -MAX_TURN_TORQUE) ship->net_torque = Q16_FROM_FLOAT(-MAX_TURN_TORQUE);
+            }
         }
     }
     
@@ -785,18 +1339,64 @@ void sim_process_input(struct Sim* sim, const struct InputCmd* cmd) {
 // Physics implementation
 static void update_ship_physics(struct Ship* ship, q16_t dt) {
     if (!ship) return;
-    
-    // Apply water friction to velocity
-    q16_t friction = Q16_FROM_FLOAT(0.95f);
-    ship->velocity = vec2_mul_scalar(ship->velocity, friction);
-    
-    // Apply angular friction
-    ship->angular_velocity = q16_mul(ship->angular_velocity, friction);
-    
-    // Integrate position and rotation
+
+    /* ── Integrate accumulated forces ──────────────────────────────────────
+     * All per-tick forces (thrust, sail, currents, etc.) were added to
+     * net_force / net_torque during input processing and sail updates.
+     * We integrate them here once and then reset for next tick.
+     *
+     *   a = F / m          →  v += a * dt
+     *   α = τ / I          →  ω += α * dt                                */
+    Vec2Q16 lin_accel = vec2_mul_scalar(ship->net_force, q16_div(Q16_ONE, ship->mass));
+    ship->velocity    = vec2_add(ship->velocity, vec2_mul_scalar(lin_accel, dt));
+
+    q16_t ang_accel       = q16_div(ship->net_torque, ship->moment_inertia);
+    ship->angular_velocity = q16_add_sat(ship->angular_velocity, q16_mul(ang_accel, dt));
+
+    /* Reset — collisions (impulse-based) write velocity directly and are
+     * processed after physics, so they don't need to go through here. */
+    ship->net_force  = VEC2_ZERO;
+    ship->net_torque = 0;
+
+    /* ── Hydrodynamic drag (linear + quadratic) ─────────────────────────────
+     *
+     * drag_factor = 1 − (c_lin + c_quad · |v|)
+     *
+     * Linear term (c_lin): low-speed hull friction — dominates at rest.
+     * Quadratic term (c_quad · |v|): wave-making resistance — dominates at
+     * speed and naturally caps velocity without a hard clamp.
+     *
+     * At equilibrium, thrust_accel * dt = |v| * (c_lin + c_quad * |v|),
+     * yielding a natural top speed that can't be exceeded.  With the
+     * values below and max thrust 5000 N / mass 1000 kg:
+     *   top speed ≈ 3.2 server units/s  (≈ 32 client px/s)
+     *   top ω     ≈ 0.45 rad/s
+     *
+     * Sails, currents, or other forces that push harder will raise the
+     * equilibrium, but drag always wins eventually.                       */
+    {
+        static const float C_LIN_V  = 0.02f;   /* 2 % base linear drag     */
+        static const float C_QUAD_V = 0.008f;   /* quadratic drag coeff     */
+        static const float C_LIN_W  = 0.04f;   /* angular linear drag — heavy water resistance */
+        static const float C_QUAD_W = 0.06f;   /* angular quadratic coeff  */
+        static const float MIN_DRAG = 0.60f;    /* safety floor             */
+
+        float spd = Q16_TO_FLOAT(vec2_length(ship->velocity));
+        float drag_v = 1.0f - (C_LIN_V + C_QUAD_V * spd);
+        if (drag_v < MIN_DRAG) drag_v = MIN_DRAG;
+        ship->velocity = vec2_mul_scalar(ship->velocity, Q16_FROM_FLOAT(drag_v));
+
+        float w = Q16_TO_FLOAT(ship->angular_velocity);
+        float abs_w = w < 0 ? -w : w;
+        float drag_w = 1.0f - (C_LIN_W + C_QUAD_W * abs_w);
+        if (drag_w < MIN_DRAG) drag_w = MIN_DRAG;
+        ship->angular_velocity = q16_mul(ship->angular_velocity, Q16_FROM_FLOAT(drag_w));
+    }
+
+    /* ── Integrate state ───────────────────────────────────────────────── */
     Vec2Q16 displacement = vec2_mul_scalar(ship->velocity, dt);
     ship->position = vec2_add(ship->position, displacement);
-    
+
     ship->rotation = q16_add_sat(ship->rotation, q16_mul(ship->angular_velocity, dt));
     
     // Normalize rotation to [0, 2π]
@@ -824,10 +1424,15 @@ static void update_player_physics(struct Player* player, struct Sim* sim, q16_t 
     } else {
         // Player in water - swimming physics
         player->flags |= PLAYER_FLAG_IN_WATER;
-        
-        // Note: Velocity is controlled by WebSocket server (acceleration/deceleration)
-        // No friction applied here - deceleration is handled when player stops moving
-        
+
+        /* Water drag — same 0.95/tick as ships.  This causes players to
+         * decelerate naturally when no input is applied rather than sliding
+         * forever at constant speed.  The websocket server accumulates swim
+         * acceleration into velocity; drag here opposes it each tick. */
+        const q16_t SWIM_DRAG = Q16_FROM_FLOAT(0.95f);
+        player->velocity.x = q16_mul(player->velocity.x, SWIM_DRAG);
+        player->velocity.y = q16_mul(player->velocity.y, SWIM_DRAG);
+
         // Integrate position
         Vec2Q16 displacement = vec2_mul_scalar(player->velocity, dt);
         player->position = vec2_add(player->position, displacement);
@@ -939,69 +1544,263 @@ static bool check_polygon_collision(const struct Ship* ship1, const struct Ship*
     return true;
 }
 
+/* Forward declaration */
+static bool point_in_polygon(Vec2Q16 point, const struct Ship* ship);
+
+/* Ship-ship multipoint rigid-body collision response.
+ *
+ * Contact manifold: all vertices of each ship that lie inside the other ship's
+ * hull polygon (found via the existing point_in_polygon ray-cast test).  If no
+ * penetrating vertices are found we fall back to a single contact point at the
+ * midpoint of the two support extremes along the SAT normal.
+ *
+ * Per contact point c_i, for two dynamic bodies (both finite mass/inertia):
+ *
+ *   r1_i = c_i − p1,   r2_i = c_i − p2          (lever arms)
+ *   vc_i  = (v1 + ω1×r1_i) − (v2 + ω2×r2_i)    (relative velocity)
+ *   vn    = vc_i · n
+ *   r1xn  = r1_i × n,  r2xn = r2_i × n           (2-D scalar cross)
+ *   denom = 1/m1 + 1/m2 + r1xn²/I + r2xn²/I
+ *   J_i   = −(1+e)·vn / denom                    [only if vn < 0]
+ *
+ * Impulses are accumulated across all contact points using pre-impulse
+ * velocities (simultaneous application), then written back once.
+ *
+ * All arithmetic in float using server-unit space to avoid Q16 overflow of the
+ * large mass/inertia values (mass=1000 kg, I=SHIP_INERTIA server_unit²·kg). */
+#define SHIP_RESTITUTION  0.3f
+/* Coulomb friction coefficient for ship-ship tangential impulse (spin from glancing blows). */
+#define SHIP_FRICTION     0.35f
+/* Fallback moment of inertia used only if ship->moment_inertia is uninitialised (server-unit²·kg). */
+#define SHIP_INERTIA      50000.0f
+/* Baumgarte position-correction factor [0,1].  Applied as a velocity bias that
+ * drives remaining penetration to zero over ~1/β ticks without teleporting.
+ * 0.4 → ~60% of residual error corrected each tick; feels smooth but firm. */
+#define SHIP_BAUMGARTE    0.4f
+/* Minimum penetration ignored by the Baumgarte bias (server units, ~0.5 px).
+ * Prevents micro-jitter when hulls are in near-resting light contact. */
+#define SHIP_SLOP         0.05f
+
 static void handle_ship_collisions(struct Sim* sim) {
     if (!sim || sim->ship_count < 2) return;
-    
-    // O(n²) collision detection with SAT polygon collision
+
     for (uint16_t i = 0; i < sim->ship_count; i++) {
         for (uint16_t j = i + 1; j < sim->ship_count; j++) {
-            struct Ship* ship1 = &sim->ships[i];
-            struct Ship* ship2 = &sim->ships[j];
-            
-            // Broad phase: check bounding circles first for early rejection
+            struct Ship *ship1 = &sim->ships[i];
+            struct Ship *ship2 = &sim->ships[j];
+
+            /* ── Broad phase: bounding circles ── */
             Vec2Q16 diff = vec2_sub(ship2->position, ship1->position);
             q16_t dist_sq = vec2_length_sq(diff);
-            q16_t combined_radius = q16_add_sat(ship1->bounding_radius, ship2->bounding_radius);
-            q16_t radius_sq = q16_mul(combined_radius, combined_radius);
-            
-            if (dist_sq >= radius_sq) {
-                continue; // Too far apart, skip expensive polygon check
-            }
-            
-            // Narrow phase: SAT polygon-polygon collision
+            q16_t combined_r = q16_add_sat(ship1->bounding_radius, ship2->bounding_radius);
+            if (dist_sq >= q16_mul(combined_r, combined_r)) continue;
+
+            /* ── Narrow phase: SAT polygon-polygon ── */
             Vec2Q16 collision_normal;
             q16_t overlap_depth;
-            
-            if (check_polygon_collision(ship1, ship2, &collision_normal, &overlap_depth)) {
-                // Collision detected with actual hull polygons
-                
-                // Separate ships along collision normal
-                Vec2Q16 separation = vec2_mul_scalar(collision_normal, q16_div(overlap_depth, Q16_FROM_INT(2)));
-                ship1->position = vec2_sub(ship1->position, separation);
-                ship2->position = vec2_add(ship2->position, separation);
-                
-                // Apply impulse-based collision response
-                q16_t rel_velocity = vec2_dot(vec2_sub(ship2->velocity, ship1->velocity), collision_normal);
-                
-                if (rel_velocity < 0) { // Ships are approaching
-                    // Coefficient of restitution (bounciness)
-                    q16_t restitution = Q16_FROM_FLOAT(0.3f);
-                    
-                    // Calculate impulse magnitude: J = -(1 + e) * v_rel / (1/m1 + 1/m2)
-                    q16_t numerator = q16_mul(q16_add_sat(Q16_ONE, restitution), -rel_velocity);
-                    q16_t inv_mass_sum = q16_add_sat(q16_div(Q16_ONE, ship1->mass), q16_div(Q16_ONE, ship2->mass));
-                    q16_t impulse_mag = q16_div(numerator, inv_mass_sum);
-                    
-                    Vec2Q16 impulse = vec2_mul_scalar(collision_normal, impulse_mag);
-                    
-                    // Apply impulses (F = ma, so dv = F/m)
-                    Vec2Q16 impulse1 = vec2_mul_scalar(impulse, q16_div(Q16_ONE, ship1->mass));
-                    Vec2Q16 impulse2 = vec2_mul_scalar(impulse, q16_div(Q16_ONE, ship2->mass));
-                    
-                    ship1->velocity = vec2_sub(ship1->velocity, impulse1);
-                    ship2->velocity = vec2_add(ship2->velocity, impulse2);
-                    
-                    // Apply rotational impulse at collision point
-                    // For simplicity, apply small angular velocity change
-                    q16_t angular_impulse = q16_mul(impulse_mag, Q16_FROM_FLOAT(0.001f));
-                    ship1->angular_velocity = q16_sub_sat(ship1->angular_velocity, angular_impulse);
-                    ship2->angular_velocity = q16_add_sat(ship2->angular_velocity, angular_impulse);
+            if (!check_polygon_collision(ship1, ship2, &collision_normal, &overlap_depth)) continue;
+
+            /* ── Build contact manifold (before positional correction) ── */
+            /* Find penetrating vertices while ships still overlap — this gives
+             * the best lever arms for angular impulse calculation. */
+            float cpx[94], cpy[94];  /* max 47+47 contact points */
+            int n_contacts = 0;
+
+            /* Vertices of ship2 inside ship1 */
+            for (uint8_t vi = 0; vi < ship2->hull_vertex_count; vi++) {
+                Vec2Q16 wv = transform_hull_vertex(ship2->hull_vertices[vi],
+                                                   ship2->position, ship2->rotation);
+                if (point_in_polygon(wv, ship1)) {
+                    cpx[n_contacts] = Q16_TO_FLOAT(wv.x);
+                    cpy[n_contacts] = Q16_TO_FLOAT(wv.y);
+                    n_contacts++;
                 }
-                
-                log_info("⚓ Ship hull collision: %u <-> %u (overlap: %.2f, normal: (%.2f, %.2f))", 
-                         ship1->id, ship2->id, Q16_TO_FLOAT(overlap_depth),
-                         Q16_TO_FLOAT(collision_normal.x), Q16_TO_FLOAT(collision_normal.y));
             }
+            /* Vertices of ship1 inside ship2 */
+            for (uint8_t vi = 0; vi < ship1->hull_vertex_count; vi++) {
+                Vec2Q16 wv = transform_hull_vertex(ship1->hull_vertices[vi],
+                                                   ship1->position, ship1->rotation);
+                if (point_in_polygon(wv, ship2)) {
+                    cpx[n_contacts] = Q16_TO_FLOAT(wv.x);
+                    cpy[n_contacts] = Q16_TO_FLOAT(wv.y);
+                    n_contacts++;
+                }
+            }
+
+            /* Fallback: no penetrating vertices — use both support vertices as contacts.
+             * Using TWO separate support points (rather than their midpoint) gives
+             * non-zero lever arms on glancing hits and lets friction generate spin. */
+            if (n_contacts == 0) {
+                float fnx = Q16_TO_FLOAT(collision_normal.x);
+                float fny = Q16_TO_FLOAT(collision_normal.y);
+                /* Support vertex of ship1 furthest along +n */
+                float best1 = -1e30f;
+                for (uint8_t vi = 0; vi < ship1->hull_vertex_count; vi++) {
+                    Vec2Q16 wv = transform_hull_vertex(ship1->hull_vertices[vi],
+                                                       ship1->position, ship1->rotation);
+                    float p = Q16_TO_FLOAT(wv.x)*fnx + Q16_TO_FLOAT(wv.y)*fny;
+                    if (p > best1) { best1=p; cpx[0]=Q16_TO_FLOAT(wv.x); cpy[0]=Q16_TO_FLOAT(wv.y); }
+                }
+                /* Support vertex of ship2 furthest along -n */
+                float best2 = 1e30f;
+                for (uint8_t vi = 0; vi < ship2->hull_vertex_count; vi++) {
+                    Vec2Q16 wv = transform_hull_vertex(ship2->hull_vertices[vi],
+                                                       ship2->position, ship2->rotation);
+                    float p = Q16_TO_FLOAT(wv.x)*fnx + Q16_TO_FLOAT(wv.y)*fny;
+                    if (p < best2) { best2=p; cpx[1]=Q16_TO_FLOAT(wv.x); cpy[1]=Q16_TO_FLOAT(wv.y); }
+                }
+                n_contacts = 2;
+            }
+
+            /* ── Positional separation: Baumgarte-style ──────────────────────────
+             * Manifold is built; now move ships apart so the velocity bias below
+             * drives residual penetration to zero over subsequent ticks. */
+            {
+                float pen     = Q16_TO_FLOAT(overlap_depth);
+                float corr    = SHIP_BAUMGARTE * fmaxf(pen - SHIP_SLOP, 0.0f) * 0.5f;
+                Vec2Q16 sep   = vec2_mul_scalar(collision_normal, Q16_FROM_FLOAT(corr));
+                ship1->position = vec2_sub(ship1->position, sep);
+                ship2->position = vec2_add(ship2->position, sep);
+            }
+
+            /* ── Multipoint impulse with warm starting ── */
+            float nx = Q16_TO_FLOAT(collision_normal.x);
+            float ny = Q16_TO_FLOAT(collision_normal.y);
+            float p1x = Q16_TO_FLOAT(ship1->position.x), p1y = Q16_TO_FLOAT(ship1->position.y);
+            float p2x = Q16_TO_FLOAT(ship2->position.x), p2y = Q16_TO_FLOAT(ship2->position.y);
+            float v1x = Q16_TO_FLOAT(ship1->velocity.x),  v1y = Q16_TO_FLOAT(ship1->velocity.y);
+            float v2x = Q16_TO_FLOAT(ship2->velocity.x),  v2y = Q16_TO_FLOAT(ship2->velocity.y);
+            float w1  = Q16_TO_FLOAT(ship1->angular_velocity);
+            float w2  = Q16_TO_FLOAT(ship2->angular_velocity);
+            float m1  = Q16_TO_FLOAT(ship1->mass), m2 = Q16_TO_FLOAT(ship2->mass);
+            /* Per-ship moment of inertia from the physics layer; fall back to the
+             * tuned constant if the field is zero (uninitialised ship). */
+            float I1  = Q16_TO_FLOAT(ship1->moment_inertia);
+            float I2  = Q16_TO_FLOAT(ship2->moment_inertia);
+            if (I1 < 1.0f) I1 = SHIP_INERTIA;
+            if (I2 < 1.0f) I2 = SHIP_INERTIA;
+
+            /* Limit manifold to MAX_CONTACT_POINTS for cache coherence */
+            if (n_contacts > MAX_CONTACT_POINTS) n_contacts = MAX_CONTACT_POINTS;
+
+            /* Look up warm-start data from previous tick */
+            struct ContactEntry* ce = contact_cache_find(&sim->contact_cache, ship1->id, ship2->id);
+
+            float dv1x = 0, dv1y = 0, dw1 = 0;
+            float dv2x = 0, dv2y = 0, dw2 = 0;
+
+            /* Warm start: apply cached impulse from last tick as initial guess.
+             * This lets the solver start near the correct answer instead of
+             * building up from zero, dramatically reducing jitter at rest. */
+            if (ce && ce->n_contacts > 0) {
+                for (int ci = 0; ci < n_contacts && ci < (int)ce->n_contacts; ci++) {
+                    float Jw = ce->P_n[ci] * 0.8f;  /* 80% of last tick's impulse */
+                    if (Jw >= 0.0f) continue;  /* no useful cached impulse */
+                    float r1x = cpx[ci] - p1x, r1y = cpy[ci] - p1y;
+                    float r2x = cpx[ci] - p2x, r2y = cpy[ci] - p2y;
+                    float r1xn = r1x*ny - r1y*nx;
+                    float r2xn = r2x*ny - r2y*nx;
+                    dv1x += Jw*nx/m1;   dv1y += Jw*ny/m1;   dw1 += Jw*r1xn/I1;
+                    dv2x -= Jw*nx/m2;   dv2y -= Jw*ny/m2;   dw2 -= Jw*r2xn/I2;
+                }
+                /* Apply warm-start to working velocities */
+                v1x += dv1x; v1y += dv1y; w1 += dw1;
+                v2x += dv2x; v2y += dv2y; w2 += dw2;
+            }
+
+            /* Accumulated impulse per contact this tick (for cache storage) */
+            float P_n_acc[MAX_CONTACT_POINTS];
+            memset(P_n_acc, 0, sizeof(P_n_acc));
+
+            /* Reset deltas for the iterative solve (warm-start already applied) */
+            dv1x = 0; dv1y = 0; dw1 = 0;
+            dv2x = 0; dv2y = 0; dw2 = 0;
+
+            for (int ci = 0; ci < n_contacts; ci++) {
+                float r1x = cpx[ci] - p1x, r1y = cpy[ci] - p1y;
+                float r2x = cpx[ci] - p2x, r2y = cpy[ci] - p2y;
+                /* Velocity at contact point (includes warm-start) */
+                float vc1x = v1x + w1*(-r1y),  vc1y = v1y + w1*r1x;
+                float vc2x = v2x + w2*(-r2y),  vc2y = v2y + w2*r2x;
+                /* n points FROM ship1 TO ship2.
+                 * With this convention vrel_n = (vc1−vc2)·n > 0 means the
+                 * gap is CLOSING (approaching); < 0 means separating.
+                 * Apply impulse only when approaching (vrel_n > 0).         */
+                float vrel_n = (vc1x - vc2x)*nx + (vc1y - vc2y)*ny;
+                float r1xn = r1x*ny - r1y*nx;
+                float r2xn = r2x*ny - r2y*nx;
+                /* Correct per-ship denominator: r²/I terms are separate */
+                float denom = 1.0f/m1 + 1.0f/m2 + r1xn*r1xn/I1 + r2xn*r2xn/I2;
+                if (denom < 1e-10f) continue;
+                float dt_f  = Q16_TO_FLOAT(FIXED_DT_Q16);
+                float pen_f = Q16_TO_FLOAT(overlap_depth);
+                float bias  = (SHIP_BAUMGARTE / dt_f) * fmaxf(pen_f - SHIP_SLOP, 0.0f);
+                /* Skip only if separating AND no penetration to resolve */
+                if (vrel_n <= 0.0f && bias < 1e-4f) continue;
+                float J = (-(1.0f + SHIP_RESTITUTION) * vrel_n - bias) / denom;
+                if (J > 0.0f) J = 0.0f;  /* J must be ≤ 0 (compression only) */
+                P_n_acc[ci] = J;
+                dv1x += J*nx/m1;   dv1y += J*ny/m1;   dw1 += J*r1xn/I1;
+                dv2x -= J*nx/m2;   dv2y -= J*ny/m2;   dw2 -= J*r2xn/I2;
+            }
+
+            /* ── Friction impulse: tangential spin from glancing blows ──────────
+             * After the normal impulse has pushed the ships apart, compute the
+             * remaining tangential relative velocity at each contact and apply a
+             * Coulomb-capped friction impulse.  This is what makes a ship that
+             * clips another's bow rotate sideways rather than just sliding past. */
+            for (int ci = 0; ci < n_contacts; ci++) {
+                if (P_n_acc[ci] >= 0.0f) continue;  /* no normal impulse — no friction */
+                float r1x = cpx[ci] - p1x, r1y = cpy[ci] - p1y;
+                float r2x = cpx[ci] - p2x, r2y = cpy[ci] - p2y;
+                /* Contact velocity using post-normal-impulse state */
+                float cv1x = (v1x + dv1x) + (w1 + dw1)*(-r1y);
+                float cv1y = (v1y + dv1y) + (w1 + dw1)*(r1x);
+                float cv2x = (v2x + dv2x) + (w2 + dw2)*(-r2y);
+                float cv2y = (v2y + dv2y) + (w2 + dw2)*(r2x);
+                float vrel_x = cv1x - cv2x;
+                float vrel_y = cv1y - cv2y;
+                /* Tangential component (subtract normal projection) */
+                float vn     = vrel_x*nx + vrel_y*ny;
+                float vt_x   = vrel_x - vn*nx;
+                float vt_y   = vrel_y - vn*ny;
+                float vt_len = sqrtf(vt_x*vt_x + vt_y*vt_y);
+                if (vt_len < 0.001f) continue;
+                float tx = vt_x / vt_len, ty = vt_y / vt_len;
+                float r1xt = r1x*ty - r1y*tx;
+                float r2xt = r2x*ty - r2y*tx;
+                float denom_f = 1.0f/m1 + 1.0f/m2 + r1xt*r1xt/I1 + r2xt*r2xt/I2;
+                if (denom_f < 1e-10f) continue;
+                float Jf     = -vt_len / denom_f;
+                float Jf_max =  SHIP_FRICTION * fabsf(P_n_acc[ci]);
+                if (Jf < -Jf_max) Jf = -Jf_max;
+                if (Jf >  Jf_max) Jf =  Jf_max;
+                dv1x += Jf*tx/m1;   dv1y += Jf*ty/m1;   dw1 += Jf*r1xt/I1;
+                dv2x -= Jf*tx/m2;   dv2y -= Jf*ty/m2;   dw2 -= Jf*r2xt/I2;
+            }
+
+            ship1->velocity.x = Q16_FROM_FLOAT(v1x + dv1x);
+            ship1->velocity.y = Q16_FROM_FLOAT(v1y + dv1y);
+            ship2->velocity.x = Q16_FROM_FLOAT(v2x + dv2x);
+            ship2->velocity.y = Q16_FROM_FLOAT(v2y + dv2y);
+            ship1->angular_velocity = Q16_FROM_FLOAT(w1 + dw1);
+            ship2->angular_velocity = Q16_FROM_FLOAT(w2 + dw2);
+
+            /* Store this tick's impulse into the contact cache */
+            {
+                struct ContactEntry* ce_w = contact_cache_upsert(&sim->contact_cache, ship1->id, ship2->id);
+                ce_w->last_tick = sim->tick;
+                ce_w->n_contacts = (uint8_t)n_contacts;
+                for (int ci = 0; ci < n_contacts; ci++) {
+                    ce_w->P_n[ci] = P_n_acc[ci];
+                    ce_w->cx[ci]  = cpx[ci];
+                    ce_w->cy[ci]  = cpy[ci];
+                }
+            }
+
+            log_info("⚓ Ship hull collision: %u <-> %u (overlap: %.2f, contacts: %d, warm: %s, dw1: %.4f, dw2: %.4f)",
+                     ship1->id, ship2->id, Q16_TO_FLOAT(overlap_depth), n_contacts,
+                     ce ? "yes" : "no", dw1, dw2);
         }
     }
 }
@@ -1380,8 +2179,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                 continue;
             }
             
-            // Skip friendly-fire (same company, both non-neutral)
-            if (proj->firing_company != 0 && proj->firing_company == ship->company_id) continue;
+            // Cannonballs hit all ships including allies — no friendly-fire skip
 
             // Broad-phase bounding radius
             float dx = Q16_TO_FLOAT(ship->position.x) - Q16_TO_FLOAT(proj->position.x);
@@ -1542,7 +2340,7 @@ void handle_projectile_collisions(struct Sim* sim) {
             if (proj->inside_ship_id == ship->id && !inside_hull) {
                 proj->inside_ship_id = 0;
                 proj->ticks_inside = 0;
-                if (proj->last_hit_module_id == 200) proj->last_hit_module_id = 0; // clear deck hit flag
+                proj->last_hit_module_id = 0; // clear deck hit sentinel so re-entry can damage deck again
                 log_info("🚪 Projectile %u exited hull of ship %u", proj->id, ship->id);
                 continue;
             }
@@ -1611,7 +2409,19 @@ void handle_projectile_collisions(struct Sim* sim) {
                                  proj->id, plank_idx, ship->id);
                     }
 
-                    uint16_t plank_module_id = (uint16_t)(100 + plank_idx);
+                    /* Derive ship_seq from the first plank module's ID.
+                     * All plank IDs are MID(ship_seq, MODULE_OFFSET_PLANK(i)) = (seq<<8)|(0x0C+i).
+                     * Old code used legacy IDs 100-109; now compute correct MID. */
+                    uint8_t plank_seq = 0;
+                    for (uint8_t pm = 0; pm < ship->module_count; pm++) {
+                        if (ship->modules[pm].type_id == MODULE_TYPE_PLANK) {
+                            plank_seq = MID_SHIP_SEQ(ship->modules[pm].id);
+                            break;
+                        }
+                    }
+                    uint16_t plank_module_id = (plank_seq != 0)
+                        ? MID(plank_seq, MODULE_OFFSET_PLANK(plank_idx))
+                        : (uint16_t)(100 + plank_idx); /* legacy fallback */
                     int hit_plank_idx = -1;
                     for (uint8_t m = 0; m < ship->module_count; m++) {
                         if (ship->modules[m].id == plank_module_id) { hit_plank_idx = m; break; }
@@ -1713,14 +2523,22 @@ void handle_projectile_collisions(struct Sim* sim) {
                 if (removed) { continue; }
 
                 // ---- Deck pass-through: damage deck once per hull entry (priority) ----
-                // Deck ID is always 200; use last_hit_module_id==200 to fire only once per pass.
-                if (proj->last_hit_module_id != 200) {
+                // Use the actual deck module id as the sentinel in last_hit_module_id to avoid
+                // double-hitting if the projectile re-enters the hull bounds this tick.
+                // Find the deck module id first.
+                uint16_t _deck_mid = 0;
+                for (uint8_t _dm = 0; _dm < ship->module_count; _dm++) {
+                    if (ship->modules[_dm].type_id == MODULE_TYPE_DECK) {
+                        _deck_mid = ship->modules[_dm].id; break;
+                    }
+                }
+                if (_deck_mid != 0 && proj->last_hit_module_id != _deck_mid) {
                     for (uint8_t m = 0; m < ship->module_count; m++) {
                         ShipModule* deck = &ship->modules[m];
                         if (deck->type_id != MODULE_TYPE_DECK) continue;
                         if (deck->health <= 0) break;
 
-                        proj->last_hit_module_id = 200; // mark deck as hit for this pass
+                        proj->last_hit_module_id = _deck_mid; // mark deck as hit for this pass
 
                         float dmg_before = (float)deck->health;
                         q16_t eff_dmg = Q16_FROM_FLOAT(
@@ -1879,118 +2697,258 @@ void handle_projectile_collisions(struct Sim* sim) {
             }
         }
 
+        /* ---- Boulder collision — projectile stops on contact ---- */
+        if (!removed) {
+            float px_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
+            float py_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
+
+            for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {
+                const IslandDef *isl = &ISLAND_PRESETS[ii];
+                for (int ri = 0; ri < isl->resource_count && !removed; ri++) {
+                    const IslandResource *res = &isl->resources[ri];
+                    if (res->type_id != RES_BOULDER) continue;
+                    if (res->health <= 0) continue;
+
+                    float bx_cli = isl->x + res->ox;
+                    float by_cli = isl->y + res->oy;
+                    float dx_cli = px_cli - bx_cli;
+                    float dy_cli = py_cli - by_cli;
+                    /* Rotated ellipse for projectile absorption — same hash as client */
+                    static const float BSX[5] = { 1.00f, 0.88f, 1.18f, 0.72f, 1.35f };
+                    static const float BSY[5] = { 0.72f, 0.88f, 0.60f, 1.00f, 0.50f };
+                    static const float BSR[5] = { 0.00f, 0.40f, -0.20f, 1.20f, 0.15f };
+                    uint32_t bseed2 = ((uint32_t)((int)res->ox * 73856093)) ^
+                                     ((uint32_t)((int)res->oy * 19349663));
+                    int bsi2 = (int)((bseed2 >> 4) % 5u);
+                    float ax2 = 38.0f * res->size * BSX[bsi2];
+                    float ay2 = 38.0f * res->size * BSY[bsi2];
+                    float theta2 = BSR[bsi2] + ((float)((bseed2 >> 8) & 0xFFu) / 256.0f) * (2.0f * 3.14159265f);
+                    float c2 = cosf(theta2), s2 = sinf(theta2);
+                    /* Rotate delta into ellipse local frame, then point-in-ellipse test */
+                    float lx2 =  dx_cli * c2 + dy_cli * s2;
+                    float ly2 = -dx_cli * s2 + dy_cli * c2;
+                    float ex = lx2 / ax2, ey = ly2 / ay2;
+                    if (ex*ex + ey*ey < 1.0f) {
+                        log_info("💥 Proj %u hit boulder at (%.1f, %.1f) — absorbed",
+                                 proj->id, bx_cli, by_cli);
+                        memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                                (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                        sim->projectile_count--;
+                        removed = true;
+                    }
+                }
+            }
+        }
+
         if (!removed) i++;
     }
 }
 
 /**
- * Handle player-to-player collisions with physics-based push
+ * Handle player vs boulder collisions — solid pushout, no impulse
+ * (boulders are infinite-mass static objects).
+ */
+static void handle_player_boulder_collisions(struct Sim* sim) {
+    static const float BAUMGARTE = 0.6f;
+    static const float BOULDER_BASE_R = 38.0f;
+    /* sx/sy/rot shape factors — must match client BOULDER_SHAPES order exactly */
+    static const float BOULDER_SX[5]  = { 1.00f, 0.88f, 1.18f, 0.72f, 1.35f };
+    static const float BOULDER_SY[5]  = { 0.72f, 0.88f, 0.60f, 1.00f, 0.50f };
+    static const float BOULDER_ROT[5] = { 0.00f, 0.40f, -0.20f, 1.20f, 0.15f };
+
+    for (uint16_t pi = 0; pi < sim->player_count; pi++) {
+        struct Player* p = &sim->players[pi];
+        if (p->ship_id != 0) continue;  /* on a ship — skip */
+
+        float px_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(p->position.x));
+        float py_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(p->position.y));
+        float pr_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(p->radius));
+
+        for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+            const IslandDef *isl = &ISLAND_PRESETS[ii];
+            for (int ri = 0; ri < isl->resource_count; ri++) {
+                const IslandResource *res = &isl->resources[ri];
+                if (res->type_id != RES_BOULDER) continue;
+                if (res->health <= 0) continue;
+
+                float bx_cli = isl->x + res->ox;
+                float by_cli = isl->y + res->oy;
+
+                /* Derive shape + rotation from same hash as client renderer */
+                uint32_t bseed = ((uint32_t)((int)res->ox * 73856093)) ^
+                                 ((uint32_t)((int)res->oy * 19349663));
+                int bsi = (int)((bseed >> 4) % 5u);
+                float ax = BOULDER_BASE_R * res->size * BOULDER_SX[bsi];
+                float ay = BOULDER_BASE_R * res->size * BOULDER_SY[bsi];
+                float theta = BOULDER_ROT[bsi] + ((float)((bseed >> 8) & 0xFFu) / 256.0f) * (2.0f * 3.14159265f);
+                float cos_t = cosf(theta), sin_t = sinf(theta);
+
+                float dx = px_cli - bx_cli;
+                float dy = py_cli - by_cli;
+                if (dx*dx < 1e-4f && dy*dy < 1e-4f) {
+                    dx = pr_cli; dy = 0.0f;
+                }
+                /* Rotate delta into ellipse local frame */
+                float dx_l =  dx * cos_t + dy * sin_t;
+                float dy_l = -dx * sin_t + dy * cos_t;
+
+                float dist_sq = dx*dx + dy*dy;
+                float dist = sqrtf(dist_sq);
+                float unx = dx / dist, uny = dy / dist;
+
+                /* Effective ellipse radius along approach direction (in local frame) */
+                float unx_l =  unx * cos_t + uny * sin_t;
+                float uny_l = -unx * sin_t + uny * cos_t;
+                float inv_ax = unx_l / ax, inv_ay = uny_l / ay;
+                float r_eff = 1.0f / sqrtf(inv_ax*inv_ax + inv_ay*inv_ay);
+                float min_dist = pr_cli + r_eff;
+                if (dist >= min_dist) continue;
+
+                /* Ellipse surface normal in local frame, rotated back to world */
+                float gx_l = dx_l / (ax * ax), gy_l = dy_l / (ay * ay);
+                float gn = sqrtf(gx_l*gx_l + gy_l*gy_l);
+                if (gn < 1e-6f) { gx_l = 1.0f; gn = 1.0f; }
+                float nx_l = gx_l / gn, ny_l = gy_l / gn;
+                float nx = nx_l * cos_t - ny_l * sin_t;
+                float ny = nx_l * sin_t + ny_l * cos_t;
+
+                float pen = min_dist - dist;
+                float corr_cli = BAUMGARTE * pen;
+
+                /* Push the player out (boulder is immovable) */
+                px_cli += corr_cli * nx;
+                py_cli += corr_cli * ny;
+
+                /* Cancel velocity component toward the boulder */
+                float vx_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(p->velocity.x));
+                float vy_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(p->velocity.y));
+                float vn = vx_cli * (-nx) + vy_cli * (-ny);
+                if (vn > 0.0f) {
+                    vx_cli += vn * nx;
+                    vy_cli += vn * ny;
+                    p->velocity.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(vx_cli));
+                    p->velocity.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(vy_cli));
+                }
+            }
+        }
+
+        /* Write corrected position back */
+        p->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(px_cli));
+        p->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(py_cli));
+    }
+}
+
+/**
+ * Handle player-to-player collisions — hybrid Baumgarte impulse solver.
+ *
+ * Uses float arithmetic throughout to avoid Q16 fixed-point overflow.
+ * Impulse is applied only to the normal (separating) component so tangential
+ * (sliding) velocity is preserved — players slide past each other naturally.
+ *
+ * Position correction is spread over multiple frames (Baumgarte) so there
+ * are no jarring teleports when players overlap slightly.
  */
 static void handle_player_player_collisions(struct Sim* sim) {
-    // Early exit if not enough players
     if (sim->player_count < 2) return;
-    
-    // Log that we're checking collisions
-    static uint32_t check_count = 0;
-    if (check_count++ % 100 == 0) {
-        log_info("🔍 Checking player collisions: %u players", sim->player_count);
-    }
-    
-    // Check all pairs of players for collisions
+
+    /* Tune these constants to feel right in-game:
+     *   RESTITUTION — bounciness on impact (0 = sticky, 1 = fully elastic)
+     *   BAUMGARTE   — fraction of positional error corrected per frame
+     *   SLOP_SU     — ignored penetration (prevents vibration from float error)
+     *   INV_DT      — 1 / timestep (30 Hz → 30) */
+    static const float RESTITUTION = 0.25f;
+    static const float BAUMGARTE   = 0.4f;
+    static const float SLOP_SU     = 0.02f;
+    static const float INV_DT      = 30.0f;
+
     for (uint16_t i = 0; i < sim->player_count; i++) {
         for (uint16_t j = i + 1; j < sim->player_count; j++) {
             struct Player* p1 = &sim->players[i];
             struct Player* p2 = &sim->players[j];
-            
-            // Calculate distance between players using distance squared for efficiency
-            q16_t dx = q16_sub_sat(p2->position.x, p1->position.x);
-            q16_t dy = q16_sub_sat(p2->position.y, p1->position.y);
-            q16_t dist_sq = q16_add_sat(q16_mul(dx, dx), q16_mul(dy, dy));
-            
-            // Calculate minimum distance (sum of radii) for collision check
-            q16_t min_dist = q16_add_sat(p1->radius, p2->radius);
-            
-            // Broad phase: Check if players are close enough to potentially collide
-            // Add a small buffer zone (1.5x radius) to catch fast-moving players
-            q16_t check_dist = q16_mul(min_dist, Q16_FROM_FLOAT(1.5f));
-            q16_t check_dist_sq = q16_mul(check_dist, check_dist);
-            
-            // Skip if players are too far apart
-            if (dist_sq >= check_dist_sq) continue;
-            
-            // Log when players are within check distance
-            log_info("⚠️ Players nearby: P%u <-> P%u (dist²: %d, check²: %d)",
-                p1->id, p2->id, Q16_TO_INT(dist_sq), Q16_TO_INT(check_dist_sq));
-            
-            // Calculate actual distance for precise collision check
-            Vec2Q16 delta = {dx, dy};
-            q16_t dist = vec2_length(delta);
-            
-            // Skip if exactly on top of each other (avoid division by zero)
-            if (dist < Q16_FROM_FLOAT(0.01f)) {
-                log_info("💥 Players on same position! P%u <-> P%u - pushing apart", p1->id, p2->id);
-                // Push them apart in a random direction if overlapping perfectly
-                p1->position.x -= Q16_FROM_FLOAT(0.5f);
-                p2->position.x += Q16_FROM_FLOAT(0.5f);
+
+            float dx = Q16_TO_FLOAT(p2->position.x) - Q16_TO_FLOAT(p1->position.x);
+            float dy = Q16_TO_FLOAT(p2->position.y) - Q16_TO_FLOAT(p1->position.y);
+            float dist_sq = dx * dx + dy * dy;
+
+            float r1       = Q16_TO_FLOAT(p1->radius);
+            float r2       = Q16_TO_FLOAT(p2->radius);
+            float min_dist = r1 + r2;
+
+            if (dist_sq >= min_dist * min_dist) continue;   /* no overlap — skip */
+
+            float dist = sqrtf(dist_sq);
+
+            /* Degenerate: perfectly stacked — nudge apart and skip impulse */
+            if (dist < 0.001f) {
+                p1->position.x -= Q16_FROM_FLOAT(0.05f);
+                p2->position.x += Q16_FROM_FLOAT(0.05f);
                 continue;
             }
-            
-            // Check if players are actually overlapping
-            if (dist < min_dist) {
-                q16_t overlap = q16_sub_sat(min_dist, dist);
-                
-                // Log collision for debugging
-                log_info("💥 Player collision: P%u <-> P%u (overlap: %d.%02d units, dist: %d.%02d, min: %d.%02d)",
-                    p1->id, p2->id, 
-                    Q16_TO_INT(overlap), (int)((Q16_TO_FLOAT(overlap) * 100) - (Q16_TO_INT(overlap) * 100)),
-                    Q16_TO_INT(dist), (int)((Q16_TO_FLOAT(dist) * 100) - (Q16_TO_INT(dist) * 100)),
-                    Q16_TO_INT(min_dist), (int)((Q16_TO_FLOAT(min_dist) * 100) - (Q16_TO_INT(min_dist) * 100)));
-                
-                // Calculate collision normal (direction from p1 to p2)
-                q16_t normal_x = q16_div(dx, dist);
-                q16_t normal_y = q16_div(dy, dist);
-                
-                // ALWAYS separate overlapping players first (regardless of velocity)
-                q16_t separation = q16_mul(overlap, Q16_FROM_FLOAT(0.5f));
-                q16_t sep_x = q16_mul(normal_x, separation);
-                q16_t sep_y = q16_mul(normal_y, separation);
-                
-                p1->position.x = q16_sub_sat(p1->position.x, sep_x);
-                p1->position.y = q16_sub_sat(p1->position.y, sep_y);
-                p2->position.x = q16_add_sat(p2->position.x, sep_x);
-                p2->position.y = q16_add_sat(p2->position.y, sep_y);
-                
-                // Calculate relative velocity for impulse
-                q16_t rel_vel_x = q16_sub_sat(p2->velocity.x, p1->velocity.x);
-                q16_t rel_vel_y = q16_sub_sat(p2->velocity.y, p1->velocity.y);
-                q16_t vel_along_normal = q16_add_sat(q16_mul(rel_vel_x, normal_x), q16_mul(rel_vel_y, normal_y));
-                
-                // Apply velocity changes only if players are moving toward each other
-                if (vel_along_normal < 0) {
-                    // Velocity correction with restitution and dampening
-                    q16_t restitution = Q16_FROM_FLOAT(0.3f);  // Bounciness
-                    q16_t dampening = Q16_FROM_FLOAT(0.7f);    // Energy loss
-                    
-                    // Calculate impulse (equal mass assumption)
-                    q16_t impulse = q16_mul(-(Q16_ONE + restitution), vel_along_normal);
-                    impulse = q16_div(impulse, Q16_FROM_INT(2)); // Divide by 2 for equal mass
-                    
-                    q16_t impulse_x = q16_mul(normal_x, impulse);
-                    q16_t impulse_y = q16_mul(normal_y, impulse);
-                    
-                    // Apply impulse to both players
-                    p1->velocity.x = q16_mul(q16_sub_sat(p1->velocity.x, impulse_x), dampening);
-                    p1->velocity.y = q16_mul(q16_sub_sat(p1->velocity.y, impulse_y), dampening);
-                    p2->velocity.x = q16_mul(q16_add_sat(p2->velocity.x, impulse_x), dampening);
-                    p2->velocity.y = q16_mul(q16_add_sat(p2->velocity.y, impulse_y), dampening);
-                    
-                    // Apply friction
-                    q16_t friction = Q16_FROM_FLOAT(0.95f);
-                    p1->velocity.x = q16_mul(p1->velocity.x, friction);
-                    p1->velocity.y = q16_mul(p1->velocity.y, friction);
-                    p2->velocity.x = q16_mul(p2->velocity.x, friction);
-                    p2->velocity.y = q16_mul(p2->velocity.y, friction);
+
+            /* Collision normal pointing from p1 toward p2 */
+            float nx  = dx / dist;
+            float ny  = dy / dist;
+            float pen = min_dist - dist;    /* penetration depth (> 0 when overlapping) */
+
+            /* ── Baumgarte positional correction ──
+             * Move each player β/2 * max(pen − slop, 0) along the normal.
+             * Spreading the correction prevents teleport artifacts while the
+             * velocity impulse below prevents re-penetration next frame. */
+            float corr = BAUMGARTE * fmaxf(pen - SLOP_SU, 0.0f) * 0.5f;
+            p1->position.x = Q16_FROM_FLOAT(Q16_TO_FLOAT(p1->position.x) - corr * nx);
+            p1->position.y = Q16_FROM_FLOAT(Q16_TO_FLOAT(p1->position.y) - corr * ny);
+            p2->position.x = Q16_FROM_FLOAT(Q16_TO_FLOAT(p2->position.x) + corr * nx);
+            p2->position.y = Q16_FROM_FLOAT(Q16_TO_FLOAT(p2->position.y) + corr * ny);
+
+            /* ── Velocity impulse with warm starting ──
+             * Relative velocity of p2 w.r.t. p1 along the collision normal. */
+            float v1x = Q16_TO_FLOAT(p1->velocity.x);
+            float v1y = Q16_TO_FLOAT(p1->velocity.y);
+            float v2x = Q16_TO_FLOAT(p2->velocity.x);
+            float v2y = Q16_TO_FLOAT(p2->velocity.y);
+
+            /* Look up warm-start from previous tick */
+            struct ContactEntry* pp_ce = contact_cache_find(&sim->contact_cache, p1->id, p2->id);
+            float P_n_warm = 0.0f;
+            if (pp_ce && pp_ce->n_contacts > 0) {
+                P_n_warm = pp_ce->P_n[0] * 0.8f;   /* 80% of last tick */
+                if (P_n_warm > 0.0f) {
+                    /* Apply warm-start: push apart along normal */
+                    v1x -= P_n_warm * 0.5f * nx;
+                    v1y -= P_n_warm * 0.5f * ny;
+                    v2x += P_n_warm * 0.5f * nx;
+                    v2y += P_n_warm * 0.5f * ny;
                 }
+            }
+
+            float vn  = (v2x - v1x) * nx + (v2y - v1y) * ny;
+
+            float J = 0.0f;
+            /* Only resolve if players are approaching */
+            if (vn < 0.0f) {
+                /* Baumgarte velocity bias — adds a small "push apart" velocity
+                 * proportional to remaining penetration to resist re-penetration. */
+                float bias = BAUMGARTE * INV_DT * fmaxf(pen - SLOP_SU, 0.0f);
+
+                /* Equal-mass impulse: J = (-(1+e)*vn + bias) / (1/m1 + 1/m2)
+                 * With unit masses denominator = 2, so multiply by 0.5. */
+                J = (-(1.0f + RESTITUTION) * vn + bias) * 0.5f;
+                if (J < 0.0f) J = 0.0f;
+
+                /* Apply impulse strictly along the normal — tangential (sliding)
+                 * velocity is left intact so players don't lose lateral momentum. */
+                p1->velocity.x = Q16_FROM_FLOAT(v1x - J * nx);
+                p1->velocity.y = Q16_FROM_FLOAT(v1y - J * ny);
+                p2->velocity.x = Q16_FROM_FLOAT(v2x + J * nx);
+                p2->velocity.y = Q16_FROM_FLOAT(v2y + J * ny);
+            }
+
+            /* Store into contact cache for next tick's warm start */
+            {
+                struct ContactEntry* pp_ce_w = contact_cache_upsert(&sim->contact_cache, p1->id, p2->id);
+                pp_ce_w->last_tick = sim->tick;
+                pp_ce_w->n_contacts = 1;
+                pp_ce_w->P_n[0] = J;
             }
         }
     }
@@ -2128,45 +3086,117 @@ void handle_player_ship_collisions(struct Sim* sim) {
                 q16_t penetration_depth;
                 Vec2Q16 edge_normal;
                 Vec2Q16 closest_hull_point = closest_point_on_hull(player->position, ship, &penetration_depth, &edge_normal);
-                
-                // Use edge normal for collision response (more accurate than radial direction)
+
+                // Use edge normal for collision response
                 Vec2Q16 normal = edge_normal;
                 q16_t normal_length = vec2_length(normal);
-                
-                // Fallback to radial direction if edge normal is invalid
                 if (normal_length < Q16_FROM_FLOAT(0.01f)) {
                     Vec2Q16 separation = vec2_sub(player->position, closest_hull_point);
                     q16_t sep_length = vec2_length(separation);
                     if (sep_length > Q16_FROM_FLOAT(0.01f)) {
                         normal = vec2_normalize(separation);
                     } else {
-                        // Last resort: push away from ship center
                         normal = vec2_normalize(vec2_sub(player->position, ship->position));
                     }
                 }
-                
-                // Push player out to just outside the hull (radius + small margin)
-                q16_t target_distance = q16_add_sat(player->radius, Q16_FROM_FLOAT(0.1f)); // radius + 0.1 unit margin
-                Vec2Q16 target_pos = vec2_add(closest_hull_point, vec2_mul_scalar(normal, target_distance));
-                player->position = target_pos;
-                
-                // Reflect velocity if moving into the hull
-                q16_t vel_along_normal = vec2_dot(player->velocity, normal);
-                if (vel_along_normal < 0) {
-                    // Moving into the hull - reflect velocity with restitution
-                    q16_t restitution = Q16_FROM_FLOAT(0.3f); // 30% bounce (reduced for smoother feel)
-                    
-                    // Separate velocity into normal and tangential components
-                    Vec2Q16 vel_normal = vec2_mul_scalar(normal, vel_along_normal);
-                    Vec2Q16 vel_tangent = vec2_sub(player->velocity, vel_normal);
-                    
-                    // Reflect normal component with restitution, keep tangential (sliding)
-                    Vec2Q16 vel_reflected = vec2_mul_scalar(vel_normal, -restitution);
-                    player->velocity = vec2_add(vel_tangent, vel_reflected);
+
+                /* ── Baumgarte positional correction ──
+                 * Compute signed penetration along the outward edge normal and
+                 * spread the correction over a couple of frames (β = 0.5) to
+                 * avoid jarring teleports.  The velocity impulse below prevents
+                 * re-penetration on the next frame. */
+                {
+                    float pnx = Q16_TO_FLOAT(normal.x), pny = Q16_TO_FLOAT(normal.y);
+                    float ppx = Q16_TO_FLOAT(player->position.x);
+                    float ppy = Q16_TO_FLOAT(player->position.y);
+                    float hpx = Q16_TO_FLOAT(closest_hull_point.x);
+                    float hpy = Q16_TO_FLOAT(closest_hull_point.y);
+                    /* Signed distance of player centre along outward normal from
+                     * the hull edge (negative → player is inside the hull). */
+                    float d_n    = (ppx - hpx) * pnx + (ppy - hpy) * pny;
+                    float pen_ps = Q16_TO_FLOAT(player->radius) - d_n; /* > 0 when penetrating */
+                    static const float PSHIP_BETA = 0.5f;
+                    float corr_ps = PSHIP_BETA * fmaxf(pen_ps, 0.0f);
+                    player->position.x = Q16_FROM_FLOAT(ppx + corr_ps * pnx);
+                    player->position.y = Q16_FROM_FLOAT(ppy + corr_ps * pny);
                 }
-                
-                log_info("🚫 Player %u collided with ship %u hull - repositioned to %.2f units from edge", 
-                         player->id, ship->id, Q16_TO_FLOAT(target_distance));
+
+                /* ── Dynamic collision response (float to avoid Q16 overflow) ──
+                 *
+                 * Treat the ship as having infinite mass (no impulse back to ship).
+                 * Velocity response relative to the ship surface at the contact point:
+                 *
+                 *   v_surf = v_ship + ω × r   (surface velocity at contact, 2-D)
+                 *   v_rel  = v_player − v_surf (player velocity relative to surface)
+                 *   v_n    = v_rel · n          (normal component)
+                 *
+                 * If v_n < 0 (player approaching the hull):
+                 *   J      = −(1 + e) * v_n    (impulse magnitude, static hull = ÷1)
+                 *   Apply normal impulse and then kinetic friction on the tangential
+                 *   relative sliding velocity.
+                 *
+                 * After impulse, add back the ship surface velocity so the player
+                 * feels the hull "carry" them when the ship is moving or spinning. */
+                float nx  = Q16_TO_FLOAT(normal.x);
+                float ny  = Q16_TO_FLOAT(normal.y);
+                float pvx = Q16_TO_FLOAT(player->velocity.x);
+                float pvy = Q16_TO_FLOAT(player->velocity.y);
+
+                /* Ship surface velocity at the contact point */
+                float svx = Q16_TO_FLOAT(ship->velocity.x);
+                float svy = Q16_TO_FLOAT(ship->velocity.y);
+                float omega = Q16_TO_FLOAT(ship->angular_velocity);
+                float rx  = Q16_TO_FLOAT(closest_hull_point.x) - Q16_TO_FLOAT(ship->position.x);
+                float ry  = Q16_TO_FLOAT(closest_hull_point.y) - Q16_TO_FLOAT(ship->position.y);
+                float surf_vx = svx + omega * (-ry);
+                float surf_vy = svy + omega * (rx);
+
+                /* Relative velocity of player vs. ship surface */
+                float rel_vx = pvx - surf_vx;
+                float rel_vy = pvy - surf_vy;
+                float vn = rel_vx * nx + rel_vy * ny;
+
+                if (vn < 0.0f) {
+                    /* Low restitution — player sticks against the hull rather
+                     * than rocketing away; increase for a bouncier feel. */
+                    static const float RESTITUTION  = 0.15f;
+                    /* Low kinetic friction — player slides smoothly along hull;
+                     * increase (max ~1.0) to make them stick/slow down more. */
+                    static const float FRICTION      = 0.12f;
+                    /* Baumgarte velocity bias: post-positional-correction distance
+                     * is ~half the original penetration (β=0.5 was applied above),
+                     * so this fires whenever the player is meaningfully inside the hull. */
+                    float d_n2   = (Q16_TO_FLOAT(player->position.x) - Q16_TO_FLOAT(closest_hull_point.x)) * nx
+                                 + (Q16_TO_FLOAT(player->position.y) - Q16_TO_FLOAT(closest_hull_point.y)) * ny;
+                    float pen_vb = Q16_TO_FLOAT(player->radius) - d_n2;
+                    float bias_ps = (0.4f * 30.0f) * fmaxf(pen_vb - 0.01f, 0.0f);
+
+                    float J = -(1.0f + RESTITUTION) * vn + bias_ps;
+
+                    /* Normal impulse (in relative space) */
+                    float new_pvx = pvx + J * nx;
+                    float new_pvy = pvy + J * ny;
+
+                    /* Kinetic friction opposes relative sliding along the edge */
+                    float rel_tx = rel_vx - vn * nx;
+                    float rel_ty = rel_vy - vn * ny;
+                    float rel_t_len = sqrtf(rel_tx * rel_tx + rel_ty * rel_ty);
+                    if (rel_t_len > 0.001f) {
+                        float ft = fminf(FRICTION * J, rel_t_len);
+                        new_pvx -= ft * (rel_tx / rel_t_len);
+                        new_pvy -= ft * (rel_ty / rel_t_len);
+                    }
+
+                    player->velocity.x = Q16_FROM_FLOAT(new_pvx);
+                    player->velocity.y = Q16_FROM_FLOAT(new_pvy);
+                }
+
+                /* Rate-limited collision log — uncomment for debugging:
+                static uint32_t pship_log_count = 0;
+                if (pship_log_count++ % 60 == 0)
+                    log_info("🚫 Player %u hit ship %u hull (surf_v=%.2f,%.2f omega=%.3f)",
+                             player->id, ship->id, surf_vx, surf_vy, omega);
+                */
             }
         }
     }

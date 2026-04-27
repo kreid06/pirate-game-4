@@ -119,6 +119,7 @@ export interface HelmModuleData {
   responsiveness: number;       // How quickly ship responds to input (0-1)
   currentInput: Vec2;           // Current steering input (-1 to 1 for each axis)
   health: number;               // Current HP (base max: 10000)
+  targetHealth: number;         // Repair ceiling — decreases with damage; spend wood to raise
   maxHealth: number;            // Max HP
   
   // Rendering properties
@@ -138,6 +139,7 @@ export interface CannonModuleData {
   ammunition: number;           // Remaining ammunition count
   maxAmmunition: number;        // Maximum ammunition capacity
   health: number;               // Current HP (base max: 8000)
+  targetHealth: number;         // Repair ceiling — decreases with damage; spend wood to raise
   maxHealth: number;            // Max HP
   stateBits: number;            // Server MODULE_STATE_* bitmask (bit 4 = RELOADING)
 }
@@ -156,6 +158,7 @@ export interface MastModuleData {
   sailColor: string;           // Color of the sail fabric
   openness: number;            // Sail openness (0-100) — how much the sail is deployed
   health: number;               // Mast pole HP (base max: 15000)
+  targetHealth: number;         // Repair ceiling — decreases with damage; spend wood to raise
   maxHealth: number;            // Max mast pole HP
   fiberHealth: number;          // Sail cloth HP (base max: 15000, same as mast)
   fiberMaxHealth: number;       // Sail cloth max HP
@@ -192,10 +195,11 @@ export interface PlankModuleData {
   length: number;              // Length of the plank segment
   width: number;               // Width/thickness of the plank
   health: number;              // Current HP (base max: 10000)
+  targetHealth: number;        // Repair ceiling — decreases with damage; spend wood to raise
   maxHealth: number;           // Max HP
   material: 'wood' | 'iron' | 'steel'; // Plank material type
   segmentIndex: number;        // Which segment of the ship hull (0-11)
-  sectionName?: string;        // Section name (e.g., "port_bow", "starboard_side")
+  sectionName?: string;        // Section name (e.g., "bow_port", "starboard_side")
   isCurved?: boolean;          // Whether this plank follows a curve
   curveData?: {                // Curve information for rendering
     start: PlankPoint;
@@ -230,6 +234,7 @@ export interface SwivelModuleData {
   reloadTime: number;           // Reload time in seconds (default 1.2)
   timeSinceLastFire: number;    // Time since last shot (seconds)
   health: number;               // Current HP (base max: 4000)
+  targetHealth: number;         // Repair ceiling — decreases with damage; spend wood to raise
   maxHealth: number;            // Max HP
 }
 
@@ -349,6 +354,7 @@ export class ModuleUtils {
           openness: 80,           // Start with sails mostly deployed
           angle: 0,               // Start with sails aligned with ship
           health: 15000,
+          targetHealth: 15000,    // Full repair ceiling on placement
           maxHealth: 15000,
           fiberHealth: 15000,     // Sail cloth HP (same base as mast)
           fiberMaxHealth: 15000,
@@ -386,6 +392,7 @@ export class ModuleUtils {
           length: 16,              // Default plank length
           width: 4,                // Default plank thickness
           health: 10000,           // Full health
+          targetHealth: 10000,     // Full repair ceiling on placement
           maxHealth: 10000,
           material: 'wood',        // Default wooden planks
           segmentIndex: 0,         // Default to first segment
@@ -417,6 +424,7 @@ export class ModuleUtils {
           reloadTime: 1.2,
           timeSinceLastFire: 0,
           health: 4000,
+          targetHealth: 4000,     // Full repair ceiling on placement
           maxHealth: 4000,
         } as SwivelModuleData;
         break;
@@ -616,8 +624,6 @@ export class ModuleUtils {
       }
       
       planks.push(plank);
-      
-      const curveInfo = segment.isCurved ? ' [CURVED]' : ' [STRAIGHT]';
     }
     
     return planks;

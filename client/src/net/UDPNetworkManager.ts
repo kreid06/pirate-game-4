@@ -678,6 +678,9 @@ export class UDPNetworkManager {
       cannonballs,
       players,
       npcs: [],
+      tombstones: [],
+      droppedItems: [],
+      companies: [],
       timestamp: header.serverTime,
       carrierDetection: new Map()
     };

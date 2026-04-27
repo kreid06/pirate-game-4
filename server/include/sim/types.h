@@ -8,6 +8,16 @@
 #include "sim/module_types.h"
 #include "sim/ship_level.h"
 
+/* ── Shipyard construction module bitmasks ──────────────────────────────── */
+#define MODULE_HULL_LEFT   (1u << 0)
+#define MODULE_HULL_RIGHT  (1u << 1)
+#define MODULE_DECK        (1u << 2)
+#define MODULE_MAST        (1u << 3)
+#define MODULE_CANNON_PORT (1u << 4)
+#define MODULE_CANNON_STBD (1u << 5)
+/** All three required modules to allow launch */
+#define MODULES_REQUIRED   (MODULE_HULL_LEFT | MODULE_HULL_RIGHT | MODULE_DECK)
+
 // Maximum entity counts
 #define MAX_SHIPS 50
 #define MAX_PLAYERS 100
@@ -40,6 +50,14 @@ struct Ship {
     q16_t angular_velocity;  // Angular velocity (rad/s)
     q16_t mass;             // Ship mass (kg)
     q16_t moment_inertia;   // Rotational inertia (kg⋅m²)
+
+    /* Force accumulators — cleared to zero after each physics integration step.
+     * All systems (input, sail, current, etc.) add to these; update_ship_physics
+     * integrates them once per tick and resets them.  Collisions use impulses
+     * (direct velocity edits) and do NOT write here. */
+    Vec2Q16 net_force;   // Accumulated force this tick (N)
+    q16_t   net_torque;  // Accumulated torque this tick (N⋅m)
+
     q16_t hull_health;      // Hull integrity
     
     // Hull collision shape (local coordinates)
@@ -110,6 +128,7 @@ struct Projectile {
     q16_t damage;           // Damage amount
     q16_t lifetime;         // Remaining lifetime in seconds
     uint32_t spawn_time;    // Server tick when created
+    uint32_t effective_age_ms; // Accumulated age: 1ms/ms at sea, 2ms/ms over land
     uint16_t flags;         // Projectile flags
     uint8_t type;           // Cannonball, grapeshot, etc
     uint8_t firing_company; // Company owning this projectile (0=unset; skip if == target ship company)
@@ -158,6 +177,36 @@ struct HitEvent {
     entity_id shooter_ship_id;  // Ship that fired the projectile (for XP award)
 };
 
+/* ── Contact cache for warm-starting collision solvers ─────────────────────
+ *
+ * Stores the accumulated normal impulse (P_n) from the previous tick for each
+ * actively-colliding entity pair.  At the start of the next tick's solve the
+ * cached impulse is applied as a warm-start guess so the solver converges
+ * faster and produces less jitter at rest.
+ *
+ * Keyed by an order-independent pair of entity IDs:
+ *   key = (min(a,b) << 16) | max(a,b)
+ *
+ * Entries are aged out after MAX_CONTACT_AGE ticks with no collision.       */
+
+#define CONTACT_CACHE_SIZE 256   /* power-of-two; open-addressing hash map */
+#define MAX_CONTACT_AGE    3     /* ticks without collision before eviction */
+#define MAX_CONTACT_POINTS 4     /* max cached contact points per pair     */
+
+struct ContactEntry {
+    uint32_t key;                               /* 0 = empty slot              */
+    uint32_t last_tick;                         /* sim->tick of last update    */
+    float    P_n[MAX_CONTACT_POINTS];           /* accumulated normal impulse  */
+    float    P_f[MAX_CONTACT_POINTS];           /* accumulated friction impulse*/
+    float    cx[MAX_CONTACT_POINTS];            /* contact point x (world)     */
+    float    cy[MAX_CONTACT_POINTS];            /* contact point y (world)     */
+    uint8_t  n_contacts;                        /* how many contacts last tick */
+};
+
+struct ContactCache {
+    struct ContactEntry entries[CONTACT_CACHE_SIZE];
+};
+
 // Complete simulation state
 struct Sim {
     uint32_t tick;               // Current simulation tick
@@ -189,6 +238,9 @@ struct Sim {
     // Hit events produced this tick; drained by websocket layer for broadcast
     struct HitEvent hit_events[MAX_HIT_EVENTS];
     uint8_t         hit_event_count;
+
+    // Contact cache for warm-starting collision solvers
+    struct ContactCache contact_cache;
 };
 
 // Simulation configuration
@@ -211,8 +263,9 @@ struct SimConfig {
 #define PLAYER_ACTION_LEAVE        (1 << 7)  // Leave current ship
 
 // Ship flags
-#define SHIP_FLAG_SINKING   (1 << 0)
-#define SHIP_FLAG_BURNING   (1 << 1)
+#define SHIP_FLAG_SINKING    (1 << 0)
+#define SHIP_FLAG_BURNING    (1 << 1)
+#define SHIP_FLAG_SCAFFOLDED (1 << 2)  // Attached to shipyard — immune to plank-drain sinking
 
 // Player flags  
 #define PLAYER_FLAG_IN_WATER    (1 << 0)

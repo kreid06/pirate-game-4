@@ -8,13 +8,14 @@
 import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
-import { EffectRenderer, AnnouncementKind } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_NEUTRAL, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure } from '../../sim/Types.js';
-import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap } from '../../sim/modules.js';
+import { EffectRenderer, AnnouncementKind, DamageTeam } from './EffectRenderer.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_UNCLAIMED, COMPANY_NEUTRAL, COMPANY_SOLO, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef, Company } from '../../sim/Types.js';
+import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
 import { RadialMenu } from '../ui/RadialMenu.js';
+import { GLWorldRenderer, PlayerColorState } from './gl/GLWorldRenderer.js';
 
 /** Max hull HP for ghost (Phantom Brig) ships — server uses raw HP scale, not 0-100. */
 const GHOST_MAX_HULL_HP = 60000;
@@ -44,6 +45,34 @@ interface RenderQueueItem {
   priority?: number;
 }
 
+type ResourceNode = {
+  ox: number;
+  oy: number;
+  type: string;
+  size: number;
+  hp: number;
+  maxHp: number;
+  depletedAt?: number;
+};
+
+type RenderIslandInput = {
+  id: number;
+  x: number;
+  y: number;
+  preset: string;
+  resources: ResourceNode[];
+  vertices?: { x: number; y: number }[];
+  grassVertices?: { x: number; y: number }[];
+  shallowVertices?: { x: number; y: number }[];
+};
+
+type RenderIsland = RenderIslandInput & {
+  resourceGrid: {
+    cellSize: number;
+    cells: Map<string, number[]>;
+  };
+};
+
 /**
  * Main rendering system
  */
@@ -55,6 +84,15 @@ export class RenderSystem {
   // Sub-systems
   private particleSystem: ParticleSystem;
   private effectRenderer: EffectRenderer;
+
+  /** WebGL2 world renderer — null when WebGL2 is unavailable or disabled. */
+  private _gl: GLWorldRenderer | null = null;
+  /** Elapsed time in seconds, passed to GL shaders for animation. */
+  private _glTimeSec = 0;
+  /** World-wrap render settings received from NetworkManager via ClientApplication. */
+  private _wrapRenderEnabled = false;
+  private _wrapWorldWidth = 0;
+  private _wrapWorldHeight = 0;
   
   // Render queue for layered rendering (10 pre-allocated buckets: index 0 = layer -1, index 1-9 = layers 1-9)
   private readonly renderBuckets: RenderQueueItem[][] = Array.from({length: 10}, () => []);
@@ -71,6 +109,7 @@ export class RenderSystem {
   private swordCooldownMs: number = 800;
   /** Set to true each frame when the local player has the sword as their active item. */
   public swordEquipped: boolean = false;
+  public axeEquipped: boolean = false;
 
   // Build mode state
   private buildMode: boolean = false;
@@ -112,26 +151,77 @@ export class RenderSystem {
   private _cachedLocalPlayer: Player | null = null;
   /** Placed island structures — updated via addPlacedStructure / setPlacedStructures. */
   private placedStructures: PlacedStructure[] = [];
+  /** Active tombstone item caches in the world. */
+  private _tombstones: import('../../sim/Types').Tombstone[] = [];
+  /** Ship-local attachment data for tombstones that spawned on a ship. */
+  private _tombstoneShipAttach: Map<number, { shipId: number; localX: number; localY: number }> = new Map();
+  /** Ships from the last rendered frame — used for tombstone ship-tracking. */
+  private _cachedWorldShips: Ship[] = [];
+  /** Players from the last rendered frame — used for NPC owner resolution in tooltips. */
+  private _cachedWorldPlayers: Player[] = [];
+  /** NPCs from the last rendered frame — used for solo ship ownership checks. */
+  private _cachedWorldNpcs: import('../../sim/Types').Npc[] = [];
+  /** Dynamic companies from the last rendered frame — used for name resolution in tooltips. */
+  private _cachedCompanies: Company[] = [];
+  /** Dropped items in the world (player-dropped inventory items). */
+  private _droppedItems: import('../../sim/Types').DroppedItem[] = [];
+  /** Maps scaffolded ship entity IDs to the shipyard structure that owns them. */
+  private _scaffoldedShips: Map<number, PlacedStructure> = new Map();
   /** Structure currently under the cursor (within hover range of the local player). */
   private _hoveredStructure: PlacedStructure | null = null;
+  /** ID of the structure that blocked the last placement attempt (shown in red during build mode). */
+  private _blockerStructureId: number | null = null;
+  /** Timestamp when the blocker highlight should expire (ms). */
+  private _blockerExpiry = 0;
+  /** Fiber bushes pending draw — populated by drawIsland, consumed after the render queue (above players). */
+  private _pendingBushes: Array<{
+    sp: { x: number; y: number };
+    isHovered: boolean; bushAlpha: number; deathAlpha: number;
+    ox: number; oy: number;
+    wx: number; wy: number;
+  }> = [];
+  /** All visible resources — populated by drawIsland, leaves+prompts drawn after bushes in renderWorld. */
+  private _pendingAllRes: Array<{
+    res: { ox: number; oy: number; type: string; size: number; hp: number; maxHp: number; depletedAt?: number };
+    wx: number; wy: number;
+    sp: { x: number; y: number };
+    isHovered: boolean; inRange: boolean; playerNear: boolean;
+    leafAlpha: number; bushAlpha: number; boulderAlpha: number; deathAlpha: number;
+  }> = [];
+  private _pendingAxeEquipped     = false;
+  private _pendingPickaxeEquipped = false;
   /** Tree node currently under cursor (world coords) — updated each frame in drawIsland. */
   private _hoveredTree: { wx: number; wy: number } | null = null;
   /** Fiber plant currently under cursor (world coords) — updated each frame in drawIsland. */
   private _hoveredFiberPlant: { wx: number; wy: number } | null = null;
   /** Rock node currently under cursor (world coords) — updated each frame in drawIsland. */
   private _hoveredRock: { wx: number; wy: number } | null = null;
+  /** Boulder node currently under cursor (world coords) — updated each frame in drawIsland. */
+  private _hoveredBoulder: { wx: number; wy: number } | null = null;
+  /** Boulders pending draw — populated by drawIsland, consumed after tree leaves in renderWorld. */
+  private _pendingBoulders: Array<{
+    sp: { x: number; y: number };
+    isHovered: boolean; boulderAlpha: number; deathAlpha: number;
+    ox: number; oy: number; size: number;
+  }> = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | null = null;
-  private _wallGhostHorizontal: boolean = true; // true = runs along X axis (N/S edge)
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | null = null;
+  /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
+  private islandBuildRotationDeg = 0;
+  private _wallGhostRotRad: number = 0; // rotation (radians) of wall/door ghost, inherited from floor edge
   /** True when the placement ghost is beyond the server's max placement range (200 px). */
   private _islandGhostTooFar = false;
   /** Last snapped placement position (may differ from raw cursor when snap-to-grid is active). */
   private _snappedBuildPos: { x: number; y: number } | null = null;
+  /** Rotation (degrees) of the source tile that generated the current snap, or null if freely placing. */
+  private _snappedBuildRotation: number | null = null;
 
   /** Returns whether the last-rendered island build ghost was out of placement range. */
   getIslandBuildTooFar(): boolean { return this._islandGhostTooFar; }
   /** Returns the current snapped placement position (or null when no ghost is active). */
   getSnappedBuildPos(): { x: number; y: number } | null { return this._snappedBuildPos; }
+  /** Returns the rotation (deg) inherited from the snap source tile, or null if freely placing. */
+  getSnappedBuildRotation(): number | null { return this._snappedBuildRotation; }
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
   public playerAimAngleRelative: number = 0;
   /** Currently selected ammo type (0 = cannonball, 1 = bar shot), set each frame by ClientApplication. */
@@ -242,34 +332,488 @@ export class RenderSystem {
   };
 
   /** Default fallback island — shown before the server sends ISLANDS. */
+  // ── Tree leaf sprite cache ──────────────────────────────────────────────────
+  private static _treeLeafSprites: Map<string, OffscreenCanvas> | null = null;
+  private static readonly TREE_SPRITE_SIZE = 256;
+  private static readonly TREE_ROT_BINS    = 8;
+  private static readonly TREE_TINTS: [string, string, string, string][] = [
+    ['#1a3a0a', '#3a7320', '#52a030', '#6ecf42'],
+    ['#1c3e08', '#3f7a18', '#5aae2e', '#74d93e'],
+    ['#152f08', '#2e6318', '#456e22', '#5a9030'],
+    ['#233a10', '#4a7c28', '#5fa035', '#72b845'],
+  ];
+
+  private static _ensureTreeSprites(): Map<string, OffscreenCanvas> {
+    if (RenderSystem._treeLeafSprites) return RenderSystem._treeLeafSprites;
+    const SIZE      = RenderSystem.TREE_SPRITE_SIZE;
+    const BINS      = RenderSystem.TREE_ROT_BINS;
+    const ROT_RANGE = Math.PI / 3.6;
+    const canopy    = SIZE * 0.38;
+    const cx = SIZE / 2, cy = SIZE / 2;
+    const BASE_L: [number, number, number][] = [
+      [  0.00, -0.22, 0.80 ],
+      [ -0.44,  0.00, 0.62 ],
+      [  0.46,  0.05, 0.58 ],
+      [ -0.20,  0.40, 0.50 ],
+      [  0.25,  0.38, 0.48 ],
+    ];
+    const sprites = new Map<string, OffscreenCanvas>();
+    for (let tintIdx = 0; tintIdx < 4; tintIdx++) {
+      const [shadowCol, baseCol, hlCol, glintCol] = RenderSystem.TREE_TINTS[tintIdx];
+      for (let bin = 0; bin < BINS; bin++) {
+        const clusterRot = -ROT_RANGE + (bin / (BINS - 1)) * 2 * ROT_RANGE;
+        const c = Math.cos(clusterRot), s = Math.sin(clusterRot);
+        const rot = (dx: number, dy: number): [number, number] =>
+          [dx * c - dy * s, dx * s + dy * c];
+        const L = BASE_L.map(([dx, dy, r]) => { const [rx, ry] = rot(dx, dy); return [rx, ry, r] as [number, number, number]; });
+        const off = new OffscreenCanvas(SIZE, SIZE);
+        const ctx = off.getContext('2d')!;
+        // Pass 1: shadow
+        ctx.fillStyle = shadowCol;
+        for (const [dx, dy, r] of L) { ctx.beginPath(); ctx.arc(cx + (dx + 0.13) * canopy, cy + (dy + 0.11) * canopy, r * canopy, 0, Math.PI * 2); ctx.fill(); }
+        // Pass 2: base
+        ctx.fillStyle = baseCol;
+        for (const [dx, dy, r] of L) { ctx.beginPath(); ctx.arc(cx + dx * canopy, cy + dy * canopy, r * canopy, 0, Math.PI * 2); ctx.fill(); }
+        // Pass 3: highlight
+        ctx.fillStyle = hlCol;
+        for (const [dx, dy, r] of L.slice(0, 3)) { ctx.beginPath(); ctx.arc(cx + (dx - 0.10) * canopy, cy + (dy - 0.15) * canopy, r * canopy * 0.62, 0, Math.PI * 2); ctx.fill(); }
+        // Pass 4: specular glint
+        const [apexRx, apexRy] = rot(-0.09, -0.34);
+        ctx.fillStyle = glintCol;
+        ctx.beginPath(); ctx.arc(cx + apexRx * canopy, cy + apexRy * canopy, canopy * 0.25, 0, Math.PI * 2); ctx.fill();
+        sprites.set(`${tintIdx}_${bin}`, off);
+      }
+    }
+    RenderSystem._treeLeafSprites = sprites;
+    return sprites;
+  }
+
+  // ── Rock sprite cache — 4 tones × 3 shapes ─────────────────────────────────
+  private static _rockSprites: Map<string, OffscreenCanvas> | null = null;
+  private static readonly ROCK_SPRITE_SIZE = 96;
+  private static readonly ROCK_SPRITE_R    = 22;
+  private static readonly ROCK_TONES = [
+    { body: '#888890', shadow: '#555560', hi: '#b8b8c0', crack: '#666670' }, // grey
+    { body: '#8a7060', shadow: '#5a4030', hi: '#b09080', crack: '#6a5040' }, // brown
+    { body: '#a09060', shadow: '#6a5830', hi: '#c8b080', crack: '#807040' }, // tan
+    { body: '#505058', shadow: '#303038', hi: '#808088', crack: '#404048' }, // dark
+  ];
+  // Shape variants: [xScale, yScale, rotation, crackX1,crackY1,crackX2,crackY2 as fraction of R]
+  private static readonly ROCK_SHAPES: [number, number, number, number, number, number, number][] = [
+    [1.0,  0.70,  0.0,   -0.10, -0.20,  0.25,  0.30], // standard flat
+    [0.85, 0.85,  0.3,    0.05, -0.30, -0.20,  0.20], // rounder, tilted
+    [1.15, 0.55, -0.2,   -0.20, -0.10,  0.30,  0.25], // wide flat
+  ];
+
+  private static _ensureRockSprites(): Map<string, OffscreenCanvas> {
+    if (RenderSystem._rockSprites) return RenderSystem._rockSprites;
+    const SIZE = RenderSystem.ROCK_SPRITE_SIZE;
+    const R    = RenderSystem.ROCK_SPRITE_R;
+    const cx = SIZE / 2, cy = SIZE / 2;
+    const sprites = new Map<string, OffscreenCanvas>();
+    for (let ti = 0; ti < RenderSystem.ROCK_TONES.length; ti++) {
+      const tone = RenderSystem.ROCK_TONES[ti];
+      for (let si = 0; si < RenderSystem.ROCK_SHAPES.length; si++) {
+        const [sx, sy, rot, cx1, cy1, cx2, cy2] = RenderSystem.ROCK_SHAPES[si];
+        for (const hovered of [false, true]) {
+          const off = new OffscreenCanvas(SIZE, SIZE);
+          const ctx = off.getContext('2d')!;
+          // Shadow
+          ctx.beginPath();
+          ctx.ellipse(cx + R * 0.18, cy + R * 0.18 * sy, R * sx, R * sy, rot, 0, Math.PI * 2);
+          ctx.fillStyle = tone.shadow; ctx.fill();
+          // Body
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, R * sx, R * sy, rot, 0, Math.PI * 2);
+          ctx.fillStyle = hovered ? tone.hi : tone.body; ctx.fill();
+          if (hovered) {
+            ctx.strokeStyle = '#ffe090'; ctx.lineWidth = 2;
+            ctx.stroke();
+          } else {
+            ctx.strokeStyle = tone.shadow; ctx.lineWidth = 1.5;
+            ctx.stroke();
+          }
+          // Highlight fleck
+          ctx.beginPath();
+          ctx.ellipse(cx - R * sx * 0.28, cy - R * sy * 0.28, R * sx * 0.26, R * sy * 0.18, rot - 0.5, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255,255,255,0.32)'; ctx.fill();
+          // Crack
+          ctx.strokeStyle = tone.crack; ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(cx + R * cx1, cy + R * cy1);
+          ctx.lineTo(cx + R * cx2, cy + R * cy2);
+          ctx.stroke();
+          sprites.set(`${ti}_${si}_${hovered ? 'h' : 'n'}`, off);
+        }
+      }
+    }
+    RenderSystem._rockSprites = sprites;
+    return sprites;
+  }
+
+  // ── Boulder sprite cache — 3 tones × 3 shapes (large rocks / boulders) ─────
+  private static _boulderSprites: Map<string, OffscreenCanvas> | null = null;
+  private static readonly BOULDER_SPRITE_SIZE = 160;
+  private static readonly BOULDER_SPRITE_R    = 52; // reference half-size within sprite
+  private static readonly BOULDER_TONES = [
+    { body: '#797975', shadow: '#44443f', hi: '#aaaaa4', crack: '#55554f', moss: '#5a7040' },
+    { body: '#8a7860', shadow: '#504030', hi: '#b09880', crack: '#60503a', moss: '#607848' },
+    { body: '#585858', shadow: '#303030', hi: '#888888', crack: '#404040', moss: '#4a6038' },
+  ];
+  private static readonly BOULDER_SHAPES: [number, number, number][] = [
+    [1.00, 0.72, 0.0],   // flat classic
+    [0.88, 0.88, 0.4],   // round
+    [1.18, 0.60, -0.2],  // wide flat
+    [0.72, 1.00, 1.2],   // tall upright
+    [1.35, 0.50, 0.15],  // very wide slab
+  ];
+
+  private static _ensureBoulderSprites(): Map<string, OffscreenCanvas> {
+    if (RenderSystem._boulderSprites) return RenderSystem._boulderSprites;
+    const SIZE = RenderSystem.BOULDER_SPRITE_SIZE;
+    const R    = RenderSystem.BOULDER_SPRITE_R;
+    const cx = SIZE / 2, cy = SIZE / 2;
+    const sprites = new Map<string, OffscreenCanvas>();
+
+    for (let ti = 0; ti < RenderSystem.BOULDER_TONES.length; ti++) {
+      const tone = RenderSystem.BOULDER_TONES[ti];
+      for (let si = 0; si < RenderSystem.BOULDER_SHAPES.length; si++) {
+        const [sx, sy, rot] = RenderSystem.BOULDER_SHAPES[si];
+        for (const hovered of [false, true]) {
+          const off = new OffscreenCanvas(SIZE, SIZE);
+          const ctx = off.getContext('2d')!;
+
+          // Soft ground shadow
+          ctx.beginPath();
+          ctx.ellipse(cx + R * 0.20, cy + R * 0.25 * sy, R * sx * 1.10, R * sy * 0.35, rot, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(0,0,0,0.30)'; ctx.fill();
+
+          // Body shadow (offset copy)
+          ctx.beginPath();
+          ctx.ellipse(cx + R * 0.15, cy + R * 0.12 * sy, R * sx, R * sy, rot, 0, Math.PI * 2);
+          ctx.fillStyle = tone.shadow; ctx.fill();
+
+          // Main body
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, R * sx, R * sy, rot, 0, Math.PI * 2);
+          ctx.fillStyle = hovered ? tone.hi : tone.body;
+          ctx.fill();
+          ctx.strokeStyle = hovered ? '#ffe090' : tone.shadow;
+          ctx.lineWidth = hovered ? 3 : 2;
+          ctx.stroke();
+
+          // Large highlight
+          ctx.beginPath();
+          ctx.ellipse(cx - R * sx * 0.28, cy - R * sy * 0.28, R * sx * 0.38, R * sy * 0.26, rot - 0.6, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.fill();
+
+          // Specular fleck
+          ctx.beginPath();
+          ctx.arc(cx - R * sx * 0.35, cy - R * sy * 0.38, R * 0.08, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255,255,255,0.40)'; ctx.fill();
+
+          // Moss patches (3 blobs near base)
+          for (let m = 0; m < 3; m++) {
+            const ma = rot + m * 0.7 + 0.3;
+            const mx = cx + Math.cos(ma) * R * sx * 0.55;
+            const my = cy + R * sy * 0.48 + Math.sin(ma) * R * sy * 0.12;
+            ctx.beginPath();
+            ctx.ellipse(mx, my, R * 0.14, R * 0.08, ma, 0, Math.PI * 2);
+            ctx.fillStyle = tone.moss; ctx.fill();
+          }
+
+          // Two crack lines
+          ctx.strokeStyle = tone.crack; ctx.lineWidth = 1.5; ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(cx - R * sx * 0.10, cy - R * sy * 0.30);
+          ctx.lineTo(cx + R * sx * 0.28, cy + R * sy * 0.32);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(cx + R * sx * 0.05, cy - R * sy * 0.18);
+          ctx.lineTo(cx - R * sx * 0.22, cy + R * sy * 0.20);
+          ctx.stroke();
+
+          sprites.set(`${ti}_${si}_${hovered ? 'h' : 'n'}`, off);
+        }
+      }
+    }
+    RenderSystem._boulderSprites = sprites;
+    return sprites;
+  }
+  private static _fiberSprites: Map<string, OffscreenCanvas> | null = null;
+  private static readonly FIBER_SPRITE_SIZE = 96;
+  private static readonly FIBER_SPRITE_H    = 32; // reference radius for draw-size math
+  private static readonly FIBER_ROT_BINS    = 4;  // reused as shape variant count
+  private static readonly FIBER_TINTS = [
+    { shadow: '#2a5010', mid: '#4a7a20', bright: '#78b838', hi: '#a8e050' }, // green
+    { shadow: '#203a08', mid: '#3c6618', bright: '#62a028', hi: '#90cc48' }, // deep green
+    { shadow: '#3a5010', mid: '#607020', bright: '#96b030', hi: '#c0dc58' }, // yellow-green
+    { shadow: '#284818', mid: '#486830', bright: '#6c9848', hi: '#98c070' }, // sage
+  ];
+  // Each variant: cluster offsets as [dx, dy, r] fractions of base radius
+  private static readonly FIBER_CLUSTERS: [number, number, number][][] = [
+    [ [-0.55,-0.30,0.55], [0.55,-0.30,0.50], [0.00,-0.62,0.52], [0.00, 0.10,0.48] ], // symmetric dome
+    [ [-0.60,-0.18,0.52], [0.50,-0.38,0.48], [0.05,-0.65,0.50], [-0.10,0.08,0.44] ], // lean left
+    [ [-0.45,-0.40,0.50], [0.60,-0.20,0.54], [0.02,-0.60,0.48], [ 0.12,0.12,0.46] ], // lean right
+    [ [-0.50,-0.35,0.56], [0.50,-0.35,0.50], [-0.05,-0.72,0.44],[0.05,-0.10,0.52] ], // tall crown
+  ];
+
+  private static _ensureFiberSprites(): Map<string, OffscreenCanvas> {
+    if (RenderSystem._fiberSprites) return RenderSystem._fiberSprites;
+    const SIZE = RenderSystem.FIBER_SPRITE_SIZE;
+    const BR   = 18; // base radius in sprite pixels
+    const cx = SIZE / 2, cy = SIZE * 0.60; // anchor slightly below centre
+    const sprites = new Map<string, OffscreenCanvas>();
+
+    for (let ti = 0; ti < RenderSystem.FIBER_TINTS.length; ti++) {
+      const tint = RenderSystem.FIBER_TINTS[ti];
+      const clusters = RenderSystem.FIBER_CLUSTERS[ti % RenderSystem.FIBER_CLUSTERS.length];
+      for (let vi = 0; vi < RenderSystem.FIBER_ROT_BINS; vi++) {
+        const vc = RenderSystem.FIBER_CLUSTERS[vi];
+        for (const hovered of [false, true]) {
+          const off = new OffscreenCanvas(SIZE, SIZE);
+          const ctx = off.getContext('2d')!;
+
+          // Ground shadow
+          ctx.beginPath();
+          ctx.ellipse(cx + 2, cy + 3, BR * 0.90, BR * 0.28, 0, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fill();
+
+          // Stem stubs
+          ctx.strokeStyle = tint.shadow; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+          for (let s = -1; s <= 1; s++) {
+            ctx.beginPath();
+            ctx.moveTo(cx + s * BR * 0.28, cy);
+            ctx.lineTo(cx + s * BR * 0.18, cy - BR * 0.55);
+            ctx.stroke();
+          }
+
+          // Back clusters (drawn first = behind)
+          for (let ci = 0; ci < vc.length; ci++) {
+            const [dx, dy, fr] = vc[ci];
+            if (ci >= 2) continue; // back row only
+            const bx = cx + dx * BR, by = cy + dy * BR, r = fr * BR;
+            ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI * 2);
+            ctx.fillStyle = tint.shadow; ctx.fill();
+          }
+
+          // Mid clusters
+          for (let ci = 0; ci < vc.length; ci++) {
+            const [dx, dy, fr] = vc[ci];
+            const bx = cx + dx * BR, by = cy + dy * BR, r = fr * BR;
+            ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI * 2);
+            ctx.fillStyle = hovered ? tint.bright : tint.mid; ctx.fill();
+            if (hovered) {
+              ctx.strokeStyle = '#ffe090'; ctx.lineWidth = 1.5; ctx.stroke();
+            }
+          }
+
+          // Bright top foliage blobs
+          for (let ci = 0; ci < vc.length; ci++) {
+            const [dx, dy, fr] = vc[ci];
+            const bx = cx + dx * BR * 0.72, by = cy + dy * BR * 0.72, r = fr * BR * 0.55;
+            ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI * 2);
+            ctx.fillStyle = hovered ? tint.hi : tint.bright; ctx.fill();
+          }
+
+          // Specular highlight on top cluster
+          const [tx, ty] = vc[2] ?? vc[0];
+          ctx.beginPath();
+          ctx.arc(cx + tx * BR * 0.5 - BR * 0.1, cy + ty * BR * 0.5 - BR * 0.1, BR * 0.18, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.fill();
+
+          sprites.set(`${ti}_${vi}_${hovered ? 'h' : 'n'}`, off);
+        }
+      }
+    }
+    RenderSystem._fiberSprites = sprites;
+    return sprites;
+  }
+
+
+  private static _trunkSprites: Map<string, OffscreenCanvas> | null = null;
+  private static readonly TRUNK_SPRITE_SIZE = 96;
+  private static readonly TRUNK_SPRITE_R    = 30; // reference radius within sprite
+
+  private static _ensureTrunkSprites(): Map<string, OffscreenCanvas> {
+    if (RenderSystem._trunkSprites) return RenderSystem._trunkSprites;
+    const SIZE = RenderSystem.TRUNK_SPRITE_SIZE;
+    const R    = RenderSystem.TRUNK_SPRITE_R;
+    const cx = SIZE / 2, cy = SIZE / 2;
+    const sprites = new Map<string, OffscreenCanvas>();
+    for (const hovered of [false, true]) {
+      const off = new OffscreenCanvas(SIZE, SIZE);
+      const ctx = off.getContext('2d')!;
+      // Shadow
+      ctx.fillStyle = '#2e1a0a';
+      ctx.beginPath(); ctx.arc(cx + R * 0.22, cy + R * 0.22, R, 0, Math.PI * 2); ctx.fill();
+      // Body
+      ctx.fillStyle = '#7a4820';
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
+      // Highlight crescent
+      ctx.fillStyle = '#a0642e';
+      ctx.beginPath(); ctx.arc(cx - R * 0.28, cy - R * 0.22, R * 0.45, 0, Math.PI * 2); ctx.fill();
+      // Hover ring baked in for the hovered variant
+      if (hovered) {
+        ctx.strokeStyle = '#cccccc';
+        ctx.lineWidth   = 2;
+        ctx.beginPath(); ctx.arc(cx, cy, R + 3, 0, Math.PI * 2); ctx.stroke();
+      }
+      sprites.set(hovered ? 'hovered' : 'normal', off);
+    }
+    // In-range hovered variant (gold ring)
+    {
+      const off = new OffscreenCanvas(SIZE, SIZE);
+      const ctx = off.getContext('2d')!;
+      ctx.fillStyle = '#2e1a0a';
+      ctx.beginPath(); ctx.arc(cx + R * 0.22, cy + R * 0.22, R, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#7a4820';
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#a0642e';
+      ctx.beginPath(); ctx.arc(cx - R * 0.28, cy - R * 0.22, R * 0.45, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#f0c040';
+      ctx.lineWidth   = 2;
+      ctx.beginPath(); ctx.arc(cx, cy, R + 3, 0, Math.PI * 2); ctx.stroke();
+      sprites.set('inrange', off);
+    }
+    RenderSystem._trunkSprites = sprites;
+    return sprites;
+  }
+
   private static readonly DEFAULT_ISLAND = {
-    id: 0, x: 800, y: 600, preset: 'tropical' as const,
+    id: 0, x: 50800, y: 50600, preset: 'tropical' as const,
     resources: [
-      { ox: -65, oy: -55, type: 'wood'  as const },
-      { ox:  85, oy: -25, type: 'wood'  as const },
-      { ox:  15, oy:  80, type: 'wood'  as const },
-      { ox: -90, oy:  38, type: 'wood'  as const },
-      { ox:  45, oy: -78, type: 'fiber' as const },
-      { ox: -28, oy:  32, type: 'fiber' as const },
-      { ox:  70, oy:  50, type: 'fiber' as const },
+      { ox: -65, oy: -55, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
+      { ox:  85, oy: -25, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
+      { ox:  15, oy:  80, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
+      { ox: -90, oy:  38, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
+      { ox:  45, oy: -78, type: 'fiber' as const, size: 1.0, hp:  30, maxHp:  30 },
+      { ox: -28, oy:  32, type: 'fiber' as const, size: 1.0, hp:  30, maxHp:  30 },
+      { ox:  70, oy:  50, type: 'fiber' as const, size: 1.0, hp:  30, maxHp:  30 },
     ],
   };
 
+  private static readonly RESOURCE_GRID_CELL = 220;
+
+  private static gridKey(cx: number, cy: number): string {
+    return `${cx},${cy}`;
+  }
+
+  private static toGridCoord(v: number, cellSize: number): number {
+    return Math.floor(v / cellSize);
+  }
+
+  private buildResourceGrid(island: RenderIsland): void {
+    const cellSize = RenderSystem.RESOURCE_GRID_CELL;
+    const cells = new Map<string, number[]>();
+    for (let ri = 0; ri < island.resources.length; ri++) {
+      const res = island.resources[ri];
+      const wx = island.x + res.ox;
+      const wy = island.y + res.oy;
+      const cx = RenderSystem.toGridCoord(wx, cellSize);
+      const cy = RenderSystem.toGridCoord(wy, cellSize);
+      const key = RenderSystem.gridKey(cx, cy);
+      let bucket = cells.get(key);
+      if (!bucket) {
+        bucket = [];
+        cells.set(key, bucket);
+      }
+      bucket.push(ri);
+    }
+    island.resourceGrid = { cellSize, cells };
+  }
+
+  private queryResourceIndices(island: RenderIsland, minX: number, minY: number, maxX: number, maxY: number): number[] {
+    const cellSize = island.resourceGrid.cellSize;
+    const cx0 = RenderSystem.toGridCoord(minX, cellSize);
+    const cy0 = RenderSystem.toGridCoord(minY, cellSize);
+    const cx1 = RenderSystem.toGridCoord(maxX, cellSize);
+    const cy1 = RenderSystem.toGridCoord(maxY, cellSize);
+
+    const out: number[] = [];
+    for (let cy = cy0; cy <= cy1; cy++) {
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const bucket = island.resourceGrid.cells.get(RenderSystem.gridKey(cx, cy));
+        if (!bucket) continue;
+        out.push(...bucket);
+      }
+    }
+    return out;
+  }
+
+  private decorateIsland(island: RenderIslandInput): RenderIsland {
+    const decorated: RenderIsland = {
+      ...island,
+      resourceGrid: { cellSize: RenderSystem.RESOURCE_GRID_CELL, cells: new Map<string, number[]>() },
+    };
+    this.buildResourceGrid(decorated);
+    return decorated;
+  }
+
   /** Live island list — replaced by server ISLANDS message when received. */
-  private islands: Array<{
-    id: number; x: number; y: number; preset: string;
-    resources: Array<{ ox: number; oy: number; type: string }>;
-    vertices?: { x: number; y: number }[];
-  }> = [RenderSystem.DEFAULT_ISLAND];
+  private islands: RenderIsland[] = [];
 
   /** Called by ClientApplication when the server sends the ISLANDS message. */
-  setIslands(islands: Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string }>; vertices?: { x: number; y: number }[] }>): void {
-    this.islands = islands;
+  setIslands(islands: RenderIslandInput[]): void {
+    this.islands = islands.map((i) => this.decorateIsland(i));
   }
 
   /** Returns the live island list (for proximity checks in ClientApplication). */
-  getIslands(): Array<{ id: number; x: number; y: number; preset: string; resources: Array<{ ox: number; oy: number; type: string }>; vertices?: { x: number; y: number }[] }> {
+  getIslands(): RenderIslandInput[] {
     return this.islands;
+  }
+
+  /**
+   * Configure world-wrap rendering. Rendering ghosts are visual-only and do not
+   * affect gameplay state or collision logic.
+   */
+  setWorldWrapConfig(enabled: boolean, worldWidth: number, worldHeight: number): void {
+    this._wrapWorldWidth = Math.max(0, worldWidth || 0);
+    this._wrapWorldHeight = Math.max(0, worldHeight || 0);
+    this._wrapRenderEnabled = !!enabled && this._wrapWorldWidth > 0 && this._wrapWorldHeight > 0;
+  }
+
+  private getWrapRenderOffsets(position: Vec2, camera: Camera, margin: number): Array<{ dx: number; dy: number }> {
+    const offsets: Array<{ dx: number; dy: number }> = [{ dx: 0, dy: 0 }];
+    if (!this._wrapRenderEnabled) return offsets;
+
+    const w = this._wrapWorldWidth;
+    const h = this._wrapWorldHeight;
+    const candidates: Array<{ dx: number; dy: number }> = [
+      { dx: -w, dy: 0 }, { dx: w, dy: 0 },
+      { dx: 0, dy: -h }, { dx: 0, dy: h },
+      { dx: -w, dy: -h }, { dx: -w, dy: h },
+      { dx: w, dy: -h }, { dx: w, dy: h },
+    ];
+
+    for (const off of candidates) {
+      const shifted = Vec2.from(position.x + off.dx, position.y + off.dy);
+      if (camera.isWorldPositionVisible(shifted, margin)) offsets.push(off);
+    }
+    return offsets;
+  }
+
+  private buildWrappedRenderCopies<T extends { position: Vec2 }>(
+    entities: readonly T[],
+    camera: Camera,
+    margin: number,
+    skipGhosts?: (entity: T) => boolean,
+  ): T[] {
+    const out: T[] = [];
+    for (const entity of entities) {
+      out.push(entity);
+      if (skipGhosts?.(entity)) continue;
+
+      const offsets = this.getWrapRenderOffsets(entity.position, camera, margin);
+      for (let i = 1; i < offsets.length; i++) {
+        const off = offsets[i];
+        out.push({
+          ...entity,
+          position: Vec2.from(entity.position.x + off.dx, entity.position.y + off.dy),
+        } as T);
+      }
+    }
+    return out;
   }
 
   /** Active flamethrower wave states keyed by cannonId. Client interpolates between server ticks. */
@@ -289,6 +833,16 @@ export class RenderSystem {
   private readonly TRAIL_SPACING_MS  = 10;   // min ms between crumbs
   /** Timestamp of last crumb per ball — prevents over-sampling. */
   private trailLastEmit: Map<number, number> = new Map();
+  /**
+   * Combined wake history: ship id -> sampled {ship-center x/y, rotation r, timestamp t}.
+   * Both the stern wash and bow V-lines are derived from this single trail at render time.
+   */
+  private shipWakeTrails: Map<number, Array<{ x: number; y: number; r: number; t: number }>> = new Map();
+  /** Last wake sample time per ship to avoid oversampling history. */
+  private shipWakeLastEmit: Map<number, number> = new Map();
+  private readonly SHIP_WAKE_TRAIL_DURATION_MS = 10000;
+  private readonly SHIP_WAKE_TRAIL_SPACING_MS = 120;
+  private readonly SHIP_WAKE_TRAIL_MIN_DIST = 18;
   
   // Debug flags
   private showHoverBoundaries: boolean = false;
@@ -306,6 +860,9 @@ export class RenderSystem {
     // Initialize sub-systems
     this.particleSystem = new ParticleSystem(this.ctx);
     this.effectRenderer = new EffectRenderer(this.ctx);
+
+    // Seed fallback island through the same path as server islands so resource grids are built.
+    this.setIslands([RenderSystem.DEFAULT_ISLAND]);
   }
   
   /**
@@ -323,6 +880,38 @@ export class RenderSystem {
     
     console.log('✅ Render system initialized');
   }
+
+  // ── GL world renderer integration ─────────────────────────────────────────
+
+  /**
+   * Attach a GLWorldRenderer. Call once after the GL canvas is created.
+   * Pass null to fall back to Canvas 2D-only rendering.
+   */
+  setGLRenderer(gl: GLWorldRenderer | null): void {
+    this._gl = gl;
+    console.log(gl ? '[GL] RenderSystem using WebGL2 world renderer' : '[GL] Falling back to Canvas 2D');
+  }
+
+  /**
+   * Begin a GL frame — call BEFORE renderWorld() each frame when GL is active.
+   * @param camX      Camera world X
+   * @param camY      Camera world Y
+   * @param zoom      Pixels per world unit
+   * @param deltaMs   Frame delta in milliseconds (for time accumulation)
+   */
+  beginGLFrame(camX: number, camY: number, zoom: number, deltaMs: number): void {
+    if (!this._gl) return;
+    this._glTimeSec += deltaMs / 1000;
+    this._gl.beginFrame(camX, camY, zoom, this._glTimeSec, this.canvas.width, this.canvas.height);
+  }
+
+  /** Flush the GL batcher — call AFTER renderWorld() each frame when GL is active. */
+  endGLFrame(): void {
+    this._gl?.endFrame();
+  }
+
+  /** GL draw-call count from the last frame (for perf HUD). 0 if GL is not active. */
+  get glDrawCallCount(): number { return this._gl?.drawCallCount ?? 0; }
   
   /**
    * Spawn a floating damage number at a world position
@@ -331,8 +920,8 @@ export class RenderSystem {
     this.particleSystem.createExplosion(worldPos, intensity);
   }
 
-  spawnDamageNumber(worldPos: Vec2, damage: number, isKill: boolean = false): void {
-    this.effectRenderer.createDamageNumber(worldPos, damage, isKill);
+  spawnDamageNumber(worldPos: Vec2, damage: number, isKill: boolean = false, team: DamageTeam = 'enemy'): void {
+    this.effectRenderer.createDamageNumber(worldPos, damage, isKill, team);
   }
 
   /**
@@ -697,7 +1286,8 @@ export class RenderSystem {
       }
     }
 
-    // ── Module highlight: amber glow when cursor hovers a module in Move To mode ──
+    // ── Module highlight: coloured glow when cursor hovers a module ──
+    // green = same company, red = enemy, light-blue = alliance (future)
     const now = performance.now();
     if (this.hoveredModule) {
       const { ship: modShip, module: mod } = this.hoveredModule;
@@ -705,6 +1295,17 @@ export class RenderSystem {
       const cameraState = camera.getState();
       const glowPulse   = 0.55 + 0.45 * Math.sin(now / 160);
       const glowAlpha   = 0.6 + 0.4 * glowPulse;
+
+      // Determine team relationship
+      type HoverTeam = 'friendly' | 'enemy' | 'alliance';
+      const hoverTeam: HoverTeam = this.isShipFriendly(modShip) ? 'friendly' : 'enemy';
+      // future: 'alliance' when all-company feature is implemented
+      const HOVER_PALETTE: Record<HoverTeam, { glow: string; inner: string; fill: string }> = {
+        friendly: { glow: '#44ff88', inner: '#88ffcc', fill: '#00ff44' },
+        enemy:    { glow: '#ff4444', inner: '#ff9999', fill: '#ff2222' },
+        alliance: { glow: '#66ccff', inner: '#aaeeff', fill: '#44aaff' },
+      };
+      const pal = HOVER_PALETTE[hoverTeam];
 
       // Build the module's local-space path for the given kind
       const buildModulePath = (ctx: CanvasRenderingContext2D): void => {
@@ -735,10 +1336,17 @@ export class RenderSystem {
       this.ctx.translate(mod.localPos.x, mod.localPos.y);
       this.ctx.rotate((mod as any).localRot ?? 0);
 
+      const hexToRgba = (hex: string, a: number) => {
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+      };
+
       // Outer glow pass
-      this.ctx.shadowColor  = '#ffe066';
+      this.ctx.shadowColor  = pal.glow;
       this.ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
-      this.ctx.strokeStyle  = `rgba(255, 220, 60, ${(glowAlpha * 0.55).toFixed(3)})`;
+      this.ctx.strokeStyle  = hexToRgba(pal.glow, glowAlpha * 0.55);
       this.ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
       this.ctx.globalAlpha  = 1;
       buildModulePath(this.ctx);
@@ -746,19 +1354,44 @@ export class RenderSystem {
 
       // Inner crisp stroke
       this.ctx.shadowBlur   = 0;
-      this.ctx.strokeStyle  = `rgba(255, 240, 130, ${(glowAlpha * 0.9).toFixed(3)})`;
+      this.ctx.strokeStyle  = pal.inner;
       this.ctx.lineWidth    = 2.5 / cameraState.zoom;
       this.ctx.globalAlpha  = glowAlpha;
       buildModulePath(this.ctx);
       this.ctx.stroke();
 
-      // Translucent amber fill overlay
+      // Translucent fill overlay
       this.ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
-      this.ctx.fillStyle    = '#ffe066';
+      this.ctx.fillStyle    = pal.fill;
       buildModulePath(this.ctx);
       this.ctx.fill();
 
       this.ctx.restore();
+
+      // Demolish hint: axe equipped + non-plank module → show "🪓 E – Demolish [kind]"
+      if (this.axeEquipped && mod.kind !== 'plank') {
+        const modWorldX = modShip.position.x + mod.localPos.x * Math.cos(modShip.rotation) - mod.localPos.y * Math.sin(modShip.rotation);
+        const modWorldY = modShip.position.y + mod.localPos.x * Math.sin(modShip.rotation) + mod.localPos.y * Math.cos(modShip.rotation);
+        const hintScreen = camera.worldToScreen(Vec2.from(modWorldX, modWorldY));
+        const label = `🪓 E – Demolish ${mod.kind}`;
+        const labelX = hintScreen.x;
+        const labelY = hintScreen.y - 42;
+        const tCtx = this.ctx;
+        tCtx.save();
+        tCtx.font = 'bold 13px Georgia, serif';
+        tCtx.textAlign = 'center';
+        const tw = tCtx.measureText(label).width;
+        tCtx.fillStyle = 'rgba(30,10,10,0.7)';
+        tCtx.strokeStyle = '#cc2222';
+        tCtx.lineWidth = 1.5;
+        tCtx.beginPath();
+        tCtx.roundRect(labelX - tw / 2 - 8, labelY - 16, tw + 16, 22, 4);
+        tCtx.fill();
+        tCtx.stroke();
+        tCtx.fillStyle = '#ffcccc';
+        tCtx.fillText(label, labelX, labelY);
+        tCtx.restore();
+      }
     }
 
     // ── Ship hull highlight: pulse the hull outline when cursor is over a ship ──
@@ -974,7 +1607,7 @@ export class RenderSystem {
     const ch   = this.canvas.height;
     const text = this._moveToHint;
     ctx.save();
-    ctx.font      = 'bold 16px Arial';
+    ctx.font      = 'bold 16px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     const tw  = ctx.measureText(text).width;
@@ -1155,9 +1788,61 @@ export class RenderSystem {
     if (s && s.type === 'door') s.doorOpen = open;
   }
 
-  /** Activate island placement ghost for wooden_floor, workbench, wall, or door, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | null): void {
+  /** Update ship construction state after a shipyard_state broadcast. */
+  updateShipyardConstruction(id: number, phase: ConstructionPhase, modulesPlaced: string[], scaffoldedShipId?: number): void {
+    const s = this.placedStructures.find(p => p.id === id);
+    if (!s || s.type !== 'shipyard') return;
+    s.construction = phase === 'empty' ? undefined : { phase, modulesPlaced, scaffoldedShipId };
+  }
+
+  /** Get the construction state of a shipyard by structure id. */
+  getShipyardConstruction(id: number): { phase: ConstructionPhase; modulesPlaced: string[] } | null {
+    const s = this.placedStructures.find(p => p.id === id && p.type === 'shipyard');
+    if (!s || !s.construction) return null;
+    return { phase: s.construction.phase, modulesPlaced: [...s.construction.modulesPlaced] };
+  }
+
+  /** Set (or clear) the structure that should be highlighted red as a placement blocker. */
+  setBlockerStructure(id: number | null, durationMs = 2000): void {
+    this._blockerStructureId = id;
+    this._blockerExpiry = id !== null ? performance.now() + durationMs : 0;
+  }
+
+  /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, or clear it. */
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | null): void {
     this.islandBuildKind = kind;
+  }
+
+  /** Set the rotation (degrees) for the island floor/workbench ghost. */
+  setIslandBuildRotation(deg: number): void {
+    this.islandBuildRotationDeg = deg;
+  }
+
+  /**
+   * SAT OBB-OBB overlap test for two 50×50 floor tiles.
+   * Returns true if they share any interior space (touching edges = false).
+   */
+  private static floorsOverlap(
+    ax: number, ay: number, aRad: number,
+    bx: number, by: number, bRad: number
+  ): boolean {
+    const HALF = 25;
+    // Small epsilon to absorb floating-point rounding on touching-edge adjacency.
+    // Must be > 0.1 to cover the %.1f server-broadcast precision gap (up to ±0.07
+    // diagonal error between stored and snap-derived positions).
+    const EPS = 0.2;
+    const cA = Math.cos(aRad), sA = Math.sin(aRad);
+    const cB = Math.cos(bRad), sB = Math.sin(bRad);
+    const dx = bx - ax, dy = by - ay;
+    // 4 SAT axes: local X and Y of each box
+    const axes: [number, number][] = [[cA, sA], [-sA, cA], [cB, sB], [-sB, cB]];
+    for (const [nx, ny] of axes) {
+      const d  = Math.abs(dx * nx + dy * ny);
+      const rA = HALF * Math.abs(cA * nx + sA * ny) + HALF * Math.abs(-sA * nx + cA * ny);
+      const rB = HALF * Math.abs(cB * nx + sB * ny) + HALF * Math.abs(-sB * nx + cB * ny);
+      if (d >= rA + rB - EPS) return false; // separating axis (or touching edge) — no overlap
+    }
+    return true; // no separating axis — tiles genuinely overlap
   }
 
   /**
@@ -1168,26 +1853,40 @@ export class RenderSystem {
    */
   computeSnappedPos(wx: number, wy: number): { x: number; y: number } {
     const TILE   = 50;
-    const SNAP_R = TILE * 0.8; // 40 px — generous snap pull radius
+    const SNAP_R = TILE * 0.4; // 20 px — snap pull radius
     if (this.islandBuildKind !== 'wooden_floor' || this.placedStructures.length === 0) {
+      this._snappedBuildRotation = null;
       return { x: wx, y: wy };
     }
     let bestDist2 = SNAP_R * SNAP_R;
     let bestX = wx, bestY = wy;
-    const DIRS = [{ dx: TILE, dy: 0 }, { dx: -TILE, dy: 0 },
-                  { dx: 0, dy: TILE  }, { dx: 0, dy: -TILE  }];
+    let bestRot: number | null = null;
     for (const s of this.placedStructures) {
       if (s.type !== 'wooden_floor') continue;
+      // Derive the 4 neighbour slots using this tile's own rotation
+      const rad = (s.rotation ?? 0) * Math.PI / 180;
+      const c = Math.cos(rad), sn = Math.sin(rad);
+      const DIRS = [
+        {  dx:  TILE * c,  dy:  TILE * sn },
+        {  dx: -TILE * c,  dy: -TILE * sn },
+        {  dx: -TILE * sn, dy:  TILE * c  },
+        {  dx:  TILE * sn, dy: -TILE * c  },
+      ];
       for (const d of DIRS) {
         const nx = s.x + d.dx, ny = s.y + d.dy;
+        // candidateRad inherits source tile's rotation.
+        // Exclude source tile (s) itself — candidate is by construction adjacent/touching it.
+        const candidateRad = rad;
         const alreadyOccupied = this.placedStructures.some(
-          f => f.type === 'wooden_floor' && Math.abs(f.x - nx) < 1 && Math.abs(f.y - ny) < 1
+          f => f.type === 'wooden_floor' && f.id !== s.id &&
+               RenderSystem.floorsOverlap(nx, ny, candidateRad, f.x, f.y, (f.rotation ?? 0) * Math.PI / 180)
         );
         if (alreadyOccupied) continue;
         const dist2 = (nx - wx) * (nx - wx) + (ny - wy) * (ny - wy);
-        if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; }
+        if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; bestRot = s.rotation ?? 0; }
       }
     }
+    this._snappedBuildRotation = bestRot;
     return { x: bestX, y: bestY };
   }
 
@@ -1201,14 +1900,21 @@ export class RenderSystem {
     if (this.placedStructures.length === 0) return { x: wx, y: wy };
     let bestDist2 = SNAP_R * SNAP_R;
     let bestX = wx, bestY = wy;
-    const EDGES = [
-      { dx: 0, dy: -HALF }, { dx: 0, dy: HALF },
-      { dx: -HALF, dy: 0 }, { dx: HALF, dy: 0 },
-    ];
     for (const s of this.placedStructures) {
       if (s.type !== 'wooden_floor') continue;
+      // Rotate the 4 canonical edge-midpoint offsets by this floor's rotation
+      const rad = (s.rotation ?? 0) * Math.PI / 180;
+      const c = Math.cos(rad), sn = Math.sin(rad);
+      // Local-space edges: (0,±HALF) → N/S (horizontal wall), (±HALF,0) → E/W (vertical wall)
+      const EDGES = [
+        { ldx:  0,    ldy: -HALF }, // N
+        { ldx:  0,    ldy:  HALF }, // S
+        { ldx: -HALF, ldy:  0    }, // W
+        { ldx:  HALF, ldy:  0    }, // E
+      ];
       for (const e of EDGES) {
-        const nx = s.x + e.dx, ny = s.y + e.dy;
+        const nx = s.x + e.ldx * c - e.ldy * sn;
+        const ny = s.y + e.ldx * sn + e.ldy * c;
         const occ = this.placedStructures.some(
           w => (w.type === 'wall' || w.type === 'door_frame') && Math.abs(w.x - nx) < 2 && Math.abs(w.y - ny) < 2
         );
@@ -1272,9 +1978,21 @@ export class RenderSystem {
     if (!this._hoveredStructure) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
-    const dx = this._hoveredStructure.x - player.position.x;
-    const dy = this._hoveredStructure.y - player.position.y;
-    return dx * dx + dy * dy <= range * range ? this._hoveredStructure : null;
+    const s = this._hoveredStructure;
+    if (s.type === 'shipyard') {
+      // OBB check: rotate player position into shipyard local frame and test against half-extents
+      const rot = (s.rotation ?? 0) * Math.PI / 180;
+      const dx = player.position.x - s.x;
+      const dy = player.position.y - s.y;
+      const c = Math.cos(-rot), sn = Math.sin(-rot);
+      const lx = dx * c - dy * sn;
+      const ly = dx * sn + dy * c;
+      // hw=170, hh=445 are world-unit half-extents; +100 interaction margin
+      return Math.abs(lx) <= 270 && Math.abs(ly) <= 545 ? s : null;
+    }
+    const dx = s.x - player.position.x;
+    const dy = s.y - player.position.y;
+    return dx * dx + dy * dy <= range * range ? s : null;
   }
 
   /** Return hovered tree world pos if player is in range and off-ship, else null. */
@@ -1305,6 +2023,284 @@ export class RenderSystem {
     const dx = this._hoveredRock.wx - player.position.x;
     const dy = this._hoveredRock.wy - player.position.y;
     return dx * dx + dy * dy <= range * range ? this._hoveredRock : null;
+  }
+
+  // ── Tombstone API ─────────────────────────────────────────────────────────
+
+  /** Replace the full tombstone list (called on every GAME_STATE). */
+  updateTombstones(list: import('../../sim/Types').Tombstone[]): void {
+    this._tombstones = list;
+  }
+
+  /** Resolve the current world-space position of a tombstone, accounting for ship movement. */
+  private _resolveTombstonePos(t: import('../../sim/Types').Tombstone): { x: number; y: number } {
+    const attach = this._tombstoneShipAttach.get(t.id);
+    if (attach) {
+      const ship = this._cachedWorldShips.find(s => s.id === attach.shipId);
+      if (ship) {
+        const cos = Math.cos(ship.rotation);
+        const sin = Math.sin(ship.rotation);
+        return {
+          x: ship.position.x + attach.localX * cos - attach.localY * sin,
+          y: ship.position.y + attach.localX * sin + attach.localY * cos,
+        };
+      }
+    }
+    return { x: t.x, y: t.y };
+  }
+
+  /** Add or update a single tombstone (called on tombstone_spawned). */
+  addTombstone(t: import('../../sim/Types').Tombstone): void {
+    // If the tombstone spawns within 500px of a ship centre, attach it so it
+    // tracks the ship as it moves.
+    for (const ship of this._cachedWorldShips) {
+      const dx = t.x - ship.position.x;
+      const dy = t.y - ship.position.y;
+      if (dx * dx + dy * dy <= 500 * 500) {
+        const cos = Math.cos(-ship.rotation);
+        const sin = Math.sin(-ship.rotation);
+        this._tombstoneShipAttach.set(t.id, {
+          shipId: ship.id,
+          localX: dx * cos - dy * sin,
+          localY: dx * sin + dy * cos,
+        });
+        break;
+      }
+    }
+    const idx = this._tombstones.findIndex(x => x.id === t.id);
+    if (idx >= 0) this._tombstones[idx] = t;
+    else this._tombstones.push(t);
+  }
+
+  /** Remove a tombstone by id (collected or despawned). */
+  removeTombstone(id: number): void {
+    this._tombstones = this._tombstones.filter(t => t.id !== id);
+    this._tombstoneShipAttach.delete(id);
+  }
+
+  /**
+   * Returns the nearest tombstone within `range` px of the local player cursor,
+   * or null if none. Used for E-key interaction.
+   */
+  getHoveredTombstone(range: number = 80): import('../../sim/Types').Tombstone | null {
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return null;
+    let best: import('../../sim/Types').Tombstone | null = null;
+    let bestDist2 = range * range;
+    for (const t of this._tombstones) {
+      const pos = this._resolveTombstonePos(t);
+      const dx = pos.x - player.position.x;
+      const dy = pos.y - player.position.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= bestDist2) { best = t; bestDist2 = d2; }
+    }
+    return best;
+  }
+
+  /** Draw all active tombstones in world-space. Call during the world render pass. */
+  private drawTombstones(ctx: CanvasRenderingContext2D, camera: import('./Camera').CameraState): void {
+    if (this._tombstones.length === 0) return;
+    const player = this._cachedLocalPlayer;
+    for (const t of this._tombstones) {
+      const pos = this._resolveTombstonePos(t);
+      const sx = (pos.x - camera.position.x) * camera.zoom + ctx.canvas.width  / 2;
+      const sy = (pos.y - camera.position.y) * camera.zoom + ctx.canvas.height / 2;
+      const sz = Math.max(0.4, Math.min(1.0, camera.zoom));
+
+      const HOVER_RANGE = 80;
+      const isNear = player != null &&
+        player.carrierId === 0 &&
+        (pos.x - player.position.x) ** 2 + (pos.y - player.position.y) ** 2 <= HOVER_RANGE * HOVER_RANGE;
+
+      ctx.save();
+      ctx.translate(sx, sy);
+
+      /* Shadow */
+      ctx.beginPath();
+      ctx.ellipse(0, 6 * sz, 14 * sz, 5 * sz, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.fill();
+
+      /* Stone body */
+      const w = 22 * sz, h = 28 * sz;
+      ctx.beginPath();
+      ctx.roundRect(-w / 2, -h, w, h, [6 * sz, 6 * sz, 2 * sz, 2 * sz]);
+      ctx.fillStyle = isNear ? '#c9c9d4' : '#8a8a96';
+      ctx.strokeStyle = '#555560';
+      ctx.lineWidth = 1.5 * sz;
+      ctx.fill();
+      ctx.stroke();
+
+      /* Cross carved into the stone */
+      ctx.strokeStyle = isNear ? '#ffffff' : '#aaaabc';
+      ctx.lineWidth = 2 * sz;
+      ctx.beginPath();
+      ctx.moveTo(0, -h * 0.8);
+      ctx.lineTo(0, -h * 0.35);
+      ctx.moveTo(-w * 0.3, -h * 0.65);
+      ctx.lineTo( w * 0.3, -h * 0.65);
+      ctx.stroke();
+
+      /* Owner name above */
+      const fontSize = Math.round(10 * sz);
+      ctx.font = `bold ${fontSize}px Georgia, serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillStyle = isNear ? '#ffe97a' : '#dddddd';
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.lineWidth = 3 * sz;
+      const label = t.ownerName || '???';
+      ctx.strokeText(label, 0, -h - 4 * sz);
+      ctx.fillText(label, 0, -h - 4 * sz);
+
+      /* Remaining time */
+      const minLeft = Math.ceil(t.remainingMs / 60000);
+      const timerText = `${minLeft}m`;
+      ctx.font = `${Math.round(8 * sz)}px Georgia, serif`;
+      ctx.fillStyle = minLeft <= 2 ? '#ff7070' : (isNear ? '#aaffaa' : '#aaaaaa');
+      ctx.strokeText(timerText, 0, -h - 4 * sz - fontSize - 2 * sz);
+      ctx.fillText(timerText, 0, -h - 4 * sz - fontSize - 2 * sz);
+
+      /* Interact hint */
+      if (isNear) {
+        ctx.font = `${Math.round(9 * sz)}px Georgia, serif`;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText('[E] Collect', 0, 14 * sz);
+      }
+
+      ctx.restore();
+    }
+  }
+
+  // ── Dropped items ──────────────────────────────────────────────────────────
+
+  /** Replace the full dropped-item list (called on every GAME_STATE). */
+  updateDroppedItems(list: import('../../sim/Types').DroppedItem[]): void {
+    this._droppedItems = list;
+  }
+
+  /**
+   * Returns all dropped items within `range` px of the local player.
+   * Items are returned sorted nearest-first.
+   */
+  getDroppedItemsInRange(range: number = 80): import('../../sim/Types').DroppedItem[] {
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return [];
+    const range2 = range * range;
+    return this._droppedItems
+      .filter(d => {
+        const dx = d.x - player.position.x;
+        const dy = d.y - player.position.y;
+        return dx * dx + dy * dy <= range2;
+      })
+      .sort((a, b) => {
+        const dxa = a.x - player.position.x, dya = a.y - player.position.y;
+        const dxb = b.x - player.position.x, dyb = b.y - player.position.y;
+        return (dxa * dxa + dya * dya) - (dxb * dxb + dyb * dyb);
+      });
+  }
+
+  /** Draw all dropped items in world-space. */
+  private drawDroppedItems(ctx: CanvasRenderingContext2D, camera: import('./Camera').CameraState): void {
+    if (this._droppedItems.length === 0) return;
+    const player = this._cachedLocalPlayer;
+    const HOVER_RANGE = 80;
+
+    // Group items into piles: items within 24 world-units of each other
+    const PILE_RADIUS = 24;
+    const consumed = new Set<number>();
+    const piles: { items: import('../../sim/Types').DroppedItem[]; cx: number; cy: number }[] = [];
+
+    for (const item of this._droppedItems) {
+      if (consumed.has(item.id)) continue;
+      const pile = { items: [item], cx: item.x, cy: item.y };
+      for (const other of this._droppedItems) {
+        if (consumed.has(other.id) || other.id === item.id) continue;
+        const dx = other.x - item.x, dy = other.y - item.y;
+        if (dx * dx + dy * dy <= PILE_RADIUS * PILE_RADIUS) {
+          pile.items.push(other);
+          consumed.add(other.id);
+        }
+      }
+      consumed.add(item.id);
+      piles.push(pile);
+    }
+
+    for (const pile of piles) {
+      const sx = (pile.cx - camera.position.x) * camera.zoom + ctx.canvas.width  / 2;
+      const sy = (pile.cy - camera.position.y) * camera.zoom + ctx.canvas.height / 2;
+      const sz = Math.max(0.4, Math.min(1.2, camera.zoom));
+
+      const isNear = player != null && player.carrierId === 0 &&
+        (pile.cx - player.position.x) ** 2 + (pile.cy - player.position.y) ** 2
+          <= HOVER_RANGE * HOVER_RANGE;
+
+      ctx.save();
+      ctx.translate(sx, sy);
+
+      /* Shadow */
+      ctx.beginPath();
+      ctx.ellipse(0, 7 * sz, 12 * sz, 4 * sz, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.fill();
+
+      /* Bag body */
+      const bw = 20 * sz, bh = 18 * sz;
+      ctx.beginPath();
+      ctx.roundRect(-bw / 2, -bh, bw, bh, [4 * sz, 4 * sz, 8 * sz, 8 * sz]);
+      ctx.fillStyle = isNear ? '#d4a84b' : '#8b6914';
+      ctx.strokeStyle = isNear ? '#ffe97a' : '#5a4209';
+      ctx.lineWidth = 1.5 * sz;
+      ctx.fill();
+      ctx.stroke();
+
+      /* Bag tie / neck */
+      ctx.beginPath();
+      ctx.roundRect(-6 * sz, -bh - 5 * sz, 12 * sz, 6 * sz, 2 * sz);
+      ctx.fillStyle = isNear ? '#c49030' : '#7a5710';
+      ctx.fill();
+      ctx.stroke();
+
+      /* Drawstring knot dot */
+      ctx.beginPath();
+      ctx.arc(0, -bh - 2 * sz, 2.5 * sz, 0, Math.PI * 2);
+      ctx.fillStyle = isNear ? '#ffe97a' : '#c4920a';
+      ctx.fill();
+
+      /* Pile count badge */
+      if (pile.items.length > 1) {
+        const badge = pile.items.length.toString();
+        const bsz = Math.round(9 * sz);
+        ctx.font = `bold ${bsz}px Georgia, serif`;
+        const bw2 = ctx.measureText(badge).width + 6 * sz;
+        const bx = bw / 2 - 2 * sz;
+        const bby = -bh + 4 * sz;
+        ctx.fillStyle = '#cc3322';
+        ctx.beginPath();
+        ctx.roundRect(bx - bw2 / 2, bby - bsz / 2 - 2 * sz, bw2, bsz + 4 * sz, 3 * sz);
+        ctx.fill();
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(badge, bx, bby);
+      }
+
+      /* Interact hint */
+      if (isNear) {
+        const hint = pile.items.length > 1 ? '[E] Pick Up  [Hold E] Choose' : '[E] Pick Up';
+        const fsz = Math.round(9 * sz);
+        ctx.font = `${fsz}px Georgia, serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+        ctx.lineWidth = 3 * sz;
+        ctx.strokeText(hint, 0, 8 * sz);
+        ctx.fillText(hint, 0, 8 * sz);
+      }
+
+      ctx.restore();
+    }
   }
 
   /**
@@ -1455,6 +2451,24 @@ export class RenderSystem {
   /**
    * Detect which module is under the mouse cursor
    */
+  /**
+   * Returns true if `ship` is controlled by / belongs to the local player's side.
+   * - Real faction (companyId > 1): same companyId → friendly.
+   * - Solo (companyId == 1): friendly only when the ship has an NPC whose ownerId matches
+   *   the local player id (i.e. the player owns the crew on this ship).
+   * Boarding an enemy ship changes carrierId but NOT NPC ownerships, so this stays correct.
+   */
+  private isShipFriendly(ship: Ship): boolean {
+    const myComp = this._localCompanyId;
+    if (myComp > 1 && ship.companyId === myComp) return true;
+    if (ship.companyId === 1 && this.localPlayerId !== null) {
+      return this._cachedWorldNpcs.some(
+        n => n.shipId === ship.id && n.ownerId === this.localPlayerId,
+      );
+    }
+    return false;
+  }
+
   private detectHoveredModule(worldState: WorldState): void {
     this.hoveredModule = null;
     
@@ -1496,10 +2510,11 @@ export class RenderSystem {
       
       // --- Pass 2: everything else (planks, cannons, masts, etc.) ---
       for (const module of ship.modules) {
-        // Ladders already checked in pass 1
-        if ((module.moduleData?.kind ?? module.kind) === 'ladder') continue;
+        // Ladders already checked in pass 1; decks are never interactively highlighted
+        const _pass2Kind = module.moduleData?.kind ?? module.kind;
+        if (_pass2Kind === 'ladder' || _pass2Kind === 'deck') continue;
 
-        const moduleKind = module.moduleData?.kind ?? module.kind;
+        const moduleKind = _pass2Kind;
 
         // Special handling for curved planks
         if (module.moduleData && moduleKind === 'plank' && module.moduleData.kind === 'plank' && module.moduleData.isCurved && module.moduleData.curveData) {
@@ -1689,11 +2704,23 @@ export class RenderSystem {
     // Clear canvas
     this.clearCanvas();
 
-    // Cache local player once for the entire frame — shared by all detect* and draw* methods.
+    // Cache local player and ships once per frame — shared by all detect* and draw* methods.
     this._cachedLocalPlayer = this.localPlayerId != null
       ? worldState.players.find(p => p.id === this.localPlayerId) ?? null
       : null;
     this._localCompanyId = this._cachedLocalPlayer?.companyId ?? 0;
+    this._cachedWorldShips   = worldState.ships;
+    this._cachedWorldPlayers  = worldState.players;
+    this._cachedWorldNpcs     = worldState.npcs ?? [];
+    this._cachedCompanies     = worldState.companies ?? [];
+
+    // Rebuild scaffolded ship lookup: maps ship entity ID → owning shipyard structure
+    this._scaffoldedShips.clear();
+    for (const s of this.placedStructures) {
+      if (s.type === 'shipyard' && s.construction?.phase === 'building' && s.construction.scaffoldedShipId) {
+        this._scaffoldedShips.set(s.construction.scaffoldedShipId, s);
+      }
+    }
 
     // Detect hovered module
     this.detectHoveredModule(worldState);
@@ -1740,16 +2767,66 @@ export class RenderSystem {
 
     // Draw background elements
     this.drawWater(camera);
-    this.drawGrid(camera);
-    this.drawIsland(camera);
-    this.drawPlacedStructures(camera);
+    if (this.config.showGrid) this.drawGrid(camera);
+    this.drawIsland(camera); // drawPlacedStructures is called inside, between trunk and leaf passes
     this.drawIslandBuildGhost(camera);
     
+    // ── Snap scaffolded ships into their shipyard docks ───────────────────────
+    // Temporarily override position/rotation so every draw call renders the ship
+    // inside the dock.  Originals are restored after the render queue executes.
+    const scaffoldOverrides: { ship: Ship; origPos: Vec2; origRot: number }[] = [];
+    for (const ship of worldState.ships) {
+      const scaffold = this._scaffoldedShips.get(ship.id);
+      if (scaffold) {
+        scaffoldOverrides.push({ ship, origPos: ship.position, origRot: ship.rotation });
+        const syRot = (scaffold.rotation ?? 0) * Math.PI / 180;
+        ship.position = Vec2.from(scaffold.x, scaffold.y);
+        ship.rotation = syRot + Math.PI / 2; // align ship +X (bow) with dock +Y (mouth)
+      }
+    }
+
     // Queue all game objects for layered rendering
     this.queueWorldObjects(worldState, camera, interpolationAlpha);
     
     // Execute render queue in layer order
     this.executeRenderQueue();
+
+    // ── Fiber bushes — above players, below tree leaves ──────────────────────
+    const zoom = camera.getState().zoom;
+    for (const b of this._pendingBushes) {
+      this.drawIslandFiberPlant(b.sp.x, b.sp.y, zoom, b.isHovered, b.bushAlpha * b.deathAlpha, b.ox, b.oy, b.wx, b.wy);
+    }
+
+    // ── Tree leaves — above bushes and players ────────────────────────────────
+    for (const e of this._pendingAllRes) {
+      if (e.res.type !== 'wood') continue;
+      this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha, e.wx, e.wy);
+    }
+
+    // ── Hover prompts + health bars (always on top) ───────────────────────────
+    for (const e of this._pendingAllRes) {
+      if (e.res.type === 'wood' && e.isHovered) {
+        if (this._pendingAxeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
+        else                          this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, (e.res.size ?? 1.0) * 40);
+      } else if (e.res.type === 'fiber' && e.isHovered) {
+        this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 30);
+      } else if (e.res.type === 'rock' && e.isHovered) {
+        this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Pick Up');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 28);
+      } else if (e.res.type === 'boulder' && e.isHovered) {
+        if (this._pendingPickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Boulder');
+        else                              this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
+        if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 64);
+      }
+    }
+
+    // Restore scaffolded ship positions so game logic is unaffected
+    for (const o of scaffoldOverrides) {
+      o.ship.position = o.origPos;
+      o.ship.rotation = o.origRot;
+    }
 
     // Draw explicit B-key build mode ghost (always on top of world objects)
     if (this.explicitBuildState) {
@@ -1855,7 +2932,7 @@ export class RenderSystem {
     
     // Draw loading message
     this.ctx.fillStyle = '#ffffff';
-    this.ctx.font = '48px Arial';
+    this.ctx.font = '48px Georgia, serif';
     this.ctx.textAlign = 'center';
     
     let message = 'Loading...';
@@ -2041,40 +3118,46 @@ export class RenderSystem {
   }
   
   private drawWater(camera: Camera): void {
+    if (this._gl) {
+      // GL ocean renderer already drew the background — Canvas 2D stays transparent
+      return;
+    }
     // Simple solid water color
     this.ctx.fillStyle = '#1e90ff'; // Ocean blue
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
   }
   
   private drawGrid(camera: Camera): void {
-    const cameraState = camera.getState();
     const bounds = camera.getWorldBounds();
-    
-    this.ctx.strokeStyle = '#ffffff20';
-    this.ctx.lineWidth = 1;
-    
-    const gridSize = 100; // World units
-    const startX = Math.floor(bounds.min.x / gridSize) * gridSize;
-    const endX = Math.ceil(bounds.max.x / gridSize) * gridSize;
-    const startY = Math.floor(bounds.min.y / gridSize) * gridSize;
-    const endY = Math.ceil(bounds.max.y / gridSize) * gridSize;
-    
-    // Draw vertical lines
-    for (let x = startX; x <= endX; x += gridSize) {
+    const majorStep = 30_000;
+
+    // Active world for now: one 90k x 90k square. Use explicit major lines at
+    // 0, 30k, 60k so players can orient quickly; world border itself provides
+    // the outer 90k edge.
+    const worldW = this._wrapWorldWidth > 0 ? this._wrapWorldWidth : 90_000;
+    const worldH = this._wrapWorldHeight > 0 ? this._wrapWorldHeight : 90_000;
+
+    this.ctx.strokeStyle = '#ffffff26';
+    this.ctx.lineWidth = 1.5;
+
+    const verticalLineCount = Math.max(1, Math.floor(worldW / majorStep));
+    for (let i = 0; i < verticalLineCount; i++) {
+      const x = i * majorStep;
+      if (x < bounds.min.x - majorStep || x > bounds.max.x + majorStep) continue;
       const screenStart = camera.worldToScreen(Vec2.from(x, bounds.min.y));
       const screenEnd = camera.worldToScreen(Vec2.from(x, bounds.max.y));
-      
       this.ctx.beginPath();
       this.ctx.moveTo(screenStart.x, screenStart.y);
       this.ctx.lineTo(screenEnd.x, screenEnd.y);
       this.ctx.stroke();
     }
-    
-    // Draw horizontal lines
-    for (let y = startY; y <= endY; y += gridSize) {
+
+    const horizontalLineCount = Math.max(1, Math.floor(worldH / majorStep));
+    for (let i = 0; i < horizontalLineCount; i++) {
+      const y = i * majorStep;
+      if (y < bounds.min.y - majorStep || y > bounds.max.y + majorStep) continue;
       const screenStart = camera.worldToScreen(Vec2.from(bounds.min.x, y));
       const screenEnd = camera.worldToScreen(Vec2.from(bounds.max.x, y));
-      
       this.ctx.beginPath();
       this.ctx.moveTo(screenStart.x, screenStart.y);
       this.ctx.lineTo(screenEnd.x, screenEnd.y);
@@ -2127,30 +3210,179 @@ export class RenderSystem {
     ctx.closePath();
   }
 
+  private offsetVertices(
+    vertices: { x: number; y: number }[] | undefined,
+    dx: number,
+    dy: number,
+  ): { x: number; y: number }[] | undefined {
+    if (!vertices) return undefined;
+    if (dx === 0 && dy === 0) return vertices;
+    return vertices.map((v) => ({ x: v.x + dx, y: v.y + dy }));
+  }
+
   private drawIsland(camera: Camera): void {
     const zoom = camera.getState().zoom;
     // Reset per-frame hovered resource nodes
     this._hoveredTree       = null;
     this._hoveredFiberPlant = null;
     this._hoveredRock       = null;
+    this._hoveredBoulder    = null;
+    this._pendingBushes     = [];
+    this._pendingBoulders   = [];
+    this._pendingAllRes     = [];
+
+    const localPlayer = this._cachedLocalPlayer;
+    const axeEquipped = (() => {
+      if (!localPlayer || localPlayer.carrierId !== 0) return false;
+      const slot = localPlayer.inventory?.activeSlot ?? 0;
+      return localPlayer.inventory?.slots[slot]?.item === 'axe';
+    })();
+    const pickaxeEquipped = (() => {
+      if (!localPlayer || localPlayer.carrierId !== 0) return false;
+      const slot = localPlayer.inventory?.activeSlot ?? 0;
+      return localPlayer.inventory?.slots[slot]?.item === 'pickaxe';
+    })();
+    this._pendingAxeEquipped     = axeEquipped;
+    this._pendingPickaxeEquipped = pickaxeEquipped;
+    const HARVEST_RANGE_SQ = 110 * 110;
+    const PLANT_HOVER_SQ = (30 * zoom) * (30 * zoom);
+    const ROCK_HOVER_SQ  = (8 * zoom) * (8 * zoom);
+    const LEAF_FADE_OUTER = 420;
+    const LEAF_FADE_INNER = 120;
+    const MIN_LEAF_ALPHA  = 0.35;
+    const BUSH_FADE_OUTER = 320;
+    const BUSH_FADE_INNER = 90;
+    const MIN_BUSH_ALPHA  = 0.30;
+    const BOULDER_HOVER_SQ = (44 * zoom) * (44 * zoom);
+    const DEATH_FADE_MS   = 2000;
+    const now = performance.now();
+    const cw = this.canvas.width;
+    const ch = this.canvas.height;
+    const msp = this.mouseWorldPos ? camera.worldToScreen(this.mouseWorldPos) : null;
+    const mwp = this.mouseWorldPos;
+    const worldBounds = camera.getWorldBounds();
+    const RESOURCE_WORLD_PAD = 140;
+    const HOVER_QUERY_WORLD_R = 120;
+
     for (const isl of this.islands) {
       const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
       // Visibility check: adapt radius to polygon bound or bump-circle
       const visR = isl.vertices
         ? Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y))) + 50
         : (preset.beachRadius + Math.max(0, ...preset.beachBumps.map(Math.abs)) + 20);
-      if (!camera.isWorldPositionVisible(Vec2.from(isl.x, isl.y), visR)) continue;
-      const sc  = camera.worldToScreen(Vec2.from(isl.x, isl.y));
-      const ctx = this.ctx;
+      const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, visR + 50);
+      for (const off of wrapOffsets) {
+        const islandX = isl.x + off.dx;
+        const islandY = isl.y + off.dy;
+        if (!camera.isWorldPositionVisible(Vec2.from(islandX, islandY), visR)) continue;
+
+        const shiftedVertices = this.offsetVertices(isl.vertices, off.dx, off.dy);
+        const shiftedGrassVertices = this.offsetVertices(isl.grassVertices, off.dx, off.dy);
+        const shiftedShallowVertices = this.offsetVertices(isl.shallowVertices, off.dx, off.dy);
+
+        const sc  = camera.worldToScreen(Vec2.from(islandX, islandY));
+        const ctx = this.ctx;
+
+      // ── Shallow water ring (drawn before island body) ────────────────────
+      {
+        // ── Shallow water ring — follows the island's actual shape ────────────
+        // Depth scales with island radius (SHALLOW_WATER_SCALE, matches server).
+        // Uses even-odd fill: outer expanded shape minus inner beach shape = ring.
+        const SHALLOW_SCALE = 0.375; // must match server SHALLOW_WATER_SCALE
+        const SEG = 64;
+        const TWO_PI = Math.PI * 2;
+        ctx.save();
+        if (shiftedVertices) {
+          const verts = shiftedVertices;
+
+          // Only render shallow zone if explicit shallow vertices are defined
+          if (shiftedShallowVertices?.length) {
+            const shallowBoundR = Math.max(...shiftedShallowVertices.map(v => Math.hypot(v.x - islandX, v.y - islandY)));
+            const sandBoundR    = Math.max(...verts.map(v => Math.hypot(v.x - islandX, v.y - islandY)));
+            const shallowW = Math.max(4, (shallowBoundR - sandBoundR) * zoom);
+            const outerScreenVerts = shiftedShallowVertices.map(v => camera.worldToScreen(Vec2.from(v.x, v.y)));
+            const sandScreenVerts  = verts.map(v => camera.worldToScreen(Vec2.from(v.x, v.y)));
+
+            const drawSandPath = () => {
+              ctx.beginPath();
+              sandScreenVerts.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
+              ctx.closePath();
+            };
+
+            // Clip to the shallow ring (outer poly minus sand poly, even-odd)
+            // so shadow and fill are only visible in the ring zone.
+            ctx.beginPath();
+            outerScreenVerts.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
+            ctx.closePath();
+            sandScreenVerts.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
+            ctx.closePath();
+            ctx.clip('evenodd');
+
+            // Draw the sand polygon with shadow passes.
+            // Shadow bleeds outward from the sand edge into the ring, clipped to the shallow boundary.
+            // Multiple passes produce a sandy→teal→blue gradient by edge distance.
+            ctx.fillStyle = 'rgba(220, 195, 130, 1)'; // opaque fill required to cast shadow
+
+            // Pass 1 — sandy, tight near-edge halo
+            ctx.shadowBlur  = Math.max(1, shallowW * 0.30);
+            ctx.shadowColor = 'rgba(220, 195, 130, 0.95)';
+            drawSandPath(); ctx.fill();
+
+            // Pass 2 — teal mid-zone
+            ctx.shadowBlur  = Math.max(1, shallowW * 0.62);
+            ctx.shadowColor = 'rgba(100, 205, 195, 0.80)';
+            drawSandPath(); ctx.fill();
+
+            // Pass 3 — blue outer fade
+            ctx.shadowBlur  = Math.max(1, shallowW);
+            ctx.shadowColor = 'rgba(60, 170, 205, 0.50)';
+            drawSandPath(); ctx.fill();
+          }
+        } else {
+          const SHALLOW_DEPTH = preset.beachRadius * SHALLOW_SCALE;
+          const n    = preset.beachBumps.length;
+          const outerBase = preset.beachRadius + SHALLOW_DEPTH;
+          // Outer subpath: expanded blob (beachRadius + SHALLOW_DEPTH + same bumps)
+          ctx.beginPath();
+          for (let i = 0; i <= SEG; i++) {
+            const angle = (i / SEG) * TWO_PI;
+            const t  = (angle / TWO_PI) * n;
+            const i0 = Math.floor(t) % n, i1 = (i0 + 1) % n;
+            const r  = outerBase + preset.beachBumps[i0] + (t - Math.floor(t)) * (preset.beachBumps[i1] - preset.beachBumps[i0]);
+            const sp = camera.worldToScreen(Vec2.from(islandX + Math.cos(angle) * r, islandY + Math.sin(angle) * r));
+            i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
+          }
+          ctx.closePath();
+          // Inner subpath: beach boundary (cuts out island via even-odd)
+          for (let i = 0; i <= SEG; i++) {
+            const angle = (i / SEG) * TWO_PI;
+            const t  = (angle / TWO_PI) * n;
+            const i0 = Math.floor(t) % n, i1 = (i0 + 1) % n;
+            const r  = preset.beachRadius + preset.beachBumps[i0] + (t - Math.floor(t)) * (preset.beachBumps[i1] - preset.beachBumps[i0]);
+            const sp = camera.worldToScreen(Vec2.from(islandX + Math.cos(angle) * r, islandY + Math.sin(angle) * r));
+            i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
+          }
+          ctx.closePath();
+          const maxBump = Math.max(0, ...preset.beachBumps.map(Math.abs));
+          const sg = ctx.createRadialGradient(sc.x, sc.y, (preset.beachRadius - maxBump) * zoom, sc.x, sc.y, (outerBase + maxBump) * zoom);
+          sg.addColorStop(0.0,  'rgba(220, 195, 130, 0.95)');
+          sg.addColorStop(0.30, 'rgba(130, 210, 200, 0.75)');
+          sg.addColorStop(0.65, 'rgba(70, 185, 215, 0.35)');
+          sg.addColorStop(1.0,  'rgba(60, 170, 205, 0.0)');
+          ctx.fillStyle = sg;
+          ctx.fill('evenodd');
+        }
+        ctx.restore();
+      }
 
       ctx.save();
 
-      if (isl.vertices) {
+      if (shiftedVertices) {
         // ── Polygon island ─────────────────────────────────────────────────────
-        const polyBoundR = Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+        const polyBoundR = Math.max(...shiftedVertices.map(v => Math.hypot(v.x - islandX, v.y - islandY)));
 
         // Beach
-        this.traceIslandPolygon(camera, isl.vertices);
+        this.traceIslandPolygon(camera, shiftedVertices);
         const beachGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, polyBoundR * zoom * 1.05);
         beachGrad.addColorStop(0.0,  preset.beachColors[0]);
         beachGrad.addColorStop(0.65, preset.beachColors[1]);
@@ -2161,14 +3393,16 @@ export class RenderSystem {
         ctx.lineWidth   = Math.max(1, 2 * zoom);
         ctx.stroke();
 
-        // Grass interior (polygon scaled toward island centre)
-        const gScale = preset.grassPolyScale ?? 0.78;
-        const grassVerts = isl.vertices.map(v => ({
-          x: isl.x + (v.x - isl.x) * gScale,
-          y: isl.y + (v.y - isl.y) * gScale,
-        }));
+        // Grass interior (explicit polygon if provided, else scale sand polygon toward centre)
+        const grassVerts = shiftedGrassVertices ?? (() => {
+          const gScale = preset.grassPolyScale ?? 0.78;
+          return shiftedVertices.map(v => ({
+            x: islandX + (v.x - islandX) * gScale,
+            y: islandY + (v.y - islandY) * gScale,
+          }));
+        })();
         this.traceIslandPolygon(camera, grassVerts);
-        const grassBoundR = polyBoundR * gScale;
+        const grassBoundR = Math.max(...grassVerts.map(v => Math.hypot(v.x - islandX, v.y - islandY)));
         const grassGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, grassBoundR * zoom);
         grassGrad.addColorStop(0.0, preset.grassColors[0]);
         grassGrad.addColorStop(0.7, preset.grassColors[1]);
@@ -2178,7 +3412,7 @@ export class RenderSystem {
       } else {
         // ── Bump-circle island ────────────────────────────────────────────────
         // Sandy beach
-        this.traceIslandBlob(camera, isl.x, isl.y, preset.beachRadius, preset.beachBumps);
+        this.traceIslandBlob(camera, islandX, islandY, preset.beachRadius, preset.beachBumps);
         const beachGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, preset.beachRadius * zoom * 1.1);
         beachGrad.addColorStop(0.0,  preset.beachColors[0]);
         beachGrad.addColorStop(0.65, preset.beachColors[1]);
@@ -2190,7 +3424,7 @@ export class RenderSystem {
         ctx.stroke();
 
         // Grass interior
-        this.traceIslandBlob(camera, isl.x, isl.y, preset.grassRadius, preset.grassBumps);
+        this.traceIslandBlob(camera, islandX, islandY, preset.grassRadius, preset.grassBumps);
         const grassGrad = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, preset.grassRadius * zoom);
         grassGrad.addColorStop(0.0, preset.grassColors[0]);
         grassGrad.addColorStop(0.7, preset.grassColors[1]);
@@ -2201,104 +3435,154 @@ export class RenderSystem {
 
       ctx.restore();
 
-      // ── Resource nodes ───────────────────────────────────────────────────────
-      const localPlayer = this._cachedLocalPlayer;
-      const axeEquipped = (() => {
-        if (!localPlayer || localPlayer.carrierId !== 0) return false;
-        const slot = localPlayer.inventory?.activeSlot ?? 0;
-        return localPlayer.inventory?.slots[slot]?.item === 'axe';
-      })();
-      const pickaxeEquipped = (() => {
-        if (!localPlayer || localPlayer.carrierId !== 0) return false;
-        const slot = localPlayer.inventory?.activeSlot ?? 0;
-        return localPlayer.inventory?.slots[slot]?.item === 'pickaxe';
-      })();
-      const HARVEST_RANGE_SQ = 110 * 110;
-      // Mouse hover radius for trees: hit-test against the canopy circle (17px * zoom)
-      const TREE_HOVER_SQ  = (Math.max(4, 17 * zoom)) * (Math.max(4, 17 * zoom));
-      const PLANT_HOVER_SQ = (Math.max(4, 14 * zoom)) * (Math.max(4, 14 * zoom));
-      const ROCK_HOVER_SQ  = (Math.max(4, 16 * zoom)) * (Math.max(4, 16 * zoom));
+      // ── Resource nodes — Passes 1-3 (drawn below structures) ────────────────
+      const visibleRes: Array<{
+        res: typeof isl.resources[0];
+        wx: number; wy: number;
+        sp: ReturnType<typeof camera.worldToScreen>;
+        isHovered: boolean; inRange: boolean; playerNear: boolean; leafAlpha: number; bushAlpha: number; boulderAlpha: number; deathAlpha: number;
+      }> = [];
 
-      for (const res of isl.resources) {
-        const wx = isl.x + res.ox;
-        const wy = isl.y + res.oy;
-        const sp = camera.worldToScreen(Vec2.from(wx, wy));
-        if (res.type === 'wood') {
-          // Hover detection (screen space)
-          let isHovered = false;
-          if (this.mouseWorldPos) {
-            const msp = camera.worldToScreen(this.mouseWorldPos);
-            const hdx = msp.x - sp.x;
-            const hdy = msp.y - sp.y;
-            isHovered = (hdx * hdx + hdy * hdy) <= TREE_HOVER_SQ;
-          }
-          // Player-proximity for harvest
-          const inRange = axeEquipped && localPlayer
-            ? (() => { const dx = localPlayer.position.x - wx; const dy = localPlayer.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
-            : false;
+      const candidateIndices = this.queryResourceIndices(
+        isl,
+        worldBounds.min.x - RESOURCE_WORLD_PAD - off.dx,
+        worldBounds.min.y - RESOURCE_WORLD_PAD - off.dy,
+        worldBounds.max.x + RESOURCE_WORLD_PAD - off.dx,
+        worldBounds.max.y + RESOURCE_WORLD_PAD - off.dy,
+      );
+      const hoverCandidateSet = (mwp && msp)
+        ? new Set<number>(
+            this.queryResourceIndices(
+              isl,
+              mwp.x - HOVER_QUERY_WORLD_R - off.dx,
+              mwp.y - HOVER_QUERY_WORLD_R - off.dy,
+              mwp.x + HOVER_QUERY_WORLD_R - off.dx,
+              mwp.y + HOVER_QUERY_WORLD_R - off.dy,
+            ),
+          )
+        : null;
 
-          if (isHovered) this._hoveredTree = { wx, wy };
-          this.drawIslandTree(sp.x, sp.y, zoom, isHovered, inRange);
-          if (isHovered && axeEquipped) {
-            this.drawHarvestPrompt(sp.x, sp.y, zoom, inRange);
-          } else if (isHovered) {
-            this.drawGatherPrompt(sp.x, sp.y, zoom, false, '(need axe)');
-          }
-        } else if (res.type === 'fiber') {
-          let isHovered = false;
-          if (this.mouseWorldPos) {
-            const msp = camera.worldToScreen(this.mouseWorldPos);
-            const hdx = msp.x - sp.x;
-            const hdy = msp.y - sp.y;
-            isHovered = (hdx * hdx + hdy * hdy) <= PLANT_HOVER_SQ;
-          }
-          const inRange = localPlayer && localPlayer.carrierId === 0
-            ? (() => { const dx = localPlayer.position.x - wx; const dy = localPlayer.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
-            : false;
-
-          if (isHovered) this._hoveredFiberPlant = { wx, wy };
-          this.drawIslandFiberPlant(sp.x, sp.y, zoom, isHovered);
-          if (isHovered) {
-            this.drawGatherPrompt(sp.x, sp.y, zoom, inRange, '[E] Gather Fiber');
-          }
-        } else if (res.type === 'rock') {
-          let isHovered = false;
-          if (this.mouseWorldPos) {
-            const msp = camera.worldToScreen(this.mouseWorldPos);
-            const hdx = msp.x - sp.x;
-            const hdy = msp.y - sp.y;
-            isHovered = (hdx * hdx + hdy * hdy) <= ROCK_HOVER_SQ;
-          }
-          const inRange = pickaxeEquipped && localPlayer
-            ? (() => { const dx = localPlayer.position.x - wx; const dy = localPlayer.position.y - wy; return dx*dx+dy*dy <= HARVEST_RANGE_SQ; })()
-            : false;
-
-          if (isHovered) this._hoveredRock = { wx, wy };
-          this.drawIslandRock(sp.x, sp.y, zoom, isHovered);
-          if (isHovered && pickaxeEquipped) {
-            this.drawGatherPrompt(sp.x, sp.y, zoom, inRange, '[E] Mine Rock');
-          } else if (isHovered) {
-            this.drawGatherPrompt(sp.x, sp.y, zoom, false, '(need pickaxe)');
-          }
+      for (const ri of candidateIndices) {
+        const res = isl.resources[ri];
+        // Depleted resources fade out over DEATH_FADE_MS, then disappear entirely.
+        // During the fade they cannot be hovered or interacted with.
+        let deathAlpha = 1.0;
+        if (res.maxHp > 0 && res.hp <= 0) {
+          if (!res.depletedAt) continue; // no timestamp yet — skip (shouldn't happen)
+          const elapsed = now - res.depletedAt;
+          if (elapsed >= DEATH_FADE_MS) continue; // fully faded, skip
+          deathAlpha = 1.0 - elapsed / DEATH_FADE_MS; // 1 → 0 over DEATH_FADE_MS
+          const wx2 = islandX + res.ox, wy2 = islandY + res.oy;
+          if (wx2 < worldBounds.min.x - RESOURCE_WORLD_PAD || wx2 > worldBounds.max.x + RESOURCE_WORLD_PAD ||
+              wy2 < worldBounds.min.y - RESOURCE_WORLD_PAD || wy2 > worldBounds.max.y + RESOURCE_WORLD_PAD) continue;
+          const sp2 = camera.worldToScreen(Vec2.from(wx2, wy2));
+          const maxR2 = 100 * zoom;
+          if (sp2.x + maxR2 < 0 || sp2.x - maxR2 > cw || sp2.y + maxR2 < 0 || sp2.y - maxR2 > ch) continue;
+          // No hover, no interaction while dying
+          visibleRes.push({ res, wx: wx2, wy: wy2, sp: sp2, isHovered: false, inRange: false, playerNear: false, leafAlpha: 1.0, bushAlpha: 1.0, boulderAlpha: 1.0, deathAlpha });
+          continue;
         }
-        // 'food' nodes reserved for a future draw method
+        const wx = islandX + res.ox;
+        const wy = islandY + res.oy;
+        if (wx < worldBounds.min.x - RESOURCE_WORLD_PAD || wx > worldBounds.max.x + RESOURCE_WORLD_PAD ||
+            wy < worldBounds.min.y - RESOURCE_WORLD_PAD || wy > worldBounds.max.y + RESOURCE_WORLD_PAD) continue;
+        const sp = camera.worldToScreen(Vec2.from(wx, wy));
+        const maxR = 100 * zoom;
+        if (sp.x + maxR < 0 || sp.x - maxR > cw || sp.y + maxR < 0 || sp.y - maxR > ch) continue;
+        if (maxR < 1) continue;
+
+        let isHovered = false;
+        let inRange   = false;
+        let playerNear = false;
+        const pdx = localPlayer ? localPlayer.position.x - wx : 0;
+        const pdy = localPlayer ? localPlayer.position.y - wy : 0;
+        const pdSq = localPlayer ? (pdx * pdx + pdy * pdy) : Infinity;
+        const playerDist = localPlayer ? Math.sqrt(pdSq) : Infinity;
+        const mayHover = !!(hoverCandidateSet && hoverCandidateSet.has(ri));
+
+        if (res.type === 'wood') {
+          const treeHoverR = 18 * (res.size ?? 1.0) * zoom;
+          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= treeHoverR * treeHoverR; }
+          inRange    = !!(axeEquipped && localPlayer && pdSq <= HARVEST_RANGE_SQ);
+          playerNear = !!(localPlayer && playerDist < LEAF_FADE_OUTER);
+          if (isHovered) this._hoveredTree = { wx, wy };
+        } else if (res.type === 'fiber') {
+          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= PLANT_HOVER_SQ; }
+          inRange = !!(localPlayer && localPlayer.carrierId === 0 && pdSq <= HARVEST_RANGE_SQ);
+          if (isHovered) this._hoveredFiberPlant = { wx, wy };
+        } else if (res.type === 'rock') {
+          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= ROCK_HOVER_SQ; }
+          inRange = !!(localPlayer && pdSq <= HARVEST_RANGE_SQ);
+          if (isHovered) this._hoveredRock = { wx, wy };
+        } else if (res.type === 'boulder') {
+          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= BOULDER_HOVER_SQ; }
+          inRange = !!(pickaxeEquipped && localPlayer && pdSq <= HARVEST_RANGE_SQ);
+          if (isHovered) this._hoveredBoulder = { wx, wy };
+        }
+        // Smooth leaf-fade alpha: 1.0 (far) → MIN_LEAF_ALPHA (inside LEAF_FADE_INNER)
+        const leafAlpha = res.type === 'wood' && localPlayer
+          ? (() => {
+              const t = Math.max(0, Math.min(1, (playerDist - LEAF_FADE_INNER) / (LEAF_FADE_OUTER - LEAF_FADE_INNER)));
+              return MIN_LEAF_ALPHA + t * (1.0 - MIN_LEAF_ALPHA);
+            })()
+          : 1.0;
+        // Bush fade alpha: fades out when player is close (same pattern as leaf fade)
+        const bushAlpha = res.type === 'fiber' && localPlayer
+          ? (() => {
+              const t = Math.max(0, Math.min(1, (playerDist - BUSH_FADE_INNER) / (BUSH_FADE_OUTER - BUSH_FADE_INNER)));
+              return MIN_BUSH_ALPHA + t * (1.0 - MIN_BUSH_ALPHA);
+            })()
+          : 1.0;
+        const boulderAlpha = 1.0;
+        visibleRes.push({ res, wx, wy, sp, isHovered, inRange, playerNear, leafAlpha, bushAlpha, boulderAlpha, deathAlpha });
+      }
+
+      // Pass 1 – rocks (below structures)
+      for (const e of visibleRes) {
+        if (e.res.type !== 'rock') continue;
+        this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha, e.res.ox, e.res.oy, e.wx, e.wy);
+      }
+      // Pass 2 – boulders (above rocks, below players)
+      for (const e of visibleRes) {
+        if (e.res.type !== 'boulder') continue;
+        this.drawIslandBoulder(e.sp.x, e.sp.y, zoom, e.isHovered, e.boulderAlpha * e.deathAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.wx, e.wy);
+      }
+      // Pass 3 – tree trunks (only visible when player is near or hovering)
+      for (const e of visibleRes) {
+        if (e.res.type !== 'wood') continue;
+        if (!e.playerNear && !e.isHovered) continue;
+        // Trunk fades IN as leaves fade OUT — inverse of leafAlpha
+        const trunkAlpha = (1.0 - e.leafAlpha) * e.deathAlpha;
+        if (trunkAlpha < 0.01) continue;
+        this.drawIslandTreeTrunk(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.playerNear, e.res.size ?? 1.0, trunkAlpha, e.wx, e.wy);
+      }
+      // Fiber bushes deferred to _pendingBushes — drawn above players after render queue
+      for (const e of visibleRes) {
+        if (e.res.type !== 'fiber') continue;
+        this._pendingBushes.push({ sp: e.sp, isHovered: e.isHovered, bushAlpha: e.bushAlpha, deathAlpha: e.deathAlpha, ox: e.res.ox, oy: e.res.oy, wx: e.wx, wy: e.wy });
+      }
+      this._pendingAllRes.push(...visibleRes);
       }
     }
 
-    // Reset hovered nodes (re-set each frame in the loop above)
-    // Done: _hoveredFiberPlant and _hoveredRock are set to null at frame start below
+    // ── Structures: above trunks, below leaves ────────────────────────────────
+    this.drawPlacedStructures(camera);
+    // ── Dropped items then tombstones (above boulders, below players) ─────────
+    this.drawDroppedItems(this.ctx, camera.getState());
+    this.drawTombstones(this.ctx, camera.getState());
+    // Tree leaves and prompts are drawn in renderWorld after bushes (player → bushes → leaves)
   }
 
-  /** Draw a floating "[E] Chop" or "Too far" prompt above a tree. */
+  /** Draw a floating "Too far" or "[E] Chop" prompt above a tree. */
   private drawHarvestPrompt(sx: number, sy: number, zoom: number, inRange: boolean): void {
     const ctx = this.ctx;
-    const canopy    = Math.max(4, 17 * zoom);
+    const canopy    = 17 * zoom;
     const label     = inRange ? '[E] Chop' : 'Too far';
     const borderCol = inRange ? '#f0c040' : '#888888';
     const textCol   = inRange ? '#f0c040' : '#aaaaaa';
     const fontSize  = Math.max(10, Math.round(13 * zoom));
     ctx.save();
-    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.font = `bold ${fontSize}px Georgia, serif`;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'bottom';
     const textW = ctx.measureText(label).width;
@@ -2323,124 +3607,152 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandTree(sx: number, sy: number, zoom: number, hovered = false, inRange = false): void {
-    const ctx    = this.ctx;
-    const trunk  = Math.max(2, 4 * zoom);
-    const canopy = Math.max(4, 17 * zoom);
+  /** Draw a health bar below the resource prompt. barW is in world-units (scaled by zoom). */
+  private drawResourceHealthBar(sx: number, sy: number, zoom: number, hp: number, maxHp: number, barW: number): void {
+    if (maxHp <= 0) return;
+    const ctx  = this.ctx;
+    const pct  = Math.max(0, Math.min(1, hp / maxHp));
+    const bw   = barW * zoom;
+    const bh   = 5  * zoom;
+    const by   = sy + 14 * zoom; // just below the resource centre
+    ctx.save();
+    ctx.globalAlpha = 0.88;
+    // Background track
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.beginPath();
+    ctx.roundRect(sx - bw / 2, by, bw, bh, 2);
+    ctx.fill();
+    // Coloured fill
+    ctx.fillStyle = pct > 0.6 ? '#4cdd44' : pct > 0.3 ? '#ddcc22' : '#dd3322';
+    if (pct > 0) {
+      ctx.beginPath();
+      ctx.roundRect(sx - bw / 2, by, bw * pct, bh, 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  private drawIslandTreeLeaves(sx: number, sy: number, zoom: number, hovered = false, inRange = false, leafAlpha = 1.0, seedX = 0, seedY = 0, size = 1.0, deathAlpha = 1.0, wx?: number, wy?: number): void {
+    const ctx = this.ctx;
+    const h  = (Math.imul(seedX | 0, 2654435761) ^ Math.imul(seedY | 0, 1664525)) >>> 0;
+    const h2 = (Math.imul(h, 2246822519) ^ Math.imul(h >>> 13, 2654435761)) >>> 0;
+    const clusterRot = (((h2 & 0xFF) / 255) - 0.5) * (Math.PI / 3.6);
+    const tintIdx    = (h >>> 16) & 3;
+    const canopy     = 72 * zoom * size;
+
+    // Map rotation to nearest pre-baked bin
+    const ROT_RANGE = Math.PI / 3.6;
+    const BINS      = RenderSystem.TREE_ROT_BINS;
+    const rotBin    = Math.max(0, Math.min(BINS - 1,
+      Math.round(((clusterRot + ROT_RANGE) / (2 * ROT_RANGE)) * (BINS - 1))));
+
+    const sprite       = RenderSystem._ensureTreeSprites().get(`${tintIdx}_${rotBin}`)!;
+    const spriteCanopy = RenderSystem.TREE_SPRITE_SIZE * 0.38;
+    const drawSize     = RenderSystem.TREE_SPRITE_SIZE * (canopy / spriteCanopy);
 
     ctx.save();
-    // Hover glow behind canopy
+    // Hover glow
     if (hovered) {
       const glowColor = inRange ? 'rgba(255,230,80,0.22)' : 'rgba(180,180,180,0.15)';
-      const glowR     = inRange ? canopy * 1.25 : canopy * 1.15;
       ctx.beginPath();
-      ctx.arc(sx, sy, glowR, 0, Math.PI * 2);
+      ctx.arc(sx, sy, inRange ? canopy * 1.25 : canopy * 1.15, 0, Math.PI * 2);
       ctx.fillStyle = glowColor;
       ctx.fill();
     }
-    // Trunk
-    ctx.fillStyle = '#5c3518';
-    ctx.beginPath();
-    ctx.ellipse(sx, sy + canopy * 0.45, trunk, trunk * 1.6, 0, 0, Math.PI * 2);
-    ctx.fill();
-    // Dark shadow canopy
-    ctx.fillStyle = '#2a5214';
-    ctx.beginPath();
-    ctx.arc(sx + canopy * 0.1, sy + canopy * 0.08, canopy, 0, Math.PI * 2);
-    ctx.fill();
-    // Mid canopy
-    ctx.fillStyle = '#3e7a22';
-    ctx.beginPath();
-    ctx.arc(sx - canopy * 0.08, sy - canopy * 0.08, canopy * 0.84, 0, Math.PI * 2);
-    ctx.fill();
-    // Bright highlight
-    ctx.fillStyle = '#52a030';
-    ctx.beginPath();
-    ctx.arc(sx - canopy * 0.15, sy - canopy * 0.2, canopy * 0.52, 0, Math.PI * 2);
-    ctx.fill();
-    // Hover outline ring
+    ctx.globalAlpha = leafAlpha * deathAlpha;
+    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
+    ctx.globalAlpha = deathAlpha;
     if (hovered) {
       ctx.beginPath();
       ctx.arc(sx, sy, canopy * 1.08, 0, Math.PI * 2);
       ctx.strokeStyle = inRange ? '#f0c040' : '#888888';
-      ctx.lineWidth   = Math.max(1, 1.8 * zoom);
+      ctx.lineWidth   = 1.8 * zoom;
       ctx.stroke();
     }
     ctx.restore();
   }
 
-  private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false): void {
-    const ctx        = this.ctx;
-    const h          = Math.max(5, 15 * zoom);
-    const bladeCount = 6;
-
+  private drawIslandTreeTrunk(sx: number, sy: number, zoom: number, hovered = false, inRange = false, playerNear = false, size = 1.0, alpha = 1.0, wx?: number, wy?: number): void {
+    const ctx      = this.ctx;
+    const trunk    = 18 * zoom * size;
+    const spriteR  = RenderSystem.TRUNK_SPRITE_R;
+    const SIZE     = RenderSystem.TRUNK_SPRITE_SIZE;
+    const drawSize = SIZE * (trunk / spriteR);
+    const key      = hovered ? (inRange ? 'inrange' : 'hovered') : 'normal';
+    const sprite   = RenderSystem._ensureTrunkSprites().get(key)!;
     ctx.save();
-    ctx.lineCap = 'round';
-    // Dark base blades
-    ctx.strokeStyle = hovered ? '#7ac040' : '#5a9030';
-    ctx.lineWidth   = Math.max(1, 2.2 * zoom);
-    for (let i = 0; i < bladeCount; i++) {
-      const angle  = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.95;
-      const bend   = Math.sin(i * 1.8) * 0.3;
-      const midX   = sx + Math.cos(angle + bend * 0.5) * h * 0.5;
-      const midY   = sy + Math.sin(angle + bend * 0.5) * h * 0.5;
-      const tipX   = sx + Math.cos(angle + bend) * h;
-      const tipY   = sy + Math.sin(angle + bend) * h;
-      ctx.beginPath();
-      ctx.moveTo(sx, sy);
-      ctx.quadraticCurveTo(midX, midY, tipX, tipY);
-      ctx.stroke();
-    }
-    // Bright inner blades
-    ctx.strokeStyle = hovered ? '#b0ff60' : '#8acc48';
-    ctx.lineWidth   = Math.max(0.5, 1.2 * zoom);
-    for (let i = 1; i < bladeCount - 1; i++) {
-      const angle = -Math.PI / 2 + ((i / (bladeCount - 1)) - 0.5) * Math.PI * 0.6;
-      ctx.beginPath();
-      ctx.moveTo(sx, sy - h * 0.25);
-      ctx.lineTo(sx + Math.cos(angle) * h * 0.72, sy + Math.sin(angle) * h * 0.72);
-      ctx.stroke();
-    }
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
     ctx.restore();
   }
 
-  private drawIslandRock(sx: number, sy: number, zoom: number, hovered = false): void {
-    const ctx = this.ctx;
-    const r   = Math.max(4, 12 * zoom);
+  private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0, wx?: number, wy?: number): void {
+    const ctx      = this.ctx;
+    const h        = 60 * zoom;
+    const spriteH  = RenderSystem.FIBER_SPRITE_H;
+    const SIZE     = RenderSystem.FIBER_SPRITE_SIZE;
+    const drawSize = SIZE * (h / spriteH);
+    const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
+    const ti       = hash % RenderSystem.FIBER_TINTS.length;
+    const bin      = (hash >> 4) % RenderSystem.FIBER_ROT_BINS;
+    const key      = `${ti}_${bin}_${hovered ? 'h' : 'n'}`;
+    const sprite   = RenderSystem._ensureFiberSprites().get(key)!;
+    const rot      = ((hash >> 8) % 360) * Math.PI / 180;
     ctx.save();
-    // Main rock body
-    ctx.beginPath();
-    ctx.ellipse(sx, sy + r * 0.15, r, r * 0.7, 0, 0, Math.PI * 2);
-    ctx.fillStyle   = hovered ? '#b0b0b4' : '#888890';
-    ctx.strokeStyle = hovered ? '#ffe090' : '#555560';
-    ctx.lineWidth   = Math.max(1, hovered ? 2.5 * zoom : 1.5 * zoom);
-    ctx.fill();
-    ctx.stroke();
-    // Highlight fleck
-    ctx.beginPath();
-    ctx.ellipse(sx - r * 0.25, sy - r * 0.15, r * 0.28, r * 0.18, -0.5, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
-    ctx.fill();
-    // Crack lines
-    ctx.strokeStyle = hovered ? '#888890' : '#666670';
-    ctx.lineWidth   = Math.max(0.5, zoom);
-    ctx.beginPath();
-    ctx.moveTo(sx - r * 0.1, sy - r * 0.2);
-    ctx.lineTo(sx + r * 0.25, sy + r * 0.3);
-    ctx.stroke();
+    ctx.globalAlpha = deathAlpha;
+    ctx.translate(sx, sy);
+    ctx.rotate(rot);
+    ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
+    ctx.restore();
+  }
+
+  private drawIslandRock(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0, wx?: number, wy?: number): void {
+    const ctx  = this.ctx;
+    const R    = RenderSystem.ROCK_SPRITE_R;
+    const SIZE = RenderSystem.ROCK_SPRITE_SIZE;
+    const r    = 6 * zoom;
+    const drawSize = SIZE * (r / R);
+    const hash = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
+    const ti   = hash % RenderSystem.ROCK_TONES.length;
+    const si   = (hash >> 4) % RenderSystem.ROCK_SHAPES.length;
+    const key  = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
+    const sprite = RenderSystem._ensureRockSprites().get(key)!;
+    ctx.save();
+    ctx.globalAlpha = deathAlpha;
+    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
+    ctx.restore();
+  }
+
+  private drawIslandBoulder(sx: number, sy: number, zoom: number, hovered = false, alpha = 1.0, ox = 0, oy = 0, size = 1.0, wx?: number, wy?: number): void {
+    const ctx      = this.ctx;
+    const R        = RenderSystem.BOULDER_SPRITE_R;
+    const SIZE     = RenderSystem.BOULDER_SPRITE_SIZE;
+    const r        = 40 * zoom * size;
+    const drawSize = SIZE * (r / R);
+    const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
+    const ti       = hash % RenderSystem.BOULDER_TONES.length;
+    const si       = (hash >> 4) % RenderSystem.BOULDER_SHAPES.length;
+    const drawRot  = ((hash >> 8) & 0xFF) / 256 * Math.PI * 2;
+    const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
+    const sprite   = RenderSystem._ensureBoulderSprites().get(key)!;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(sx, sy);
+    ctx.rotate(drawRot);
+    ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
     ctx.restore();
   }
 
   /** Draw a floating "[E] action" or "Too far" prompt above a resource node. */
   private drawGatherPrompt(sx: number, sy: number, zoom: number, inRange: boolean, actionLabel: string): void {
     const ctx = this.ctx;
-    const offsetY  = Math.max(4, 16 * zoom);
+    const offsetY  = 16 * zoom;
     const label     = inRange ? actionLabel : actionLabel.startsWith('(') ? actionLabel : 'Too far';
     const borderCol = inRange ? '#a0ff60' : '#888888';
     const textCol   = inRange ? '#c0ff80' : '#aaaaaa';
     const fontSize  = Math.max(10, Math.round(12 * zoom));
     ctx.save();
-    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.font = `bold ${fontSize}px Georgia, serif`;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'bottom';
     const textW = ctx.measureText(label).width;
@@ -2480,22 +3792,42 @@ export class RenderSystem {
       let floorHit: PlacedStructure | null = null;
       for (const s of this.placedStructures) {
         if (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') {
-          // Walls and door frames have priority over floors; door panels highest
-          const isHoriz = this.placedStructures.some(f =>
-            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
-          );
-          const hw = isHoriz ? 25 : 6;
-          const hh = isHoriz ? 6 : 25;
-          if (Math.abs(mx - s.x) <= hw && Math.abs(my - s.y) <= hh) {
+          // Derive wall orientation from nearest floor tile, then rotate mouse into local space
+          let nearFloor: PlacedStructure | null = null;
+          let nearDist2 = Infinity;
+          for (const f of this.placedStructures) {
+            if (f.type !== 'wooden_floor') continue;
+            const d2 = (f.x - s.x) * (f.x - s.x) + (f.y - s.y) * (f.y - s.y);
+            if (d2 < nearDist2) { nearDist2 = d2; nearFloor = f; }
+          }
+          const wRad = nearFloor
+            ? Math.atan2(s.y - nearFloor.y, s.x - nearFloor.x) + Math.PI / 2
+            : 0;
+          const wc = Math.cos(-wRad), ws = Math.sin(-wRad);
+          const ddx = mx - s.x, ddy = my - s.y;
+          const lx = ddx * wc - ddy * ws;
+          const ly = ddx * ws + ddy * wc;
+          if (Math.abs(lx) <= 25 && Math.abs(ly) <= 8) {
             floorHit = s; // walls/door frames/panels treated like floors — workbench still wins
           }
           continue;
         }
-        const hw = s.type === 'workbench' ? 25 * 0.88 : half;
-        const hh = s.type === 'workbench' ? 25 * 0.62 : half;
-        if (Math.abs(mx - s.x) <= hw && Math.abs(my - s.y) <= hh) {
-          if (s.type === 'workbench') {
-            // Workbench always wins — stop searching
+        // Rotate mouse into this structure's local space to handle rotation
+        const rot = (s.rotation ?? 0) * Math.PI / 180;
+        let lx: number, ly: number;
+        if (rot === 0) {
+          lx = mx - s.x; ly = my - s.y;
+        } else {
+          const c = Math.cos(-rot), sn = Math.sin(-rot);
+          const dx = mx - s.x, dy = my - s.y;
+          lx = dx * c - dy * sn;
+          ly = dx * sn + dy * c;
+        }
+        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'shipyard' ? 170 : half;
+        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'shipyard' ? 445 : half;
+        if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) {
+          if (s.type === 'workbench' || s.type === 'shipyard') {
+            // Workbench/shipyard always wins — stop searching
             this._hoveredStructure = s;
             floorHit = null;
             break;
@@ -2508,24 +3840,33 @@ export class RenderSystem {
       if (this._hoveredStructure === null) this._hoveredStructure = floorHit;
     }
 
-    // Floors first, then walls/doors, then workbenches
+    // Floors first, then walls/doors, then workbenches/shipyards
     const sorted = [...this.placedStructures].sort((a, b) => {
       const order = (t: PlacedStructure['type']) =>
-        t === 'wooden_floor' ? 0 : (t === 'wall' || t === 'door_frame') ? 1 : t === 'door' ? 1.5 : 2;
+        t === 'wooden_floor' ? 0 : (t === 'wall' || t === 'door_frame') ? 1 : t === 'door' ? 1.5 : t === 'shipyard' ? 1.8 : 2;
       return order(a.type) - order(b.type);
     });
 
     for (const s of sorted) {
       const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
       const sz  = Math.max(4, 50 * zoom);
-      const isHovered = this._hoveredStructure?.id === s.id;
+      // Cull structures that are entirely off-screen
+      if (ssp.x + sz < 0 || ssp.x - sz > this.canvas.width ||
+          ssp.y + sz < 0 || ssp.y - sz > this.canvas.height) continue;
+      const isHovered  = this._hoveredStructure?.id === s.id;
+      const isBlocker  = this._blockerStructureId === s.id && performance.now() < this._blockerExpiry;
 
       if (s.type === 'wooden_floor') {
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         // Darken the fill as hp drops (up to 50% darker at 0 hp)
         const dmgDarken = (1 - hpFrac) * 0.5;
-        const baseColor = isHovered ? '#d09a3a' : '#b8832b';
+        const baseColor = isBlocker ? '#cc3322' : isHovered ? '#d09a3a' : '#b8832b';
         ctx.save();
+        if (s.rotation) {
+          ctx.translate(ssp.x, ssp.y);
+          ctx.rotate(s.rotation * Math.PI / 180);
+          ctx.translate(-ssp.x, -ssp.y);
+        }
         ctx.fillStyle   = baseColor;
         ctx.strokeStyle = '#7a5520';
         ctx.lineWidth   = Math.max(1, 2 * zoom);
@@ -2561,6 +3902,11 @@ export class RenderSystem {
         const bx = ssp.x - bw / 2;
         const by = ssp.y - bh / 2;
         ctx.save();
+        if (s.rotation) {
+          ctx.translate(ssp.x, ssp.y);
+          ctx.rotate(s.rotation * Math.PI / 180);
+          ctx.translate(-ssp.x, -ssp.y);
+        }
 
         // Outer frame (structural legs / frame seen from above)
         const frameColor  = isHovered ? '#5a3010' : '#4a2408';
@@ -2615,7 +3961,7 @@ export class RenderSystem {
         }
 
         // ⚒ icon centred on the work surface
-        ctx.font         = `${Math.max(7, Math.round(10 * zoom))}px monospace`;
+        ctx.font         = `${Math.max(7, Math.round(10 * zoom))}px Georgia, serif`;
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillStyle    = 'rgba(255, 210, 100, 0.9)';
@@ -2636,17 +3982,23 @@ export class RenderSystem {
 
         ctx.restore();
       } else if (s.type === 'wall') {
-        // Determine orientation: if a floor shares X and is offset ±25 in Y → horizontal
-        const isHoriz = this.placedStructures.some(f =>
-          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        // Derive wall rotation from the nearest floor (floor-centre → wall-midpoint vector + 90°)
+        const nearWallFloor = this.placedStructures.find(f =>
+          f.type === 'wooden_floor' && Math.hypot(f.x - s.x, f.y - s.y) < 30
         );
+        const wallRotRad = nearWallFloor
+          ? Math.atan2(s.y - nearWallFloor.y, s.x - nearWallFloor.x) + Math.PI / 2
+          : 0;
         const THICK = 0.18; // ratio of tile (50px * 0.18 = 9px)
-        const ww = isHoriz ? sz : sz * THICK;
-        const wh = isHoriz ? sz * THICK : sz;
+        const ww = sz;          // long axis (rotated by wallRotRad)
+        const wh = sz * THICK;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = (1 - hpFrac) * 0.5;
 
         ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(wallRotRad);
+        ctx.translate(-ssp.x, -ssp.y);
         ctx.fillStyle   = isHovered ? '#7a5030' : '#5c3a1a';
         ctx.strokeStyle = '#2e1a08';
         ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
@@ -2654,26 +4006,18 @@ export class RenderSystem {
         ctx.rect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
         ctx.fill();
         ctx.stroke();
-        // Plank grain lines along the length
+        // Plank grain lines (verticals in wall-local space)
         ctx.strokeStyle = 'rgba(40, 20, 5, 0.4)';
         ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
-        if (isHoriz) {
-          for (let li = 1; li < 3; li++) {
-            const gx = ssp.x - ww / 2 + ww * (li / 3);
-            ctx.beginPath(); ctx.moveTo(gx, ssp.y - wh / 2); ctx.lineTo(gx, ssp.y + wh / 2); ctx.stroke();
-          }
-        } else {
-          for (let li = 1; li < 3; li++) {
-            const gy = ssp.y - wh / 2 + wh * (li / 3);
-            ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2, gy); ctx.lineTo(ssp.x + ww / 2, gy); ctx.stroke();
-          }
+        for (let li = 1; li < 3; li++) {
+          const gx = ssp.x - ww / 2 + ww * (li / 3);
+          ctx.beginPath(); ctx.moveTo(gx, ssp.y - wh / 2); ctx.lineTo(gx, ssp.y + wh / 2); ctx.stroke();
         }
         // Company color strip
         const wallCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
         const stripSz = Math.max(1, 2 * zoom);
         ctx.fillStyle = wallCompanyColor;
-        if (isHoriz) ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, stripSz);
-        else         ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, stripSz, wh);
+        ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, stripSz);
         // Damage darkening
         if (dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
@@ -2682,83 +4026,73 @@ export class RenderSystem {
         ctx.restore();
       } else if (s.type === 'door_frame') {
         // Door Frame: two posts at the ends with an open gap in the centre
-        const isHoriz = this.placedStructures.some(f =>
-          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        const nearDFFloor = this.placedStructures.find(f =>
+          f.type === 'wooden_floor' && Math.hypot(f.x - s.x, f.y - s.y) < 30
         );
+        const dfRotRad = nearDFFloor
+          ? Math.atan2(s.y - nearDFFloor.y, s.x - nearDFFloor.x) + Math.PI / 2
+          : 0;
         const THICK = 0.18;
-        const ww = isHoriz ? sz : sz * THICK;
-        const wh = isHoriz ? sz * THICK : sz;
+        const ww = sz;          // long axis
+        const wh = sz * THICK;
         const POST = sz * 0.14; // post square size
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = (1 - hpFrac) * 0.5;
 
         ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(dfRotRad);
+        ctx.translate(-ssp.x, -ssp.y);
         ctx.fillStyle   = isHovered ? '#9a6040' : '#7a4820';
         ctx.strokeStyle = '#3e200c';
         ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
-        if (isHoriz) {
-          // Two posts at left and right ends
-          ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
-          ctx.strokeRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
-          ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
-          ctx.strokeRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
-          // Dashed lintel lines to suggest the frame
-          ctx.strokeStyle = 'rgba(120, 70, 30, 0.45)';
-          ctx.lineWidth = Math.max(0.5, 1 * zoom);
-          ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
-          ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2 + POST, ssp.y - wh / 2);
-          ctx.lineTo(ssp.x + ww / 2 - POST, ssp.y - wh / 2); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2 + POST, ssp.y + wh / 2);
-          ctx.lineTo(ssp.x + ww / 2 - POST, ssp.y + wh / 2); ctx.stroke();
-          ctx.setLineDash([]);
-        } else {
-          // Two posts at top and bottom ends
-          ctx.fillRect(ssp.x - POST / 2, ssp.y - wh / 2, POST, POST);
-          ctx.strokeRect(ssp.x - POST / 2, ssp.y - wh / 2, POST, POST);
-          ctx.fillRect(ssp.x - POST / 2, ssp.y + wh / 2 - POST, POST, POST);
-          ctx.strokeRect(ssp.x - POST / 2, ssp.y + wh / 2 - POST, POST, POST);
-          // Dashed side lines
-          ctx.strokeStyle = 'rgba(120, 70, 30, 0.45)';
-          ctx.lineWidth = Math.max(0.5, 1 * zoom);
-          ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
-          ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2, ssp.y - wh / 2 + POST);
-          ctx.lineTo(ssp.x - ww / 2, ssp.y + wh / 2 - POST); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(ssp.x + ww / 2, ssp.y - wh / 2 + POST);
-          ctx.lineTo(ssp.x + ww / 2, ssp.y + wh / 2 - POST); ctx.stroke();
-          ctx.setLineDash([]);
-        }
+        // Two posts at left and right ends (in wall-local horizontal space)
+        ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
+        ctx.strokeRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
+        ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
+        ctx.strokeRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
+        // Dashed lintel lines
+        ctx.strokeStyle = 'rgba(120, 70, 30, 0.45)';
+        ctx.lineWidth = Math.max(0.5, 1 * zoom);
+        ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
+        ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2 + POST, ssp.y - wh / 2);
+        ctx.lineTo(ssp.x + ww / 2 - POST, ssp.y - wh / 2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2 + POST, ssp.y + wh / 2);
+        ctx.lineTo(ssp.x + ww / 2 - POST, ssp.y + wh / 2); ctx.stroke();
+        ctx.setLineDash([]);
         // Company color strip
         const dfCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
         const dfStripSz = Math.max(1, 2 * zoom);
         ctx.fillStyle = dfCompanyColor;
-        if (isHoriz) ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, dfStripSz);
-        else         ctx.fillRect(ssp.x - POST / 2, ssp.y - wh / 2, dfStripSz, POST);
+        ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, dfStripSz);
         if (dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          if (isHoriz) {
-            ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
-            ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
-          } else {
-            ctx.fillRect(ssp.x - POST / 2, ssp.y - wh / 2, POST, POST);
-            ctx.fillRect(ssp.x - POST / 2, ssp.y + wh / 2 - POST, POST, POST);
-          }
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
+          ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
         }
         ctx.restore();
       } else if (s.type === 'door') {
-        // Door: same shape as wall, but shows open/closed state
-        const isHoriz = this.placedStructures.some(f =>
-          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+        // Door: derive rotation from nearest floor (same as wall/door_frame)
+        const nearDoorFloor = this.placedStructures.find(f =>
+          f.type === 'wooden_floor' && Math.hypot(f.x - s.x, f.y - s.y) < 30
         );
+        const doorRotRad = nearDoorFloor
+          ? Math.atan2(s.y - nearDoorFloor.y, s.x - nearDoorFloor.x) + Math.PI / 2
+          : 0;
+        // Always draw in horizontal local space; rotation is applied via ctx transform
         const THICK = 0.18;
-        const ww = isHoriz ? sz : sz * THICK;
-        const wh = isHoriz ? sz * THICK : sz;
+        const ww = sz;
+        const wh = sz * THICK;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = (1 - hpFrac) * 0.5;
         const isOpen = s.doorOpen === true;
 
         ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(doorRotRad);
+        ctx.translate(-ssp.x, -ssp.y);
         if (!isOpen) {
-          // Closed door: filled planks like wall but with a lighter color
+          // Closed door: filled planks
           ctx.fillStyle   = isHovered ? '#9a6040' : '#7a4820';
           ctx.strokeStyle = '#3e200c';
           ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
@@ -2766,31 +4100,20 @@ export class RenderSystem {
           ctx.rect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
           ctx.fill();
           ctx.stroke();
-          // Center door marker (vertical line or horizontal line)
+          // Center dividing line (vertical in local space = across the width)
           ctx.strokeStyle = 'rgba(30, 12, 4, 0.5)';
           ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-          if (isHoriz) {
-            ctx.beginPath(); ctx.moveTo(ssp.x, ssp.y - wh / 2); ctx.lineTo(ssp.x, ssp.y + wh / 2); ctx.stroke();
-          } else {
-            ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2, ssp.y); ctx.lineTo(ssp.x + ww / 2, ssp.y); ctx.stroke();
-          }
+          ctx.beginPath(); ctx.moveTo(ssp.x, ssp.y - wh / 2); ctx.lineTo(ssp.x, ssp.y + wh / 2); ctx.stroke();
         } else {
-          // Open door: just two short end-posts, gap in middle
+          // Open door: two short end-posts, gap in middle
           const postSz = sz * 0.15;
           ctx.fillStyle   = isHovered ? '#9a6040' : '#7a4820';
           ctx.strokeStyle = '#3e200c';
           ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
-          if (isHoriz) {
-            ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, postSz, wh);
-            ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, postSz, wh);
-            ctx.fillRect(ssp.x + ww / 2 - postSz, ssp.y - wh / 2, postSz, wh);
-            ctx.strokeRect(ssp.x + ww / 2 - postSz, ssp.y - wh / 2, postSz, wh);
-          } else {
-            ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, postSz);
-            ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, postSz);
-            ctx.fillRect(ssp.x - ww / 2, ssp.y + wh / 2 - postSz, ww, postSz);
-            ctx.strokeRect(ssp.x - ww / 2, ssp.y + wh / 2 - postSz, ww, postSz);
-          }
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, postSz, wh);
+          ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, postSz, wh);
+          ctx.fillRect(ssp.x + ww / 2 - postSz, ssp.y - wh / 2, postSz, wh);
+          ctx.strokeRect(ssp.x + ww / 2 - postSz, ssp.y - wh / 2, postSz, wh);
           // Dashed outline showing door extent
           ctx.strokeStyle = 'rgba(150, 100, 60, 0.35)';
           ctx.lineWidth   = Math.max(0.5, 1 * zoom);
@@ -2802,14 +4125,251 @@ export class RenderSystem {
         const doorCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
         const doorStripSz = Math.max(1, 2 * zoom);
         ctx.fillStyle = doorCompanyColor;
-        if (isHoriz) ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, doorStripSz);
-        else         ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, doorStripSz, wh);
+        ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, doorStripSz);
         // Damage darkening
         if (!isOpen && dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
           ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
         }
         ctx.restore();
+      } else if (s.type === 'shipyard') {
+        // ── U-shaped dry dock sized to fit the Brigantine (760×180 world px) ──
+        const ARM_T  = sz * 1.00;   // pier arm thickness
+        const INT_W  = sz * 4.80;   // interior bay width  (brigantine beam 180 + margins)
+        const ARM_L  = sz * 16.80;  // arm length / bay depth (brigantine length 760 + margins)
+        const BACK_T = sz * 1.00;   // back wall thickness
+        const totalW = ARM_T + INT_W + ARM_T;   // sz * 6.8
+        const totalH = BACK_T + ARM_L;          // sz * 17.8
+        const hw = totalW / 2, hh = totalH / 2;
+        const cx = ssp.x, cy = ssp.y;
+        const hpFrac    = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const dmgDarken = (1 - hpFrac) * 0.5;
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate((s.rotation ?? 0) * Math.PI / 180);
+        ctx.translate(-cx, -cy);
+        // U-path: clockwise outer polygon with gap at +y (mouth / open end)
+        const uPath = () => {
+          ctx.beginPath();
+          ctx.moveTo(cx - hw,         cy - hh);
+          ctx.lineTo(cx + hw,         cy - hh);
+          ctx.lineTo(cx + hw,         cy + hh);
+          ctx.lineTo(cx + hw - ARM_T, cy + hh);
+          ctx.lineTo(cx + hw - ARM_T, cy - hh + BACK_T);
+          ctx.lineTo(cx - hw + ARM_T, cy - hh + BACK_T);
+          ctx.lineTo(cx - hw + ARM_T, cy + hh);
+          ctx.lineTo(cx - hw,         cy + hh);
+          ctx.closePath();
+        };
+        // ── Dock body (weathered timber) ──────────────────────────────────────
+        ctx.fillStyle   = isHovered ? '#4a6852' : '#2e4a36';
+        ctx.strokeStyle = '#1a2a1e';
+        ctx.lineWidth   = Math.max(1, 2 * zoom);
+        uPath();
+        ctx.fill();
+        ctx.stroke();
+        // ── Plank grain on arms and back wall ─────────────────────────────────
+        ctx.strokeStyle = 'rgba(10, 20, 10, 0.28)';
+        ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
+        const plankStep = ARM_T / 2.5;
+        for (let p = plankStep; p < totalH; p += plankStep) {
+          const py = cy - hh + p;
+          ctx.beginPath(); ctx.moveTo(cx - hw,         py); ctx.lineTo(cx - hw + ARM_T, py); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx + hw - ARM_T, py); ctx.lineTo(cx + hw,         py); ctx.stroke();
+        }
+        for (let p = plankStep; p < INT_W; p += plankStep) {
+          const px = cx - hw + ARM_T + p;
+          ctx.beginPath(); ctx.moveTo(px, cy - hh); ctx.lineTo(px, cy - hh + BACK_T); ctx.stroke();
+        }
+
+        // ── Dark seafloor inside the bay ──────────────────────────────────────
+        ctx.fillStyle = 'rgba(10, 40, 65, 0.72)';
+        ctx.fillRect(cx - hw + ARM_T, cy - hh + BACK_T, INT_W, ARM_L);
+        // ── Brigantine hull silhouette (empty dock — ghost/placeholder) ────────
+        {
+          const shpHW  = INT_W * 0.36;
+          const shpTop = cy - hh + BACK_T + ARM_L * 0.05;
+          const shpBot = cy + hh          - ARM_L * 0.05;
+          const shpLen = shpBot - shpTop;
+          ctx.fillStyle   = 'rgba(68, 46, 20, 0.30)';
+          ctx.strokeStyle = 'rgba(155, 115, 60, 0.55)';
+          ctx.lineWidth   = Math.max(1, 1.5 * zoom);
+          ctx.beginPath();
+          ctx.moveTo(cx, shpTop);
+          ctx.bezierCurveTo(cx + shpHW * 0.5, shpTop + shpLen * 0.07,
+                            cx + shpHW,       shpTop + shpLen * 0.22,
+                            cx + shpHW,       shpTop + shpLen * 0.65);
+          ctx.bezierCurveTo(cx + shpHW,       shpTop + shpLen * 0.85,
+                            cx + shpHW * 0.5, shpBot,
+                            cx,               shpBot);
+          ctx.bezierCurveTo(cx - shpHW * 0.5, shpBot,
+                            cx - shpHW,       shpTop + shpLen * 0.85,
+                            cx - shpHW,       shpTop + shpLen * 0.65);
+          ctx.bezierCurveTo(cx - shpHW,       shpTop + shpLen * 0.22,
+                            cx - shpHW * 0.5, shpTop + shpLen * 0.07,
+                            cx,               shpTop);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
+        // ── Scaffolding bay planks (shown while a ship is under construction) ─
+        if (s.construction?.phase === 'building') {
+          const bayX0 = cx - hw + ARM_T;
+          const bayX1 = cx + hw - ARM_T;
+          const bayY0 = cy - hh + BACK_T;
+          const bayY1 = cy + hh;
+          const bayW  = bayX1 - bayX0;
+          const bayH  = bayY1 - bayY0;
+          ctx.fillStyle = 'rgba(110, 75, 30, 0.72)';
+          ctx.fillRect(bayX0, bayY0, bayW, bayH);
+          ctx.strokeStyle = 'rgba(65, 42, 14, 0.50)';
+          ctx.lineWidth   = Math.max(0.4, 0.9 * zoom);
+          const boardSpacing = ARM_T * 0.55;
+          for (let oy = boardSpacing; oy < bayH; oy += boardSpacing) {
+            const py = bayY0 + oy;
+            ctx.beginPath(); ctx.moveTo(bayX0, py); ctx.lineTo(bayX1, py); ctx.stroke();
+          }
+          ctx.strokeStyle = 'rgba(75, 50, 18, 0.28)';
+          const grainCount = 4;
+          const grainSpacing = bayW / (grainCount + 1);
+          for (let gi = 1; gi <= grainCount; gi++) {
+            const px = bayX0 + grainSpacing * gi;
+            ctx.beginPath(); ctx.moveTo(px, bayY0); ctx.lineTo(px, bayY1); ctx.stroke();
+          }
+          ctx.strokeStyle = 'rgba(145, 105, 50, 0.70)';
+          ctx.lineWidth   = Math.max(0.8, 1.2 * zoom);
+          ctx.strokeRect(bayX0, bayY0, bayW, bayH);
+          // Guard-rail posts and rope at the dock mouth edge only
+          const postHeight = ARM_T * 1.4;
+          const postY0     = bayY1 - ARM_T;
+          ctx.strokeStyle = 'rgba(190, 150, 85, 0.90)';
+          ctx.lineWidth   = Math.max(1.5, 2.5 * zoom);
+          for (const px of [bayX0, cx, bayX1]) {
+            ctx.beginPath();
+            ctx.moveTo(px, postY0 + ARM_T * 0.1);
+            ctx.lineTo(px, postY0 - postHeight * 0.4);
+            ctx.stroke();
+          }
+          ctx.strokeStyle = 'rgba(200, 160, 80, 0.70)';
+          ctx.lineWidth   = Math.max(0.8, 1.2 * zoom);
+          ctx.setLineDash([Math.max(3, 5 * zoom), Math.max(2, 3 * zoom)]);
+          ctx.beginPath();
+          ctx.moveTo(bayX0, postY0 - postHeight * 0.4);
+          ctx.lineTo(bayX1, postY0 - postHeight * 0.4);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          const stairPulse = 0.5 + 0.3 * Math.sin(performance.now() * 0.002);
+          ctx.fillStyle = `rgba(220, 200, 100, ${stairPulse.toFixed(2)})`;
+          ctx.font = `bold ${Math.max(8, Math.round(10 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('▲', cx - hw + ARM_T * 0.5, bayY1 - ARM_T * 0.5);
+          ctx.fillText('▲', cx + hw - ARM_T * 0.5, bayY1 - ARM_T * 0.5);
+        }
+        // Mast yard-arm crosses (fore + main)
+        ctx.strokeStyle = 'rgba(155, 115, 60, 0.65)';
+        ctx.lineWidth   = Math.max(1, 2 * zoom);
+        for (const mf of [0.28, 0.60]) {
+          const mpy = cy - hh + BACK_T + ARM_L * mf;
+          const mhw = INT_W * 0.36;
+          ctx.beginPath(); ctx.moveTo(cx,             mpy - ARM_T * 0.25); ctx.lineTo(cx,             mpy + ARM_T * 0.25); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx - mhw * 0.4, mpy);               ctx.lineTo(cx + mhw * 0.4, mpy);               ctx.stroke();
+        }
+        // ── Scaffolding cross-beams and diagonal arm bracing ──────────────────
+        ctx.strokeStyle = 'rgba(190, 150, 85, 0.85)';
+        ctx.lineWidth   = Math.max(1, 1.8 * zoom);
+        for (const frac of [0.25, 0.50, 0.75]) {
+          const bpy = cy - hh + BACK_T + ARM_L * frac;
+          ctx.beginPath(); ctx.moveTo(cx - hw + ARM_T, bpy); ctx.lineTo(cx + hw - ARM_T, bpy); ctx.stroke();
+          const pLen = ARM_T * 0.30;
+          ctx.beginPath(); ctx.moveTo(cx - hw + ARM_T, bpy - pLen); ctx.lineTo(cx - hw + ARM_T, bpy + pLen); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx + hw - ARM_T, bpy - pLen); ctx.lineTo(cx + hw - ARM_T, bpy + pLen); ctx.stroke();
+        }
+        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+        ctx.strokeStyle = 'rgba(160, 120, 60, 0.45)';
+        const bFracs = [0, 0.25, 0.50, 0.75, 1.0];
+        for (let bi = 0; bi < bFracs.length - 1; bi++) {
+          const y0 = cy - hh + BACK_T + ARM_L * bFracs[bi];
+          const y1 = cy - hh + BACK_T + ARM_L * bFracs[bi + 1];
+          ctx.beginPath(); ctx.moveTo(cx - hw,         y0); ctx.lineTo(cx - hw + ARM_T, y1); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx - hw + ARM_T, y0); ctx.lineTo(cx - hw,         y1); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx + hw - ARM_T, y0); ctx.lineTo(cx + hw,         y1); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx + hw,         y0); ctx.lineTo(cx + hw - ARM_T, y1); ctx.stroke();
+        }
+        // ── Mooring bollards at the mouth ──────────────────────────────────────
+        ctx.fillStyle = 'rgba(190, 150, 85, 0.95)';
+        const bollardR = Math.max(2, 3.5 * zoom);
+        ctx.beginPath(); ctx.arc(cx - hw + ARM_T * 0.5, cy + hh - ARM_T * 0.4, bollardR, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx + hw - ARM_T * 0.5, cy + hh - ARM_T * 0.4, bollardR, 0, Math.PI * 2); ctx.fill();
+        // ── Company color strip along back wall ────────────────────────────────
+        const syStripH = Math.max(2, 3 * zoom);
+        ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
+        ctx.fillRect(cx - hw, cy - hh, totalW, syStripH);
+        // ── Damage darkening overlay ────────────────────────────────────────────
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          uPath();
+          ctx.fill();
+        }
+        ctx.restore();
+      } else if (s.type === 'wreck') {
+        // ── Shipwreck — broken hull timbers at sea ──────────────────────────
+        const wrsz = Math.max(6, 60 * zoom);
+        ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        // Tilted broken planks (cross shape, rotated 35°)
+        ctx.rotate(0.61); // ~35 degrees
+        const alpha = isHovered ? 1.0 : 0.88;
+        ctx.globalAlpha = alpha;
+        // Hull outline (irregular pentagon for a battered ship)
+        ctx.fillStyle = '#5a3a18';
+        ctx.strokeStyle = '#2e1a08';
+        ctx.lineWidth = Math.max(1, 1.5 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(-wrsz * 0.55, -wrsz * 0.25);
+        ctx.lineTo( wrsz * 0.50, -wrsz * 0.30);
+        ctx.lineTo( wrsz * 0.65,  wrsz * 0.10);
+        ctx.lineTo( wrsz * 0.20,  wrsz * 0.35);
+        ctx.lineTo(-wrsz * 0.60,  wrsz * 0.25);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        // Broken plank lines
+        ctx.strokeStyle = '#2e1a08';
+        ctx.lineWidth = Math.max(0.5, 1 * zoom);
+        for (let i = -1; i <= 1; i++) {
+          ctx.beginPath();
+          ctx.moveTo(-wrsz * 0.5, i * wrsz * 0.12);
+          ctx.lineTo( wrsz * 0.5, i * wrsz * 0.12);
+          ctx.stroke();
+        }
+        // Mast stub
+        ctx.strokeStyle = '#7a5520';
+        ctx.lineWidth = Math.max(1.5, 2.5 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(-wrsz * 0.1, -wrsz * 0.05);
+        ctx.lineTo(-wrsz * 0.1 + wrsz * 0.05, -wrsz * 0.5);
+        ctx.stroke();
+        // Salvage indicator: small glint if hp > 0
+        if (s.hp > 0) {
+          ctx.fillStyle = 'rgba(255, 220, 80, 0.85)';
+          ctx.beginPath();
+          ctx.arc(0, 0, Math.max(3, 5 * zoom), 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        ctx.restore();
+        // Label "WRECK" when hovered
+        if (isHovered) {
+          ctx.save();
+          ctx.font = `bold ${Math.max(10, 12 * zoom)}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.fillStyle = 'rgba(0,0,0,0.6)';
+          ctx.fillText(`⚓ Wreck (${s.hp} loot)`, ssp.x + 1, ssp.y - wrsz * 0.7 + 1);
+          ctx.fillStyle = '#ffd050';
+          ctx.fillText(`⚓ Wreck (${s.hp} loot)`, ssp.x, ssp.y - wrsz * 0.7);
+          ctx.restore();
+        }
       }
     } // end for sorted
 
@@ -2818,50 +4378,58 @@ export class RenderSystem {
       const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
       const sz  = Math.max(4, 50 * zoom);
 
-      ctx.save();
-      ctx.strokeStyle = '#ffe090';
-      ctx.lineWidth   = Math.max(1, 3 * zoom);
-      if (s.type === 'wooden_floor') {
-        ctx.strokeRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
-      } else if (s.type === 'workbench') {
-        const bw = sz * 0.88;
-        const bh = sz * 0.62;
-        ctx.strokeRect(ssp.x - bw / 2, ssp.y - bh / 2, bw, bh);
-      } else if (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') {
-        const isHoriz = this.placedStructures.some(f =>
-          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
-        );
-        const THICK = 0.18;
-        const ww = isHoriz ? sz : sz * THICK;
-        const wh = isHoriz ? sz * THICK : sz;
-        ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+      // Derive rendering rotation for this structure.
+      // Floors/workbenches carry an explicit rotation field.
+      // Walls/door_frames/doors derive orientation from the nearest floor tile:
+      // the wall runs perpendicular to the floor-centre→wall-midpoint vector.
+      let rotRad = 0;
+      if (s.type === 'wooden_floor' || s.type === 'workbench' || s.type === 'shipyard') {
+        rotRad = (s.rotation ?? 0) * Math.PI / 180;
+      } else {
+        let nearFloor: PlacedStructure | null = null;
+        let nearDist2 = Infinity;
+        for (const f of this.placedStructures) {
+          if (f.type !== 'wooden_floor') continue;
+          const d2 = (f.x - s.x) * (f.x - s.x) + (f.y - s.y) * (f.y - s.y);
+          if (d2 < nearDist2) { nearDist2 = d2; nearFloor = f; }
+        }
+        if (nearFloor) rotRad = Math.atan2(s.y - nearFloor.y, s.x - nearFloor.x) + Math.PI / 2;
       }
+
+      // Unrotated dimensions of the structure rect
+      const THICK  = 0.18;
+      const isWall = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
+      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'shipyard' ? sz * 6.8  : sz;
+      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'shipyard' ? sz * 17.8 : sz;
+
+      // Axis-aligned bounding box after rotation (used for bar/tooltip screen positioning)
+      const absC = Math.abs(Math.cos(rotRad)), absS = Math.abs(Math.sin(rotRad));
+      const bbW  = rawW * absC + rawH * absS;
+      const bbH  = rawW * absS + rawH * absC;
+
+      // Draw outline rect rotated to match structure orientation — team-coloured
+      const _sComp = s.companyId;
+      const _sTeam: 'friendly' | 'enemy' =
+        this._localCompanyId > 0 && _sComp > 0 && _sComp === this._localCompanyId
+          ? 'friendly' : 'enemy';
+      const _sOutline = _sTeam === 'friendly' ? '#44ff88' : '#ff4444';
+      ctx.save();
+      ctx.strokeStyle = _sOutline;
+      ctx.shadowColor = _sOutline;
+      ctx.shadowBlur  = 8 * zoom;
+      ctx.lineWidth   = Math.max(1, 3 * zoom);
+      ctx.translate(ssp.x, ssp.y);
+      ctx.rotate(rotRad);
+      ctx.strokeRect(-rawW / 2, -rawH / 2, rawW, rawH);
       ctx.restore();
 
       // ── HP bar (hover only) ────────────────────────────────────────────
       {
-        const isHovWall = (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') && (() => {
-          const isHoriz = this.placedStructures.some(f =>
-            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
-          );
-          return isHoriz ? sz * 0.18 : sz; // hh
-        })();
-        const hpFrac  = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const barW    = s.type === 'workbench' ? sz * 0.88 : (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') ? (() => {
-          const isHoriz = this.placedStructures.some(f =>
-            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
-          );
-          return isHoriz ? sz : sz * 0.18;
-        })() : sz;
-        const barH    = Math.max(2, 3 * zoom);
-        const barX    = ssp.x - barW / 2;
-        const structH = s.type === 'workbench' ? sz * 0.62 : (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') ? (() => {
-          const isHoriz = this.placedStructures.some(f =>
-            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
-          );
-          return isHoriz ? sz * 0.18 : sz;
-        })() : sz;
-        const barY    = ssp.y + structH / 2 + Math.max(2, 2 * zoom);
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const barW   = bbW;
+        const barH   = Math.max(2, 3 * zoom);
+        const barX   = ssp.x - barW / 2;
+        const barY   = ssp.y + bbH / 2 + Math.max(2, 2 * zoom);
         ctx.save();
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
         ctx.fillRect(barX, barY, barW, barH);
@@ -2871,15 +4439,19 @@ export class RenderSystem {
       }
 
       // ── Tooltip ────────────────────────────────────────────────────────
-      const structH = s.type === 'workbench' ? sz * 0.62 : (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') ? (() => {
-        const isHoriz = this.placedStructures.some(f =>
-          f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
-        );
-        return isHoriz ? sz * 0.18 : sz;
-      })() : sz;
-      const tipY = ssp.y - structH / 2 - 8;
+      const tipY = ssp.y - bbH / 2 - 8;
 
       const inRange = player && player.carrierId === 0 && (() => {
+        if (s.type === 'shipyard') {
+          // OBB check: rotate player into shipyard local frame
+          const rot = (s.rotation ?? 0) * Math.PI / 180;
+          const dx = player.position.x - s.x;
+          const dy = player.position.y - s.y;
+          const c = Math.cos(-rot), sn = Math.sin(-rot);
+          const lx = dx * c - dy * sn;
+          const ly = dx * sn + dy * c;
+          return Math.abs(lx) <= 270 && Math.abs(ly) <= 545;
+        }
         const dx = s.x - player.position.x;
         const dy = s.y - player.position.y;
         return dx * dx + dy * dy <= 110 * 110;
@@ -2889,6 +4461,8 @@ export class RenderSystem {
                  : s.type === 'wall' ? 'Wall'
                  : s.type === 'door_frame' ? 'Door Frame'
                  : s.type === 'door' ? (s.doorOpen ? 'Door (Open)' : 'Door (Closed)')
+                 : s.type === 'shipyard' ? 'Shipyard'
+                 : s.type === 'wreck' ? 'Shipwreck'
                  : 'Workbench';
 
       // Determine ownership line text + color
@@ -2896,6 +4470,8 @@ export class RenderSystem {
       let ownerText: string;
       if (s.companyId !== 0 && COMPANY_NAMES[s.companyId]) {
         ownerText = COMPANY_NAMES[s.companyId];
+      } else if (s.companyId !== 0 && s.companyId >= 100) {
+        ownerText = this._cachedCompanies.find(c => c.id === s.companyId)?.name ?? `Company #${s.companyId}`;
       } else if (s.placerName) {
         ownerText = `Player: ${s.placerName}`;
       } else {
@@ -2905,12 +4481,12 @@ export class RenderSystem {
       ctx.save();
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'bottom';
-      ctx.font      = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
+      ctx.font      = `bold ${Math.max(10, Math.round(12 * zoom))}px Georgia, serif`;
       ctx.fillStyle = '#ffe8a0';
       ctx.fillText(label, ssp.x, tipY);
 
       const lineH = Math.max(12, 14 * zoom);
-      ctx.font = `${Math.max(9, Math.round(10 * zoom))}px Consolas, monospace`;
+      ctx.font = `${Math.max(9, Math.round(10 * zoom))}px Georgia, serif`;
 
       // Owner line (colored by faction)
       ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
@@ -2921,6 +4497,8 @@ export class RenderSystem {
         ctx.fillStyle = 'rgba(200, 255, 180, 0.95)';
         const interactHint = s.type === 'door' ? 'Tap [E] to open/close'
                            : s.type === 'door_frame' ? 'Hold [E] to demolish'
+                           : s.type === 'shipyard' ? 'Hold [E] to build ships'
+                           : s.type === 'wreck' ? '[E] to salvage loot'
                            : 'Hold [E] to interact';
         ctx.fillText(interactHint, ssp.x, tipY - lineH * 2);
       } else {
@@ -2933,8 +4511,9 @@ export class RenderSystem {
 
   /** Draw the island structure placement ghost at the cursor position (drawn once, after all islands). */
   private drawIslandBuildGhost(camera: Camera): void {
-    this._islandGhostTooFar = false;
-    this._snappedBuildPos   = null;
+    this._islandGhostTooFar    = false;
+    this._snappedBuildPos      = null;
+    this._snappedBuildRotation = null;
     if (!this.islandBuildKind || !this.mouseWorldPos) return;
     const zoom = camera.getState().zoom;
     const ctx  = this.ctx;
@@ -2958,41 +4537,63 @@ export class RenderSystem {
     let mx = this.mouseWorldPos.x;
     let my = this.mouseWorldPos.y;
     if (this.islandBuildKind === 'wooden_floor' && this.placedStructures.length > 0) {
-      const SNAP_R  = TILE * 0.8; // 40 px — snap pull radius
+      const SNAP_R  = TILE * 0.4; // 20 px — snap pull radius
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
-      const DIRS = [{ dx: TILE, dy: 0 }, { dx: -TILE, dy: 0 },
-                    { dx: 0, dy:  TILE }, { dx: 0, dy: -TILE }];
+      let bestSnapRot: number | null = null;
       for (const s of this.placedStructures) {
         if (s.type !== 'wooden_floor') continue;
+        // Derive the 4 neighbour slots using this tile's own rotation
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const c = Math.cos(rad), sn = Math.sin(rad);
+        const DIRS = [
+          {  dx:  TILE * c,  dy:  TILE * sn },
+          {  dx: -TILE * c,  dy: -TILE * sn },
+          {  dx: -TILE * sn, dy:  TILE * c  },
+          {  dx:  TILE * sn, dy: -TILE * c  },
+        ];
         for (const d of DIRS) {
           const nx = s.x + d.dx, ny = s.y + d.dy;
-          // Skip neighbour slots already occupied by another floor
-          const occupied = this.placedStructures.some(
-            f => f.type === 'wooden_floor' && Math.abs(f.x - nx) < 1 && Math.abs(f.y - ny) < 1
+          // Skip neighbour slots occupied by a *different* floor.
+          // Source tile (s) is excluded by id — candidate is adjacent/touching it by construction.
+          const blocker = this.placedStructures.find(
+            f => f.type === 'wooden_floor' && f.id !== s.id &&
+                 RenderSystem.floorsOverlap(nx, ny, rad, f.x, f.y, (f.rotation ?? 0) * Math.PI / 180)
           );
-          if (occupied) continue;
+          if (blocker) {
+            if (import.meta.env.DEV) console.debug(
+              `[snap] candidate (${nx.toFixed(1)},${ny.toFixed(1)}) blocked by floor id=${blocker.id}` +
+              ` at (${blocker.x.toFixed(1)},${blocker.y.toFixed(1)}) rot=${blocker.rotation ?? 0}°`
+            );
+            continue;
+          }
           const dist2 = (nx - mx) * (nx - mx) + (ny - my) * (ny - my);
-          if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; }
+          if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; bestSnapRot = s.rotation ?? 0; }
         }
       }
       mx = bestX; my = bestY;
+      this._snappedBuildRotation = bestSnapRot;
     } else if ((this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame') && this.placedStructures.length > 0) {
-      // Snap to unoccupied edge midpoints of floor tiles
+      // Reset rotation so stale value never persists when no snap is found
+      this._wallGhostRotRad = 0;
       const HALF = TILE / 2; // 25 px
       const SNAP_R = TILE * 0.6;
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
-      const EDGES = [
-        { dx: 0, dy: -HALF }, // N edge → horizontal
-        { dx: 0, dy:  HALF }, // S edge → horizontal
-        { dx: -HALF, dy: 0 }, // W edge → vertical
-        { dx:  HALF, dy: 0 }, // E edge → vertical
-      ];
       for (const s of this.placedStructures) {
         if (s.type !== 'wooden_floor') continue;
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const c = Math.cos(rad), sn = Math.sin(rad);
+        // (ldx, ldy) in local tile space; isHoriz tracks whether it's a N/S edge
+        const EDGES = [
+          { ldx:  0,    ldy: -HALF, horiz: true  }, // N
+          { ldx:  0,    ldy:  HALF, horiz: true  }, // S
+          { ldx: -HALF, ldy:  0,    horiz: false }, // W
+          { ldx:  HALF, ldy:  0,    horiz: false }, // E
+        ];
         for (const e of EDGES) {
-          const nx = s.x + e.dx, ny = s.y + e.dy;
+          const nx = s.x + e.ldx * c - e.ldy * sn;
+          const ny = s.y + e.ldx * sn + e.ldy * c;
           const occ = this.placedStructures.some(
             w => (w.type === 'wall' || w.type === 'door_frame') && Math.abs(w.x - nx) < 2 && Math.abs(w.y - ny) < 2
           );
@@ -3000,7 +4601,8 @@ export class RenderSystem {
           const dist2 = (nx - mx) * (nx - mx) + (ny - my) * (ny - my);
           if (dist2 < bestDist2) {
             bestDist2 = dist2; bestX = nx; bestY = ny;
-            this._wallGhostHorizontal = (e.dy !== 0);
+            const floorRad = (s.rotation ?? 0) * Math.PI / 180;
+            this._wallGhostRotRad = e.horiz ? floorRad : floorRad + Math.PI / 2;
           }
         }
       }
@@ -3019,14 +4621,20 @@ export class RenderSystem {
         const dist2 = (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my);
         if (dist2 < bestDist2) {
           bestDist2 = dist2; bestX = s.x; bestY = s.y;
-          this._wallGhostHorizontal = this.placedStructures.some(f =>
-            f.type === 'wooden_floor' && Math.abs(f.x - s.x) < 2 && Math.abs(Math.abs(f.y - s.y) - 25) < 2
+          const nearFloorDoor = this.placedStructures.find(f =>
+            f.type === 'wooden_floor' && Math.hypot(f.x - s.x, f.y - s.y) < 30
           );
+          this._wallGhostRotRad = nearFloorDoor
+            ? Math.atan2(s.y - nearFloorDoor.y, s.x - nearFloorDoor.x) + Math.PI / 2
+            : 0;
         }
       }
       mx = bestX; my = bestY;
     }
     this._snappedBuildPos = { x: mx, y: my };
+    // Effective rotation: snapped tile inherits source floor's rotation; free-placing uses user setting
+    const effectiveRotDeg = this._snappedBuildRotation !== null
+      ? this._snappedBuildRotation : this.islandBuildRotationDeg;
 
     // Recalculate screen position after potential snap
     const msp = camera.worldToScreen(Vec2.from(mx, my));
@@ -3060,6 +4668,156 @@ export class RenderSystem {
       }
     }
 
+    // ── Shipyard ghost — unique placement logic ──────────────────────────
+    if (this.islandBuildKind === 'shipyard') {
+      const SHALLOW_SCALE_G = 0.375; // must match server SHALLOW_WATER_SCALE
+      const playerG = this._cachedLocalPlayer;
+
+      // Helper: check if a world point is in water (not inside any island land mass)
+      const isPointInWater = (px: number, py: number): boolean => {
+        for (const isl of this.islands) {
+          if (isl.vertices) {
+            let inside = false;
+            const verts = isl.vertices;
+            const n = verts.length;
+            for (let i = 0, j = n - 1; i < n; j = i++) {
+              const xi = verts[i].x, yi = verts[i].y;
+              const xj = verts[j].x, yj = verts[j].y;
+              if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+                inside = !inside;
+            }
+            if (inside) return false;
+          } else {
+            const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+            const ddx = px - isl.x, ddy = py - isl.y;
+            const dSq = ddx * ddx + ddy * ddy;
+            const broadR = preset.beachRadius + Math.max(...preset.beachBumps.map(Math.abs));
+            if (dSq >= broadR * broadR) continue;
+            const ang = Math.atan2(ddy, ddx);
+            const nR = sampleBoundary(preset.beachRadius, preset.beachBumps, ang);
+            if (dSq < nR * nR) return false;
+          }
+        }
+        return true;
+      };
+
+      // Helper: minimum distance from (wx, wy) to any edge of an island's polygon
+      const polyEdgeDist = (verts: {x:number;y:number}[], cx: number, cy: number, wx: number, wy: number): number => {
+        let minDist = Infinity;
+        const n = verts.length;
+        for (let i = 0, j = n - 1; i < n; j = i++) {
+          const ax = verts[j].x, ay = verts[j].y;
+          const bx = verts[i].x, by = verts[i].y;
+          const ex = bx - ax, ey = by - ay;
+          const len2 = ex * ex + ey * ey;
+          let t = len2 > 0 ? ((wx - ax) * ex + (wy - ay) * ey) / len2 : 0;
+          t = Math.max(0, Math.min(1, t));
+          const nearX = ax + t * ex - wx, nearY = ay + t * ey - wy;
+          const d = Math.hypot(nearX, nearY);
+          if (d < minDist) minDist = d;
+        }
+        return minDist;
+      };
+
+      let inShallowZone = false;
+      if (inWater) {
+        for (const isl of this.islands) {
+          if (isl.vertices) {
+            const polyBoundR = Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+            const shallowDepth = polyBoundR * SHALLOW_SCALE_G;
+            const d = Math.hypot(mx - isl.x, my - isl.y);
+            if (d <= polyBoundR + shallowDepth) {
+              // Polygon-accurate: check actual edge distance
+              const edgeDist = polyEdgeDist(isl.vertices, isl.x, isl.y, mx, my);
+              if (edgeDist < shallowDepth) { inShallowZone = true; break; }
+            }
+          } else {
+            const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+            const maxBump = Math.max(...preset.beachBumps.map(Math.abs));
+            const shallowDepth = preset.beachRadius * SHALLOW_SCALE_G;
+            const outerR  = preset.beachRadius + maxBump + shallowDepth;
+            const dx = mx - isl.x, dy = my - isl.y;
+            if (dx * dx + dy * dy <= outerR * outerR) { inShallowZone = true; break; }
+          }
+        }
+      }
+
+      // Check that the dock mouth leads to open water for ship release.
+      // Mouth is 445 world units from center in the local +y direction.
+      const HH_WORLD = 445;
+      const rotRad = effectiveRotDeg * Math.PI / 180;
+      const mouthX = mx - HH_WORLD * Math.sin(rotRad);
+      const mouthY = my + HH_WORLD * Math.cos(rotRad);
+      // Also check a point 600 units out (clear path for the ship)
+      const releaseX = mx - 600 * Math.sin(rotRad);
+      const releaseY = my + 600 * Math.cos(rotRad);
+      const mouthClear = isPointInWater(mouthX, mouthY) && isPointInWater(releaseX, releaseY);
+
+      // Allow placing from shore — 700 px matches the server shipyard placement range
+      const syPlayerFar = playerG ? (() => {
+        const dx = mx - playerG.position.x; const dy = my - playerG.position.y;
+        return dx * dx + dy * dy > 700 * 700;
+      })() : false;
+      const syOccupied = this.placedStructures.some(s =>
+        s.type === 'shipyard' && Math.hypot(s.x - mx, s.y - my) < 700
+      );
+      const syInvalid = !inWater || !inShallowZone || syPlayerFar || syOccupied || !mouthClear;
+      this._islandGhostTooFar = syInvalid;
+      // Ghost uses same proportions as rendered shipyard (bracketized to brigantine scale)
+      const GA_T = TILE * 1.00 * zoom;
+      const GI_W = TILE * 4.80 * zoom;
+      const GA_L = TILE * 16.80 * zoom;
+      const GB_T = TILE * 1.00 * zoom;
+      const gtW  = Math.max(4, GA_T + GI_W + GA_T);
+      const gtH  = Math.max(4, GB_T + GA_L);
+      const gHW = gtW / 2, gHH = gtH / 2;
+      ctx.save();
+      ctx.globalAlpha = 0.72 + 0.14 * Math.sin(performance.now() / 300);
+      // Apply rotation — same effectiveRotDeg used by floor/workbench ghost
+      if (effectiveRotDeg !== 0) {
+        ctx.translate(msp.x, msp.y);
+        ctx.rotate(effectiveRotDeg * Math.PI / 180);
+        ctx.translate(-msp.x, -msp.y);
+      }
+      ctx.fillStyle   = syInvalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 180, 255, 0.45)';
+      ctx.strokeStyle = syInvalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 200, 255, 0.75)';
+      ctx.lineWidth   = Math.max(1, 2 * zoom);
+      ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+      ctx.beginPath();
+      ctx.moveTo(msp.x - gHW,         msp.y - gHH);
+      ctx.lineTo(msp.x + gHW,         msp.y - gHH);
+      ctx.lineTo(msp.x + gHW,         msp.y + gHH);
+      ctx.lineTo(msp.x + gHW - GA_T,  msp.y + gHH);
+      ctx.lineTo(msp.x + gHW - GA_T,  msp.y - gHH + GB_T);
+      ctx.lineTo(msp.x - gHW + GA_T,  msp.y - gHH + GB_T);
+      ctx.lineTo(msp.x - gHW + GA_T,  msp.y + gHH);
+      ctx.lineTo(msp.x - gHW,         msp.y + gHH);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const syLabelY = msp.y - gHH - 6;
+      ctx.globalAlpha = 1;
+      ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Georgia, serif`;
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'bottom';
+      if (!inWater) {
+        ctx.fillStyle = '#ff6644'; ctx.fillText('ON LAND', msp.x, syLabelY);
+      } else if (!inShallowZone) {
+        ctx.fillStyle = '#4488ff'; ctx.fillText('PLACE IN SHALLOW WATER', msp.x, syLabelY);
+      } else if (!mouthClear) {
+        ctx.fillStyle = '#ff6644'; ctx.fillText('SHIP EXIT BLOCKED BY LAND', msp.x, syLabelY);
+      } else if (syOccupied) {
+        ctx.fillStyle = '#ff6644'; ctx.fillText('TOO CLOSE TO SHIPYARD', msp.x, syLabelY);
+      } else if (syPlayerFar) {
+        ctx.fillStyle = '#ff6644'; ctx.fillText('TOO FAR', msp.x, syLabelY);
+      } else {
+        ctx.fillStyle = '#aadeff'; ctx.fillText('Shipyard', msp.x, syLabelY);
+      }
+      ctx.restore();
+      return;
+    }
+
     // Distance check: player must be within 200 px (world space) of placement point
     const player = this._cachedLocalPlayer;
     let tooFar = false;
@@ -3069,42 +4827,50 @@ export class RenderSystem {
       tooFar = dx * dx + dy * dy > 200 * 200;
     }
 
-    // AABB overlap check: floor tile (50×50) must not overlap an existing floor tile
+    // OBB-OBB overlap check via SAT: ghost floor must not overlap any existing floor tile
     let overlaps = false;
     if (this.islandBuildKind === 'wooden_floor') {
+      const ghostRad = effectiveRotDeg * Math.PI / 180;
       overlaps = this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
-        return Math.abs(s.x - mx) < TILE && Math.abs(s.y - my) < TILE;
+        return RenderSystem.floorsOverlap(mx, my, ghostRad, s.x, s.y, (s.rotation ?? 0) * Math.PI / 180);
       });
     }
 
-    // Tree obstacle: circle-AABB intersection — trees (wood resources) block floor placement
+    // Tree obstacle: circle-OBB intersection — trees (wood resources) block floor placement
     const TREE_R = 20; // world px — obstacle exclusion radius around tree trunk+canopy
     let blockedByTree = false;
     if (this.islandBuildKind === 'wooden_floor') {
       const half = TILE / 2;
+      const treeRad = effectiveRotDeg * Math.PI / 180;
+      const trc = Math.cos(-treeRad), trs = Math.sin(-treeRad);
       outer:
       for (const isl of this.islands) {
         for (const res of isl.resources) {
           if (res.type !== 'wood') continue;
+          if (res.hp <= 0) continue; // depleted — no longer an obstacle
           const tx = isl.x + res.ox, ty = isl.y + res.oy;
-          // Closest point on floor AABB to tree centre
-          const cx = Math.max(mx - half, Math.min(tx, mx + half));
-          const cy = Math.max(my - half, Math.min(ty, my + half));
-          const cdx = tx - cx, cdy = ty - cy;
+          // Rotate tree into floor's local space, then closest-point on local AABB
+          const lx = (tx - mx) * trc - (ty - my) * trs;
+          const ly = (tx - mx) * trs + (ty - my) * trc;
+          const cx = Math.max(-half, Math.min(lx, half));
+          const cy = Math.max(-half, Math.min(ly, half));
+          const cdx = lx - cx, cdy = ly - cy;
           if (cdx * cdx + cdy * cdy < TREE_R * TREE_R) { blockedByTree = true; break outer; }
         }
       }
     }
-
-    this._islandGhostTooFar = tooFar || inWater;
 
     // Workbench needs a floor tile whose AABB contains the cursor point
     let noFloor = false;
     if (this.islandBuildKind === 'workbench') {
       noFloor = !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
-        return Math.abs(s.x - mx) <= 25 && Math.abs(s.y - my) <= 25;
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const rc = Math.cos(-rad), rs = Math.sin(-rad);
+        const lx = (mx - s.x) * rc - (my - s.y) * rs;
+        const ly = (mx - s.x) * rs + (my - s.y) * rc;
+        return Math.abs(lx) <= 25 && Math.abs(ly) <= 25;
       });
     }
 
@@ -3120,18 +4886,23 @@ export class RenderSystem {
       );
       noEdge = !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
-        return (Math.abs(mx - s.x) < 3 && Math.abs(Math.abs(my - s.y) - 25) < 3) ||
-               (Math.abs(my - s.y) < 3 && Math.abs(Math.abs(mx - s.x) - 25) < 3);
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const rc = Math.cos(rad), rs = Math.sin(rad);
+        const HALF_E = 25;
+        return [
+          { ldx: 0, ldy: -HALF_E }, { ldx: 0, ldy: HALF_E },
+          { ldx: -HALF_E, ldy: 0 }, { ldx: HALF_E, ldy: 0 },
+        ].some(e => {
+          const ex = s.x + e.ldx * rc - e.ldy * rs;
+          const ey = s.y + e.ldx * rs + e.ldy * rc;
+          return Math.abs(mx - ex) < 3 && Math.abs(my - ey) < 3;
+        });
       });
-      // Check if a workbench or door panel occupies this slot's AABB
+      // Check if a workbench or door panel occupies this slot
       if (!wallOccupied && !noEdge) {
-        const isHoriz = this._wallGhostHorizontal;
-        const hw = isHoriz ? 25 : 5;
-        const hh = isHoriz ? 5  : 25;
-        const WB_R = 15;
         blockedByStructure = this.placedStructures.some(s => {
           if (s.type === 'wooden_floor' || s.type === 'wall' || s.type === 'door_frame') return false;
-          return Math.abs(s.x - mx) < hw + WB_R && Math.abs(s.y - my) < hh + WB_R;
+          return Math.hypot(s.x - mx, s.y - my) < 35;
         });
       }
     } else if (this.islandBuildKind === 'door') {
@@ -3152,66 +4923,66 @@ export class RenderSystem {
 
     // Workbench on enemy floor: a floor exists under cursor but belongs to a different company
     const wrongCompany = this.islandBuildKind === 'workbench' && !noFloor &&
-      !this.placedStructures.some(s =>
-        s.type === 'wooden_floor' &&
-        Math.abs(s.x - mx) <= 25 && Math.abs(s.y - my) <= 25 &&
-        s.companyId === myCompany
-      );
+      !this.placedStructures.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const rc = Math.cos(-rad), rs = Math.sin(-rad);
+        const lx = (mx - s.x) * rc - (my - s.y) * rs;
+        const ly = (mx - s.x) * rs + (my - s.y) * rc;
+        return Math.abs(lx) <= 25 && Math.abs(ly) <= 25 && s.companyId === myCompany;
+      });
 
-    const invalid = tooFar || inWater || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied;
+    // Only floors are rejected for water placement — other types need a floor tile anyway
+    const waterBlocked = inWater && this.islandBuildKind === 'wooden_floor';
+    this._islandGhostTooFar = tooFar || waterBlocked;
+    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
     ctx.save();
     ctx.globalAlpha = 0.72 + 0.14 * Math.sin(performance.now() / 300);
+    // Apply rotation around ghost centre
+    const WALL_THICK = 0.18;
+    const isWallOrDoor = this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame' || this.islandBuildKind === 'door';
+    const buildKind    = this.islandBuildKind as string;
+    const isRotatable  = buildKind === 'wooden_floor' || buildKind === 'workbench' || buildKind === 'shipyard';
+    const ghostRotRad  = isWallOrDoor ? this._wallGhostRotRad
+                       : isRotatable ? effectiveRotDeg * Math.PI / 180 : 0;
+    if (ghostRotRad !== 0) {
+      ctx.translate(msp.x, msp.y);
+      ctx.rotate(ghostRotRad);
+      ctx.translate(-msp.x, -msp.y);
+    }
     ctx.fillStyle   = ghostColor;
     ctx.strokeStyle = borderColor;
     ctx.lineWidth   = Math.max(1, 2 * zoom);
     ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
-    const WALL_THICK = 0.18;
-    const isWallOrDoor = this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame' || this.islandBuildKind === 'door';
     const ghostW = this.islandBuildKind === 'workbench' ? sz * 0.88
-                 : isWallOrDoor ? (this._wallGhostHorizontal ? sz : sz * WALL_THICK)
+                 : isWallOrDoor ? sz
                  : sz;
     const ghostH = this.islandBuildKind === 'workbench' ? sz * 0.62
-                 : isWallOrDoor ? (this._wallGhostHorizontal ? sz * WALL_THICK : sz)
+                 : isWallOrDoor ? sz * WALL_THICK
                  : sz;
 
     if (this.islandBuildKind === 'door_frame') {
       // Ghost shaped like a door frame: two posts at ends, dashed span in the middle
+      // Rotation is already applied via ctx.rotate(ghostRotRad); always draw horizontal shape.
       const POST = sz * 0.14;
       ctx.setLineDash([]);
-      if (this._wallGhostHorizontal) {
-        ctx.fillRect(msp.x - ghostW / 2, msp.y - POST / 2, POST, POST);
-        ctx.strokeRect(msp.x - ghostW / 2, msp.y - POST / 2, POST, POST);
-        ctx.fillRect(msp.x + ghostW / 2 - POST, msp.y - POST / 2, POST, POST);
-        ctx.strokeRect(msp.x + ghostW / 2 - POST, msp.y - POST / 2, POST, POST);
-        // dashed span lines top + bottom
-        ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
-        ctx.beginPath();
-        ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y - ghostH / 2);
-        ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y - ghostH / 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y + ghostH / 2);
-        ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y + ghostH / 2);
-        ctx.stroke();
-      } else {
-        ctx.fillRect(msp.x - POST / 2, msp.y - ghostH / 2, POST, POST);
-        ctx.strokeRect(msp.x - POST / 2, msp.y - ghostH / 2, POST, POST);
-        ctx.fillRect(msp.x - POST / 2, msp.y + ghostH / 2 - POST, POST, POST);
-        ctx.strokeRect(msp.x - POST / 2, msp.y + ghostH / 2 - POST, POST, POST);
-        // dashed span lines left + right
-        ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
-        ctx.beginPath();
-        ctx.moveTo(msp.x - ghostW / 2, msp.y - ghostH / 2 + POST);
-        ctx.lineTo(msp.x - ghostW / 2, msp.y + ghostH / 2 - POST);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(msp.x + ghostW / 2, msp.y - ghostH / 2 + POST);
-        ctx.lineTo(msp.x + ghostW / 2, msp.y + ghostH / 2 - POST);
-        ctx.stroke();
-      }
+      ctx.fillRect(msp.x - ghostW / 2, msp.y - POST / 2, POST, POST);
+      ctx.strokeRect(msp.x - ghostW / 2, msp.y - POST / 2, POST, POST);
+      ctx.fillRect(msp.x + ghostW / 2 - POST, msp.y - POST / 2, POST, POST);
+      ctx.strokeRect(msp.x + ghostW / 2 - POST, msp.y - POST / 2, POST, POST);
+      // dashed span lines top + bottom
+      ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
+      ctx.beginPath();
+      ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y - ghostH / 2);
+      ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y - ghostH / 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y + ghostH / 2);
+      ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y + ghostH / 2);
+      ctx.stroke();
       ctx.setLineDash([]);
     } else {
       ctx.beginPath();
@@ -3224,10 +4995,10 @@ export class RenderSystem {
     // Label above the ghost
     const labelY = msp.y - ghostH / 2 - 6;
     ctx.globalAlpha = 1;
-    ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
+    ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Georgia, serif`;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'bottom';
-    if (inWater) {
+    if (waterBlocked) {
       ctx.fillStyle = '#4488ff';
       ctx.fillText('IN WATER', msp.x, labelY);
     } else if (enemyTerritory) {
@@ -3304,6 +5075,44 @@ export class RenderSystem {
         this.sinkSplashTimers.delete(id);
       }
     }
+
+    // ── Ship wake trail history sampling/pruning ───────────────────────────
+    const wakeNow = performance.now();
+    const wakeCutoff = wakeNow - this.SHIP_WAKE_TRAIL_DURATION_MS;
+    for (const ship of worldState.ships) {
+      if (ship.shipType === SHIP_TYPE_GHOST) continue;
+      const speed = Math.hypot(ship.velocity.x, ship.velocity.y);
+      if (speed < 6) continue;
+
+      const lastEmit = this.shipWakeLastEmit.get(ship.id) ?? 0;
+      if (wakeNow - lastEmit < this.SHIP_WAKE_TRAIL_SPACING_MS) continue;
+
+      let trail = this.shipWakeTrails.get(ship.id);
+      if (!trail) {
+        trail = [];
+        this.shipWakeTrails.set(ship.id, trail);
+      }
+
+      const prev = trail.length > 0 ? trail[trail.length - 1] : null;
+      const movedEnough = !prev || Math.hypot(ship.position.x - prev.x, ship.position.y - prev.y) >= this.SHIP_WAKE_TRAIL_MIN_DIST;
+      if (movedEnough) {
+        // Store ship center + rotation; both wash and bow V-lines are derived from this.
+        trail.push({ x: ship.position.x, y: ship.position.y, r: ship.rotation, t: wakeNow });
+        this.shipWakeLastEmit.set(ship.id, wakeNow);
+      }
+
+      let start = 0;
+      while (start < trail.length && trail[start].t < wakeCutoff) start++;
+      if (start > 0) trail.splice(0, start);
+    }
+
+    // Remove history for ships that no longer exist in the live world set.
+    for (const id of this.shipWakeTrails.keys()) {
+      if (!currentShipIds.has(id)) {
+        this.shipWakeTrails.delete(id);
+        this.shipWakeLastEmit.delete(id);
+      }
+    }
     // ───────────────────────────────────────────────────────────────────────
 
     // ── NPC kill detection ─────────────────────────────────────────────────
@@ -3363,6 +5172,21 @@ export class RenderSystem {
         this.particleSystem.createSinkSplash(Vec2.from(wx, wy), intensity);
       }
     }
+
+    // Visual-only wrap ghosts for seam visibility.
+    // Canonical world objects remain unchanged for collisions and gameplay.
+    const renderShips = this.buildWrappedRenderCopies(worldState.ships, camera, 320);
+    const renderPlayers = this.buildWrappedRenderCopies(
+      // Dead players (health ≤ 0) are hidden from the world — they're either
+      // awaiting respawn or are stale zombie entries (e.g. from a page reload).
+      // The local player is excluded from this filter so camera/prediction
+      // keep working while the respawn screen is shown.
+      worldState.players.filter(p => p.health > 0 || p.id === this.localPlayerId),
+      camera,
+      80,
+      (p) => p.id === this.localPlayerId,
+    );
+    const renderCannonballs = this.buildWrappedRenderCopies(worldState.cannonballs, camera, 40);
     
     // Render order (from lowest to highest):
     // 0: water, gridlines (drawn before this queue)
@@ -3374,22 +5198,28 @@ export class RenderSystem {
     // 6: sail fibers
     // 7: sail masts
     
-    // Queue ship hulls (layer 1)
-    for (const ship of worldState.ships) {
+    // Queue ship wakes + hulls (layer 1)
+    for (const ship of renderShips) {
+      this.queueRenderItem(1, 'ship-wake', () => this.drawShipWake(ship, camera), -2);
       this.queueRenderItem(1, 'ship-hull', () => this.drawShipHull(ship, camera));
       // Ghost fog aura: drawn at layer 0.5 (below hull, like water surface wisps)
       if (ship.shipType === SHIP_TYPE_GHOST) {
         this.queueRenderItem(1, `ghost-fog-${ship.id}`, () => this.drawGhostFogAura(ship, camera), -1);
       }
+      // Scaffolding clamps & ropes for ships under construction in a shipyard
+      const scaffold = this._scaffoldedShips.get(ship.id);
+      if (scaffold) {
+        this.queueRenderItem(1, `scaffold-vis-${ship.id}`, () => this.drawScaffoldingVisuals(ship, scaffold, camera), 1);
+      }
     }
     
     // Queue players (layer 2)
-    for (const player of worldState.players) {
+    for (const player of renderPlayers) {
       this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
     }
     
     // Queue ship planks (layer 3 — ghost ships have no physical planks, purely hull-fade driven)
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       if (ship.shipType !== SHIP_TYPE_GHOST) {
         this.queueRenderItem(3, 'ship-planks', () => this.drawShipPlanks(ship, camera));
       }
@@ -3407,12 +5237,12 @@ export class RenderSystem {
     }
 
     // Plank status icons — missing (red ✕) and leaking (water waves) — layer 3 priority 2
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       this.queueRenderItem(3, 'plank-status', () => this.drawPlankStatusIcons(ship, camera), 2);
     }
 
     // Burning module fire overlays — drawn above module graphics
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       this.queueRenderItem(4, `fire-modules-${ship.id}`, () => this.drawBurningModules(ship, camera), 5);
     }
 
@@ -3456,7 +5286,7 @@ export class RenderSystem {
     }
     
     // Queue cannons, swivel guns, and steering wheels (layers 4-6)
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
       this.queueRenderItem(4, 'swivel-guns', () => this.drawShipSwivelGuns(ship, camera));
       this.queueRenderItem(4, 'cannon-aim-guides', () => this.drawCannonAimGuides(ship, worldState, camera), 1);
@@ -3473,12 +5303,12 @@ export class RenderSystem {
     }
     
     // Queue sail fibers (layer 6)
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       this.queueRenderItem(6, 'sail-fibers', () => this.drawShipSailFibers(ship, camera));
     }
     
     // Queue sail masts (layer 7)
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       this.queueRenderItem(7, 'sail-masts', () => this.drawShipSailMasts(ship, camera));
     }
     
@@ -3539,11 +5369,52 @@ export class RenderSystem {
           const intensity = hitStructure ? 0.6 : 0.5;
           this.particleSystem.createExplosion(Vec2.from(last.x, last.y), intensity);
           if (hitStructure) {
-            this.spawnDamageNumber(Vec2.from(last.x, last.y), 25, false);
+            const _csComp = (hitStructure as any).companyId as number ?? -1;
+            const _csTeam: DamageTeam =
+              this._localCompanyId > 0 && _csComp === this._localCompanyId ? 'enemy' : 'friendly';
+            this.spawnDamageNumber(Vec2.from(last.x, last.y), 25, false, _csTeam);
           }
         } else if (!overShip && (last.ammoType === 0 || last.ammoType === 1)) {
-          console.log(`💦 SPLASH: cannonball ${id} expired over water at (${last.x.toFixed(1)}, ${last.y.toFixed(1)})`);
-          this.particleSystem.createWaterSplash(Vec2.from(last.x, last.y), 1.2);
+          // Check if over island land → dirt splash; otherwise water splash
+          let overLand = false;
+          for (const isl of this.islands) {
+            if (isl.vertices) {
+              let inside = false;
+              const verts = isl.vertices;
+              const n = verts.length;
+              for (let vi = 0, vj = n - 1; vi < n; vj = vi++) {
+                const xi = verts[vi].x, yi = verts[vi].y;
+                const xj = verts[vj].x, yj = verts[vj].y;
+                if ((yi > last.y) !== (yj > last.y) &&
+                    last.x < (xj - xi) * (last.y - yi) / (yj - yi) + xi)
+                  inside = !inside;
+              }
+              if (inside) { overLand = true; break; }
+            } else {
+              const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+              const dx = last.x - isl.x, dy = last.y - isl.y;
+              const distSq = dx * dx + dy * dy;
+              const broadR = preset.beachRadius + Math.max(...preset.beachBumps.map(Math.abs));
+              if (distSq < broadR * broadR) {
+                const angle = Math.atan2(dy, dx);
+                const TWO_PI = Math.PI * 2;
+                const bumps = preset.beachBumps;
+                let a = angle % TWO_PI; if (a < 0) a += TWO_PI;
+                const t = (a / TWO_PI) * bumps.length;
+                const i0 = Math.floor(t) % bumps.length;
+                const i1 = (i0 + 1) % bumps.length;
+                const narrowR = preset.beachRadius + bumps[i0] + (t - Math.floor(t)) * (bumps[i1] - bumps[i0]);
+                if (distSq < narrowR * narrowR) { overLand = true; break; }
+              }
+            }
+          }
+          if (overLand) {
+            console.log(`💨 DIRT: cannonball ${id} expired over land at (${last.x.toFixed(1)}, ${last.y.toFixed(1)})`);
+            this.particleSystem.createDirtSplash(Vec2.from(last.x, last.y), 1.2);
+          } else {
+            console.log(`💦 SPLASH: cannonball ${id} expired over water at (${last.x.toFixed(1)}, ${last.y.toFixed(1)})`);
+            this.particleSystem.createWaterSplash(Vec2.from(last.x, last.y), 1.2);
+          }
         } else if (overShip) {
           console.log(`💥 NO SPLASH: cannonball ${id} disappeared near ship at (${last.x.toFixed(1)}, ${last.y.toFixed(1)})`);
         }
@@ -3570,6 +5441,8 @@ export class RenderSystem {
           if (start > 0) trail.splice(0, start);
         }
       }
+    }
+    for (const cannonball of renderCannonballs) {
       this.queueRenderItem(8, 'cannonballs', () => this.drawCannonball(cannonball, camera, worldState));
     }
 
@@ -3592,23 +5465,30 @@ export class RenderSystem {
     }
 
     // Queue ship ammo labels (layer 9 - HUD overlay above all ship elements)
-    for (const ship of worldState.ships) {
+    for (const ship of renderShips) {
       this.queueRenderItem(9, 'ship-ammo-hud', () => this.drawShipAmmoLabel(ship, camera));
+      if (ship.claimFlag) {
+        this.queueRenderItem(9, `ship-flag-${ship.id}`, () => this.drawShipClaimFlag(ship, camera));
+      }
     }
 
     // ── Sinking ghost ships (client-side fade-out after server despawn) ──────
     for (const ghost of this.sinkingGhosts.values()) {
-      const id = ghost.id;
-      this.queueRenderItem(1, `ghost-hull-${id}`,       () => this.drawShipHull(ghost, camera));
-      this.queueRenderItem(3, `ghost-planks-${id}`,     () => this.drawShipPlanks(ghost, camera));
-      this.queueRenderItem(4, `ghost-cannons-${id}`,    () => this.drawShipCannons(ghost, camera));
-      this.queueRenderItem(4, `ghost-swivelguns-${id}`, () => this.drawShipSwivelGuns(ghost, camera));
-      this.queueRenderItem(4, `ghost-rudder-${id}`,     () => this.drawShipRudder(ghost, camera));
-      this.queueRenderItem(5, `ghost-wheels-${id}`,     () => this.drawShipSteeringWheels(ghost, camera));
-      this.queueRenderItem(5, `ghost-ladders-${id}`,    () => this.drawShipLadders(ghost, camera));
-      this.queueRenderItem(5, `ghost-ropes-${id}`,      () => this.drawShipSailRopes(ghost, camera));
-      this.queueRenderItem(6, `ghost-fibers-${id}`,     () => this.drawShipSailFibers(ghost, camera));
-      this.queueRenderItem(7, `ghost-masts-${id}`,      () => this.drawShipSailMasts(ghost, camera));
+      const wrappedGhostCopies = this.buildWrappedRenderCopies([ghost], camera, 320);
+      for (const ghostCopy of wrappedGhostCopies) {
+        const id = ghostCopy.id;
+        this.queueRenderItem(1, `ghost-wake-${id}`,      () => this.drawShipWake(ghostCopy, camera), -2);
+        this.queueRenderItem(1, `ghost-hull-${id}`,       () => this.drawShipHull(ghostCopy, camera));
+        this.queueRenderItem(3, `ghost-planks-${id}`,     () => this.drawShipPlanks(ghostCopy, camera));
+        this.queueRenderItem(4, `ghost-cannons-${id}`,    () => this.drawShipCannons(ghostCopy, camera));
+        this.queueRenderItem(4, `ghost-swivelguns-${id}`, () => this.drawShipSwivelGuns(ghostCopy, camera));
+        this.queueRenderItem(4, `ghost-rudder-${id}`,     () => this.drawShipRudder(ghostCopy, camera));
+        this.queueRenderItem(5, `ghost-wheels-${id}`,     () => this.drawShipSteeringWheels(ghostCopy, camera));
+        this.queueRenderItem(5, `ghost-ladders-${id}`,    () => this.drawShipLadders(ghostCopy, camera));
+        this.queueRenderItem(5, `ghost-ropes-${id}`,      () => this.drawShipSailRopes(ghostCopy, camera));
+        this.queueRenderItem(6, `ghost-fibers-${id}`,     () => this.drawShipSailFibers(ghostCopy, camera));
+        this.queueRenderItem(7, `ghost-masts-${id}`,      () => this.drawShipSailMasts(ghostCopy, camera));
+      }
     }
   }
   
@@ -3631,6 +5511,223 @@ export class RenderSystem {
         }
       }
     }
+  }
+
+  private drawShipWake(ship: Ship, camera: Camera): void {
+    if (ship.shipType === SHIP_TYPE_GHOST) return;
+    if (!camera.isWorldPositionVisible(ship.position, 420)) return;
+
+    const speed = Math.hypot(ship.velocity.x, ship.velocity.y);
+    if (speed < 8) return;
+
+    const forwardX = Math.cos(ship.rotation);
+    const forwardY = Math.sin(ship.rotation);
+    const signedForwardSpeed = ship.velocity.x * forwardX + ship.velocity.y * forwardY;
+
+    // Wake intensity grows with forward/reverse movement along the ship heading.
+    const wakeFactor = Math.min(1, Math.abs(signedForwardSpeed) / 135);
+    if (wakeFactor < 0.06) return;
+
+    const { phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
+
+    const ctx = this.ctx;
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const t = performance.now() / 1000;
+    const pulse = 0.6 + 0.4 * Math.sin(t * 7.5 + ship.id * 0.37);
+
+    ctx.save();
+    ctx.translate(screenPos.x, screenPos.y);
+    ctx.scale(cameraState.zoom, cameraState.zoom);
+    ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const wakeAlpha = (0.15 + wakeFactor * 0.42) * phase1Alpha;
+    // Bow is at local +X (max hull X), stern at -X (min hull X).
+    // Physics convention: signedForwardSpeed >= 0 maps to BACKWARD motion in this client,
+    // so leadSign is intentionally inverted.
+    const leadSign = signedForwardSpeed >= 0 ? -1 : 1;
+
+    const bowLocalX = ship.hull.length > 0
+      ? Math.max(...ship.hull.map(v => v.x))
+      : 150;
+    const leadX = (bowLocalX - 80) * -leadSign;
+    const bowGlow = ctx.createRadialGradient(leadX, 0, 12, leadX, 0, 170 + wakeFactor * 65);
+    bowGlow.addColorStop(0, `rgba(248,252,255,${(wakeAlpha * (1.0 + 0.25 * pulse)).toFixed(3)})`);  
+    bowGlow.addColorStop(1, 'rgba(180,210,245,0)');
+    ctx.fillStyle = bowGlow;
+    ctx.beginPath();
+    ctx.ellipse(leadX, 0, 140 + wakeFactor * 65, 54 + wakeFactor * 28, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = `rgba(245,252,255,${(wakeAlpha * 1.4).toFixed(3)})`;  
+    ctx.lineWidth = 2.6;
+    ctx.beginPath();
+    ctx.moveTo(bowLocalX * -leadSign, -10);
+    ctx.quadraticCurveTo((bowLocalX - 140) * -leadSign, -88 - wakeFactor * 34, (bowLocalX - 370) * -leadSign, -120 - wakeFactor * 42);
+    ctx.moveTo(bowLocalX * -leadSign, 10);
+    ctx.quadraticCurveTo((bowLocalX - 140) * -leadSign, 88 + wakeFactor * 34, (bowLocalX - 370) * -leadSign, 120 + wakeFactor * 42);
+    ctx.stroke();
+
+    ctx.restore();
+
+    // ── Combined wake trail (wash + Kelvin V-lines + bow wave history) ──────
+    // All three effects share one trail of {x,y,r,t} (ship-center + rotation).
+    // Screen positions are computed once per point and reused across effects.
+    const trail = this.shipWakeTrails.get(ship.id);
+    if (!trail || trail.length < 2) return;
+
+    // Hull extremes (computed with a loop, not spread/map to avoid allocations).
+    let bowLX = -Infinity, sternLX = Infinity;
+    for (let i = 0; i < ship.hull.length; i++) {
+      const vx = ship.hull[i].x;
+      if (vx > bowLX)   bowLX   = vx;
+      if (vx < sternLX) sternLX = vx;
+    }
+    if (!isFinite(bowLX))   bowLX   =  150;
+    if (!isFinite(sternLX)) sternLX = -150;
+
+    const nowMs  = performance.now();
+    const DUR    = this.SHIP_WAKE_TRAIL_DURATION_MS;
+    const z      = cameraState.zoom;
+    const camRot = cameraState.rotation;
+    const kelvinTan = 0.35355; // 1/√8
+
+    // Pre-compute per-point data in one pass (no repeated worldToScreen calls).
+    // ssx/ssy = stern screen x/y; bsx/bsy = bow screen x/y.
+    // We store these in flat arrays to avoid object allocation.
+    const N = trail.length;
+    const ssx = new Float32Array(N);
+    const ssy = new Float32Array(N);
+    const bsx = new Float32Array(N);
+    const bsy = new Float32Array(N);
+    const fades = new Float32Array(N);
+    // Also compute perpendicular unit vector per point for Kelvin lines.
+    const perpX = new Float32Array(N);
+    const perpY = new Float32Array(N);
+    // Cumulative stern-path distance (for Kelvin offset).
+    const cumDist = new Float32Array(N);
+
+    // Shift to anchor trail to current stern world pos.
+    const newest = trail[N - 1];
+    const cosR = Math.cos(ship.rotation), sinR = Math.sin(ship.rotation);
+    const curSternX = ship.position.x + cosR * sternLX;
+    const curSternY = ship.position.y + sinR * sternLX;
+    const shiftX = curSternX - newest.x;
+    const shiftY = curSternY - newest.y;
+
+    // Camera transform constants for worldToScreen inline.
+    const camState = cameraState;
+    // We'll call camera.worldToScreen since it handles any camera projection.
+    // But we compute bow+stern in one shot per point.
+    for (let i = 0; i < N; i++) {
+      const pt = trail[i];
+      const age = (nowMs - pt.t) / DUR;
+      fades[i] = age >= 0 && age <= 1 ? 1 - age : 0;
+      if (fades[i] <= 0) continue;
+
+      const cosPR = Math.cos(pt.r), sinPR = Math.sin(pt.r);
+      // Stern: just shift the stored ship-center position — shiftX already anchors
+      // newest.x → curSternX, so adding sternLX here would double-offset.
+      const sp = camera.worldToScreen(Vec2.from(pt.x + shiftX, pt.y + shiftY));
+      ssx[i] = sp.x; ssy[i] = sp.y;
+
+      // Bow world pos derived from historical rotation (no shift — bow is absolute).
+      const bwx = pt.x + cosPR * bowLX;
+      const bwy = pt.y + sinPR * bowLX;
+      const bp  = camera.worldToScreen(Vec2.from(bwx, bwy));
+      bsx[i] = bp.x; bsy[i] = bp.y;
+    }
+
+    // Cumulative stern-path distances for Kelvin angle.
+    for (let i = N - 2; i >= 0; i--) {
+      const dx = ssx[i + 1] - ssx[i], dy = ssy[i + 1] - ssy[i];
+      cumDist[i] = cumDist[i + 1] + Math.hypot(dx, dy);
+    }
+
+    // Perpendicular to stern segment direction (screen space).
+    for (let i = 1; i < N; i++) {
+      const dx = ssx[i] - ssx[i - 1], dy = ssy[i] - ssy[i - 1];
+      const len = Math.hypot(dx, dy);
+      if (len > 0.5) { perpX[i] = -dy / len; perpY[i] = dx / len; }
+      else           { perpX[i] = perpX[i - 1]; perpY[i] = perpY[i - 1]; }
+    }
+    perpX[0] = perpX[1]; perpY[0] = perpY[1];
+
+    ctx.save();
+    ctx.lineCap  = 'round';
+    ctx.lineJoin = 'round';
+
+    // Pass A – Wash (core foam stripe, 4 fade buckets).
+    const washBaseW = Math.min(100, Math.max(3, (34 + wakeFactor * 28) * z));
+    for (let b = 0; b < 4; b++) {
+      const fadeMin = b / 4, fadeMax = (b + 1) / 4, fadeMid = (fadeMin + fadeMax) / 2;
+      const alpha = wakeAlpha * 1.2 * fadeMid;
+      if (alpha <= 0.01) continue;
+      ctx.strokeStyle = `rgba(248,252,255,${alpha.toFixed(3)})`;
+      ctx.lineWidth   = washBaseW * fadeMid;
+      ctx.beginPath();
+      let drew = false;
+      for (let i = 1; i < N; i++) {
+        const fade = fades[i];
+        if (fade <= 0 || fade < fadeMin || fade >= fadeMax) continue;
+        ctx.moveTo(ssx[i - 1], ssy[i - 1]);
+        ctx.lineTo(ssx[i],     ssy[i]);
+        drew = true;
+      }
+      if (drew) ctx.stroke();
+    }
+
+    // Pass B – Kelvin V-lines + bow wave V-shapes, interleaved in one alpha-bucketed loop.
+    ctx.lineWidth = Math.min(3, Math.max(0.8, 2.2 * z));
+    let lastAlpha = -1;
+    ctx.beginPath();
+    for (let i = 1; i < N; i++) {
+      const fade = fades[i];
+      if (fade <= 0) continue;
+      const alpha = wakeAlpha * 1.1 * fade;
+      if (alpha <= 0.01) continue;
+      const qa = Math.round(alpha / 0.05) * 0.05;
+      if (qa !== lastAlpha) {
+        if (lastAlpha >= 0) ctx.stroke();
+        ctx.strokeStyle = `rgba(238,250,255,${qa.toFixed(2)})`;
+        ctx.beginPath();
+        lastAlpha = qa;
+      }
+
+      // Kelvin V-lines: offset stern points perpendicular by Kelvin angle.
+      const offA = cumDist[i - 1] * kelvinTan;
+      const offB = cumDist[i]     * kelvinTan;
+      ctx.moveTo(ssx[i-1] + perpX[i] * offA, ssy[i-1] + perpY[i] * offA);
+      ctx.lineTo(ssx[i]   + perpX[i] * offB, ssy[i]   + perpY[i] * offB);
+      ctx.moveTo(ssx[i-1] - perpX[i] * offA, ssy[i-1] - perpY[i] * offA);
+      ctx.lineTo(ssx[i]   - perpX[i] * offB, ssy[i]   - perpY[i] * offB);
+
+      // Bow wave V-shape at this historical bow position.
+      // Rotate fan vectors using stored rotation pt.r.
+      const pt  = trail[i];
+      const cosS = Math.cos(pt.r - camRot), sinS = Math.sin(pt.r - camRot);
+      // localToScreen offset: (lx, ly) -> (cosS*lx - sinS*ly, sinS*lx + cosS*ly) * z
+      const spread = (88 + wakeFactor * 34) * fade;
+      const tip    = spread * 1.36;
+      const f140x = (-cosS * 140) * z, f140y = (-sinS * 140) * z;
+      const f370x = (-cosS * 370) * z, f370y = (-sinS * 370) * z;
+      const tpx = (-sinS *  spread) * z, tpy = ( cosS *  spread) * z;
+      const bpx = (-sinS * -spread) * z, bpy = ( cosS * -spread) * z;
+      const tipx = (-sinS *  tip) * z,   tipy = ( cosS *  tip) * z;
+      const btipx = (-sinS * -tip) * z,  btipy = ( cosS * -tip) * z;
+      // Top arm
+      ctx.moveTo(bsx[i], bsy[i]);
+      ctx.quadraticCurveTo(bsx[i] + f140x + tpx,  bsy[i] + f140y + tpy,
+                           bsx[i] + f370x + tipx,  bsy[i] + f370y + tipy);
+      // Bottom arm
+      ctx.moveTo(bsx[i], bsy[i]);
+      ctx.quadraticCurveTo(bsx[i] + f140x + bpx,  bsy[i] + f140y + bpy,
+                           bsx[i] + f370x + btipx, bsy[i] + f370y + btipy);
+    }
+    if (lastAlpha >= 0) ctx.stroke();
+
+    ctx.restore();
   }
   
   private drawShipHull(ship: Ship, camera: Camera): void {
@@ -3659,6 +5756,9 @@ export class RenderSystem {
 
     // Ghost ship: dark spectral hull with cyan edge glow
     const isGhost = ship.shipType === SHIP_TYPE_GHOST;
+    // Enemy ship: different non-zero company to the local player
+    const isEnemyShip = !isGhost && this._localCompanyId !== 0
+      && ship.companyId !== 0 && ship.companyId !== this._localCompanyId;
     if (isGhost) {
       this.ctx.fillStyle   = '#0f0f1a';
       this.ctx.strokeStyle = '#0a0a16';
@@ -3666,78 +5766,199 @@ export class RenderSystem {
       this.ctx.shadowBlur   = 12 / cameraState.zoom;
     }
 
-    // Enemy ship: dark blue hull
-    const isEnemy = this._localCompanyId !== 0 && ship.companyId !== 0
-      && ship.companyId !== this._localCompanyId;
-    if (!isGhost && isEnemy) {
-      this.ctx.strokeStyle = '#1a1a4a';
-      this.ctx.fillStyle = '#1e3a6e';
-    }
     this.ctx.lineWidth = 2 / cameraState.zoom;
 
-    // Ghost hull fades as it takes damage (health 60000→0 maps opacity 1.0→0.2)
-    if (isGhost) {
-      const healthFade = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
-      this.ctx.globalAlpha = phase1Alpha * healthFade;
-    }
-    
-    this.ctx.beginPath();
-    this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
-    
-    for (let i = 1; i < ship.hull.length; i++) {
-      this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
-    }
-    
-    this.ctx.closePath();
-    this.ctx.fill();
-    this.ctx.stroke();
+    const hasDeck = ship.modules.some(m => m.kind === 'deck');
 
-    // Ghost ships: add a second thin cyan edge stroke for the spectral glow outline
-    if (isGhost) {
-      const healthMult = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
-      const sinkMult   = phase1Alpha < 1 ? phase1Alpha : 1;
-      this.ctx.shadowBlur   = 0;
-      this.ctx.strokeStyle  = `rgba(0,230,255,${0.55 * sinkMult * healthMult})`;
-      this.ctx.lineWidth    = 1.5 / cameraState.zoom;
+    if (!hasDeck && !isGhost) {
+      // ── Skeleton hull: bare wooden frame (no deck installed) ──
+      // Hull outline only — no fill; show the raw outer edge in bare-wood colour
+      this.ctx.strokeStyle = '#8B4513';
+      this.ctx.lineWidth = 2.5 / cameraState.zoom;
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
       for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
       this.ctx.closePath();
       this.ctx.stroke();
-    }
 
-    // Water flood tint: blue overlay (non-ghost), cyan mist dissolve (ghost)
-    // Ghost mist begins at 75% HP (25% damage) and reaches full intensity at 0 HP
-    const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / GHOST_MAX_HULL_HP) - 0.25) / 0.75 : 0;
-    if (isGhost ? ghostMistAlpha > 0 : floodTint > 0) {
-      if (isGhost) {
-        // Ghost dissolve: cyan/teal mist, starts from 75% HP
-        const sinkMult = phase1Alpha < 1 ? phase1Alpha : 1;
-        this.ctx.globalAlpha = ghostMistAlpha * 0.75 * sinkMult;
-        this.ctx.fillStyle = '#00eeff';
-        this.ctx.shadowColor = '#00eeff';
-        this.ctx.shadowBlur  = 16 / cameraState.zoom;
-      } else {
-        this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
-        this.ctx.fillStyle = '#1a6eb5';
+      // Ribs: cross-beams at plank-boundary x-positions.
+      // Port side (y=+90) and starboard side (y=-90) share the same four x values:
+      //   stern (-260), 1st joint (-110), 2nd joint (40), bow (190)
+      this.ctx.strokeStyle = '#6B3A10';
+      this.ctx.lineWidth = 1.5;
+      for (const rx of [-260, -110, 40, 190]) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(rx,  90);
+        this.ctx.lineTo(rx, -90);
+        this.ctx.stroke();
       }
+
+      // Keel: longitudinal centre beam from bow tip (415,0) to stern tip (-345,0)
+      this.ctx.strokeStyle = '#5A3008';
+      this.ctx.lineWidth = 2;
+      this.ctx.beginPath();
+      this.ctx.moveTo( 415, 0);
+      this.ctx.lineTo(-345, 0);
+      this.ctx.stroke();
+    } else {
+      // ── Normal hull: filled polygon ──
+
+      // Ghost hull fades as it takes damage (health 60000→0 maps opacity 1.0→0.2)
+      if (isGhost) {
+        const healthFade = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
+        this.ctx.globalAlpha = phase1Alpha * healthFade;
+      }
+
+      // Darken hull fill colour to reflect deck damage (mirrors plank darkenByDamage).
+      if (!isGhost && hasDeck) {
+        const deckMod = ship.modules.find(m => m.kind === 'deck');
+        const dmd = deckMod?.moduleData as any;
+        if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number' && dmd.maxHealth > 0) {
+          const deckHealthRatio = Math.max(0, dmd.health / dmd.maxHealth);
+          this.ctx.fillStyle = this.darkenByDamage('#DEB887', deckHealthRatio);
+        }
+      }
+
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
       for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
       this.ctx.closePath();
       this.ctx.fill();
+      this.ctx.stroke();
+
+      // Ghost ships: add a second thin cyan edge stroke for the spectral glow outline
+      if (isGhost) {
+        const healthMult = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
+        const sinkMult   = phase1Alpha < 1 ? phase1Alpha : 1;
+        this.ctx.shadowBlur   = 0;
+        this.ctx.strokeStyle  = `rgba(0,230,255,${0.55 * sinkMult * healthMult})`;
+        this.ctx.lineWidth    = 1.5 / cameraState.zoom;
+        this.ctx.beginPath();
+        this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+        for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+        this.ctx.closePath();
+        this.ctx.stroke();
+      }
+
+      // Water flood tint: blue overlay (non-ghost), cyan mist dissolve (ghost)
+      // Ghost mist begins at 75% HP (25% damage) and reaches full intensity at 0 HP
+      const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / GHOST_MAX_HULL_HP) - 0.25) / 0.75 : 0;
+      if (isGhost ? ghostMistAlpha > 0 : floodTint > 0) {
+        if (isGhost) {
+          // Ghost dissolve: cyan/teal mist, starts from 75% HP
+          const sinkMult = phase1Alpha < 1 ? phase1Alpha : 1;
+          this.ctx.globalAlpha = ghostMistAlpha * 0.75 * sinkMult;
+          this.ctx.fillStyle = '#00eeff';
+          this.ctx.shadowColor = '#00eeff';
+          this.ctx.shadowBlur  = 16 / cameraState.zoom;
+        } else {
+          this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
+          this.ctx.fillStyle = '#1a6eb5';
+        }
+        this.ctx.beginPath();
+        this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+        for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+        this.ctx.closePath();
+        this.ctx.fill();
+      }
     }
-    
-    // Draw ship direction indicator
-    this.ctx.globalAlpha = phase1Alpha < 1 ? phase1Alpha : 1;
-    this.ctx.strokeStyle = '#ff0000';
-    this.ctx.lineWidth = 4 / cameraState.zoom;
-    this.ctx.beginPath();
-    this.ctx.moveTo(0, 0);
-    this.ctx.lineTo(80, 0);
-    this.ctx.stroke();
-    
+
     this.ctx.restore();
+  }
+
+  /**
+   * Draw scaffolding clamps and rope ties that visually attach a scaffolded ship
+   * to the surrounding shipyard dock walls.
+   */
+  private drawScaffoldingVisuals(ship: Ship, scaffold: PlacedStructure, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+
+    const ctx = this.ctx;
+    const cameraState = camera.getState();
+    const zoom = cameraState.zoom;
+    const screenPos = camera.worldToScreen(ship.position);
+
+    ctx.save();
+    ctx.translate(screenPos.x, screenPos.y);
+    ctx.scale(zoom, zoom);
+    ctx.rotate(ship.rotation - cameraState.rotation);
+
+    // Shipyard dock dimensions in world units (BASE = 50)
+    const BASE  = 50;
+    const INT_W = BASE * 4.80; // 240  — interior bay width
+    const ARM_T = BASE * 1.00; // 50   — pier arm thickness
+    const dockHW = (INT_W + ARM_T * 2) / 2; // 170 — half total dock width
+
+    // Ship hull half-beam (approximate brigantine beam / 2)
+    const hullHB = 90;
+
+    // Clamp positions along the ship's local X-axis (fore-aft)
+    const clampPositions = [-280, -140, 0, 140, 280];
+    const pulse = 0.6 + 0.2 * Math.sin(performance.now() * 0.002);
+
+    for (const lx of clampPositions) {
+      // ── Port side (local +Y) ──
+      const portHull = hullHB;
+      const portDock = dockHW - ARM_T * 0.3; // inner edge of dock wall
+      // Rope line from hull edge to dock wall
+      ctx.strokeStyle = `rgba(160, 120, 60, ${(0.75 * pulse).toFixed(2)})`;
+      ctx.lineWidth = Math.max(1.5, 2.5 / zoom);
+      ctx.setLineDash([Math.max(3, 5 / zoom), Math.max(2, 3 / zoom)]);
+      ctx.beginPath();
+      ctx.moveTo(lx, portHull);
+      ctx.lineTo(lx, portDock);
+      ctx.stroke();
+      // Clamp bracket at hull edge
+      ctx.setLineDash([]);
+      ctx.strokeStyle = `rgba(120, 90, 40, ${(0.9 * pulse).toFixed(2)})`;
+      ctx.lineWidth = Math.max(2, 3 / zoom);
+      const bw = 12; // bracket half-width along hull
+      ctx.beginPath();
+      ctx.moveTo(lx - bw, portHull - 4);
+      ctx.lineTo(lx - bw, portHull + 6);
+      ctx.lineTo(lx + bw, portHull + 6);
+      ctx.lineTo(lx + bw, portHull - 4);
+      ctx.stroke();
+      // Bollard dot at dock wall end
+      ctx.fillStyle = `rgba(190, 150, 85, ${(0.85 * pulse).toFixed(2)})`;
+      ctx.beginPath();
+      ctx.arc(lx, portDock, Math.max(2, 3.5 / zoom), 0, Math.PI * 2);
+      ctx.fill();
+
+      // ── Starboard side (local -Y) ──
+      const stbdHull = -hullHB;
+      const stbdDock = -(dockHW - ARM_T * 0.3);
+      ctx.strokeStyle = `rgba(160, 120, 60, ${(0.75 * pulse).toFixed(2)})`;
+      ctx.lineWidth = Math.max(1.5, 2.5 / zoom);
+      ctx.setLineDash([Math.max(3, 5 / zoom), Math.max(2, 3 / zoom)]);
+      ctx.beginPath();
+      ctx.moveTo(lx, stbdHull);
+      ctx.lineTo(lx, stbdDock);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.strokeStyle = `rgba(120, 90, 40, ${(0.9 * pulse).toFixed(2)})`;
+      ctx.lineWidth = Math.max(2, 3 / zoom);
+      ctx.beginPath();
+      ctx.moveTo(lx - bw, stbdHull + 4);
+      ctx.lineTo(lx - bw, stbdHull - 6);
+      ctx.lineTo(lx + bw, stbdHull - 6);
+      ctx.lineTo(lx + bw, stbdHull + 4);
+      ctx.stroke();
+      ctx.fillStyle = `rgba(190, 150, 85, ${(0.85 * pulse).toFixed(2)})`;
+      ctx.beginPath();
+      ctx.arc(lx, stbdDock, Math.max(2, 3.5 / zoom), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // ── "Under Construction" label ──
+    ctx.rotate(-(ship.rotation - cameraState.rotation)); // undo ship rotation for text
+    ctx.font = `bold ${Math.max(10, Math.round(12 / zoom))}px Georgia, serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = `rgba(220, 180, 80, ${(0.85 * pulse).toFixed(2)})`;
+    ctx.fillText('⚒ Under Construction', 0, 0);
+
+    ctx.restore();
   }
   
   private drawShipPlanks(ship: Ship, camera: Camera): void {
@@ -3765,7 +5986,41 @@ export class RenderSystem {
     this.ctx.rotate(ship.rotation - cameraState.rotation);
     // Find all plank modules
     const planks = ship.modules.filter(m => m.kind === 'plank');
-    
+    const shipHasDeck = ship.modules.some(m => m.kind === 'deck');
+
+    if (!shipHasDeck) {
+      // ── Skeleton mode: fill hull sections (between ribs/keel/hull-edge)
+      // for PRESENT planks. Missing planks (health ≤ 0) are transparent gaps.
+      const sectionFill = 'rgb(125, 103, 76)';
+      this.ctx.fillStyle = sectionFill;
+
+      // Rib x-positions that divide the straight hull sides into 3 sections each
+      const portRibBounds: [number, number][] = [[-260, -110], [-110, 40], [40, 190]];
+      const stbdRibBounds: [number, number][] = [[40, 190], [-110, 40], [-260, -110]];
+
+      for (const plank of planks) {
+        if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
+        if ((plank.moduleData.health ?? 0) <= 0) continue;
+
+        const section = plank.moduleData.sectionName;
+        const seg = plank.moduleData.segmentIndex;
+
+        if (section === 'port_side') {
+          const [x1, x2] = portRibBounds[seg] ?? [0, 0];
+          this.ctx.fillRect(x1, 0, x2 - x1, 90);
+        } else if (section === 'starboard_side') {
+          const [x1, x2] = stbdRibBounds[seg] ?? [0, 0];
+          this.ctx.fillRect(x1, -90, x2 - x1, 90);
+        } else if (section) {
+          this.drawCurvedHullSection(section);
+        }
+      }
+
+      this.ctx.restore();
+      return;
+    }
+
+    // ── Normal mode (has deck): draw wood-textured planks
     for (const plank of planks) {
       if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
       
@@ -3776,8 +6031,7 @@ export class RenderSystem {
       const width = plankData.width;
       const health = plankData.health;
       const isCurved = plankData.isCurved || false;
-      
-      // Skip completely destroyed planks
+
       if (health <= 0) continue;
       
       // Smoothly darken toward black as health decreases
@@ -3872,6 +6126,50 @@ export class RenderSystem {
     }
     
     this.ctx.restore();
+  }
+
+  /**
+   * Draw a curved hull section (bow/stern) as a filled polygon bounded by rib, keel, and hull curve.
+   * Used in skeleton mode to show sealed panels where planks are present.
+   */
+  private drawCurvedHullSection(section: string): void {
+    const p = HULL_POINTS;
+    const steps = 12;
+    let p0: {x: number; y: number}, p1: {x: number; y: number}, p2: {x: number; y: number};
+    let tFrom: number, tTo: number;
+    let ribX: number, hullEdgeY: number;
+
+    if (section === 'bow_port') {
+      p0 = p.bow; p1 = p.bowTip; p2 = p.bowBottom;
+      tFrom = 0; tTo = 0.5;
+      ribX = 190; hullEdgeY = 90;
+    } else if (section === 'bow_starboard') {
+      p0 = p.bow; p1 = p.bowTip; p2 = p.bowBottom;
+      tFrom = 1.0; tTo = 0.5;
+      ribX = 190; hullEdgeY = -90;
+    } else if (section === 'stern_starboard') {
+      p0 = p.sternBottom; p1 = p.sternTip; p2 = p.stern;
+      tFrom = 0; tTo = 0.5;
+      ribX = -260; hullEdgeY = -90;
+    } else if (section === 'stern_port') {
+      p0 = p.sternBottom; p1 = p.sternTip; p2 = p.stern;
+      tFrom = 1.0; tTo = 0.5;
+      ribX = -260; hullEdgeY = 90;
+    } else {
+      return;
+    }
+
+    this.ctx.beginPath();
+    this.ctx.moveTo(ribX, 0);            // rib/keel corner
+    this.ctx.lineTo(ribX, hullEdgeY);    // along rib to hull edge
+    // Trace the hull curve from hull-edge toward the tip
+    for (let i = 0; i <= steps; i++) {
+      const t = tFrom + (i / steps) * (tTo - tFrom);
+      const pt = getQuadraticPoint(p0, p1, p2, t);
+      this.ctx.lineTo(pt.x, pt.y);
+    }
+    this.ctx.closePath();               // back along keel to rib/keel corner
+    this.ctx.fill();
   }
 
   /**
@@ -4204,6 +6502,9 @@ export class RenderSystem {
   private drawPlankStatusIcons(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
+    // Scaffolded ships under construction — suppress plank status icons
+    if (this._scaffoldedShips.has(ship.id)) return;
+
     // Only show for own company or neutral ships — hide from enemies
     const isEnemy = this._localCompanyId !== 0 && ship.companyId !== 0
       && ship.companyId !== this._localCompanyId;
@@ -4225,7 +6526,8 @@ export class RenderSystem {
     );
     for (const pm of plankModules) {
       const pd = pm.moduleData as PlankModuleData;
-      presentKeys.add(`${pd.sectionName}_${pd.segmentIndex}`);
+      // Health=0 means destroyed — treat as absent (show missing icon)
+      if ((pd.health ?? 1) > 0) presentKeys.add(`${pd.sectionName}_${pd.segmentIndex}`);
     }
 
     const template = this.getPlankTemplate();
@@ -5428,7 +7730,7 @@ export class RenderSystem {
         this.ctx.arc(-9, -5, badgeR, 0, Math.PI * 2);
         this.ctx.fill();
         this.ctx.fillStyle = '#fff';
-        this.ctx.font = `bold ${isActive ? 9 : 8}px Consolas, monospace`;
+        this.ctx.font = `bold ${isActive ? 9 : 8}px Georgia, serif`;
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'middle';
         this.ctx.fillText(String(info.g), -9, -5);
@@ -6781,7 +9083,7 @@ export class RenderSystem {
     const labelY = screenPos.y - 120 * zoom;
 
     this.ctx.save();
-    this.ctx.font = `bold ${Math.max(11, 13 * zoom)}px Arial`;
+    this.ctx.font = `bold ${Math.max(11, 13 * zoom)}px Georgia, serif`;
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'middle';
 
@@ -6799,6 +9101,102 @@ export class RenderSystem {
 
     this.ctx.fillStyle = ship.infiniteAmmo ? '#aaffaa' : '#ffdd88';
     this.ctx.fillText(ammoText, screenPos.x, labelY);
+    this.ctx.restore();
+  }
+
+  private drawShipClaimFlag(ship: Ship, camera: Camera): void {
+    const cf = ship.claimFlag;
+    if (!cf) return;
+    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+
+    const zoom = camera.getState().zoom;
+    const cos = Math.cos(ship.rotation);
+    const sin = Math.sin(ship.rotation);
+
+    // Transform ship-local flag position to world coords
+    const wx = ship.position.x + cos * cf.localX - sin * cf.localY;
+    const wy = ship.position.y + sin * cf.localX + cos * cf.localY;
+    const sp = camera.worldToScreen(Vec2.from(wx, wy));
+
+    const poleH  = 32 * zoom;
+    const poleW  = 2.5 * zoom;
+    const flagW  = 18 * zoom;
+    const flagH  = 12 * zoom;
+
+    const progress = Math.min(1, cf.progressMs / cf.totalMs);
+    const t = Date.now() / 1000;
+    const pulse = cf.contested ? 0.55 + 0.45 * Math.sin(t * 6) : 1;
+
+    this.ctx.save();
+
+    // Glow behind pole when contested
+    if (cf.contested) {
+      this.ctx.shadowColor = `rgba(255,60,60,${0.4 * pulse})`;
+      this.ctx.shadowBlur  = 14 * zoom;
+    }
+
+    // Pole
+    this.ctx.strokeStyle = '#5c3a1a';
+    this.ctx.lineWidth   = poleW;
+    this.ctx.beginPath();
+    this.ctx.moveTo(sp.x, sp.y);
+    this.ctx.lineTo(sp.x, sp.y - poleH);
+    this.ctx.stroke();
+
+    this.ctx.shadowBlur = 0;
+
+    // Flag cloth — derive company color from planterCompany
+    const COMPANY_COLORS: Record<number, string> = {
+      1: '#2266aa',  // Solo → blue
+      2: '#cc2222',  // Pirates → red
+      3: '#2299aa',  // Navy → teal
+      99: '#556b2f', // Ghost → dark-olive
+    };
+    const clothColor = COMPANY_COLORS[cf.planterCompany] ?? '#cc2222';
+    const topX = sp.x;
+    const topY = sp.y - poleH;
+    this.ctx.fillStyle = clothColor;
+    this.ctx.beginPath();
+    this.ctx.moveTo(topX, topY);
+    this.ctx.lineTo(topX + flagW, topY + flagH * 0.4);
+    this.ctx.lineTo(topX, topY + flagH);
+    this.ctx.closePath();
+    this.ctx.fill();
+
+    // Progress arc ring below the pole tip
+    const arcR = 10 * zoom;
+    const arcCx = sp.x;
+    const arcCy = sp.y - poleH - arcR * 1.5;
+    const arcColor = cf.contested ? `rgba(255,60,60,${pulse})` : '#44ff88';
+
+    this.ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    this.ctx.lineWidth = 3 * zoom;
+    this.ctx.beginPath();
+    this.ctx.arc(arcCx, arcCy, arcR, 0, Math.PI * 2);
+    this.ctx.stroke();
+
+    this.ctx.strokeStyle = arcColor;
+    this.ctx.lineWidth = 3 * zoom;
+    this.ctx.lineCap = 'round';
+    this.ctx.beginPath();
+    this.ctx.arc(arcCx, arcCy, arcR, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress);
+    this.ctx.stroke();
+
+    // Label text above arc
+    const fontSize = Math.max(10, 11 * zoom);
+    this.ctx.font = `bold ${fontSize}px Georgia, serif`;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'bottom';
+    const label = cf.contested ? 'CONTESTED' : `${Math.round(progress * 100)}%`;
+    const labelY2 = arcCy - arcR - 4 * zoom;
+
+    this.ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    const mw = this.ctx.measureText(label).width;
+    this.ctx.fillRect(arcCx - mw / 2 - 3, labelY2 - fontSize, mw + 6, fontSize + 2);
+
+    this.ctx.fillStyle = cf.contested ? '#ff6666' : '#aaffaa';
+    this.ctx.fillText(label, arcCx, labelY2);
+
     this.ctx.restore();
   }
 
@@ -6862,6 +9260,9 @@ export class RenderSystem {
   }
   
   private drawPlayer(player: Player, worldState: WorldState, camera: Camera): void {
+    // Dead players are not rendered (includes local player while respawn screen is up)
+    if (player.health <= 0) return;
+
     // Check if player is visible
     if (!camera.isWorldPositionVisible(player.position, 50)) {
       return; // Skip off-screen players
@@ -6914,7 +9315,7 @@ export class RenderSystem {
     // If mounted, draw mount indicator
     if (player.isMounted) {
       this.ctx.fillStyle = '#ffffff';
-      this.ctx.font = '12px Arial';
+      this.ctx.font = '12px Georgia, serif';
       this.ctx.fillText('⚓', screenPos.x - 5, screenPos.y - scaledRadius - 5);
     }
     
@@ -6968,7 +9369,7 @@ export class RenderSystem {
     
     // Draw player name above the player
     if (player.name) {
-      this.ctx.font = '14px Arial';
+      this.ctx.font = '14px Georgia, serif';
       this.ctx.textAlign = 'center';
       this.ctx.textBaseline = 'bottom';
       
@@ -7303,13 +9704,22 @@ export class RenderSystem {
     const radius = 8 * cameraState.zoom;
     const isMoving = npc.state === NPC_STATE_MOVING;
 
+    // NPC rotation is in ship-local space; add the ship's rotation for world-space rendering
+    const ship = npc.shipId ? worldState.ships.find(s => s.id === npc.shipId) : null;
+    const worldRotation = npc.rotation + (ship ? ship.rotation : 0);
+
     this.ctx.save();
     this.ctx.globalAlpha = isMoving ? 0.7 : 1.0;
 
     // Colour NPC by company then task assignment (darkened via globalAlpha when moving)
     const npcTask = this.npcTaskMap.get(npc.id) ?? 'Idle';
-    const _npcIsEnemy   = this._localCompanyId !== 0 && npc.companyId !== 0 && npc.companyId !== this._localCompanyId;
-    const _npcIsNeutral = npc.companyId === COMPANY_NEUTRAL;
+    // For COMPANY_SOLO NPCs: enemy if owner unknown (ownerId=0) OR owned by a different player
+    const _npcIsEnemy = this._localCompanyId !== 0 && npc.companyId !== 0 && (
+      npc.companyId === COMPANY_SOLO
+        ? (npc.ownerId === 0 || npc.ownerId !== this.localPlayerId)
+        : npc.companyId !== this._localCompanyId
+    );
+    const _npcIsNeutral = npc.companyId === COMPANY_UNCLAIMED;
     this.ctx.fillStyle = _npcIsNeutral ? '#222222' : _npcIsEnemy ? '#cc2222' : (NPC_TASK_COLORS[npcTask] ?? '#DAA520');
     this.ctx.strokeStyle = '#ffffff';
     this.ctx.lineWidth = 2;
@@ -7344,8 +9754,8 @@ export class RenderSystem {
     this.ctx.beginPath();
     this.ctx.moveTo(screenPos.x, screenPos.y);
     this.ctx.lineTo(
-      screenPos.x + Math.cos(npc.rotation) * radius * 1.5,
-      screenPos.y + Math.sin(npc.rotation) * radius * 1.5
+      screenPos.x + Math.cos(worldRotation - cameraState.rotation) * radius * 1.5,
+      screenPos.y + Math.sin(worldRotation - cameraState.rotation) * radius * 1.5
     );
     this.ctx.stroke();
 
@@ -7354,7 +9764,7 @@ export class RenderSystem {
     // Name label only when standing still (avoid visual noise during movement)
     if (!isMoving) {
       const fontSize = Math.max(10, Math.min(14, 12 * cameraState.zoom));
-      this.ctx.font = `${fontSize}px Arial`;
+      this.ctx.font = `${fontSize}px Georgia, serif`;
       this.ctx.textAlign = 'center';
       this.ctx.textBaseline = 'bottom';
       const nameY = screenPos.y - radius - 3;
@@ -7372,7 +9782,7 @@ export class RenderSystem {
         this.ctx.fillStyle = '#ffdd00';
         this.ctx.strokeStyle = '#222';
         this.ctx.lineWidth = 1;
-        this.ctx.font = `bold ${lockSize + 2}px Arial`;
+        this.ctx.font = `bold ${lockSize + 2}px Georgia, serif`;
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'bottom';
         this.ctx.fillText('🔒', lx, ly);
@@ -7385,7 +9795,7 @@ export class RenderSystem {
         const debugLabel = `${ROLE_SHORT[npc.role] ?? '?'}:${STATE_SHORT[npc.state] ?? '?'}`
           + (npc.assignedWeaponId ? ` c${npc.assignedWeaponId}` : '');
         const debugFontSize = Math.max(8, Math.min(11, 10 * cameraState.zoom));
-        this.ctx.font = `${debugFontSize}px monospace`;
+        this.ctx.font = `${debugFontSize}px Georgia, serif`;
         const dtw = this.ctx.measureText(debugLabel).width;
         const debugY = screenPos.y + radius + debugFontSize + 2;
         this.ctx.textBaseline = 'bottom';
@@ -7532,7 +9942,7 @@ export class RenderSystem {
           
           // Draw module ID label
           this.ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-          this.ctx.font = `${12 / camera.getState().zoom}px monospace`;
+          this.ctx.font = `${12 / camera.getState().zoom}px Georgia, serif`;
           this.ctx.textAlign = 'center';
           this.ctx.textBaseline = 'middle';
           this.ctx.fillText(`#${module.id}`, 0, 0);
@@ -7558,7 +9968,7 @@ export class RenderSystem {
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.fillStyle = 'rgba(0,220,255,0.85)';
-      ctx.font = `${11}px monospace`;
+      ctx.font = `${11}px Georgia, serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
       ctx.fillText(`ship#${ship.id} broad`, sc.x, sc.y - SHIP_BOUNDING_R * zoom - 4);
@@ -7592,6 +10002,76 @@ export class RenderSystem {
     };
 
     for (const isl of this.islands) {
+      // ── Polygon island (e.g. continental) — draw actual vertex polygon ──────
+      if (isl.vertices && isl.vertices.length >= 3) {
+        const icx = isl.x, icy = isl.y;
+        const isc = camera.worldToScreen(Vec2.from(icx, icy));
+
+        // Broad-phase: max vertex distance + buffer
+        let pBroadR = 0;
+        for (const v of isl.vertices) {
+          const dd = Math.hypot(v.x - icx, v.y - icy);
+          if (dd > pBroadR) pBroadR = dd;
+        }
+        pBroadR += 50;
+
+        // Broad-phase circle (dashed yellow)
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,220,0,0.35)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.arc(isc.x, isc.y, pBroadR * zoom, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+
+        // Beach polygon (red-orange) — ship collision boundary
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,80,0,0.85)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        isl.vertices.forEach((v, vi) => {
+          const vs = camera.worldToScreen(Vec2.from(v.x, v.y));
+          vi === 0 ? ctx.moveTo(vs.x, vs.y) : ctx.lineTo(vs.x, vs.y);
+        });
+        ctx.closePath();
+        ctx.stroke();
+        ctx.restore();
+
+        // Grass polygon (green, 0.82 scale from centre) — player walkable zone
+        const GRASS_POLY_SCALE = 0.82;
+        ctx.save();
+        ctx.strokeStyle = 'rgba(80,220,80,0.85)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        isl.vertices.forEach((v, vi) => {
+          const gx = icx + (v.x - icx) * GRASS_POLY_SCALE;
+          const gy = icy + (v.y - icy) * GRASS_POLY_SCALE;
+          const gs = camera.worldToScreen(Vec2.from(gx, gy));
+          vi === 0 ? ctx.moveTo(gs.x, gs.y) : ctx.lineTo(gs.x, gs.y);
+        });
+        ctx.closePath();
+        ctx.stroke();
+        ctx.restore();
+
+        // Centre cross + label
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(isc.x - 10, isc.y); ctx.lineTo(isc.x + 10, isc.y);
+        ctx.moveTo(isc.x, isc.y - 10); ctx.lineTo(isc.x, isc.y + 10);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.font = '11px Georgia, serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(`island#${isl.id} (${isl.preset}) verts:${isl.vertices.length}`, isc.x, isc.y - pBroadR * zoom - 4);
+        ctx.restore();
+        continue;
+      }
+
       const preset  = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
       const { beachRadius, grassRadius, beachBumps, grassBumps } = preset;
       const beachMaxBump = Math.max(...beachBumps.map(Math.abs));
@@ -7645,7 +10125,7 @@ export class RenderSystem {
       ctx.moveTo(sc.x, sc.y - 8); ctx.lineTo(sc.x, sc.y + 8);
       ctx.stroke();
       ctx.fillStyle    = 'rgba(255,255,255,0.9)';
-      ctx.font         = '11px monospace';
+      ctx.font         = '11px Georgia, serif';
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'bottom';
       ctx.fillText(
@@ -7653,6 +10133,84 @@ export class RenderSystem {
         sc.x, sc.y - (beachRadius + beachMaxBump) * zoom - 4,
       );
       ctx.restore();
+    }
+
+    // ── Shipyard physics bodies (U-shape: left arm, right arm, back wall) ───
+    // Constants mirror server websocket_server.c DOCK_* (all in client px)
+    const DOCK_HW_D    = 170;  // half total width
+    const DOCK_HH_D    = 445;  // half total height
+    const DOCK_ARM_T_D =  50;  // arm thickness
+    const DOCK_BACK_T_D = 50;  // back wall thickness
+    const DOCK_STAIR_D  = 50;  // stair gap at arm tips
+
+    // [local-cx, local-cy, half-x, half-y, label, color]
+    // Arms span the full dock height Y ∈ [−DOCK_HH_D, +DOCK_HH_D] → centre 0, half DOCK_HH_D
+    const DOCK_OBBS: [number, number, number, number, string, string][] = [
+      [-(DOCK_HW_D - DOCK_ARM_T_D / 2), 0,                            DOCK_ARM_T_D / 2, DOCK_HH_D,         'arm-L', 'rgba(0,160,255,0.85)'],
+      [ (DOCK_HW_D - DOCK_ARM_T_D / 2), 0,                            DOCK_ARM_T_D / 2, DOCK_HH_D,         'arm-R', 'rgba(0,160,255,0.85)'],
+      [0,                               -(DOCK_HH_D - DOCK_BACK_T_D / 2), DOCK_HW_D,    DOCK_BACK_T_D / 2, 'back',  'rgba(0,200,130,0.85)'],
+    ];
+
+    // Matches ctx.rotate() standard matrix: wx = ox + lx·cosR − ly·sinR, wy = oy + lx·sinR + ly·cosR
+    const drawOBBWorld = (
+      originX: number, originY: number, rotDeg: number,
+      cx: number, cy: number, hx: number, hy: number,
+      color: string, label: string,
+    ) => {
+      const rad = rotDeg * Math.PI / 180;
+      const cosR = Math.cos(rad), sinR = Math.sin(rad);
+      const corners: [number, number][] = [[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]];
+      const pts = corners.map(([ox, oy]) => {
+        const lx = cx + ox, ly = cy + oy;
+        return camera.worldToScreen(Vec2.from(
+          originX + lx * cosR - ly * sinR,
+          originY + lx * sinR + ly * cosR,
+        ));
+      });
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.closePath();
+      ctx.stroke();
+      const csc = camera.worldToScreen(Vec2.from(
+        originX + cx * cosR - cy * sinR,
+        originY + cx * sinR + cy * cosR,
+      ));
+      ctx.fillStyle = color;
+      ctx.font = '10px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, csc.x, csc.y);
+      ctx.restore();
+    };
+
+    for (const sy of this.placedStructures) {
+      if (sy.type !== 'shipyard') continue;
+      const rot = sy.rotation ?? 0;
+      const sc  = camera.worldToScreen(Vec2.from(sy.x, sy.y));
+
+      // Centre cross + label
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,200,0,0.9)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(sc.x - 10, sc.y); ctx.lineTo(sc.x + 10, sc.y);
+      ctx.moveTo(sc.x, sc.y - 10); ctx.lineTo(sc.x, sc.y + 10);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255,200,0,0.9)';
+      ctx.font = '11px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(`shipyard#${sy.id} rot=${rot}°`, sc.x, sc.y - 12);
+      ctx.restore();
+
+      // Draw the 3 OBBs
+      for (const [ocx, ocy, ohx, ohy, lbl, col] of DOCK_OBBS) {
+        drawOBBWorld(sy.x, sy.y, rot, ocx, ocy, ohx, ohy, col, lbl);
+      }
     }
   }
   
@@ -7740,27 +10298,27 @@ export class RenderSystem {
 
     const ship = this.hoveredShip;
     const COMPANY_NAMES: Record<number, string> = {
-      [COMPANY_NEUTRAL]: 'Neutral',
-      [COMPANY_PIRATES]: 'Pirates',
-      [COMPANY_NAVY]:    'Navy',
-      [COMPANY_GHOST]:   'Ghost Ships',
+      [COMPANY_UNCLAIMED]: 'Unclaimed',
+      [COMPANY_SOLO]:      'Solo',
+      [COMPANY_PIRATES]:   'Pirates',
+      [COMPANY_NAVY]:      'Navy',
+      [COMPANY_GHOST]:     'Ghost Ships',
     };
-    const companyName = COMPANY_NAMES[ship.companyId] ?? `#${ship.companyId}`;
+    const companyName = COMPANY_NAMES[ship.companyId]
+      ?? this._cachedCompanies.find(c => c.id === ship.companyId)?.name
+      ?? `#${ship.companyId}`;
     const shipTitle   = ship.shipType === SHIP_TYPE_GHOST
       ? 'Phantom Brig'
-      : `${companyName} Brigantine`;
+      : ship.shipName
+        ? ship.shipName
+        : `${companyName} Brigantine`;
 
-    // Sum plank/deck module health
-    let totalPlankHp    = 0;
-    let totalPlankMaxHp = 0;
-    for (const mod of ship.modules) {
-      const md = mod.moduleData as any;
-      if (!md) continue;
-      if (md.kind === 'plank' || md.kind === 'deck') {
-        totalPlankHp    += md.health    ?? md.maxHealth ?? 10000;
-        totalPlankMaxHp += md.maxHealth ?? 10000;
-      }
-    }
+    // Deck module health for the tooltip bar
+    const deckModTip = ship.modules.find(m => m.kind === 'deck');
+    const dmdTip = deckModTip?.moduleData as any;
+    const deckHp       = dmdTip?.health    ?? 0;
+    const deckMaxHp    = dmdTip?.maxHealth ?? 10000;
+    const deckTargetHp = dmdTip?.targetHealth ?? deckHp;
 
     const isGhost = ship.shipType === SHIP_TYPE_GHOST;
     const maxHullHP = isGhost ? GHOST_MAX_HULL_HP : 100;
@@ -7768,10 +10326,11 @@ export class RenderSystem {
     const hullText = isGhost
       ? `Hull: ${ship.hullHealth.toFixed(0)} / ${GHOST_MAX_HULL_HP.toLocaleString()}`
       : `Hull: ${ship.hullHealth.toFixed(0)}%`;
-    const deckText = totalPlankMaxHp > 0
-      ? `Deck HP: ${Math.round(totalPlankHp)} / ${Math.round(totalPlankMaxHp)}`
-      : 'Deck HP: —';
-    const deckPct  = totalPlankMaxHp > 0 ? totalPlankHp / totalPlankMaxHp : 1;
+    const deckText = deckModTip
+      ? `Deck: ${Math.round(deckHp)} / ${Math.round(deckTargetHp)} / ${Math.round(deckMaxHp)}`
+      : 'Deck: —';
+    const deckPct       = deckMaxHp > 0 ? deckHp       / deckMaxHp : 1;
+    const deckTargetPct = deckMaxHp > 0 ? deckTargetHp / deckMaxHp : 1;
 
     const screenPos = camera.worldToScreen(this.mouseWorldPos);
     const padding   = 10;
@@ -7779,7 +10338,7 @@ export class RenderSystem {
     const barW      = 180;
     const lineH     = 18;
 
-    this.ctx.font = '14px monospace';
+    this.ctx.font = '14px Georgia, serif';
     this.ctx.textAlign    = 'left';
     this.ctx.textBaseline = 'top';
 
@@ -7806,12 +10365,12 @@ export class RenderSystem {
 
     // Ship title (gold)
     this.ctx.fillStyle = '#ffe066';
-    this.ctx.font = '14px monospace';
+    this.ctx.font = '14px Georgia, serif';
     this.ctx.fillText(shipTitle, tx + padding, cy);  cy += lineH;
 
     // Company
     this.ctx.fillStyle = '#9ab';
-    this.ctx.font = '12px monospace';
+    this.ctx.font = '12px Georgia, serif';
     this.ctx.fillText(`Company: ${companyName}`, tx + padding, cy);  cy += lineH;
 
     const bx = tx + padding;
@@ -7831,16 +10390,31 @@ export class RenderSystem {
     this.ctx.strokeRect(bx, cy, bw, barH);
     cy += barH + 6;
 
-    // Deck HP label
+    // Deck HP label  (format: current / target / max)
     this.ctx.fillStyle = '#ccc';
-    this.ctx.font = '12px monospace';
+    this.ctx.font = '12px Georgia, serif';
     this.ctx.fillText(deckText, bx, cy);  cy += lineH;
-    // Deck bar
+    // Plank bar: grey background, amber target-HP marker, green/amber/red current-HP fill
     this.ctx.fillStyle = '#333';
     this.ctx.fillRect(bx, cy, bw, barH);
+    // Target HP marker (dimmer fill up to target ceiling)
+    if (deckTargetPct < 1) {
+      this.ctx.fillStyle = 'rgba(200,160,60,0.35)';
+      this.ctx.fillRect(bx, cy, Math.round(bw * deckTargetPct), barH);
+    }
     const deckColor = deckPct > 0.6 ? '#44cc66' : deckPct > 0.3 ? '#ffaa44' : '#ff5544';
     this.ctx.fillStyle = deckColor;
     this.ctx.fillRect(bx, cy, Math.round(bw * deckPct), barH);
+    // Target HP tick mark
+    if (deckTargetPct < 1) {
+      const tx2 = bx + Math.round(bw * deckTargetPct);
+      this.ctx.strokeStyle = '#c8a03c';
+      this.ctx.lineWidth = 1.5;
+      this.ctx.beginPath();
+      this.ctx.moveTo(tx2, cy - 1);
+      this.ctx.lineTo(tx2, cy + barH + 1);
+      this.ctx.stroke();
+    }
     this.ctx.strokeStyle = '#556';
     this.ctx.lineWidth = 0.8;
     this.ctx.strokeRect(bx, cy, bw, barH);
@@ -7863,7 +10437,10 @@ export class RenderSystem {
       0: 'Idle', 1: 'Moving', 2: 'At Station', 3: 'Repairing',
     };
 
-    const sameCompany = this._localCompanyId !== 0 && npc.companyId === this._localCompanyId;
+    // For COMPANY_SOLO NPCs, same-company only if this player owns them
+    const sameCompany = npc.companyId === COMPANY_SOLO
+      ? (npc.ownerId !== 0 && npc.ownerId === this.localPlayerId)
+      : (this._localCompanyId !== 0 && npc.companyId === this._localCompanyId);
     const hpPct = npc.maxHealth > 0 ? npc.health / npc.maxHealth : 1;
     const xpToNext = npc.npcLevel * 100;
     const xpPct    = Math.min(npc.xp / xpToNext, 1);
@@ -7874,14 +10451,28 @@ export class RenderSystem {
     const barW    = 180;
     const lineH   = 18;
 
-    this.ctx.font = '14px monospace';
+    this.ctx.font = '14px Georgia, serif';
     this.ctx.textAlign = 'left';
     this.ctx.textBaseline = 'top';
 
-    const COMPANY_NAMES: Record<number, string> = { [COMPANY_NEUTRAL]: 'Neutral', [COMPANY_PIRATES]: 'Pirates', [COMPANY_NAVY]: 'Navy', [COMPANY_GHOST]: 'Ghost Ships' };
+    const COMPANY_NAMES: Record<number, string> = { [COMPANY_UNCLAIMED]: 'Unclaimed', [COMPANY_SOLO]: 'Solo', [COMPANY_PIRATES]: 'Pirates', [COMPANY_NAVY]: 'Navy', [COMPANY_GHOST]: 'Ghost Ships' };
+    const COMPANY_COLORS_MAP: Record<number, string> = { [COMPANY_UNCLAIMED]: '#888888', [COMPANY_SOLO]: '#ffcc44', [COMPANY_PIRATES]: '#ff6644', [COMPANY_NAVY]: '#4488ff', [COMPANY_GHOST]: '#00eeff' };
+
+    // Resolve owner name: for solo NPCs use the ownerId field directly
+    let ownerName: string | null = null;
+    if (npc.companyId === COMPANY_SOLO && npc.ownerId !== 0) {
+      const ownerPlayer = this._cachedWorldPlayers.find(p => p.id === npc.ownerId);
+      ownerName = ownerPlayer?.name ?? `Player #${npc.ownerId}`;
+    }
+
     const titleText   = `${npc.name}  Lv.${npc.npcLevel}${npc.locked ? '  🔒' : ''}`;
     const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
-    const companyText = `Company: ${COMPANY_NAMES[npc.companyId] ?? `#${npc.companyId}`}`;
+    const companyLabel = COMPANY_NAMES[npc.companyId]
+      ?? this._cachedCompanies.find(c => c.id === npc.companyId)?.name
+      ?? `#${npc.companyId}`;
+    const companyText = (npc.companyId === COMPANY_SOLO)
+      ? `Company of ${ownerName ?? `Player #${npc.ownerId || '?'}`}`
+      : `Company: ${companyLabel}`;
     const hpText      = `HP ${npc.health}/${npc.maxHealth} (${Math.round(hpPct * 100)}%)`;
 
     const lines = [titleText, subText, companyText, hpText];
@@ -7913,11 +10504,20 @@ export class RenderSystem {
 
     // Sub-line (dim)
     this.ctx.fillStyle = '#9ab';
-    this.ctx.font = '12px monospace';
+    this.ctx.font = '12px Georgia, serif';
     this.ctx.fillText(subText, tx + padding, cy);  cy += lineH;
 
+    // Company / owner line — color swatch + text
+    const swatchSz = 10;
+    const swatchColor = COMPANY_COLORS_MAP[npc.companyId] ?? '#aaa';
+    this.ctx.fillStyle = swatchColor;
+    this.ctx.fillRect(tx + padding, cy + 3, swatchSz, swatchSz);
+    this.ctx.fillStyle = sameCompany ? '#ffe066' : '#ccc';
+    this.ctx.font = '12px Georgia, serif';
+    this.ctx.fillText(companyText, tx + padding + swatchSz + 5, cy);  cy += lineH;
+
     // HP label
-    this.ctx.font = '12px monospace';
+    this.ctx.font = '12px Georgia, serif';
     this.ctx.fillStyle = '#ccc';
     this.ctx.fillText(hpText, tx + padding, cy);  cy += lineH;
 
@@ -7937,7 +10537,7 @@ export class RenderSystem {
     if (sameCompany) {
       // XP label
       this.ctx.fillStyle = '#9ab';
-      this.ctx.font = '12px monospace';
+      this.ctx.font = '12px Georgia, serif';
       this.ctx.fillText(`XP ${npc.xp} / ${xpToNext}  (next level)`, tx + padding, cy);  cy += lineH;
       // XP bar
       this.ctx.fillStyle = '#333';
@@ -7989,25 +10589,29 @@ export class RenderSystem {
       }
     } else if (moduleData.kind === 'cannon') {
       const hp = Math.round(moduleData.health);
+      const tgt = Math.round((moduleData as any).targetHealth ?? (moduleData as any).maxHealth ?? 8000);
       const maxHp = (moduleData as any).maxHealth ?? 8000;
-      lines.push(`Health: ${hp} / ${maxHp}`);
+      lines.push(`Health: ${hp} / ${tgt} / ${maxHp}`);
       lines.push(`Dmg: 3000`);
       lines.push(`Reload: ${(moduleData as any).reloadTime ?? 3.0}s`);
       lines.push(`Quality: Common`);
     } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
       const hp = Math.round((moduleData as any).health ?? 10000);
+      const tgt = Math.round((moduleData as any).targetHealth ?? (moduleData as any).maxHealth ?? 10000);
       const maxHp = (moduleData as any).maxHealth ?? 10000;
-      lines.push(`Health: ${hp} / ${maxHp}`);
+      lines.push(`Health: ${hp} / ${tgt} / ${maxHp}`);
       lines.push(`Turn Rate: ${moduleData.maxTurnRate.toFixed(2)}`);
       lines.push(`Responsiveness: ${(moduleData.responsiveness * 100).toFixed(0)}%`);
     } else if (moduleData.kind === 'mast') {
       // Guard against Q16 fixed-point blowup from server (Q16 max for 15000 ≈ 983 million)
       const Q16_THRESHOLD = 100_000;
-      const rawHp = moduleData.health ?? 15000;
+      const rawHp  = moduleData.health ?? 15000;
+      const rawTgt = (moduleData as any).targetHealth ?? moduleData.maxHealth ?? 15000;
       const rawMax = moduleData.maxHealth ?? 15000;
       const hp    = Math.round(rawHp  > Q16_THRESHOLD ? rawHp  / 65536 : rawHp);
+      const tgt   = Math.round(rawTgt > Q16_THRESHOLD ? rawTgt / 65536 : rawTgt);
       const maxHp = Math.round(rawMax > Q16_THRESHOLD ? rawMax / 65536 : rawMax);
-      lines.push(`Health: ${hp} / ${maxHp}`);
+      lines.push(`Health: ${hp} / ${tgt} / ${maxHp}`);
       // Guard against 0/0 fiber health on freshly placed masts
       const rawFh    = moduleData.fiberHealth    ?? 15000;
       const rawFhMax = moduleData.fiberMaxHealth ?? 15000;
@@ -8041,7 +10645,7 @@ export class RenderSystem {
     lines.push(interactLabel);
     
     // Measure text dimensions
-    this.ctx.font = '14px monospace';
+    this.ctx.font = '14px Georgia, serif';
     this.ctx.textAlign = 'left';
     this.ctx.textBaseline = 'top';
     
@@ -8082,7 +10686,8 @@ export class RenderSystem {
       this.ctx.fillText(lines[i], tooltipX + padding, textY);
     }
     
-    // Draw green highlight outline around the hovered module
+    // Draw team-coloured highlight outline around the hovered module
+    const _htColor = this.isShipFriendly(ship) ? '#44ff88' : '#ff4444';
     this.ctx.save();
     
     // Check if it's a curved plank (needs special handling)
@@ -8094,7 +10699,7 @@ export class RenderSystem {
       this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
       
       // Draw curved plank highlight
-      this.ctx.strokeStyle = '#00ff00'; // Green
+      this.ctx.strokeStyle = _htColor;
       this.ctx.lineWidth = 3 / camera.getState().zoom;
       this.ctx.beginPath();
       
@@ -8173,7 +10778,7 @@ export class RenderSystem {
       this.ctx.rotate(module.localRot);
       
       // Draw highlight based on module type
-      this.ctx.strokeStyle = '#00ff00'; // Green
+      this.ctx.strokeStyle = _htColor;
       this.ctx.lineWidth = 3 / camera.getState().zoom;
       
       if (moduleData.kind === 'plank') {
@@ -8377,7 +10982,7 @@ export class RenderSystem {
       // Label
       this.ctx.globalAlpha = (isSnap ? snapPulse : pulse) * 0.9;
       this.ctx.fillStyle = isSnap ? '#44ffee' : '#99eebb';
-      this.ctx.font = isSnap ? 'bold 10px Consolas, monospace' : '9px Consolas, monospace';
+      this.ctx.font = isSnap ? 'bold 10px Georgia, serif' : '9px Georgia, serif';
       this.ctx.textAlign = 'center';
       this.ctx.textBaseline = 'bottom';
       const labelY = g.kind === 'deck' ? -64 : -22;
@@ -8567,7 +11172,7 @@ export class RenderSystem {
       ? `Place ${kind} [click]`
       : invalidReason || 'Not on ship';
     this.ctx.save();
-    this.ctx.font = 'bold 12px Consolas, monospace';
+    this.ctx.font = 'bold 12px Georgia, serif';
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'top';
     const tw = this.ctx.measureText(label).width + 10;
@@ -8756,7 +11361,7 @@ export class RenderSystem {
     const labelColor = valid ? '#88ff88' : ghostSnap ? '#44ddcc' : ghostBlocked ? '#ffaa44' : '#ff8888';
 
     this.ctx.save();
-    this.ctx.font = 'bold 13px Consolas, monospace';
+    this.ctx.font = 'bold 13px Georgia, serif';
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'top';
     this.ctx.fillStyle = 'rgba(0,0,0,0.6)';
