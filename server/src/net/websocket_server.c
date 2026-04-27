@@ -2249,6 +2249,23 @@ int websocket_server_update(struct Sim* sim) {
                                     // Skip normal response sending since we already sent
                                     ws_server.packets_sent += 2;
                                     ws_server.packets_received++;
+
+                                    // If the reconnecting player is dead, re-trigger the respawn
+                                    // screen on the client by sending a killed=true ENTITY_HIT.
+                                    if (player->health == 0) {
+                                        char dead_msg[192];
+                                        snprintf(dead_msg, sizeof(dead_msg),
+                                            "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\","
+                                            "\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                                            "\"damage\":0,\"health\":0,\"maxHealth\":%u,"
+                                            "\"killed\":true}",
+                                            player->player_id, player->x, player->y,
+                                            (unsigned)player->max_health);
+                                        ws_send_text(client->fd, dead_msg);
+                                        log_info("💀 Sent player_dead notification to reconnecting dead player %u",
+                                                 player->player_id);
+                                    }
+
                                     continue;
                                 }
                             }
