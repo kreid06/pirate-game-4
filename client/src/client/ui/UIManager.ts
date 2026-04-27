@@ -500,8 +500,6 @@ export class UIManager {
     const _localCompanyId = _localPlayer?.companyId ?? 0;
     this.manningPanel.render(ctx, context.worldState.npcs ?? [], shipId, _localCompanyId);
     
-    // Always render FPS in top-right corner
-    this.renderFPS(ctx, context);
 
     // Ammo selector widget
     if (context.mountKind === 'cannon') {
@@ -602,55 +600,6 @@ export class UIManager {
     }
   }
   
-  /**
-   * Render FPS counter in top-right corner
-   */
-  private renderFPS(ctx: CanvasRenderingContext2D, context: UIRenderContext): void {
-    ctx.save();
-
-    const fps = Math.round(context.fps);
-    const frameMs = context.frameMs ?? (fps > 0 ? (1000 / fps) : 0);
-    const ping = Math.round(context.networkStats?.ping ?? 0);
-    const glDc = context.glDrawCalls ?? 0;
-    const glScale = context.glScalePct ?? 0;
-
-    const lines = [
-      `${fps} FPS  ${frameMs.toFixed(1)} ms`,
-      glScale > 0
-        ? `Ping ${ping} ms  GL ${glDc} dc @ ${glScale}%`
-        : `Ping ${ping} ms  Canvas 2D`,
-    ];
-
-    // Measure text block for background box
-    ctx.font = 'bold 16px Georgia, serif';
-    const textWidth = Math.max(...lines.map((l) => ctx.measureText(l).width));
-    const lineH = 18;
-    const textHeight = lineH * lines.length;
-
-    // Position in top-right corner
-    const padding = 10;
-    const x = ctx.canvas.width - textWidth - padding * 2;
-    const y = padding;
-
-    // Draw semi-transparent background
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    ctx.fillRect(x, y, textWidth + padding * 2, textHeight + padding);
-
-    // Draw border
-    ctx.strokeStyle = fps >= 60 ? '#00ff00' : fps >= 30 ? '#ffaa00' : '#ff0000';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x, y, textWidth + padding * 2, textHeight + padding);
-
-    // Draw stats text
-    ctx.fillStyle = fps >= 60 ? '#00ff00' : fps >= 30 ? '#ffaa00' : '#ff0000';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    for (let i = 0; i < lines.length; i++) {
-      ctx.fillText(lines[i], x + padding, y + padding + i * lineH);
-    }
-
-    ctx.restore();
-  }
 
   /**
    * Helm combined ammo selector — bottom-left corner.
@@ -2133,44 +2082,62 @@ class HUDElement implements UIElement {
     
     if (!player) return;
     
-    // Set up text rendering with better visibility
+    // ── Top-left stats box ────────────────────────────────────────────────
     ctx.save();
-    
-    // Background for better readability
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    ctx.fillRect(10, 10, 320, 120);
-    
-    // Border for the info box
-    ctx.strokeStyle = '#ffffff';
+
+    const fps      = Math.round(context.fps);
+    const frameMs  = context.frameMs ?? (fps > 0 ? 1000 / fps : 0);
+    const ping     = Math.round(context.networkStats?.ping ?? 0);
+    const glDc     = context.glDrawCalls ?? 0;
+    const glScale  = context.glScalePct ?? 0;
+    const fpsColor = fps >= 60 ? '#44ff66' : fps >= 30 ? '#ffaa00' : '#ff4444';
+
+    const BOX_W = 260;
+    const BOX_H = 118;
+    const BX = 10, BY = 10;
+
+    // Background + border
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
+    ctx.fillRect(BX, BY, BOX_W, BOX_H);
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
     ctx.lineWidth = 1;
-    ctx.strokeRect(10, 10, 320, 120);
-    
-    // Set up text rendering
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 16px Georgia, serif';
-    ctx.textAlign = 'left';
-    
-    // Player coordinates (prominent display)
-    ctx.fillStyle = '#00ff00'; // Green for coordinates
-    ctx.font = 'bold 18px Georgia, serif';
-    ctx.fillText(`POSITION: ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`, 20, 35);
-    
-    // Other info in white
-    ctx.fillStyle = '#ffffff';
-    ctx.font = '14px Georgia, serif';
-    const lines = [
-      `FPS: ${context.fps}`,
-      `On Ship: ${player.onDeck ? 'Yes' : 'No'}`,
-      `Carrier ID: ${player.carrierId}`,
-      `Velocity: ${player.velocity.x.toFixed(1)}, ${player.velocity.y.toFixed(1)}`,
-      `Network: ${context.networkStats.ping.toFixed(0)}ms`
-    ];
-    
-    // Render additional info lines
-    lines.forEach((line, index) => {
-      ctx.fillText(line, 20, 55 + index * 16);
-    });
-    
+    ctx.strokeRect(BX, BY, BOX_W, BOX_H);
+
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+
+    // FPS row — large & colour-coded
+    ctx.font      = 'bold 15px Georgia, serif';
+    ctx.fillStyle = fpsColor;
+    ctx.fillText(`${fps} FPS  ${frameMs.toFixed(1)} ms`, BX + 10, BY + 9);
+
+    // Ping + GL row
+    ctx.font      = '13px Georgia, serif';
+    ctx.fillStyle = ping < 80 ? '#88ddff' : ping < 200 ? '#ffaa00' : '#ff4444';
+    const glText  = glScale > 0 ? `  GL ${glDc} dc @ ${glScale}%` : '  Canvas 2D';
+    ctx.fillText(`Ping ${ping} ms${glText}`, BX + 10, BY + 28);
+
+    // Divider
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.moveTo(BX + 8, BY + 46); ctx.lineTo(BX + BOX_W - 8, BY + 46);
+    ctx.stroke();
+
+    // Position
+    ctx.font      = '13px Georgia, serif';
+    ctx.fillStyle = '#aaffcc';
+    ctx.fillText(`Pos  ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`, BX + 10, BY + 52);
+
+    // Ship / velocity
+    ctx.fillStyle = '#cccccc';
+    ctx.fillText(`Ship ${player.onDeck ? `#${player.carrierId}` : '—'}   Vel ${player.velocity.x.toFixed(1)}, ${player.velocity.y.toFixed(1)}`, BX + 10, BY + 69);
+
+    // Network bandwidth
+    const ns = context.networkStats;
+    ctx.fillStyle = '#aaaaaa';
+    ctx.fillText(`↑ ${(ns.bytesSent / 1024).toFixed(1)} KB  ↓ ${(ns.bytesReceived / 1024).toFixed(1)} KB  loss ${ns.packetLoss.toFixed(1)}%`, BX + 10, BY + 86);
+
     ctx.restore();
 
     // --- Water meter (top-right boat icon) ---
@@ -2180,19 +2147,19 @@ class HUDElement implements UIElement {
       : null;
 
     if (playerShip != null) {
-      // Compute aggregate plank health ratio from the ship's plank modules
-      const planks = playerShip.modules.filter(m => m.kind === 'plank');
-      let plankRatio = 1;
-      if (planks.length > 0) {
+      // Compute deck health ratio from the ship's deck module(s)
+      const decks = playerShip.modules.filter(m => m.kind === 'deck');
+      let deckRatio = 1;
+      if (decks.length > 0) {
         let totalHp = 0, totalMax = 0;
-        for (const m of planks) {
+        for (const m of decks) {
           const d = m.moduleData as { health?: number; maxHealth?: number } | undefined;
           totalHp  += d?.health    ?? 0;
           totalMax += d?.maxHealth ?? 10000;
         }
-        plankRatio = totalMax > 0 ? Math.max(0, Math.min(1, totalHp / totalMax)) : 1;
+        deckRatio = totalMax > 0 ? Math.max(0, Math.min(1, totalHp / totalMax)) : 1;
       }
-      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, plankRatio);
+      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio);
     }
 
     // Health / stamina bars above hotbar
@@ -2776,7 +2743,7 @@ class HUDElement implements UIElement {
     ctx.fillStyle = isCritical ? '#ff7777' : '#557799';
     ctx.fillText('WATER', ix + iW / 2, labelY + 14);
 
-    // ── Hull (plank) health bar ───────────────────────────────────────────
+    // ── Deck health bar ───────────────────────────────────────────────────
     const barY       = labelY + 28;
     const barW       = iW;
     const barH       = 8;
@@ -2797,13 +2764,13 @@ class HUDElement implements UIElement {
     ctx.lineWidth   = 1;
     ctx.strokeRect(ix, barY, barW, barH);
 
-    // Label: "HULL  XX%"
+    // Label: "DECK  XX%"
     const hullPct = Math.round(plankRatio * 100);
     ctx.font         = '9px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle    = plankCrit ? '#ff5555' : '#778866';
-    ctx.fillText('HULL', ix, barY + barH + 3);
+    ctx.fillText('DECK', ix, barY + barH + 3);
     ctx.textAlign = 'right';
     ctx.fillStyle = plankCrit ? '#ff5555' : '#aabbaa';
     ctx.fillText(`${hullPct}%`, ix + barW, barY + barH + 3);
