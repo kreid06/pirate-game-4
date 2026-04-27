@@ -2160,7 +2160,8 @@ class HUDElement implements UIElement {
         }
         deckRatio = totalMax > 0 ? Math.max(0, Math.min(1, totalHp / totalMax)) : 1;
       }
-      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio);
+      const mastModules = playerShip.modules.filter(m => m.kind === 'mast');
+      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? []);
     }
 
     // Health / stamina bars above hotbar
@@ -2646,126 +2647,211 @@ class HUDElement implements UIElement {
     ctx: CanvasRenderingContext2D,
     canvas: HTMLCanvasElement,
     hullHealth: number,
-    plankRatio: number = 1
+    plankRatio: number = 1,
+    shipRotation: number = 0,
+    mastModules: import('../../../sim/modules.js').ShipModule[] = [],
+    shipHull: import('../../../common/Vec2.js').Vec2[] = []
   ): void {
-    // waterFill: 0 = completely dry, 1 = ship fully flooded
-    const waterFill = Math.max(0, Math.min(1, 1 - hullHealth / 100));
+    const waterFill  = Math.max(0, Math.min(1, 1 - hullHealth / 100));
     const isCritical = waterFill > 0.9;
 
-    ctx.save();
+    ctx.save(); // OUTER — removed at end; labels drawn after this restore
 
     // ── Dimensions & position (top-right corner) ─────────────────────────
-    const iW   = 88;   // icon width
-    const iH   = 66;   // icon height (hull cross-section)
-    const marg = 14;   // margin from canvas edge
+    const iW   = 44;
+    const iH   = 110;
+    const marg = 28;
     const ix   = canvas.width - iW - marg;
     const iy   = marg;
+    const cx   = ix + iW / 2;
+    const cy   = iy + iH / 2;
+    // Half-diagonal of the icon bounding box: max screen extent after any rotation
+    const halfDiag = Math.ceil(Math.sqrt(iW * iW + iH * iH) / 2) + 4; // ≈62
 
-    // ── Hull cross-section path ───────────────────────────────────────────
-    // Wide at the deck, tapering slightly, with a curved bottom
-    const deckY  = iy + 10;          // y of the deck rail
-    const sideBot = iy + iH - 6;     // y where sides meet the curved keel
-    const hullPath = new Path2D();
-    hullPath.moveTo(ix + 2,      deckY);              // port (left) rail
-    hullPath.lineTo(ix + iW - 2, deckY);              // starboard (right) rail
-    hullPath.lineTo(ix + iW - 9, sideBot);            // starboard lower side
-    // Curved keel bottom
-    hullPath.quadraticCurveTo(
-      ix + iW / 2, iy + iH + 4,                       // control: below center
-      ix + 9,      sideBot                             // port lower side
+    // ── Apply ship rotation around icon centre ────────────────────────────
+    ctx.translate(cx, cy);
+    ctx.rotate(shipRotation + Math.PI / 2);
+    ctx.translate(-cx, -cy);
+
+    // ── Ship silhouette path (defined in rotated space) ───────────────────
+    const bowY   = iy + 4;
+    const sternY = iy + iH - 4;
+    const hw     = iW / 2 - 2;
+
+    const shipPath = new Path2D();
+    shipPath.moveTo(cx, bowY);
+    shipPath.bezierCurveTo(
+      cx + hw * 0.45, iy + iH * 0.14,
+      cx + hw,        iy + iH * 0.38,
+      cx + hw - 1,    iy + iH * 0.65
     );
-    hullPath.closePath();
+    shipPath.quadraticCurveTo(cx + hw - 3, sternY - 5, cx + 7, sternY);
+    shipPath.lineTo(cx - 7, sternY);
+    shipPath.quadraticCurveTo(cx - hw + 3, sternY - 5, cx - hw + 1, iy + iH * 0.65);
+    shipPath.bezierCurveTo(
+      cx - hw,        iy + iH * 0.38,
+      cx - hw * 0.45, iy + iH * 0.14,
+      cx, bowY
+    );
+    shipPath.closePath();
 
-    // ── Water fill (clipped to hull interior) ────────────────────────────
-    ctx.save();
-    ctx.clip(hullPath);
-
-    // Fill water from the bottom of the keel up
-    const interiorH = sideBot - deckY;
-    const fillH     = waterFill * (interiorH + 12); // +12 to cover the curved keel
-    const fillY     = sideBot - waterFill * interiorH;
-
+    // ── Water fill — clipped to ship, drawn in SCREEN space ───────────────
+    // ctx.clip() captures the clip region in screen coords at call time, so
+    // after we undo the rotation the rectangle fills are always horizontal.
     if (waterFill > 0) {
-      // Main water body
-      ctx.fillStyle = isCritical ? '#bb1111' : '#1155cc';
-      ctx.fillRect(ix, fillY, iW, fillH + 8);
+      ctx.save(); // CLIP A
+      ctx.clip(shipPath);
 
-      // Animated-looking wave bands (lighter stripes)
-      const waveColor = isCritical ? 'rgba(255,140,140,0.20)' : 'rgba(120,200,255,0.22)';
-      const bandH = 4;
-      for (let by = fillY + 4; by < sideBot; by += 12) {
-        ctx.fillStyle = waveColor;
-        ctx.fillRect(ix, by, iW, bandH);
+      // Undo rotation → back to screen (unrotated) space
+      ctx.translate(cx, cy);
+      ctx.rotate(-(shipRotation + Math.PI / 2));
+      ctx.translate(-cx, -cy);
+
+      // Water rises from the screen-bottom of the silhouette bounding box upward
+      const shipScreenBottom = cy + halfDiag;
+      const shipScreenTop    = cy - halfDiag;
+      const shipScreenH      = shipScreenBottom - shipScreenTop;
+      const fillH            = waterFill * shipScreenH;
+      const fillY            = shipScreenBottom - fillH;
+      const spanX            = cx - halfDiag - 2;
+      const spanW            = halfDiag * 2 + 4;
+
+      ctx.fillStyle = isCritical ? 'rgba(187,17,17,0.82)' : 'rgba(17,85,204,0.78)';
+      ctx.fillRect(spanX, fillY, spanW, fillH + 4);
+
+      // Shimmer at water surface
+      ctx.fillStyle = isCritical ? 'rgba(255,160,160,0.55)' : 'rgba(170,230,255,0.60)';
+      ctx.fillRect(spanX, fillY, spanW, 2);
+
+      // Wave bands
+      for (let by = fillY + 6; by < shipScreenBottom; by += 9) {
+        ctx.fillStyle = isCritical ? 'rgba(255,80,80,0.14)' : 'rgba(120,200,255,0.18)';
+        ctx.fillRect(spanX, by, spanW, 3);
       }
 
-      // Surface shimmer line at water top
-      ctx.fillStyle = isCritical ? 'rgba(255,160,160,0.50)' : 'rgba(170,230,255,0.55)';
-      ctx.fillRect(ix, fillY, iW, 3);
+      ctx.restore(); // CLIP A — removes clip, restores rotated transform
     }
 
-    ctx.restore(); // remove clip
+    // ── Fore-aft plank lines (clipped, drawn in rotated space) ────────────
+    ctx.save(); // CLIP B
+    ctx.clip(shipPath);
+    ctx.strokeStyle = waterFill > 0.6 ? 'rgba(200,120,120,0.30)' : 'rgba(200,180,140,0.28)';
+    ctx.lineWidth   = 0.8;
+    for (let lx = ix + 8; lx < ix + iW - 4; lx += 8) {
+      ctx.beginPath();
+      ctx.moveTo(lx, bowY + 10);
+      ctx.lineTo(lx, sternY - 4);
+      ctx.stroke();
+    }
+    ctx.restore(); // CLIP B
 
-    // ── Hull outline (white / red-tinted when critical) ───────────────────
-    ctx.strokeStyle = isCritical ? '#ff5555' : '#ffffff';
-    ctx.lineWidth   = isCritical ? 2.5 : 2;
-    ctx.stroke(hullPath);
-
-    // ── Deck rail (horizontal line at top of hull) ────────────────────────
+    // ── Bowsprit ──────────────────────────────────────────────────────────
     ctx.beginPath();
-    ctx.moveTo(ix + 2,      deckY);
-    ctx.lineTo(ix + iW - 2, deckY);
-    ctx.strokeStyle = isCritical ? '#ff8888' : '#dddddd';
+    ctx.moveTo(cx, bowY);
+    ctx.lineTo(cx, bowY - 10);
+    ctx.strokeStyle = isCritical ? '#ff9977' : '#ccbbaa';
     ctx.lineWidth   = 1.5;
     ctx.stroke();
 
-    // Small deck posts / bollards for a nautical feel
-    for (const bx of [ix + 10, ix + iW / 2 - 1, ix + iW - 10]) {
+    // ── Masts + Sails (data-driven from ship modules) ────────────────────
+    // Map mast localPos.x (fore-aft in ship space, +x = bow) onto stencil Y.
+    // Use hull fore/aft extent for normalisation; fall back to mast range.
+    let hullFore = 0, hullAft = 0;
+    if (shipHull.length > 0) {
+      hullFore = Math.max(...shipHull.map(v => v.x));
+      hullAft  = Math.min(...shipHull.map(v => v.x));
+    } else if (mastModules.length > 0) {
+      hullFore = Math.max(...mastModules.map(m => m.localPos.x));
+      hullAft  = Math.min(...mastModules.map(m => m.localPos.x));
+    }
+    const shipLocalLen = hullFore - hullAft || 1;
+    // Map localPos.x → stencil Y: bow (hullFore) → bowY, stern (hullAft) → sternY
+    const toIconY = (lx: number) =>
+      bowY + (hullFore - lx) / shipLocalLen * (sternY - bowY);
+
+    const sailR    = 10;
+
+    // Sort fore → aft so they draw in natural order
+    const sortedMasts = [...mastModules].sort((a, b) => b.localPos.x - a.localPos.x);
+
+    for (const mast of sortedMasts) {
+      const my = toIconY(mast.localPos.x);
+
+      // Mast dot — skip, sail arc already marks the position
+
+      // Sail arc + openness indicator line
+      const md = mast.moduleData as { kind: string; angle?: number; openness?: number } | undefined;
+      const sailAngle = md?.angle ?? 0;   // radians
+      const openness  = (md?.openness ?? 100) / 100;
+
+      ctx.save();
+      ctx.translate(cx, my);
+      ctx.rotate(sailAngle);
+
+      ctx.strokeStyle = '#39ff14';
+      ctx.shadowColor = '#39ff14';
+      ctx.shadowBlur  = 4;
+
+      // Arc — always full size, full opacity
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(bx, deckY);
-      ctx.lineTo(bx, deckY - 5);
-      ctx.strokeStyle = isCritical ? '#ff8888' : '#bbbbbb';
-      ctx.lineWidth   = 1.5;
+      ctx.arc(0, 0, sailR, 0, Math.PI, true); // semicircle, no diameter line
       ctx.stroke();
+
+      // Radius line along the arc's bisector — starts at arc edge, grows inward
+      // Arc midpoint is at (0, -sailR); full openness reaches center (0, 0)
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(0, -sailR);
+      ctx.lineTo(0, -sailR + sailR * openness);
+      ctx.stroke();
+
+      ctx.shadowBlur = 0;
+      ctx.restore();
     }
 
-    // ── Percentage label + "WATER" tag below icon ─────────────────────────
-    const pct       = Math.round(waterFill * 100);
-    const labelY    = iy + iH + 7;
+    // ── Ship outline ──────────────────────────────────────────────────────
+    ctx.strokeStyle = isCritical ? '#ff5555' : '#e0e0e0';
+    ctx.lineWidth   = isCritical ? 2.5 : 1.8;
+    ctx.stroke(shipPath);
+
+    ctx.restore(); // OUTER — removes rotation; labels drawn below in screen space
+
+    // ── Water % label + "WATER" tag ───────────────────────────────────────
+    const pct        = Math.round(waterFill * 100);
+    // labelY is below the maximum rotated extent of the silhouette
+    const labelY     = cy + halfDiag + 6;
     const labelColor = isCritical ? '#ff5555' : '#88bbee';
 
-    ctx.font          = 'bold 12px Georgia, serif';
-    ctx.textAlign     = 'center';
-    ctx.textBaseline  = 'top';
-    ctx.fillStyle     = labelColor;
-    ctx.fillText(`${pct}%`, ix + iW / 2, labelY);
+    ctx.save();
+    ctx.font         = 'bold 12px Georgia, serif';
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle    = labelColor;
+    ctx.fillText(`${pct}%`, cx, labelY);
 
-    // Tiny "WATER" subtitle
     ctx.font      = '9px Georgia, serif';
     ctx.fillStyle = isCritical ? '#ff7777' : '#557799';
-    ctx.fillText('WATER', ix + iW / 2, labelY + 14);
+    ctx.fillText('WATER', cx, labelY + 14);
 
     // ── Deck health bar ───────────────────────────────────────────────────
-    const barY       = labelY + 28;
-    const barW       = iW;
-    const barH       = 8;
-    const plankCrit  = plankRatio < 0.30;
-    const plankWarn  = plankRatio < 0.60;
-    const barColor   = plankCrit ? '#dd3333' : plankWarn ? '#dd9922' : '#33aa55';
+    const barY      = labelY + 28;
+    const barW      = iW;
+    const barH      = 8;
+    const plankCrit = plankRatio < 0.30;
+    const plankWarn = plankRatio < 0.60;
+    const barColor  = plankCrit ? '#dd3333' : plankWarn ? '#dd9922' : '#33aa55';
 
-    // Background track
     ctx.fillStyle = 'rgba(255,255,255,0.10)';
     ctx.fillRect(ix, barY, barW, barH);
 
-    // Filled portion
     ctx.fillStyle = barColor;
     ctx.fillRect(ix, barY, Math.round(barW * plankRatio), barH);
 
-    // Border
     ctx.strokeStyle = plankCrit ? '#ff4444' : 'rgba(255,255,255,0.30)';
     ctx.lineWidth   = 1;
     ctx.strokeRect(ix, barY, barW, barH);
 
-    // Label: "DECK  XX%"
     const hullPct = Math.round(plankRatio * 100);
     ctx.font         = '9px Georgia, serif';
     ctx.textAlign    = 'left';
