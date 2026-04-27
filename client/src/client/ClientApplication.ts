@@ -1789,8 +1789,9 @@ export class ClientApplication {
             const companyId = me?.companyId ?? 0;
             const islands = this.renderSystem.getIslands();
             const ships = ws?.ships ?? [];
+            const deathPos = me ? { x: me.x, y: me.y } : undefined;
             // Open immediately — the RespawnScreen's own fade-in animation handles the transition.
-            this.uiManager.openRespawnScreen(ships, islands, companyId);
+            this.uiManager.openRespawnScreen(ships, islands, companyId, deathPos);
           }
         }
       };

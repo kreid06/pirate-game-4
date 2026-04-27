@@ -302,10 +302,10 @@ export class UIManager {
     this.activeMenuId = id;
   }
 
-  /** Open the respawn screen. Pass the current world ships, islands, and local company ID. */
-  openRespawnScreen(ships: import('../../sim/Types.js').Ship[], islands: import('../../sim/Types.js').IslandDef[], localCompanyId: number): void {
+  /** Open the respawn screen. Pass the current world ships, islands, local company ID, and death position. */
+  openRespawnScreen(ships: import('../../sim/Types.js').Ship[], islands: import('../../sim/Types.js').IslandDef[], localCompanyId: number, deathPos?: { x: number; y: number }): void {
     this._islands = islands;
-    this.respawnScreen.open(ships, islands, localCompanyId);
+    this.respawnScreen.open(ships, islands, localCompanyId, deathPos);
   }
 
   /** Close the respawn screen (called after the server confirms respawn). */

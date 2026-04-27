@@ -53,6 +53,9 @@ export class RespawnScreen {
   // Pulse animation time
   private _pulseT = 0;
 
+  // Position where the player died (world coords), shown as an X on the map
+  private _deathPos: { x: number; y: number } | null = null;
+
   // Two-phase fade: border frame first, then map content
   private _fadeStartTime = 0;
   private _borderAlpha = 0;
@@ -64,7 +67,7 @@ export class RespawnScreen {
   /** Duration (ms) for the map content to fade in after the border. */
   private static readonly PHASE_MAP_MS = 500;
 
-  open(ships: Ship[], islands: IslandDef[], localCompanyId: number): void {
+  open(ships: Ship[], islands: IslandDef[], localCompanyId: number, deathPos?: { x: number; y: number }): void {
     this.visible = true;
     this.selectedOption = null;
     this.spawnOptions = [];
@@ -94,6 +97,8 @@ export class RespawnScreen {
     }
 
     this.selectedOption = this.spawnOptions[0] ?? null;
+
+    this._deathPos = deathPos ?? null;
 
     // Reset zoom to auto-fit on open
     this.zoom = 0;
@@ -235,17 +240,22 @@ export class RespawnScreen {
       }
     }
 
-    // ── Map dark background — rendered BEFORE the border so the border sits on top.
-    // Explicit alpha so it doesn't go through globalAlpha and bury the border.
+    // ── Map dark background — drawn first; everything else renders above it ────
     if (this._mapAlpha > 0) {
       ctx.fillStyle = `rgba(2, 10, 20, ${0.92 * this._mapAlpha})`;
       ctx.fillRect(0, 0, cw, ch);
     }
 
-    // ── Death border frame — always above the dark overlay ────────────────────
-    this._renderDeathBorder(ctx, cw, ch, this._borderAlpha);
+    // ── Edge cloud/fog — below map content, border, and HUD ──────────────────
+    const cloudAlpha = this._borderAlpha;
+    if (cloudAlpha > 0) {
+      this._renderEdgeClouds(ctx, cw, ch, cloudAlpha);
+    }
 
-    // ── Map content (fades in during phase 2) ────────────────────────────────
+    // pulse drives spawn-option rings AND the respawn button glow
+    const pulse = 0.5 + 0.5 * Math.sin(this._pulseT * 3.5);
+
+    // ── Map geographic content (fades in during phase 2) ─────────────────────
     if (this._mapAlpha > 0) {
     ctx.save();
     ctx.globalAlpha = this._mapAlpha;
@@ -337,7 +347,6 @@ export class RespawnScreen {
     }
 
     // ── Spawn options (selectable) ────────────────────────────────────────────
-    const pulse = 0.5 + 0.5 * Math.sin(this._pulseT * 3.5);
     for (const opt of this.spawnOptions) {
       const mx = toScreenX(opt.x);
       const my = toScreenY(opt.y);
@@ -382,8 +391,41 @@ export class RespawnScreen {
       ctx.fillText(opt.label, mx, my - (selected ? 13 : 9));
     }
 
+    // ── Death position marker ────────────────────────────────────────────────
+    if (this._deathPos) {
+      const dx = toScreenX(this._deathPos.x);
+      const dy = toScreenY(this._deathPos.y);
+      const s = Math.max(6, toScreenLen(60));
+      ctx.save();
+      ctx.strokeStyle = '#ff2222';
+      ctx.lineWidth = Math.max(1.5, toScreenLen(12));
+      ctx.shadowColor = '#ff0000';
+      ctx.shadowBlur = 6;
+      ctx.beginPath();
+      ctx.moveTo(dx - s, dy - s); ctx.lineTo(dx + s, dy + s);
+      ctx.moveTo(dx + s, dy - s); ctx.lineTo(dx - s, dy + s);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.textAlign = 'center';
+      ctx.font = `bold ${Math.max(9, Math.min(12, toScreenLen(60)))}px Consolas, monospace`;
+      ctx.fillStyle = '#ff4444';
+      ctx.fillText('YOU DIED HERE', dx, dy + s + 12);
+      ctx.restore();
+    }
+
     // ── Scale bar ─────────────────────────────────────────────────────────────
     this._renderScaleBar(ctx, cw, ch);
+
+    ctx.restore(); // end map geographic content
+    } // end map geographic block
+
+    // ── Death border frame — on top of map geography, below HUD ──────────────
+    this._renderDeathBorder(ctx, cw, ch, this._borderAlpha);
+
+    // ── Map HUD: banner + RESPAWN button — on top of border ───────────────────
+    if (this._mapAlpha > 0) {
+    ctx.save();
+    ctx.globalAlpha = this._mapAlpha;
 
     // ── HUD header ────────────────────────────────────────────────────────────
     // Red "YOU DIED" banner at top
@@ -444,15 +486,8 @@ export class RespawnScreen {
 
     this._btnBounds = { x: btnX, y: btnY, w: btnW, h: btnH };
 
-    ctx.restore(); // end map content globalAlpha
-    } // end if (this._mapAlpha > 0)
-
-    // ── Edge cloud/fog ────────────────────────────────────────────────────────
-    // Fades in with the border and stays for the entire respawn screen.
-    const cloudAlpha = this._borderAlpha;
-    if (cloudAlpha > 0) {
-      this._renderEdgeClouds(ctx, cw, ch, cloudAlpha);
-    }
+    ctx.restore(); // end map HUD
+    } // end map HUD block
 
     // ── Centered "YOU DIED" — fades in immediately, fades out as map appears ──
     if (youDiedAlpha > 0) {
