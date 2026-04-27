@@ -53,6 +53,17 @@ export class RespawnScreen {
   // Pulse animation time
   private _pulseT = 0;
 
+  // Two-phase fade: border frame first, then map content
+  private _fadeStartTime = 0;
+  private _borderAlpha = 0;
+  private _mapAlpha = 0;
+  /** Duration (ms) for the border frame to fade in. */
+  private static readonly PHASE_BORDER_FADE_MS = 700;
+  /** How long (ms) to show the death screen before the map starts fading in. */
+  private static readonly PHASE_BORDER_MS = 5000;
+  /** Duration (ms) for the map content to fade in after the border. */
+  private static readonly PHASE_MAP_MS = 500;
+
   open(ships: Ship[], islands: IslandDef[], localCompanyId: number): void {
     this.visible = true;
     this.selectedOption = null;
@@ -87,6 +98,11 @@ export class RespawnScreen {
     // Reset zoom to auto-fit on open
     this.zoom = 0;
     this._btnBounds = null;
+
+    // Start two-phase fade: border first, then map content
+    this._borderAlpha = 0;
+    this._mapAlpha = 0;
+    this._fadeStartTime = Date.now();
   }
 
   close(): void {
@@ -99,6 +115,8 @@ export class RespawnScreen {
 
   handleMouseDown(x: number, y: number): boolean {
     if (!this.visible) return false;
+    // Block all input until map content is at least half visible
+    if (this._mapAlpha < 0.5) return true;
 
     // Respawn button
     if (this._btnBounds) {
@@ -165,6 +183,16 @@ export class RespawnScreen {
   render(ctx: CanvasRenderingContext2D, ships: Ship[], islands: IslandDef[], localCompanyId: number): void {
     if (!this.visible) return;
 
+    // Isolate ALL canvas state from the game world renderer (hover shadows,
+    // globalAlpha, etc. set by RenderSystem must not bleed in here).
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = 'transparent';
+    ctx.globalCompositeOperation = 'source-over';
+
+    try {
+
     // Keep ship spawn option positions fresh
     for (const opt of this.spawnOptions) {
       if (opt.type === 'ship' && opt.shipId !== undefined) {
@@ -179,6 +207,25 @@ export class RespawnScreen {
     this._ch = ch;
     this._pulseT = Date.now() / 1000;
 
+    // ── Phase alphas ──────────────────────────────────────────────────────────
+    const elapsed = Date.now() - this._fadeStartTime;
+    this._borderAlpha = Math.min(1, elapsed / RespawnScreen.PHASE_BORDER_FADE_MS);
+    this._mapAlpha    = Math.min(1, Math.max(0,
+      (elapsed - RespawnScreen.PHASE_BORDER_MS) / RespawnScreen.PHASE_MAP_MS));
+    // "YOU DIED" fades in immediately (faster than border) then fades out as map arrives
+    const youDiedFadeIn = Math.min(1, elapsed / 400);
+    const youDiedAlpha  = youDiedFadeIn * (1 - this._mapAlpha);
+
+    // ── Dark vignette over the live game world ────────────────────────────────
+    // During the death phase the world is still visible underneath; we darken
+    // it progressively as the border fades in. Once the map fades in it gets
+    // covered by the map's own opaque dark overlay.
+    const vignetteAlpha = this._borderAlpha * 0.55 * (1 - this._mapAlpha);
+    if (vignetteAlpha > 0) {
+      ctx.fillStyle = `rgba(0, 0, 8, ${vignetteAlpha})`;
+      ctx.fillRect(0, 0, cw, ch);
+    }
+
     if (this.zoom === 0) {
       this.zoom = this._fitZoom();
       // Pan to selected option if one exists
@@ -187,6 +234,11 @@ export class RespawnScreen {
         this.panY = this.selectedOption.y;
       }
     }
+
+    // ── Map content (fades in during phase 2) ────────────────────────────────
+    if (this._mapAlpha > 0) {
+    ctx.save();
+    ctx.globalAlpha = this._mapAlpha;
 
     // ── Dark overlay ──────────────────────────────────────────────────────────
     ctx.fillStyle = 'rgba(2, 10, 20, 0.92)';
@@ -375,6 +427,9 @@ export class RespawnScreen {
     ctx.fill();
     ctx.stroke();
     ctx.restore();
+    // Explicitly clear shadow so it doesn't affect text or subsequent draws
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = 'transparent';
 
     ctx.textAlign = 'center';
     ctx.font = 'bold 20px sans-serif';
@@ -382,9 +437,206 @@ export class RespawnScreen {
     ctx.fillText('RESPAWN', btnX + btnW / 2, btnY + 31);
 
     this._btnBounds = { x: btnX, y: btnY, w: btnW, h: btnH };
+
+    ctx.restore(); // end map content globalAlpha
+    } // end if (this._mapAlpha > 0)
+
+    // ── Edge cloud/fog ────────────────────────────────────────────────────────
+    // Fades in with the border and stays for the entire respawn screen.
+    const cloudAlpha = this._borderAlpha;
+    if (cloudAlpha > 0) {
+      this._renderEdgeClouds(ctx, cw, ch, cloudAlpha);
+    }
+
+    // ── Death border frame (always on top) ───────────────────────────────────
+    this._renderDeathBorder(ctx, cw, ch, this._borderAlpha);
+
+    // ── Centered "YOU DIED" — fades in immediately, fades out as map appears ──
+    if (youDiedAlpha > 0) {
+      this._renderYouDied(ctx, cw, ch, youDiedAlpha);
+    }
+    } finally {
+      ctx.restore(); // restore game-world state
+    }
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────────
+
+  /** Soft cloud/fog gradient that creeps in from all four edges on death. */
+  private _renderEdgeClouds(ctx: CanvasRenderingContext2D, cw: number, ch: number, alpha: number): void {
+    if (alpha <= 0) return;
+    ctx.save();
+
+    // How far the fog reaches inward (roughly 35% of the smaller dimension)
+    const reach = Math.min(cw, ch) * 0.38;
+
+    // Fog colour — dark smoke
+    const fog  = (a: number) => `rgba(8, 4, 4, ${a * alpha})`;
+    const fog2 = (a: number) => `rgba(18, 8, 8, ${a * alpha})`;
+
+    // Helper: draw one radial cloud blob
+    const blob = (x: number, y: number, r: number, innerA: number) => {
+      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0,   fog(innerA));
+      g.addColorStop(0.4, fog(innerA * 0.7));
+      g.addColorStop(1,   fog(0));
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+    };
+
+    // Four edge bands — linear gradients from each edge inward
+    const edges: [number, number, number, number][] = [
+      [0, 0, 0, reach],        // top
+      [0, ch, 0, ch - reach],  // bottom
+      [0, 0, reach, 0],        // left
+      [cw, 0, cw - reach, 0],  // right
+    ];
+    for (const [x0, y0, x1, y1] of edges) {
+      const g = ctx.createLinearGradient(x0, y0, x1, y1);
+      g.addColorStop(0,   fog(0.82));
+      g.addColorStop(0.35, fog2(0.45));
+      g.addColorStop(1,   fog(0));
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, cw, ch);
+    }
+
+    // Corner blobs for extra volume
+    const cr = reach * 1.15;
+    blob(0,  0,  cr, 0.75);
+    blob(cw, 0,  cr, 0.75);
+    blob(0,  ch, cr, 0.75);
+    blob(cw, ch, cr, 0.75);
+
+    // Scattered mid-edge blobs to break up the uniform gradient
+    blob(cw / 2, 0,  reach * 0.9, 0.55);
+    blob(cw / 2, ch, reach * 0.9, 0.55);
+    blob(0,  ch / 2, reach * 0.9, 0.55);
+    blob(cw, ch / 2, reach * 0.9, 0.55);
+
+    ctx.restore();
+  }
+
+  /** Ornate nautical border frame drawn around the screen edges on death. */
+  private _renderDeathBorder(ctx: CanvasRenderingContext2D, cw: number, ch: number, alpha: number): void {
+    if (alpha <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    const M1 = 14;  // outer border inset (px)
+    const M2 = 30;  // inner border inset (px)
+    const D  = 12;  // corner diamond half-size
+
+    // Outer thick border — deep crimson
+    ctx.strokeStyle = '#7a0010';
+    ctx.lineWidth = 4;
+    ctx.strokeRect(M1, M1, cw - M1 * 2, ch - M1 * 2);
+
+    // Inner thin border — dark amber
+    ctx.strokeStyle = '#6b4a10';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(M2, M2, cw - M2 * 2, ch - M2 * 2);
+
+    // Tick marks between the two border lines
+    ctx.strokeStyle = '#4a0808';
+    ctx.lineWidth = 1;
+    const tick = 72;
+    for (let x = M1 + tick; x < cw - M1; x += tick) {
+      ctx.beginPath(); ctx.moveTo(x, M1 + 2); ctx.lineTo(x, M2 - 2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, ch - M1 - 2); ctx.lineTo(x, ch - M2 + 2); ctx.stroke();
+    }
+    for (let y = M1 + tick; y < ch - M1; y += tick) {
+      ctx.beginPath(); ctx.moveTo(M1 + 2, y); ctx.lineTo(M2 - 2, y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cw - M1 - 2, y); ctx.lineTo(cw - M2 + 2, y); ctx.stroke();
+    }
+
+    // Corner diamond ornaments
+    const corners: [number, number][] = [
+      [M2, M2], [cw - M2, M2], [M2, ch - M2], [cw - M2, ch - M2],
+    ];
+    for (const [cx, cy] of corners) {
+      ctx.fillStyle = '#220008';
+      ctx.strokeStyle = '#cc2233';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(cx,     cy - D);
+      ctx.lineTo(cx + D, cy);
+      ctx.lineTo(cx,     cy + D);
+      ctx.lineTo(cx - D, cy);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      // Cross-hair through diamond
+      ctx.strokeStyle = '#881122';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(cx - D * 0.55, cy); ctx.lineTo(cx + D * 0.55, cy); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx, cy - D * 0.55); ctx.lineTo(cx, cy + D * 0.55); ctx.stroke();
+      // Centre dot
+      ctx.fillStyle = '#ff4455';
+      ctx.beginPath(); ctx.arc(cx, cy, 2.5, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Smaller diamond ornaments at mid-points of each side
+    const edgeMids: [number, number][] = [
+      [cw / 2, M2], [cw / 2, ch - M2],
+      [M2, ch / 2], [cw - M2, ch / 2],
+    ];
+    const dS = 7;
+    for (const [cx, cy] of edgeMids) {
+      ctx.fillStyle = '#220008';
+      ctx.strokeStyle = '#882233';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx,      cy - dS);
+      ctx.lineTo(cx + dS, cy);
+      ctx.lineTo(cx,      cy + dS);
+      ctx.lineTo(cx - dS, cy);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  /** Large centered "YOU DIED" shown during the border phase; fades out as map appears. */
+  private _renderYouDied(ctx: CanvasRenderingContext2D, cw: number, ch: number, alpha: number): void {
+    if (alpha <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    const cx = cw / 2;
+    // Top-center: sit just below the inner border line (~50px from top)
+    const fontSize = Math.min(Math.round(cw * 0.11), 128);
+    const cy = 50 + Math.round(fontSize * 0.8);
+
+    // Red glow pass
+    ctx.save();
+    ctx.shadowColor = '#ff0000';
+    ctx.shadowBlur = 48;
+    ctx.textAlign = 'center';
+    ctx.font = `bold ${fontSize}px serif`;
+    ctx.fillStyle = '#aa0011';
+    ctx.fillText('YOU DIED', cx, cy);
+    ctx.restore();
+
+    // Stroke + fill
+    ctx.textAlign = 'center';
+    ctx.font = `bold ${fontSize}px serif`;
+    ctx.strokeStyle = '#330000';
+    ctx.lineWidth = 4;
+    ctx.strokeText('YOU DIED', cx, cy);
+    ctx.fillStyle = '#dd2233';
+    ctx.fillText('YOU DIED', cx, cy);
+
+    // Subtitle
+    ctx.font = '15px Consolas, monospace';
+    ctx.fillStyle = '#6e4650';
+    ctx.fillText('Choose your respawn location', cx, cy + Math.round(fontSize * 0.55));
+
+    ctx.restore();
+  }
 
   /** Try to select a spawn option within ~20px of the click. Returns true if one was found. */
   private _trySelectNearClick(x: number, y: number): boolean {

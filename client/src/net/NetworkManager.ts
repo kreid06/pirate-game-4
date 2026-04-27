@@ -552,6 +552,9 @@ export class NetworkManager {
     maxHealth: number, playerLevel: number,
     statHealth: number, statDamage: number, statStamina: number, statWeight: number,
     statPoints: number) => void) | null = null;
+  /** Fired when the server sends {type:"ack"} — the final handshake confirmation that the
+   *  player has been spawned and is ready to play. */
+  public onPlayerAck: (() => void) | null = null;
   /** Fired when a cannonball hits an NPC or player. */
   /** Fired when any weapon fires — used to render hit-scan tracers (grapeshot, canister). */
   public onCannonFireEvent: ((cannonId: number, shipId: number, x: number, y: number,
@@ -2140,6 +2143,11 @@ export class NetworkManager {
         }
         break;
         
+      case 'ack':
+        console.log('✅ Server ack received — player ready to play');
+        this.onPlayerAck?.();
+        break;
+
       case MessageType.MESSAGE_ACK:
         if (message.status === 'npc_moved_to_module') {
           this.onNpcMoveResult?.(true, message.npcId ?? 0);

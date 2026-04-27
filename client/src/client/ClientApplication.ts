@@ -204,6 +204,12 @@ export class ClientApplication {
   private _loadingShownAt = 0;
   private _loadingHidden = false;
   private static readonly LOADING_MIN_MS = 2000; // minimum time overlay is visible
+  /** Timestamp (ms) when we entered CONNECTED state — used for loading fallback timeout. */
+  private _loadingConnectedAt = 0;
+  /** Set true when the server sends {type:"ack"} — the real ready-to-play signal. */
+  private _playerAckReceived = false;
+  /** Max ms to wait for the server ack before forcing past loading screen. */
+  private static readonly LOADING_PLAYER_TIMEOUT_MS = 10000;
 
   constructor(canvas: HTMLCanvasElement, config: ClientConfig) {
     this.canvas = canvas;
@@ -328,6 +334,15 @@ export class ClientApplication {
       this.networkManager = new NetworkManager(this.config.network);
       this.networkManager.setWorldStateHandler(this.onServerWorldState.bind(this));
       this.networkManager.setConnectionStateHandler(this.onConnectionStateChanged.bind(this));
+      this.networkManager.onPlayerAck = () => {
+        this._playerAckReceived = true;
+        if (this.state === ClientState.CONNECTED) {
+          this.state = ClientState.IN_GAME;
+          this.setLoadingStep(3);
+          this.hideLoadingOverlay();
+          console.log('🎮 Entered game world (server ack)');
+        }
+      };
       
       // Module mounting callbacks
       this.networkManager.onModuleMountSuccess = (moduleId, moduleKind, mountOffset) => {
@@ -1774,6 +1789,7 @@ export class ClientApplication {
             const companyId = me?.companyId ?? 0;
             const islands = this.renderSystem.getIslands();
             const ships = ws?.ships ?? [];
+            // Open immediately — the RespawnScreen's own fade-in animation handles the transition.
             this.uiManager.openRespawnScreen(ships, islands, companyId);
           }
         }
@@ -2087,6 +2103,7 @@ export class ClientApplication {
       this.setLoadingStep(1);
       try {
         await this.networkManager.connect(playerName ?? 'Player', accessToken);
+        this._loadingConnectedAt = Date.now();
         this.setLoadingStep(2);
         console.log('✅ Connected to physics server');
       } catch (serverError) {
@@ -2197,9 +2214,10 @@ export class ClientApplication {
     const mouseScreen = this.inputManager.getMouseScreenPosition();
     const mouseWorld  = this.camera.screenToWorld(mouseScreen);
     this.inputManager.updateMouseWorldPosition(mouseWorld);
-    this.renderSystem.updateMousePosition(mouseWorld);
-
-    // Update input (collect current input state)
+    // Suppress hover detection while the respawn screen is up so modules/resources
+    // don't flicker with highlight glows through the overlay.
+    const _respawnOpen = this.uiManager?.isRespawnScreenVisible() ?? false;
+    this.renderSystem.updateMousePosition(_respawnOpen ? Vec2.from(-999999, -999999) : mouseWorld);
     this.inputManager.update(dt);
     
     // Update prediction engine (client-side simulation)
@@ -2624,12 +2642,17 @@ export class ClientApplication {
     // Re-evaluate build mode whenever world state arrives (inventory may have changed)
     this.checkBuildMode();
     
-    // Update game state if we just entered the game
-    if (this.state === ClientState.CONNECTED) {
-      this.state = ClientState.IN_GAME;
-      this.setLoadingStep(3);
-      this.hideLoadingOverlay();
-      console.log('🎮 Entered game world');
+    // Fallback: if ack never arrived but 10s passed since connect, force-advance.
+    if (this.state === ClientState.CONNECTED && !this._playerAckReceived) {
+      const timedOut = this._loadingConnectedAt > 0
+        && (Date.now() - this._loadingConnectedAt) > ClientApplication.LOADING_PLAYER_TIMEOUT_MS;
+      if (timedOut) {
+        console.warn('⚠️ Loading timeout — no server ack received, entering game anyway');
+        this.state = ClientState.IN_GAME;
+        this.setLoadingStep(3);
+        this.hideLoadingOverlay();
+        console.log('🎮 Entered game world (timeout fallback)');
+      }
     }
   }
   
@@ -3220,8 +3243,10 @@ export class ClientApplication {
       // Update input manager with mouse world position
       this.inputManager.updateMouseWorldPosition(worldPos);
       
-      // Update render system for hover detection
-      this.renderSystem.updateMousePosition(worldPos);
+      // Update render system for hover detection (suppressed during respawn screen)
+      if (!(this.uiManager?.isRespawnScreenVisible() ?? false)) {
+        this.renderSystem.updateMousePosition(worldPos);
+      }
       // Feed radial menu mouse position (screen space)
       this._radialMenu.updateMouse(screenX, screenY);
     });
