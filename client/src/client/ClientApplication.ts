@@ -12,6 +12,7 @@ import { RenderSystem } from './gfx/RenderSystem.js';
 import { Camera } from './gfx/Camera.js';
 import { GLContext } from './gfx/gl/GLContext.js';
 import { GLWorldRenderer } from './gfx/gl/GLWorldRenderer.js';
+import { DamageTeam } from './gfx/EffectRenderer.js';
 
 // Network System  
 import { NetworkManager, ConnectionState } from '../net/NetworkManager.js';
@@ -38,7 +39,7 @@ import { logout } from './auth/AuthService.js';
 import { AudioManager } from './audio/AudioManager.js';
 
 // Core Simulation Types
-import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED } from '../sim/Types.js';
+import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED, IslandDef } from '../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../sim/Types.js';
 import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
@@ -389,7 +390,7 @@ export class ClientApplication {
           const _dMyId = this.networkManager.getAssignedPlayerId();
           const _dMyComp = _dMyId !== null ? (_dWs?.players.find(p => p.id === _dMyId)?.companyId ?? -1) : -1;
           const _dHitComp = _dWs?.ships.find(s => s.id === shipId)?.companyId ?? -1;
-          const _dTeam: import('../gfx/EffectRenderer.js').DamageTeam =
+          const _dTeam: DamageTeam =
             _dMyComp > 0 && _dHitComp === _dMyComp ? 'enemy' : 'friendly';
           this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage || 3000, true, _dTeam);
           // Mast destroyed: big sail-shred burst
@@ -441,7 +442,7 @@ export class ClientApplication {
           const _mdMyId = this.networkManager.getAssignedPlayerId();
           const _mdMyComp = _mdMyId !== null ? (_mdWs?.players.find(p => p.id === _mdMyId)?.companyId ?? -1) : -1;
           const _mdHitComp = _mdWs?.ships.find(s => s.id === shipId)?.companyId ?? -1;
-          const _mdTeam: import('../gfx/EffectRenderer.js').DamageTeam =
+          const _mdTeam: DamageTeam =
             _mdMyComp > 0 && _mdHitComp === _mdMyComp ? 'enemy' : 'friendly';
           this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage, false, _mdTeam);
           // Impact explosion for hull/plank and cannon hits
@@ -487,7 +488,7 @@ export class ClientApplication {
         const sinkingShip = ws?.ships.find(s => s.id === shipId);
         if (sinkingShip) {
           const dynCompanies = ws?.companies ?? [];
-          const shipDisplayName = (s: import('./../../sim/Types.js').Ship) =>
+          const shipDisplayName = (s: Ship) =>
             s.shipName || 'Brigantine';
           const sinkLabel  = shipDisplayName(sinkingShip);
           const isOwnShip  = myPlayer?.carrierId === shipId;
@@ -1831,7 +1832,7 @@ export class ClientApplication {
         const _myId2  = this.networkManager.getAssignedPlayerId();
         const _myPlayer2 = _myId2 !== null ? _hitWs?.players.find(p => p.id === _myId2) : null;
         const _myCompany = _myPlayer2?.companyId ?? -1;
-        let _dmgTeam: import('../../net/../client/gfx/EffectRenderer.js').DamageTeam = 'enemy';
+        let _dmgTeam: DamageTeam = 'enemy';
         if (killerShipId > 0 && _hitWs) {
           const _kShip = _hitWs.ships.find(s => s.id === killerShipId);
           if (_kShip && _myCompany !== -1 && _kShip.companyId === _myCompany) _dmgTeam = 'friendly';
@@ -1881,7 +1882,7 @@ export class ClientApplication {
             const ships = ws?.ships ?? [];
             const deathPos = me ? { x: me.position.x, y: me.position.y } : undefined;
             // Open immediately — the RespawnScreen's own fade-in animation handles the transition.
-            this.uiManager.openRespawnScreen(ships, islands, companyId, deathPos);
+            this.uiManager.openRespawnScreen(ships, islands as unknown as IslandDef[], companyId, deathPos);
           }
         }
       };
@@ -1950,7 +1951,7 @@ export class ClientApplication {
           const _sdMyId = this.networkManager.getAssignedPlayerId();
           const _sdWs = this.authoritativeWorldState ?? this.predictedWorldState;
           const _sdMyComp = _sdMyId !== null ? (_sdWs?.players.find(p => p.id === _sdMyId)?.companyId ?? -1) : -1;
-          const _sdTeam: import('../gfx/EffectRenderer.js').DamageTeam =
+          const _sdTeam: DamageTeam =
             _sdMyComp > 0 && _sdComp === _sdMyComp ? 'enemy' : 'friendly';
           this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, true, _sdTeam);
         }
@@ -1966,7 +1967,7 @@ export class ClientApplication {
         const _shMyId = this.networkManager.getAssignedPlayerId();
         const _shWs = this.authoritativeWorldState ?? this.predictedWorldState;
         const _shMyComp = _shMyId !== null ? (_shWs?.players.find(p => p.id === _shMyId)?.companyId ?? -1) : -1;
-        const _shTeam: import('../gfx/EffectRenderer.js').DamageTeam =
+        const _shTeam: DamageTeam =
           _shMyComp > 0 && _shComp === _shMyComp ? 'enemy' : 'friendly';
         this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, false, _shTeam);
       };

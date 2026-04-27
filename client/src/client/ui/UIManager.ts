@@ -2651,8 +2651,8 @@ class HUDElement implements UIElement {
     hullHealth: number,
     plankRatio: number = 1,
     shipRotation: number = 0,
-    mastModules: import('../../../sim/modules.js').ShipModule[] = [],
-    shipHull: import('../../../common/Vec2.js').Vec2[] = []
+    mastModules: import('../../sim/modules.js').ShipModule[] = [],
+    shipHull: import('../../common/Vec2.js').Vec2[] = []
   ): void {
     const waterFill  = Math.max(0, Math.min(1, 1 - hullHealth / 100));
     const isCritical = waterFill > 0.9;
