@@ -17,7 +17,7 @@ sudo chown -R $USER:$USER /opt/pirate-game
 # 2. Install dependencies
 echo "📦 Installing dependencies..."
 sudo apt-get update
-sudo apt-get install -y libssl3 libjson-c5
+sudo apt-get install -y libssl3 libjson-c5 nginx certbot python3-certbot-nginx
 
 # Install Node.js (for auth server) if not present
 if ! command -v node &> /dev/null; then
@@ -101,12 +101,12 @@ if command -v ufw &> /dev/null; then
     # UFW is installed
     echo "Using UFW firewall..."
     sudo ufw allow 22/tcp comment 'SSH'
+    sudo ufw allow 80/tcp comment 'HTTP (nginx / Let'\''s Encrypt)'
+    sudo ufw allow 443/tcp comment 'HTTPS (nginx)'
     sudo ufw allow 8082/tcp comment 'Pirate Game WebSocket'
     sudo ufw allow 8081/tcp comment 'Pirate Game Admin Panel'
     sudo ufw allow 8080/udp comment 'Pirate Game UDP Traffic (future)'
-    # Auth server listens on loopback only — no public firewall rule needed
-    # If you expose it directly, uncomment the line below:
-    # sudo ufw allow 3001/tcp comment 'Pirate Auth Server'
+    # Auth server listens on loopback only — nginx proxies /auth/ to it
     echo "✅ UFW rules added (including SSH)"
 else
     # UFW not installed - offer to install or use iptables
@@ -127,11 +127,12 @@ else
         sudo ufw allow 22/tcp comment 'SSH'
         
         # Add game server ports
+        sudo ufw allow 80/tcp comment 'HTTP (nginx / Let'\''s Encrypt)'
+        sudo ufw allow 443/tcp comment 'HTTPS (nginx)'
         sudo ufw allow 8082/tcp comment 'Pirate Game WebSocket'
         sudo ufw allow 8081/tcp comment 'Pirate Game Admin Panel'
         sudo ufw allow 8080/udp comment 'Pirate Game UDP Traffic (future)'
-        # Auth server: expose only if clients hit it directly
-        # sudo ufw allow 3001/tcp comment 'Pirate Auth Server'
+        # Auth server proxied via nginx — no direct public port needed
         
         echo ""
         echo "⚠️  IMPORTANT: About to enable UFW firewall"
@@ -161,11 +162,12 @@ else
         sudo iptables -A INPUT -i lo -j ACCEPT
         
         # Configure game server ports
+        sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT -m comment --comment "HTTP (nginx)"
+        sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT -m comment --comment "HTTPS (nginx)"
         sudo iptables -A INPUT -p tcp --dport 8082 -j ACCEPT -m comment --comment "Game WebSocket"
         sudo iptables -A INPUT -p tcp --dport 8081 -j ACCEPT -m comment --comment "Admin Panel"
         sudo iptables -A INPUT -p udp --dport 8080 -j ACCEPT -m comment --comment "UDP (future)"
-        # Auth server: expose only if clients hit it directly
-        # sudo iptables -A INPUT -p tcp --dport 3001 -j ACCEPT -m comment --comment "Auth Server"
+        # Auth server proxied via nginx — no direct public port needed
         
         # Install iptables-persistent to save rules
         echo "Installing iptables-persistent to save rules..."
@@ -178,20 +180,72 @@ fi
 echo ""
 echo "✅ Setup complete!"
 echo ""
+
+# 8. Configure nginx reverse proxy
+echo "🌐 Configuring nginx reverse proxy..."
+read -p "Enter your domain name (or server IP if no domain, e.g. example.com): " SERVER_DOMAIN
+
+sudo tee /etc/nginx/sites-available/pirate-game > /dev/null << NGINXEOF
+server {
+    listen 80;
+    server_name ${SERVER_DOMAIN};
+
+    # Proxy auth API to Node.js auth server (loopback)
+    location /auth/ {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    # WebSocket proxy for game server
+    location /ws {
+        proxy_pass http://127.0.0.1:8082;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_read_timeout 86400;
+    }
+}
+NGINXEOF
+
+sudo ln -sf /etc/nginx/sites-available/pirate-game /etc/nginx/sites-enabled/pirate-game
+sudo nginx -t && sudo systemctl reload nginx
+
+# Offer to set up SSL with certbot
+if [[ "$SERVER_DOMAIN" =~ \. ]]; then
+    echo ""
+    read -p "Set up HTTPS with Let's Encrypt for ${SERVER_DOMAIN}? (y/n): " setup_ssl
+    if [[ $setup_ssl == "y" ]]; then
+        read -p "Enter your email for Let's Encrypt notifications: " LE_EMAIL
+        sudo certbot --nginx -d "${SERVER_DOMAIN}" --non-interactive --agree-tos -m "${LE_EMAIL}"
+        echo "✅ SSL configured — nginx now handles HTTPS"
+    fi
+else
+    echo "⚠️  IP address detected (not a domain) — skipping Let's Encrypt (requires a domain name)"
+fi
+
+echo ""
 echo "Firewall ports opened:"
-echo "  - 8082/tcp: WebSocket (game traffic)"
+echo "  - 22/tcp:   SSH"
+echo "  - 80/tcp:   HTTP (nginx, redirect to HTTPS)"
+echo "  - 443/tcp:  HTTPS (nginx — proxies /auth/ and /ws)"
+echo "  - 8082/tcp: WebSocket (game traffic, direct)"
 echo "  - 8081/tcp: Admin panel"
 echo "  - 8080/udp: UDP traffic (future feature)"
-echo "  - 3001/tcp: Auth server (loopback only by default)"
+echo "  - 3001/tcp: Auth server (loopback only — proxied via nginx)"
 echo ""
 echo "Next steps:"
-echo "1. Edit /opt/pirate-game/config/auth.env — set JWT_SECRET and CORS_ORIGINS"
-echo "2. Add GitHub secrets for deployment"
-echo "3. Push code to main branch"
-echo "4. GitHub Actions will deploy the server binary and auth server dist/"
+echo "1. Edit /opt/pirate-game/config/auth.env — verify JWT_SECRET is set by CI"
+echo "2. Make sure GitHub secrets are set: AUTH_JWT_SECRET, AUTH_CORS_ORIGINS"
+echo "3. Update VITE_AUTH_URL in deploy-client.yml to use your domain (if not already)"
+echo "4. Push code to main branch — GitHub Actions will deploy both servers"
 echo "5. Start game server:  sudo systemctl start pirate-server"
 echo "6. Start auth server:  sudo systemctl start pirate-auth"
-echo "7. Check status:       sudo systemctl status pirate-server pirate-auth"
+echo "7. Check status:       sudo systemctl status pirate-server pirate-auth nginx"
 echo "8. View game logs:     sudo journalctl -u pirate-server -f"
 echo "9. View auth logs:     sudo journalctl -u pirate-auth -f"
 echo "10. Access admin panel: http://your-server-ip:8081"
