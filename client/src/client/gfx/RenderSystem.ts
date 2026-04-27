@@ -8,7 +8,7 @@
 import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
-import { EffectRenderer, AnnouncementKind } from './EffectRenderer.js';
+import { EffectRenderer, AnnouncementKind, DamageTeam } from './EffectRenderer.js';
 import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_UNCLAIMED, COMPANY_NEUTRAL, COMPANY_SOLO, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef, Company } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
@@ -918,8 +918,8 @@ export class RenderSystem {
     this.particleSystem.createExplosion(worldPos, intensity);
   }
 
-  spawnDamageNumber(worldPos: Vec2, damage: number, isKill: boolean = false): void {
-    this.effectRenderer.createDamageNumber(worldPos, damage, isKill);
+  spawnDamageNumber(worldPos: Vec2, damage: number, isKill: boolean = false, team: DamageTeam = 'enemy'): void {
+    this.effectRenderer.createDamageNumber(worldPos, damage, isKill, team);
   }
 
   /**
@@ -1284,7 +1284,8 @@ export class RenderSystem {
       }
     }
 
-    // ── Module highlight: amber glow when cursor hovers a module in Move To mode ──
+    // ── Module highlight: coloured glow when cursor hovers a module ──
+    // green = same company, red = enemy, light-blue = alliance (future)
     const now = performance.now();
     if (this.hoveredModule) {
       const { ship: modShip, module: mod } = this.hoveredModule;
@@ -1292,6 +1293,23 @@ export class RenderSystem {
       const cameraState = camera.getState();
       const glowPulse   = 0.55 + 0.45 * Math.sin(now / 160);
       const glowAlpha   = 0.6 + 0.4 * glowPulse;
+
+      // Determine team relationship
+      const myComp = this._localCompanyId;
+      const modComp = modShip.companyId;
+      type HoverTeam = 'friendly' | 'enemy' | 'alliance';
+      // Own ship: player is currently aboard this ship
+      const isOwnShip = modShip.id === this._cachedLocalPlayer?.carrierId;
+      // Real ally: same company that is not Solo (companyId=1) or Unclaimed (0)
+      const isAlly = !isOwnShip && myComp > 1 && modComp === myComp;
+      const hoverTeam: HoverTeam = (isOwnShip || isAlly) ? 'friendly' : 'enemy';
+      // future: 'alliance' when all-company feature is implemented
+      const HOVER_PALETTE: Record<HoverTeam, { glow: string; inner: string; fill: string }> = {
+        friendly: { glow: '#44ff88', inner: '#88ffcc', fill: '#00ff44' },
+        enemy:    { glow: '#ff4444', inner: '#ff9999', fill: '#ff2222' },
+        alliance: { glow: '#66ccff', inner: '#aaeeff', fill: '#44aaff' },
+      };
+      const pal = HOVER_PALETTE[hoverTeam];
 
       // Build the module's local-space path for the given kind
       const buildModulePath = (ctx: CanvasRenderingContext2D): void => {
@@ -1322,10 +1340,17 @@ export class RenderSystem {
       this.ctx.translate(mod.localPos.x, mod.localPos.y);
       this.ctx.rotate((mod as any).localRot ?? 0);
 
+      const hexToRgba = (hex: string, a: number) => {
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+      };
+
       // Outer glow pass
-      this.ctx.shadowColor  = '#ffe066';
+      this.ctx.shadowColor  = pal.glow;
       this.ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
-      this.ctx.strokeStyle  = `rgba(255, 220, 60, ${(glowAlpha * 0.55).toFixed(3)})`;
+      this.ctx.strokeStyle  = hexToRgba(pal.glow, glowAlpha * 0.55);
       this.ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
       this.ctx.globalAlpha  = 1;
       buildModulePath(this.ctx);
@@ -1333,15 +1358,15 @@ export class RenderSystem {
 
       // Inner crisp stroke
       this.ctx.shadowBlur   = 0;
-      this.ctx.strokeStyle  = `rgba(255, 240, 130, ${(glowAlpha * 0.9).toFixed(3)})`;
+      this.ctx.strokeStyle  = pal.inner;
       this.ctx.lineWidth    = 2.5 / cameraState.zoom;
       this.ctx.globalAlpha  = glowAlpha;
       buildModulePath(this.ctx);
       this.ctx.stroke();
 
-      // Translucent amber fill overlay
+      // Translucent fill overlay
       this.ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
-      this.ctx.fillStyle    = '#ffe066';
+      this.ctx.fillStyle    = pal.fill;
       buildModulePath(this.ctx);
       this.ctx.fill();
 
@@ -4366,9 +4391,16 @@ export class RenderSystem {
       const bbW  = rawW * absC + rawH * absS;
       const bbH  = rawW * absS + rawH * absC;
 
-      // Draw outline rect rotated to match structure orientation
+      // Draw outline rect rotated to match structure orientation — team-coloured
+      const _sComp = s.companyId;
+      const _sTeam: 'friendly' | 'enemy' =
+        this._localCompanyId > 0 && _sComp > 0 && _sComp === this._localCompanyId
+          ? 'friendly' : 'enemy';
+      const _sOutline = _sTeam === 'friendly' ? '#44ff88' : '#ff4444';
       ctx.save();
-      ctx.strokeStyle = '#ffe090';
+      ctx.strokeStyle = _sOutline;
+      ctx.shadowColor = _sOutline;
+      ctx.shadowBlur  = 8 * zoom;
       ctx.lineWidth   = Math.max(1, 3 * zoom);
       ctx.translate(ssp.x, ssp.y);
       ctx.rotate(rotRad);
@@ -5321,7 +5353,10 @@ export class RenderSystem {
           const intensity = hitStructure ? 0.6 : 0.5;
           this.particleSystem.createExplosion(Vec2.from(last.x, last.y), intensity);
           if (hitStructure) {
-            this.spawnDamageNumber(Vec2.from(last.x, last.y), 25, false);
+            const _csComp = (hitStructure as any).companyId as number ?? -1;
+            const _csTeam: DamageTeam =
+              this._localCompanyId > 0 && _csComp === this._localCompanyId ? 'enemy' : 'friendly';
+            this.spawnDamageNumber(Vec2.from(last.x, last.y), 25, false, _csTeam);
           }
         } else if (!overShip && (last.ammoType === 0 || last.ammoType === 1)) {
           // Check if over island land → dirt splash; otherwise water splash

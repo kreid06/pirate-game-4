@@ -102,6 +102,8 @@ export class ClientApplication {
   // Optimistic hotbar slot — held until server confirms the same value so that
   // rapid movement messages (W held) don't let stale world-states flicker the UI back.
   private pendingActiveSlot: number | null = null;
+  /** companyId keyed by structure id — for team-colouring damage numbers on structure hits. */
+  private _structureCompanyMap = new Map<number, number>();
   // Optimistic mount state — held from module_interact_success until the server's
   // world-state echo confirms isMounted=true for the same module.
   private pendingMount: { moduleId: number; moduleKind: string; mountOffset?: Vec2 } | null = null;
@@ -382,7 +384,14 @@ export class ClientApplication {
         }
 
         if (worldX !== null && worldY !== null) {
-          this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage || 3000, true);
+          // Determine team: hit ship same company as local → we took damage (enemy), else we dealt it (friendly)
+          const _dWs = this.authoritativeWorldState ?? this.predictedWorldState;
+          const _dMyId = this.networkManager.getAssignedPlayerId();
+          const _dMyComp = _dMyId !== null ? (_dWs?.players.find(p => p.id === _dMyId)?.companyId ?? -1) : -1;
+          const _dHitComp = _dWs?.ships.find(s => s.id === shipId)?.companyId ?? -1;
+          const _dTeam: import('../gfx/EffectRenderer.js').DamageTeam =
+            _dMyComp > 0 && _dHitComp === _dMyComp ? 'enemy' : 'friendly';
+          this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage || 3000, true, _dTeam);
           // Mast destroyed: big sail-shred burst
           const ws2 = this.authoritativeWorldState || this.predictedWorldState;
           const hitShip = ws2?.ships.find(s => s.id === shipId);
@@ -427,7 +436,14 @@ export class ClientApplication {
         }
 
         if (worldX !== null && worldY !== null) {
-          this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage, false);
+          // Determine team: hit ship same company as local → we took damage (enemy), else we dealt it (friendly)
+          const _mdWs = this.authoritativeWorldState ?? this.predictedWorldState;
+          const _mdMyId = this.networkManager.getAssignedPlayerId();
+          const _mdMyComp = _mdMyId !== null ? (_mdWs?.players.find(p => p.id === _mdMyId)?.companyId ?? -1) : -1;
+          const _mdHitComp = _mdWs?.ships.find(s => s.id === shipId)?.companyId ?? -1;
+          const _mdTeam: import('../gfx/EffectRenderer.js').DamageTeam =
+            _mdMyComp > 0 && _mdHitComp === _mdMyComp ? 'enemy' : 'friendly';
+          this.renderSystem.spawnDamageNumber(Vec2.from(worldX, worldY), damage, false, _mdTeam);
           // Impact explosion for hull/plank and cannon hits
           const hitShipDmg = ws?.ships.find(s => s.id === shipId);
           const hitModDmg  = hitShipDmg?.modules.find(m => m.id === moduleId);
@@ -1810,7 +1826,17 @@ export class ClientApplication {
             if (player) { player.health = health; player.maxHealth = maxHealth; }
           }
         }
-        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), damage, killed);
+        // Determine team relationship for damage number colour
+        const _hitWs = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _myId2  = this.networkManager.getAssignedPlayerId();
+        const _myPlayer2 = _myId2 !== null ? _hitWs?.players.find(p => p.id === _myId2) : null;
+        const _myCompany = _myPlayer2?.companyId ?? -1;
+        let _dmgTeam: import('../../net/../client/gfx/EffectRenderer.js').DamageTeam = 'enemy';
+        if (killerShipId > 0 && _hitWs) {
+          const _kShip = _hitWs.ships.find(s => s.id === killerShipId);
+          if (_kShip && _myCompany !== -1 && _kShip.companyId === _myCompany) _dmgTeam = 'friendly';
+        }
+        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), damage, killed, _dmgTeam);
         this.renderSystem.notifyEntityDamaged(id, entityType === 'npc');
 
         // Kill announcement — skip for the local player's own death (respawn screen handles that)
@@ -1839,7 +1865,7 @@ export class ClientApplication {
                 const npc = ws?.npcs.find(n => n.id === id);
                 targetName = npc?.name || `NPC #${id}`;
               }
-              this.renderSystem.showAnnouncement(`${killerName} killed ${targetName}`, 'npc_kill', 3.0);
+              this.renderSystem.showAnnouncement(`${killerName} killed ${targetName}`, 'info', 3.0);
             }
           }
         }
@@ -1915,25 +1941,40 @@ export class ClientApplication {
         };
       };
       this.networkManager.onStructureDemolished = (id, x, y) => {
+        const _sdComp = this._structureCompanyMap.get(id) ?? -1;
+        this._structureCompanyMap.delete(id);
         this.renderSystem.removePlacedStructure(id);
         if (x !== undefined && y !== undefined) {
           // Cannonball kill — big explosion
           this.renderSystem.spawnExplosion(Vec2.from(x, y), 1.2);
-          this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, true);
+          const _sdMyId = this.networkManager.getAssignedPlayerId();
+          const _sdWs = this.authoritativeWorldState ?? this.predictedWorldState;
+          const _sdMyComp = _sdMyId !== null ? (_sdWs?.players.find(p => p.id === _sdMyId)?.companyId ?? -1) : -1;
+          const _sdTeam: import('../gfx/EffectRenderer.js').DamageTeam =
+            _sdMyComp > 0 && _sdComp === _sdMyComp ? 'enemy' : 'friendly';
+          this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, true, _sdTeam);
         }
       };
       this.networkManager.onStructureCompanyUpdated = (id, companyId) => {
+        this._structureCompanyMap.set(id, companyId);
         this.renderSystem.updateStructureCompany(id, companyId);
       };
       this.networkManager.onStructureHpChanged = (id, hp, maxHp, x, y) => {
         this.renderSystem.updateStructureHp(id, hp, maxHp);
         this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.6);
-        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, false);
+        const _shComp = this._structureCompanyMap.get(id) ?? -1;
+        const _shMyId = this.networkManager.getAssignedPlayerId();
+        const _shWs = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _shMyComp = _shMyId !== null ? (_shWs?.players.find(p => p.id === _shMyId)?.companyId ?? -1) : -1;
+        const _shTeam: import('../gfx/EffectRenderer.js').DamageTeam =
+          _shMyComp > 0 && _shComp === _shMyComp ? 'enemy' : 'friendly';
+        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, false, _shTeam);
       };
       this.networkManager.onTreeHit = (x, y) => {
         this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.5);
       };
       this.networkManager.onStructurePlaced = (s) => {
+        this._structureCompanyMap.set(s.id, s.companyId ?? 0);
         this.renderSystem.addPlacedStructure(s);
       };
       this.networkManager.onPlacementFailed = (reason, _x, _y, _structureType, blockerId) => {
