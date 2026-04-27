@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include "net/harvesting.h"
 
@@ -212,9 +213,19 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
             goto send_fiber_ret;
         }
 
-        log_info("🌿 Player %u gathered fiber → +5 fiber", player->player_id);
-        snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_fiber_success\",\"fiber\":5}");
+        /* 10% chance to also drop 1 wood */
+        int bonus_wood = (rand() % 10 == 0) ? 1 : 0;
+        if (bonus_wood) craft_grant(player, ITEM_WOOD, 1); /* ignore full — fiber already granted */
+
+        log_info("🌿 Player %u gathered fiber → +5 fiber%s", player->player_id,
+                 bonus_wood ? " +1 wood (bonus)" : "");
+        if (bonus_wood) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_fiber_success\",\"fiber\":5,\"wood\":1}");
+        } else {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_fiber_success\",\"fiber\":5}");
+        }
     }
 
 send_fiber_ret:;
