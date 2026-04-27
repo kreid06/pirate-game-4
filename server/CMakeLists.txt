@@ -38,6 +38,9 @@ set(SIM_SOURCES
     src/sim/simulation.c
     src/sim/module_types.c
     src/sim/island_data.c
+    src/sim/island_loader.c
+    src/sim/ship_level.c
+    src/sim/world_save.c
 )
 
 set(NET_SOURCES
@@ -47,6 +50,19 @@ set(NET_SOURCES
     src/net/snapshot.c
     src/net/websocket_server.c
     src/net/websocket_protocol.c
+    src/net/websocket_auth.c
+    src/net/cannon_fire.c
+    src/net/crafting.c
+    src/net/dock_physics.c
+    src/net/harvesting.c
+    src/net/module_interactions.c
+    src/net/npc_agents.c
+    src/net/npc_world.c
+    src/net/player_movement.c
+    src/net/player_persistence.c
+    src/net/ship_control.c
+    src/net/ship_init.c
+    src/net/structures.c
 )
 
 set(AOI_SOURCES
