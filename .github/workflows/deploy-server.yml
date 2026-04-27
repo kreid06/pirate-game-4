@@ -103,12 +103,13 @@ jobs:
           "
 
           # Write auth.env from GitHub secrets (overwrites placeholder values from setup-server.sh)
-          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
-            "sudo tee /opt/pirate-game/config/auth.env > /dev/null << 'ENVEOF'
-AUTH_PORT=3001
-JWT_SECRET=${{ secrets.AUTH_JWT_SECRET }}
-CORS_ORIGINS=${{ secrets.AUTH_CORS_ORIGINS }}
-ENVEOF"
+          {
+            echo "AUTH_PORT=3001"
+            echo "JWT_SECRET=${{ secrets.AUTH_JWT_SECRET }}"
+            echo "CORS_ORIGINS=${{ secrets.AUTH_CORS_ORIGINS }}"
+          } > /tmp/auth.env
+          scp -o StrictHostKeyChecking=no /tmp/auth.env ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/auth.env
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mv /tmp/auth.env /opt/pirate-game/config/auth.env && sudo chmod 600 /opt/pirate-game/config/auth.env"
           
       - name: Restart server services
         run: |
