@@ -159,6 +159,8 @@ export class RenderSystem {
   private _cachedWorldShips: Ship[] = [];
   /** Players from the last rendered frame — used for NPC owner resolution in tooltips. */
   private _cachedWorldPlayers: Player[] = [];
+  /** NPCs from the last rendered frame — used for solo ship ownership checks. */
+  private _cachedWorldNpcs: import('../../sim/Types').Npc[] = [];
   /** Dynamic companies from the last rendered frame — used for name resolution in tooltips. */
   private _cachedCompanies: Company[] = [];
   /** Dropped items in the world (player-dropped inventory items). */
@@ -1295,14 +1297,8 @@ export class RenderSystem {
       const glowAlpha   = 0.6 + 0.4 * glowPulse;
 
       // Determine team relationship
-      const myComp = this._localCompanyId;
-      const modComp = modShip.companyId;
       type HoverTeam = 'friendly' | 'enemy' | 'alliance';
-      // Own ship: player is currently aboard this ship
-      const isOwnShip = modShip.id === this._cachedLocalPlayer?.carrierId;
-      // Real ally: same company that is not Solo (companyId=1) or Unclaimed (0)
-      const isAlly = !isOwnShip && myComp > 1 && modComp === myComp;
-      const hoverTeam: HoverTeam = (isOwnShip || isAlly) ? 'friendly' : 'enemy';
+      const hoverTeam: HoverTeam = this.isShipFriendly(modShip) ? 'friendly' : 'enemy';
       // future: 'alliance' when all-company feature is implemented
       const HOVER_PALETTE: Record<HoverTeam, { glow: string; inner: string; fill: string }> = {
         friendly: { glow: '#44ff88', inner: '#88ffcc', fill: '#00ff44' },
@@ -2455,6 +2451,24 @@ export class RenderSystem {
   /**
    * Detect which module is under the mouse cursor
    */
+  /**
+   * Returns true if `ship` is controlled by / belongs to the local player's side.
+   * - Real faction (companyId > 1): same companyId → friendly.
+   * - Solo (companyId == 1): friendly only when the ship has an NPC whose ownerId matches
+   *   the local player id (i.e. the player owns the crew on this ship).
+   * Boarding an enemy ship changes carrierId but NOT NPC ownerships, so this stays correct.
+   */
+  private isShipFriendly(ship: Ship): boolean {
+    const myComp = this._localCompanyId;
+    if (myComp > 1 && ship.companyId === myComp) return true;
+    if (ship.companyId === 1 && this.localPlayerId !== null) {
+      return this._cachedWorldNpcs.some(
+        n => n.shipId === ship.id && n.ownerId === this.localPlayerId,
+      );
+    }
+    return false;
+  }
+
   private detectHoveredModule(worldState: WorldState): void {
     this.hoveredModule = null;
     
@@ -2496,10 +2510,11 @@ export class RenderSystem {
       
       // --- Pass 2: everything else (planks, cannons, masts, etc.) ---
       for (const module of ship.modules) {
-        // Ladders already checked in pass 1
-        if ((module.moduleData?.kind ?? module.kind) === 'ladder') continue;
+        // Ladders already checked in pass 1; decks are never interactively highlighted
+        const _pass2Kind = module.moduleData?.kind ?? module.kind;
+        if (_pass2Kind === 'ladder' || _pass2Kind === 'deck') continue;
 
-        const moduleKind = module.moduleData?.kind ?? module.kind;
+        const moduleKind = _pass2Kind;
 
         // Special handling for curved planks
         if (module.moduleData && moduleKind === 'plank' && module.moduleData.kind === 'plank' && module.moduleData.isCurved && module.moduleData.curveData) {
@@ -2696,6 +2711,7 @@ export class RenderSystem {
     this._localCompanyId = this._cachedLocalPlayer?.companyId ?? 0;
     this._cachedWorldShips   = worldState.ships;
     this._cachedWorldPlayers  = worldState.players;
+    this._cachedWorldNpcs     = worldState.npcs ?? [];
     this._cachedCompanies     = worldState.companies ?? [];
 
     // Rebuild scaffolded ship lookup: maps ship entity ID → owning shipyard structure
@@ -5847,26 +5863,6 @@ export class RenderSystem {
       }
     }
 
-    // Enemy faction: semi-transparent red overlay for hostile ships
-    if (isEnemyShip && ship.hull.length > 0) {
-      this.ctx.globalAlpha = 0.35 * (phase1Alpha < 1 ? phase1Alpha : 1);
-      this.ctx.fillStyle = '#cc2222';
-      this.ctx.beginPath();
-      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
-      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
-      this.ctx.closePath();
-      this.ctx.fill();
-    }
-
-    // Draw ship direction indicator
-    this.ctx.globalAlpha = phase1Alpha < 1 ? phase1Alpha : 1;
-    this.ctx.strokeStyle = '#ff0000';
-    this.ctx.lineWidth = 4 / cameraState.zoom;
-    this.ctx.beginPath();
-    this.ctx.moveTo(0, 0);
-    this.ctx.lineTo(80, 0);
-    this.ctx.stroke();
-    
     this.ctx.restore();
   }
 
@@ -10690,7 +10686,8 @@ export class RenderSystem {
       this.ctx.fillText(lines[i], tooltipX + padding, textY);
     }
     
-    // Draw green highlight outline around the hovered module
+    // Draw team-coloured highlight outline around the hovered module
+    const _htColor = this.isShipFriendly(ship) ? '#44ff88' : '#ff4444';
     this.ctx.save();
     
     // Check if it's a curved plank (needs special handling)
@@ -10702,7 +10699,7 @@ export class RenderSystem {
       this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
       
       // Draw curved plank highlight
-      this.ctx.strokeStyle = '#00ff00'; // Green
+      this.ctx.strokeStyle = _htColor;
       this.ctx.lineWidth = 3 / camera.getState().zoom;
       this.ctx.beginPath();
       
@@ -10781,7 +10778,7 @@ export class RenderSystem {
       this.ctx.rotate(module.localRot);
       
       // Draw highlight based on module type
-      this.ctx.strokeStyle = '#00ff00'; // Green
+      this.ctx.strokeStyle = _htColor;
       this.ctx.lineWidth = 3 / camera.getState().zoom;
       
       if (moduleData.kind === 'plank') {
