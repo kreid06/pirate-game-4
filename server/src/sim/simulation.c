@@ -2179,8 +2179,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                 continue;
             }
             
-            // Skip friendly-fire (same company, both non-neutral)
-            if (proj->firing_company != 0 && proj->firing_company == ship->company_id) continue;
+            // Cannonballs hit all ships including allies — no friendly-fire skip
 
             // Broad-phase bounding radius
             float dx = Q16_TO_FLOAT(ship->position.x) - Q16_TO_FLOAT(proj->position.x);
