@@ -5129,7 +5129,11 @@ export class RenderSystem {
     // Canonical world objects remain unchanged for collisions and gameplay.
     const renderShips = this.buildWrappedRenderCopies(worldState.ships, camera, 320);
     const renderPlayers = this.buildWrappedRenderCopies(
-      worldState.players,
+      // Dead players (health ≤ 0) are hidden from the world — they're either
+      // awaiting respawn or are stale zombie entries (e.g. from a page reload).
+      // The local player is excluded from this filter so camera/prediction
+      // keep working while the respawn screen is shown.
+      worldState.players.filter(p => p.health > 0 || p.id === this.localPlayerId),
       camera,
       80,
       (p) => p.id === this.localPlayerId,
@@ -9225,6 +9229,9 @@ export class RenderSystem {
   }
   
   private drawPlayer(player: Player, worldState: WorldState, camera: Camera): void {
+    // Dead players are not rendered (includes local player while respawn screen is up)
+    if (player.health <= 0) return;
+
     // Check if player is visible
     if (!camera.isWorldPositionVisible(player.position, 50)) {
       return; // Skip off-screen players

@@ -2519,6 +2519,8 @@ export class ClientApplication {
    * Handle input frame from input manager
    */
   private onInputFrame(inputFrame: InputFrame): void {
+    // Don't send input while the player is dead / respawn screen is open.
+    if (this.uiManager?.isRespawnScreenVisible()) return;
     // Send input to server
     this.networkManager.sendInput(inputFrame);
   }

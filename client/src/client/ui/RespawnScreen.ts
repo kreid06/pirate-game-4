@@ -235,6 +235,10 @@ export class RespawnScreen {
       }
     }
 
+    // ── Death border frame — drawn UNDER map content so the banner, button,
+    // and YOU DIED text are always readable above it.
+    this._renderDeathBorder(ctx, cw, ch, this._borderAlpha);
+
     // ── Map content (fades in during phase 2) ────────────────────────────────
     if (this._mapAlpha > 0) {
     ctx.save();
@@ -447,9 +451,6 @@ export class RespawnScreen {
     if (cloudAlpha > 0) {
       this._renderEdgeClouds(ctx, cw, ch, cloudAlpha);
     }
-
-    // ── Death border frame (always on top) ───────────────────────────────────
-    this._renderDeathBorder(ctx, cw, ch, this._borderAlpha);
 
     // ── Centered "YOU DIED" — fades in immediately, fades out as map appears ──
     if (youDiedAlpha > 0) {
