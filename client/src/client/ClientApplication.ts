@@ -1624,6 +1624,10 @@ export class ClientApplication {
         this.networkManager.sendClaimShip(shipId);
       });
 
+      this.uiManager.setShipRenameCallback((shipId, name) => {
+        this.networkManager.sendRenameShip(shipId, name);
+      });
+
       // Wire Leave Company button in the company menu — moves player back to Solo
       this.uiManager.setLeaveCompanyCallback(() => {
         this.networkManager.sendCommand('/AddPlayerToCompany solo');

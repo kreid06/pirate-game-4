@@ -96,6 +96,9 @@ export class ShipMenu {
   /** Called when the player confirms "Claim Ship" from the settings panel. */
   public onClaimShip?: (shipId: number) => void;
 
+  /** Called when the player submits a new name from the settings panel. */
+  public onRenameShip?: (shipId: number, name: string) => void;
+
   /** Hit areas for attribute rows populated each render frame. */
   private _upgradeHitAreas: Array<{ attr: number; serverName: string; x: number; y: number; w: number; h: number; affordable: boolean }> = [];
   private _npcHitAreas: Array<{ npc: import('../../sim/Types.js').Npc; x: number; y: number; w: number; h: number }> = [];
@@ -108,6 +111,8 @@ export class ShipMenu {
   private _gearBtnArea:    { x: number; y: number; w: number; h: number } | null = null;
   private _unclaimBtnArea: { x: number; y: number; w: number; h: number } | null = null;
   private _claimBtnArea:   { x: number; y: number; w: number; h: number } | null = null;
+  private _renameBtnArea:  { x: number; y: number; w: number; h: number } | null = null;
+  private _currentShipName = '';
 
   toggle(): void { this.visible = !this.visible; if (!this.visible) this._settingsOpen = false; }
   open():   void { this.visible = true;  }
@@ -131,6 +136,17 @@ export class ShipMenu {
 
     // Settings panel is open — handle its buttons
     if (this._settingsOpen) {
+      if (this._renameBtnArea) {
+        const r = this._renameBtnArea;
+        if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+          const newName = window.prompt('Enter ship name (max 31 chars):', this._currentShipName);
+          if (newName !== null && newName.trim().length > 0) {
+            this.onRenameShip?.(this._currentShipId, newName.trim().slice(0, 31));
+          }
+          this._settingsOpen = false;
+          return true;
+        }
+      }
       if (this._unclaimBtnArea) {
         const u = this._unclaimBtnArea;
         if (x >= u.x && x <= u.x + u.w && y >= u.y && y <= u.y + u.h) {
@@ -226,6 +242,7 @@ export class ShipMenu {
       return;
     }
 
+    this._currentShipName = ship.shipName ?? '';
     cur = this._identity(ctx, px, cur, ship);
     cur = this._hullAmmo(ctx, px, cur, ship);
     cur = this._modulesSection(ctx, px, cur, ship.modules);
@@ -293,7 +310,7 @@ export class ShipMenu {
     myCompany:    number,
   ): void {
     const OW = 320;
-    const OH = 160;
+    const OH = 220;
     const ox = px + Math.round((PANEL_W - OW) / 2);
     const oy = py + Math.round((PANEL_H - OH) / 2);
 
@@ -344,38 +361,54 @@ export class ShipMenu {
     const btnW = OW - 28;
     const btnH = 30;
     const btnX = ox + 14;
-    const btnY = oy + OH - btnH - 14;
+    const claimBtnY  = oy + OH - btnH - 14;
+    const renameBtnY = claimBtnY - btnH - 8;
 
     // Reset hit areas
+    this._renameBtnArea  = null;
     this._unclaimBtnArea = null;
     this._claimBtnArea   = null;
+
+    // RENAME SHIP button (always shown)
+    const currentName = this._currentShipName || '(unnamed)';
+    ctx.fillStyle = 'rgba(100,140,255,0.15)';
+    ctx.fillRect(btnX, renameBtnY, btnW, btnH);
+    ctx.strokeStyle = '#6699ff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(btnX, renameBtnY, btnW, btnH);
+    ctx.font = 'bold 13px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#aabbff';
+    ctx.fillText(`✏  RENAME SHIP  (${currentName})`, btnX + btnW / 2, renameBtnY + btnH / 2);
+    this._renameBtnArea = { x: btnX, y: renameBtnY, w: btnW, h: btnH };
 
     if (isUnclaimed) {
       // CLAIM SHIP button (green)
       ctx.fillStyle = 'rgba(68,204,102,0.15)';
-      ctx.fillRect(btnX, btnY, btnW, btnH);
+      ctx.fillRect(btnX, claimBtnY, btnW, btnH);
       ctx.strokeStyle = '#44cc66';
       ctx.lineWidth = 1;
-      ctx.strokeRect(btnX, btnY, btnW, btnH);
+      ctx.strokeRect(btnX, claimBtnY, btnW, btnH);
       ctx.font = 'bold 13px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#88ffaa';
-      ctx.fillText('⚓  CLAIM SHIP', btnX + btnW / 2, btnY + btnH / 2);
-      this._claimBtnArea = { x: btnX, y: btnY, w: btnW, h: btnH };
+      ctx.fillText('⚓  CLAIM SHIP', btnX + btnW / 2, claimBtnY + btnH / 2);
+      this._claimBtnArea = { x: btnX, y: claimBtnY, w: btnW, h: btnH };
     } else if (isOwnShip) {
       // UNCLAIM SHIP button (red)
       ctx.fillStyle = 'rgba(255,85,68,0.15)';
-      ctx.fillRect(btnX, btnY, btnW, btnH);
+      ctx.fillRect(btnX, claimBtnY, btnW, btnH);
       ctx.strokeStyle = '#ff5544';
       ctx.lineWidth = 1;
-      ctx.strokeRect(btnX, btnY, btnW, btnH);
+      ctx.strokeRect(btnX, claimBtnY, btnW, btnH);
       ctx.font = 'bold 13px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#ff8877';
-      ctx.fillText('⚓  UNCLAIM SHIP', btnX + btnW / 2, btnY + btnH / 2);
-      this._unclaimBtnArea = { x: btnX, y: btnY, w: btnW, h: btnH };
+      ctx.fillText('⚓  UNCLAIM SHIP', btnX + btnW / 2, claimBtnY + btnH / 2);
+      this._unclaimBtnArea = { x: btnX, y: claimBtnY, w: btnW, h: btnH };
     }
   }
 

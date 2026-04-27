@@ -1110,6 +1110,11 @@ export class UIManager {
     this.shipMenu.onClaimShip = cb;
   }
 
+  /** Set callback for the "Rename Ship" action from the ship settings panel. */
+  setShipRenameCallback(cb: (shipId: number, name: string) => void): void {
+    this.shipMenu.onRenameShip = cb;
+  }
+
   /** Set callback for the Leave Company button in the company menu. */
   setLeaveCompanyCallback(cb: () => void): void {
     this.companyMenu.onLeaveCompany = cb;
