@@ -391,25 +391,78 @@ export class RespawnScreen {
       ctx.fillText(opt.label, mx, my - (selected ? 13 : 9));
     }
 
-    // ── Death position marker ────────────────────────────────────────────────
+    // ── Death position marker (treasure-map X) ────────────────────────────────
     if (this._deathPos) {
       const dx = toScreenX(this._deathPos.x);
       const dy = toScreenY(this._deathPos.y);
-      const s = Math.max(6, toScreenLen(60));
+      const s = Math.max(8, toScreenLen(70));
+      const lw = Math.max(2, toScreenLen(14));
       ctx.save();
-      ctx.strokeStyle = '#ff2222';
-      ctx.lineWidth = Math.max(1.5, toScreenLen(12));
-      ctx.shadowColor = '#ff0000';
-      ctx.shadowBlur = 6;
+
+      // Outer glow pass
+      ctx.strokeStyle = 'rgba(180, 60, 0, 0.4)';
+      ctx.lineWidth = lw + 4;
+      ctx.lineCap = 'round';
+      ctx.shadowColor = '#cc3300';
+      ctx.shadowBlur = 12;
       ctx.beginPath();
       ctx.moveTo(dx - s, dy - s); ctx.lineTo(dx + s, dy + s);
       ctx.moveTo(dx + s, dy - s); ctx.lineTo(dx - s, dy + s);
       ctx.stroke();
+
+      // Dark ink shadow (slightly offset, like hand-drawn)
       ctx.shadowBlur = 0;
+      ctx.strokeStyle = 'rgba(30, 8, 0, 0.65)';
+      ctx.lineWidth = lw + 1.5;
+      ctx.beginPath();
+      ctx.moveTo(dx - s + 1.5, dy - s + 1.5); ctx.lineTo(dx + s + 1.5, dy + s + 1.5);
+      ctx.moveTo(dx + s + 1.5, dy - s + 1.5); ctx.lineTo(dx - s + 1.5, dy + s + 1.5);
+      ctx.stroke();
+
+      // Main aged-parchment red X
+      ctx.strokeStyle = '#c0392b';
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      ctx.moveTo(dx - s, dy - s); ctx.lineTo(dx + s, dy + s);
+      ctx.moveTo(dx + s, dy - s); ctx.lineTo(dx - s, dy + s);
+      ctx.stroke();
+
+      // Circle around the X (treasure map style)
+      ctx.strokeStyle = 'rgba(180, 50, 10, 0.7)';
+      ctx.lineWidth = Math.max(1, lw * 0.55);
+      ctx.setLineDash([Math.max(2, s * 0.35), Math.max(2, s * 0.2)]);
+      ctx.beginPath();
+      ctx.arc(dx, dy, s * 1.35, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Small serif-style end-caps on each arm tip
+      const cap = s * 0.22;
+      ctx.strokeStyle = '#c0392b';
+      ctx.lineWidth = Math.max(1.5, lw * 0.7);
+      for (const [ex, ey, angle] of [
+        [dx - s, dy - s, -Math.PI / 4],
+        [dx + s, dy + s, -Math.PI / 4],
+        [dx + s, dy - s, Math.PI / 4],
+        [dx - s, dy + s, Math.PI / 4],
+      ] as [number, number, number][]) {
+        ctx.save();
+        ctx.translate(ex, ey);
+        ctx.rotate(angle);
+        ctx.beginPath();
+        ctx.moveTo(-cap, 0); ctx.lineTo(cap, 0);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Label — weathered serif style
       ctx.textAlign = 'center';
-      ctx.font = `bold ${Math.max(9, Math.min(12, toScreenLen(60)))}px Consolas, monospace`;
-      ctx.fillStyle = '#ff4444';
-      ctx.fillText('YOU DIED HERE', dx, dy + s + 12);
+      ctx.font = `bold italic ${Math.max(9, Math.min(13, toScreenLen(65)))}px Georgia, serif`;
+      ctx.fillStyle = 'rgba(20, 6, 0, 0.6)';
+      ctx.fillText('you perished here', dx + 1, dy + s * 1.35 + 14 + 1);
+      ctx.fillStyle = '#d4a96a';
+      ctx.fillText('you perished here', dx, dy + s * 1.35 + 14);
+
       ctx.restore();
     }
 
