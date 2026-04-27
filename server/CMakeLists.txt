@@ -94,11 +94,13 @@ add_executable(pirate-server
 # System libraries
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_library(JSONC_LIBRARY json-c REQUIRED)
 target_link_libraries(pirate-server 
     Threads::Threads 
     m 
     OpenSSL::SSL 
     OpenSSL::Crypto
+    ${JSONC_LIBRARY}
 )
 
 # Optional: xxHash for fast hashing (fallback to simple hash if not available)

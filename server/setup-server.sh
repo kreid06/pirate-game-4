@@ -17,7 +17,7 @@ sudo chown -R $USER:$USER /opt/pirate-game
 # 2. Install dependencies
 echo "📦 Installing dependencies..."
 sudo apt-get update
-sudo apt-get install -y libssl3
+sudo apt-get install -y libssl3 libjson-c5
 
 # Install Node.js (for auth server) if not present
 if ! command -v node &> /dev/null; then
