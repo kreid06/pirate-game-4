@@ -184,7 +184,7 @@ export class IslandEditor {
 
       if (isHover) {
         // Coordinate label
-        ctx.font      = '11px monospace';
+        ctx.font      = '11px Georgia, serif';
         ctx.fillStyle = '#ffe066';
         ctx.fillText(`${Math.round(pt.x)}, ${Math.round(pt.y)}`, sp.x + 10, sp.y - 8);
       }
@@ -209,7 +209,7 @@ export class IslandEditor {
 
     // Vertex count badge
     ctx.save();
-    ctx.font      = '12px monospace';
+    ctx.font      = '12px Georgia, serif';
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
     ctx.fillText(
       `verts: ${activePoly.length}  |  island-local coords`,
@@ -492,7 +492,7 @@ export class IslandEditor {
         border: 1px solid rgba(245,200,66,0.4);
         border-radius: 6px;
         padding: 10px;
-        font-family: 'Courier New', monospace;
+        font-family: 'Courier New', Georgia, serif;
         font-size: 12px;
         color: #e8d59a;
         pointer-events: all;

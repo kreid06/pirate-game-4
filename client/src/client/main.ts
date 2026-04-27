@@ -78,7 +78,7 @@ export async function main(): Promise<void> {
     errorDiv.style.cssText = `
       position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
       background: #ff4444; color: white; padding: 20px; border-radius: 10px;
-      font-family: Arial, sans-serif; font-size: 16px; z-index: 10000;
+      font-family: Georgia, serif, Georgia, serif; font-size: 16px; z-index: 10000;
     `;
     errorDiv.textContent = `Failed to start game: ${error instanceof Error ? error.message : 'Unknown error'}`;
     document.body.appendChild(errorDiv);

@@ -339,7 +339,7 @@ export class PlayerMenu {
     }
 
     if (!player) {
-      ctx.font = '14px Consolas, monospace';
+      ctx.font = '14px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
@@ -365,13 +365,13 @@ export class PlayerMenu {
     ctx.fillStyle = 'rgba(255,215,0,0.06)';
     ctx.fillRect(px, py, PANEL_W, HEADER_H);
 
-    ctx.font = 'bold 17px Consolas, monospace';
+    ctx.font = 'bold 17px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = GOLD;
     ctx.fillText('⚔  CHARACTER', px + PAD, py + HEADER_H / 2);
 
-    ctx.font = '12px Consolas, monospace';
+    ctx.font = '12px Georgia, serif';
     ctx.textAlign = 'right';
     ctx.fillStyle = TEXT_DIM;
     ctx.fillText('[O / I / ESC] close', px + PANEL_W - PAD, py + HEADER_H / 2);
@@ -440,14 +440,14 @@ export class PlayerMenu {
           const pad = 7;
           ctx.fillStyle    = def.color;
           ctx.fillRect(sx + pad, sy + pad, ESLOTSZ - pad * 2, ESLOTSZ - pad * 2);
-          ctx.font         = 'bold 18px Consolas, monospace';
+          ctx.font         = 'bold 18px Georgia, serif';
           ctx.fillStyle    = '#fff';
           ctx.textAlign    = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(def.symbol, sx + ESLOTSZ / 2, sy + ESLOTSZ / 2);
         }
 
-        ctx.font         = '10px Consolas, monospace';
+        ctx.font         = '10px Georgia, serif';
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'top';
         ctx.fillStyle    = item !== 'none' ? TEXT_HEAD : TEXT_DIM;
@@ -468,7 +468,7 @@ export class PlayerMenu {
     let sty = equipTop;
 
     // Sub-label
-    ctx.font         = 'bold 11px Consolas, monospace';
+    ctx.font         = 'bold 11px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = GOLD;
@@ -503,7 +503,7 @@ export class PlayerMenu {
         ctx.fillStyle = BG_STRIPE;
         ctx.fillRect(statusX, sty, statusW, STATUS_R);
       }
-      ctx.font         = '12px Consolas, monospace';
+      ctx.font         = '12px Georgia, serif';
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = TEXT_DIM;
@@ -522,7 +522,7 @@ export class PlayerMenu {
     const xpPct      = isMax ? 1 : Math.min(xp / xpToNext, 1);
     const statPoints = player.statPoints ?? 0;
 
-    ctx.font         = 'bold 11px Consolas, monospace';
+    ctx.font         = 'bold 11px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = GOLD;
@@ -539,7 +539,7 @@ export class PlayerMenu {
     // Level label + XP bar on one line
     const BAR_H = 7;
     const LVL_W = 54;
-    ctx.font         = 'bold 12px Consolas, monospace';
+    ctx.font         = 'bold 12px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = GOLD;
@@ -556,7 +556,7 @@ export class PlayerMenu {
     sty += BAR_H + 3;
 
     const xpLabel = isMax ? 'MAX LEVEL' : `${xp} / ${xpToNext} XP`;
-    ctx.font      = '10px Consolas, monospace';
+    ctx.font      = '10px Georgia, serif';
     ctx.textAlign = 'right';
     ctx.fillStyle = TEXT_DIM;
     ctx.fillText(xpLabel, statusX + statusW, sty);
@@ -584,19 +584,19 @@ export class PlayerMenu {
       }
 
       // Label
-      ctx.font         = 'bold 12px Consolas, monospace';
+      ctx.font         = 'bold 12px Georgia, serif';
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = stat.color;
       ctx.fillText(stat.label, statusX + 4, sty + STAT_ROW_H / 2);
 
       // Current actual value (e.g. "140 HP")
-      ctx.font      = 'bold 11px Consolas, monospace';
+      ctx.font      = 'bold 11px Georgia, serif';
       ctx.fillStyle = statLvl > 0 ? stat.color : TEXT_DIM;
       ctx.fillText(stat.currentVal(player, statLvl), statusX + 70, sty + STAT_ROW_H / 2);
 
       // Per-point gain — green if can afford, grey if not
-      ctx.font      = '10px Consolas, monospace';
+      ctx.font      = '10px Georgia, serif';
       ctx.fillStyle = afford ? '#66dd88' : TEXT_DIM;
       ctx.fillText(stat.gainPerPt, statusX + 160, sty + STAT_ROW_H / 2);
 
@@ -608,7 +608,7 @@ export class PlayerMenu {
       ctx.roundRect(sbtnX, sbtnY, SBTN_W, SBTN_H, 3);
       ctx.fill();
       ctx.stroke();
-      ctx.font         = 'bold 14px Consolas, monospace';
+      ctx.font         = 'bold 14px Georgia, serif';
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = afford ? '#aaffaa' : '#445';
@@ -626,7 +626,7 @@ export class PlayerMenu {
       const { stat, sbtnX, sbtnY } = hoveredStat;
       const tipText = `next: ${stat.gainPerPt}`;
       const TIP_PAD = 6;
-      ctx.font = 'bold 10px Consolas, monospace';
+      ctx.font = 'bold 10px Georgia, serif';
       const tipW = ctx.measureText(tipText).width + TIP_PAD * 2;
       const tipH = 18;
       const tipX = Math.min(sbtnX + SBTN_W / 2 - tipW / 2, statusX + statusW - tipW);
@@ -726,7 +726,7 @@ export class PlayerMenu {
         ctx.stroke();
       }
 
-      ctx.font         = `${isActive ? 'bold ' : ''}10px Consolas, monospace`;
+      ctx.font         = `${isActive ? 'bold ' : ''}10px Georgia, serif`;
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = isActive ? GOLD : TEXT_DIM;
@@ -767,7 +767,7 @@ export class PlayerMenu {
         ctx.strokeStyle = outDef.borderColor;
         ctx.lineWidth   = 1;
         ctx.strokeRect(iconX, iconY, ICON, ICON);
-        ctx.font         = 'bold 14px Consolas, monospace';
+        ctx.font         = 'bold 14px Georgia, serif';
         ctx.fillStyle    = '#fff';
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
@@ -775,7 +775,7 @@ export class PlayerMenu {
 
         // Output name + qty
         const textX = iconX + ICON + 6;
-        ctx.font         = 'bold 12px Consolas, monospace';
+        ctx.font         = 'bold 12px Georgia, serif';
         ctx.textAlign    = 'left';
         ctx.textBaseline = 'top';
         ctx.fillStyle    = canAfford ? TEXT_HEAD : TEXT_DIM;
@@ -783,7 +783,7 @@ export class PlayerMenu {
         ctx.fillText(nameStr, textX, ry + 7);
 
         // Ingredients with per-item colour
-        ctx.font = '10px Consolas, monospace';
+        ctx.font = '10px Georgia, serif';
         ctx.textBaseline = 'top';
         let ix = textX;
         const ingY = ry + 23;
@@ -805,7 +805,7 @@ export class PlayerMenu {
         ctx.roundRect(btnX, btnY, BTN_W, BTN_H, 3);
         ctx.fill();
         ctx.stroke();
-        ctx.font         = 'bold 11px Consolas, monospace';
+        ctx.font         = 'bold 11px Georgia, serif';
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillStyle    = canAfford ? '#aaffaa' : '#556';
@@ -927,14 +927,14 @@ export class PlayerMenu {
           const pad = 6;
           ctx.fillStyle = def.color;
           ctx.fillRect(sx + pad, sy + pad, ISZ - pad * 2, ISZ - pad * 2);
-          ctx.font         = 'bold 16px Consolas, monospace';
+          ctx.font         = 'bold 16px Georgia, serif';
           ctx.fillStyle    = '#fff';
           ctx.textAlign    = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(def.symbol, sx + ISZ / 2, sy + ISZ / 2);
 
           if (slot.quantity > 1) {
-            ctx.font         = '10px Consolas, monospace';
+            ctx.font         = '10px Georgia, serif';
             ctx.textAlign    = 'right';
             ctx.textBaseline = 'bottom';
             ctx.fillStyle    = '#fff';
@@ -946,7 +946,7 @@ export class PlayerMenu {
     }
 
     // Hotbar key-number labels below first row
-    ctx.font         = '10px Consolas, monospace';
+    ctx.font         = '10px Georgia, serif';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'top';
     for (let i = 0; i < HOTBAR_SLOTS; i++) {
@@ -980,7 +980,7 @@ export class PlayerMenu {
         const pad = 6;
         ctx.fillStyle = def.color;
         ctx.fillRect(gx + pad, gy + pad, ISZ - pad * 2, ISZ - pad * 2);
-        ctx.font = 'bold 16px Consolas, monospace';
+        ctx.font = 'bold 16px Georgia, serif';
         ctx.fillStyle = '#fff';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -1020,7 +1020,7 @@ export class PlayerMenu {
     const W      = 220;
     const LINE   = 16;
     const nameH  = 18;
-    const descLines = this._wrapText(ctx, def.description, W - PAD_T * 2, '12px Consolas, monospace');
+    const descLines = this._wrapText(ctx, def.description, W - PAD_T * 2, '12px Georgia, serif');
     const quantityLine = slot.quantity > 1 ? 1 : 0;
     const totalH = PAD_T + nameH + 4 + LINE + 4 + descLines.length * LINE + quantityLine * LINE + PAD_T;
 
@@ -1051,19 +1051,19 @@ export class PlayerMenu {
     let cy = ty + PAD_T;
 
     ctx.fillStyle    = '#ffffff';
-    ctx.font         = 'bold 14px Consolas, monospace';
+    ctx.font         = 'bold 14px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillText(def.name, tx + PAD_T + 4, cy);
     cy += nameH + 4;
 
     ctx.fillStyle = '#888';
-    ctx.font      = '11px Consolas, monospace';
+    ctx.font      = '11px Georgia, serif';
     ctx.fillText(`ID: ${itemId}   [${def.category}]`, tx + PAD_T + 4, cy);
     cy += LINE + 4;
 
     ctx.fillStyle = '#ccc';
-    ctx.font      = '12px Consolas, monospace';
+    ctx.font      = '12px Georgia, serif';
     for (const line of descLines) {
       ctx.fillText(line, tx + PAD_T + 4, cy);
       cy += LINE;
@@ -1161,7 +1161,7 @@ export class PlayerMenu {
         ctx.stroke();
       }
 
-      ctx.font = `${isActive ? 'bold ' : ''}12px Consolas, monospace`;
+      ctx.font = `${isActive ? 'bold ' : ''}12px Georgia, serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = isActive ? GOLD : TEXT_DIM;
@@ -1181,13 +1181,13 @@ export class PlayerMenu {
     const midY = Math.round((contentTop + contentBottom) / 2);
     const midX = px + PANEL_W / 2;
 
-    ctx.font = '14px Consolas, monospace';
+    ctx.font = '14px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = TEXT_DIM;
     ctx.fillText('Skill tree — coming soon.', midX, midY - 12);
 
-    ctx.font = '12px Consolas, monospace';
+    ctx.font = '12px Georgia, serif';
     ctx.fillStyle = 'rgba(120,120,136,0.5)';
     ctx.fillText('Active abilities, passives and talent trees will appear here.', midX, midY + 12);
   }
@@ -1203,7 +1203,7 @@ export class PlayerMenu {
     ctx.fillStyle = 'rgba(255,215,0,0.08)';
     ctx.fillRect(px, py, PANEL_W, h);
 
-    ctx.font = 'bold 12px Consolas, monospace';
+    ctx.font = 'bold 12px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = GOLD;

@@ -486,7 +486,7 @@ export class CommandConsole {
         flex-direction: column;
         pointer-events: all;
         z-index: 900;
-        font-family: 'Courier New', Courier, monospace;
+        font-family: 'Courier New', Courier, Georgia, serif;
         font-size: 13px;
       }
 
@@ -571,7 +571,7 @@ export class CommandConsole {
         position: absolute;
         visibility: hidden;
         white-space: pre;
-        font-family: 'Courier New', Courier, monospace;
+        font-family: 'Courier New', Courier, Georgia, serif;
         font-size: 13px;
         pointer-events: none;
         left: 0; top: 0;

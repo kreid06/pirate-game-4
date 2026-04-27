@@ -1357,7 +1357,7 @@ export class RenderSystem {
         const labelY = hintScreen.y - 42;
         const tCtx = this.ctx;
         tCtx.save();
-        tCtx.font = 'bold 13px sans-serif';
+        tCtx.font = 'bold 13px Georgia, serif';
         tCtx.textAlign = 'center';
         const tw = tCtx.measureText(label).width;
         tCtx.fillStyle = 'rgba(30,10,10,0.7)';
@@ -1586,7 +1586,7 @@ export class RenderSystem {
     const ch   = this.canvas.height;
     const text = this._moveToHint;
     ctx.save();
-    ctx.font      = 'bold 16px Arial';
+    ctx.font      = 'bold 16px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     const tw  = ctx.measureText(text).width;
@@ -2122,7 +2122,7 @@ export class RenderSystem {
 
       /* Owner name above */
       const fontSize = Math.round(10 * sz);
-      ctx.font = `bold ${fontSize}px monospace`;
+      ctx.font = `bold ${fontSize}px Georgia, serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
       ctx.fillStyle = isNear ? '#ffe97a' : '#dddddd';
@@ -2135,14 +2135,14 @@ export class RenderSystem {
       /* Remaining time */
       const minLeft = Math.ceil(t.remainingMs / 60000);
       const timerText = `${minLeft}m`;
-      ctx.font = `${Math.round(8 * sz)}px monospace`;
+      ctx.font = `${Math.round(8 * sz)}px Georgia, serif`;
       ctx.fillStyle = minLeft <= 2 ? '#ff7070' : (isNear ? '#aaffaa' : '#aaaaaa');
       ctx.strokeText(timerText, 0, -h - 4 * sz - fontSize - 2 * sz);
       ctx.fillText(timerText, 0, -h - 4 * sz - fontSize - 2 * sz);
 
       /* Interact hint */
       if (isNear) {
-        ctx.font = `${Math.round(9 * sz)}px monospace`;
+        ctx.font = `${Math.round(9 * sz)}px Georgia, serif`;
         ctx.fillStyle = '#ffffff';
         ctx.fillText('[E] Collect', 0, 14 * sz);
       }
@@ -2250,7 +2250,7 @@ export class RenderSystem {
       if (pile.items.length > 1) {
         const badge = pile.items.length.toString();
         const bsz = Math.round(9 * sz);
-        ctx.font = `bold ${bsz}px monospace`;
+        ctx.font = `bold ${bsz}px Georgia, serif`;
         const bw2 = ctx.measureText(badge).width + 6 * sz;
         const bx = bw / 2 - 2 * sz;
         const bby = -bh + 4 * sz;
@@ -2268,7 +2268,7 @@ export class RenderSystem {
       if (isNear) {
         const hint = pile.items.length > 1 ? '[E] Pick Up  [Hold E] Choose' : '[E] Pick Up';
         const fsz = Math.round(9 * sz);
-        ctx.font = `${fsz}px monospace`;
+        ctx.font = `${fsz}px Georgia, serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         ctx.fillStyle = '#ffffff';
@@ -2891,7 +2891,7 @@ export class RenderSystem {
     
     // Draw loading message
     this.ctx.fillStyle = '#ffffff';
-    this.ctx.font = '48px Arial';
+    this.ctx.font = '48px Georgia, serif';
     this.ctx.textAlign = 'center';
     
     let message = 'Loading...';
@@ -3541,7 +3541,7 @@ export class RenderSystem {
     const textCol   = inRange ? '#f0c040' : '#aaaaaa';
     const fontSize  = Math.max(10, Math.round(13 * zoom));
     ctx.save();
-    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.font = `bold ${fontSize}px Georgia, serif`;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'bottom';
     const textW = ctx.measureText(label).width;
@@ -3711,7 +3711,7 @@ export class RenderSystem {
     const textCol   = inRange ? '#c0ff80' : '#aaaaaa';
     const fontSize  = Math.max(10, Math.round(12 * zoom));
     ctx.save();
-    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.font = `bold ${fontSize}px Georgia, serif`;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'bottom';
     const textW = ctx.measureText(label).width;
@@ -3920,7 +3920,7 @@ export class RenderSystem {
         }
 
         // ⚒ icon centred on the work surface
-        ctx.font         = `${Math.max(7, Math.round(10 * zoom))}px monospace`;
+        ctx.font         = `${Math.max(7, Math.round(10 * zoom))}px Georgia, serif`;
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillStyle    = 'rgba(255, 210, 100, 0.9)';
@@ -4219,7 +4219,7 @@ export class RenderSystem {
           ctx.setLineDash([]);
           const stairPulse = 0.5 + 0.3 * Math.sin(performance.now() * 0.002);
           ctx.fillStyle = `rgba(220, 200, 100, ${stairPulse.toFixed(2)})`;
-          ctx.font = `bold ${Math.max(8, Math.round(10 * zoom))}px Consolas, monospace`;
+          ctx.font = `bold ${Math.max(8, Math.round(10 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText('▲', cx - hw + ARM_T * 0.5, bayY1 - ARM_T * 0.5);
@@ -4321,7 +4321,7 @@ export class RenderSystem {
         // Label "WRECK" when hovered
         if (isHovered) {
           ctx.save();
-          ctx.font = `bold ${Math.max(10, 12 * zoom)}px monospace`;
+          ctx.font = `bold ${Math.max(10, 12 * zoom)}px Georgia, serif`;
           ctx.textAlign = 'center';
           ctx.fillStyle = 'rgba(0,0,0,0.6)';
           ctx.fillText(`⚓ Wreck (${s.hp} loot)`, ssp.x + 1, ssp.y - wrsz * 0.7 + 1);
@@ -4433,12 +4433,12 @@ export class RenderSystem {
       ctx.save();
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'bottom';
-      ctx.font      = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
+      ctx.font      = `bold ${Math.max(10, Math.round(12 * zoom))}px Georgia, serif`;
       ctx.fillStyle = '#ffe8a0';
       ctx.fillText(label, ssp.x, tipY);
 
       const lineH = Math.max(12, 14 * zoom);
-      ctx.font = `${Math.max(9, Math.round(10 * zoom))}px Consolas, monospace`;
+      ctx.font = `${Math.max(9, Math.round(10 * zoom))}px Georgia, serif`;
 
       // Owner line (colored by faction)
       ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
@@ -4750,7 +4750,7 @@ export class RenderSystem {
       ctx.setLineDash([]);
       const syLabelY = msp.y - gHH - 6;
       ctx.globalAlpha = 1;
-      ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
+      ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Georgia, serif`;
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'bottom';
       if (!inWater) {
@@ -4947,7 +4947,7 @@ export class RenderSystem {
     // Label above the ghost
     const labelY = msp.y - ghostH / 2 - 6;
     ctx.globalAlpha = 1;
-    ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Consolas, monospace`;
+    ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Georgia, serif`;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'bottom';
     if (waterBlocked) {
@@ -5921,7 +5921,7 @@ export class RenderSystem {
 
     // ── "Under Construction" label ──
     ctx.rotate(-(ship.rotation - cameraState.rotation)); // undo ship rotation for text
-    ctx.font = `bold ${Math.max(10, Math.round(12 / zoom))}px Consolas, monospace`;
+    ctx.font = `bold ${Math.max(10, Math.round(12 / zoom))}px Georgia, serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = `rgba(220, 180, 80, ${(0.85 * pulse).toFixed(2)})`;
@@ -7699,7 +7699,7 @@ export class RenderSystem {
         this.ctx.arc(-9, -5, badgeR, 0, Math.PI * 2);
         this.ctx.fill();
         this.ctx.fillStyle = '#fff';
-        this.ctx.font = `bold ${isActive ? 9 : 8}px Consolas, monospace`;
+        this.ctx.font = `bold ${isActive ? 9 : 8}px Georgia, serif`;
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'middle';
         this.ctx.fillText(String(info.g), -9, -5);
@@ -9052,7 +9052,7 @@ export class RenderSystem {
     const labelY = screenPos.y - 120 * zoom;
 
     this.ctx.save();
-    this.ctx.font = `bold ${Math.max(11, 13 * zoom)}px Arial`;
+    this.ctx.font = `bold ${Math.max(11, 13 * zoom)}px Georgia, serif`;
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'middle';
 
@@ -9153,7 +9153,7 @@ export class RenderSystem {
 
     // Label text above arc
     const fontSize = Math.max(10, 11 * zoom);
-    this.ctx.font = `bold ${fontSize}px Arial`;
+    this.ctx.font = `bold ${fontSize}px Georgia, serif`;
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'bottom';
     const label = cf.contested ? 'CONTESTED' : `${Math.round(progress * 100)}%`;
@@ -9284,7 +9284,7 @@ export class RenderSystem {
     // If mounted, draw mount indicator
     if (player.isMounted) {
       this.ctx.fillStyle = '#ffffff';
-      this.ctx.font = '12px Arial';
+      this.ctx.font = '12px Georgia, serif';
       this.ctx.fillText('⚓', screenPos.x - 5, screenPos.y - scaledRadius - 5);
     }
     
@@ -9338,7 +9338,7 @@ export class RenderSystem {
     
     // Draw player name above the player
     if (player.name) {
-      this.ctx.font = '14px Arial';
+      this.ctx.font = '14px Georgia, serif';
       this.ctx.textAlign = 'center';
       this.ctx.textBaseline = 'bottom';
       
@@ -9733,7 +9733,7 @@ export class RenderSystem {
     // Name label only when standing still (avoid visual noise during movement)
     if (!isMoving) {
       const fontSize = Math.max(10, Math.min(14, 12 * cameraState.zoom));
-      this.ctx.font = `${fontSize}px Arial`;
+      this.ctx.font = `${fontSize}px Georgia, serif`;
       this.ctx.textAlign = 'center';
       this.ctx.textBaseline = 'bottom';
       const nameY = screenPos.y - radius - 3;
@@ -9751,7 +9751,7 @@ export class RenderSystem {
         this.ctx.fillStyle = '#ffdd00';
         this.ctx.strokeStyle = '#222';
         this.ctx.lineWidth = 1;
-        this.ctx.font = `bold ${lockSize + 2}px Arial`;
+        this.ctx.font = `bold ${lockSize + 2}px Georgia, serif`;
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'bottom';
         this.ctx.fillText('🔒', lx, ly);
@@ -9764,7 +9764,7 @@ export class RenderSystem {
         const debugLabel = `${ROLE_SHORT[npc.role] ?? '?'}:${STATE_SHORT[npc.state] ?? '?'}`
           + (npc.assignedWeaponId ? ` c${npc.assignedWeaponId}` : '');
         const debugFontSize = Math.max(8, Math.min(11, 10 * cameraState.zoom));
-        this.ctx.font = `${debugFontSize}px monospace`;
+        this.ctx.font = `${debugFontSize}px Georgia, serif`;
         const dtw = this.ctx.measureText(debugLabel).width;
         const debugY = screenPos.y + radius + debugFontSize + 2;
         this.ctx.textBaseline = 'bottom';
@@ -9911,7 +9911,7 @@ export class RenderSystem {
           
           // Draw module ID label
           this.ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-          this.ctx.font = `${12 / camera.getState().zoom}px monospace`;
+          this.ctx.font = `${12 / camera.getState().zoom}px Georgia, serif`;
           this.ctx.textAlign = 'center';
           this.ctx.textBaseline = 'middle';
           this.ctx.fillText(`#${module.id}`, 0, 0);
@@ -9937,7 +9937,7 @@ export class RenderSystem {
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.fillStyle = 'rgba(0,220,255,0.85)';
-      ctx.font = `${11}px monospace`;
+      ctx.font = `${11}px Georgia, serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
       ctx.fillText(`ship#${ship.id} broad`, sc.x, sc.y - SHIP_BOUNDING_R * zoom - 4);
@@ -10033,7 +10033,7 @@ export class RenderSystem {
         ctx.moveTo(isc.x, isc.y - 10); ctx.lineTo(isc.x, isc.y + 10);
         ctx.stroke();
         ctx.fillStyle = 'rgba(255,255,255,0.9)';
-        ctx.font = '11px monospace';
+        ctx.font = '11px Georgia, serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'bottom';
         ctx.fillText(`island#${isl.id} (${isl.preset}) verts:${isl.vertices.length}`, isc.x, isc.y - pBroadR * zoom - 4);
@@ -10094,7 +10094,7 @@ export class RenderSystem {
       ctx.moveTo(sc.x, sc.y - 8); ctx.lineTo(sc.x, sc.y + 8);
       ctx.stroke();
       ctx.fillStyle    = 'rgba(255,255,255,0.9)';
-      ctx.font         = '11px monospace';
+      ctx.font         = '11px Georgia, serif';
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'bottom';
       ctx.fillText(
@@ -10149,7 +10149,7 @@ export class RenderSystem {
         originY + cx * sinR + cy * cosR,
       ));
       ctx.fillStyle = color;
-      ctx.font = '10px monospace';
+      ctx.font = '10px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(label, csc.x, csc.y);
@@ -10170,7 +10170,7 @@ export class RenderSystem {
       ctx.moveTo(sc.x, sc.y - 10); ctx.lineTo(sc.x, sc.y + 10);
       ctx.stroke();
       ctx.fillStyle = 'rgba(255,200,0,0.9)';
-      ctx.font = '11px monospace';
+      ctx.font = '11px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
       ctx.fillText(`shipyard#${sy.id} rot=${rot}°`, sc.x, sc.y - 12);
@@ -10305,7 +10305,7 @@ export class RenderSystem {
     const barW      = 180;
     const lineH     = 18;
 
-    this.ctx.font = '14px monospace';
+    this.ctx.font = '14px Georgia, serif';
     this.ctx.textAlign    = 'left';
     this.ctx.textBaseline = 'top';
 
@@ -10332,12 +10332,12 @@ export class RenderSystem {
 
     // Ship title (gold)
     this.ctx.fillStyle = '#ffe066';
-    this.ctx.font = '14px monospace';
+    this.ctx.font = '14px Georgia, serif';
     this.ctx.fillText(shipTitle, tx + padding, cy);  cy += lineH;
 
     // Company
     this.ctx.fillStyle = '#9ab';
-    this.ctx.font = '12px monospace';
+    this.ctx.font = '12px Georgia, serif';
     this.ctx.fillText(`Company: ${companyName}`, tx + padding, cy);  cy += lineH;
 
     const bx = tx + padding;
@@ -10359,7 +10359,7 @@ export class RenderSystem {
 
     // Deck HP label  (format: current / target / max)
     this.ctx.fillStyle = '#ccc';
-    this.ctx.font = '12px monospace';
+    this.ctx.font = '12px Georgia, serif';
     this.ctx.fillText(deckText, bx, cy);  cy += lineH;
     // Plank bar: grey background, amber target-HP marker, green/amber/red current-HP fill
     this.ctx.fillStyle = '#333';
@@ -10418,7 +10418,7 @@ export class RenderSystem {
     const barW    = 180;
     const lineH   = 18;
 
-    this.ctx.font = '14px monospace';
+    this.ctx.font = '14px Georgia, serif';
     this.ctx.textAlign = 'left';
     this.ctx.textBaseline = 'top';
 
@@ -10471,7 +10471,7 @@ export class RenderSystem {
 
     // Sub-line (dim)
     this.ctx.fillStyle = '#9ab';
-    this.ctx.font = '12px monospace';
+    this.ctx.font = '12px Georgia, serif';
     this.ctx.fillText(subText, tx + padding, cy);  cy += lineH;
 
     // Company / owner line — color swatch + text
@@ -10480,11 +10480,11 @@ export class RenderSystem {
     this.ctx.fillStyle = swatchColor;
     this.ctx.fillRect(tx + padding, cy + 3, swatchSz, swatchSz);
     this.ctx.fillStyle = sameCompany ? '#ffe066' : '#ccc';
-    this.ctx.font = '12px monospace';
+    this.ctx.font = '12px Georgia, serif';
     this.ctx.fillText(companyText, tx + padding + swatchSz + 5, cy);  cy += lineH;
 
     // HP label
-    this.ctx.font = '12px monospace';
+    this.ctx.font = '12px Georgia, serif';
     this.ctx.fillStyle = '#ccc';
     this.ctx.fillText(hpText, tx + padding, cy);  cy += lineH;
 
@@ -10504,7 +10504,7 @@ export class RenderSystem {
     if (sameCompany) {
       // XP label
       this.ctx.fillStyle = '#9ab';
-      this.ctx.font = '12px monospace';
+      this.ctx.font = '12px Georgia, serif';
       this.ctx.fillText(`XP ${npc.xp} / ${xpToNext}  (next level)`, tx + padding, cy);  cy += lineH;
       // XP bar
       this.ctx.fillStyle = '#333';
@@ -10612,7 +10612,7 @@ export class RenderSystem {
     lines.push(interactLabel);
     
     // Measure text dimensions
-    this.ctx.font = '14px monospace';
+    this.ctx.font = '14px Georgia, serif';
     this.ctx.textAlign = 'left';
     this.ctx.textBaseline = 'top';
     
@@ -10948,7 +10948,7 @@ export class RenderSystem {
       // Label
       this.ctx.globalAlpha = (isSnap ? snapPulse : pulse) * 0.9;
       this.ctx.fillStyle = isSnap ? '#44ffee' : '#99eebb';
-      this.ctx.font = isSnap ? 'bold 10px Consolas, monospace' : '9px Consolas, monospace';
+      this.ctx.font = isSnap ? 'bold 10px Georgia, serif' : '9px Georgia, serif';
       this.ctx.textAlign = 'center';
       this.ctx.textBaseline = 'bottom';
       const labelY = g.kind === 'deck' ? -64 : -22;
@@ -11138,7 +11138,7 @@ export class RenderSystem {
       ? `Place ${kind} [click]`
       : invalidReason || 'Not on ship';
     this.ctx.save();
-    this.ctx.font = 'bold 12px Consolas, monospace';
+    this.ctx.font = 'bold 12px Georgia, serif';
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'top';
     const tw = this.ctx.measureText(label).width + 10;
@@ -11327,7 +11327,7 @@ export class RenderSystem {
     const labelColor = valid ? '#88ff88' : ghostSnap ? '#44ddcc' : ghostBlocked ? '#ffaa44' : '#ff8888';
 
     this.ctx.save();
-    this.ctx.font = 'bold 13px Consolas, monospace';
+    this.ctx.font = 'bold 13px Georgia, serif';
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'top';
     this.ctx.fillStyle = 'rgba(0,0,0,0.6)';

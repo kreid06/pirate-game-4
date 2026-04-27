@@ -421,12 +421,12 @@ function render(): void {
     ctx.fill();
     ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5; ctx.stroke();
 
-    ctx.font      = '10px monospace';
+    ctx.font      = '10px Georgia, serif';
     ctx.fillStyle = hover ? '#ffe066' : 'rgba(255,255,255,0.45)';
     ctx.fillText(String(vi), sp.x + 9, sp.y - 6);
 
     if (hover) {
-      ctx.font = '11px monospace'; ctx.fillStyle = '#ffe066';
+      ctx.font = '11px Georgia, serif'; ctx.fillStyle = '#ffe066';
       ctx.fillText(`(${Math.round(pt.x)}, ${Math.round(pt.y)})`, sp.x + 9, sp.y + 7);
     }
     ctx.restore();
@@ -495,7 +495,7 @@ function render(): void {
       const cy = sub.sandVerts.reduce((s, v) => s + v.y, 0) / sub.sandVerts.length;
       const sc = w2s(isl.cx + cx, isl.cy + cy);
       ctx.save();
-      ctx.font = '11px monospace';
+      ctx.font = '11px Georgia, serif';
       ctx.fillStyle = isActiveSub ? '#f5c842' : 'rgba(245,200,66,0.45)';
       ctx.textAlign = 'center';
       ctx.fillText(`islet ${si + 1}`, sc.x, sc.y + 4);
@@ -514,11 +514,11 @@ function render(): void {
         ctx.arc(sp.x, sp.y, hover ? HOVER_RADIUS : VERTEX_RADIUS, 0, Math.PI * 2);
         ctx.fillStyle   = hover ? '#ffe066' : 'rgba(255,255,255,0.85)';
         ctx.fill(); ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5; ctx.stroke();
-        ctx.font = '10px monospace';
+        ctx.font = '10px Georgia, serif';
         ctx.fillStyle = hover ? '#ffe066' : 'rgba(255,255,255,0.45)';
         ctx.fillText(String(vi), sp.x + 9, sp.y - 6);
         if (hover) {
-          ctx.font = '11px monospace'; ctx.fillStyle = '#ffe066';
+          ctx.font = '11px Georgia, serif'; ctx.fillStyle = '#ffe066';
           ctx.fillText(`(${Math.round(pt.x)}, ${Math.round(pt.y)})`, sp.x + 9, sp.y + 7);
         }
         ctx.restore();
@@ -529,7 +529,7 @@ function render(): void {
   // Sub-island mode HUD
   if (activeSubIslandIdx !== null) {
     ctx.save();
-    ctx.font = 'bold 13px monospace';
+    ctx.font = 'bold 13px Georgia, serif';
     ctx.fillStyle = 'rgba(245,200,66,0.85)';
     ctx.fillText(`✏ Editing Islet ${activeSubIslandIdx + 1}  [${activeLayerKey === 'innerGrass' ? 'Grass' : 'Sand'}]`, 12, 22);
     ctx.restore();
@@ -897,7 +897,7 @@ document.getElementById('btn-export')!.addEventListener('click', () => {
     () => toast('Copied to clipboard!'),
     () => {
       const w = window.open('', '_blank', 'width=700,height=600');
-      w?.document.write(`<pre style="font:12px monospace;background:#111;color:#cfc;padding:16px">${
+      w?.document.write(`<pre style="font:12px Georgia, serif;background:#111;color:#cfc;padding:16px">${
         jsonFinal.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
       }</pre>`);
     },
@@ -939,7 +939,7 @@ function toast(msg: string): void {
   Object.assign(d.style, {
     position:'fixed', bottom:'24px', right:'24px',
     background:'rgba(30,90,30,0.92)', color:'#a8e890',
-    padding:'8px 14px', borderRadius:'4px', fontFamily:'monospace', fontSize:'13px',
+    padding:'8px 14px', borderRadius:'4px', fontFamily:'Georgia, serif', fontSize:'13px',
     zIndex:'9999', transition:'opacity 0.4s',
   });
   document.body.appendChild(d);

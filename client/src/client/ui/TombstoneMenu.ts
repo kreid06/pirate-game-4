@@ -182,7 +182,7 @@ export class TombstoneMenu {
 
     // Player side title (left)
     ctx.fillStyle = '#e8e0cc';
-    ctx.font = 'bold 13px Consolas, monospace';
+    ctx.font = 'bold 13px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText('Your Inventory', PAD, HEADER_H / 2);
@@ -195,7 +195,7 @@ export class TombstoneMenu {
     // Close button [X]
     const cx = PANEL_W - 10, cy = HEADER_H / 2;
     ctx.fillStyle = '#ff6666';
-    ctx.font = 'bold 14px monospace';
+    ctx.font = 'bold 14px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('✕', cx, cy);
@@ -311,14 +311,14 @@ export class TombstoneMenu {
 
     // Symbol
     ctx.fillStyle = '#ffffff';
-    ctx.font = `bold ${Math.round(ISZ * 0.38)}px monospace`;
+    ctx.font = `bold ${Math.round(ISZ * 0.38)}px Georgia, serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(def?.symbol ?? '?', sx + ISZ / 2, sy + ISZ / 2 - 2);
 
     // Quantity badge
     if (qty > 1) {
-      ctx.font = `bold 10px monospace`;
+      ctx.font = `bold 10px Georgia, serif`;
       ctx.fillStyle = '#ffffff';
       ctx.textAlign = 'right';
       ctx.textBaseline = 'bottom';
@@ -348,7 +348,7 @@ export class TombstoneMenu {
     ctx.stroke();
 
     ctx.fillStyle = '#ffffff';
-    ctx.font = `bold ${Math.round(ISZ * 0.38)}px monospace`;
+    ctx.font = `bold ${Math.round(ISZ * 0.38)}px Georgia, serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(def?.symbol ?? '?', x + ISZ / 2, y + ISZ / 2);
@@ -362,7 +362,7 @@ export class TombstoneMenu {
 
     // Hint text on the left (player) side
     ctx.fillStyle = '#778';
-    ctx.font = '11px Consolas, monospace';
+    ctx.font = '11px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText('[Esc] Close  •  Drag items ←', PAD, fy + FOOTER_H / 2);
@@ -379,7 +379,7 @@ export class TombstoneMenu {
     ctx.fill();
     ctx.stroke();
     ctx.fillStyle = '#ffe97a';
-    ctx.font = 'bold 12px Consolas, monospace';
+    ctx.font = 'bold 12px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('Take All', btnX + btnW / 2, btnY + btnH / 2);

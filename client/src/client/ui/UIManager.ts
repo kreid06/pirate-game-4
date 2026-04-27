@@ -580,7 +580,7 @@ export class UIManager {
     ];
 
     // Measure text block for background box
-    ctx.font = 'bold 16px Consolas, monospace';
+    ctx.font = 'bold 16px Georgia, serif';
     const textWidth = Math.max(...lines.map((l) => ctx.measureText(l).width));
     const lineH = 18;
     const textHeight = lineH * lines.length;
@@ -696,20 +696,20 @@ export class UIManager {
       ctx.strokeRect(slotX, y0, slotW, slotH);
 
       // Icon
-      ctx.font         = '11px Consolas, monospace';
+      ctx.font         = '11px Georgia, serif';
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = iconColor;
       ctx.fillText(ammo.icon, slotX + pad + 1, y0 + slotH / 2 - 4);
 
       // Name
-      ctx.font      = (isLoaded || isPending) ? 'bold 8px Consolas, monospace' : '8px Consolas, monospace';
+      ctx.font      = (isLoaded || isPending) ? 'bold 8px Georgia, serif' : '8px Georgia, serif';
       ctx.fillStyle = textColor;
       ctx.fillText(ammo.name, slotX + pad + 1, y0 + slotH / 2 + 5);
 
       // Desc (swivel only)
       if (ammo.desc) {
-        ctx.font      = '6px Consolas, monospace';
+        ctx.font      = '6px Georgia, serif';
         ctx.fillStyle = (isLoaded || isPending) ? 'rgba(160,200,160,0.65)' : 'rgba(90,100,100,0.50)';
         ctx.fillText(ammo.desc, slotX + pad + 1, y0 + slotH / 2 + 13);
       }
@@ -748,7 +748,7 @@ export class UIManager {
     }
 
     // --- Group labels above each section ---
-    ctx.font         = 'bold 6px Consolas, monospace';
+    ctx.font         = 'bold 6px Georgia, serif';
     ctx.textBaseline = 'bottom';
     ctx.textAlign    = 'center';
 
@@ -765,7 +765,7 @@ export class UIManager {
     ctx.globalAlpha = 1.0;
 
     // --- Hint row ---
-    ctx.font         = '9px Consolas, monospace';
+    ctx.font         = '9px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle    = 'rgba(120,120,140,0.70)';
@@ -854,7 +854,7 @@ export class UIManager {
       ctx.strokeRect(sx, y0, slotW, slotH);
 
       // Icon
-      ctx.font         = '18px Consolas, monospace';
+      ctx.font         = '18px Georgia, serif';
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = iconColor;
@@ -862,19 +862,19 @@ export class UIManager {
 
       // Name
       const highlighted = isLoaded || isPending;
-      ctx.font      = highlighted ? 'bold 11px Consolas, monospace' : '11px Consolas, monospace';
+      ctx.font      = highlighted ? 'bold 11px Georgia, serif' : '11px Georgia, serif';
       ctx.fillStyle = textColor;
       ctx.fillText(ammo.name, sx + pad + 2, y0 + slotH / 2 + 10);
 
       // Small label: LOADED / NEXT
       if (isLoaded && switchPending) {
-        ctx.font      = '9px Consolas, monospace';
+        ctx.font      = '9px Georgia, serif';
         ctx.fillStyle = '#44dd66';
         ctx.textAlign = 'right';
         ctx.fillText('LOADED', sx + slotW - 5, y0 + slotH - 6);
         ctx.textAlign = 'left';
       } else if (isPending && switchPending) {
-        ctx.font      = '9px Consolas, monospace';
+        ctx.font      = '9px Georgia, serif';
         ctx.fillStyle = '#ffd700';
         ctx.textAlign = 'right';
         ctx.fillText('NEXT', sx + slotW - 5, y0 + slotH - 6);
@@ -891,7 +891,7 @@ export class UIManager {
     }
 
     // [X] key hint below the slots
-    ctx.font         = '10px Consolas, monospace';
+    ctx.font         = '10px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle    = 'rgba(120,120,140,0.7)';
@@ -931,7 +931,7 @@ export class UIManager {
     const switchPending = safePending !== safeLoaded;
 
     // Header label
-    ctx.font         = 'bold 9px Consolas, monospace';
+    ctx.font         = 'bold 9px Georgia, serif';
     ctx.fillStyle    = 'rgba(200,160,80,0.80)';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'bottom';
@@ -982,33 +982,33 @@ export class UIManager {
       ctx.strokeRect(sx, y0, slotW, slotH);
 
       // Icon
-      ctx.font         = '17px Consolas, monospace';
+      ctx.font         = '17px Georgia, serif';
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = iconColor;
       ctx.fillText(ammo.icon, sx + pad, y0 + slotH / 2 - 8);
 
       // Name
-      ctx.font         = (isLoaded || isPending) ? 'bold 10px Consolas, monospace' : '10px Consolas, monospace';
+      ctx.font         = (isLoaded || isPending) ? 'bold 10px Georgia, serif' : '10px Georgia, serif';
       ctx.fillStyle    = textColor;
       ctx.textBaseline = 'middle';
       ctx.fillText(ammo.name, sx + pad, y0 + slotH / 2 + 5);
 
       // Desc line
-      ctx.font      = '8px Consolas, monospace';
+      ctx.font      = '8px Georgia, serif';
       ctx.fillStyle = (isLoaded || isPending) ? 'rgba(180,220,180,0.65)' : 'rgba(100,100,120,0.5)';
       ctx.fillText(ammo.desc, sx + pad, y0 + slotH / 2 + 17);
 
       // LOADED / NEXT sub-label
       if (isLoaded && switchPending) {
-        ctx.font         = '8px Consolas, monospace';
+        ctx.font         = '8px Georgia, serif';
         ctx.fillStyle    = '#44dd66';
         ctx.textAlign    = 'right';
         ctx.textBaseline = 'bottom';
         ctx.fillText('LOADED', sx + slotW - 4, y0 + slotH - 3);
         ctx.textAlign = 'left';
       } else if (isPending && switchPending) {
-        ctx.font         = '8px Consolas, monospace';
+        ctx.font         = '8px Georgia, serif';
         ctx.fillStyle    = '#ffd700';
         ctx.textAlign    = 'right';
         ctx.textBaseline = 'bottom';
@@ -1026,7 +1026,7 @@ export class UIManager {
     }
 
     // Key hint below the slots
-    ctx.font         = '10px Consolas, monospace';
+    ctx.font         = '10px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle    = 'rgba(120,120,140,0.7)';
@@ -1370,7 +1370,7 @@ export class UIManager {
       : selectedItem === 'swivel'
       ? '🔫 SWIVEL'
       : `⛵ SAIL (${sailCount}/${maxSails})`;
-    ctx.font = 'bold 22px Consolas, monospace';
+    ctx.font = 'bold 22px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff8e0';
@@ -1422,7 +1422,7 @@ export class UIManager {
     if (enemyClose) status = '  \u26a0\ufe0f ENEMY NEARBY — retreat to place';
     else if (tooFar) status = '  \u26a0\ufe0f TOO FAR — move closer';
 
-    ctx.font = 'bold 20px Consolas, monospace';
+    ctx.font = 'bold 20px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff8e0';
@@ -1485,7 +1485,7 @@ export class UIManager {
       ctx.stroke();
       if (is45) {
         ctx.fillStyle = '#ffcc44';
-        ctx.font = '9px Consolas, monospace';
+        ctx.font = '9px Georgia, serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'bottom';
         ctx.fillText(`${tickDeg}°`, px, dialY + DIAL_H - 4 - tickH - 1);
@@ -1507,7 +1507,7 @@ export class UIManager {
     ctx.fill();
 
     // Current angle label (centered in dial)
-    ctx.font = 'bold 15px Consolas, monospace';
+    ctx.font = 'bold 15px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillStyle = '#ffffff';
@@ -1548,7 +1548,7 @@ export class UIManager {
       ctx.moveTo(0, BANNER_H);
       ctx.lineTo(cw, BANNER_H);
       ctx.stroke();
-      ctx.font = 'bold 18px Consolas, monospace';
+      ctx.font = 'bold 18px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#66ee99';
@@ -1577,7 +1577,7 @@ export class UIManager {
     ctx.fill();
 
     ctx.fillStyle = '#66ee99';
-    ctx.font = 'bold 12px Consolas, monospace';
+    ctx.font = 'bold 12px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('📋  PLAN MODE  [B]', px + W / 2, py + HH / 2);
@@ -1619,14 +1619,14 @@ export class UIManager {
 
       // Symbol inside swatch
       ctx.fillStyle = '#fff';
-      ctx.font = `${swatchR * 1.1}px sans-serif`;
+      ctx.font = `${swatchR * 1.1}px Georgia, serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(e.symbol, swatchX, swatchY + 1);
 
       // Entry label
       ctx.fillStyle = isPending ? '#88ee99' : isHovered ? '#d0e8ff' : '#c8d8e8';
-      ctx.font = isPending ? 'bold 13px Consolas, monospace' : '13px Consolas, monospace';
+      ctx.font = isPending ? 'bold 13px Georgia, serif' : '13px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillText(e.label, swatchX + swatchR + 8, swatchY);
@@ -1636,7 +1636,7 @@ export class UIManager {
       if (count > 0) {
         const badge = `×${count}`;
         ctx.fillStyle = 'rgba(255,200,50,0.85)';
-        ctx.font = 'bold 11px Consolas, monospace';
+        ctx.font = 'bold 11px Georgia, serif';
         ctx.textAlign = 'right';
         ctx.fillText(badge, px + W - 10, swatchY);
       }
@@ -1644,7 +1644,7 @@ export class UIManager {
       // Pending indicator arrow on the right edge
       if (isPending) {
         ctx.fillStyle = '#55ee88';
-        ctx.font = '13px sans-serif';
+        ctx.font = '13px Georgia, serif';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
         ctx.fillText('▶', px + W - 8, swatchY);
@@ -1663,7 +1663,7 @@ export class UIManager {
 
     // ── Footer hint ────────────────────────────────────────────────────────
     ctx.fillStyle = 'rgba(140,170,200,0.6)';
-    ctx.font = '10px Consolas, monospace';
+    ctx.font = '10px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('[R] rotate  [RMB] cancel', px + W / 2, py + totalH - 6);
@@ -1841,7 +1841,7 @@ export class UIManager {
 
     // Title
     ctx.fillStyle     = '#f0c060';
-    ctx.font          = 'bold 21px Consolas, monospace';
+    ctx.font          = 'bold 21px Georgia, serif';
     ctx.textAlign     = 'center';
     ctx.textBaseline  = 'top';
     ctx.fillText('\uD83D\uDD28  HAMMER REPAIR', cw / 2, py + 16);
@@ -1898,11 +1898,11 @@ export class UIManager {
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'top';
     if (resultElapsed >= 0) {
-      ctx.font      = 'bold 28px Consolas, monospace';
+      ctx.font      = 'bold 28px Georgia, serif';
       ctx.fillStyle = this.hammerGame.won ? '#33ff88' : '#ff5555';
       ctx.fillText(this.hammerGame.won ? 'CRACK! \u2192 +10 000 HP' : 'MISSED!', cw / 2, py + 128);
     } else {
-      ctx.font      = '14px Consolas, monospace';
+      ctx.font      = '14px Georgia, serif';
       ctx.fillStyle = '#aaaacc';
       ctx.fillText('Press [SPACE] or click when the cursor enters the green zone', cw / 2, py + 128);
       // Countdown ticks along the bottom of the track as tiny tick marks
@@ -1948,14 +1948,14 @@ export class UIManager {
 
     // Header
     ctx.fillStyle = '#ffd700';
-    ctx.font = 'bold 13px Consolas, monospace';
+    ctx.font = 'bold 13px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('Pick Up Item', px + W / 2, py + HEADER_H / 2);
 
     // Close hint
     ctx.fillStyle = '#778';
-    ctx.font = '11px Consolas, monospace';
+    ctx.font = '11px Georgia, serif';
     ctx.textAlign = 'right';
     ctx.fillText('[Esc]', px + W - PAD, py + HEADER_H / 2);
 
@@ -1999,18 +1999,18 @@ export class UIManager {
         symbol = def.symbol ?? symbol;
       }
 
-      ctx.font = '18px monospace';
+      ctx.font = '18px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#ffffff';
       ctx.fillText(symbol, px + PAD, ry + ROW_H / 2);
 
-      ctx.font = '13px Consolas, monospace';
+      ctx.font = '13px Georgia, serif';
       ctx.fillStyle = isHovered ? '#ffd700' : '#e8e0cc';
       ctx.fillText(name, px + PAD + 28, ry + ROW_H / 2);
 
       if (item.quantity > 1) {
-        ctx.font = 'bold 11px monospace';
+        ctx.font = 'bold 11px Georgia, serif';
         ctx.fillStyle = '#aaa';
         ctx.textAlign = 'right';
         ctx.fillText(`\u00d7${item.quantity}`, px + W - PAD, ry + ROW_H / 2);
@@ -2100,17 +2100,17 @@ class HUDElement implements UIElement {
     
     // Set up text rendering
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 16px Consolas, monospace';
+    ctx.font = 'bold 16px Georgia, serif';
     ctx.textAlign = 'left';
     
     // Player coordinates (prominent display)
     ctx.fillStyle = '#00ff00'; // Green for coordinates
-    ctx.font = 'bold 18px Consolas, monospace';
+    ctx.font = 'bold 18px Georgia, serif';
     ctx.fillText(`POSITION: ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`, 20, 35);
     
     // Other info in white
     ctx.fillStyle = '#ffffff';
-    ctx.font = '14px Consolas, monospace';
+    ctx.font = '14px Georgia, serif';
     const lines = [
       `FPS: ${context.fps}`,
       `On Ship: ${player.onDeck ? 'Yes' : 'No'}`,
@@ -2214,7 +2214,7 @@ class HUDElement implements UIElement {
     ctx.lineWidth = 1;
     ctx.strokeRect(barX, xpY, barW, XP_BAR_H);
 
-    ctx.font = 'bold 8px Consolas, monospace';
+    ctx.font = 'bold 8px Georgia, serif';
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
     ctx.fillStyle = 'rgba(255,255,255,0.70)';
@@ -2237,7 +2237,7 @@ class HUDElement implements UIElement {
     ctx.lineWidth = 1;
     ctx.strokeRect(barX, hpY, barW, BAR_H);
 
-    ctx.font = 'bold 9px Consolas, monospace';
+    ctx.font = 'bold 9px Georgia, serif';
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
     ctx.fillStyle = 'rgba(255,255,255,0.80)';
@@ -2259,7 +2259,7 @@ class HUDElement implements UIElement {
     ctx.lineWidth = 1;
     ctx.strokeRect(barX, stY, barW, BAR_H);
 
-    ctx.font = 'bold 9px Consolas, monospace';
+    ctx.font = 'bold 9px Georgia, serif';
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
     ctx.fillStyle = 'rgba(255,255,255,0.80)';
@@ -2340,7 +2340,7 @@ class HUDElement implements UIElement {
         const hasLock  = mode === 'targetfire' && state != null && state.targetId >= 0;
 
         // Group number label (top-centre)
-        ctx.font         = 'bold 11px Consolas, monospace';
+        ctx.font         = 'bold 11px Georgia, serif';
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'top';
         ctx.fillStyle    = isActive ? '#ffd700' : 'rgba(160,160,180,0.75)';
@@ -2348,15 +2348,15 @@ class HUDElement implements UIElement {
 
         // Cannon count (large, centre)
         if (count > 0) {
-          ctx.font         = 'bold 20px Consolas, monospace';
+          ctx.font         = 'bold 20px Georgia, serif';
           ctx.textBaseline = 'middle';
           ctx.fillStyle    = isActive ? '#ffffff' : 'rgba(200,200,220,0.9)';
           ctx.fillText(String(count), sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2 - 3);
-          ctx.font         = '8px Consolas, monospace';
+          ctx.font         = '8px Georgia, serif';
           ctx.fillStyle    = isActive ? 'rgba(255,255,255,0.65)' : 'rgba(140,140,160,0.6)';
           ctx.fillText(count === 1 ? 'cannon' : 'cannons', sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2 + 10);
         } else {
-          ctx.font         = '10px Consolas, monospace';
+          ctx.font         = '10px Georgia, serif';
           ctx.textBaseline = 'middle';
           ctx.fillStyle    = 'rgba(70,70,80,0.5)';
           ctx.fillText('empty', sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
@@ -2366,7 +2366,7 @@ class HUDElement implements UIElement {
         const BADGE_H = 13;
         ctx.fillStyle = count > 0 ? modeCol : 'rgba(50,50,60,0.85)';
         ctx.fillRect(sx + 1, sy + SLOT_SIZE - BADGE_H - 1, SLOT_SIZE - 2, BADGE_H);
-        ctx.font         = 'bold 8px Consolas, monospace';
+        ctx.font         = 'bold 8px Georgia, serif';
         ctx.textBaseline = 'middle';
         ctx.fillStyle    = '#fff';
         ctx.fillText(count > 0 ? modeLbl : '---', sx + SLOT_SIZE / 2, sy + SLOT_SIZE - BADGE_H / 2 - 1);
@@ -2391,7 +2391,7 @@ class HUDElement implements UIElement {
 
           // Symbol
           ctx.fillStyle = '#fff';
-          ctx.font = 'bold 18px Consolas, monospace';
+          ctx.font = 'bold 18px Georgia, serif';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
@@ -2399,7 +2399,7 @@ class HUDElement implements UIElement {
           // Stack count (bottom-right, only for stackables > 1)
           if (slot.quantity > 1) {
             ctx.fillStyle = '#ffee88';
-            ctx.font = 'bold 11px Consolas, monospace';
+            ctx.font = 'bold 11px Georgia, serif';
             ctx.textAlign = 'right';
             ctx.textBaseline = 'bottom';
             ctx.fillText(String(slot.quantity), sx + SLOT_SIZE - 3, sy + SLOT_SIZE - 3);
@@ -2409,7 +2409,7 @@ class HUDElement implements UIElement {
 
       // Slot number label below slot
       ctx.fillStyle = isActive ? '#ffd700' : '#778';
-      ctx.font = '11px Consolas, monospace';
+      ctx.font = '11px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillText(String(i === 9 ? 0 : i + 1), sx + SLOT_SIZE / 2, sy + SLOT_SIZE + 2);
@@ -2451,7 +2451,7 @@ class HUDElement implements UIElement {
     const W     = 220;
     const LINE  = 16;
     const nameH = 18;
-    const descLines = this.wrapText(ctx, def.description, W - PAD * 2, '12px Consolas, monospace');
+    const descLines = this.wrapText(ctx, def.description, W - PAD * 2, '12px Georgia, serif');
     const totalH = PAD + nameH + 4 + LINE + 4 + descLines.length * LINE + PAD;
 
     // Position: centred above the slot, clamped to canvas
@@ -2482,7 +2482,7 @@ class HUDElement implements UIElement {
 
     // Item name
     ctx.fillStyle    = '#ffffff';
-    ctx.font         = `bold 14px Consolas, monospace`;
+    ctx.font         = `bold 14px Georgia, serif`;
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillText(def.name, tx + PAD + 4, cy);
@@ -2490,13 +2490,13 @@ class HUDElement implements UIElement {
 
     // ID  +  category
     ctx.fillStyle = '#888';
-    ctx.font      = '11px Consolas, monospace';
+    ctx.font      = '11px Georgia, serif';
     ctx.fillText(`ID: ${itemId}   [${def.category}]`, tx + PAD + 4, cy);
     cy += LINE + 4;
 
     // Description
     ctx.fillStyle = '#ccc';
-    ctx.font      = '12px Consolas, monospace';
+    ctx.font      = '12px Georgia, serif';
     for (const line of descLines) {
       ctx.fillText(line, tx + PAD + 4, cy);
       cy += LINE;
@@ -2579,7 +2579,7 @@ class HUDElement implements UIElement {
 
     // Header
     ctx.fillStyle = '#aaa';
-    ctx.font = 'bold 11px Consolas, monospace';
+    ctx.font = 'bold 11px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillText('EQUIP', px + panelW / 2, py + 4);
@@ -2610,7 +2610,7 @@ class HUDElement implements UIElement {
         ctx.lineWidth = 1;
         ctx.strokeRect(sx + swatchPad, sy + swatchPad, SLOT_SIZE - swatchPad * 2, SLOT_SIZE - swatchPad * 2);
         ctx.fillStyle = '#fff';
-        ctx.font = 'bold 16px Consolas, monospace';
+        ctx.font = 'bold 16px Georgia, serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
@@ -2618,7 +2618,7 @@ class HUDElement implements UIElement {
 
       // Label
       ctx.fillStyle = '#778';
-      ctx.font = '10px Consolas, monospace';
+      ctx.font = '10px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillText(label, sx + SLOT_SIZE / 2, sy + SLOT_SIZE + 3);
@@ -2718,14 +2718,14 @@ class HUDElement implements UIElement {
     const labelY    = iy + iH + 7;
     const labelColor = isCritical ? '#ff5555' : '#88bbee';
 
-    ctx.font          = 'bold 12px Consolas, monospace';
+    ctx.font          = 'bold 12px Georgia, serif';
     ctx.textAlign     = 'center';
     ctx.textBaseline  = 'top';
     ctx.fillStyle     = labelColor;
     ctx.fillText(`${pct}%`, ix + iW / 2, labelY);
 
     // Tiny "WATER" subtitle
-    ctx.font      = '9px Consolas, monospace';
+    ctx.font      = '9px Georgia, serif';
     ctx.fillStyle = isCritical ? '#ff7777' : '#557799';
     ctx.fillText('WATER', ix + iW / 2, labelY + 14);
 
@@ -2752,7 +2752,7 @@ class HUDElement implements UIElement {
 
     // Label: "HULL  XX%"
     const hullPct = Math.round(plankRatio * 100);
-    ctx.font         = '9px Consolas, monospace';
+    ctx.font         = '9px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle    = plankCrit ? '#ff5555' : '#778866';
@@ -2788,7 +2788,7 @@ class DebugOverlayElement implements UIElement {
     
     // Debug text
     ctx.fillStyle = '#00ff00';
-    ctx.font = '14px monospace';
+    ctx.font = '14px Georgia, serif';
     ctx.textAlign = 'left';
     
     const debugLines = [
@@ -2832,7 +2832,7 @@ class NetworkStatsElement implements UIElement {
     ctx.fillRect(ctx.canvas.width - 220, 10, 210, 120);
     
     ctx.fillStyle = '#00ffff';
-    ctx.font = '14px monospace';
+    ctx.font = '14px Georgia, serif';
     ctx.textAlign = 'left';
     
     const networkLines = [
@@ -2863,7 +2863,7 @@ class ControlHintsElement implements UIElement {
     ctx.fillRect(10, ctx.canvas.height - 120, 300, 110);
     
     ctx.fillStyle = '#ffff00';
-    ctx.font = '12px Arial';
+    ctx.font = '12px Georgia, serif';
     ctx.textAlign = 'left';
     
     const controlLines = [

@@ -187,14 +187,14 @@ export class CrewLevelMenu {
     let cy = py + PAD;
 
     // Name + level badge
-    ctx.font      = 'bold 16px Consolas, monospace';
+    ctx.font      = 'bold 16px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle = TEXT_H;
     ctx.fillText(npc.name, px + PAD, cy);
 
     const badge = `Lv. ${npc.npcLevel}${npc.npcLevel >= NPC_MAX_LEVEL ? ' MAX' : ''}`;
-    ctx.font      = 'bold 13px Consolas, monospace';
+    ctx.font      = 'bold 13px Georgia, serif';
     ctx.textAlign = 'right';
     ctx.fillStyle = GOLD;
     ctx.fillText(badge, px + PW - PAD, cy + 2);
@@ -203,7 +203,7 @@ export class CrewLevelMenu {
 
     // Role sub-line
     const roleLine = ROLE_NAMES[npc.role] ?? 'Sailor';
-    ctx.font      = '12px Consolas, monospace';
+    ctx.font      = '12px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.fillStyle = TEXT_DIM;
     ctx.fillText(roleLine, px + PAD, cy);
@@ -219,7 +219,7 @@ export class CrewLevelMenu {
     cy += 8;
 
     // ── HP bar ───────────────────────────────────────────────────────────────
-    ctx.font      = '12px Consolas, monospace';
+    ctx.font      = '12px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.fillStyle = TEXT_M;
     const hpLabel = `HP  ${npc.health} / ${npc.maxHealth}  (${Math.round(hpPct * 100)}%)`;
@@ -231,7 +231,7 @@ export class CrewLevelMenu {
     cy += BAR_H + 8;
 
     // ── XP bar ───────────────────────────────────────────────────────────────
-    ctx.font      = '12px Consolas, monospace';
+    ctx.font      = '12px Georgia, serif';
     ctx.fillStyle = TEXT_M;
     if (isMaxLevel) {
       ctx.fillText(`XP  MAX LEVEL`, px + PAD, cy);
@@ -246,7 +246,7 @@ export class CrewLevelMenu {
     // ── Stat points available ─────────────────────────────────────────────────
     const statPointsLeft = npc.statPoints ?? 0;
     if (statPointsLeft > 0) {
-      ctx.font      = 'bold 12px Consolas, monospace';
+      ctx.font      = 'bold 12px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.fillStyle = GOLD;
       ctx.fillText(`★ ${statPointsLeft} stat point${statPointsLeft !== 1 ? 's' : ''} available`, px + PW / 2, cy);
@@ -271,20 +271,20 @@ export class CrewLevelMenu {
       ctx.fillRect(px + PAD / 2, cy, PW - PAD, ROW_H - 4);
 
       // Stat label
-      ctx.font      = 'bold 13px Consolas, monospace';
+      ctx.font      = 'bold 13px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = stat.color;
       ctx.fillText(stat.label, px + PAD, cy + 14);
 
       // Level number indicator
-      ctx.font      = 'bold 12px Consolas, monospace';
+      ctx.font      = 'bold 12px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.fillStyle = statLvl > 0 ? stat.color : TEXT_DIM;
       ctx.fillText(`${statLvl}`, px + 90, cy + 14);
 
       // Effect description
-      ctx.font         = '11px Consolas, monospace';
+      ctx.font         = '11px Georgia, serif';
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = TEXT_DIM;
@@ -304,7 +304,7 @@ export class CrewLevelMenu {
       ctx.fill();
       ctx.stroke();
 
-      ctx.font         = 'bold 11px Consolas, monospace';
+      ctx.font         = 'bold 11px Georgia, serif';
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = afford ? BTN_TXT_AFD : BTN_TXT_NOT;
@@ -326,7 +326,7 @@ export class CrewLevelMenu {
     ctx.stroke();
     cy += 8;
 
-    ctx.font         = '11px Consolas, monospace';
+    ctx.font         = '11px Georgia, serif';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'top';
     ctx.fillStyle    = TEXT_DIM;

@@ -253,7 +253,7 @@ export class EffectRenderer {
     const LINE_H = FONT_SIZE + PAD_Y * 2;
 
     ctx.save();
-    ctx.font = `bold ${FONT_SIZE}px Consolas, monospace`;
+    ctx.font = `bold ${FONT_SIZE}px Georgia, serif`;
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'center';
 
@@ -463,7 +463,7 @@ export class EffectRenderer {
 
     this.ctx.save();
     this.ctx.globalAlpha = alpha;
-    this.ctx.font = `bold ${Math.round(fontSize * scale)}px Arial`;
+    this.ctx.font = `bold ${Math.round(fontSize * scale)}px Georgia, serif`;
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'middle';
 

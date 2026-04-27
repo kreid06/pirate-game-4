@@ -317,7 +317,7 @@ export class RespawnScreen {
       const ly = toScreenY(isl.y);
       if (lx > -50 && lx < cw + 50 && ly > -50 && ly < ch + 50) {
         ctx.textAlign = 'center';
-        ctx.font = `${Math.max(9, Math.min(14, toScreenLen(80)))}px Consolas, monospace`;
+        ctx.font = `${Math.max(9, Math.min(14, toScreenLen(80)))}px Georgia, serif`;
         ctx.fillStyle = '#55aa44';
         ctx.fillText(`Isle ${isl.id ?? '?'}`, lx, ly - toScreenLen(30) - 4);
       }
@@ -386,7 +386,7 @@ export class RespawnScreen {
       ctx.restore();
 
       ctx.textAlign = 'center';
-      ctx.font = `${selected ? 'bold ' : ''}${Math.max(9, Math.min(13, toScreenLen(70)))}px Consolas, monospace`;
+      ctx.font = `${selected ? 'bold ' : ''}${Math.max(9, Math.min(13, toScreenLen(70)))}px Georgia, serif`;
       ctx.fillStyle = selected ? '#ffffff' : '#999999';
       ctx.fillText(opt.label, mx, my - (selected ? 13 : 9));
     }
@@ -436,7 +436,7 @@ export class RespawnScreen {
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Small serif-style end-caps on each arm tip
+      // Small Georgia, serif-style end-caps on each arm tip
       const cap = s * 0.22;
       ctx.strokeStyle = '#c0392b';
       ctx.lineWidth = Math.max(1.5, lw * 0.7);
@@ -455,7 +455,7 @@ export class RespawnScreen {
         ctx.restore();
       }
 
-      // Label — weathered serif style
+      // Label — weathered Georgia, serif style
       ctx.textAlign = 'center';
       ctx.font = `bold italic ${Math.max(9, Math.min(13, toScreenLen(65)))}px Georgia, serif`;
       ctx.fillStyle = 'rgba(20, 6, 0, 0.6)';
@@ -487,24 +487,24 @@ export class RespawnScreen {
     ctx.fillRect(0, 0, cw, bannerH);
 
     ctx.textAlign = 'left';
-    ctx.font = 'bold 32px serif';
+    ctx.font = 'bold 32px Georgia, serif';
     ctx.fillStyle = '#dd2233';
     ctx.fillText('YOU DIED', 16, 42);
 
-    ctx.font = '13px Consolas, monospace';
+    ctx.font = '13px Georgia, serif';
     ctx.fillStyle = '#778899';
     ctx.fillText('Click a spawn point  •  Drag to pan  •  Scroll to zoom', 16, bannerH - 8);
 
     // Selected spawn info (top right)
     if (this.selectedOption) {
       ctx.textAlign = 'right';
-      ctx.font = '13px Consolas, monospace';
+      ctx.font = '13px Georgia, serif';
       ctx.fillStyle = '#aabbcc';
       ctx.fillText(`Selected: ${this.selectedOption.label}`, cw - 16, 30);
     }
 
     ctx.textAlign = 'right';
-    ctx.font = '11px Consolas, monospace';
+    ctx.font = '11px Georgia, serif';
     ctx.fillStyle = '#445566';
     ctx.fillText(`zoom ×${(1 / this.zoom * 100).toFixed(0)}%`, cw - 16, bannerH - 8);
 
@@ -533,7 +533,7 @@ export class RespawnScreen {
     ctx.shadowColor = 'transparent';
 
     ctx.textAlign = 'center';
-    ctx.font = 'bold 20px sans-serif';
+    ctx.font = 'bold 20px Georgia, serif';
     ctx.fillStyle = enabled ? '#ffffff' : '#444444';
     ctx.fillText('RESPAWN', btnX + btnW / 2, btnY + 31);
 
@@ -707,14 +707,14 @@ export class RespawnScreen {
     ctx.shadowColor = '#ff0000';
     ctx.shadowBlur = 48;
     ctx.textAlign = 'center';
-    ctx.font = `bold ${fontSize}px serif`;
+    ctx.font = `bold ${fontSize}px Georgia, serif`;
     ctx.fillStyle = '#aa0011';
     ctx.fillText('YOU DIED', cx, cy);
     ctx.restore();
 
     // Stroke + fill
     ctx.textAlign = 'center';
-    ctx.font = `bold ${fontSize}px serif`;
+    ctx.font = `bold ${fontSize}px Georgia, serif`;
     ctx.strokeStyle = '#330000';
     ctx.lineWidth = 4;
     ctx.strokeText('YOU DIED', cx, cy);
@@ -722,7 +722,7 @@ export class RespawnScreen {
     ctx.fillText('YOU DIED', cx, cy);
 
     // Subtitle
-    ctx.font = '15px Consolas, monospace';
+    ctx.font = '15px Georgia, serif';
     ctx.fillStyle = '#6e4650';
     ctx.fillText('Choose your respawn location', cx, cy + Math.round(fontSize * 0.55));
 
@@ -779,7 +779,7 @@ export class RespawnScreen {
     ctx.moveTo(x + barPx, y - 5); ctx.lineTo(x + barPx, y + 5);
     ctx.stroke();
     ctx.textAlign = 'center';
-    ctx.font = '11px Consolas, monospace';
+    ctx.font = '11px Georgia, serif';
     ctx.fillStyle = '#aabbcc';
     ctx.fillText(`${nice.toFixed(0)} px`, x + barPx / 2, y - 8);
     ctx.restore();

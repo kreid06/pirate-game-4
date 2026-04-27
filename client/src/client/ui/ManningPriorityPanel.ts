@@ -167,7 +167,7 @@ export class ManningPriorityPanel {
     ctx.fill();
 
     ctx.fillStyle = '#aac8ff';
-    ctx.font = 'bold 11px monospace';
+    ctx.font = 'bold 11px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('CREW PRIORITY', px + pw / 2, py + HEADER_H / 2);
@@ -278,7 +278,7 @@ export class ManningPriorityPanel {
 
       // ---- Task name ----
       ctx.fillStyle = color;
-      ctx.font = 'bold 12px monospace';
+      ctx.font = 'bold 12px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillText(task.toUpperCase(), px + 24, rowMidY - 6);
@@ -290,11 +290,11 @@ export class ManningPriorityPanel {
           return `#${n.id}${avail ? '' : '●'}`;
         });
         ctx.fillStyle = 'rgba(200,220,255,0.65)';
-        ctx.font = '9px monospace';
+        ctx.font = '9px Georgia, serif';
         ctx.fillText(chipParts.join('  '), px + 24, rowMidY + 8);
       } else {
         ctx.fillStyle = 'rgba(180,180,180,0.25)';
-        ctx.font = '9px monospace';
+        ctx.font = '9px Georgia, serif';
         ctx.fillText('no crew', px + 24, rowMidY + 8);
       }
 
@@ -311,7 +311,7 @@ export class ManningPriorityPanel {
       ctx.fillStyle = 'rgba(255,255,255,0.10)';
       ctx.fillRect(badgeX - 14, rowY + 14, 14, 17);
       ctx.fillStyle = '#e8f0ff';
-      ctx.font = 'bold 10px monospace';
+      ctx.font = 'bold 10px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(String(count), badgeX - 7, rowY + 14 + 8);
@@ -420,7 +420,7 @@ export class ManningPriorityPanel {
     ctx.fillStyle = active ? 'rgba(255,255,255,0.13)' : 'rgba(255,255,255,0.03)';
     ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
     ctx.fillStyle = active ? '#aac8ff' : 'rgba(255,255,255,0.18)';
-    ctx.font = '9px monospace';
+    ctx.font = '9px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(label, btn.x + btn.w / 2, btn.y + btn.h / 2);
@@ -438,7 +438,7 @@ export class ManningPriorityPanel {
     ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
     ctx.strokeRect(btn.x, btn.y, btn.w, btn.h);
     ctx.fillStyle = active ? '#aac8ff' : 'rgba(255,255,255,0.22)';
-    ctx.font = 'bold 13px monospace';
+    ctx.font = 'bold 13px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(label, btn.x + btn.w / 2, btn.y + btn.h / 2);

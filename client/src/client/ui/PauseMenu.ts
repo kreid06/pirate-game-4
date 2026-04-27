@@ -237,7 +237,7 @@ export class PauseMenu {
         z-index: 8000;
         align-items: center;
         justify-content: center;
-        font-family: 'Segoe UI', Arial, sans-serif;
+        font-family: 'Segoe UI', Georgia, serif, Georgia, serif;
       }
       #pause-menu .pm-backdrop {
         position: absolute;
@@ -517,7 +517,7 @@ export class PauseMenu {
         cursor: pointer;
         text-align: center;
         transition: background 0.12s, border-color 0.12s;
-        font-family: monospace;
+        font-family: Georgia, serif;
         letter-spacing: 0.5px;
       }
       #pause-menu .pm-bind-btn:hover {
@@ -548,7 +548,7 @@ export class PauseMenu {
         color: rgba(255,255,255,0.5);
         font-size: 11px;
         font-weight: 600;
-        font-family: monospace;
+        font-family: Georgia, serif;
         letter-spacing: 0.3px;
         white-space: nowrap;
       }

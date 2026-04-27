@@ -99,7 +99,7 @@ export class AuthScreen {
         position: fixed; inset: 0; z-index: 9999;
         background: radial-gradient(ellipse at 50% 60%, #0a1a2e 0%, #000510 100%);
         display: flex; align-items: center; justify-content: center;
-        font-family: 'Segoe UI', Arial, sans-serif;
+        font-family: 'Segoe UI', Georgia, serif, Georgia, serif;
       }
       .auth-card {
         background: rgba(255,255,255,0.06);

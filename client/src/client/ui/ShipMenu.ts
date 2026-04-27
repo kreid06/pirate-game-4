@@ -217,7 +217,7 @@ export class ShipMenu {
       : null;
 
     if (!ship) {
-      ctx.font = '14px Consolas, monospace';
+      ctx.font = '14px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
@@ -246,7 +246,7 @@ export class ShipMenu {
     ctx.fillStyle = 'rgba(255,215,0,0.06)';
     ctx.fillRect(px, py, PANEL_W, HEADER_H);
 
-    ctx.font = 'bold 17px Consolas, monospace';
+    ctx.font = 'bold 17px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = GOLD;
@@ -263,14 +263,14 @@ export class ShipMenu {
     ctx.strokeStyle = gearActive ? GOLD : BORDER;
     ctx.lineWidth = 1;
     ctx.strokeRect(gearX, gearY, gearW, gearH);
-    ctx.font = '16px Consolas, monospace';
+    ctx.font = '16px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = gearActive ? GOLD : TEXT_DIM;
     ctx.fillText('⚙', gearX + gearW / 2, gearY + gearH / 2);
     this._gearBtnArea = { x: gearX, y: gearY, w: gearW, h: gearH };
 
-    ctx.font = '12px Consolas, monospace';
+    ctx.font = '12px Georgia, serif';
     ctx.textAlign = 'right';
     ctx.fillStyle = TEXT_DIM;
     ctx.fillText('[F / ESC] close', px + PANEL_W - PAD, py + HEADER_H / 2);
@@ -309,7 +309,7 @@ export class ShipMenu {
     ctx.strokeRect(ox, oy, OW, OH);
 
     // Title
-    ctx.font = 'bold 15px Consolas, monospace';
+    ctx.font = 'bold 15px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = GOLD;
@@ -327,7 +327,7 @@ export class ShipMenu {
     const isOwnShip   = !isUnclaimed && shipCompany === myCompany;
 
     // Info text
-    ctx.font = '12px Consolas, monospace';
+    ctx.font = '12px Georgia, serif';
     ctx.fillStyle = TEXT_DIM;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
@@ -357,7 +357,7 @@ export class ShipMenu {
       ctx.strokeStyle = '#44cc66';
       ctx.lineWidth = 1;
       ctx.strokeRect(btnX, btnY, btnW, btnH);
-      ctx.font = 'bold 13px Consolas, monospace';
+      ctx.font = 'bold 13px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#88ffaa';
@@ -370,7 +370,7 @@ export class ShipMenu {
       ctx.strokeStyle = '#ff5544';
       ctx.lineWidth = 1;
       ctx.strokeRect(btnX, btnY, btnW, btnH);
-      ctx.font = 'bold 13px Consolas, monospace';
+      ctx.font = 'bold 13px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#ff8877';
@@ -396,7 +396,7 @@ export class ShipMenu {
     ctx.fillStyle = COMPANY_COLORS[co] ?? '#aaa';
     ctx.fillRect(px + PAD + 8, py + 10, 14, 14);
 
-    ctx.font = 'bold 15px Consolas, monospace';
+    ctx.font = 'bold 15px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle = TEXT_HEAD;
@@ -405,7 +405,7 @@ export class ShipMenu {
     // Speed + heading
     const spd = Math.sqrt(ship.velocity.x ** 2 + ship.velocity.y ** 2);
     const deg = ((ship.rotation * 180 / Math.PI) % 360 + 360) % 360;
-    ctx.font = '12px Consolas, monospace';
+    ctx.font = '12px Georgia, serif';
     ctx.fillStyle = TEXT_MONO;
     ctx.fillText(
       `Speed: ${spd.toFixed(1)} u/s   Heading: ${deg.toFixed(1)}°`,
@@ -439,7 +439,7 @@ export class ShipMenu {
       const hp      = Math.max(0, Math.min(100, ship.hullHealth));
       const barColor = hp > 60 ? GREEN : hp > 30 ? ORANGE : RED;
 
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = TEXT_DIM;
@@ -461,7 +461,7 @@ export class ShipMenu {
 
     // Ammo row
     {
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = BG_STRIPE;
@@ -531,7 +531,7 @@ export class ShipMenu {
     const colDmg   = px + PAD + 320;
 
     // Column header
-    ctx.font = 'bold 11px Consolas, monospace';
+    ctx.font = 'bold 11px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = TEXT_DIM;
@@ -551,7 +551,7 @@ export class ShipMenu {
       }
 
       const label = kind.replace('-', ' ');
-      ctx.font = '13px Consolas, monospace';
+      ctx.font = '13px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = TEXT_HEAD;
@@ -570,7 +570,7 @@ export class ShipMenu {
     }
 
     if (count > 8) {
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
@@ -595,7 +595,7 @@ export class ShipMenu {
     py = this._sectionHeader(ctx, px, py, 'CREW', `${players.length} player${players.length !== 1 ? 's' : ''}, ${aboard.length} NPC${aboard.length !== 1 ? 's' : ''}`);
 
     if (aboard.length === 0 && players.length === 0) {
-      ctx.font = '13px Consolas, monospace';
+      ctx.font = '13px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
@@ -624,18 +624,18 @@ export class ShipMenu {
       ctx.textBaseline = 'top';
 
       // Name + level
-      ctx.font      = 'bold 13px Consolas, monospace';
+      ctx.font      = 'bold 13px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.fillStyle = TEXT_HEAD;
       ctx.fillText(npc.name, rowX + 4, rowY + 4);
 
-      ctx.font      = '11px Consolas, monospace';
+      ctx.font      = '11px Georgia, serif';
       ctx.fillStyle = GOLD;
       ctx.fillText(`Lv.${npc.npcLevel}`, rowX + 140, rowY + 5);
 
       // Role tag
       const roleStr = ROLE_TAGS[npc.role] ?? 'Crew';
-      ctx.font      = '11px Consolas, monospace';
+      ctx.font      = '11px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'right';
       ctx.fillText(roleStr, rowX + rowW - 4, rowY + 5);
@@ -654,13 +654,13 @@ export class ShipMenu {
       ctx.strokeRect(barX, barY, barW, BAR_H_SM);
 
       // HP text next to bar
-      ctx.font      = '10px Consolas, monospace';
+      ctx.font      = '10px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.fillStyle = TEXT_DIM;
       ctx.fillText(`${npc.health}/${npc.maxHealth}`, barX + barW + 3, barY);
 
       // Click hint (small arrow)
-      ctx.font      = '10px Consolas, monospace';
+      ctx.font      = '10px Georgia, serif';
       ctx.textAlign = 'right';
       ctx.fillStyle = TEXT_DIM;
       ctx.fillText('▸', rowX + rowW, rowY + 4);
@@ -688,7 +688,7 @@ export class ShipMenu {
     if (!ls) {
       // Server hasn't sent level data yet — show a placeholder
       py = this._sectionHeader(ctx, px, py, 'PROGRESSION', 'no data');
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
@@ -712,7 +712,7 @@ export class ShipMenu {
       const fillFrac = Math.min(shipLevel / totalCap, 1);
       const barColor = shipCapped ? GOLD : GREEN;
 
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = TEXT_DIM;
@@ -731,7 +731,7 @@ export class ShipMenu {
 
     // Next upgrade cost row (single cost applies to any attribute)
     if (!shipCapped) {
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = TEXT_DIM;
@@ -745,7 +745,7 @@ export class ShipMenu {
 
     // Header row for attribute table
     {
-      ctx.font = 'bold 11px Consolas, monospace';
+      ctx.font = 'bold 11px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = TEXT_DIM;
@@ -781,7 +781,7 @@ export class ShipMenu {
       }
 
       // Attribute name
-      ctx.font = '13px Consolas, monospace';
+      ctx.font = '13px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = wip ? TEXT_DIM : TEXT_HEAD;
@@ -801,14 +801,14 @@ export class ShipMenu {
         ctx.fillStyle = isMaxed && pts >= attrCap ? GOLD : (wip ? '#556' : GREEN);
         ctx.fillRect(mBarX, py + (ROW_H - 8) / 2, mBarW * frac, 8);
         // pts/cap label
-        ctx.font = '10px Consolas, monospace';
+        ctx.font = '10px Georgia, serif';
         ctx.textAlign = 'right';
         ctx.fillStyle = TEXT_DIM;
         ctx.fillText(`${pts}/${attrCap}`, mBarX + mBarW + 28, py + ROW_H / 2);
       }
 
       // Computed effect
-      ctx.font = '12px Consolas, monospace';
+      ctx.font = '12px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.fillStyle = wip ? TEXT_DIM : TEXT_MONO;
       let effectStr = '';
@@ -838,12 +838,12 @@ export class ShipMenu {
       if (isMaxed) {
         ctx.textAlign = 'right';
         ctx.fillStyle = TEXT_DIM;
-        ctx.font = '11px Consolas, monospace';
+        ctx.font = '11px Georgia, serif';
         ctx.fillText(attrMaxed ? '— maxed —' : '— capped —', btnX + btnW, py + ROW_H / 2);
       } else if (wip) {
         ctx.textAlign = 'right';
         ctx.fillStyle = TEXT_DIM;
-        ctx.font = '11px Consolas, monospace';
+        ctx.font = '11px Georgia, serif';
         ctx.fillText('— WIP —', btnX + btnW, py + ROW_H / 2);
       } else {
         // + button
@@ -852,7 +852,7 @@ export class ShipMenu {
         ctx.strokeStyle = affordable ? GREEN : '#444';
         ctx.lineWidth = 1;
         ctx.strokeRect(btnX, btnY, btnW, btnH);
-        ctx.font = 'bold 15px Consolas, monospace';
+        ctx.font = 'bold 15px Georgia, serif';
         ctx.textAlign = 'center';
         ctx.fillStyle = affordable ? GREEN : TEXT_DIM;
         ctx.fillText('+', btnX + btnW / 2, py + ROW_H / 2);
@@ -881,7 +881,7 @@ export class ShipMenu {
     ctx.fillStyle = 'rgba(255,215,0,0.08)';
     ctx.fillRect(px, py, PANEL_W, h);
 
-    ctx.font = 'bold 12px Consolas, monospace';
+    ctx.font = 'bold 12px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = GOLD;

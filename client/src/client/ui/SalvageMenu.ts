@@ -139,13 +139,13 @@ export class SalvageMenu {
     ctx.fillRect(px, py, PANEL_W, HEADER_H);
 
     // Header text
-    ctx.font         = 'bold 15px Consolas, monospace';
+    ctx.font         = 'bold 15px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = GOLD;
     ctx.fillText('🪵  SHIPWRECK', px + PAD, py + HEADER_H / 2);
 
-    ctx.font      = '11px Consolas, monospace';
+    ctx.font      = '11px Georgia, serif';
     ctx.textAlign = 'right';
     ctx.fillStyle = TEXT_DIM;
     ctx.fillText('[Esc] close', px + PANEL_W - PAD, py + HEADER_H / 2);
@@ -167,7 +167,7 @@ export class SalvageMenu {
     ctx.clip();
 
     if (isEmpty) {
-      ctx.font         = '13px Consolas, monospace';
+      ctx.font         = '13px Georgia, serif';
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = TEXT_DIM;
@@ -193,25 +193,25 @@ export class SalvageMenu {
         }
 
         // Chest icon
-        ctx.font         = '20px serif';
+        ctx.font         = '20px Georgia, serif';
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillStyle    = hovered ? '#fff' : TEXT_H;
         ctx.fillText('📦', px + PAD + 12, ry + ROW_H / 2);
 
         // Label
-        ctx.font         = '13px Consolas, monospace';
+        ctx.font         = '13px Georgia, serif';
         ctx.textAlign    = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillStyle    = hovered ? GOLD : TEXT_H;
         ctx.fillText('Loot Item', px + PAD + 34, ry + ROW_H / 2 - 7);
-        ctx.font      = '11px Consolas, monospace';
+        ctx.font      = '11px Georgia, serif';
         ctx.fillStyle = TEXT_DIM;
         ctx.fillText(`slot ${i + 1} of ${rows}`, px + PAD + 34, ry + ROW_H / 2 + 8);
 
         // Arrow hint
         if (hovered) {
-          ctx.font         = '11px Consolas, monospace';
+          ctx.font         = '11px Georgia, serif';
           ctx.textAlign    = 'right';
           ctx.textBaseline = 'middle';
           ctx.fillStyle    = GOLD;
@@ -239,7 +239,7 @@ export class SalvageMenu {
     ctx.lineTo(px + PANEL_W, fy);
     ctx.stroke();
 
-    ctx.font         = '11px Consolas, monospace';
+    ctx.font         = '11px Georgia, serif';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = TEXT_DIM;

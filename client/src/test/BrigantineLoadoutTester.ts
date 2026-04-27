@@ -113,7 +113,7 @@ export class BrigantineLoadoutTester {
       color: white;
       padding: 20px;
       border-radius: 8px;
-      font-family: monospace;
+      font-family: Georgia, serif;
       z-index: 1000;
       max-width: 400px;
     `;

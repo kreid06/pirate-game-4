@@ -88,7 +88,7 @@ export class ShipyardMenu {
     ctx.roundRect(px, py, PANEL_W, HDR_H, [6, 6, 0, 0]);
     ctx.fill();
 
-    ctx.font         = 'bold 18px Consolas, monospace';
+    ctx.font         = 'bold 18px Georgia, serif';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = TEXT_HEAD;
@@ -103,7 +103,7 @@ export class ShipyardMenu {
     ctx.strokeStyle = '#ff7755';
     ctx.lineWidth   = 1;
     ctx.stroke();
-    ctx.font         = 'bold 14px monospace';
+    ctx.font         = 'bold 14px Georgia, serif';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = '#fff';
@@ -118,7 +118,7 @@ export class ShipyardMenu {
     }
 
     // ── Footer ──────────────────────────────────────────────────────────
-    ctx.font         = '11px Consolas, monospace';
+    ctx.font         = '11px Georgia, serif';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'bottom';
     ctx.fillStyle    = TEXT_DIM;
@@ -146,7 +146,7 @@ export class ShipyardMenu {
     ctx.roundRect(icx, icy, ic, ic, 4);
     ctx.fill();
     ctx.stroke();
-    ctx.font         = 'bold 20px Consolas, monospace';
+    ctx.font         = 'bold 20px Georgia, serif';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = '#80d4ff';
@@ -156,10 +156,10 @@ export class ShipyardMenu {
     const tx = icx + ic + 10;
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
-    ctx.font         = 'bold 14px Consolas, monospace';
+    ctx.font         = 'bold 14px Georgia, serif';
     ctx.fillStyle    = TEXT_HEAD;
     ctx.fillText('Lay Keel  (Brigantine)', tx, ry + 9);
-    ctx.font      = '12px Consolas, monospace';
+    ctx.font      = '12px Georgia, serif';
     ctx.fillStyle = '#e8d070';
     ctx.fillText('20× Wood  +  10× Fiber', tx, ry + 31);
 
@@ -172,7 +172,7 @@ export class ShipyardMenu {
     ctx.roundRect(bx, by, bw, bh, 4);
     ctx.fill();
     ctx.stroke();
-    ctx.font         = 'bold 13px Consolas, monospace';
+    ctx.font         = 'bold 13px Georgia, serif';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = '#ccffdd';
@@ -198,7 +198,7 @@ export class ShipyardMenu {
     ctx.roundRect(icx, icy, ic, ic, 4);
     ctx.fill();
     ctx.stroke();
-    ctx.font         = 'bold 20px Consolas, monospace';
+    ctx.font         = 'bold 20px Georgia, serif';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = '#80ffaa';
@@ -208,10 +208,10 @@ export class ShipyardMenu {
     const tx = icx + ic + 10;
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
-    ctx.font         = 'bold 14px Consolas, monospace';
+    ctx.font         = 'bold 14px Georgia, serif';
     ctx.fillStyle    = TEXT_HEAD;
     ctx.fillText('Ship Under Construction', tx, ry + 9);
-    ctx.font      = '12px Consolas, monospace';
+    ctx.font      = '12px Georgia, serif';
     ctx.fillStyle = TEXT_DIM;
     ctx.fillText('Use build mode [B] to add planks & modules', tx, ry + 31);
 
@@ -224,7 +224,7 @@ export class ShipyardMenu {
     ctx.roundRect(bx, by, bw, bh, 4);
     ctx.fill();
     ctx.stroke();
-    ctx.font         = 'bold 13px Consolas, monospace';
+    ctx.font         = 'bold 13px Georgia, serif';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = '#ccf4ff';

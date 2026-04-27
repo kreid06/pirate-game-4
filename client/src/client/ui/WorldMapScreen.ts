@@ -157,7 +157,7 @@ export class WorldMapScreen {
       ctx.save();
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
       ctx.lineWidth = 1.25;
-      ctx.font = '9px Consolas, monospace';
+      ctx.font = '9px Georgia, serif';
       ctx.fillStyle = 'rgba(255, 255, 255, 0.32)';
       for (let g = WORLD_MIN_X; g < WORLD_MAX_X; g += MAJOR_GRID_STEP) {
         const sx = toScreenX(g);
@@ -212,7 +212,7 @@ export class WorldMapScreen {
       const ly = toScreenY(isl.y);
       if (lx > -50 && lx < cw + 50 && ly > -50 && ly < ch + 50) {
         ctx.textAlign = 'center';
-        ctx.font = `${Math.max(9, Math.min(14, toScreenLen(80)))}px Consolas, monospace`;
+        ctx.font = `${Math.max(9, Math.min(14, toScreenLen(80)))}px Georgia, serif`;
         ctx.fillStyle = '#55aa44';
         ctx.fillText(`Isle ${isl.id ?? '?'}`, lx, ly - toScreenLen(30) - 4);
       }
@@ -246,7 +246,7 @@ export class WorldMapScreen {
       // Ship label
       if (toScreenLen(1) > 0.04) {
         ctx.textAlign = 'center';
-        ctx.font = `${Math.max(8, Math.min(12, toScreenLen(60)))}px Consolas, monospace`;
+        ctx.font = `${Math.max(8, Math.min(12, toScreenLen(60)))}px Georgia, serif`;
         ctx.fillStyle = isFriendly ? '#aaccff' : '#ffaaaa';
         ctx.fillText(`Ship ${ship.id}`, sx, sy + r + 12);
       }
@@ -287,7 +287,7 @@ export class WorldMapScreen {
       // Player name
       if (player.name) {
         ctx.textAlign = 'center';
-        ctx.font = `${isLocal ? 'bold ' : ''}${Math.max(8, Math.min(11, toScreenLen(55)))}px Consolas, monospace`;
+        ctx.font = `${isLocal ? 'bold ' : ''}${Math.max(8, Math.min(11, toScreenLen(55)))}px Georgia, serif`;
         ctx.fillStyle = isLocal ? '#ffee44' : '#aaffcc';
         ctx.fillText(player.name, sx, sy - pr - 4);
       }
@@ -298,11 +298,11 @@ export class WorldMapScreen {
 
     // ── HUD overlay ───────────────────────────────────────────────────────
     ctx.textAlign = 'left';
-    ctx.font = 'bold 18px Consolas, monospace';
+    ctx.font = 'bold 18px Georgia, serif';
     ctx.fillStyle = '#ccddee';
     ctx.fillText('WORLD MAP', 16, 30);
 
-    ctx.font = '12px Consolas, monospace';
+    ctx.font = '12px Georgia, serif';
     ctx.fillStyle = '#556677';
     ctx.fillText('Drag to pan  •  Scroll to zoom  •  M or Esc to close', 16, 50);
 
@@ -323,7 +323,7 @@ export class WorldMapScreen {
     ctx.fill();
     ctx.stroke();
     ctx.textAlign = 'center';
-    ctx.font = 'bold 16px sans-serif';
+    ctx.font = 'bold 16px Georgia, serif';
     ctx.fillStyle = '#ffffff';
     ctx.fillText('✕', btnX + btnW / 2, btnY + 19);
     ctx.restore();
@@ -368,7 +368,7 @@ export class WorldMapScreen {
     ctx.lineTo(x + barPx, y + 5);
     ctx.stroke();
     ctx.textAlign = 'center';
-    ctx.font = '11px Consolas, monospace';
+    ctx.font = '11px Georgia, serif';
     ctx.fillStyle = '#aabbcc';
     ctx.fillText(`${nice.toFixed(0)} px`, x + barPx / 2, y - 8);
     ctx.restore();

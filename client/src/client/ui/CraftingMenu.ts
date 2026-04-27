@@ -379,7 +379,7 @@ export class CraftingMenu {
     ctx.lineTo(px + PANEL_W, py + HDR_H);
     ctx.stroke();
 
-    ctx.font = 'bold 19px Consolas, monospace';
+    ctx.font = 'bold 19px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = TEXT_HEAD;
@@ -396,7 +396,7 @@ export class CraftingMenu {
     ctx.strokeStyle = '#ff7755';
     ctx.lineWidth = 1;
     ctx.stroke();
-    ctx.font = 'bold 13px monospace';
+    ctx.font = 'bold 13px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff';
@@ -448,12 +448,12 @@ export class CraftingMenu {
       const tabCx = tx + (SIDEBAR_W - 16) / 2;
 
       // Icon
-      ctx.font = '22px serif';
+      ctx.font = '22px Georgia, serif';
       ctx.fillStyle = active ? '#fff' : '#aaa';
       ctx.fillText(cat.icon, tabCx, ty + tabH / 2 - 10);
 
       // Label
-      ctx.font = `${active ? 'bold ' : ''}11px Consolas, monospace`;
+      ctx.font = `${active ? 'bold ' : ''}11px Georgia, serif`;
       ctx.fillStyle = active ? TEXT_HEAD : TEXT_DIM;
       ctx.fillText(cat.id, tabCx, ty + tabH / 2 + 14);
     }
@@ -500,7 +500,7 @@ export class CraftingMenu {
       ctx.fill();
       ctx.stroke();
 
-      ctx.font = 'bold 18px Consolas, monospace';
+      ctx.font = 'bold 18px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#fff';
@@ -510,14 +510,14 @@ export class CraftingMenu {
       const textX = iconX + iconSize + 10;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      ctx.font = 'bold 14px Consolas, monospace';
+      ctx.font = 'bold 14px Georgia, serif';
       ctx.fillStyle = TEXT_HEAD;
       const yieldStr = r.outputCount > 1 ? ` ×${r.outputCount}` : '';
       ctx.fillText(r.outputName + yieldStr, textX, ry + 12);
 
       // Ingredients — each segment coloured green (have enough) or red (missing)
       const craftable = canCraft(inventory, r);
-      ctx.font = '11px Consolas, monospace';
+      ctx.font = '11px Georgia, serif';
       ctx.textBaseline = 'top';
       let ingCursorX = textX;
       for (let j = 0; j < r.ingredients.length; j++) {
@@ -543,7 +543,7 @@ export class CraftingMenu {
       ctx.roundRect(btnX, btnY, btnW, btnH, 5);
       ctx.fill();
       ctx.stroke();
-      ctx.font = 'bold 12px Consolas, monospace';
+      ctx.font = 'bold 12px Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = craftable ? '#dfffcc' : '#777777';
@@ -554,7 +554,7 @@ export class CraftingMenu {
     if (recipes.length === 0) {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.font = '14px Consolas, monospace';
+      ctx.font = '14px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.fillText('No recipes available', listX + listW / 2, listY + listH / 2);
     }
@@ -579,7 +579,7 @@ export class CraftingMenu {
     ctx.lineTo(px + PANEL_W,   py + PANEL_H - FOOTER_H);
     ctx.stroke();
 
-    ctx.font = '11px Consolas, monospace';
+    ctx.font = '11px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = TEXT_DIM;
@@ -651,7 +651,7 @@ export class CraftingMenu {
         const W      = 230;
         const LINE   = 16;
         const nameH  = 18;
-        const font12 = '12px Consolas, monospace';
+        const font12 = '12px Georgia, serif';
         const descLines = this._wrapText(ctx, def.description, W - PAD * 2, font12);
         const totalH = PAD + nameH + 4 + LINE + 4 + descLines.length * LINE + PAD;
 
@@ -685,12 +685,12 @@ export class CraftingMenu {
         ctx.textBaseline = 'top';
 
         ctx.fillStyle = '#ffffff';
-        ctx.font      = 'bold 14px Consolas, monospace';
+        ctx.font      = 'bold 14px Georgia, serif';
         ctx.fillText(def.name, tx + PAD + 4, cy);
         cy += nameH + 4;
 
         ctx.fillStyle = '#888888';
-        ctx.font      = '11px Consolas, monospace';
+        ctx.font      = '11px Georgia, serif';
         ctx.fillText(`ID: ${itemId}   [${def.category}]`, tx + PAD + 4, cy);
         cy += LINE + 4;
 

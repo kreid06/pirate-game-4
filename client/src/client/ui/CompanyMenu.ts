@@ -264,14 +264,14 @@ export class CompanyMenu {
     ctx.stroke();
 
     // Title
-    ctx.font          = 'bold 17px Consolas, monospace';
+    ctx.font          = 'bold 17px Georgia, serif';
     ctx.textAlign     = 'left';
     ctx.textBaseline  = 'middle';
     ctx.fillStyle     = GOLD;
     ctx.fillText('⚓  COMPANY LEDGER', px + PAD, py + HEADER_H / 2);
 
     // Close hint
-    ctx.font          = '12px Consolas, monospace';
+    ctx.font          = '12px Georgia, serif';
     ctx.textAlign     = 'right';
     ctx.fillStyle     = TEXT_DIM;
     ctx.fillText('[L / ESC] close', px + PANEL_W - PAD, py + HEADER_H / 2);
@@ -301,7 +301,7 @@ export class CompanyMenu {
     ctx.fillRect(swatchX, swatchY, 18, 18);
 
     // Company name
-    ctx.font         = 'bold 16px Consolas, monospace';
+    ctx.font         = 'bold 16px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = TEXT_HEAD;
@@ -313,7 +313,7 @@ export class CompanyMenu {
     const isSolo   = playerCompany === COMPANY_SOLO;
 
     if (!canLeave && !isSolo && playerId != null) {
-      ctx.font      = '13px Consolas, monospace';
+      ctx.font      = '13px Georgia, serif';
       ctx.fillStyle = TEXT_DIM;
       ctx.textAlign = 'right';
       ctx.fillText(`Player #${playerId}`, px + PANEL_W - PAD - 8, py + sectionH / 2);
@@ -333,7 +333,7 @@ export class CompanyMenu {
       ctx.lineWidth   = 1;
       ctx.strokeRect(btnX, btnY, btnW, btnH);
 
-      ctx.font         = 'bold 12px Consolas, monospace';
+      ctx.font         = 'bold 12px Georgia, serif';
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = '#ff8888';
@@ -364,7 +364,7 @@ export class CompanyMenu {
         ctx.fillRect(px + PAD, inputY, PANEL_W - PAD * 2, formH);
 
         // Label
-        ctx.font         = 'bold 11px Consolas, monospace';
+        ctx.font         = 'bold 11px Georgia, serif';
         ctx.textAlign    = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillStyle    = TEXT_DIM;
@@ -385,7 +385,7 @@ export class CompanyMenu {
 
         // Typed text + blinking cursor
         const displayText = this._createInputText + '|';
-        ctx.font         = '13px Consolas, monospace';
+        ctx.font         = '13px Georgia, serif';
         ctx.fillStyle    = '#e8e0cc';
         ctx.textAlign    = 'left';
         ctx.textBaseline = 'middle';
@@ -406,7 +406,7 @@ export class CompanyMenu {
         ctx.strokeStyle = '#44cc66';
         ctx.lineWidth   = 1;
         ctx.strokeRect(cBtnX, cBtnY, cBtnW, cBtnH);
-        ctx.font         = 'bold 11px Consolas, monospace';
+        ctx.font         = 'bold 11px Georgia, serif';
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillStyle    = '#88ffaa';
@@ -427,7 +427,7 @@ export class CompanyMenu {
         this._cancelBtnArea = { x: xBtnX, y: xBtnY, w: xBtnW, h: cBtnH };
 
         // Hint text below
-        ctx.font         = '11px Consolas, monospace';
+        ctx.font         = '11px Georgia, serif';
         ctx.textAlign    = 'left';
         ctx.textBaseline = 'top';
         ctx.fillStyle    = TEXT_DIM;
@@ -438,7 +438,7 @@ export class CompanyMenu {
 
       // ── Dynamic companies list ────────────────────────────────────────────
       if (companies.length > 0) {
-        ctx.font      = 'bold 12px Consolas, monospace';
+        ctx.font      = 'bold 12px Georgia, serif';
         ctx.fillStyle = GOLD;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
@@ -456,7 +456,7 @@ export class CompanyMenu {
           }
           ctx.fillStyle = '#cc88ff';
           ctx.fillRect(px + PAD + 6, py + (rowH - 12) / 2, 12, 12);
-          ctx.font      = '13px Consolas, monospace';
+          ctx.font      = '13px Georgia, serif';
           ctx.fillStyle = TEXT_HEAD;
           ctx.textAlign = 'left';
           ctx.textBaseline = 'middle';
@@ -468,7 +468,7 @@ export class CompanyMenu {
           ctx.strokeStyle = '#44cc44';
           ctx.lineWidth = 1;
           ctx.strokeRect(jBtnX, jBtnY, jBtnW, 20);
-          ctx.font      = 'bold 11px Consolas, monospace';
+          ctx.font      = 'bold 11px Georgia, serif';
           ctx.fillStyle = '#88ff88';
           ctx.textAlign = 'center';
           ctx.fillText('JOIN', jBtnX + jBtnW / 2, jBtnY + 10);
@@ -476,7 +476,7 @@ export class CompanyMenu {
           py += rowH;
         }
         if (companies.length > maxShow) {
-          ctx.font      = '12px Consolas, monospace';
+          ctx.font      = '12px Georgia, serif';
           ctx.fillStyle = TEXT_DIM;
           ctx.textAlign = 'left';
           ctx.textBaseline = 'top';
@@ -496,7 +496,7 @@ export class CompanyMenu {
       ctx.strokeStyle = '#88aaff';
       ctx.lineWidth   = 1;
       ctx.strokeRect(cBtnX, cBtnY, cBtnW, cBtnH);
-      ctx.font         = 'bold 12px Consolas, monospace';
+      ctx.font         = 'bold 12px Georgia, serif';
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = '#aaccff';
@@ -519,7 +519,7 @@ export class CompanyMenu {
     py = this._sectionHeader(ctx, px, py, 'YOUR CREW ABOARD', `${crewAboard.length} sailor${crewAboard.length !== 1 ? 's' : ''}`);
 
     if (crewAboard.length === 0) {
-      ctx.font         = '13px Consolas, monospace';
+      ctx.font         = '13px Georgia, serif';
       ctx.fillStyle    = TEXT_DIM;
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'top';
@@ -546,7 +546,7 @@ export class CompanyMenu {
     }
 
     if (crewAboard.length > maxRows) {
-      ctx.font         = '12px Consolas, monospace';
+      ctx.font         = '12px Georgia, serif';
       ctx.fillStyle    = TEXT_DIM;
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'top';
@@ -573,7 +573,7 @@ export class CompanyMenu {
 
     const drawGroup = (label: string, group: Ship[], color: string): number => {
       if (group.length === 0) return py;
-      ctx.font         = 'bold 12px Consolas, monospace';
+      ctx.font         = 'bold 12px Georgia, serif';
       ctx.fillStyle    = color;
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'top';
@@ -596,7 +596,7 @@ export class CompanyMenu {
         ctx.fillStyle = COMPANY_COLORS[ship.companyId] ?? '#aaa';
         ctx.fillRect(px + PAD + 4, py + 6, 10, 10);
 
-        ctx.font         = '13px Consolas, monospace';
+        ctx.font         = '13px Georgia, serif';
         ctx.textAlign    = 'left';
         ctx.textBaseline = 'top';
         ctx.fillStyle    = isYours ? GOLD : TEXT_HEAD;
@@ -615,7 +615,7 @@ export class CompanyMenu {
     py = drawGroup('Enemy',    enemy,   '#ff5555');
 
     if (ships.length === 0) {
-      ctx.font         = '13px Consolas, monospace';
+      ctx.font         = '13px Georgia, serif';
       ctx.fillStyle    = TEXT_DIM;
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'top';
@@ -645,7 +645,7 @@ export class CompanyMenu {
     const allyShips = ships.filter(s => s.companyId === playerCompany).length;
     const allyNpcs  = npcs.filter(n => n.companyId === playerCompany).length;
 
-    ctx.font         = '12px Consolas, monospace';
+    ctx.font         = '12px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = TEXT_DIM;
@@ -667,7 +667,7 @@ export class CompanyMenu {
     ctx.fillStyle = 'rgba(255,215,0,0.08)';
     ctx.fillRect(px, py, PANEL_W, h);
 
-    ctx.font         = 'bold 12px Consolas, monospace';
+    ctx.font         = 'bold 12px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle    = GOLD;
@@ -700,7 +700,7 @@ export class CompanyMenu {
       ctx.fillRect(px + PAD, py, PANEL_W - PAD * 2, ROW_H);
     }
 
-    ctx.font         = isHeader ? 'bold 12px Consolas, monospace' : '13px Consolas, monospace';
+    ctx.font         = isHeader ? 'bold 12px Georgia, serif' : '13px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     const baseY = py + ROW_H / 2;
