@@ -1989,9 +1989,9 @@ int websocket_server_update(struct Sim* sim) {
                                     for (int s = 0; s < ship_count && ships_offset < (int)sizeof(ships_str) - 512; s++) {
                                         if (ships[s].active) {
                                             ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
-                                                    "%s{\"id\":%u,\"seq\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"company\":%u,\"shipType\":%u,\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
+                                                    "%s{\"id\":%u,\"seq\":%u,\"name\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"company\":%u,\"shipType\":%u,\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                                                     first_ship ? "" : ",",
-                                                    ships[s].ship_id, ships[s].ship_seq,
+                                                    ships[s].ship_id, ships[s].ship_seq, ships[s].ship_name,
                                                     ships[s].x, ships[s].y, ships[s].rotation,
                                                     ships[s].velocity_x, ships[s].velocity_y,
                                                     ships[s].company_id, ships[s].ship_type,
@@ -2575,6 +2575,64 @@ int websocket_server_update(struct Sim* sim) {
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) handle_salvage_module(player, client, payload);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "rename_ship") == 0) {
+                            // Player sets a display name for a ship they own/crew
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    // Parse shipId and name fields
+                                    uint32_t rs_ship_id = 0;
+                                    const char* p_rs_id = strstr(payload, "\"shipId\":");
+                                    if (p_rs_id) rs_ship_id = (uint32_t)atoi(p_rs_id + 9);
+
+                                    char rs_name[32] = {0};
+                                    const char* p_rn = strstr(payload, "\"name\":\"");
+                                    if (p_rn) {
+                                        p_rn += 8;
+                                        int ri = 0;
+                                        while (*p_rn && *p_rn != '"' && ri < 31) {
+                                            /* Reject control chars */
+                                            unsigned char rc = (unsigned char)*p_rn;
+                                            if (rc >= 32) rs_name[ri++] = *p_rn;
+                                            p_rn++;
+                                        }
+                                        rs_name[ri] = '\0';
+                                    }
+
+                                    /* Locate the ship — player must be aboard it */
+                                    SimpleShip* rs_ship = NULL;
+                                    for (int si = 0; si < ship_count; si++) {
+                                        if (ships[si].active && ships[si].ship_id == rs_ship_id) {
+                                            rs_ship = &ships[si];
+                                            break;
+                                        }
+                                    }
+
+                                    if (rs_ship && player->parent_ship_id == rs_ship_id
+                                        && rs_name[0] != '\0') {
+                                        strncpy(rs_ship->ship_name, rs_name, sizeof(rs_ship->ship_name) - 1);
+                                        rs_ship->ship_name[sizeof(rs_ship->ship_name) - 1] = '\0';
+                                        /* Broadcast the new name to all clients */
+                                        char rs_msg[128];
+                                        snprintf(rs_msg, sizeof(rs_msg),
+                                            "{\"type\":\"ship_renamed\",\"shipId\":%u,\"name\":\"%s\"}",
+                                            rs_ship_id, rs_ship->ship_name);
+                                        websocket_server_broadcast(rs_msg);
+                                        log_info("⚓ Ship %u renamed to \"%s\" by player %u",
+                                                 rs_ship_id, rs_ship->ship_name, player->player_id);
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"rename_ship_ok\",\"shipId\":%u,\"name\":\"%s\"}",
+                                            rs_ship_id, rs_ship->ship_name);
+                                    } else {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"rename_ship_fail\",\"reason\":\"%s\"}",
+                                            !rs_ship   ? "ship_not_found" :
+                                            rs_name[0] == '\0' ? "empty_name" : "not_aboard");
+                                    }
+                                }
                             }
                             handled = true;
 
@@ -6393,12 +6451,13 @@ int websocket_server_update(struct Sim* sim) {
                     ? (float)ship->hull_health
                     : Q16_TO_FLOAT(ship->hull_health);
                 int offset = snprintf(ship_entry, sizeof(ship_entry),
-                        "{\"id\":%u,\"seq\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
+                        "{\"id\":%u,\"seq\":%u,\"name\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                         "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                         "\"rudder_angle\":%.3f,"
                         "\"hullHealth\":%.2f,\"company\":%u,\"shipType\":%u,"
                         "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                         ship->id, simple_ship ? simple_ship->ship_seq : (uint8_t)(ship->id & 0xFF),
+                        simple_ship ? simple_ship->ship_name : "",
                         pos_x, pos_y, rotation, vel_x, vel_y, ang_vel,
                         rudder_radians,
                         hull_health_pct,
@@ -6567,12 +6626,12 @@ int websocket_server_update(struct Sim* sim) {
                     // Build ship entry with modules
                     char ship_entry[6144];
                     int offset = snprintf(ship_entry, sizeof(ship_entry),
-                            "{\"id\":%u,\"seq\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
+                            "{\"id\":%u,\"seq\":%u,\"name\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
                             "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                             "\"rudder_angle\":%.3f,"
                             "\"company\":%u,\"shipType\":%u,"
                             "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
-                            ships[s].ship_id, ships[s].ship_seq,
+                            ships[s].ship_id, ships[s].ship_seq, ships[s].ship_name,
                             ships[s].x, ships[s].y, ships[s].rotation,
                             ships[s].velocity_x, ships[s].velocity_y, ships[s].angular_velocity,
                             0.0f,

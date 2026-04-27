@@ -101,6 +101,7 @@ export enum MessageType {
   UPGRADE_PLAYER_STAT = 'upgrade_player_stat',
   COMMAND = 'command',
   RESPAWN_REQUEST = 'respawn_request',
+  RENAME_SHIP = 'rename_ship',
 
   PING = 'ping',
   
@@ -536,6 +537,7 @@ export class NetworkManager {
   public onFlagCaptureComplete: ((shipId: number, planterCompany: number) => void) | null = null;
   public onSalvageSuccess: ((item: number, quantity: number) => void) | null = null;
   public onNpcUnclaimed: ((npcId: number) => void) | null = null;
+  public onShipRenamed: ((shipId: number, name: string) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
   /**
    * Fired when the server accepts or rejects a Move To module command.
@@ -1589,6 +1591,11 @@ export class NetworkManager {
     this.socket.send(JSON.stringify(msg));
   }
 
+  sendRenameShip(shipId: number, name: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.RENAME_SHIP, shipId, name: name.slice(0, 31) }));
+  }
+
   /**
    * Get current network statistics
    */
@@ -1966,6 +1973,7 @@ export class NetworkManager {
               hullHealth: ship.hullHealth ?? 100,
               companyId: ship.company ?? 0,
               shipType: ship.shipType ?? 3,
+              shipName: ship.name ?? '',
               levelStats: ship.levelStats ? {
                 levels: [
                   ship.levelStats.weight     ?? 1,
@@ -2310,6 +2318,13 @@ export class NetworkManager {
         const sinkingShipId: number = message.shipId || 0;
         console.log(`🌊 SHIP_SINKING: ship ${sinkingShipId} is sinking!`);
         this.onShipSinking?.(sinkingShipId);
+        break;
+      }
+
+      case 'ship_renamed': {
+        const renamedShipId: number = message.shipId || 0;
+        const newShipName: string = message.name ?? '';
+        this.onShipRenamed?.(renamedShipId, newShipName);
         break;
       }
 

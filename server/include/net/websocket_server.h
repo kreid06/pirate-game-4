@@ -116,6 +116,9 @@ typedef struct SimpleShip {
 
     /* Reverse thrust — set when the helmsman holds S; propels the ship slowly backward */
     bool reverse_thrust;
+
+    /* Display name — set by the owning player; broadcast to all clients */
+    char ship_name[32];
 } SimpleShip;
 
 // NPC behavior types

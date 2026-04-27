@@ -531,6 +531,14 @@ export class ClientApplication {
         console.log(`⚓ Ship ${shipId} claimed — company ${companyId}`);
       };
 
+      this.networkManager.onShipRenamed = (shipId, name) => {
+        for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
+          if (!ws) continue;
+          const ship = ws.ships.find(s => s.id === shipId);
+          if (ship) ship.shipName = name;
+        }
+      };
+
       this.networkManager.onNpcUnclaimed = (npcId) => {
         for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
           if (!ws) continue;
@@ -3794,6 +3802,25 @@ export class ClientApplication {
             const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
             const pos = me?.position ? { x: me.position.x, y: me.position.y } : undefined;
             this.uiManager.openWorldMap(pos);
+          }
+          e.preventDefault();
+          break;
+        }
+
+        case 'n':
+        case 'N': {
+          if (e.repeat) break;
+          // Rename the ship the player is currently aboard
+          const ws = this.authoritativeWorldState || this.predictedWorldState;
+          const myId = this.networkManager.getAssignedPlayerId();
+          const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
+          const shipId = me?.carrierId ?? 0;
+          if (shipId === 0) break; // not on a ship
+          const ship = ws?.ships.find(s => s.id === shipId);
+          const current = ship?.shipName ?? '';
+          const newName = window.prompt('Enter ship name (max 31 chars):', current);
+          if (newName !== null && newName.trim().length > 0) {
+            this.networkManager.sendRenameShip(shipId, newName.trim().slice(0, 31));
           }
           e.preventDefault();
           break;

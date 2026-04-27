@@ -10278,7 +10278,9 @@ export class RenderSystem {
       ?? `#${ship.companyId}`;
     const shipTitle   = ship.shipType === SHIP_TYPE_GHOST
       ? 'Phantom Brig'
-      : `${companyName} Brigantine`;
+      : ship.shipName
+        ? ship.shipName
+        : `${companyName} Brigantine`;
 
     // Deck module health for the tooltip bar
     const deckModTip = ship.modules.find(m => m.kind === 'deck');

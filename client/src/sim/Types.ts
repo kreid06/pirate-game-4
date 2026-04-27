@@ -47,6 +47,9 @@ export interface Ship {
   // Ship type (SHIP_TYPE_* constants); used for spectral/ghost rendering
   shipType: number;
 
+  // Display name set by the crew (empty string = unnamed)
+  shipName?: string;
+
   // Ship progression (from server levelStats; optional until server sends it)
   levelStats?: ShipLevelStats;
 
