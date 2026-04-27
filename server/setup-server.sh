@@ -190,6 +190,13 @@ server {
     listen 80;
     server_name ${SERVER_DOMAIN};
 
+    root /var/www/html;
+
+    # Allow Let's Encrypt ACME challenges to be served
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
     # Proxy auth API to Node.js auth server (loopback)
     location /auth/ {
         proxy_pass http://127.0.0.1:3001;
@@ -213,6 +220,9 @@ server {
 NGINXEOF
 
 sudo ln -sf /etc/nginx/sites-available/pirate-game /etc/nginx/sites-enabled/pirate-game
+# Remove default site so it doesn't intercept ACME challenges
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo mkdir -p /var/www/html
 sudo nginx -t && sudo systemctl reload nginx
 
 # Offer to set up SSL with certbot
