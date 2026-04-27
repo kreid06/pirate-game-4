@@ -563,7 +563,7 @@ export class NetworkManager {
     angle: number, projectileId: number, ammoType: number) => void) | null = null;
 
   public onEntityHit: ((entityType: 'npc' | 'player', id: number, x: number, y: number,
-    damage: number, health: number, maxHealth: number, killed: boolean) => void) | null = null;
+    damage: number, health: number, maxHealth: number, killed: boolean, killerShipId: number) => void) | null = null;
   /** Fired when liquid flame ignites an entity or wooden module. */
   public onFireEffect: ((entityType: 'npc' | 'player' | 'module', id: number, x: number, y: number,
     durationMs: number, shipId?: number, moduleId?: number) => void) | null = null;
@@ -2339,6 +2339,7 @@ export class NetworkManager {
           message.health   ?? 0,
           message.maxHealth ?? 100,
           message.killed   ?? false,
+          message.killerShipId ?? message.attackerShipId ?? message.shipId ?? 0,
         );
         break;
       }

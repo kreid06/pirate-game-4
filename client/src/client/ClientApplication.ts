@@ -470,22 +470,22 @@ export class ClientApplication {
         const myPlayer    = myPlayerId !== null ? ws?.players.find(p => p.id === myPlayerId) : null;
         const sinkingShip = ws?.ships.find(s => s.id === shipId);
         if (sinkingShip) {
-          const FACTION: Record<number, string> = { 0: 'Unclaimed', 1: 'Solo', 2: 'Pirates', 3: 'Navy', 99: 'Phantom Brig' };
           const dynCompanies = ws?.companies ?? [];
-          const shipLabel = (s: Ship) => FACTION[s.companyId] ?? dynCompanies.find(c => c.id === s.companyId)?.name ?? `Ship #${s.id}`;
-          const sinkLabel  = shipLabel(sinkingShip);
+          const shipDisplayName = (s: import('./../../sim/Types.js').Ship) =>
+            s.shipName || 'Brigantine';
+          const sinkLabel  = shipDisplayName(sinkingShip);
           const isOwnShip  = myPlayer?.carrierId === shipId;
           if (isOwnShip) {
             const attackerId = this.renderSystem.getLastAttackerOf(shipId);
             const attacker   = attackerId !== null ? ws?.ships.find(s => s.id === attackerId) : null;
             const msg = attacker
-              ? `Your ${sinkLabel} was sunk by ${shipLabel(attacker)}`
-              : `Your s${sinkLabel} was sunk!`;
+              ? `Your ${sinkLabel} was sunk by ${shipDisplayName(attacker)}`
+              : `Your ${sinkLabel} was sunk!`;
             this.renderSystem.showAnnouncement(msg, 'ship_sink', 4.0);
           } else {
             const myShip  = myPlayer?.carrierId ? ws?.ships.find(s => s.id === myPlayer!.carrierId) : null;
-            const myLabel = myShip ? shipLabel(myShip) : 'Our ship';
-            this.renderSystem.showAnnouncement(`Your ${myLabel} sunk ${sinkLabel}`, 'ship_sink', 4.0);
+            const myLabel = myShip ? shipDisplayName(myShip) : 'Our ship';
+            this.renderSystem.showAnnouncement(`${myLabel} sunk ${sinkLabel}`, 'ship_sink', 4.0);
           }
         }
 
@@ -1799,7 +1799,7 @@ export class ClientApplication {
       };
 
       // Handle ENTITY_HIT: update NPC/player health and show floating damage number
-      this.networkManager.onEntityHit = (entityType, id, x, y, damage, health, maxHealth, killed) => {
+      this.networkManager.onEntityHit = (entityType, id, x, y, damage, health, maxHealth, killed, killerShipId) => {
         for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
           if (!ws) continue;
           if (entityType === 'npc') {
@@ -1812,6 +1812,37 @@ export class ClientApplication {
         }
         this.renderSystem.spawnDamageNumber(Vec2.from(x, y), damage, killed);
         this.renderSystem.notifyEntityDamaged(id, entityType === 'npc');
+
+        // Kill announcement — skip for the local player's own death (respawn screen handles that)
+        if (killed) {
+          const myId = this.networkManager.getAssignedPlayerId();
+          const isLocalPlayerDeath = entityType === 'player' && myId !== null && id === myId;
+          if (!isLocalPlayerDeath) {
+            const ws = this.authoritativeWorldState ?? this.predictedWorldState;
+            // Resolve killer ship: prefer server-provided ID, fall back to nearest ship
+            let killerShip = killerShipId > 0 ? ws?.ships.find(s => s.id === killerShipId) : undefined;
+            if (!killerShip && ws) {
+              let bestDist = Infinity;
+              for (const s of ws.ships) {
+                const dx = s.position.x - x, dy = s.position.y - y;
+                const d = dx * dx + dy * dy;
+                if (d < bestDist) { bestDist = d; killerShip = s; }
+              }
+            }
+            const killerName = killerShip ? (killerShip.shipName || 'Brigantine') : null;
+            if (killerName) {
+              let targetName: string;
+              if (entityType === 'player') {
+                const p = ws?.players.find(pl => pl.id === id);
+                targetName = p?.name || `Player #${id}`;
+              } else {
+                const npc = ws?.npcs.find(n => n.id === id);
+                targetName = npc?.name || `NPC #${id}`;
+              }
+              this.renderSystem.showAnnouncement(`${killerName} killed ${targetName}`, 'npc_kill', 3.0);
+            }
+          }
+        }
 
         // Detect local player death → show respawn screen
         if (killed && entityType === 'player') {

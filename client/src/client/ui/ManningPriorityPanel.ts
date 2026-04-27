@@ -104,21 +104,53 @@ export class ManningPriorityPanel {
     }
   }
 
-  // Panel geometry (screen-space, fixed on left side)
-  private readonly PX = 10;
-  private readonly PY = 60;
+  // Panel geometry (screen-space, draggable)
+  // Default: flush with left edge, just below the stats box (BY=10 + BOX_H=118 + 8px gap)
+  private panelX = 10;
+  private panelY = 136;
   private readonly PW = 192;
   private readonly HEADER_H = 26;
   private readonly ROW_H = 46;
+
+  // Drag state
+  private _dragging = false;
+  private _dragOffX = 0;
+  private _dragOffY = 0;
+
+  // Minimize state
+  private _minimized = false;
 
   // -------------------------------------------------------------------------
   // Public API
   // -------------------------------------------------------------------------
 
   /**
-   * Try to consume a canvas click. Returns true if the click was inside the panel.
+   * Try to consume a mousedown. Handles header drag, minimize toggle, and button hits.
+   * Returns true if the click was inside the panel.
    */
-  handleClick(cx: number, cy: number): boolean {
+  handleMouseDown(cx: number, cy: number): boolean {
+    const { panelX: px, panelY: py, PW: pw, HEADER_H } = this;
+
+    // Click inside header → start drag (or fall through to minimize button below)
+    if (cx >= px && cx < px + pw && cy >= py && cy < py + HEADER_H) {
+      // Minimize toggle button (right side of header, 20 px wide)
+      const minBtnX = px + pw - 20;
+      if (cx >= minBtnX) {
+        this._minimized = !this._minimized;
+        return true;
+      }
+      // Begin drag
+      this._dragging = true;
+      this._dragOffX = cx - px;
+      this._dragOffY = cy - py;
+      return true;
+    }
+
+    // When minimized no other hit areas are active
+    if (this._minimized) {
+      return cx >= px && cx < px + pw && cy >= py && cy < py + HEADER_H;
+    }
+
     for (const area of this.hitAreas) {
       if (cx >= area.x && cx < area.x + area.w && cy >= area.y && cy < area.y + area.h) {
         area.action();
@@ -126,6 +158,16 @@ export class ManningPriorityPanel {
       }
     }
     return false;
+  }
+
+  handleMouseMove(cx: number, cy: number): void {
+    if (!this._dragging) return;
+    this.panelX = cx - this._dragOffX;
+    this.panelY = cy - this._dragOffY;
+  }
+
+  handleMouseUp(): void {
+    this._dragging = false;
   }
 
   /**
@@ -148,7 +190,7 @@ export class ManningPriorityPanel {
     this._localCompanyId = localCompanyId;
 
     const tasks = this.priorityOrder;
-    const { PX: px, PY: py, PW: pw, HEADER_H, ROW_H } = this;
+    const { panelX: px, panelY: py, PW: pw, HEADER_H, ROW_H } = this;
     const panelH = HEADER_H + tasks.length * ROW_H + 6;
 
     ctx.save();
@@ -171,6 +213,21 @@ export class ManningPriorityPanel {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('CREW PRIORITY', px + pw / 2, py + HEADER_H / 2);
+
+    // Minimize toggle button (top-right of header)
+    const minLabel = this._minimized ? '▶' : '▼';
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.fillRect(px + pw - 20, py + 3, 17, HEADER_H - 6);
+    ctx.fillStyle = '#aac8ff';
+    ctx.font = '9px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(minLabel, px + pw - 11, py + HEADER_H / 2);
+
+    if (this._minimized) {
+      ctx.restore();
+      return;
+    }
 
     // ---- NPC pool: sort by ID (stable), same company only ----
     const shipNpcs = npcs

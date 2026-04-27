@@ -382,6 +382,7 @@ export class UIManager {
     if (this.activeMenuId === MENU_ID.PLAYER) this.playerMenu.handleMouseMove(x, y);
     if (this.salvageMenu.visible) this.salvageMenu.handleMouseMove(x, y);
     if (this.respawnScreen.visible) this.respawnScreen.handleMouseMove(x, y);
+    this.manningPanel.handleMouseMove(x, y);
     this.worldMapScreen.handleMouseMove(x, y);
   }
 
@@ -390,6 +391,7 @@ export class UIManager {
     if (this.tombstoneMenu.visible) this.tombstoneMenu.handleMouseUp(x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) this.playerMenu.handleMouseUp(x, y);
     if (this.respawnScreen.visible) this.respawnScreen.handleMouseUp();
+    this.manningPanel.handleMouseUp();
     this.worldMapScreen.handleMouseUp();
   }
 
@@ -1238,7 +1240,7 @@ export class UIManager {
         }
       }
     }
-    return this.manningPanel.handleClick(x, y);
+    return this.manningPanel.handleMouseDown(x, y);
   }
 
   /** Returns the current npcId → task name map for colouring NPCs in the render system. */
