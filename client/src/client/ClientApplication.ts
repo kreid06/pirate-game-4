@@ -28,6 +28,7 @@ import { MENU_ID } from './ui/UIManager.js';
 import { RadialMenu } from './ui/RadialMenu.js';
 import { CraftingMenu } from './ui/CraftingMenu.js';
 import { ShipyardMenu } from './ui/ShipyardMenu.js';
+import { ShipRenameDialog } from './ui/ShipRenameDialog.js';
 import { PauseMenu, GameSettings } from './ui/PauseMenu.js';
 import { CommandConsole } from './ui/CommandConsole.js';
 import { IslandEditor } from './gfx/IslandEditor.js';
@@ -179,6 +180,8 @@ export class ClientApplication {
   private craftingMenu = new CraftingMenu();
   /** Ship construction panel opened when the player presses E at a shipyard. */
   private shipyardMenu = new ShipyardMenu();
+  /** Custom rename dialog — replaces window.prompt() for ship naming. */
+  private renameDialog!: ShipRenameDialog;
   /** Pause overlay — opened by Escape / ` / P when no other menu is up. */
   private pauseMenu = new PauseMenu();
   /** Terminal command bar — opened by / when no other menu is up. */
@@ -302,6 +305,12 @@ export class ClientApplication {
       this.renderSystem = new RenderSystem(this.canvas, this.config.graphics);
       await this.renderSystem.initialize();
       this.renderSystem.setRadialMenu(this._radialMenu);
+
+      // Initialize rename dialog (needs canvas to position the HTML input overlay)
+      this.renameDialog = new ShipRenameDialog(this.canvas);
+      this.renameDialog.onConfirm = (shipId, name) => {
+        this.networkManager.sendRenameShip(shipId, name);
+      };
 
       // Initialize WebGL2 world renderer (dual-canvas setup)
       if (this.config.graphics.useWebGL2) {
@@ -1275,6 +1284,8 @@ export class ClientApplication {
 
       // Let UI panels (e.g. manning priority panel) consume clicks before game logic
       this.inputManager.onUIClick = (x, y) => {
+        // Rename dialog is topmost — check first
+        if (this.renameDialog?.handleClick(x, y)) return true;
         if (this.shipyardMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
         const _wsClick = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
         const _pidClick = this.networkManager.getAssignedPlayerId();
@@ -1624,8 +1635,8 @@ export class ClientApplication {
         this.networkManager.sendClaimShip(shipId);
       });
 
-      this.uiManager.setShipRenameCallback((shipId, name) => {
-        this.networkManager.sendRenameShip(shipId, name);
+      this.uiManager.setShipRenameRequestCallback((shipId, currentName) => {
+        this.renameDialog.open(shipId, currentName);
       });
 
       // Wire Leave Company button in the company menu — moves player back to Solo
@@ -1938,6 +1949,8 @@ export class ClientApplication {
           this.shipyardMenu.close();
           this.uiManager.setActiveMenuId(null);
           this.renderSystem.showAnnouncement('⚓ Ship released!', 'info', 3.5);
+          // Open custom rename dialog for the newly-launched ship
+          this.renameDialog.open(shipSpawned, '');
         }
       };
 
@@ -2480,6 +2493,14 @@ export class ClientApplication {
       // Shipyard construction menu
       if (this.shipyardMenu.visible) {
         this.shipyardMenu.render(
+          this.renderSystem.getContext(),
+          this.canvas.width,
+          this.canvas.height,
+        );
+      }
+      // Rename dialog — topmost overlay
+      if (this.renameDialog?.visible) {
+        this.renameDialog.render(
           this.renderSystem.getContext(),
           this.canvas.width,
           this.canvas.height,
@@ -3822,10 +3843,8 @@ export class ClientApplication {
           if (shipId === 0) break; // not on a ship
           const ship = ws?.ships.find(s => s.id === shipId);
           const current = ship?.shipName ?? '';
-          const newName = window.prompt('Enter ship name (max 31 chars):', current);
-          if (newName !== null && newName.trim().length > 0) {
-            this.networkManager.sendRenameShip(shipId, newName.trim().slice(0, 31));
-          }
+          // Open the custom rename dialog instead of window.prompt
+          this.renameDialog.open(shipId, current);
           e.preventDefault();
           break;
         }

@@ -96,8 +96,8 @@ export class ShipMenu {
   /** Called when the player confirms "Claim Ship" from the settings panel. */
   public onClaimShip?: (shipId: number) => void;
 
-  /** Called when the player submits a new name from the settings panel. */
-  public onRenameShip?: (shipId: number, name: string) => void;
+  /** Called when the player clicks Rename in settings — opens the rename dialog. */
+  public onRenameRequest?: (shipId: number, currentName: string) => void;
 
   /** Hit areas for attribute rows populated each render frame. */
   private _upgradeHitAreas: Array<{ attr: number; serverName: string; x: number; y: number; w: number; h: number; affordable: boolean }> = [];
@@ -139,11 +139,8 @@ export class ShipMenu {
       if (this._renameBtnArea) {
         const r = this._renameBtnArea;
         if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
-          const newName = window.prompt('Enter ship name (max 31 chars):', this._currentShipName);
-          if (newName !== null && newName.trim().length > 0) {
-            this.onRenameShip?.(this._currentShipId, newName.trim().slice(0, 31));
-          }
           this._settingsOpen = false;
+          this.onRenameRequest?.(this._currentShipId, this._currentShipName);
           return true;
         }
       }
