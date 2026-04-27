@@ -113,10 +113,18 @@ if(XXHASH_INCLUDE_DIR AND XXHASH_LIBRARY)
 endif()
 
 # Test executables
+# test-determinism only tests core math/rng/sim — exclude world_save and island_loader
+# which have deep dependencies on the full server (globals, net functions, json-c).
+set(SIM_SOURCES_TEST
+    src/sim/simulation.c
+    src/sim/module_types.c
+    src/sim/island_data.c
+    src/sim/ship_level.c
+)
 add_executable(test-determinism 
     tests/test_determinism.c 
     ${CORE_SOURCES} 
-    ${SIM_SOURCES} 
+    ${SIM_SOURCES_TEST} 
     ${UTIL_SOURCES}
 )
 target_link_libraries(test-determinism m)
