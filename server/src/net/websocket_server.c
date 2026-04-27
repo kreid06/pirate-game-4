@@ -2294,6 +2294,10 @@ int websocket_server_update(struct Sim* sim) {
                                         
                                         // Store movement state for tick-based processing
                                         // (Don't apply movement immediately - let websocket_server_tick handle it)
+                                        // Dead players cannot move
+                                        if (player->health == 0) {
+                                            x = 0.0f; y = 0.0f;
+                                        }
                                         player->movement_direction_x = x;
                                         player->movement_direction_y = y;
                                         player->is_moving = (x != 0.0f || y != 0.0f);
@@ -2358,6 +2362,10 @@ int websocket_server_update(struct Sim* sim) {
                                     if (y > 1.0f) y = 1.0f;
                                     
                                     // Update player's movement state (NOT apply movement yet - that happens every tick)
+                                    // Dead players cannot move
+                                    if (player->health == 0) {
+                                        x = 0.0f; y = 0.0f; is_moving = false;
+                                    }
                                     player->movement_direction_x = x;
                                     player->movement_direction_y = y;
                                     player->is_moving = is_moving;
@@ -7877,7 +7885,12 @@ void websocket_server_tick(float dt) {
                 }
 
                 // Players who are mounted cannot move - they're locked to the module position
-                if (ws_player->is_mounted) {
+                if (ws_player->health == 0) {
+                    // Dead players cannot move; ensure movement state is cleared
+                    ws_player->is_moving = false;
+                    ws_player->movement_direction_x = 0.0f;
+                    ws_player->movement_direction_y = 0.0f;
+                } else if (ws_player->is_mounted) {
                     // Mounted players stay at their mount position
                     // Their world position still updates as the ship moves/rotates
                     if (on_ship && player_ship) {
