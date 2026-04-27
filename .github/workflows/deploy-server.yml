@@ -101,6 +101,14 @@ jobs:
             sudo chown -R \$USER:\$USER /opt/pirate-game/auth &&
             cd /opt/pirate-game/auth && npm ci --omit=dev
           "
+
+          # Write auth.env from GitHub secrets (overwrites placeholder values from setup-server.sh)
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
+            "sudo tee /opt/pirate-game/config/auth.env > /dev/null << 'ENVEOF'
+AUTH_PORT=3001
+JWT_SECRET=${{ secrets.AUTH_JWT_SECRET }}
+CORS_ORIGINS=${{ secrets.AUTH_CORS_ORIGINS }}
+ENVEOF"
           
       - name: Restart server services
         run: |
