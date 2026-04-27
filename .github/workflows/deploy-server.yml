@@ -91,13 +91,14 @@ jobs:
           scp -o StrictHostKeyChecking=no server/config/server.conf ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/server.conf
           ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mv /tmp/server.conf /opt/pirate-game/config/server.conf"
 
-          # Deploy auth server dist + package.json
+          # Deploy auth server dist + package.json + package-lock.json
           scp -o StrictHostKeyChecking=no -r server/auth/dist ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/auth-dist
-          scp -o StrictHostKeyChecking=no server/auth/package.json ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/auth-package.json
+          scp -o StrictHostKeyChecking=no server/auth/package.json server/auth/package-lock.json ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/
           ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "
             sudo rm -rf /opt/pirate-game/auth/dist &&
             sudo mv /tmp/auth-dist /opt/pirate-game/auth/dist &&
-            sudo mv /tmp/auth-package.json /opt/pirate-game/auth/package.json &&
+            sudo mv /tmp/package.json /opt/pirate-game/auth/package.json &&
+            sudo mv /tmp/package-lock.json /opt/pirate-game/auth/package-lock.json &&
             sudo chown -R \$USER:\$USER /opt/pirate-game/auth &&
             cd /opt/pirate-game/auth && npm ci --omit=dev
           "
