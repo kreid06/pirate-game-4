@@ -46,6 +46,8 @@ jobs:
           VITE_WS_PROTOCOL: ${{ secrets.VITE_WS_PROTOCOL }}
           VITE_WS_HOST: ${{ secrets.VITE_WS_HOST }}
           VITE_WS_PORT: ${{ secrets.VITE_WS_PORT }}
+          # nginx proxies /auth/ → localhost:3001, so no port needed
+          VITE_AUTH_URL: https://${{ secrets.VITE_WS_HOST }}
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
