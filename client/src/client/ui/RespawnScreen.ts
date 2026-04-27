@@ -25,8 +25,9 @@ interface SpawnOption {
 export class RespawnScreen {
   public visible: boolean = false;
 
-  /** Called when the player confirms a respawn location. */
-  public onRespawnConfirmed: ((shipId?: number, worldX?: number, worldY?: number, islandId?: number) => void) | null = null;
+  /** Called when the player confirms a respawn location.
+   * spawnX/spawnY are the world-space target coords for camera snapping. */
+  public onRespawnConfirmed: ((shipId?: number, worldX?: number, worldY?: number, islandId?: number, spawnX?: number, spawnY?: number) => void) | null = null;
 
   private selectedOption: SpawnOption | null = null;
   private spawnOptions: SpawnOption[] = [];
@@ -128,10 +129,12 @@ export class RespawnScreen {
       const b = this._btnBounds;
       if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
         if (this.selectedOption) {
+          const sx = this.selectedOption.x;
+          const sy = this.selectedOption.y;
           if (this.selectedOption.type === 'ship') {
-            this.onRespawnConfirmed?.(this.selectedOption.shipId, undefined, undefined, undefined);
+            this.onRespawnConfirmed?.(this.selectedOption.shipId, undefined, undefined, undefined, sx, sy);
           } else {
-            this.onRespawnConfirmed?.(undefined, undefined, undefined, this.selectedOption.islandId);
+            this.onRespawnConfirmed?.(undefined, undefined, undefined, this.selectedOption.islandId, sx, sy);
           }
           this.visible = false;
         }

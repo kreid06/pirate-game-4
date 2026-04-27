@@ -97,6 +97,7 @@ export class ClientApplication {
   private hasReceivedWorldState = false; // Track if we've received at least one world state
   private previousMountState = false;    // Track previous mount state to detect changes
   private previousCarrierId: number | null = null; // Track ship changes for boarding sync
+  private _prevLocalHealth: number | null = null;  // Detect respawn (health ≤0 → >0) for flash
   // Optimistic hotbar slot — held until server confirms the same value so that
   // rapid movement messages (W held) don't let stale world-states flicker the UI back.
   private pendingActiveSlot: number | null = null;
@@ -1646,10 +1647,19 @@ export class ClientApplication {
         this.networkManager.sendPlayerStatUpgrade(stat);
       });
 
-      // Wire respawn confirmation: send respawn_request to server, close screen
-      this.uiManager.setRespawnConfirmedCallback((shipId, worldX, worldY, islandId) => {
-        this.networkManager.sendRespawnRequest(shipId, worldX, worldY, islandId);
+      // Wire respawn confirmation: flash white, snap camera, send network request immediately
+      this.uiManager.setRespawnConfirmedCallback((shipId, worldX, worldY, islandId, spawnX, spawnY) => {
+        // 1. Hold screen at full white
+        this.uiManager.triggerWhiteFlash();
         this.uiManager.closeRespawnScreen();
+
+        // 2. Snap camera to spawn target so it's in the right place when white fades
+        if (spawnX !== undefined && spawnY !== undefined) {
+          this.camera.setPosition(Vec2.from(spawnX, spawnY));
+        }
+
+        // 3. Send network request immediately
+        this.networkManager.sendRespawnRequest(shipId, worldX, worldY, islandId);
       });
 
       // Hotbar left-click slot selection
@@ -2531,6 +2541,21 @@ export class ClientApplication {
    */
   private onServerWorldState(worldState: WorldState): void {
     this.authoritativeWorldState = worldState;
+
+    // Detect respawn: local player health transitions from ≤0 to >0 → flash white again
+    const _pid = this.networkManager.getAssignedPlayerId();
+    if (_pid !== null) {
+      const _lp = worldState.players.find(p => p.id === _pid);
+      if (_lp) {
+        const wasDown = this._prevLocalHealth !== null && this._prevLocalHealth <= 0;
+        const nowUp   = _lp.health > 0;
+        if (wasDown && nowUp) {
+          // Server confirmed respawn — start fading the white out
+          this.uiManager.releaseWhiteFlash();
+        }
+        this._prevLocalHealth = _lp.health;
+      }
+    }
 
     // Re-apply optimistic hotbar slot so rapid world-state updates don't flicker it back.
     // Once the server confirms (its activeSlot matches our pending value) we clear pending.

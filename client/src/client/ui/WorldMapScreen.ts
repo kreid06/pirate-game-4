@@ -43,12 +43,15 @@ export class WorldMapScreen {
     this.visible = true;
     this._closeBounds = null;
     this._openPlayerPos = localPlayerPos ?? null;
-    // Only reset pan/zoom on the very first open (zoom===0 is the sentinel for "never opened")
-    if (this.zoom === 0) {
+    // Centre on the player whenever a position is provided; fall back to world centre.
+    if (localPlayerPos) {
+      this.panX = localPlayerPos.x;
+      this.panY = localPlayerPos.y;
+    } else if (this.zoom === 0) {
       this.panX = WORLD_MIN_X + WORLD_W / 2;
       this.panY = WORLD_MIN_Y + WORLD_H / 2;
-      // zoom stays 0 — first render will call fitZoom()
     }
+    // zoom === 0 is the sentinel for "never opened" — first render will call fitZoom()
   }
 
   close(): void {
@@ -285,11 +288,12 @@ export class WorldMapScreen {
       }
 
       // Player name
-      if (player.name) {
+      const label = isLocal ? 'You' : player.name;
+      if (label) {
         ctx.textAlign = 'center';
         ctx.font = `${isLocal ? 'bold ' : ''}${Math.max(8, Math.min(11, toScreenLen(55)))}px Georgia, serif`;
         ctx.fillStyle = isLocal ? '#ffee44' : '#aaffcc';
-        ctx.fillText(player.name, sx, sy - pr - 4);
+        ctx.fillText(label, sx, sy - pr - 4);
       }
     }
 

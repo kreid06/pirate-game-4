@@ -136,6 +136,13 @@ export class UIManager {
   private showNetworkStats = false;
   private showControlHints = true;
 
+  // White flash overlay (triggered on respawn)
+  // _flashHolding=true  → fully opaque, waiting for server confirmation
+  // _flashStartTime > 0 → fading out after server confirmed
+  private _flashHolding = false;
+  private _flashStartTime = 0;
+  private static readonly _FLASH_MS = 3000;
+
   // Mouse screen position (updated each frame before render)
   private mouseX = 0;
   private mouseY = 0;
@@ -313,13 +320,26 @@ export class UIManager {
     this.respawnScreen.close();
   }
 
+  /** Hold screen at full white until releaseWhiteFlash() is called. */
+  triggerWhiteFlash(): void {
+    this._flashHolding = true;
+    this._flashStartTime = 0;
+  }
+
+  /** Start fading the white flash out (call once server confirms new position). */
+  releaseWhiteFlash(): void {
+    if (!this._flashHolding && this._flashStartTime === 0) return; // not active
+    this._flashHolding = false;
+    this._flashStartTime = Date.now();
+  }
+
   /** True while the respawn screen is showing. */
   isRespawnScreenVisible(): boolean {
     return this.respawnScreen.visible;
   }
 
   /** Set the callback that fires when the player confirms a respawn location. */
-  setRespawnConfirmedCallback(cb: (shipId?: number, worldX?: number, worldY?: number, islandId?: number) => void): void {
+  setRespawnConfirmedCallback(cb: (shipId?: number, worldX?: number, worldY?: number, islandId?: number, spawnX?: number, spawnY?: number) => void): void {
     this.respawnScreen.onRespawnConfirmed = cb;
   }
 
@@ -557,6 +577,28 @@ export class UIManager {
     // Tombstone menu — rendered above everything else
     if (this.tombstoneMenu.visible) {
       this.tombstoneMenu.render(ctx);
+    }
+
+    // White flash — very topmost, fades out after respawn
+    if (this._flashHolding) {
+      ctx.save();
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      ctx.restore();
+    } else if (this._flashStartTime > 0) {
+      const elapsed = Date.now() - this._flashStartTime;
+      const t = Math.min(1, elapsed / UIManager._FLASH_MS);
+      // Fast-in slow-out: start opaque, decelerate as it fades (ease-out quad)
+      const alpha = Math.max(0, (1 - t) * (1 - t));
+      if (alpha > 0) {
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        ctx.restore();
+      } else {
+        this._flashStartTime = 0;
+      }
     }
   }
   
