@@ -8,6 +8,8 @@ import db from './db.js';
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) throw new Error('JWT_SECRET environment variable is required');
 
+const SECRET: string = JWT_SECRET;
+
 const ACCESS_TOKEN_TTL  = 15 * 60;       // 15 minutes (seconds)
 const REFRESH_TOKEN_TTL = 7 * 24 * 3600; // 7 days (seconds)
 
@@ -20,14 +22,14 @@ export interface AccessTokenPayload {
 
 // ── Access token ──────────────────────────────────────────────────────────────
 export function signAccessToken(payload: AccessTokenPayload): string {
-  return jwt.sign(payload, JWT_SECRET, {
+  return jwt.sign(payload, SECRET, {
     algorithm: 'HS256',
     expiresIn: ACCESS_TOKEN_TTL,
   });
 }
 
 export function verifyAccessToken(token: string): AccessTokenPayload {
-  return jwt.verify(token, JWT_SECRET) as AccessTokenPayload;
+  return jwt.verify(token, SECRET) as AccessTokenPayload;
 }
 
 // ── Refresh token ─────────────────────────────────────────────────────────────
