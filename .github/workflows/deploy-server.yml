@@ -81,7 +81,7 @@ jobs:
       - name: Deploy to server
         run: |
           # Create directories
-          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mkdir -p /opt/pirate-game/bin /opt/pirate-game/config /opt/pirate-game/auth"
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "sudo mkdir -p /opt/pirate-game/bin /opt/pirate-game/config /opt/pirate-game/auth /opt/pirate-game/data/auth"
           
           # Copy binary to temp location, then move with sudo
           scp -o StrictHostKeyChecking=no server/build/pirate-server ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/pirate-server
