@@ -1637,6 +1637,16 @@ export class ClientApplication {
         if (!ws) return [];
         return ws.players.filter(p => p.name).map(p => p.name as string);
       });
+      this.commandConsole.setArgValuesProvider('TpToPlayer', 0, () => {
+        const ws = this.authoritativeWorldState;
+        if (!ws) return [];
+        return ws.players.filter(p => p.name).map(p => p.name as string);
+      });
+      this.commandConsole.setArgValuesProvider('TpToPlayer', 1, () => {
+        const ws = this.authoritativeWorldState;
+        if (!ws) return [];
+        return ws.players.filter(p => p.name).map(p => p.name as string);
+      });
       this.networkManager.onCommandResponse = (text, success) => {
         this.commandConsole.pushResponse(text, success ? 'response' : 'error');
         // Don't auto-open — the player can re-open with / to see the log
