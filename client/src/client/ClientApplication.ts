@@ -606,9 +606,10 @@ export class ClientApplication {
         }
       };
 
-      this.networkManager.onFiberHarvestResult = (success, fiber, reason) => {
+      this.networkManager.onFiberHarvestResult = (success, fiber, reason, wood) => {
         if (success) {
-          this.renderSystem.showAnnouncement(`🌿 Gathered  +${fiber} fiber`, 'info', 2.5);
+          const woodStr = wood ? `  +${wood} wood` : '';
+          this.renderSystem.showAnnouncement(`🌿 Gathered  +${fiber} fiber${woodStr}`, 'info', 2.5);
         } else {
           const msg: Record<string, string> = {
             too_far:        'Move closer to a plant',
@@ -630,6 +631,19 @@ export class ClientApplication {
             inventory_full: 'Inventory is full',
           };
           this.renderSystem.showAnnouncement(`⛏ ${msg[reason] ?? 'Cannot mine right now'}`, 'info', 2.0);
+        }
+      };
+
+      this.networkManager.onStoneHarvestResult = (success, stone, reason) => {
+        if (success) {
+          this.renderSystem.showAnnouncement(`🪨 Picked up +${stone} stone`, 'info', 2.5);
+        } else {
+          const msg: Record<string, string> = {
+            too_far:        'Move closer to a rock',
+            not_on_island:  'You must be on an island',
+            inventory_full: 'Inventory is full',
+          };
+          this.renderSystem.showAnnouncement(`🪨 ${msg[reason] ?? 'No rock nearby'}`, 'info', 2.0);
         }
       };
 
@@ -927,7 +941,16 @@ export class ClientApplication {
             }
           }
 
-          // Mine rock: pickaxe equipped + hovering rock → press E
+          // Harvest stone: hover a rock → press E (no tool required, gives ITEM_STONE)
+          if (player && player.carrierId === 0) {
+            const rock = this.renderSystem.getHoveredRock();
+            if (rock) {
+              this.networkManager.sendHarvestStone();
+              return;
+            }
+          }
+
+          // Mine rock: pickaxe equipped + hovering rock → press E (gives ITEM_METAL)
           if (activeItem === 'pickaxe' && player && player.carrierId === 0) {
             const rock = this.renderSystem.getHoveredRock();
             if (rock) {
@@ -1610,6 +1633,16 @@ export class ClientApplication {
         return ws.players.filter(p => p.name).map(p => p.name as string);
       });
       this.commandConsole.setArgValuesProvider('TpPlayerTo', 0, () => {
+        const ws = this.authoritativeWorldState;
+        if (!ws) return [];
+        return ws.players.filter(p => p.name).map(p => p.name as string);
+      });
+      this.commandConsole.setArgValuesProvider('TpToPlayer', 0, () => {
+        const ws = this.authoritativeWorldState;
+        if (!ws) return [];
+        return ws.players.filter(p => p.name).map(p => p.name as string);
+      });
+      this.commandConsole.setArgValuesProvider('TpToPlayer', 1, () => {
         const ws = this.authoritativeWorldState;
         if (!ws) return [];
         return ws.players.filter(p => p.name).map(p => p.name as string);

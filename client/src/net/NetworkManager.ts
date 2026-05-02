@@ -86,6 +86,9 @@ export enum MessageType {
   HARVEST_ROCK     = 'harvest_rock',
   HARVEST_ROCK_SUCCESS  = 'harvest_rock_success',
   HARVEST_ROCK_FAILURE  = 'harvest_rock_failure',
+  HARVEST_STONE     = 'harvest_stone',
+  HARVEST_STONE_SUCCESS = 'harvest_stone_success',
+  HARVEST_STONE_FAILURE = 'harvest_stone_failure',
   PLACE_STRUCTURE  = 'place_structure',
   STRUCTURE_INTERACT = 'structure_interact',
   PLACE_MAST_AT = 'place_mast_at',
@@ -583,9 +586,11 @@ export class NetworkManager {
   /** Fired when the server responds to a harvest_resource request. */
   public onHarvestResult: ((success: boolean, wood: number, reason: string) => void) | null = null;
   /** Fired when the server responds to a harvest_fiber request. */
-  public onFiberHarvestResult: ((success: boolean, fiber: number, reason: string) => void) | null = null;
+  public onFiberHarvestResult: ((success: boolean, fiber: number, reason: string, wood?: number) => void) | null = null;
   /** Fired when the server responds to a harvest_rock request. */
   public onRockHarvestResult: ((success: boolean, metal: number, reason: string) => void) | null = null;
+  /** Fired when the server responds to a harvest_stone request. */
+  public onStoneHarvestResult: ((success: boolean, stone: number, reason: string) => void) | null = null;
   /**
    * Fired once on connect with the full list of server-defined islands.
    * Falls back to client defaults if the server never sends this.
@@ -1296,6 +1301,12 @@ export class NetworkManager {
   sendHarvestRock(): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: 'harvest_rock', timestamp: Date.now() }));
+  }
+
+  /** Request server to pick up stone from the nearest rock outcrop (no tool required). */
+  sendHarvestStone(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'harvest_stone', timestamp: Date.now() }));
   }
 
   sendCollectTombstone(id: number): void {
@@ -2111,11 +2122,12 @@ export class NetworkManager {
             remainingMs: t.remainingMs ?? 0,
           })),
           droppedItems: (message.droppedItems ?? []).map((d: any) => ({
-            id:       d.id       ?? 0,
-            itemKind: d.itemKind ?? 0,
-            quantity: d.quantity ?? 0,
-            x:        d.x        ?? 0,
-            y:        d.y        ?? 0,
+            id:          d.id          ?? 0,
+            itemKind:    d.itemKind    ?? 0,
+            quantity:    d.quantity    ?? 0,
+            x:           d.x           ?? 0,
+            y:           d.y           ?? 0,
+            remainingMs: d.remainingMs ?? undefined,
           })),
           companies: (message.companies ?? []).map((c: any): Company => ({
             id:         c.id         ?? 0,
@@ -2191,11 +2203,11 @@ export class NetworkManager {
         break;
 
       case MessageType.HARVEST_FIBER_SUCCESS:
-        this.onFiberHarvestResult?.(true, message.fiber ?? 0, '');
+        this.onFiberHarvestResult?.(true, message.fiber ?? 0, '', message.wood ?? 0);
         break;
 
       case MessageType.HARVEST_FIBER_FAILURE:
-        this.onFiberHarvestResult?.(false, 0, message.reason ?? 'unknown');
+        this.onFiberHarvestResult?.(false, 0, message.reason ?? 'unknown', 0);
         break;
 
       case MessageType.HARVEST_ROCK_SUCCESS:
@@ -2204,6 +2216,14 @@ export class NetworkManager {
 
       case MessageType.HARVEST_ROCK_FAILURE:
         this.onRockHarvestResult?.(false, 0, message.reason ?? 'unknown');
+        break;
+
+      case MessageType.HARVEST_STONE_SUCCESS:
+        this.onStoneHarvestResult?.(true, message.stone ?? 0, '');
+        break;
+
+      case MessageType.HARVEST_STONE_FAILURE:
+        this.onStoneHarvestResult?.(false, 0, message.reason ?? 'unknown');
         break;
 
       case 'npc_dialogue':

@@ -2529,6 +2529,14 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "harvest_stone") == 0) {
+                            // HARVEST STONE: player presses E near a rock (no tool required)
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_harvest_stone(player, client);
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "collect_tombstone") == 0) {
                             // TOMBSTONE: take-all (legacy / "Take All" button)
                             if (client->player_id != 0) {
@@ -5458,6 +5466,8 @@ int websocket_server_update(struct Sim* sim) {
                              * Supported commands:
                              *   /AddPlayerToCompany <pirates|navy|solo>
                              *   /TpPlayerToShip <playername> <ship_id>
+                             *   /TpToPlayer <destinationPlayer>
+                             *   /TpToPlayer <targetPlayer> <destinationPlayer>
                              *   /SpawnEntity <crewmember> [neutral|pirates|navy]
                              *   /SpawnShip [brigantine|ghost|sloop|cutter]
                              */
@@ -6034,6 +6044,138 @@ int websocket_server_update(struct Sim* sim) {
                                             "\"success\":true,"
                                             "\"text\":\"Spawned %s (id %u) ahead of you.\"}",
                                             ss_type_name, ss_id);
+                                    }
+                                }
+
+                            } else if (strcmp(cmd_name, "tptoplayer") == 0) {
+                                /* /TpToPlayer <destinationPlayer>
+                                 *   Teleports the issuing player to the named player.
+                                 * /TpToPlayer <targetPlayer> <destinationPlayer>
+                                 *   Teleports targetPlayer to destinationPlayer (admin). */
+                                char tp2_arg1[64] = "";
+                                char tp2_arg2[64] = "";
+                                {
+                                    const char *p = cmd_body;
+                                    while (*p && *p != ' ') p++; /* skip cmd name */
+                                    while (*p == ' ') p++;
+                                    int ai = 0;
+                                    while (*p && *p != ' ' && ai < 63) tp2_arg1[ai++] = *p++;
+                                    tp2_arg1[ai] = '\0';
+                                    while (*p == ' ') p++;
+                                    ai = 0;
+                                    while (*p && *p != ' ' && ai < 63) tp2_arg2[ai++] = *p++;
+                                    tp2_arg2[ai] = '\0';
+                                }
+
+                                if (tp2_arg1[0] == '\0') {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\","
+                                        "\"success\":false,"
+                                        "\"text\":\"Usage: /TpToPlayer <destination> OR /TpToPlayer <target> <destination>\"}");
+                                } else {
+                                    /* Helper: find a player by case-insensitive name prefix */
+                                    #define FIND_PLAYER_BY_NAME(out_ptr, name_cstr) do { \
+                                        (out_ptr) = NULL; \
+                                        char _lname[64]; \
+                                        int _li = 0; \
+                                        while ((name_cstr)[_li] && _li < 63) { \
+                                            _lname[_li] = ((name_cstr)[_li] >= 'A' && (name_cstr)[_li] <= 'Z') \
+                                                ? (name_cstr)[_li] + 32 : (name_cstr)[_li]; \
+                                            _li++; \
+                                        } \
+                                        _lname[_li] = '\0'; \
+                                        for (int _pi = 0; _pi < WS_MAX_CLIENTS && !(out_ptr); _pi++) { \
+                                            if (!players[_pi].active) continue; \
+                                            char _lpn[64]; int _pj = 0; \
+                                            while (players[_pi].name[_pj] && _pj < 63) { \
+                                                _lpn[_pj] = (players[_pi].name[_pj] >= 'A' && players[_pi].name[_pj] <= 'Z') \
+                                                    ? players[_pi].name[_pj] + 32 : players[_pi].name[_pj]; \
+                                                _pj++; \
+                                            } \
+                                            _lpn[_pj] = '\0'; \
+                                            if (strstr(_lpn, _lname)) (out_ptr) = &players[_pi]; \
+                                        } \
+                                    } while (0)
+
+                                    WebSocketPlayer *tp2_mover = NULL;
+                                    WebSocketPlayer *tp2_dest  = NULL;
+
+                                    if (tp2_arg2[0] == '\0') {
+                                        /* Single-arg form: issuer → arg1 */
+                                        tp2_mover = find_player(client->player_id);
+                                        FIND_PLAYER_BY_NAME(tp2_dest, tp2_arg1);
+                                    } else {
+                                        /* Two-arg form: arg1 → arg2 */
+                                        FIND_PLAYER_BY_NAME(tp2_mover, tp2_arg1);
+                                        FIND_PLAYER_BY_NAME(tp2_dest,  tp2_arg2);
+                                    }
+                                    #undef FIND_PLAYER_BY_NAME
+
+                                    if (!tp2_mover) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":false,"
+                                            "\"text\":\"Player '%s' not found.\"}" , tp2_arg1);
+                                    } else if (!tp2_dest) {
+                                        const char *missing = tp2_arg2[0] ? tp2_arg2 : tp2_arg1;
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":false,"
+                                            "\"text\":\"Player '%s' not found.\"}", missing);
+                                    } else if (tp2_mover == tp2_dest) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":false,"
+                                            "\"text\":\"Cannot teleport a player to themselves.\"}");
+                                    } else {
+                                        /* Dismount mover from any module */
+                                        if (tp2_mover->is_mounted) {
+                                            tp2_mover->is_mounted          = false;
+                                            tp2_mover->mounted_module_id   = 0;
+                                            tp2_mover->controlling_ship_id = 0;
+                                        }
+
+                                        if (tp2_dest->parent_ship_id != 0) {
+                                            /* Destination is on a ship — board mover at dest's local pos */
+                                            SimpleShip *dest_ship = find_ship(tp2_dest->parent_ship_id);
+                                            if (dest_ship) {
+                                                board_player_on_ship(tp2_mover, dest_ship,
+                                                    tp2_dest->local_x, tp2_dest->local_y);
+                                            } else {
+                                                tp2_mover->x          = tp2_dest->x;
+                                                tp2_mover->y          = tp2_dest->y;
+                                                tp2_mover->parent_ship_id = 0;
+                                            }
+                                        } else {
+                                            /* Destination is on land/sea — place mover at dest's world pos */
+                                            tp2_mover->x           = tp2_dest->x;
+                                            tp2_mover->y           = tp2_dest->y;
+                                            tp2_mover->parent_ship_id  = 0;
+                                            tp2_mover->on_island_id = tp2_dest->on_island_id;
+                                        }
+
+                                        /* Broadcast new position to all clients */
+                                        char tp2_msg[256];
+                                        snprintf(tp2_msg, sizeof(tp2_msg),
+                                            "{\"type\":\"player_teleported\","
+                                            "\"player_id\":%u,"
+                                            "\"x\":%.1f,\"y\":%.1f,"
+                                            "\"parent_ship\":%u,"
+                                            "\"local_x\":%.1f,\"local_y\":%.1f}",
+                                            tp2_mover->player_id,
+                                            tp2_mover->x, tp2_mover->y,
+                                            tp2_mover->parent_ship_id,
+                                            tp2_mover->local_x, tp2_mover->local_y);
+                                        websocket_server_broadcast(tp2_msg);
+
+                                        log_info("🚀 TpToPlayer: %u (%s) → %u (%s)",
+                                                 tp2_mover->player_id, tp2_mover->name,
+                                                 tp2_dest->player_id,  tp2_dest->name);
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\","
+                                            "\"success\":true,"
+                                            "\"text\":\"Teleported %s to %s.\"}",
+                                            tp2_mover->name, tp2_dest->name);
                                     }
                                 }
 
@@ -6957,12 +7099,18 @@ int websocket_server_update(struct Sim* sim) {
                 if (!dropped_items[di].active) continue;
                 if (!first_drop && gs_off < (int)sizeof(game_state) - 2)
                     game_state[gs_off++] = ',';
-                gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
-                    "{\"id\":%u,\"itemKind\":%u,\"quantity\":%u,\"x\":%.1f,\"y\":%.1f}",
-                    dropped_items[di].id,
-                    (unsigned)dropped_items[di].item_kind,
-                    (unsigned)dropped_items[di].quantity,
-                    dropped_items[di].x, dropped_items[di].y);
+                {
+                    uint32_t _now  = get_time_ms();
+                    uint32_t _age  = _now - dropped_items[di].spawn_time_ms;
+                    uint32_t _rem  = (_age < DROPPED_ITEM_TTL_MS) ? (DROPPED_ITEM_TTL_MS - _age) : 0u;
+                    gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
+                        "{\"id\":%u,\"itemKind\":%u,\"quantity\":%u,\"x\":%.1f,\"y\":%.1f,\"remainingMs\":%u}",
+                        dropped_items[di].id,
+                        (unsigned)dropped_items[di].item_kind,
+                        (unsigned)dropped_items[di].quantity,
+                        dropped_items[di].x, dropped_items[di].y,
+                        _rem);
+                }
                 first_drop = false;
             }
         }

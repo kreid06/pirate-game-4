@@ -46,6 +46,14 @@ const COMMANDS: CommandDef[] = [
     ],
   },
   {
+    name: 'TpToPlayer',
+    description: 'Teleport yourself to a player, or teleport one player to another.',
+    args: [
+      { name: 'targetOrDestination' },
+      { name: 'destination (optional)' },
+    ],
+  },
+  {
     name: 'SpawnShip',
     description: 'Spawn a ship ahead of you.',
     args: [{ name: 'type', values: ['brigantine', 'ghost', 'sloop', 'cutter'] }],

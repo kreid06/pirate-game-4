@@ -330,3 +330,85 @@ send_rock_ret:;
     if (frame_len > 0 && frame_len < sizeof(frame))
         send(client->fd, frame, frame_len, 0);
 }
+
+/**
+ * Handle harvest_stone: player presses E near a rock outcrop (no tool required).
+ * Grants 2 ITEM_STONE from the nearest RES_ROCK node within HARVEST_RANGE.
+ */
+void handle_harvest_stone(WebSocketPlayer* player, struct WebSocketClient* client) {
+    char response[256];
+
+    if (player->on_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_stone_failure\",\"reason\":\"not_on_island\"}");
+        goto send_stone_ret;
+    }
+
+    {
+        const IslandDef *isl = NULL;
+        for (int i = 0; i < ISLAND_COUNT; i++) {
+            if (ISLAND_PRESETS[i].id == (int)player->on_island_id) {
+                isl = &ISLAND_PRESETS[i];
+                break;
+            }
+        }
+        if (!isl) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_stone_failure\",\"reason\":\"island_not_found\"}");
+            goto send_stone_ret;
+        }
+
+        float best_dist_sq = (float)(HARVEST_RANGE * HARVEST_RANGE);
+        bool  found = false;
+        int   best_ri = -1;
+        for (int ri = 0; ri < isl->resource_count; ri++) {
+            if (isl->resources[ri].type_id != RES_ROCK) continue;
+            if (isl->resources[ri].health <= 0) continue; /* depleted */
+            float rx = isl->x + isl->resources[ri].ox;
+            float ry = isl->y + isl->resources[ri].oy;
+            float dx = player->x - rx;
+            float dy = player->y - ry;
+            float dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= best_dist_sq) {
+                best_dist_sq = dist_sq;
+                best_ri = ri;
+                found = true;
+            }
+        }
+
+        if (!found) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_stone_failure\",\"reason\":\"too_far\"}");
+            goto send_stone_ret;
+        }
+
+        /* Deduct health and broadcast */
+        if (best_ri >= 0) {
+            IslandResource *res = &isl->resources[best_ri];
+            res->health -= 10;
+            if (res->health < 0) res->health = 0;
+            char dmsg[160];
+            snprintf(dmsg, sizeof(dmsg),
+                     "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
+                     player->on_island_id, best_ri, res->ox, res->oy, res->health, res->max_health);
+            websocket_server_broadcast(dmsg);
+        }
+
+        if (!craft_grant(player, ITEM_STONE, 2)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_stone_failure\",\"reason\":\"inventory_full\"}");
+            goto send_stone_ret;
+        }
+
+        log_info("🪨 Player %u gathered stone → +2 stone", player->player_id);
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_stone_success\",\"stone\":2}");
+    }
+
+send_stone_ret:;
+    char frame[512];
+    size_t frame_len = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0 && frame_len < sizeof(frame))
+        send(client->fd, frame, frame_len, 0);
+}
