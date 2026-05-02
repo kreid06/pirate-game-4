@@ -1084,18 +1084,37 @@ static void handle_pickup_item(WebSocketPlayer* player,
         return;
     }
     int free_slot = -1;
+    /* First: try to stack into an existing slot with the same item */
     for (int i = 0; i < INVENTORY_SLOTS; i++) {
-        if (player->inventory.slots[i].item == ITEM_NONE ||
-            player->inventory.slots[i].quantity == 0) {
+        if (player->inventory.slots[i].item == (ItemKind)di->item_kind &&
+            player->inventory.slots[i].quantity > 0 &&
+            player->inventory.slots[i].quantity < 99) {
             free_slot = i; break;
+        }
+    }
+    /* Fall back to an empty slot */
+    if (free_slot < 0) {
+        for (int i = 0; i < INVENTORY_SLOTS; i++) {
+            if (player->inventory.slots[i].item == ITEM_NONE ||
+                player->inventory.slots[i].quantity == 0) {
+                free_slot = i; break;
+            }
         }
     }
     if (free_slot < 0) {
         ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"inventory_full\"}");
         return;
     }
-    player->inventory.slots[free_slot].item     = (ItemKind)di->item_kind;
-    player->inventory.slots[free_slot].quantity = di->quantity;
+    if (player->inventory.slots[free_slot].item == (ItemKind)di->item_kind &&
+        player->inventory.slots[free_slot].quantity > 0) {
+        /* Stack onto existing */
+        int new_qty = (int)player->inventory.slots[free_slot].quantity + (int)di->quantity;
+        if (new_qty > 99) new_qty = 99;
+        player->inventory.slots[free_slot].quantity = (uint8_t)new_qty;
+    } else {
+        player->inventory.slots[free_slot].item     = (ItemKind)di->item_kind;
+        player->inventory.slots[free_slot].quantity = di->quantity;
+    }
     di->active = false;
     char resp[128];
     snprintf(resp, sizeof(resp),
