@@ -6135,22 +6135,22 @@ int websocket_server_update(struct Sim* sim) {
                                             tp2_mover->controlling_ship_id = 0;
                                         }
 
-                                        if (tp2_dest->parent_ship != 0) {
+                                        if (tp2_dest->parent_ship_id != 0) {
                                             /* Destination is on a ship — board mover at dest's local pos */
-                                            SimpleShip *dest_ship = find_ship(tp2_dest->parent_ship);
+                                            SimpleShip *dest_ship = find_ship(tp2_dest->parent_ship_id);
                                             if (dest_ship) {
                                                 board_player_on_ship(tp2_mover, dest_ship,
                                                     tp2_dest->local_x, tp2_dest->local_y);
                                             } else {
                                                 tp2_mover->x          = tp2_dest->x;
                                                 tp2_mover->y          = tp2_dest->y;
-                                                tp2_mover->parent_ship = 0;
+                                                tp2_mover->parent_ship_id = 0;
                                             }
                                         } else {
                                             /* Destination is on land/sea — place mover at dest's world pos */
                                             tp2_mover->x           = tp2_dest->x;
                                             tp2_mover->y           = tp2_dest->y;
-                                            tp2_mover->parent_ship  = 0;
+                                            tp2_mover->parent_ship_id  = 0;
                                             tp2_mover->on_island_id = tp2_dest->on_island_id;
                                         }
 
@@ -6164,7 +6164,7 @@ int websocket_server_update(struct Sim* sim) {
                                             "\"local_x\":%.1f,\"local_y\":%.1f}",
                                             tp2_mover->player_id,
                                             tp2_mover->x, tp2_mover->y,
-                                            tp2_mover->parent_ship,
+                                            tp2_mover->parent_ship_id,
                                             tp2_mover->local_x, tp2_mover->local_y);
                                         websocket_server_broadcast(tp2_msg);
 
