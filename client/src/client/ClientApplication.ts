@@ -606,9 +606,10 @@ export class ClientApplication {
         }
       };
 
-      this.networkManager.onFiberHarvestResult = (success, fiber, reason) => {
+      this.networkManager.onFiberHarvestResult = (success, fiber, reason, wood) => {
         if (success) {
-          this.renderSystem.showAnnouncement(`🌿 Gathered  +${fiber} fiber`, 'info', 2.5);
+          const woodStr = wood ? `  +${wood} wood` : '';
+          this.renderSystem.showAnnouncement(`🌿 Gathered  +${fiber} fiber${woodStr}`, 'info', 2.5);
         } else {
           const msg: Record<string, string> = {
             too_far:        'Move closer to a plant',

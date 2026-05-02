@@ -368,6 +368,7 @@ export interface DroppedItem {
   quantity: number;
   x: number;
   y: number;
+  remainingMs?: number; // milliseconds until this item despawns (5-min TTL)
 }
 
 /** A player-created company (id >= 100). */

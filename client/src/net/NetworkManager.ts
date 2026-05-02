@@ -586,7 +586,7 @@ export class NetworkManager {
   /** Fired when the server responds to a harvest_resource request. */
   public onHarvestResult: ((success: boolean, wood: number, reason: string) => void) | null = null;
   /** Fired when the server responds to a harvest_fiber request. */
-  public onFiberHarvestResult: ((success: boolean, fiber: number, reason: string) => void) | null = null;
+  public onFiberHarvestResult: ((success: boolean, fiber: number, reason: string, wood?: number) => void) | null = null;
   /** Fired when the server responds to a harvest_rock request. */
   public onRockHarvestResult: ((success: boolean, metal: number, reason: string) => void) | null = null;
   /** Fired when the server responds to a harvest_stone request. */
@@ -2122,11 +2122,12 @@ export class NetworkManager {
             remainingMs: t.remainingMs ?? 0,
           })),
           droppedItems: (message.droppedItems ?? []).map((d: any) => ({
-            id:       d.id       ?? 0,
-            itemKind: d.itemKind ?? 0,
-            quantity: d.quantity ?? 0,
-            x:        d.x        ?? 0,
-            y:        d.y        ?? 0,
+            id:          d.id          ?? 0,
+            itemKind:    d.itemKind    ?? 0,
+            quantity:    d.quantity    ?? 0,
+            x:           d.x           ?? 0,
+            y:           d.y           ?? 0,
+            remainingMs: d.remainingMs ?? undefined,
           })),
           companies: (message.companies ?? []).map((c: any): Company => ({
             id:         c.id         ?? 0,
@@ -2202,11 +2203,11 @@ export class NetworkManager {
         break;
 
       case MessageType.HARVEST_FIBER_SUCCESS:
-        this.onFiberHarvestResult?.(true, message.fiber ?? 0, '');
+        this.onFiberHarvestResult?.(true, message.fiber ?? 0, '', message.wood ?? 0);
         break;
 
       case MessageType.HARVEST_FIBER_FAILURE:
-        this.onFiberHarvestResult?.(false, 0, message.reason ?? 'unknown');
+        this.onFiberHarvestResult?.(false, 0, message.reason ?? 'unknown', 0);
         break;
 
       case MessageType.HARVEST_ROCK_SUCCESS:

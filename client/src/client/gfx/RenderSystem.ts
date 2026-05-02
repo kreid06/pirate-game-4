@@ -2285,6 +2285,30 @@ export class RenderSystem {
         ctx.fillText(badge, bx, bby);
       }
 
+      /* Countdown timer — drawn above the bag */
+      {
+        const minRemMs = pile.items.reduce((min, it) =>
+          (it.remainingMs !== undefined && it.remainingMs < min) ? it.remainingMs : min,
+          Infinity);
+        if (isFinite(minRemMs)) {
+          const totalSec = Math.ceil(minRemMs / 1000);
+          const mins = Math.floor(totalSec / 60);
+          const secs = totalSec % 60;
+          const timerStr = `${mins}:${secs.toString().padStart(2, '0')}`;
+          // Colour: green > 2 min, yellow 1-2 min, red < 1 min
+          const timerColor = minRemMs > 120000 ? '#88ff88' : minRemMs > 60000 ? '#ffdd44' : '#ff5544';
+          const tsz = Math.round(8 * sz);
+          ctx.font = `bold ${tsz}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.fillStyle = timerColor;
+          ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+          ctx.lineWidth = 2.5 * sz;
+          ctx.strokeText(timerStr, 0, -20 * sz);
+          ctx.fillText(timerStr, 0, -20 * sz);
+        }
+      }
+
       /* Interact hint */
       if (isNear) {
         const hint = pile.items.length > 1 ? '[E] Pick Up  [Hold E] Choose' : '[E] Pick Up';

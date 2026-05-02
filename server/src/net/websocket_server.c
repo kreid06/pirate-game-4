@@ -6965,12 +6965,18 @@ int websocket_server_update(struct Sim* sim) {
                 if (!dropped_items[di].active) continue;
                 if (!first_drop && gs_off < (int)sizeof(game_state) - 2)
                     game_state[gs_off++] = ',';
-                gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
-                    "{\"id\":%u,\"itemKind\":%u,\"quantity\":%u,\"x\":%.1f,\"y\":%.1f}",
-                    dropped_items[di].id,
-                    (unsigned)dropped_items[di].item_kind,
-                    (unsigned)dropped_items[di].quantity,
-                    dropped_items[di].x, dropped_items[di].y);
+                {
+                    uint32_t _now  = get_time_ms();
+                    uint32_t _age  = _now - dropped_items[di].spawn_time_ms;
+                    uint32_t _rem  = (_age < DROPPED_ITEM_TTL_MS) ? (DROPPED_ITEM_TTL_MS - _age) : 0u;
+                    gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
+                        "{\"id\":%u,\"itemKind\":%u,\"quantity\":%u,\"x\":%.1f,\"y\":%.1f,\"remainingMs\":%u}",
+                        dropped_items[di].id,
+                        (unsigned)dropped_items[di].item_kind,
+                        (unsigned)dropped_items[di].quantity,
+                        dropped_items[di].x, dropped_items[di].y,
+                        _rem);
+                }
                 first_drop = false;
             }
         }
