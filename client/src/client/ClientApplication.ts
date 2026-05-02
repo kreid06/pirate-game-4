@@ -633,6 +633,19 @@ export class ClientApplication {
         }
       };
 
+      this.networkManager.onStoneHarvestResult = (success, stone, reason) => {
+        if (success) {
+          this.renderSystem.showAnnouncement(`🪨 Picked up +${stone} stone`, 'info', 2.5);
+        } else {
+          const msg: Record<string, string> = {
+            too_far:        'Move closer to a rock',
+            not_on_island:  'You must be on an island',
+            inventory_full: 'Inventory is full',
+          };
+          this.renderSystem.showAnnouncement(`🪨 ${msg[reason] ?? 'No rock nearby'}`, 'info', 2.0);
+        }
+      };
+
       // Authoritative per-ship weapon group state from server
       this.networkManager.onCannonGroupState = (shipId, groups) => {
         // Resolve the player's current ship from the world state.
@@ -927,7 +940,16 @@ export class ClientApplication {
             }
           }
 
-          // Mine rock: pickaxe equipped + hovering rock → press E
+          // Harvest stone: hover a rock → press E (no tool required, gives ITEM_STONE)
+          if (player && player.carrierId === 0) {
+            const rock = this.renderSystem.getHoveredRock();
+            if (rock) {
+              this.networkManager.sendHarvestStone();
+              return;
+            }
+          }
+
+          // Mine rock: pickaxe equipped + hovering rock → press E (gives ITEM_METAL)
           if (activeItem === 'pickaxe' && player && player.carrierId === 0) {
             const rock = this.renderSystem.getHoveredRock();
             if (rock) {

@@ -3246,7 +3246,7 @@ export class RenderSystem {
     this._pendingPickaxeEquipped = pickaxeEquipped;
     const HARVEST_RANGE_SQ = 110 * 110;
     const PLANT_HOVER_SQ = (30 * zoom) * (30 * zoom);
-    const ROCK_HOVER_SQ  = (8 * zoom) * (8 * zoom);
+    const ROCK_HOVER_SQ  = (22 * zoom) * (22 * zoom);
     const LEAF_FADE_OUTER = 420;
     const LEAF_FADE_INNER = 120;
     const MIN_LEAF_ALPHA  = 0.35;
