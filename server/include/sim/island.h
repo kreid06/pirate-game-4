@@ -98,6 +98,13 @@ typedef struct {
      */
     float rotation_deg;
 
+    /* ── Template inheritance ─────────────────────────────────────────────
+     * When set, this island copies its shape vertices AND biome polygons
+     * from the named template (loaded from data/islands/templates/<name>.json)
+     * before rotation is applied.
+     */
+    char template_name[64];
+
     /* ── Polygon island (vertex_count > 0 overrides bump-circle) ──────────
      * Vertices are offsets from (x, y) in world pixels.  When vertex_count
      * is nonzero the bump-circle fields (beach_radius_px etc.) are ignored

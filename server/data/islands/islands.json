@@ -1,0 +1,79 @@
+[
+  {
+    "id": 1,
+    "centre": {
+      "x": 9000,
+      "y": 62000
+    }
+  },
+  {
+    "id": 2,
+    "centre": {
+      "x": 9000,
+      "y": 52000
+    },
+    "template": "continental"
+  },
+  {
+    "id": 3,
+    "centre": {
+      "x": 79000,
+      "y": 68000
+    },
+    "template": "crescent"
+  },
+  {
+    "id": 4,
+    "centre": {
+      "x": 16000,
+      "y": 15000
+    },
+    "template": "crescent",
+    "rotation_deg": 47
+  },
+  {
+    "id": 5,
+    "centre": {
+      "x": 75000,
+      "y": 23000
+    },
+    "template": "crescent",
+    "rotation_deg": 163
+  },
+  {
+    "id": 6,
+    "centre": {
+      "x": 11000,
+      "y": 78000
+    },
+    "template": "crescent",
+    "rotation_deg": 251
+  },
+  {
+    "id": 7,
+    "centre": {
+      "x": 82000,
+      "y": 45000
+    },
+    "template": "continental",
+    "rotation_deg": 78
+  },
+  {
+    "id": 8,
+    "centre": {
+      "x": 48000,
+      "y": 82000
+    },
+    "template": "continental",
+    "rotation_deg": 197
+  },
+  {
+    "id": 9,
+    "centre": {
+      "x": 45000,
+      "y": 11000
+    },
+    "template": "continental",
+    "rotation_deg": 324
+  }
+]

@@ -1,9 +1,8 @@
 {
-  "islandId": 3,
-  "centre": {
-    "x": 79000,
-    "y": 68000
-  },
+  "name": "crescent",
+  "poly_bound_r": 5800,
+  "grass_poly_scale": 0.82,
+  "shallow_poly_scale": 1.375,
   "sand_verts_JSON": [
     {
       "x": -3152,
