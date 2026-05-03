@@ -22,10 +22,13 @@
  *   grass_max_bump  — max(abs(grass_bumps)); used as broad-phase margin
  */
 
-#define ISLAND_MAX_RESOURCES 4096
-#define ISLAND_MAX_COUNT     16
-#define ISLAND_BUMP_COUNT    16
-#define ISLAND_MAX_VERTS     128
+#define ISLAND_MAX_RESOURCES  4096
+#define ISLAND_MAX_COUNT      16
+#define ISLAND_BUMP_COUNT     16
+#define ISLAND_MAX_VERTS      128
+#define ISLAND_MAX_BIOME_POLYS   8    /* max polygons per stone/metal biome */
+#define ISLAND_BIOME_MAX_VERTS   128  /* max verts per individual biome polygon */
+
 
 /* Resource type enum — integer values used internally.
  * res_type_str() converts back to the string expected by the client. */
@@ -49,11 +52,12 @@ static inline const char *res_type_str(uint8_t t) {
 }
 
 typedef struct {
-    float   ox, oy;    /* Offset from island centre (world px) */
-    uint8_t type_id;   /* ResType — RES_WOOD / RES_FIBER / RES_ROCK / RES_FOOD */
-    float   size;      /* Size scale: 0.5–1.8 (1.0 = default). Derived from hash of ox/oy. */
-    int     health;    /* Current health */
-    int     max_health;/* Max health (set at init, depends on type) */
+    float    ox, oy;           /* Offset from island centre (world px) */
+    uint8_t  type_id;          /* ResType — RES_WOOD / RES_FIBER / RES_ROCK / RES_FOOD */
+    float    size;             /* Size scale: 0.5–1.8 (1.0 = default). Derived from hash of ox/oy. */
+    int      health;           /* Current health */
+    int      max_health;       /* Max health (set at init, depends on type) */
+    uint32_t respawn_at_ms;    /* Wall-clock ms when this node should respawn (0 = not depleted) */
 } IslandResource;
 
 /* ── Spatial grid for wood (tree) nodes ─────────────────────────────────────
@@ -94,6 +98,13 @@ typedef struct {
      */
     float rotation_deg;
 
+    /* ── Template inheritance ─────────────────────────────────────────────
+     * When set, this island copies its shape vertices AND biome polygons
+     * from the named template (loaded from data/islands/templates/<name>.json)
+     * before rotation is applied.
+     */
+    char template_name[64];
+
     /* ── Polygon island (vertex_count > 0 overrides bump-circle) ──────────
      * Vertices are offsets from (x, y) in world pixels.  When vertex_count
      * is nonzero the bump-circle fields (beach_radius_px etc.) are ignored
@@ -130,6 +141,21 @@ typedef struct {
      * Shrinks as trees are destroyed; maintained by island_mark_tree_dead(). */
     uint16_t alive_wood[ISLAND_MAX_RESOURCES];
     int      alive_wood_count;
+
+    /* ── Stone biome polygons (loaded from island JSON by island_loader.c) ──
+     * RES_ROCK nodes are procedurally placed inside all polygons.
+     * Same coordinate space as gvx/gvy — offsets from island centre. */
+    int   stone_poly_count;
+    int   stone_vc[ISLAND_MAX_BIOME_POLYS];
+    float stone_vx[ISLAND_MAX_BIOME_POLYS][ISLAND_BIOME_MAX_VERTS];
+    float stone_vy[ISLAND_MAX_BIOME_POLYS][ISLAND_BIOME_MAX_VERTS];
+
+    /* ── Metal biome polygons ───────────────────────────────────────────────
+     * RES_BOULDER nodes are procedurally placed inside all polygons. */
+    int   metal_poly_count;
+    int   metal_vc[ISLAND_MAX_BIOME_POLYS];
+    float metal_vx[ISLAND_MAX_BIOME_POLYS][ISLAND_BIOME_MAX_VERTS];
+    float metal_vy[ISLAND_MAX_BIOME_POLYS][ISLAND_BIOME_MAX_VERTS];
 } IslandDef;
 
 /**
@@ -370,6 +396,15 @@ void islands_apply_rotations(void);
 void islands_generate_trees(void);
 
 /**
+ * Procedurally generate stone (RES_ROCK) and metal (RES_BOULDER) resource
+ * nodes inside any zone polygons defined for each island.
+ * Must be called AFTER islands_apply_rotations() so zone polygons are in
+ * their final orientation, and BEFORE islands_generate_trees() so resource
+ * indices are assigned correctly.
+ */
+void islands_generate_zone_resources(void);
+
+/**
  * Build the spatial wood grid and alive_wood list for all islands.
  * Must be called once after islands_generate_trees() completes.
  */
@@ -382,6 +417,12 @@ void islands_build_grid(void);
  * @param ri   Index into isl->resources[].
  */
 void island_mark_tree_dead(IslandDef *isl, int ri);
+
+/**
+ * Restores a wood/tree resource into the alive list and spatial grid.
+ * Call when a depleted tree respawns.
+ */
+void island_mark_tree_alive(IslandDef *isl, int ri);
 
 /**
  * Returns true if the resource at (rx, ry) is allowed to respawn.

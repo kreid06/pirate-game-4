@@ -17,3 +17,6 @@ void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_typ
 void update_flame_waves(uint32_t time_elapsed);
 void check_projectile_static_collisions(struct Sim* sim);
 void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, bool manually_fired, uint8_t ammo_type);
+void fire_island_cannon(PlacedStructure* cannon_struct, WebSocketPlayer* player, uint8_t ammo_type);
+void handle_island_cannon_aim(WebSocketPlayer* player, float aim_angle);
+void handle_island_cannon_fire(WebSocketPlayer* player, uint8_t ammo_type);

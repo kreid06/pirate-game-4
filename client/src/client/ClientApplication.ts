@@ -164,7 +164,7 @@ export class ClientApplication {
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
   /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
-  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | null = null;
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
@@ -363,6 +363,24 @@ export class ClientApplication {
       };
       this.networkManager.onModuleMountFailure = (reason) => {
         this.handleModuleMountFailure(reason);
+      };
+      this.networkManager.onIslandCannonMounted = (structureId, _aimAngle, _reloadMs, mountX, mountY) => {
+        console.log(`🎯 [ISLAND CANNON] Mounted to island cannon ${structureId} at (${mountX.toFixed(1)}, ${mountY.toFixed(1)})`);
+        // Snap player to the mount position optimistically (before next world-state echo).
+        // We reuse pendingMount so the same guard in the world-state loop keeps it applied.
+        this.pendingMount = { moduleId: structureId, moduleKind: 'CANNON' };
+        const pid = this.networkManager.getAssignedPlayerId();
+        const ws  = this.authoritativeWorldState || this.predictedWorldState;
+        if (pid !== null && ws) {
+          const p = ws.players.find(pl => pl.id === pid);
+          if (p) {
+            p.position = Vec2.from(mountX, mountY);
+            p.isMounted = true;
+            p.mountedModuleId = structureId;
+          }
+        }
+        // Enable aim/fire controls (no shipId — island cannon is not on a ship)
+        this.inputManager?.setMountState(true, undefined, 'CANNON', structureId);
       };
       this.networkManager.onModuleDestroyed = (shipId, moduleId, damage, hitX, hitY) => {
         // Spawn a kill damage number at the hit location
@@ -593,58 +611,68 @@ export class ClientApplication {
       };
 
       this.networkManager.onHarvestResult = (success, wood, reason) => {
+        const _ws0 = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _id0 = this.networkManager.getAssignedPlayerId();
+        const _me0 = _id0 !== null && _ws0 ? _ws0.players.find(p => p.id === _id0) : null;
         if (success) {
-          this.renderSystem.showAnnouncement(`🪓 Harvested  +${wood} wood`, 'info', 2.5);
-        } else {
-          const msg: Record<string, string> = {
-            need_axe:        'Equip the axe to chop trees',
-            too_far:         'Move closer to a tree',
-            not_on_island:   'You must be on an island',
-            inventory_full:  'Inventory is full',
-          };
-          this.renderSystem.showAnnouncement(`🪓 ${msg[reason] ?? 'Cannot harvest right now'}`, 'info', 2.0);
+          if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, `+${wood} wood`, '#c8a060');
+        } else if (reason === 'no_stamina') {
+          if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, 'No stamina!', '#e05050');
         }
       };
 
       this.networkManager.onFiberHarvestResult = (success, fiber, reason, wood) => {
+        const _ws1 = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _id1 = this.networkManager.getAssignedPlayerId();
+        const _me1 = _id1 !== null && _ws1 ? _ws1.players.find(p => p.id === _id1) : null;
         if (success) {
-          const woodStr = wood ? `  +${wood} wood` : '';
-          this.renderSystem.showAnnouncement(`🌿 Gathered  +${fiber} fiber${woodStr}`, 'info', 2.5);
-        } else {
-          const msg: Record<string, string> = {
-            too_far:        'Move closer to a plant',
-            not_on_island:  'You must be on an island',
-            inventory_full: 'Inventory is full',
-          };
-          this.renderSystem.showAnnouncement(`🌿 ${msg[reason] ?? 'Cannot gather right now'}`, 'info', 2.0);
+          if (_me1) {
+            this.renderSystem.spawnResourcePickup(_me1.position, `+${fiber} fiber`, '#60c870');
+            if (wood) this.renderSystem.spawnResourcePickup(_me1.position.add(Vec2.from(0, -20)), `+${wood} wood`, '#c8a060');
+          }
+        } else if (reason === 'no_stamina') {
+          if (_me1) this.renderSystem.spawnResourcePickup(_me1.position, 'No stamina!', '#e05050');
         }
       };
 
       this.networkManager.onRockHarvestResult = (success, metal, reason) => {
+        const ws = this.authoritativeWorldState ?? this.predictedWorldState;
+        const myId = this.networkManager.getAssignedPlayerId();
+        const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
         if (success) {
-          this.renderSystem.showAnnouncement(`⛏ Mined  +${metal} metal`, 'info', 2.5);
-        } else {
-          const msg: Record<string, string> = {
-            need_pickaxe:   'Equip the pickaxe to mine rocks',
-            too_far:        'Move closer to a rock',
-            not_on_island:  'You must be on an island',
-            inventory_full: 'Inventory is full',
-          };
-          this.renderSystem.showAnnouncement(`⛏ ${msg[reason] ?? 'Cannot mine right now'}`, 'info', 2.0);
+          if (me) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
+        } else if (reason === 'no_stamina') {
+          if (me) this.renderSystem.spawnResourcePickup(me.position, 'No stamina!', '#e05050');
         }
       };
 
       this.networkManager.onStoneHarvestResult = (success, stone, reason) => {
+        const _ws3 = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _id3 = this.networkManager.getAssignedPlayerId();
+        const _me3 = _id3 !== null && _ws3 ? _ws3.players.find(p => p.id === _id3) : null;
         if (success) {
-          this.renderSystem.showAnnouncement(`🪨 Picked up +${stone} stone`, 'info', 2.5);
-        } else {
-          const msg: Record<string, string> = {
-            too_far:        'Move closer to a rock',
-            not_on_island:  'You must be on an island',
-            inventory_full: 'Inventory is full',
-          };
-          this.renderSystem.showAnnouncement(`🪨 ${msg[reason] ?? 'No rock nearby'}`, 'info', 2.0);
+          if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, `+${stone} stone`, '#b0b8c0');
+        } else if (reason === 'no_stamina') {
+          if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, 'No stamina!', '#e05050');
         }
+      };
+
+      this.networkManager.onBoulderHarvestResult = (success, metal, reason) => {
+        const ws = this.authoritativeWorldState ?? this.predictedWorldState;
+        const myId = this.networkManager.getAssignedPlayerId();
+        const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
+        if (success) {
+          if (me) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
+        } else if (reason === 'no_stamina') {
+          if (me) this.renderSystem.spawnResourcePickup(me.position, 'No stamina!', '#e05050');
+        }
+      };
+
+      this.networkManager.onNoStamina = () => {
+        const _wsS = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _idS = this.networkManager.getAssignedPlayerId();
+        const _meS = _idS !== null && _wsS ? _wsS.players.find(p => p.id === _idS) : null;
+        if (_meS) this.renderSystem.spawnResourcePickup(_meS.position, 'No stamina!', '#e05050');
       };
 
       // Authoritative per-ship weapon group state from server
@@ -957,6 +985,11 @@ export class ClientApplication {
               this.networkManager.sendHarvestRock();
               return;
             }
+            const boulder = this.renderSystem.getHoveredBoulder();
+            if (boulder) {
+              this.networkManager.sendHarvestBoulder();
+              return;
+            }
           }
 
           // Collect tombstone: any player on foot within 80px → press E → open menu
@@ -972,7 +1005,11 @@ export class ClientApplication {
           if (player && player.carrierId === 0) {
             const nearbyDrops = this.renderSystem.getDroppedItemsInRange(80);
             if (nearbyDrops.length > 0) {
-              this.networkManager.sendPickupItem(nearbyDrops[0].id);
+              const _di = nearbyDrops[0];
+              const _ik = ITEM_ID_MAP[_di.itemKind];
+              const _dname = _ik ? (ITEM_DEFS[_ik]?.name ?? _ik) : 'item';
+              this.renderSystem.spawnResourcePickup(Vec2.from(_di.x, _di.y), `+${_di.quantity} ${_dname}`, '#80e880');
+              this.networkManager.sendPickupItem(_di.id);
               return;
             }
           }
@@ -1195,7 +1232,7 @@ export class ClientApplication {
           const pid = this.networkManager.getAssignedPlayerId();
           const p   = ws?.players.find(pl => pl.id === pid);
           const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
-          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard') {
+          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon') {
             // Compute snap at click time (not from stale render state)
             const pos = kind === 'wooden_floor'
               ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
@@ -1203,11 +1240,15 @@ export class ClientApplication {
               ? this.renderSystem.computeSnappedWallPos(worldPos.x, worldPos.y)
               : kind === 'door'
               ? this.renderSystem.computeSnappedDoorPos(worldPos.x, worldPos.y)
+              : kind === 'wood_ceiling'
+              ? this.renderSystem.computeSnappedCeilingPos(worldPos.x, worldPos.y)
               : { x: worldPos.x, y: worldPos.y };
-            // Only floors and workbenches carry rotation; walls/doors snap by orientation
+            // Only floors, workbenches, ceilings, and cannons carry rotation
             const rot = kind === 'wooden_floor'
               ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
-              : (kind === 'workbench' || kind === 'shipyard') ? this.islandBuildRotationDeg : 0;
+              : (kind === 'workbench' || kind === 'shipyard' || kind === 'cannon') ? this.islandBuildRotationDeg
+              : kind === 'wood_ceiling' ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
+              : 0;
             this.networkManager.sendPlaceStructure(kind, pos.x, pos.y, rot);
           }
           return;
@@ -1763,13 +1804,22 @@ export class ClientApplication {
 
       this.uiManager.playerMenu.onDropItem = (fromSlot) => {
         const pid = this.networkManager.getAssignedPlayerId();
+        let _dropLabel: string | null = null;
+        let _dropPos: import('../common/Vec2.js').Vec2 | null = null;
         for (const w of [this.authoritativeWorldState, this.predictedWorldState]) {
           const p = w?.players.find(pl => pl.id === pid);
           if (!p) continue;
+          const slot = p.inventory.slots[fromSlot];
+          if (!_dropLabel && slot && slot.item !== 'none' && slot.quantity > 0) {
+            const name = ITEM_DEFS[slot.item]?.name ?? slot.item;
+            _dropLabel = `\u2212${slot.quantity} ${name}`;
+            _dropPos = p.position;
+          }
           // Optimistic local clear
           p.inventory.slots[fromSlot] = { item: 'none' as any, quantity: 0 };
         }
         this.networkManager.sendDropItem(fromSlot);
+        if (_dropLabel && _dropPos) this.renderSystem.spawnResourcePickup(_dropPos, _dropLabel, '#e07070');
       };
 
       // Hand-craft from inventory (no workbench needed)
@@ -1795,6 +1845,13 @@ export class ClientApplication {
 
       // Handle drop picker item selection (hold-E near pile)
       this.uiManager.onDropPickerPick = (itemId) => {
+        const _ws = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _di = _ws?.droppedItems.find(d => d.id === itemId);
+        if (_di) {
+          const _ik = ITEM_ID_MAP[_di.itemKind];
+          const _dname = _ik ? (ITEM_DEFS[_ik]?.name ?? _ik) : 'item';
+          this.renderSystem.spawnResourcePickup(Vec2.from(_di.x, _di.y), `+${_di.quantity} ${_dname}`, '#80e880');
+        }
         this.networkManager.sendPickupItem(itemId);
       };
 
@@ -1818,7 +1875,7 @@ export class ClientApplication {
 
       // Handle PLAYER_STAT_UP broadcast: refresh world-state player fields
       this.networkManager.onPlayerStatUp = (_stat, _statLevel, xp,
-          maxHealth, playerLevel, statHealth, statDamage, statStamina, statWeight, statPoints) => {
+          maxHealth, maxStamina, playerLevel, statHealth, statDamage, statStamina, statWeight, statPoints) => {
         const playerId = this.networkManager.getAssignedPlayerId();
         if (playerId === null) return;
         for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
@@ -1827,6 +1884,7 @@ export class ClientApplication {
           if (!p) continue;
           p.xp         = xp;
           p.maxHealth  = maxHealth;
+          p.maxStamina = maxStamina;
           p.level      = playerLevel;
           p.statHealth  = statHealth;
           p.statDamage  = statDamage;
@@ -1943,6 +2001,18 @@ export class ClientApplication {
         if (res) {
           res.hp = hp; res.maxHp = maxHp;
           if (hp <= 0 && !res.depletedAt) res.depletedAt = performance.now();
+        }
+      };
+
+      this.networkManager.onResourceRespawned = (islandId, ri, ox, oy, hp, maxHp) => {
+        const isl = this.renderSystem.getIslands().find(i => i.id === islandId);
+        if (!isl) return;
+        // Prefer index-based lookup; fall back to position match for robustness
+        const res = isl.resources[ri] ?? isl.resources.find(r => Math.abs(r.ox - ox) < 0.5 && Math.abs(r.oy - oy) < 0.5);
+        if (res) {
+          res.hp = hp;
+          res.maxHp = maxHp;
+          res.depletedAt = undefined;
         }
       };
 
@@ -2903,11 +2973,11 @@ export class ClientApplication {
     const inDeckBuildMode   = activeItem === 'deck';
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
-    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard');
+    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling' || activeItem === 'cannon');
     this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
     this.inputManager.islandBuildMode = this.islandBuildMode;
     this.renderSystem.setIslandBuildItem(
-      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard') : null
+      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon') : null
     );
     this.renderSystem.setIslandBuildRotation(this.islandBuildMode ? this.islandBuildRotationDeg : 0);
 
@@ -3604,6 +3674,16 @@ export class ClientApplication {
 
           // ── Dismount: player is already mounted ──────────────────────────────
           // No hover required — player is physically AT the mounted module.
+          // Island cannon: player stays on foot (carrierId === 0) but is still mounted.
+          if (meE.isMounted && meE.carrierId === 0) {
+            // Dismount from island cannon immediately
+            this._suppressLadderInteract = true;
+            this.networkManager.sendAction('dismount');
+            this.inputManager?.setMountState(false);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log('🎮 E: dismount island cannon');
+            break;
+          }
           if (meE.isMounted && meE.carrierId !== 0) {
             // Find the module by ID if known, else fall back to kind search on current ship
             const MOUNTABLE = new Set(['helm', 'cannon', 'mast', 'swivel']);
@@ -3785,13 +3865,33 @@ export class ClientApplication {
                   this.uiManager.setActiveMenuId(MENU_ID.SALVAGE);
                   this.uiManager.salvageMenu.open(struct.id, struct.hp ?? 1);
                 }, 400);
+              } else if (struct.type === 'cannon') {
+                // Cannon: tap E = mount; hold E = radial with Mount + Demolish
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  const cannonOpts: { id: string; label: string }[] = [
+                    { id: 'use', label: 'Mount Cannon' },
+                  ];
+                  if (isOwnCompany) cannonOpts.push({ id: 'demolish', label: 'Demolish Cannon' });
+                  this._radialMenu.open(mp2.x, mp2.y, cannonOpts);
+                }, 300);
               } else {
                 this._ladderHoldTimer = setTimeout(() => {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
+                  const _demolishLabel =
+                    struct.type === 'wood_ceiling' ? 'Demolish Ceiling'
+                    : struct.type === 'wall'        ? 'Demolish Wall'
+                    : struct.type === 'door_frame'  ? 'Demolish Door Frame'
+                    : struct.type === 'door'        ? 'Demolish Door'
+                    : struct.type === 'workbench'   ? 'Demolish Workbench'
+                    : struct.type === 'shipyard'    ? 'Demolish Shipyard'
+                    : 'Demolish Floor';
                   this._radialMenu.open(mp2.x, mp2.y, [
-                    { id: 'demolish', label: 'Demolish Floor' },
+                    { id: 'demolish', label: _demolishLabel },
                   ]);
                 }, 600);
               }
@@ -4082,6 +4182,9 @@ export class ClientApplication {
           this.renderSystem.stopLadderHoldRing();
           if (structType === 'workbench') {
             // Tap E on workbench = open crafting menu
+            doUse();
+          } else if (structType === 'cannon') {
+            // Tap E on island cannon = mount
             doUse();
           } else if (structType === 'shipyard' && structId !== null) {
             // Tap E on shipyard = open menu with current local state

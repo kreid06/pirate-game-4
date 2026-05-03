@@ -6,7 +6,7 @@
  * scrollable recipe list for the active category.
  */
 
-import { type PlayerInventory, type ItemKind, ITEM_DEFS, ITEM_KIND_ID } from '../../sim/Inventory.js';
+import { type PlayerInventory, type ItemKind, ITEM_DEFS, ITEM_KIND_ID, drawAxeIcon } from '../../sim/Inventory.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -504,7 +504,8 @@ export class CraftingMenu {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#fff';
-      ctx.fillText(r.symbol, iconX + iconSize / 2, iconY + iconSize / 2);
+      if (r.id === 'craft_stone_axe') drawAxeIcon(ctx, iconX + iconSize / 2, iconY + iconSize / 2, iconSize);
+      else ctx.fillText(r.symbol, iconX + iconSize / 2, iconY + iconSize / 2);
 
       // Name + yield
       const textX = iconX + iconSize + 10;

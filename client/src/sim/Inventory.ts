@@ -143,6 +143,43 @@ export const ITEM_KIND_ID: Partial<Record<ItemKind, number>> = Object.fromEntrie
   Object.entries(ITEM_ID_MAP).map(([id, kind]) => [kind, Number(id)])
 ) as Partial<Record<ItemKind, number>>;
 
+// ── Canvas icon helpers ───────────────────────────────────────────────────────
+
+/** Cached monochrome axe sprite (white emoji, redrawn when slot size changes). */
+let _axeCache: { sz: number; canvas: OffscreenCanvas } | null = null;
+
+/**
+ * Draws the axe emoji tinted flat white so it matches the monochrome style of ⛏.
+ * Renders to an offscreen canvas, composites white over all pixels, then blits.
+ */
+export function drawAxeIcon(
+  ctx: CanvasRenderingContext2D,
+  cx:  number,
+  cy:  number,
+  sz:  number,
+): void {
+  const dim = Math.ceil(sz * 0.85); // sized to match ⛏ pickaxe visual scale
+  if (!_axeCache || _axeCache.sz !== dim) {
+    const off    = new OffscreenCanvas(dim, dim);
+    const offCtx = off.getContext('2d')!;
+    offCtx.font         = `bold ${Math.round(sz * 0.40)}px sans-serif`;
+    offCtx.textAlign    = 'center';
+    offCtx.textBaseline = 'middle';
+    offCtx.fillText('\uD83E\uDE93', dim / 2, dim / 2);   // 🪓
+    // Tint every non-transparent pixel to white
+    offCtx.globalCompositeOperation = 'source-in';
+    offCtx.fillStyle = '#ffffff';
+    offCtx.fillRect(0, 0, dim, dim);
+    _axeCache = { sz: dim, canvas: off };
+  }
+  ctx.drawImage(
+    _axeCache.canvas as unknown as HTMLCanvasElement,
+    Math.round(cx - dim / 2),
+    Math.round(cy - dim / 2),
+    dim, dim,
+  );
+}
+
 // ── Slot / inventory structures ─────────────────────────────────────────────
 
 export interface InventorySlot {

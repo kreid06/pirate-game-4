@@ -3,8 +3,17 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 #include "net/harvesting.h"
+#include "net/npc_agents.h"
+#include "util/time.h"
 
-#define HARVEST_RANGE 110.0f   /* world-px, generous for feel */
+#define HARVEST_RANGE 110.0f      /* world-px, generous for feel */
+#define HARVEST_STAMINA_COST 15u   /* stamina drained per harvest action */
+
+/* Respawn delays per resource type (milliseconds) */
+#define RESPAWN_MS_WOOD    120000u  /* 2 minutes */
+#define RESPAWN_MS_FIBER    60000u  /* 1 minute  */
+#define RESPAWN_MS_ROCK    180000u  /* 3 minutes */
+#define RESPAWN_MS_BOULDER 300000u  /* 5 minutes */
 
 void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* client) {
     char response[256];
@@ -28,6 +37,15 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
             goto send_and_ret;
         }
     }
+
+    /* Stamina check */
+    if (player->stamina < HARVEST_STAMINA_COST) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_failure\",\"reason\":\"no_stamina\"}");
+        goto send_and_ret;
+    }
+    player->stamina -= HARVEST_STAMINA_COST;
+    player->stamina_last_used_ms = get_time_ms();
 
     /* Find the island definition */
     const IslandDef *isl = NULL;
@@ -81,7 +99,10 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
             const int WOOD_DAMAGE = 10;
             res->health -= WOOD_DAMAGE;
             if (res->health < 0) res->health = 0;
-            if (res->health == 0) island_mark_tree_dead(isl_chop, best_ri);
+            if (res->health == 0) {
+                island_mark_tree_dead(isl_chop, best_ri);
+                res->respawn_at_ms = get_time_ms() + RESPAWN_MS_WOOD;
+            }
             char dmsg[160];
             snprintf(dmsg, sizeof(dmsg),
                      "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
@@ -126,8 +147,9 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
             player->inventory.slots[grant_slot].quantity = 10;
         }
 
-        log_info("🪓 Player %u harvested wood → +10 wood (slot %d qty=%d)",
-                 player->player_id, grant_slot,
+        player_apply_xp(player, PLAYER_XP_PER_WOOD_HARVEST);
+        log_info("🪓 Player %u harvested wood → +10 wood +%u xp (slot %d qty=%d)",
+                 player->player_id, PLAYER_XP_PER_WOOD_HARVEST, grant_slot,
                  (int)player->inventory.slots[grant_slot].quantity);
         snprintf(response, sizeof(response),
                  "{\"type\":\"harvest_success\",\"wood\":10}");
@@ -199,6 +221,7 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
             IslandResource *res = &isl->resources[best_ri];
             res->health -= 10;
             if (res->health < 0) res->health = 0;
+            if (res->health == 0) res->respawn_at_ms = get_time_ms() + RESPAWN_MS_FIBER;
             char dmsg[160];
             snprintf(dmsg, sizeof(dmsg),
                      "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
@@ -217,8 +240,9 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
         int bonus_wood = (rand() % 10 == 0) ? 1 : 0;
         if (bonus_wood) craft_grant(player, ITEM_WOOD, 1); /* ignore full — fiber already granted */
 
-        log_info("🌿 Player %u gathered fiber → +5 fiber%s", player->player_id,
-                 bonus_wood ? " +1 wood (bonus)" : "");
+        player_apply_xp(player, PLAYER_XP_PER_FIBER_HARVEST);
+        log_info("🌿 Player %u gathered fiber → +5 fiber +%u xp%s", player->player_id,
+                 PLAYER_XP_PER_FIBER_HARVEST, bonus_wood ? " +1 wood (bonus)" : "");
         if (bonus_wood) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_fiber_success\",\"fiber\":5,\"wood\":1}");
@@ -261,6 +285,15 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
             goto send_rock_ret;
         }
     }
+
+    /* Stamina check */
+    if (player->stamina < HARVEST_STAMINA_COST) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_rock_failure\",\"reason\":\"no_stamina\"}");
+        goto send_rock_ret;
+    }
+    player->stamina -= HARVEST_STAMINA_COST;
+    player->stamina_last_used_ms = get_time_ms();
 
     {
         const IslandDef *isl = NULL;
@@ -305,6 +338,7 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
             IslandResource *res = &isl->resources[best_ri];
             res->health -= 10;
             if (res->health < 0) res->health = 0;
+            if (res->health == 0) res->respawn_at_ms = get_time_ms() + RESPAWN_MS_ROCK;
             char dmsg[160];
             snprintf(dmsg, sizeof(dmsg),
                      "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
@@ -318,7 +352,8 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
             goto send_rock_ret;
         }
 
-        log_info("⛏ Player %u mined rock → +3 metal", player->player_id);
+        player_apply_xp(player, PLAYER_XP_PER_ROCK_HARVEST);
+        log_info("⛏ Player %u mined rock → +3 metal +%u xp", player->player_id, PLAYER_XP_PER_ROCK_HARVEST);
         snprintf(response, sizeof(response),
                  "{\"type\":\"harvest_rock_success\",\"metal\":3}");
     }
@@ -400,12 +435,122 @@ void handle_harvest_stone(WebSocketPlayer* player, struct WebSocketClient* clien
             goto send_stone_ret;
         }
 
-        log_info("🪨 Player %u gathered stone → +2 stone", player->player_id);
+        player_apply_xp(player, PLAYER_XP_PER_STONE_HARVEST);
+        log_info("🪨 Player %u gathered stone → +2 stone +%u xp", player->player_id, PLAYER_XP_PER_STONE_HARVEST);
         snprintf(response, sizeof(response),
                  "{\"type\":\"harvest_stone_success\",\"stone\":2}");
     }
 
 send_stone_ret:;
+    char frame[512];
+    size_t frame_len = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0 && frame_len < sizeof(frame))
+        send(client->fd, frame, frame_len, 0);
+}
+
+/**
+ * Handle harvest_boulder: player presses E (with pickaxe) near a large boulder.
+ * Grants 5 ITEM_STONE if a boulder resource node is within HARVEST_RANGE.
+ * Boulders have 400 max health and are a separate resource type from RES_ROCK.
+ */
+void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* client) {
+    char response[256];
+
+    if (player->on_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_boulder_failure\",\"reason\":\"not_on_island\"}");
+        goto send_boulder_ret;
+    }
+
+    /* Check pickaxe equipped */
+    {
+        bool has_pickaxe = false;
+        int active = player->inventory.active_slot;
+        if (player->inventory.slots[active].item == ITEM_PICKAXE)
+            has_pickaxe = true;
+        if (!has_pickaxe) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_boulder_failure\",\"reason\":\"need_pickaxe\"}");
+            goto send_boulder_ret;
+        }
+    }
+
+    /* Stamina check */
+    if (player->stamina < HARVEST_STAMINA_COST) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_boulder_failure\",\"reason\":\"no_stamina\"}");
+        goto send_boulder_ret;
+    }
+    player->stamina -= HARVEST_STAMINA_COST;
+    player->stamina_last_used_ms = get_time_ms();
+
+    {
+        const IslandDef *isl = NULL;
+        for (int i = 0; i < ISLAND_COUNT; i++) {
+            if (ISLAND_PRESETS[i].id == (int)player->on_island_id) {
+                isl = &ISLAND_PRESETS[i];
+                break;
+            }
+        }
+        if (!isl) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_boulder_failure\",\"reason\":\"island_not_found\"}");
+            goto send_boulder_ret;
+        }
+
+        float best_dist_sq = (float)(HARVEST_RANGE * HARVEST_RANGE);
+        bool  found = false;
+        int   best_ri = -1;
+        for (int ri = 0; ri < isl->resource_count; ri++) {
+            if (isl->resources[ri].type_id != RES_BOULDER) continue;
+            if (isl->resources[ri].health <= 0) continue; /* depleted */
+            float bx = isl->x + isl->resources[ri].ox;
+            float by_ = isl->y + isl->resources[ri].oy;
+            float dx = player->x - bx;
+            float dy = player->y - by_;
+            float dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= best_dist_sq) {
+                best_dist_sq = dist_sq;
+                best_ri = ri;
+                found = true;
+            }
+        }
+
+        if (!found) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_boulder_failure\",\"reason\":\"too_far\"}");
+            goto send_boulder_ret;
+        }
+
+        /* Deduct health and broadcast */
+        if (best_ri >= 0) {
+            IslandResource *res = &isl->resources[best_ri];
+            const int BOULDER_DAMAGE = 20;
+            res->health -= BOULDER_DAMAGE;
+            if (res->health < 0) res->health = 0;
+            if (res->health == 0) res->respawn_at_ms = get_time_ms() + RESPAWN_MS_BOULDER;
+            char dmsg[160];
+            snprintf(dmsg, sizeof(dmsg),
+                     "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
+                     player->on_island_id, best_ri, res->ox, res->oy, res->health, res->max_health);
+            websocket_server_broadcast(dmsg);
+        }
+
+        /* Grant 5 metal */
+        if (!craft_grant(player, ITEM_METAL, 5)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_boulder_failure\",\"reason\":\"inventory_full\"}");
+            goto send_boulder_ret;
+        }
+
+        player_apply_xp(player, PLAYER_XP_PER_BOULDER_HARVEST);
+        log_info("⛏️  Player %u mined boulder → +5 metal +%u xp", player->player_id, PLAYER_XP_PER_BOULDER_HARVEST);
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_boulder_success\",\"metal\":5}");
+    }
+
+send_boulder_ret:;
     char frame[512];
     size_t frame_len = websocket_create_frame(
         WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));

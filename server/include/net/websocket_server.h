@@ -303,6 +303,8 @@ typedef enum {
     STRUCT_DOOR         = 4,  /* panel that snaps onto a door frame */
     STRUCT_SHIPYARD     = 5,  /* placed in shallow water near island — used to build ships */
     STRUCT_WRECK        = 6,  /* spawns at sea when a ship sinks — can be salvaged */
+    STRUCT_CEILING      = 7,  /* wood ceiling tile — requires a wall or adjacent ceiling */
+    STRUCT_CANNON       = 8,  /* placed cannon on a floor tile — requires same-company floor */
 } PlacedStructureType;
 
 /** Shallow-water ring width as a multiple of the island's own radius.
@@ -341,6 +343,10 @@ typedef struct {
     uint8_t  wreck_qtys[6];      /* quantity per loot slot                */
     uint8_t  wreck_loot_count;   /* number of remaining non-empty slots   */
     uint32_t wreck_expires_ms;   /* wall-clock ms for auto-despawn; 0 = persist */
+    /* Island cannon state (STRUCT_CANNON only) */
+    float    cannon_aim_angle;    /* current aim direction (radians, world space) */
+    uint32_t cannon_reload_ms;    /* ms remaining until cannon can fire again (0 = ready) */
+    uint32_t cannon_mounted_player_id; /* player_id currently mounted to this cannon (0 = none) */
     /* 64-byte string last (avoids breaking alignment of above) */
     char     placer_name[64];     /* display name of builder */
 } PlacedStructure;
@@ -405,6 +411,7 @@ typedef struct WebSocketPlayer {
     bool is_mounted;               // Is player mounted to a module
     module_id_t mounted_module_id; /* ID of mounted module — MID(ship_seq, offset); 0 if not mounted */
     uint16_t controlling_ship_id;  // ID of ship being controlled (helm only, 0 if not controlling)
+    uint16_t mounted_cannon_structure_id; /* ID of island PlacedStructure cannon (0 = none) */
     
     // Cannon aiming state
     float cannon_aim_angle;        // World coordinates aim angle (radians)
@@ -415,6 +422,11 @@ typedef struct WebSocketPlayer {
     // Health
     uint16_t health;             // Current HP (0 = dead)
     uint16_t max_health;         // Max HP (default 100)
+
+    // Stamina pool — drained by sprinting, attacking, and harvesting; regens when idle
+    uint16_t stamina;            // Current stamina (0–max_stamina)
+    uint16_t max_stamina;        // Max stamina (base 100 + 10 * stat_stamina)
+    uint32_t stamina_last_used_ms; // Wall-clock ms of last stamina drain (regen delayed 2 s after)
 
     // Player XP / levelling (mirrors WorldNpc system)
     uint8_t  player_level;       // 1–120

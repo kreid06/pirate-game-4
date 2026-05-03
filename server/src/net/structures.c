@@ -11,6 +11,7 @@
 #include "net/websocket_protocol.h"
 #include "net/structures.h"
 #include "net/dock_physics.h"
+#include "net/cannon_fire.h"
 #include "sim/island.h"
 
 /* ── Island structure placement ─────────────────────────────────────────────
@@ -166,6 +167,12 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     } else if (strcmp(stype, "shipyard") == 0) {
         stype_enum    = STRUCT_SHIPYARD;
         required_item = ITEM_SHIPYARD;
+    } else if (strcmp(stype, "wood_ceiling") == 0) {
+        stype_enum    = STRUCT_CEILING;
+        required_item = ITEM_WOOD_CEILING;
+    } else if (strcmp(stype, "cannon") == 0) {
+        stype_enum    = STRUCT_CANNON;
+        required_item = ITEM_CANNON;
     } else {
         snprintf(response, sizeof(response),
                  "{\"type\":\"place_structure_fail\",\"reason\":\"unknown_type\"}");
@@ -312,6 +319,37 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         }
     }
 
+    /* Cannon: centre point must fall inside the rotated floor tile (50x50 px)
+       AND that floor tile must belong to the same company as the placing player. */
+    if (stype_enum == STRUCT_CANNON) {
+        bool has_floor     = false;
+        bool wrong_company = false;
+        const float HALF_TILE = 25.0f;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
+            float rad = placed_structures[si].rotation * (float)M_PI / 180.0f;
+            float c   = cosf(-rad), s = sinf(-rad);
+            float ddx = px - placed_structures[si].x;
+            float ddy = py - placed_structures[si].y;
+            float lx  = ddx * c - ddy * s;
+            float ly  = ddx * s + ddy * c;
+            if (fabsf(lx) <= HALF_TILE && fabsf(ly) <= HALF_TILE) {
+                if (placed_structures[si].company_id != (uint8_t)player->company_id)
+                    wrong_company = true;
+                else
+                    has_floor = true;
+                break;
+            }
+        }
+        if (!has_floor) {
+            snprintf(response, sizeof(response), wrong_company
+                     ? "{\"type\":\"place_structure_fail\",\"reason\":\"wrong_company\"}"
+                     : "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor\"}");
+            goto ps_send;
+        }
+    }
+
     /* Wall / Door: must snap to an edge midpoint of an existing same-company floor tile.
        Edge midpoints are at (fx, fy±25) and (fx±25, fy) for floor at (fx, fy). */
     if (stype_enum == STRUCT_WALL || stype_enum == STRUCT_DOOR_FRAME) {
@@ -421,6 +459,93 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         }
     }
 
+    /* Ceiling: must be adjacent to a wall/door_frame (at one of its 4 edge midpoints)
+       OR adjacent (edge-touching) to an existing ceiling tile. */
+    if (stype_enum == STRUCT_CEILING) {
+        const float EDGE_TOL  = 3.0f;
+        const float HALF_TILE = 25.0f;
+        const float TILE      = 50.0f;
+        /* Overlap: no two ceilings at same position */
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_CEILING) continue;
+            if (fabsf(placed_structures[si].x - px) < EDGE_TOL &&
+                fabsf(placed_structures[si].y - py) < EDGE_TOL) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
+                goto ps_send;
+            }
+        }
+        bool supported = false;
+        /* Check 1: a wall or door_frame exists at one of this ceiling's 4 edge midpoints */
+        {
+            float c = cosf(place_rad), s = sinf(place_rad);
+            const struct { float ldx; float ldy; } edge_offs[4] = {
+                {  0.0f,      -HALF_TILE },
+                {  0.0f,       HALF_TILE },
+                { -HALF_TILE,  0.0f      },
+                {  HALF_TILE,  0.0f      },
+            };
+            for (int ei = 0; ei < 4 && !supported; ei++) {
+                float ex = px + edge_offs[ei].ldx * c - edge_offs[ei].ldy * s;
+                float ey = py + edge_offs[ei].ldx * s + edge_offs[ei].ldy * c;
+                for (uint32_t si = 0; si < placed_structure_count && !supported; si++) {
+                    if (!placed_structures[si].active) continue;
+                    if (placed_structures[si].type != STRUCT_WALL &&
+                        placed_structures[si].type != STRUCT_DOOR_FRAME) continue;
+                    if (fabsf(placed_structures[si].x - ex) < EDGE_TOL &&
+                        fabsf(placed_structures[si].y - ey) < EDGE_TOL) {
+                        supported = true;
+                    }
+                }
+            }
+        }
+        /* Check 2: an adjacent ceiling tile exists (center is ~TILE away) */
+        if (!supported) {
+            for (uint32_t si = 0; si < placed_structure_count && !supported; si++) {
+                if (!placed_structures[si].active) continue;
+                if (placed_structures[si].type != STRUCT_CEILING) continue;
+                float cr = placed_structures[si].rotation * (float)M_PI / 180.0f;
+                float cc = cosf(cr), cs = sinf(cr);
+                /* 4 adjacent tile centres from this existing ceiling */
+                const struct { float ldx; float ldy; } adj[4] = {
+                    {  TILE, 0.0f }, { -TILE, 0.0f },
+                    { 0.0f,  TILE }, { 0.0f, -TILE },
+                };
+                for (int ai = 0; ai < 4 && !supported; ai++) {
+                    float ax = placed_structures[si].x + adj[ai].ldx * cc - adj[ai].ldy * cs;
+                    float ay = placed_structures[si].y + adj[ai].ldx * cs + adj[ai].ldy * cc;
+                    if (fabsf(ax - px) < EDGE_TOL && fabsf(ay - py) < EDGE_TOL) {
+                        supported = true;
+                    }
+                }
+            }
+        }
+        if (!supported) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"needs_wall_or_ceiling\"}");
+            goto ps_send;
+        }
+        /* Must also have a same-company floor tile within 2 tile-widths (100 px) */
+        {
+            const float FLOOR_UNDER_R = 100.0f;
+            bool has_floor = false;
+            for (uint32_t si = 0; si < placed_structure_count && !has_floor; si++) {
+                if (!placed_structures[si].active) continue;
+                if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
+                if (placed_structures[si].company_id != (uint8_t)player->company_id) continue;
+                float fdx = placed_structures[si].x - px;
+                float fdy = placed_structures[si].y - py;
+                if (fdx*fdx + fdy*fdy <= FLOOR_UNDER_R * FLOOR_UNDER_R) has_floor = true;
+            }
+            if (!has_floor) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor_nearby\"}");
+                goto ps_send;
+            }
+        }
+    }
+
     /* Door (panel): must snap onto an existing door_frame at the same position */
     if (stype_enum == STRUCT_DOOR) {
         const float POS_TOL = 3.0f;
@@ -481,7 +606,8 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     placed_structures[placed_structure_count].open       = false;
     placed_structures[placed_structure_count].rotation   =
         (stype_enum == STRUCT_WOODEN_FLOOR || stype_enum == STRUCT_WORKBENCH ||
-         stype_enum == STRUCT_SHIPYARD) ? place_rotation : 0.0f;
+         stype_enum == STRUCT_SHIPYARD || stype_enum == STRUCT_CEILING ||
+         stype_enum == STRUCT_CANNON) ? place_rotation : 0.0f;
     placed_structure_count++;
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
@@ -661,6 +787,57 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
                      sid, placed_structures[i].open ? "true" : "false");
             websocket_server_broadcast(bcast);
             return; /* broadcast sent, no per-client response needed */
+        }
+        if (placed_structures[i].type == STRUCT_CANNON) {
+            /* Company check: must be same company or neutral */
+            if (placed_structures[i].company_id != 0 &&
+                player->company_id != 0 &&
+                placed_structures[i].company_id != player->company_id) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"structure_interact_fail\",\"reason\":\"wrong_company\"}");
+                goto si_send;
+            }
+            /* Occupancy check: another player is already on this cannon */
+            if (placed_structures[i].cannon_mounted_player_id != 0 &&
+                placed_structures[i].cannon_mounted_player_id != player->player_id) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"structure_interact_fail\",\"reason\":\"occupied\"}");
+                goto si_send;
+            }
+            /* Mount the player to the cannon */
+            placed_structures[i].cannon_mounted_player_id = player->player_id;
+            player->is_mounted = true;
+            player->mounted_cannon_structure_id = placed_structures[i].id;
+            /* Position player behind the cannon breech */
+            float _mount_x, _mount_y;
+            {
+                const float MOUNT_DIST = 25.0f;
+                float aim = placed_structures[i].cannon_aim_angle;
+                _mount_x = placed_structures[i].x - cosf(aim) * MOUNT_DIST;
+                _mount_y = placed_structures[i].y - sinf(aim) * MOUNT_DIST;
+                player->x = _mount_x;
+                player->y = _mount_y;
+            }
+            log_info("🎯 Player %u mounted to island cannon %u at (%.1f,%.1f)",
+                     player->player_id, placed_structures[i].id, _mount_x, _mount_y);
+            /* Broadcast mount event */
+            {
+                char bcast[160];
+                snprintf(bcast, sizeof(bcast),
+                         "{\"type\":\"player_mounted\",\"player_id\":%u,"
+                         "\"structure_id\":%u,\"is_island_cannon\":true}",
+                         player->player_id, placed_structures[i].id);
+                websocket_server_broadcast(bcast);
+            }
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"island_cannon_mounted\",\"structure_id\":%u,"
+                     "\"aim_angle\":%.4f,\"reload_ms\":%u,"
+                     "\"mount_x\":%.2f,\"mount_y\":%.2f}",
+                     placed_structures[i].id,
+                     placed_structures[i].cannon_aim_angle,
+                     placed_structures[i].cannon_reload_ms,
+                     _mount_x, _mount_y);
+            goto si_send;
         }
         snprintf(response, sizeof(response),
                  "{\"type\":\"structure_interact_fail\",\"reason\":\"not_interactive\"}");
@@ -975,6 +1152,29 @@ void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketClient* 
                             websocket_server_broadcast(wcast);
                             continue;
                         }
+                    }
+                } else if (placed_structures[j].type == STRUCT_CEILING) {
+                    /* Ceiling needs a floor within 150 px — check if any remain */
+                    float cx2 = placed_structures[j].x;
+                    float cy2 = placed_structures[j].y;
+                    bool ceil_has_floor = false;
+                    for (uint32_t fi = 0; fi < placed_structure_count && !ceil_has_floor; fi++) {
+                        PlacedStructure* f = &placed_structures[fi];
+                        if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                        float fdx2 = f->x - cx2, fdy2 = f->y - cy2;
+                        if (fdx2*fdx2 + fdy2*fdy2 <= 150.0f * 150.0f) ceil_has_floor = true;
+                    }
+                    if (!ceil_has_floor) {
+                        uint32_t cid = placed_structures[j].id;
+                        for (uint32_t k = j; k + 1 < placed_structure_count; k++)
+                            placed_structures[k] = placed_structures[k + 1];
+                        placed_structure_count--;
+                        log_info("🔨 Cascade-demolished ceiling %u (floor %u removed)", cid, sid);
+                        char cccast[128];
+                        snprintf(cccast, sizeof(cccast),
+                                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", cid);
+                        websocket_server_broadcast(cccast);
+                        continue;
                     }
                 }
                 j++;

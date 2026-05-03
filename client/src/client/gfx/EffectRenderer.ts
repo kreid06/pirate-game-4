@@ -17,7 +17,8 @@ export enum EffectType {
   SHIP_FOAM = 'ship_foam',
   EXPLOSION_FLASH = 'explosion_flash',
   DAMAGE_NUMBER = 'damage_number',
-  SWORD_ARC = 'sword_arc'
+  SWORD_ARC = 'sword_arc',
+  RESOURCE_PICKUP = 'resource_pickup'
 }
 
 /** Category controls the colour and icon of a top-centre announcement banner. */
@@ -83,6 +84,13 @@ interface DamageNumberEffect extends Effect {
   team: DamageTeam;    // controls text colour
 }
 
+/** Floating resource pickup text (e.g. "+3 metal") at a world position. */
+interface ResourcePickupEffect extends Effect {
+  type: EffectType.RESOURCE_PICKUP;
+  label: string;   // e.g. "+3 metal"
+  color: string;   // CSS colour string
+}
+
 /** Screen-space announcement banner shown at the top-centre of the canvas. */
 interface Announcement {
   text: string;
@@ -94,7 +102,7 @@ interface Announcement {
 /**
  * Effect union type
  */
-type VisualEffect = MuzzleFlashEffect | WaterWakeEffect | DamageNumberEffect | SwordArcEffect | Effect;
+type VisualEffect = MuzzleFlashEffect | WaterWakeEffect | DamageNumberEffect | SwordArcEffect | ResourcePickupEffect | Effect;
 
 /**
  * Effect renderer system
@@ -173,6 +181,9 @@ export class EffectRenderer {
         case EffectType.SWORD_ARC:
           this.renderSwordArc(effect as SwordArcEffect, camera);
           break;
+        case EffectType.RESOURCE_PICKUP:
+          this.renderResourcePickup(effect as ResourcePickupEffect, camera);
+          break;
       }
     }
     
@@ -231,6 +242,26 @@ export class EffectRenderer {
       age: 0,
       maxAge: 3.0,
       intensity: 1.0
+    };
+    this.effects.push(effect);
+  }
+
+  /**
+   * Spawn a floating resource pickup label at a world position.
+   * @param position  World position (typically the player's position).
+   * @param label     Text to display, e.g. "+3 metal".
+   * @param color     CSS colour string for the text (default: gold).
+   */
+  createResourcePickup(position: Vec2, label: string, color = '#f0c040'): void {
+    const effect: ResourcePickupEffect = {
+      id: this.nextEffectId++,
+      type: EffectType.RESOURCE_PICKUP,
+      position: position.clone(),
+      label,
+      color,
+      age: 0,
+      maxAge: 2.2,
+      intensity: 1.0,
     };
     this.effects.push(effect);
   }
@@ -492,6 +523,38 @@ export class EffectRenderer {
     }
     this.ctx.fillStyle = mainColor;
     this.ctx.fillText(label, x, y);
+    this.ctx.restore();
+  }
+
+  private renderResourcePickup(effect: ResourcePickupEffect, camera: Camera): void {
+    const screenPos = camera.worldToScreen(effect.position);
+    const t = effect.age / effect.maxAge; // 0 → 1
+
+    // Float upward 30 screen-px over lifetime
+    const floatY = -30 * t;
+
+    // Fade: hold for first 55%, then fade out
+    const alpha = t < 0.55 ? 1.0 : 1.0 - (t - 0.55) / 0.45;
+
+    // Scale: quick pop-in over first 8%
+    const scale = t < 0.08 ? 0.4 + 0.6 * (t / 0.08) : 1.0;
+
+    const x = screenPos.x;
+    const y = screenPos.y + floatY;
+    const fontSize = 18;
+
+    this.ctx.save();
+    this.ctx.globalAlpha = Math.max(0, alpha);
+    this.ctx.font = `bold ${Math.round(fontSize * scale)}px Georgia, serif`;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'middle';
+
+    // Drop shadow for readability
+    this.ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    this.ctx.fillText(effect.label, x + 1, y + 1);
+
+    this.ctx.fillStyle = effect.color;
+    this.ctx.fillText(effect.label, x, y);
     this.ctx.restore();
   }
 

@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <json-c/json.h>
 
 // Static buffer for JSON responses (to avoid dynamic allocation)
 static char json_buffer[32768];
@@ -845,6 +846,32 @@ int admin_api_islands(struct HttpResponse* resp) {
                 }
                 ISL_APPEND("]");
             }
+            if (isl->stone_poly_count > 0) {
+                ISL_APPEND(",\"stonePolys\":[");
+                for (int pi = 0; pi < isl->stone_poly_count; pi++) {
+                    if (pi > 0) ISL_APPEND(",");
+                    ISL_APPEND("[");
+                    for (int vi = 0; vi < isl->stone_vc[pi]; vi++) {
+                        if (vi > 0) ISL_APPEND(",");
+                        ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->stone_vx[pi][vi], isl->stone_vy[pi][vi]);
+                    }
+                    ISL_APPEND("]");
+                }
+                ISL_APPEND("]");
+            }
+            if (isl->metal_poly_count > 0) {
+                ISL_APPEND(",\"metalPolys\":[");
+                for (int pi = 0; pi < isl->metal_poly_count; pi++) {
+                    if (pi > 0) ISL_APPEND(",");
+                    ISL_APPEND("[");
+                    for (int vi = 0; vi < isl->metal_vc[pi]; vi++) {
+                        if (vi > 0) ISL_APPEND(",");
+                        ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->metal_vx[pi][vi], isl->metal_vy[pi][vi]);
+                    }
+                    ISL_APPEND("]");
+                }
+                ISL_APPEND("]");
+            }
         } else {
             /* Bump-circle island */
             ISL_APPEND(",\"beachRadius\":%.1f,\"grassRadius\":%.1f",
@@ -869,8 +896,11 @@ int admin_api_islands(struct HttpResponse* resp) {
 /* ── Island save endpoint ────────────────────────────────────────────────── *
  * POST /api/islands/save                                                      *
  * Body: the full island JSON schema (same format as the editor export).       *
- * Writes to data/islands/island_<id>.json on the server filesystem.          */
-static char save_resp_buf[256];
+ *                                                                             *
+ * If the island uses a named template, writes to                              *
+ *   data/islands/templates/<template>.json  (template format).               *
+ * Otherwise writes to data/islands/island_<id>.json (standalone).            */
+static char save_resp_buf[512];
 
 int admin_api_islands_save(struct HttpResponse *resp, const char *body, size_t body_len)
 {
@@ -882,32 +912,88 @@ int admin_api_islands_save(struct HttpResponse *resp, const char *body, size_t b
         return -1;
     }
 
-    const char *id_ptr = strstr(body, "\"islandId\"");
-    if (!id_ptr) {
+    /* Parse the posted schema so we can extract vertex fields cleanly */
+    struct json_object *posted = json_tokener_parse(body);
+    if (!posted) {
         resp->status_code = 400;
-        resp->body = (char *)"{\"error\":\"missing islandId\"}";
-        resp->body_length = 27;
-        resp->content_type = "application/json";
-        return -1;
-    }
-    id_ptr = strchr(id_ptr, ':');
-    if (!id_ptr) {
-        resp->status_code = 400;
-        resp->body = (char *)"{\"error\":\"malformed islandId\"}";
-        resp->body_length = 29;
-        resp->content_type = "application/json";
-        return -1;
-    }
-    int island_id = atoi(id_ptr + 1);
-    if (island_id <= 0) {
-        resp->status_code = 400;
-        resp->body = (char *)"{\"error\":\"invalid islandId\"}";
-        resp->body_length = 27;
+        resp->body = (char *)"{\"error\":\"invalid JSON\"}";
+        resp->body_length = 23;
         resp->content_type = "application/json";
         return -1;
     }
 
-    char path[256];
+    struct json_object *id_j = NULL;
+    json_object_object_get_ex(posted, "islandId", &id_j);
+    int island_id = id_j ? json_object_get_int(id_j) : 0;
+    if (island_id <= 0) {
+        json_object_put(posted);
+        resp->status_code = 400;
+        resp->body = (char *)"{\"error\":\"missing or invalid islandId\"}";
+        resp->body_length = 38;
+        resp->content_type = "application/json";
+        return -1;
+    }
+
+    /* Find the matching IslandDef */
+    IslandDef *isl = NULL;
+    for (int k = 0; k < ISLAND_COUNT; k++) {
+        if (ISLAND_PRESETS[k].id == island_id) { isl = &ISLAND_PRESETS[k]; break; }
+    }
+
+    char path[512];
+
+    if (isl && isl->template_name[0] != '\0') {
+        /* ── Template island — save vertex/biome data to templates/<name>.json ─ */
+        snprintf(path, sizeof(path), "data/islands/templates/%s.json", isl->template_name);
+
+        struct json_object *tmpl = json_object_new_object();
+
+        /* Metadata from live ISLAND_PRESETS */
+        json_object_object_add(tmpl, "name",
+            json_object_new_string(isl->template_name));
+        json_object_object_add(tmpl, "poly_bound_r",
+            json_object_new_double((double)isl->poly_bound_r));
+        json_object_object_add(tmpl, "grass_poly_scale",
+            json_object_new_double((double)isl->grass_poly_scale));
+        json_object_object_add(tmpl, "shallow_poly_scale",
+            json_object_new_double((double)isl->shallow_poly_scale));
+
+        /* Vertex/biome fields — copied from posted body */
+        static const char *const VERT_KEYS[] = {
+            "sand_verts_JSON", "grass_verts_JSON", "shallow_verts_JSON",
+            "stone_polys_JSON", "metal_polys_JSON", NULL
+        };
+        for (int k = 0; VERT_KEYS[k]; k++) {
+            struct json_object *field = NULL;
+            if (json_object_object_get_ex(posted, VERT_KEYS[k], &field))
+                json_object_object_add(tmpl, VERT_KEYS[k], json_object_get(field));
+        }
+
+        int rc = json_object_to_file_ext(path, tmpl, JSON_C_TO_STRING_PRETTY);
+        json_object_put(tmpl);
+        json_object_put(posted);
+
+        if (rc != 0) {
+            int len = snprintf(save_resp_buf, sizeof(save_resp_buf),
+                               "{\"error\":\"cannot write %s\"}", path);
+            resp->status_code = 500;
+            resp->body = save_resp_buf;
+            resp->body_length = (size_t)len;
+            resp->content_type = "application/json";
+            return -1;
+        }
+
+        int len = snprintf(save_resp_buf, sizeof(save_resp_buf),
+                           "{\"ok\":true,\"file\":\"%s\"}", path);
+        resp->status_code = 200;
+        resp->content_type = "application/json";
+        resp->body = save_resp_buf;
+        resp->body_length = (size_t)len;
+        return 0;
+    }
+
+    /* ── Standalone island — write raw JSON to island_<id>.json ────────────── */
+    json_object_put(posted);
     snprintf(path, sizeof(path), "data/islands/island_%d.json", island_id);
 
     FILE *f = fopen(path, "wb");

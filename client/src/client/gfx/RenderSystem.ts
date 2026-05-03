@@ -53,6 +53,7 @@ type ResourceNode = {
   hp: number;
   maxHp: number;
   depletedAt?: number;
+  metal?: boolean;
 };
 
 type RenderIslandInput = {
@@ -64,6 +65,8 @@ type RenderIslandInput = {
   vertices?: { x: number; y: number }[];
   grassVertices?: { x: number; y: number }[];
   shallowVertices?: { x: number; y: number }[];
+  stonePolys?: { x: number; y: number }[][];
+  metalPolys?: { x: number; y: number }[][];
 };
 
 type RenderIsland = RenderIslandInput & {
@@ -205,7 +208,7 @@ export class RenderSystem {
     ox: number; oy: number; size: number;
   }> = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | null = null;
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
   private islandBuildRotationDeg = 0;
   private _wallGhostRotRad: number = 0; // rotation (radians) of wall/door ghost, inherited from floor edge
@@ -451,15 +454,21 @@ export class RenderSystem {
     return sprites;
   }
 
-  // ── Boulder sprite cache — 3 tones × 3 shapes (large rocks / boulders) ─────
+  // ── Boulder sprite cache — 3 stone tones + 3 metal tones × 5 shapes ────
   private static _boulderSprites: Map<string, OffscreenCanvas> | null = null;
   private static readonly BOULDER_SPRITE_SIZE = 160;
   private static readonly BOULDER_SPRITE_R    = 52; // reference half-size within sprite
   private static readonly BOULDER_TONES = [
+    // Stone tones (indices 0-2)
     { body: '#797975', shadow: '#44443f', hi: '#aaaaa4', crack: '#55554f', moss: '#5a7040' },
     { body: '#8a7860', shadow: '#504030', hi: '#b09880', crack: '#60503a', moss: '#607848' },
     { body: '#585858', shadow: '#303030', hi: '#888888', crack: '#404040', moss: '#4a6038' },
+    // Metal/iron tones (indices 3-5) — dark blue-grey iron with metallic sheen
+    { body: '#4a5260', shadow: '#252b35', hi: '#7a8898', crack: '#303840', moss: '#384858' },
+    { body: '#3e4a58', shadow: '#202830', hi: '#6a7a8a', crack: '#2a3240', moss: '#2e3e50' },
+    { body: '#525a6a', shadow: '#2a3040', hi: '#8090a4', crack: '#363e50', moss: '#404e60' },
   ];
+  private static readonly BOULDER_METAL_TONE_OFFSET = 3;
   private static readonly BOULDER_SHAPES: [number, number, number][] = [
     [1.00, 0.72, 0.0],   // flat classic
     [0.88, 0.88, 0.4],   // round
@@ -477,6 +486,7 @@ export class RenderSystem {
 
     for (let ti = 0; ti < RenderSystem.BOULDER_TONES.length; ti++) {
       const tone = RenderSystem.BOULDER_TONES[ti];
+      const isMetal = ti >= RenderSystem.BOULDER_METAL_TONE_OFFSET;
       for (let si = 0; si < RenderSystem.BOULDER_SHAPES.length; si++) {
         const [sx, sy, rot] = RenderSystem.BOULDER_SHAPES[si];
         for (const hovered of [false, true]) {
@@ -502,24 +512,31 @@ export class RenderSystem {
           ctx.lineWidth = hovered ? 3 : 2;
           ctx.stroke();
 
-          // Large highlight
+          // Large highlight — more pronounced metallic sheen for metal nodes
           ctx.beginPath();
           ctx.ellipse(cx - R * sx * 0.28, cy - R * sy * 0.28, R * sx * 0.38, R * sy * 0.26, rot - 0.6, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.fill();
+          ctx.fillStyle = isMetal ? 'rgba(160,200,255,0.28)' : 'rgba(255,255,255,0.22)'; ctx.fill();
 
           // Specular fleck
           ctx.beginPath();
           ctx.arc(cx - R * sx * 0.35, cy - R * sy * 0.38, R * 0.08, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255,255,255,0.40)'; ctx.fill();
+          ctx.fillStyle = isMetal ? 'rgba(180,220,255,0.55)' : 'rgba(255,255,255,0.40)'; ctx.fill();
 
-          // Moss patches (3 blobs near base)
-          for (let m = 0; m < 3; m++) {
-            const ma = rot + m * 0.7 + 0.3;
-            const mx = cx + Math.cos(ma) * R * sx * 0.55;
-            const my = cy + R * sy * 0.48 + Math.sin(ma) * R * sy * 0.12;
+          if (isMetal) {
+            // Metal: bright thin streak highlight instead of moss
             ctx.beginPath();
-            ctx.ellipse(mx, my, R * 0.14, R * 0.08, ma, 0, Math.PI * 2);
-            ctx.fillStyle = tone.moss; ctx.fill();
+            ctx.ellipse(cx - R * sx * 0.18, cy - R * sy * 0.22, R * sx * 0.15, R * sy * 0.06, rot - 0.3, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(190,220,255,0.35)'; ctx.fill();
+          } else {
+            // Stone: moss patches (3 blobs near base)
+            for (let m = 0; m < 3; m++) {
+              const ma = rot + m * 0.7 + 0.3;
+              const mx = cx + Math.cos(ma) * R * sx * 0.55;
+              const my = cy + R * sy * 0.48 + Math.sin(ma) * R * sy * 0.12;
+              ctx.beginPath();
+              ctx.ellipse(mx, my, R * 0.14, R * 0.08, ma, 0, Math.PI * 2);
+              ctx.fillStyle = tone.moss; ctx.fill();
+            }
           }
 
           // Two crack lines
@@ -922,6 +939,11 @@ export class RenderSystem {
 
   spawnDamageNumber(worldPos: Vec2, damage: number, isKill: boolean = false, team: DamageTeam = 'enemy'): void {
     this.effectRenderer.createDamageNumber(worldPos, damage, isKill, team);
+  }
+
+  /** Spawn a floating resource pickup label (e.g. "+3 metal") at a world position. */
+  spawnResourcePickup(worldPos: Vec2, label: string, color?: string): void {
+    this.effectRenderer.createResourcePickup(worldPos, label, color);
   }
 
   /**
@@ -1808,8 +1830,8 @@ export class RenderSystem {
     this._blockerExpiry = id !== null ? performance.now() + durationMs : 0;
   }
 
-  /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | null): void {
+  /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, wood_ceiling, cannon, or clear it. */
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | null): void {
     this.islandBuildKind = kind;
   }
 
@@ -1945,6 +1967,72 @@ export class RenderSystem {
   }
 
   /**
+   * Compute the snapped world position for a wood_ceiling placement at (wx, wy).
+   * Valid snap targets:
+   *  1. Any floor-tile centre that has a wall/door_frame at one of its 4 edge-midpoints
+   *     (ceiling starts at a walled edge).
+   *  2. Any tile position adjacent (edge-touching) to an existing ceiling tile
+   *     (ceiling extends from another ceiling).
+   */
+  computeSnappedCeilingPos(wx: number, wy: number): { x: number; y: number } {
+    const TILE   = 50;
+    const HALF   = 25;
+    const SNAP_R = TILE * 0.7;
+    let bestDist2 = SNAP_R * SNAP_R;
+    let bestX = wx, bestY = wy;
+    // Candidate set: floor centres that have at least one wall, plus ceiling-adjacent positions
+    const candidates: { x: number; y: number; rot: number }[] = [];
+    for (const s of this.placedStructures) {
+      if (s.type === 'wooden_floor') {
+        // Is there a wall at any edge of this floor?
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const c = Math.cos(rad), sn = Math.sin(rad);
+        const EDGES = [
+          { ldx:  0,    ldy: -HALF },
+          { ldx:  0,    ldy:  HALF },
+          { ldx: -HALF, ldy:  0    },
+          { ldx:  HALF, ldy:  0    },
+        ];
+        const hasWall = EDGES.some(e => {
+          const ex = s.x + e.ldx * c - e.ldy * sn;
+          const ey = s.y + e.ldx * sn + e.ldy * c;
+          return this.placedStructures.some(
+            w => (w.type === 'wall' || w.type === 'door_frame') &&
+                 Math.abs(w.x - ex) < 3 && Math.abs(w.y - ey) < 3
+          );
+        });
+        if (hasWall) candidates.push({ x: s.x, y: s.y, rot: s.rotation ?? 0 });
+      } else if (s.type === 'wood_ceiling') {
+        // 4 adjacent tile positions from each existing ceiling
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const c = Math.cos(rad), sn = Math.sin(rad);
+        const DIRS = [
+          {  dx:  TILE * c,  dy:  TILE * sn },
+          {  dx: -TILE * c,  dy: -TILE * sn },
+          {  dx: -TILE * sn, dy:  TILE * c  },
+          {  dx:  TILE * sn, dy: -TILE * c  },
+        ];
+        for (const d of DIRS) {
+          const nx = s.x + d.dx, ny = s.y + d.dy;
+          const alreadyOccupied = this.placedStructures.some(
+            f => f.type === 'wood_ceiling' && Math.abs(f.x - nx) < 3 && Math.abs(f.y - ny) < 3
+          );
+          if (!alreadyOccupied) candidates.push({ x: nx, y: ny, rot: s.rotation ?? 0 });
+        }
+      }
+    }
+    for (const cand of candidates) {
+      const dist2 = (cand.x - wx) * (cand.x - wx) + (cand.y - wy) * (cand.y - wy);
+      if (dist2 < bestDist2) {
+        bestDist2 = dist2; bestX = cand.x; bestY = cand.y;
+        this._snappedBuildRotation = cand.rot;
+      }
+    }
+    if (bestDist2 >= SNAP_R * SNAP_R) this._snappedBuildRotation = null;
+    return { x: bestX, y: bestY };
+  }
+
+  /**
    * Return the nearest workbench within `range` world-px of the local player,
    * or null if none found. Used to decide whether E-key triggers interact.
    */
@@ -2023,6 +2111,15 @@ export class RenderSystem {
     const dx = this._hoveredRock.wx - player.position.x;
     const dy = this._hoveredRock.wy - player.position.y;
     return dx * dx + dy * dy <= range * range ? this._hoveredRock : null;
+  }
+
+  getHoveredBoulder(range: number = 110): { wx: number; wy: number } | null {
+    if (!this._hoveredBoulder) return null;
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return null;
+    const dx = this._hoveredBoulder.wx - player.position.x;
+    const dy = this._hoveredBoulder.wy - player.position.y;
+    return dx * dx + dy * dy <= range * range ? this._hoveredBoulder : null;
   }
 
   // ── Tombstone API ─────────────────────────────────────────────────────────
@@ -3303,6 +3400,8 @@ export class RenderSystem {
         const shiftedVertices = this.offsetVertices(isl.vertices, off.dx, off.dy);
         const shiftedGrassVertices = this.offsetVertices(isl.grassVertices, off.dx, off.dy);
         const shiftedShallowVertices = this.offsetVertices(isl.shallowVertices, off.dx, off.dy);
+        const shiftedStonePolys = isl.stonePolys?.map(ring => this.offsetVertices(ring, off.dx, off.dy)!);
+        const shiftedMetalPolys = isl.metalPolys?.map(ring => this.offsetVertices(ring, off.dx, off.dy)!);
 
         const sc  = camera.worldToScreen(Vec2.from(islandX, islandY));
         const ctx = this.ctx;
@@ -3433,6 +3532,46 @@ export class RenderSystem {
         grassGrad.addColorStop(1.0, preset.grassColors[2]);
         ctx.fillStyle = grassGrad;
         ctx.fill();
+
+        // ── Stone biome overlay (above grass) ─────────────────────────────
+        if (shiftedStonePolys?.length) {
+          ctx.save();
+          for (const ring of shiftedStonePolys) {
+            if (!ring || ring.length < 3) continue;
+            ctx.beginPath();
+            ring.forEach((v, i) => {
+              const sp = camera.worldToScreen(Vec2.from(v.x, v.y));
+              i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
+            });
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(118, 90, 55, 0.55)';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(90, 65, 35, 0.7)';
+            ctx.lineWidth = Math.max(1, 1.5 * zoom);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+
+        // ── Metal biome overlay (above grass, same stone color) ────────────
+        if (shiftedMetalPolys?.length) {
+          ctx.save();
+          for (const ring of shiftedMetalPolys) {
+            if (!ring || ring.length < 3) continue;
+            ctx.beginPath();
+            ring.forEach((v, i) => {
+              const sp = camera.worldToScreen(Vec2.from(v.x, v.y));
+              i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
+            });
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(118, 90, 55, 0.55)';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(90, 65, 35, 0.7)';
+            ctx.lineWidth = Math.max(1, 1.5 * zoom);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
       } else {
         // ── Bump-circle island ────────────────────────────────────────────────
         // Sandy beach
@@ -3569,7 +3708,7 @@ export class RenderSystem {
       // Pass 2 – boulders (above rocks, below players)
       for (const e of visibleRes) {
         if (e.res.type !== 'boulder') continue;
-        this.drawIslandBoulder(e.sp.x, e.sp.y, zoom, e.isHovered, e.boulderAlpha * e.deathAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.wx, e.wy);
+        this.drawIslandBoulder(e.sp.x, e.sp.y, zoom, e.isHovered, e.boulderAlpha * e.deathAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.wx, e.wy, e.res.metal === true);
       }
       // Pass 3 – tree trunks (only visible when player is near or hovering)
       for (const e of visibleRes) {
@@ -3747,14 +3886,16 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandBoulder(sx: number, sy: number, zoom: number, hovered = false, alpha = 1.0, ox = 0, oy = 0, size = 1.0, wx?: number, wy?: number): void {
+  private drawIslandBoulder(sx: number, sy: number, zoom: number, hovered = false, alpha = 1.0, ox = 0, oy = 0, size = 1.0, wx?: number, wy?: number, metal = false): void {
     const ctx      = this.ctx;
     const R        = RenderSystem.BOULDER_SPRITE_R;
     const SIZE     = RenderSystem.BOULDER_SPRITE_SIZE;
     const r        = 40 * zoom * size;
     const drawSize = SIZE * (r / R);
     const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
-    const ti       = hash % RenderSystem.BOULDER_TONES.length;
+    const toneCount = 3; // 3 variants within stone or metal range
+    const tiBase   = metal ? RenderSystem.BOULDER_METAL_TONE_OFFSET : 0;
+    const ti       = tiBase + (hash % toneCount);
     const si       = (hash >> 4) % RenderSystem.BOULDER_SHAPES.length;
     const drawRot  = ((hash >> 8) & 0xFF) / 256 * Math.PI * 2;
     const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
@@ -3801,6 +3942,70 @@ export class RenderSystem {
   private drawPlacedStructures(camera: Camera): void {
     const ctx  = this.ctx;
     const zoom = camera.getState().zoom;
+
+    // ── Faded ceiling IDs (player's current building) ────────────────────────
+    // Computed first so hover detection can use it for ceiling occlusion.
+    const _fadedCeilingIds = new Set<number>();
+    {
+      const lp = this._cachedLocalPlayer;
+      if (lp && lp.carrierId === 0) {
+        const px = lp.position.x, py = lp.position.y;
+        const HALF_T = 25;
+        const ADJ   = 55;
+        const allFloors = this.placedStructures.filter(f => f.type === 'wooden_floor');
+        let startFloor: PlacedStructure | null = null;
+        for (const f of allFloors) {
+          const fr = (f.rotation ?? 0) * Math.PI / 180;
+          const fc = Math.cos(-fr), fs = Math.sin(-fr);
+          const lx = (px - f.x) * fc - (py - f.y) * fs;
+          const ly = (px - f.x) * fs + (py - f.y) * fc;
+          if (Math.abs(lx) <= HALF_T && Math.abs(ly) <= HALF_T) { startFloor = f; break; }
+        }
+        if (startFloor !== null) {
+          const connectedFloorIds = new Set<number>([startFloor.id]);
+          const floorQueue: PlacedStructure[] = [startFloor];
+          while (floorQueue.length > 0) {
+            const cur = floorQueue.shift()!;
+            for (const f of allFloors) {
+              if (connectedFloorIds.has(f.id)) continue;
+              const dx = f.x - cur.x, dy = f.y - cur.y;
+              if (Math.sqrt(dx * dx + dy * dy) <= ADJ) {
+                connectedFloorIds.add(f.id);
+                floorQueue.push(f);
+              }
+            }
+          }
+          const connectedFloors = allFloors.filter(f => connectedFloorIds.has(f.id));
+          const ceilings = this.placedStructures.filter(c => c.type === 'wood_ceiling');
+          let startCeil: PlacedStructure | null = null;
+          outer:
+          for (const c of ceilings) {
+            const cr = (c.rotation ?? 0) * Math.PI / 180;
+            const cc = Math.cos(-cr), cs = Math.sin(-cr);
+            for (const f of connectedFloors) {
+              const lx = (f.x - c.x) * cc - (f.y - c.y) * cs;
+              const ly = (f.x - c.x) * cs + (f.y - c.y) * cc;
+              if (Math.abs(lx) <= HALF_T && Math.abs(ly) <= HALF_T) { startCeil = c; break outer; }
+            }
+          }
+          if (startCeil !== null) {
+            const ceilQueue: PlacedStructure[] = [startCeil];
+            _fadedCeilingIds.add(startCeil.id);
+            while (ceilQueue.length > 0) {
+              const cur = ceilQueue.shift()!;
+              for (const c of ceilings) {
+                if (_fadedCeilingIds.has(c.id)) continue;
+                const dx = c.x - cur.x, dy = c.y - cur.y;
+                if (Math.sqrt(dx * dx + dy * dy) <= ADJ) {
+                  _fadedCeilingIds.add(c.id);
+                  ceilQueue.push(c);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
 
     // ── Update hovered structure ──────────────────────────────────────────────
     // Highlight whichever structure the mouse cursor is over (AABB for floor,
@@ -3862,12 +4067,37 @@ export class RenderSystem {
         }
       }
       if (this._hoveredStructure === null) this._hoveredStructure = floorHit;
+
+      // ── Ceiling occlusion: suppress hover if mouse is under an opaque ceiling ──
+      // If the mouse world position is inside a ceiling tile that is NOT faded
+      // (i.e. the player is outside that building), don't highlight anything below.
+      if (this._hoveredStructure !== null) {
+        const HALF_T = 25;
+        for (const c of this.placedStructures) {
+          if (c.type !== 'wood_ceiling') continue;
+          if (_fadedCeilingIds.has(c.id)) continue; // faded = player is inside, hover allowed
+          if (c.id === this._hoveredStructure!.id) continue; // ceiling IS what's hovered — allow it
+          const cr = (c.rotation ?? 0) * Math.PI / 180;
+          let clx: number, cly: number;
+          if (cr === 0) {
+            clx = mx - c.x; cly = my - c.y;
+          } else {
+            const cc2 = Math.cos(-cr), cs2 = Math.sin(-cr);
+            clx = (mx - c.x) * cc2 - (my - c.y) * cs2;
+            cly = (mx - c.x) * cs2 + (my - c.y) * cc2;
+          }
+          if (Math.abs(clx) <= HALF_T && Math.abs(cly) <= HALF_T) {
+            this._hoveredStructure = null;
+            break;
+          }
+        }
+      }
     }
 
-    // Floors first, then walls/doors, then workbenches/shipyards
+    // Floors first, then walls/doors, then workbenches/cannons/shipyards
     const sorted = [...this.placedStructures].sort((a, b) => {
       const order = (t: PlacedStructure['type']) =>
-        t === 'wooden_floor' ? 0 : (t === 'wall' || t === 'door_frame') ? 1 : t === 'door' ? 1.5 : t === 'shipyard' ? 1.8 : 2;
+        t === 'wooden_floor' ? 0 : (t === 'wall' || t === 'door_frame') ? 1 : t === 'door' ? 1.5 : t === 'cannon' ? 1.6 : t === 'shipyard' ? 1.8 : 2;
       return order(a.type) - order(b.type);
     });
 
@@ -4394,6 +4624,101 @@ export class RenderSystem {
           ctx.fillText(`⚓ Wreck (${s.hp} loot)`, ssp.x, ssp.y - wrsz * 0.7);
           ctx.restore();
         }
+      } else if (s.type === 'wood_ceiling') {
+        // ── Wooden ceiling tile ──
+        // Fade this tile if it belongs to the same connected building the player is under.
+        const ceilAlpha = _fadedCeilingIds.has(s.id) ? 0.25 : 1.0;
+        const rotRad = (s.rotation ?? 0) * Math.PI / 180;
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const dmgDarken = (1 - hpFrac) * 0.5;
+
+        ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(rotRad);
+        ctx.translate(-ssp.x, -ssp.y);
+
+        // Main ceiling panel
+        ctx.globalAlpha = ceilAlpha;
+        ctx.fillStyle   = isHovered ? '#c8924a' : '#96642a';
+        ctx.strokeStyle = '#5a3a12';
+        ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
+        ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+        ctx.strokeRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+
+        // Cross-brace lines
+        ctx.strokeStyle = 'rgba(50, 25, 5, 0.5)';
+        ctx.lineWidth   = Math.max(0.5, 0.9 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(ssp.x - sz / 2, ssp.y - sz / 2);
+        ctx.lineTo(ssp.x + sz / 2, ssp.y + sz / 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(ssp.x + sz / 2, ssp.y - sz / 2);
+        ctx.lineTo(ssp.x - sz / 2, ssp.y + sz / 2);
+        ctx.stroke();
+
+        // Centre beam (horizontal plank line)
+        ctx.beginPath();
+        ctx.moveTo(ssp.x - sz / 2, ssp.y);
+        ctx.lineTo(ssp.x + sz / 2, ssp.y);
+        ctx.stroke();
+
+        // Company color strip
+        const ceilCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        const ceilStripH = Math.max(1, 2 * zoom);
+        ctx.globalAlpha = Math.min(ceilAlpha, 0.8);
+        ctx.fillStyle = ceilCompanyColor;
+        ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, ceilStripH);
+
+        // Damage darkening
+        if (dmgDarken > 0.01) {
+          ctx.globalAlpha = dmgDarken * ceilAlpha;
+          ctx.fillStyle = 'rgba(0,0,0,1)';
+          ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+        }
+        ctx.globalAlpha = 1;
+        ctx.restore();
+      } else if (s.type === 'cannon') {
+        // ── Placed island cannon — same visual as ship cannon ──
+        const rotRad = (s.rotation ?? 0) * Math.PI / 180;
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const dmgDarken = (1 - hpFrac) * 0.5;
+        const lw = Math.max(0.5, 1.5 * zoom);
+
+        ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(rotRad);
+
+        // Base (brown rectangle) — same proportions as ship cannon (30×20 world units)
+        ctx.fillStyle   = isHovered ? '#b06030' : '#8B4513';
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth   = lw;
+        ctx.fillRect(-15 * zoom, -10 * zoom, 30 * zoom, 20 * zoom);
+        ctx.strokeRect(-15 * zoom, -10 * zoom, 30 * zoom, 20 * zoom);
+
+        // Barrel — same proportions as ship cannon (16×40 world units), pointing up (−y)
+        ctx.fillStyle   = isHovered ? '#aaaaaa' : '#333333';
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth   = lw;
+        ctx.beginPath();
+        ctx.moveTo(-8 * zoom,    0);
+        ctx.lineTo(-8 * zoom, -40 * zoom);
+        ctx.lineTo( 8 * zoom, -40 * zoom);
+        ctx.lineTo( 8 * zoom,    0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // Company color strip
+        ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
+        ctx.fillRect(-8 * zoom, -4 * zoom, 16 * zoom, Math.max(1.5, 2.5 * zoom));
+
+        // Damage darkening overlay
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          ctx.fillRect(-15 * zoom, -40 * zoom, 30 * zoom, 50 * zoom);
+        }
+        ctx.restore();
       }
     } // end for sorted
 
@@ -4407,7 +4732,7 @@ export class RenderSystem {
       // Walls/door_frames/doors derive orientation from the nearest floor tile:
       // the wall runs perpendicular to the floor-centre→wall-midpoint vector.
       let rotRad = 0;
-      if (s.type === 'wooden_floor' || s.type === 'workbench' || s.type === 'shipyard') {
+      if (s.type === 'wooden_floor' || s.type === 'workbench' || s.type === 'shipyard' || s.type === 'wood_ceiling' || s.type === 'cannon') {
         rotRad = (s.rotation ?? 0) * Math.PI / 180;
       } else {
         let nearFloor: PlacedStructure | null = null;
@@ -4423,8 +4748,9 @@ export class RenderSystem {
       // Unrotated dimensions of the structure rect
       const THICK  = 0.18;
       const isWall = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
-      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'shipyard' ? sz * 6.8  : sz;
-      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'shipyard' ? sz * 17.8 : sz;
+      // Cannon: base is 30×20 world units, barrel extends 40 upward from centre → total 30×50
+      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'shipyard' ? sz * 6.8 : s.type === 'cannon' ? 30 * zoom : sz;
+      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'shipyard' ? sz * 17.8 : s.type === 'cannon' ? 50 * zoom : sz;
 
       // Axis-aligned bounding box after rotation (used for bar/tooltip screen positioning)
       const absC = Math.abs(Math.cos(rotRad)), absS = Math.abs(Math.sin(rotRad));
@@ -4444,7 +4770,14 @@ export class RenderSystem {
       ctx.lineWidth   = Math.max(1, 3 * zoom);
       ctx.translate(ssp.x, ssp.y);
       ctx.rotate(rotRad);
-      ctx.strokeRect(-rawW / 2, -rawH / 2, rawW, rawH);
+      if (s.type === 'cannon') {
+        // Draw highlight matching cannon shape: base rect + barrel rect
+        const baseW = 30 * zoom, baseH = 20 * zoom, barW = 16 * zoom, barH = 40 * zoom;
+        ctx.strokeRect(-baseW / 2, -baseH / 2, baseW, baseH);
+        ctx.strokeRect(-barW / 2, -barH, barW, barH);
+      } else {
+        ctx.strokeRect(-rawW / 2, -rawH / 2, rawW, rawH);
+      }
       ctx.restore();
 
       // ── HP bar (hover only) ────────────────────────────────────────────
@@ -4487,6 +4820,8 @@ export class RenderSystem {
                  : s.type === 'door' ? (s.doorOpen ? 'Door (Open)' : 'Door (Closed)')
                  : s.type === 'shipyard' ? 'Shipyard'
                  : s.type === 'wreck' ? 'Shipwreck'
+                 : s.type === 'wood_ceiling' ? 'Wood Ceiling'
+                 : s.type === 'cannon' ? 'Cannon'
                  : 'Workbench';
 
       // Determine ownership line text + color
@@ -4523,6 +4858,7 @@ export class RenderSystem {
                            : s.type === 'door_frame' ? 'Hold [E] to demolish'
                            : s.type === 'shipyard' ? 'Hold [E] to build ships'
                            : s.type === 'wreck' ? '[E] to salvage loot'
+                           : s.type === 'cannon' ? 'Hold [E] to fire'
                            : 'Hold [E] to interact';
         ctx.fillText(interactHint, ssp.x, tipY - lineH * 2);
       } else {
@@ -4654,6 +4990,61 @@ export class RenderSystem {
         }
       }
       mx = bestX; my = bestY;
+    } else if (this.islandBuildKind === 'wood_ceiling' && this.placedStructures.length > 0) {
+      // Snap ceiling to: (1) floor centres with a wall at edge, or (2) adjacent ceiling positions
+      const SNAP_R = TILE * 0.7;
+      let bestDist2 = SNAP_R * SNAP_R;
+      let bestX = mx, bestY = my;
+      let bestRot: number | null = null;
+      const HALF = TILE / 2;
+      for (const s of this.placedStructures) {
+        if (s.type === 'wooden_floor') {
+          // Only a valid start position if it has a wall at one of its edges
+          const rad = (s.rotation ?? 0) * Math.PI / 180;
+          const c = Math.cos(rad), sn = Math.sin(rad);
+          const EDGES = [
+            { ldx:  0,    ldy: -HALF },
+            { ldx:  0,    ldy:  HALF },
+            { ldx: -HALF, ldy:  0    },
+            { ldx:  HALF, ldy:  0    },
+          ];
+          const hasWall = EDGES.some(e => {
+            const ex = s.x + e.ldx * c - e.ldy * sn;
+            const ey = s.y + e.ldx * sn + e.ldy * c;
+            return this.placedStructures.some(
+              w => (w.type === 'wall' || w.type === 'door_frame') &&
+                   Math.abs(w.x - ex) < 3 && Math.abs(w.y - ey) < 3
+            );
+          });
+          if (!hasWall) continue;
+          const alreadyCeiling = this.placedStructures.some(
+            f => f.type === 'wood_ceiling' && Math.abs(f.x - s.x) < 3 && Math.abs(f.y - s.y) < 3
+          );
+          if (alreadyCeiling) continue;
+          const dist2 = (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my);
+          if (dist2 < bestDist2) { bestDist2 = dist2; bestX = s.x; bestY = s.y; bestRot = s.rotation ?? 0; }
+        } else if (s.type === 'wood_ceiling') {
+          const rad = (s.rotation ?? 0) * Math.PI / 180;
+          const c = Math.cos(rad), sn = Math.sin(rad);
+          const DIRS = [
+            {  dx:  TILE * c,  dy:  TILE * sn },
+            {  dx: -TILE * c,  dy: -TILE * sn },
+            {  dx: -TILE * sn, dy:  TILE * c  },
+            {  dx:  TILE * sn, dy: -TILE * c  },
+          ];
+          for (const d of DIRS) {
+            const nx = s.x + d.dx, ny = s.y + d.dy;
+            const occ = this.placedStructures.some(
+              f => f.type === 'wood_ceiling' && Math.abs(f.x - nx) < 3 && Math.abs(f.y - ny) < 3
+            );
+            if (occ) continue;
+            const dist2 = (nx - mx) * (nx - mx) + (ny - my) * (ny - my);
+            if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; bestRot = s.rotation ?? 0; }
+          }
+        }
+      }
+      mx = bestX; my = bestY;
+      this._snappedBuildRotation = bestRot;
     }
     this._snappedBuildPos = { x: mx, y: my };
     // Effective rotation: snapped tile inherits source floor's rotation; free-placing uses user setting
@@ -4887,7 +5278,7 @@ export class RenderSystem {
 
     // Workbench needs a floor tile whose AABB contains the cursor point
     let noFloor = false;
-    if (this.islandBuildKind === 'workbench') {
+    if (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') {
       noFloor = !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -4938,6 +5329,40 @@ export class RenderSystem {
       );
     }
 
+    // Ceiling needs a wall at one of its edges OR an adjacent ceiling tile
+    let noCeilingSupport = false;
+    let ceilingOccupied = false;
+    if (this.islandBuildKind === 'wood_ceiling') {
+      ceilingOccupied = this.placedStructures.some(
+        f => f.type === 'wood_ceiling' && Math.abs(f.x - mx) < 3 && Math.abs(f.y - my) < 3
+      );
+      if (!ceilingOccupied) {
+        const HALF_C = 25;
+        const ghostRad = (this._snappedBuildRotation ?? 0) * Math.PI / 180;
+        const cGc = Math.cos(ghostRad), cGs = Math.sin(ghostRad);
+        const EDGES_C = [
+          { ldx:  0,    ldy: -HALF_C },
+          { ldx:  0,    ldy:  HALF_C },
+          { ldx: -HALF_C, ldy: 0    },
+          { ldx:  HALF_C, ldy: 0    },
+        ];
+        const wallAtEdge = EDGES_C.some(e => {
+          const ex = mx + e.ldx * cGc - e.ldy * cGs;
+          const ey = my + e.ldx * cGs + e.ldy * cGc;
+          return this.placedStructures.some(
+            w => (w.type === 'wall' || w.type === 'door_frame') &&
+                 Math.abs(w.x - ex) < 3 && Math.abs(w.y - ey) < 3
+          );
+        });
+        const adjCeiling = this.placedStructures.some(
+          f => f.type === 'wood_ceiling' &&
+               Math.abs(f.x - mx) >= 3 &&  // not the same tile
+               Math.hypot(f.x - mx, f.y - my) < TILE * 1.1
+        );
+        noCeilingSupport = !wallAtEdge && !adjCeiling;
+      }
+    }
+
     // Enemy territory: any structure not belonging to the current company within 500 world px
     const myCompany = (this._localCompanyId ?? 0) as number;
     const enemyTerritory = this.placedStructures.some(s =>
@@ -4946,7 +5371,7 @@ export class RenderSystem {
     );
 
     // Workbench on enemy floor: a floor exists under cursor but belongs to a different company
-    const wrongCompany = this.islandBuildKind === 'workbench' && !noFloor &&
+    const wrongCompany = (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') && !noFloor &&
       !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -4959,7 +5384,7 @@ export class RenderSystem {
     // Only floors are rejected for water placement — other types need a floor tile anyway
     const waterBlocked = inWater && this.islandBuildKind === 'wooden_floor';
     this._islandGhostTooFar = tooFar || waterBlocked;
-    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied;
+    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
@@ -4969,7 +5394,7 @@ export class RenderSystem {
     const WALL_THICK = 0.18;
     const isWallOrDoor = this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame' || this.islandBuildKind === 'door';
     const buildKind    = this.islandBuildKind as string;
-    const isRotatable  = buildKind === 'wooden_floor' || buildKind === 'workbench' || buildKind === 'shipyard';
+    const isRotatable  = buildKind === 'wooden_floor' || buildKind === 'workbench' || buildKind === 'shipyard' || buildKind === 'wood_ceiling' || buildKind === 'cannon';
     const ghostRotRad  = isWallOrDoor ? this._wallGhostRotRad
                        : isRotatable ? effectiveRotDeg * Math.PI / 180 : 0;
     if (ghostRotRad !== 0) {
@@ -4986,6 +5411,7 @@ export class RenderSystem {
                  : sz;
     const ghostH = this.islandBuildKind === 'workbench' ? sz * 0.62
                  : isWallOrDoor ? sz * WALL_THICK
+                 : this.islandBuildKind === 'wood_ceiling' ? sz * 0.9  // slightly smaller to distinguish
                  : sz;
 
     if (this.islandBuildKind === 'door_frame') {
@@ -5006,6 +5432,18 @@ export class RenderSystem {
       ctx.beginPath();
       ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y + ghostH / 2);
       ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y + ghostH / 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    } else if (this.islandBuildKind === 'cannon') {
+      // Ghost shaped like ship cannon: brown base + dark barrel pointing up
+      ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+      // Base
+      ctx.fillRect(msp.x - 15 * zoom, msp.y - 10 * zoom, 30 * zoom, 20 * zoom);
+      ctx.strokeRect(msp.x - 15 * zoom, msp.y - 10 * zoom, 30 * zoom, 20 * zoom);
+      // Barrel
+      ctx.beginPath();
+      ctx.rect(msp.x - 8 * zoom, msp.y - 40 * zoom, 16 * zoom, 40 * zoom);
+      ctx.fill();
       ctx.stroke();
       ctx.setLineDash([]);
     } else {
@@ -5034,9 +5472,12 @@ export class RenderSystem {
     } else if (blockedByStructure) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('BLOCKED BY STRUCTURE', msp.x, labelY);
-    } else if (overlaps || wallOccupied || doorOccupied) {
+    } else if (overlaps || wallOccupied || doorOccupied || ceilingOccupied) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('OCCUPIED', msp.x, labelY);
+    } else if (noCeilingSupport) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('NEEDS WALL OR CEILING', msp.x, labelY);
     } else if (noDoorFrame) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('NEEDS DOOR FRAME', msp.x, labelY);
@@ -5058,6 +5499,8 @@ export class RenderSystem {
                   : this.islandBuildKind === 'wall' ? 'Wall'
                   : this.islandBuildKind === 'door_frame' ? 'Door Frame'
                   : this.islandBuildKind === 'door' ? 'Door'
+                  : this.islandBuildKind === 'wood_ceiling' ? 'Wood Ceiling'
+                  : this.islandBuildKind === 'cannon' ? 'Cannon'
                   : 'Workbench';
       ctx.fillText(label, msp.x, labelY);
     }

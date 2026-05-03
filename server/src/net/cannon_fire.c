@@ -6,6 +6,7 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+#include "net/structures.h"
 #include "net/websocket_server_internal.h"
 #include "net/cannon_fire.h"
 #include "net/npc_agents.h"
@@ -13,6 +14,7 @@
 #include "net/module_interactions.h"
 #include "net/dock_physics.h"
 #include "sim/island.h"
+#include "util/time.h"
 
 int parse_json_uint32_array(const char* json, const char* key, uint32_t* out, int max_out) {
     // Build search pattern: "key":[
@@ -1928,11 +1930,14 @@ void check_projectile_static_collisions(struct Sim* sim) {
                             float ty = isl->y + res->oy;
                             float dx = px - tx;
                             float dy = py - ty;
-                            if (dx * dx + dy * dy <= TREE_COLLISION_R_PX * TREE_COLLISION_R_PX) {
+                            if (dx * dx + dy * dy <= (TREE_COLLISION_R_PX * res->size) * (TREE_COLLISION_R_PX * res->size)) {
                                 const int CANNON_TREE_DMG = 30;
                                 res->health -= CANNON_TREE_DMG;
                                 if (res->health < 0) res->health = 0;
-                                if (res->health == 0) island_mark_tree_dead(isl, ri);
+                                if (res->health == 0) {
+                                    island_mark_tree_dead(isl, ri);
+                                    res->respawn_at_ms = get_time_ms() + 120000u; /* 2 min */
+                                }
                                 char tmsg[160];
                                 snprintf(tmsg, sizeof(tmsg),
                                          "{\"type\":\"resource_damaged\",\"island_id\":%u"
@@ -1957,5 +1962,114 @@ void check_projectile_static_collisions(struct Sim* sim) {
         }
 
         if (!removed) i++;
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Island cannon (PlacedStructure of type STRUCT_CANNON) fire/aim helpers
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+extern PlacedStructure placed_structures[];
+extern uint32_t placed_structure_count;
+
+/**
+ * fire_island_cannon – fires the island cannon structure once.
+ * Requires:
+ *   - cannon_reload_ms == 0 (ready)
+ *   - player has at least 1 ITEM_CANNON_BALL in inventory
+ * Spawns a projectile at the barrel tip and broadcasts CANNON_FIRE_EVENT.
+ */
+void fire_island_cannon(PlacedStructure* str, WebSocketPlayer* player, uint8_t ammo_type) {
+    if (!str || !player) return;
+    if (str->cannon_reload_ms > 0) {
+        /* Still reloading — silently ignore */
+        return;
+    }
+
+    /* Consume 1 cannonball from the player's inventory */
+    bool found_ammo = false;
+    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+        InventorySlot* slot = &player->inventory.slots[s];
+        if (slot->item == ITEM_CANNON_BALL && slot->quantity > 0) {
+            slot->quantity--;
+            if (slot->quantity == 0) slot->item = ITEM_NONE;
+            found_ammo = true;
+            break;
+        }
+    }
+    if (!found_ammo) {
+        /* Player has no cannonballs — silently fail (client can show "no ammo" if needed) */
+        return;
+    }
+
+    /* Set reload timer (matches ship cannon) */
+    str->cannon_reload_ms = (uint32_t)CANNON_RELOAD_TIME_MS;
+
+    float aim = str->cannon_aim_angle;
+    const float BARREL_LENGTH = 30.0f;  /* px, same as ship cannon */
+    float spawn_x = str->x + cosf(aim) * BARREL_LENGTH;
+    float spawn_y = str->y + sinf(aim) * BARREL_LENGTH;
+
+    const float CANNONBALL_SPEED = CLIENT_TO_SERVER(500.0f);
+    float pvx = cosf(aim) * CANNONBALL_SPEED;
+    float pvy = sinf(aim) * CANNONBALL_SPEED;
+
+    if (global_sim) {
+        Vec2Q16 pos = {
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(spawn_x)),
+            Q16_FROM_FLOAT(CLIENT_TO_SERVER(spawn_y))
+        };
+        Vec2Q16 vel = {
+            Q16_FROM_FLOAT(pvx),
+            Q16_FROM_FLOAT(pvy)
+        };
+        entity_id pid = sim_create_projectile(global_sim, pos, vel, player->player_id, ammo_type);
+        if (pid != INVALID_ENTITY_ID) {
+            struct Projectile* proj = sim_get_projectile(global_sim, pid);
+            if (proj) {
+                proj->firing_company = player->company_id;
+                proj->firing_ship_id = 0; /* island — no owning ship */
+                proj->type = ammo_type;
+                if (ammo_type == PROJ_TYPE_CANNONBALL || ammo_type == PROJ_TYPE_BAR_SHOT) {
+                    proj->lifetime = Q16_FROM_FLOAT(5.0f);
+                }
+            }
+            /* Broadcast same event format as ship cannon; shipId=0 signals island origin */
+            broadcast_cannon_fire((uint32_t)str->id, /*ship_id=*/0,
+                                  spawn_x, spawn_y, aim, pid, ammo_type);
+            log_info("💥 Island cannon %u fired by player %u @ (%.1f,%.1f) angle=%.2f°",
+                     str->id, player->player_id, spawn_x, spawn_y, aim * (180.0f / (float)M_PI));
+        } else {
+            log_warn("Island cannon: failed to spawn projectile (max reached)");
+        }
+    }
+}
+
+/**
+ * handle_island_cannon_aim – called when a player is mounted on an island cannon
+ * and sends a cannon_aim message. Updates the cannon structure's aim angle.
+ */
+void handle_island_cannon_aim(WebSocketPlayer* player, float aim_angle) {
+    if (!player || player->mounted_cannon_structure_id == 0) return;
+    for (uint32_t si = 0; si < placed_structure_count; si++) {
+        if (!placed_structures[si].active) continue;
+        if (placed_structures[si].id != player->mounted_cannon_structure_id) continue;
+        placed_structures[si].cannon_aim_angle = aim_angle;
+        player->cannon_aim_angle = aim_angle;
+        break;
+    }
+}
+
+/**
+ * handle_island_cannon_fire – called when a player mounted on an island cannon
+ * sends a cannon_fire message.
+ */
+void handle_island_cannon_fire(WebSocketPlayer* player, uint8_t ammo_type) {
+    if (!player || player->mounted_cannon_structure_id == 0) return;
+    for (uint32_t si = 0; si < placed_structure_count; si++) {
+        if (!placed_structures[si].active) continue;
+        if (placed_structures[si].id != player->mounted_cannon_structure_id) continue;
+        fire_island_cannon(&placed_structures[si], player, ammo_type);
+        break;
     }
 }

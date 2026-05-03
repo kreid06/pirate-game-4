@@ -310,10 +310,11 @@ int world_save(const char *path) {
             const IslandResource *res = &isl->resources[r];
             if (r > 0) fprintf(f, ",");
             fprintf(f,
-                "\n        {\"idx\":%d,\"health\":%d,\"alive\":%s}",
+                "\n        {\"idx\":%d,\"health\":%d,\"alive\":%s,\"respawn_at\":%u}",
                 r,
                 res->health,
-                res->health > 0 ? "true" : "false"
+                res->health > 0 ? "true" : "false",
+                res->respawn_at_ms
             );
         }
         fprintf(f, "\n      ]\n    }");
@@ -725,11 +726,18 @@ int world_load(const char *path) {
                     if (rarr) {
                         char *robj;
                         while ((robj = next_json_object(&rarr)) != NULL) {
-                            unsigned idx = 0, health = 0;
-                            ws_json_uint(robj, "idx",    &idx);
-                            ws_json_uint(robj, "health", &health);
-                            if ((int)idx < isl->resource_count)
+                            unsigned idx = 0, health = 0, respawn_at = 0;
+                            ws_json_uint(robj, "idx",        &idx);
+                            ws_json_uint(robj, "health",     &health);
+                            ws_json_uint(robj, "respawn_at", &respawn_at);
+                            if ((int)idx < isl->resource_count) {
                                 isl->resources[idx].health = (int)health;
+                                isl->resources[idx].respawn_at_ms = respawn_at;
+                                /* Rebuild alive_wood: remove depleted trees from the list */
+                                if (health == 0 && isl->resources[idx].type_id == RES_WOOD) {
+                                    island_mark_tree_dead(isl, (int)idx);
+                                }
+                            }
                             free(robj);
                         }
                     }

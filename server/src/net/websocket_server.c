@@ -1188,6 +1188,8 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].movement_state = PLAYER_STATE_SWIMMING;
             players[i].health = 100;
             players[i].max_health = 100;
+            players[i].stamina = 100;
+            players[i].max_stamina = 100;
             players[i].player_level = 1;
             players[i].player_xp = 0;
             players[i].stat_health = 0;
@@ -1499,6 +1501,7 @@ int websocket_server_init(uint16_t port) {
      * called before any client connects so the ISLANDS message is complete. */
     islands_load_from_files("data/islands");
     islands_apply_rotations();
+    islands_generate_zone_resources();
     islands_generate_trees();
     islands_build_grid();
 
@@ -1973,6 +1976,10 @@ int websocket_server_update(struct Sim* sim) {
                                     // Restore persistent data (position, XP, inventory, etc.)
                                     bool resumed = load_player_from_file(player);
 
+                                    // Re-derive max_stamina from loaded stat_stamina
+                                    player->max_stamina = (uint16_t)(100u + 10u * (uint32_t)player->stat_stamina);
+                                    player->stamina     = player->max_stamina; // always full on login
+
                                     // If position was restored, sync the sim entity position too
                                     if (resumed && global_sim && player->sim_entity_id != 0) {
                                         struct Player* sim_pl = sim_get_player(global_sim, player->sim_entity_id);
@@ -2068,7 +2075,42 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                             }
                                             
-                                            ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "]}");
+                                            ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "]");
+                                            
+                                            // Include levelStats from sim ship (always on initial state)
+                                            {
+                                                const struct Ship* sim_ship = (ships[s].ship_id < SIM_SHIP_ID_SIZE)
+                                                    ? g_sim_ship_by_id[ships[s].ship_id] : NULL;
+                                                if (sim_ship) {
+                                                    uint16_t tp = ship_level_total_points(&sim_ship->level_stats);
+                                                    uint32_t next_cost = (tp < SHIP_LEVEL_TOTAL_POINT_CAP)
+                                                        ? SHIP_LEVEL_XP_BASE * (uint32_t)(tp + 1u) : 0u;
+                                                    ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
+                                                        ",\"levelStats\":{"
+                                                        "\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u,"
+                                                        "\"xp\":%u,\"maxCrew\":%u,"
+                                                        "\"shipLevel\":%u,\"totalPoints\":%u,\"totalCap\":%u,"
+                                                        "\"nextUpgradeCost\":%u,"
+                                                        "\"attrCaps\":{\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u}"
+                                                        "}",
+                                                        sim_ship->level_stats.levels[SHIP_ATTR_WEIGHT],
+                                                        sim_ship->level_stats.levels[SHIP_ATTR_RESISTANCE],
+                                                        sim_ship->level_stats.levels[SHIP_ATTR_DAMAGE],
+                                                        sim_ship->level_stats.levels[SHIP_ATTR_CREW],
+                                                        sim_ship->level_stats.levels[SHIP_ATTR_STURDINESS],
+                                                        sim_ship->level_stats.xp,
+                                                        (unsigned)ship_level_max_crew(&sim_ship->level_stats),
+                                                        tp, tp, SHIP_LEVEL_TOTAL_POINT_CAP,
+                                                        next_cost,
+                                                        ship_attr_point_cap(SHIP_ATTR_WEIGHT),
+                                                        ship_attr_point_cap(SHIP_ATTR_RESISTANCE),
+                                                        ship_attr_point_cap(SHIP_ATTR_DAMAGE),
+                                                        ship_attr_point_cap(SHIP_ATTR_CREW),
+                                                        ship_attr_point_cap(SHIP_ATTR_STURDINESS));
+                                                }
+                                            }
+
+                                            ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "}");
                                             first_ship = false;
                                         }
                                     }
@@ -2169,6 +2211,36 @@ int websocket_server_update(struct Sim* sim) {
                                                 /* shallowPolyScale removed — no longer used by client */
                                                 (void)isl->shallow_poly_scale;
                                             }
+                                            /* Stone biome polygons */
+                                            if (isl->stone_poly_count > 0) {
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"stonePolys\":[");
+                                                for (int pi = 0; pi < isl->stone_poly_count; pi++) {
+                                                    hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "%s[", pi ? "," : "");
+                                                    for (int vi = 0; vi < isl->stone_vc[pi]; vi++) {
+                                                        hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                                            "%s{\"x\":%.1f,\"y\":%.1f}",
+                                                                            vi ? "," : "",
+                                                                            isl->x + isl->stone_vx[pi][vi], isl->y + isl->stone_vy[pi][vi]);
+                                                    }
+                                                    hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
+                                                }
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
+                                            }
+                                            /* Metal biome polygons */
+                                            if (isl->metal_poly_count > 0) {
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"metalPolys\":[");
+                                                for (int pi = 0; pi < isl->metal_poly_count; pi++) {
+                                                    hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "%s[", pi ? "," : "");
+                                                    for (int vi = 0; vi < isl->metal_vc[pi]; vi++) {
+                                                        hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                                            "%s{\"x\":%.1f,\"y\":%.1f}",
+                                                                            vi ? "," : "",
+                                                                            isl->x + isl->metal_vx[pi][vi], isl->y + isl->metal_vy[pi][vi]);
+                                                    }
+                                                    hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
+                                                }
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
+                                            }
                                             hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"resources\":[");
                                             for (int hri = 0; hri < isl->resource_count; hri++) {
                                                 const IslandResource *r = &isl->resources[hri];
@@ -2209,7 +2281,9 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
                                             placed_structures[si].type == STRUCT_DOOR         ? "door" :
                                             placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
-                                            placed_structures[si].type == STRUCT_WRECK        ? "wreck" : "unknown";
+                                            placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
+                                            placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" :
+                                            placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
                                         bool hs_is_door = (placed_structures[si].type == STRUCT_DOOR);
                                         bool hs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
                                         /* Build extra fields for shipyard construction state */
@@ -2526,6 +2600,14 @@ int websocket_server_update(struct Sim* sim) {
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) handle_harvest_rock(player, client);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "harvest_boulder") == 0) {
+                            // HARVEST BOULDER: player presses E with pickaxe near a boulder
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_harvest_boulder(player, client);
                             }
                             handled = true;
 
@@ -2949,6 +3031,15 @@ int websocket_server_update(struct Sim* sim) {
                                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"sword_cooldown\"}");
                                                     goto sword_attack_done;
                                                 }
+                                                /* Stamina check — attacks cost 25 ST */
+                                                const uint16_t SWORD_STAMINA_COST = 25u;
+                                                if (player->stamina < SWORD_STAMINA_COST) {
+                                                    log_info("⚔️  Player %u attack rejected: no stamina (%u)", player->player_id, player->stamina);
+                                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_stamina\"}");
+                                                    goto sword_attack_done;
+                                                }
+                                                player->stamina -= SWORD_STAMINA_COST;
+                                                player->stamina_last_used_ms = now_ms;
                                                 player->sword_last_attack_ms = now_ms;
 
                                                 const float SWORD_RANGE  = 45.0f;
@@ -3263,6 +3354,13 @@ int websocket_server_update(struct Sim* sim) {
                                              active_group_count > 2 ? ",..." : "");
                                     handle_cannon_aim(player, aim_angle, active_groups, active_group_count);
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"aim_updated\"}");
+                                } else if (player && player->mounted_cannon_structure_id != 0) {
+                                    /* Island cannon aim */
+                                    float aim_angle = 0.0f;
+                                    char* angle_start = strstr(payload, "\"aim_angle\":");
+                                    if (angle_start) sscanf(angle_start + 12, "%f", &aim_angle);
+                                    handle_island_cannon_aim(player, aim_angle);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"aim_updated\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 }
@@ -3325,6 +3423,14 @@ int websocket_server_update(struct Sim* sim) {
                                                        explicit_count > 0 ? explicit_ids : NULL,
                                                        explicit_count,
                                                        freefire);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"cannons_fired\"}");
+                                } else if (player && player->mounted_cannon_structure_id != 0) {
+                                    /* Island cannon fire */
+                                    uint8_t ammo_type = PROJ_TYPE_CANNONBALL;
+                                    char* at = strstr(payload, "\"ammo_type\":");
+                                    if (at) ammo_type = (uint8_t)atoi(at + 12);
+                                    if (ammo_type > 1) ammo_type = PROJ_TYPE_CANNONBALL;
+                                    handle_island_cannon_fire(player, ammo_type);
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"cannons_fired\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
@@ -5353,12 +5459,18 @@ int websocket_server_update(struct Sim* sim) {
                                             ups_player->player_level, ups_points_earned, ups_total_spent);
                                     } else {
                                         (*ups_stat_ptr)++;
-                                        /* Recalculate max HP if health stat upgraded */
+                                        /* Recalculate derived stats */
                                         if (ups_stat_ptr == &ups_player->stat_health) {
                                             uint16_t new_max = (uint16_t)(100 + ups_player->stat_health * 20);
                                             if (new_max > ups_player->max_health)
                                                 ups_player->health += (new_max - ups_player->max_health);
                                             ups_player->max_health = new_max;
+                                        }
+                                        if (ups_stat_ptr == &ups_player->stat_stamina) {
+                                            uint16_t new_max = (uint16_t)(100 + ups_player->stat_stamina * 10);
+                                            if (new_max > ups_player->max_stamina)
+                                                ups_player->stamina += (new_max - ups_player->max_stamina);
+                                            ups_player->max_stamina = new_max;
                                         }
                                         uint8_t ups_points_left = (uint8_t)(ups_points_earned - (ups_total_spent + 1));
                                         log_info("👤 Player %u upgraded %s → %u (level %u, %u stat points left)",
@@ -5368,11 +5480,12 @@ int websocket_server_update(struct Sim* sim) {
                                         char ups_msg[256];
                                         snprintf(ups_msg, sizeof(ups_msg),
                                             "{\"type\":\"PLAYER_STAT_UP\",\"playerId\":%u,\"stat\":\"%s\","
-                                            "\"level\":%u,\"xp\":%u,\"maxHealth\":%u,\"playerLevel\":%u,"
+                                            "\"level\":%u,\"xp\":%u,\"maxHealth\":%u,\"maxStamina\":%u,\"playerLevel\":%u,"
                                             "\"statHealth\":%u,\"statDamage\":%u,\"statStamina\":%u,\"statWeight\":%u,"
                                             "\"statPoints\":%u}",
                                             ups_player->player_id, ups_stat, *ups_stat_ptr,
                                             ups_player->player_xp, ups_player->max_health,
+                                            ups_player->max_stamina,
                                             ups_player->player_level,
                                             ups_player->stat_health, ups_player->stat_damage,
                                             ups_player->stat_stamina, ups_player->stat_weight,
@@ -5688,11 +5801,6 @@ int websocket_server_update(struct Sim* sim) {
                                         "\"success\":false,"
                                         "\"text\":\"Unknown entity '%s'. Known: crewmember\"}",
                                         cmd_arg1);
-                                } else if (world_npc_count >= MAX_WORLD_NPCS) {
-                                    snprintf(response, sizeof(response),
-                                        "{\"type\":\"command_response\","
-                                        "\"success\":false,"
-                                        "\"text\":\"Cannot spawn: NPC cap reached.\"}");
                                 } else {
                                     /* Resolve company (default neutral) */
                                     uint8_t spawn_company = 0;
@@ -5704,8 +5812,23 @@ int websocket_server_update(struct Sim* sim) {
                                     float sx = issuer ? issuer->x : 0.0f;
                                     float sy = issuer ? issuer->y : 0.0f;
 
-                                    /* Spawn free-standing crewmember at that position */
-                                    WorldNpc *npc = &world_npcs[world_npc_count++];
+                                    /* Trim trailing inactive slots then reuse or append */
+                                    while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
+                                        world_npc_count--;
+                                    WorldNpc *npc = NULL;
+                                    for (int _si = 0; _si < world_npc_count; _si++) {
+                                        if (!world_npcs[_si].active) { npc = &world_npcs[_si]; break; }
+                                    }
+                                    if (!npc) {
+                                        if (world_npc_count >= MAX_WORLD_NPCS) {
+                                            snprintf(response, sizeof(response),
+                                                "{\"type\":\"command_response\","
+                                                "\"success\":false,"
+                                                "\"text\":\"Cannot spawn: NPC cap reached.\"}");
+                                            goto spawn_npc_done;
+                                        }
+                                        npc = &world_npcs[world_npc_count++];
+                                    }
                                     memset(npc, 0, sizeof(WorldNpc));
                                     npc->id              = next_world_npc_id++;
                                     npc->active          = true;
@@ -5743,6 +5866,7 @@ int websocket_server_update(struct Sim* sim) {
                                         "\"text\":\"Spawned crewmember (id %u) [%s] at your location.\"}",
                                         npc->id, cname);
                                 }
+                                spawn_npc_done:;
 
                             } else if (strcmp(cmd_name, "tpplayerto") == 0) {
                                 /* /TpPlayerTo <playername> <x> <y>
@@ -6316,7 +6440,10 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_WALL         ? "wall" :
                                             placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
                                             placed_structures[si].type == STRUCT_DOOR         ? "door" :
-                                            placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" : "unknown";
+                                            placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
+                                            placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
+                                            placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" :
+                                            placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
                                         bool is_door_s = (placed_structures[si].type == STRUCT_DOOR);
                                         bool is_sy_s   = (placed_structures[si].type == STRUCT_SHIPYARD);
                                         char sy_extra_s[256] = "";
@@ -6389,7 +6516,9 @@ int websocket_server_update(struct Sim* sim) {
                                         placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
                                         placed_structures[si].type == STRUCT_DOOR         ? "door" :
                                         placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
-                                        placed_structures[si].type == STRUCT_WRECK        ? "wreck" : "unknown";
+                                        placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
+                                        placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" :
+                                        placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
                                     bool gs_is_door = (placed_structures[si].type == STRUCT_DOOR);
                                     bool gs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
                                     char gs_sy_extra[256] = "";
@@ -6910,7 +7039,9 @@ int websocket_server_update(struct Sim* sim) {
                         "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
                         "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\","
                         "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
-                        "\"company\":%u,\"health\":%u,\"max_health\":%u,\"on_island\":%u,"
+                        "\"company\":%u,\"health\":%u,\"max_health\":%u,"
+                        "\"stamina\":%u,\"max_stamina\":%u,"
+                        "\"on_island\":%u,"
                         "\"player_level\":%u,\"player_xp\":%u,"
                         "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
                         "\"stat_points\":%u%s}",
@@ -6926,6 +7057,7 @@ int websocket_server_update(struct Sim* sim) {
                         players[p].controlling_ship_id,
                         players[p].company_id,
                         players[p].health, players[p].max_health,
+                        players[p].stamina, players[p].max_stamina,
                         players[p].on_island_id,
                         (unsigned)players[p].player_level,
                         (unsigned)players[p].player_xp,
@@ -7369,6 +7501,40 @@ int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id) 
         }
     }
     return -1; // not found
+}
+
+/* ── Resource respawn tick ──────────────────────────────────────────────────
+ * Runs every server tick.  For each depleted resource whose timer has expired
+ * and whose footprint is clear of structures, restore health and broadcast. */
+static void tick_resource_respawn(void)
+{
+    uint32_t now = get_time_ms();
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        IslandDef *isl = &ISLAND_PRESETS[ii];
+        for (int ri = 0; ri < isl->resource_count; ri++) {
+            IslandResource *res = &isl->resources[ri];
+            if (res->health > 0 || res->respawn_at_ms == 0) continue;
+            if (now < res->respawn_at_ms) continue;
+            /* Check no structure is built over this spot */
+            float wx = isl->x + res->ox;
+            float wy = isl->y + res->oy;
+            if (!island_resource_can_respawn(wx, wy, placed_structures, placed_structure_count))
+                continue;
+            /* Restore the node */
+            res->health = res->max_health;
+            res->respawn_at_ms = 0;
+            if (res->type_id == RES_WOOD) {
+                island_mark_tree_alive(isl, ri);
+            }
+            /* Broadcast to all clients */
+            char rmsg[160];
+            snprintf(rmsg, sizeof(rmsg),
+                     "{\"type\":\"resource_respawned\",\"island_id\":%d,\"ri\":%d,"
+                     "\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
+                     isl->id, ri, res->ox, res->oy, res->health, res->max_health);
+            websocket_server_broadcast(rmsg);
+        }
+    }
 }
 
 // HYBRID: Apply movement state to all active players (called every server tick)
@@ -7973,6 +8139,22 @@ void websocket_server_tick(float dt) {
     // ===== TICK GHOST SHIPS (wander + attack AI) =====
     tick_ghost_ships(dt);
 
+    // ===== TICK RESOURCE RESPAWNS =====
+    tick_resource_respawn();
+
+    // ===== TICK ISLAND CANNON RELOAD TIMERS =====
+    {
+        uint32_t tick_ms = (uint32_t)(dt * 1000.0f + 0.5f);
+        for (uint32_t _csi = 0; _csi < placed_structure_count; _csi++) {
+            PlacedStructure* _cs = &placed_structures[_csi];
+            if (!_cs->active || _cs->type != STRUCT_CANNON) continue;
+            if (_cs->cannon_reload_ms > 0) {
+                _cs->cannon_reload_ms = (_cs->cannon_reload_ms > tick_ms)
+                    ? _cs->cannon_reload_ms - tick_ms : 0;
+            }
+        }
+    }
+
     // ===== ADVANCE CANNON AIM TOWARD DESIRED (turn-speed limit) =====
     // Normal cannons: 60 deg/s.  Ghost ship cannons: 180 deg/s so their swept
     // barrels track the oscillation without visible lag.
@@ -8133,6 +8315,39 @@ void websocket_server_tick(float dt) {
                     ws_player->is_moving = false;
                     ws_player->movement_direction_x = 0.0f;
                     ws_player->movement_direction_y = 0.0f;
+                } else {
+                    /* ── Stamina drain (sprint) / regen ─────────────────────────────────
+                     * Drain 40 ST/s while sprinting, regen 20 ST/s otherwise.
+                     * Regen is delayed 2 s after the last stamina use.
+                     * Cancel sprint immediately if stamina hits 0. */
+                    {
+                        const float SPRINT_DRAIN_PER_S = 40.0f;
+                        /* Regen at 20% of max_stamina per second — scales with upgrades */
+                        const float STAMINA_REGEN_PCT_PER_S = 0.20f;
+                        const uint32_t STAMINA_REGEN_DELAY_MS = 2000u;
+                        uint32_t now_st = get_time_ms();
+                        if (ws_player->is_sprinting && ws_player->is_moving) {
+                            uint16_t drain = (uint16_t)(SPRINT_DRAIN_PER_S * dt + 0.5f);
+                            if (drain >= ws_player->stamina) {
+                                ws_player->stamina = 0;
+                                ws_player->is_sprinting = false; /* cancel sprint */
+                            } else {
+                                ws_player->stamina -= drain;
+                            }
+                            ws_player->stamina_last_used_ms = now_st;
+                        } else if (ws_player->stamina < ws_player->max_stamina
+                                   && (now_st - ws_player->stamina_last_used_ms) >= STAMINA_REGEN_DELAY_MS) {
+                            float regen_per_s = STAMINA_REGEN_PCT_PER_S * (float)ws_player->max_stamina;
+                            uint16_t gain = (uint16_t)(regen_per_s * dt + 0.5f);
+                            if (gain < 1) gain = 1; /* always regen at least 1 per tick */
+                            uint32_t newSt = (uint32_t)ws_player->stamina + gain;
+                            ws_player->stamina = (newSt > ws_player->max_stamina)
+                                ? ws_player->max_stamina : (uint16_t)newSt;
+                        }
+                    }
+                }
+                if (ws_player->health == 0) {
+                    /* already handled above — no-op block to keep else-chain correct */
                 } else if (ws_player->is_mounted) {
                     // Mounted players stay at their mount position
                     // Their world position still updates as the ship moves/rotates
@@ -8445,11 +8660,13 @@ void websocket_server_tick(float dt) {
                                  * Uses alive_wood list: skips depleted trees, O(alive) not O(total). */
                                 if (isl_mv) {
                                     const float PLAYER_R = 8.0f;
-                                    const float combined_r = PLAYER_R + TREE_TRUNK_R_PX;
                                     for (int ak = 0; ak < isl_mv->alive_wood_count; ak++) {
                                         int ri = isl_mv->alive_wood[ak];
-                                        float tx = isl_mv->x + isl_mv->resources[ri].ox;
-                                        float ty = isl_mv->y + isl_mv->resources[ri].oy;
+                                        const IslandResource *tr = &isl_mv->resources[ri];
+                                        float trunk_r    = TREE_TRUNK_R_PX * tr->size;
+                                        float combined_r = PLAYER_R + trunk_r;
+                                        float tx = isl_mv->x + tr->ox;
+                                        float ty = isl_mv->y + tr->oy;
                                         float dx = new_x - tx, dy = new_y - ty;
                                         float dist_sq = dx * dx + dy * dy;
                                         if (dist_sq < combined_r * combined_r && dist_sq > 0.0001f) {

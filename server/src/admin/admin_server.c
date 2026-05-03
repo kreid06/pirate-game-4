@@ -730,12 +730,63 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
     int client_fd = accept(admin->socket_fd, (struct sockaddr*)&client_addr, &addr_len);
     
     if (client_fd >= 0) {
-        // Handle simple HTTP requests
-        char buffer[4096];
-        ssize_t received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+        /* ── Read full HTTP request (headers + body) ─────────────────────
+         * Use a fixed header buffer for the first recv, then malloc a larger
+         * buffer if Content-Length indicates more body bytes are on the way.
+         * This fixes truncation for large POSTs (e.g. island save JSON).    */
+#define ADMIN_HDR_BUF  4096
+#define ADMIN_MAX_BODY (512 * 1024)   /* 512 KB max request body */
+
+        char hdr_buf[ADMIN_HDR_BUF];
+        ssize_t hdr_recv = recv(client_fd, hdr_buf, ADMIN_HDR_BUF - 1, 0);
+        char *dyn_buf = NULL;
+        char *buffer;                 /* unified pointer used throughout routing */
+
+        if (hdr_recv <= 0) {
+            close(client_fd);
+            return 0;
+        }
+        hdr_buf[hdr_recv] = '\0';
+
+        /* Parse Content-Length and locate header/body boundary */
+        char  *body_sep = strstr(hdr_buf, "\r\n\r\n");
+        size_t cl = 0;
+        {
+            const char *p = strstr(hdr_buf, "Content-Length: ");
+            if (!p) p = strstr(hdr_buf, "content-length: ");
+            if (p) cl = (size_t)strtoul(p + 16, NULL, 10);
+        }
+
+        if (cl > 0 && body_sep) {
+            size_t hdr_len   = (size_t)(body_sep + 4 - hdr_buf);
+            size_t in_buf    = (size_t)hdr_recv - hdr_len;          /* body bytes already in hdr_buf */
+            size_t remaining = cl > in_buf ? cl - in_buf : 0;       /* bytes still on the wire */
+            size_t total     = hdr_len + cl;
+
+            if (remaining > 0 && total <= (size_t)(ADMIN_HDR_BUF + ADMIN_MAX_BODY)) {
+                dyn_buf = (char *)malloc(total + 1);
+                if (dyn_buf) {
+                    memcpy(dyn_buf, hdr_buf, (size_t)hdr_recv);
+                    size_t done = (size_t)hdr_recv;
+                    while (done < total) {
+                        ssize_t n = recv(client_fd, dyn_buf + done, total - done, 0);
+                        if (n <= 0) break;
+                        done += (size_t)n;
+                    }
+                    dyn_buf[done] = '\0';
+                    buffer = dyn_buf;
+                } else {
+                    buffer = hdr_buf;  /* malloc failed; fall back to partial buffer */
+                }
+            } else {
+                buffer = hdr_buf;
+            }
+        } else {
+            buffer = hdr_buf;
+        }
+
+        ssize_t received = (ssize_t)strlen(buffer);  /* satisfy existing `received > 0` check */
         if (received > 0) {
-            buffer[received] = '\0';
-            
             // Parse request path for GET
             char *options_start = strstr(buffer, "OPTIONS ");
             char *path_start = strstr(buffer, "GET ");
@@ -886,6 +937,7 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                 }
             }
         }
+        free(dyn_buf);
         close(client_fd);
     }
     

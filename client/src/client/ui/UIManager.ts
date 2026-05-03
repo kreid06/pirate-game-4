@@ -10,7 +10,7 @@ import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState, DroppedItem }
 import { GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
-import { ITEM_DEFS, INVENTORY_SLOTS, HOTBAR_SLOTS, ItemKind, ITEM_KIND_ID } from '../../sim/Inventory.js';
+import { ITEM_DEFS, INVENTORY_SLOTS, HOTBAR_SLOTS, ItemKind, ITEM_KIND_ID, drawAxeIcon } from '../../sim/Inventory.js';
 import { ManningPriorityPanel } from './ManningPriorityPanel.js';
 import { CompanyMenu } from './CompanyMenu.js';
 import { PlayerMenu } from './PlayerMenu.js';
@@ -2412,7 +2412,8 @@ class HUDElement implements UIElement {
           ctx.font = 'bold 18px Georgia, serif';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
+          if (slot.item === 'axe') drawAxeIcon(ctx, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2, SLOT_SIZE);
+          else ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
 
           // Stack count (bottom-right, only for stackables > 1)
           if (slot.quantity > 1) {
@@ -2631,7 +2632,8 @@ class HUDElement implements UIElement {
         ctx.font = 'bold 16px Georgia, serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
+        if (item === 'axe') drawAxeIcon(ctx, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2, SLOT_SIZE);
+        else ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
       }
 
       // Label

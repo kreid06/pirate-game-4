@@ -16,7 +16,7 @@
 
 type Pt = { x: number; y: number };
 type EditMode = 'move' | 'add';
-type LayerKey = 'islandShape' | 'outerSand' | 'innerGrass' | 'outerShallow' | 'waterZone' | 'sandPatch';
+type LayerKey = 'islandShape' | 'outerSand' | 'innerGrass' | 'outerShallow' | 'waterZone' | 'sandPatch' | 'stoneZone' | 'metalZone';
 
 interface LayerDef {
   key: LayerKey;
@@ -48,6 +48,8 @@ const LAYERS: LayerDef[] = [
   { key: 'outerShallow', label: '🌊 Shallow', fill: 'rgba(30,144,255,0.20)',  stroke: '#3abaff', multi: false },
   { key: 'waterZone',    label: '💧 Water',   fill: 'rgba(30,144,255,0.35)',  stroke: '#1e8fff', multi: true  },
   { key: 'sandPatch',    label: '🏝 Patch',   fill: 'rgba(200,180,100,0.35)', stroke: '#c8b464', multi: true  },
+  { key: 'stoneZone',    label: '⛰ Stone',   fill: 'rgba(130,100,70,0.40)',  stroke: '#a07840', multi: true },
+  { key: 'metalZone',    label: '⚙ Metal',   fill: 'rgba(130,100,70,0.40)',  stroke: '#a07840', multi: true },
 ];
 
 const VERTEX_RADIUS = 6;
@@ -740,6 +742,8 @@ interface ServerIslandData {
   grassVerts?: Pt[];
   shallowVertCount?: number;
   shallowVerts?: Pt[];
+  stonePolys?: Pt[][];
+  metalPolys?: Pt[][];
   beachRadius?: number;
   grassRadius?: number;
 }
@@ -785,6 +789,14 @@ async function fetchFromServer(): Promise<void> {
           // Regenerate shallow from updated sand
           layerData.delete(dataKey(local.id, 'outerShallow'));
         }
+        // Load stone biome polygons from server if provided
+        if (srv.stonePolys && srv.stonePolys.length) {
+          layerData.set(dataKey(local.id, 'stoneZone'), srv.stonePolys.map(ring => ring.map(v => ({ x: v.x, y: v.y }))));
+        }
+        // Load metal biome polygons from server if provided
+        if (srv.metalPolys && srv.metalPolys.length) {
+          layerData.set(dataKey(local.id, 'metalZone'), srv.metalPolys.map(ring => ring.map(v => ({ x: v.x, y: v.y }))));
+        }
       }
       if (srv.beachRadius !== undefined) local.circleRadius = srv.beachRadius;
       updated++;
@@ -824,19 +836,42 @@ document.getElementById('btn-import')!.addEventListener('click', () => {
   const ta = document.getElementById('import-area') as HTMLTextAreaElement;
   try {
     const parsed = JSON.parse(ta.value.trim());
-    const isl = ISLANDS[selectedIslandIdx];
 
     // Full schema object — load sand, grass, islets all at once
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      // ── Switch to the correct island based on islandId in the schema ──
+      if (parsed.islandId != null) {
+        const idx = ISLANDS.findIndex(i => i.id === parsed.islandId);
+        if (idx >= 0) {
+          selectedIslandIdx = idx;
+          islSelect.value = String(idx);
+          activeSubIslandIdx = null;
+          updateSubIslandUI();
+        }
+      }
+      const isl = ISLANDS[selectedIslandIdx];
+
+      // ── Update island centre if provided ──
+      if (parsed.centre) {
+        isl.cx = +parsed.centre.x;
+        isl.cy = +parsed.centre.y;
+        // Invalidate all cached layer data so getPolys() re-seeds from new centre
+        for (const ld of LAYERS) layerData.delete(dataKey(isl.id, ld.key));
+      }
+
+      const importedLayers: LayerKey[] = [];
       if (parsed.sand_verts_JSON) {
-        layerData.set(dataKey(isl.id, 'outerSand'), [(parsed.sand_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
+        layerData.set(dataKey(isl.id, 'outerSand'),   [(parsed.sand_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
         layerData.set(dataKey(isl.id, 'islandShape'), [(parsed.sand_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
+        importedLayers.push('outerSand');
       }
       if (parsed.grass_verts_JSON) {
         layerData.set(dataKey(isl.id, 'innerGrass'), [(parsed.grass_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
+        importedLayers.push('innerGrass');
       }
       if (parsed.shallow_verts_JSON) {
         layerData.set(dataKey(isl.id, 'outerShallow'), [(parsed.shallow_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
+        importedLayers.push('outerShallow');
       }
       if (Array.isArray(parsed.islets)) {
         const subs: SubIslandEntry[] = (parsed.islets as any[]).map((s: any) => ({
@@ -847,14 +882,44 @@ document.getElementById('btn-import')!.addEventListener('click', () => {
         subIslandsMap.set(isl.id, subs);
         refreshSubIslandList();
       }
+      if (parsed.stone_polys_JSON) {
+        layerData.set(dataKey(isl.id, 'stoneZone'), (parsed.stone_polys_JSON as Pt[][]).map(ring => ring.map((p: Pt) => ({ x: +p.x, y: +p.y }))));
+        importedLayers.push('stoneZone');
+      } else if (parsed.stone_verts_JSON) {
+        // backward compat with old single-polygon export
+        layerData.set(dataKey(isl.id, 'stoneZone'), [(parsed.stone_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
+        importedLayers.push('stoneZone');
+      }
+      if (parsed.metal_polys_JSON) {
+        layerData.set(dataKey(isl.id, 'metalZone'), (parsed.metal_polys_JSON as Pt[][]).map(ring => ring.map((p: Pt) => ({ x: +p.x, y: +p.y }))));
+        importedLayers.push('metalZone');
+      } else if (parsed.metal_verts_JSON) {
+        layerData.set(dataKey(isl.id, 'metalZone'), [(parsed.metal_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
+        importedLayers.push('metalZone');
+      }
+
+      // ── Switch to first imported layer so the result is immediately visible ──
+      if (importedLayers.length > 0) {
+        activeLayerKey = importedLayers[0];
+        activePolyIdx  = 0;
+        layerBtnsEl.querySelectorAll('.btn').forEach((b, i) => {
+          b.classList.toggle('active', LAYERS[i].key === activeLayerKey);
+        });
+      }
+
+      // Pan camera to the island centre
+      cam.centreOn(isl.cx, isl.cy);
+      cam.zoom = 0.12;
+
       refreshPolySelect(); refreshVertCount(); ta.value = '';
-      toast('Schema imported');
+      toast(`Imported ${importedLayers.map(k => LAYERS.find(l => l.key === k)?.label ?? k).join(', ')}`);
       return;
     }
 
     // Bare array — import into active layer/poly
     if (!Array.isArray(parsed)) throw new Error('expected array or schema object');
-    const polys = getPolys(isl.id, activeLayerKey);
+    const islArr = ISLANDS[selectedIslandIdx];
+    const polys = getPolys(islArr.id, activeLayerKey);
     if (Array.isArray(parsed[0])) {
       (parsed as Pt[][]).forEach((pts, i) => { polys[i] = pts.map((p: Pt) => ({ x: +p.x, y: +p.y })); });
     } else {
@@ -874,9 +939,15 @@ document.getElementById('btn-export')!.addEventListener('click', () => {
     const polys = getPolys(isl.id, ld.key).filter(p => p.length > 0);
     if (!polys.length) continue;
 
-    if (ld.key === 'islandShape' || ld.key === 'outerSand' || ld.key === 'innerGrass' || ld.key === 'outerShallow') {
+    if (ld.key === 'stoneZone') {
+      schema['stone_polys_JSON'] = polys;
+    } else if (ld.key === 'metalZone') {
+      schema['metal_polys_JSON'] = polys;
+    } else if (ld.key === 'islandShape' || ld.key === 'outerSand' || ld.key === 'innerGrass' || ld.key === 'outerShallow') {
       const verts = polys[0];
-      const label = ld.key === 'innerGrass' ? 'grass' : ld.key === 'outerShallow' ? 'shallow' : 'sand';
+      const label = ld.key === 'innerGrass' ? 'grass'
+                  : ld.key === 'outerShallow' ? 'shallow'
+                  : 'sand';
       schema[`${label}_verts_JSON`] = verts;
       schema[`${label}_C_vx`]      = `.vx = { ${verts.map(v => Math.round(v.x)).join(', ')} }`;
       schema[`${label}_C_vy`]      = `.vy = { ${verts.map(v => Math.round(v.y)).join(', ')} }`;
@@ -911,9 +982,15 @@ document.getElementById('btn-save-to-server')!.addEventListener('click', async (
   for (const ld of LAYERS) {
     const polys = getPolys(isl.id, ld.key).filter(p => p.length > 0);
     if (!polys.length) continue;
-    if (ld.key === 'islandShape' || ld.key === 'outerSand' || ld.key === 'innerGrass' || ld.key === 'outerShallow') {
+    if (ld.key === 'stoneZone') {
+      schema['stone_polys_JSON'] = polys;
+    } else if (ld.key === 'metalZone') {
+      schema['metal_polys_JSON'] = polys;
+    } else if (ld.key === 'islandShape' || ld.key === 'outerSand' || ld.key === 'innerGrass' || ld.key === 'outerShallow') {
       const verts = polys[0];
-      const label = ld.key === 'innerGrass' ? 'grass' : ld.key === 'outerShallow' ? 'shallow' : 'sand';
+      const label = ld.key === 'innerGrass' ? 'grass'
+                  : ld.key === 'outerShallow' ? 'shallow'
+                  : 'sand';
       schema[`${label}_verts_JSON`] = verts;
     }
   }

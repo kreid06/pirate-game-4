@@ -89,6 +89,8 @@ export enum MessageType {
   HARVEST_STONE     = 'harvest_stone',
   HARVEST_STONE_SUCCESS = 'harvest_stone_success',
   HARVEST_STONE_FAILURE = 'harvest_stone_failure',
+  HARVEST_BOULDER_SUCCESS = 'harvest_boulder_success',
+  HARVEST_BOULDER_FAILURE = 'harvest_boulder_failure',
   PLACE_STRUCTURE  = 'place_structure',
   STRUCTURE_INTERACT = 'structure_interact',
   PLACE_MAST_AT = 'place_mast_at',
@@ -554,7 +556,7 @@ export class NetworkManager {
     statPoints: number) => void) | null = null;
   /** Fired when the server confirms a player stat upgrade. */
   public onPlayerStatUp: ((stat: string, statLevel: number, xp: number,
-    maxHealth: number, playerLevel: number,
+    maxHealth: number, maxStamina: number, playerLevel: number,
     statHealth: number, statDamage: number, statStamina: number, statWeight: number,
     statPoints: number) => void) | null = null;
   /** Fired when the server sends {type:"ack"} — the final handshake confirmation that the
@@ -564,6 +566,10 @@ export class NetworkManager {
   /** Fired when any weapon fires — used to render hit-scan tracers (grapeshot, canister). */
   public onCannonFireEvent: ((cannonId: number, shipId: number, x: number, y: number,
     angle: number, projectileId: number, ammoType: number) => void) | null = null;
+
+  /** Fired when the server confirms the player has mounted an island cannon structure.
+   *  `mountX`/`mountY` are the world-space coordinates the player should snap to. */
+  public onIslandCannonMounted: ((structureId: number, aimAngle: number, reloadMs: number, mountX: number, mountY: number) => void) | null = null;
 
   public onEntityHit: ((entityType: 'npc' | 'player', id: number, x: number, y: number,
     damage: number, health: number, maxHealth: number, killed: boolean, killerShipId: number) => void) | null = null;
@@ -591,6 +597,10 @@ export class NetworkManager {
   public onRockHarvestResult: ((success: boolean, metal: number, reason: string) => void) | null = null;
   /** Fired when the server responds to a harvest_stone request. */
   public onStoneHarvestResult: ((success: boolean, stone: number, reason: string) => void) | null = null;
+  /** Fired when the server responds to a harvest_boulder request. */
+  public onBoulderHarvestResult: ((success: boolean, metal: number, reason: string) => void) | null = null;
+  /** Fired when any action is rejected by the server due to insufficient stamina. */
+  public onNoStamina: (() => void) | null = null;
   /**
    * Fired once on connect with the full list of server-defined islands.
    * Falls back to client defaults if the server never sends this.
@@ -605,6 +615,8 @@ export class NetworkManager {
   public mapWrap: boolean = true;
   /** Fired when the server broadcasts a resource_damaged event. */
   public onResourceDamaged: ((islandId: number, ox: number, oy: number, hp: number, maxHp: number) => void) | null = null;
+  /** Fired when a depleted resource respawns (resource_respawned event). */
+  public onResourceRespawned: ((islandId: number, ri: number, ox: number, oy: number, hp: number, maxHp: number) => void) | null = null;
 
   /** Fired when the server broadcasts a newly placed structure to all clients. */
   public onStructurePlaced: ((s: PlacedStructure) => void) | null = null;
@@ -1303,6 +1315,12 @@ export class NetworkManager {
     this.socket.send(JSON.stringify({ type: 'harvest_rock', timestamp: Date.now() }));
   }
 
+  /** Request server to mine the nearest boulder on the current island (requires pickaxe). */
+  sendHarvestBoulder(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'harvest_boulder', timestamp: Date.now() }));
+  }
+
   /** Request server to pick up stone from the nearest rock outcrop (no tool required). */
   sendHarvestStone(): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
@@ -1331,7 +1349,7 @@ export class NetworkManager {
    * The server validates that the player is on an island, has the item, and for
    * workbench that a floor tile is close enough.
    */
-  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard', x: number, y: number, rotationDeg = 0): void {
+  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon', x: number, y: number, rotationDeg = 0): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y, rotation: rotationDeg });
   }
@@ -2065,6 +2083,8 @@ export class NetworkManager {
             companyId: player.company ?? 0,
             health: player.health ?? 100,
             maxHealth: player.max_health ?? 100,
+            stamina: player.stamina ?? undefined,
+            maxStamina: player.max_stamina ?? 100,
             onIslandId: player.on_island ?? 0,
             level: player.player_level ?? 1,
             xp: player.player_xp ?? 0,
@@ -2171,6 +2191,8 @@ export class NetworkManager {
       case MessageType.MESSAGE_ACK:
         if (message.status === 'npc_moved_to_module') {
           this.onNpcMoveResult?.(true, message.npcId ?? 0);
+        } else if (message.status === 'no_stamina') {
+          this.onNoStamina?.();
         }
         break;
 
@@ -2226,6 +2248,14 @@ export class NetworkManager {
         this.onStoneHarvestResult?.(false, 0, message.reason ?? 'unknown');
         break;
 
+      case MessageType.HARVEST_BOULDER_SUCCESS:
+        this.onBoulderHarvestResult?.(true, message.metal ?? 0, '');
+        break;
+
+      case MessageType.HARVEST_BOULDER_FAILURE:
+        this.onBoulderHarvestResult?.(false, 0, message.reason ?? 'unknown');
+        break;
+
       case 'npc_dialogue':
         console.log(`💬 [NPC] ${message.npc_name}: "${message.text}"`);
         this.onNpcDialogue?.(message.npc_id, message.npc_name, message.text);
@@ -2244,7 +2274,8 @@ export class NetworkManager {
       case 'PLAYER_STAT_UP': {
         this.onPlayerStatUp?.(
           message.stat, message.level, message.xp,
-          message.maxHealth, message.playerLevel,
+          message.maxHealth, message.maxStamina ?? 100,
+          message.playerLevel,
           message.statHealth, message.statDamage, message.statStamina, message.statWeight,
           message.statPoints ?? 0,
         );
@@ -2422,18 +2453,44 @@ export class NetworkManager {
       }
 
       case 'ISLANDS': {
-        const islands: IslandDef[] = (message.islands ?? []).map((isl: any) => ({
+        const now = performance.now();
+        /** Ray-cast even-odd PIP for world-space polygon rings. */
+        const pipInRing = (poly: {x:number,y:number}[], wx: number, wy: number): boolean => {
+          let inside = false;
+          const n = poly.length;
+          for (let i = 0, j = n - 1; i < n; j = i++) {
+            const xi = poly[i].x, yi = poly[i].y;
+            const xj = poly[j].x, yj = poly[j].y;
+            if ((yi > wy) !== (yj > wy) && wx < (xj - xi) * (wy - yi) / (yj - yi) + xi)
+              inside = !inside;
+          }
+          return inside;
+        };
+        const isInMetalPolys = (metalPolys: {x:number,y:number}[][]|undefined, islX: number, islY: number, ox: number, oy: number): boolean => {
+          if (!metalPolys) return false;
+          const wx = islX + ox, wy = islY + oy;
+          return metalPolys.some(ring => pipInRing(ring, wx, wy));
+        };
+        const islands: IslandDef[] = (message.islands ?? []).map((isl: any) => {
+          const islX = isl.x ?? 0;
+          const islY = isl.y ?? 0;
+          const metalPolys: {x:number,y:number}[][] | undefined = isl.metalPolys
+            ? (isl.metalPolys as any[][]).map((ring: any[]) => ring.map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 })))
+            : undefined;
+          return {
           id:        isl.id       ?? 0,
-          x:         isl.x       ?? 0,
-          y:         isl.y       ?? 0,
+          x:         islX,
+          y:         islY,
           preset:    (isl.preset ?? 'tropical') as IslandPreset,
           resources: (isl.resources ?? []).map((r: any): IslandResource => ({
-            ox:    r.ox    ?? 0,
-            oy:    r.oy    ?? 0,
-            type:  (r.type ?? 'wood') as IslandResource['type'],
-            size:  r.size  ?? 1.0,
-            hp:    r.hp    ?? 100,
-            maxHp: r.maxHp ?? 100,
+            ox:         r.ox    ?? 0,
+            oy:         r.oy    ?? 0,
+            type:       (r.type ?? 'wood') as IslandResource['type'],
+            size:       r.size  ?? 1.0,
+            hp:         r.hp    ?? 100,
+            maxHp:      r.maxHp ?? 100,
+            depletedAt: (r.hp <= 0) ? now : undefined,
+            metal:      r.type === 'boulder' ? isInMetalPolys(metalPolys, islX, islY, r.ox ?? 0, r.oy ?? 0) : undefined,
           })),
           vertices: isl.vertices
             ? (isl.vertices as any[]).map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 }))
@@ -2444,7 +2501,12 @@ export class NetworkManager {
           shallowVertices: isl.shallowVertices
             ? (isl.shallowVertices as any[]).map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 }))
             : undefined,
-        }));
+          stonePolys: isl.stonePolys
+            ? (isl.stonePolys as any[][]).map((ring: any[]) => ring.map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 })))
+            : undefined,
+          metalPolys,
+          };
+        });
         this.onIslands?.(islands);
         break;
       }
@@ -2460,15 +2522,29 @@ export class NetworkManager {
         break;
       }
 
+      case 'resource_respawned': {
+        this.onResourceRespawned?.(
+          message.island_id ?? 0,
+          message.ri        ?? 0,
+          message.ox        ?? 0,
+          message.oy        ?? 0,
+          message.hp        ?? 100,
+          message.maxHp     ?? 100,
+        );
+        break;
+      }
+
       case 'STRUCTURES': {
         const structs: PlacedStructure[] = (message.structures ?? []).map((s: any): PlacedStructure => ({
           id:        s.id       ?? 0,
-          type:      s.structure_type === 'workbench'  ? 'workbench'
-                   : s.structure_type === 'wall'       ? 'wall'
-                   : s.structure_type === 'door_frame' ? 'door_frame'
-                   : s.structure_type === 'door'       ? 'door'
-                   : s.structure_type === 'shipyard'   ? 'shipyard'
-                   : s.structure_type === 'wreck'      ? 'wreck'
+          type:      s.structure_type === 'workbench'    ? 'workbench'
+                   : s.structure_type === 'wall'         ? 'wall'
+                   : s.structure_type === 'door_frame'   ? 'door_frame'
+                   : s.structure_type === 'door'         ? 'door'
+                   : s.structure_type === 'shipyard'     ? 'shipyard'
+                   : s.structure_type === 'wreck'        ? 'wreck'
+                   : s.structure_type === 'wood_ceiling' ? 'wood_ceiling'
+                   : s.structure_type === 'cannon'       ? 'cannon'
                    : 'wooden_floor',
           islandId:  s.island_id ?? 0,
           x:         s.x ?? 0,
@@ -2491,12 +2567,14 @@ export class NetworkManager {
       case 'structure_placed': {
         const sp: PlacedStructure = {
           id:        message.id       ?? 0,
-          type:      message.structure_type === 'workbench'  ? 'workbench'
-                   : message.structure_type === 'wall'       ? 'wall'
-                   : message.structure_type === 'door_frame' ? 'door_frame'
-                   : message.structure_type === 'door'       ? 'door'
-                   : message.structure_type === 'shipyard'   ? 'shipyard'
-                   : message.structure_type === 'wreck'      ? 'wreck'
+          type:      message.structure_type === 'workbench'    ? 'workbench'
+                   : message.structure_type === 'wall'         ? 'wall'
+                   : message.structure_type === 'door_frame'   ? 'door_frame'
+                   : message.structure_type === 'door'         ? 'door'
+                   : message.structure_type === 'shipyard'     ? 'shipyard'
+                   : message.structure_type === 'wreck'        ? 'wreck'
+                   : message.structure_type === 'wood_ceiling' ? 'wood_ceiling'
+                   : message.structure_type === 'cannon'       ? 'cannon'
                    : 'wooden_floor',
           islandId:  message.island_id ?? 0,
           x:         message.x ?? 0,
@@ -2619,6 +2697,17 @@ export class NetworkManager {
           message.angle       ?? 0,
           message.projectileId ?? 0,
           message.ammoType    ?? 0,
+        );
+        break;
+      }
+
+      case 'island_cannon_mounted': {
+        this.onIslandCannonMounted?.(
+          message.structure_id ?? 0,
+          message.aim_angle    ?? 0,
+          message.reload_ms    ?? 0,
+          message.mount_x      ?? 0,
+          message.mount_y      ?? 0,
         );
         break;
       }

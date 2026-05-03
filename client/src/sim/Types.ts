@@ -161,7 +161,7 @@ export interface ShipConstruction {
  */
 export interface PlacedStructure {
   id: number;
-  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck';
+  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon';
   islandId: number;
   x: number;
   y: number;
@@ -313,6 +313,8 @@ export interface IslandResource {
   maxHp: number;
   /** Client-only: timestamp (performance.now()) when hp first reached 0. Used for fade-out. */
   depletedAt?: number;
+  /** Client-only: true if this boulder is inside a metal biome polygon (uses iron/dark sprite tones). */
+  metal?: boolean;
 }
 
 /**
@@ -331,6 +333,10 @@ export interface IslandDef {
   grassVertices?: { x: number; y: number }[];
   /** Explicit shallow water polygon vertices in world-space. Defines the outer boundary of the shallow zone. */
   shallowVertices?: { x: number; y: number }[];
+  /** Stone biome polygons in world-space (array of rings). Terrain overlay drawn above grass. */
+  stonePolys?: { x: number; y: number }[][];
+  /** Metal biome polygons in world-space (array of rings). Terrain overlay drawn above grass. */
+  metalPolys?: { x: number; y: number }[][];
 }
 
 /**

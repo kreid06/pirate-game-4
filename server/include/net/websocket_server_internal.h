@@ -21,6 +21,13 @@
 #define PLAYER_XP_PER_NPC_KILL    25u
 #define PLAYER_XP_PER_PLAYER_KILL 75u
 
+/* XP awarded per harvest action */
+#define PLAYER_XP_PER_WOOD_HARVEST    5u
+#define PLAYER_XP_PER_FIBER_HARVEST   3u
+#define PLAYER_XP_PER_ROCK_HARVEST    8u
+#define PLAYER_XP_PER_STONE_HARVEST   4u
+#define PLAYER_XP_PER_BOULDER_HARVEST 10u
+
 // ── Internal struct definitions ───────────────────────────────────────────────
 // These are defined only in websocket_server.c but needed by split-out modules.
 
