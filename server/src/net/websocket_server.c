@@ -6375,7 +6375,9 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_WALL         ? "wall" :
                                             placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
                                             placed_structures[si].type == STRUCT_DOOR         ? "door" :
-                                            placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" : "unknown";
+                                            placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
+                                            placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
+                                            placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" : "unknown";
                                         bool is_door_s = (placed_structures[si].type == STRUCT_DOOR);
                                         bool is_sy_s   = (placed_structures[si].type == STRUCT_SHIPYARD);
                                         char sy_extra_s[256] = "";
@@ -6448,7 +6450,8 @@ int websocket_server_update(struct Sim* sim) {
                                         placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
                                         placed_structures[si].type == STRUCT_DOOR         ? "door" :
                                         placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
-                                        placed_structures[si].type == STRUCT_WRECK        ? "wreck" : "unknown";
+                                        placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
+                                        placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" : "unknown";
                                     bool gs_is_door = (placed_structures[si].type == STRUCT_DOOR);
                                     bool gs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
                                     char gs_sy_extra[256] = "";
