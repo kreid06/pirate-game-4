@@ -22,10 +22,20 @@
  *   grass_max_bump  — max(abs(grass_bumps)); used as broad-phase margin
  */
 
-#define ISLAND_MAX_RESOURCES 4096
-#define ISLAND_MAX_COUNT     16
-#define ISLAND_BUMP_COUNT    16
-#define ISLAND_MAX_VERTS     128
+#define ISLAND_MAX_RESOURCES  4096
+#define ISLAND_MAX_COUNT      16
+#define ISLAND_BUMP_COUNT     16
+#define ISLAND_MAX_VERTS      128
+#define ISLAND_MAX_ZONES      8     /* max stone/metal zone polygons per island */
+#define ISLAND_ZONE_MAX_VERTS 64    /* max vertices per zone polygon */
+
+/* A single resource-zone polygon (stone or metal).
+ * Vertices are island-local offsets in world px (same coord space as vx/vy). */
+typedef struct {
+    int   count;
+    float vx[ISLAND_ZONE_MAX_VERTS];
+    float vy[ISLAND_ZONE_MAX_VERTS];
+} IslandZonePoly;
 
 /* Resource type enum — integer values used internally.
  * res_type_str() converts back to the string expected by the client. */
@@ -131,6 +141,15 @@ typedef struct {
      * Shrinks as trees are destroyed; maintained by island_mark_tree_dead(). */
     uint16_t alive_wood[ISLAND_MAX_RESOURCES];
     int      alive_wood_count;
+
+    /* ── Resource zones (loaded from island JSON by island_loader.c) ──────
+     * stone_zones: polygons where RES_ROCK nodes are procedurally placed.
+     * metal_zones: polygons where RES_BOULDER nodes are procedurally placed.
+     * Vertices are island-local offsets in world pixels. */
+    IslandZonePoly stone_zones[ISLAND_MAX_ZONES];
+    int            stone_zone_count;
+    IslandZonePoly metal_zones[ISLAND_MAX_ZONES];
+    int            metal_zone_count;
 } IslandDef;
 
 /**
@@ -369,6 +388,15 @@ void islands_apply_rotations(void);
  * before any client connects.
  */
 void islands_generate_trees(void);
+
+/**
+ * Procedurally generate stone (RES_ROCK) and metal (RES_BOULDER) resource
+ * nodes inside any zone polygons defined for each island.
+ * Must be called AFTER islands_apply_rotations() so zone polygons are in
+ * their final orientation, and BEFORE islands_generate_trees() so resource
+ * indices are assigned correctly.
+ */
+void islands_generate_zone_resources(void);
 
 /**
  * Build the spatial wood grid and alive_wood list for all islands.

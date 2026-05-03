@@ -24,17 +24,16 @@
 #include <string.h>
 #include <math.h>
 
-/* Load an array of {x,y} objects into dst_x/dst_y.
- * Returns the number of verts loaded (clamped to ISLAND_MAX_VERTS). */
-static int load_vert_array(struct json_object *arr,
-                           float *dst_x, float *dst_y)
+/* Load an array of {x,y} objects into dst_x/dst_y, clamped to max_n.
+ * Returns the number of verts loaded. */
+static int load_vert_array_n(struct json_object *arr,
+                              float *dst_x, float *dst_y, int max_n)
 {
     if (!arr) return 0;
     int n = (int)json_object_array_length(arr);
-    if (n > ISLAND_MAX_VERTS) {
-        log_warn("[islands] vertex count %d exceeds ISLAND_MAX_VERTS=%d, clamping",
-                 n, ISLAND_MAX_VERTS);
-        n = ISLAND_MAX_VERTS;
+    if (n > max_n) {
+        log_warn("[islands] vertex count %d exceeds limit %d, clamping", n, max_n);
+        n = max_n;
     }
     for (int j = 0; j < n; j++) {
         struct json_object *v  = json_object_array_get_idx(arr, j);
@@ -45,6 +44,14 @@ static int load_vert_array(struct json_object *arr,
         dst_y[j] = vy ? (float)json_object_get_double(vy) : 0.0f;
     }
     return n;
+}
+
+/* Load an array of {x,y} objects into dst_x/dst_y.
+ * Returns the number of verts loaded (clamped to ISLAND_MAX_VERTS). */
+static int load_vert_array(struct json_object *arr,
+                           float *dst_x, float *dst_y)
+{
+    return load_vert_array_n(arr, dst_x, dst_y, ISLAND_MAX_VERTS);
 }
 
 void islands_load_from_files(const char *dir)
@@ -101,10 +108,49 @@ void islands_load_from_files(const char *dir)
             isl->shallow_vertex_count = load_vert_array(shallow, isl->svx, isl->svy);
         }
 
+        /* ── Stone zones ─────────────────────────────────────────────────── */
+        struct json_object *stone_j = NULL;
+        json_object_object_get_ex(root, "stone_zones", &stone_j);
+        if (stone_j) {
+            int nz = (int)json_object_array_length(stone_j);
+            if (nz > ISLAND_MAX_ZONES) nz = ISLAND_MAX_ZONES;
+            isl->stone_zone_count = 0;
+            for (int zi = 0; zi < nz; zi++) {
+                struct json_object *poly = json_object_array_get_idx(stone_j, zi);
+                int n = load_vert_array_n(poly,
+                    isl->stone_zones[zi].vx, isl->stone_zones[zi].vy,
+                    ISLAND_ZONE_MAX_VERTS);
+                if (n > 0) {
+                    isl->stone_zones[zi].count = n;
+                    isl->stone_zone_count++;
+                }
+            }
+        }
+
+        /* ── Metal zones ─────────────────────────────────────────────────── */
+        struct json_object *metal_j = NULL;
+        json_object_object_get_ex(root, "metal_zones", &metal_j);
+        if (metal_j) {
+            int nz = (int)json_object_array_length(metal_j);
+            if (nz > ISLAND_MAX_ZONES) nz = ISLAND_MAX_ZONES;
+            isl->metal_zone_count = 0;
+            for (int zi = 0; zi < nz; zi++) {
+                struct json_object *poly = json_object_array_get_idx(metal_j, zi);
+                int n = load_vert_array_n(poly,
+                    isl->metal_zones[zi].vx, isl->metal_zones[zi].vy,
+                    ISLAND_ZONE_MAX_VERTS);
+                if (n > 0) {
+                    isl->metal_zones[zi].count = n;
+                    isl->metal_zone_count++;
+                }
+            }
+        }
+
         json_object_put(root);
 
-        log_info("[islands] Loaded island %d from %s (sand=%d grass=%d shallow=%d)",
+        log_info("[islands] Loaded island %d from %s (sand=%d grass=%d shallow=%d stone_zones=%d metal_zones=%d)",
                  isl->id, path,
-                 isl->vertex_count, isl->grass_vertex_count, isl->shallow_vertex_count);
+                 isl->vertex_count, isl->grass_vertex_count, isl->shallow_vertex_count,
+                 isl->stone_zone_count, isl->metal_zone_count);
     }
 }

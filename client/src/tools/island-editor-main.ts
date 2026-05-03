@@ -16,7 +16,7 @@
 
 type Pt = { x: number; y: number };
 type EditMode = 'move' | 'add';
-type LayerKey = 'islandShape' | 'outerSand' | 'innerGrass' | 'outerShallow' | 'waterZone' | 'sandPatch';
+type LayerKey = 'islandShape' | 'outerSand' | 'innerGrass' | 'outerShallow' | 'waterZone' | 'sandPatch' | 'stoneZone' | 'metalZone';
 
 interface LayerDef {
   key: LayerKey;
@@ -48,6 +48,8 @@ const LAYERS: LayerDef[] = [
   { key: 'outerShallow', label: '🌊 Shallow', fill: 'rgba(30,144,255,0.20)',  stroke: '#3abaff', multi: false },
   { key: 'waterZone',    label: '💧 Water',   fill: 'rgba(30,144,255,0.35)',  stroke: '#1e8fff', multi: true  },
   { key: 'sandPatch',    label: '🏝 Patch',   fill: 'rgba(200,180,100,0.35)', stroke: '#c8b464', multi: true  },
+  { key: 'stoneZone',    label: '⛰ Stone',   fill: 'rgba(130,100,70,0.40)',  stroke: '#a07840', multi: true  },
+  { key: 'metalZone',    label: '⚙ Metal',   fill: 'rgba(70,110,140,0.40)',  stroke: '#5090b0', multi: true  },
 ];
 
 const VERTEX_RADIUS = 6;
@@ -847,6 +849,18 @@ document.getElementById('btn-import')!.addEventListener('click', () => {
         subIslandsMap.set(isl.id, subs);
         refreshSubIslandList();
       }
+      if (Array.isArray(parsed.stone_zones)) {
+        const polys = getPolys(isl.id, 'stoneZone');
+        polys.length = 0;
+        for (const zone of parsed.stone_zones as Pt[][])
+          polys.push(zone.map((p: Pt) => ({ x: +p.x, y: +p.y })));
+      }
+      if (Array.isArray(parsed.metal_zones)) {
+        const polys = getPolys(isl.id, 'metalZone');
+        polys.length = 0;
+        for (const zone of parsed.metal_zones as Pt[][])
+          polys.push(zone.map((p: Pt) => ({ x: +p.x, y: +p.y })));
+      }
       refreshPolySelect(); refreshVertCount(); ta.value = '';
       toast('Schema imported');
       return;
@@ -881,6 +895,8 @@ document.getElementById('btn-export')!.addEventListener('click', () => {
       schema[`${label}_C_vx`]      = `.vx = { ${verts.map(v => Math.round(v.x)).join(', ')} }`;
       schema[`${label}_C_vy`]      = `.vy = { ${verts.map(v => Math.round(v.y)).join(', ')} }`;
       schema[`${label}_vertex_count`] = verts.length;
+    } else if (ld.key === 'stoneZone' || ld.key === 'metalZone') {
+      schema[ld.key === 'stoneZone' ? 'stone_zones' : 'metal_zones'] = polys;
     } else {
       schema[ld.key] = ld.multi ? polys : polys[0];
     }
@@ -915,6 +931,8 @@ document.getElementById('btn-save-to-server')!.addEventListener('click', async (
       const verts = polys[0];
       const label = ld.key === 'innerGrass' ? 'grass' : ld.key === 'outerShallow' ? 'shallow' : 'sand';
       schema[`${label}_verts_JSON`] = verts;
+    } else if (ld.key === 'stoneZone' || ld.key === 'metalZone') {
+      schema[ld.key === 'stoneZone' ? 'stone_zones' : 'metal_zones'] = polys;
     }
   }
   const base = serverUrlInput.value.trim().replace(/\/$/, '');

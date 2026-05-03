@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": 1777837302,
+    "timestamp": 1777838565,
     "ship_count": 2,
     "npc_count": 18,
-    "structure_count": 43
+    "structure_count": 42
   },
   "ships": [
     {
@@ -1089,20 +1089,6 @@
       "type": 7,
       "x": 72305.297,
       "y": 23523.400,
-      "rot": 345.000,
-      "island_id": 5,
-      "company": 3,
-      "hp": 100,
-      "max_hp": 100,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false
-    },
-    {
-      "id": 43,
-      "type": 7,
-      "x": 72353.602,
-      "y": 23510.500,
       "rot": 345.000,
       "island_id": 5,
       "company": 3,
