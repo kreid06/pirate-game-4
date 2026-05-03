@@ -838,19 +838,42 @@ document.getElementById('btn-import')!.addEventListener('click', () => {
   const ta = document.getElementById('import-area') as HTMLTextAreaElement;
   try {
     const parsed = JSON.parse(ta.value.trim());
-    const isl = ISLANDS[selectedIslandIdx];
 
     // Full schema object — load sand, grass, islets all at once
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      // ── Switch to the correct island based on islandId in the schema ──
+      if (parsed.islandId != null) {
+        const idx = ISLANDS.findIndex(i => i.id === parsed.islandId);
+        if (idx >= 0) {
+          selectedIslandIdx = idx;
+          islSelect.value = String(idx);
+          activeSubIslandIdx = null;
+          updateSubIslandUI();
+        }
+      }
+      const isl = ISLANDS[selectedIslandIdx];
+
+      // ── Update island centre if provided ──
+      if (parsed.centre) {
+        isl.cx = +parsed.centre.x;
+        isl.cy = +parsed.centre.y;
+        // Invalidate all cached layer data so getPolys() re-seeds from new centre
+        for (const ld of LAYERS) layerData.delete(dataKey(isl.id, ld.key));
+      }
+
+      const importedLayers: LayerKey[] = [];
       if (parsed.sand_verts_JSON) {
-        layerData.set(dataKey(isl.id, 'outerSand'), [(parsed.sand_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
+        layerData.set(dataKey(isl.id, 'outerSand'),   [(parsed.sand_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
         layerData.set(dataKey(isl.id, 'islandShape'), [(parsed.sand_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
+        importedLayers.push('outerSand');
       }
       if (parsed.grass_verts_JSON) {
         layerData.set(dataKey(isl.id, 'innerGrass'), [(parsed.grass_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
+        importedLayers.push('innerGrass');
       }
       if (parsed.shallow_verts_JSON) {
         layerData.set(dataKey(isl.id, 'outerShallow'), [(parsed.shallow_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
+        importedLayers.push('outerShallow');
       }
       if (Array.isArray(parsed.islets)) {
         const subs: SubIslandEntry[] = (parsed.islets as any[]).map((s: any) => ({
@@ -863,18 +886,35 @@ document.getElementById('btn-import')!.addEventListener('click', () => {
       }
       if (parsed.stone_verts_JSON) {
         layerData.set(dataKey(isl.id, 'stoneZone'), [(parsed.stone_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
+        importedLayers.push('stoneZone');
       }
       if (parsed.metal_verts_JSON) {
         layerData.set(dataKey(isl.id, 'metalZone'), [(parsed.metal_verts_JSON as Pt[]).map((p: Pt) => ({ x: +p.x, y: +p.y }))]);
+        importedLayers.push('metalZone');
       }
+
+      // ── Switch to first imported layer so the result is immediately visible ──
+      if (importedLayers.length > 0) {
+        activeLayerKey = importedLayers[0];
+        activePolyIdx  = 0;
+        layerBtnsEl.querySelectorAll('.btn').forEach((b, i) => {
+          b.classList.toggle('active', LAYERS[i].key === activeLayerKey);
+        });
+      }
+
+      // Pan camera to the island centre
+      cam.centreOn(isl.cx, isl.cy);
+      cam.zoom = 0.12;
+
       refreshPolySelect(); refreshVertCount(); ta.value = '';
-      toast('Schema imported');
+      toast(`Imported ${importedLayers.map(k => LAYERS.find(l => l.key === k)?.label ?? k).join(', ')}`);
       return;
     }
 
     // Bare array — import into active layer/poly
     if (!Array.isArray(parsed)) throw new Error('expected array or schema object');
-    const polys = getPolys(isl.id, activeLayerKey);
+    const islArr = ISLANDS[selectedIslandIdx];
+    const polys = getPolys(islArr.id, activeLayerKey);
     if (Array.isArray(parsed[0])) {
       (parsed as Pt[][]).forEach((pts, i) => { polys[i] = pts.map((p: Pt) => ({ x: +p.x, y: +p.y })); });
     } else {
