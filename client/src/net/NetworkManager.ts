@@ -567,8 +567,9 @@ export class NetworkManager {
   public onCannonFireEvent: ((cannonId: number, shipId: number, x: number, y: number,
     angle: number, projectileId: number, ammoType: number) => void) | null = null;
 
-  /** Fired when the server confirms the player has mounted an island cannon structure. */
-  public onIslandCannonMounted: ((structureId: number, aimAngle: number, reloadMs: number) => void) | null = null;
+  /** Fired when the server confirms the player has mounted an island cannon structure.
+   *  `mountX`/`mountY` are the world-space coordinates the player should snap to. */
+  public onIslandCannonMounted: ((structureId: number, aimAngle: number, reloadMs: number, mountX: number, mountY: number) => void) | null = null;
 
   public onEntityHit: ((entityType: 'npc' | 'player', id: number, x: number, y: number,
     damage: number, health: number, maxHealth: number, killed: boolean, killerShipId: number) => void) | null = null;
@@ -2705,6 +2706,8 @@ export class NetworkManager {
           message.structure_id ?? 0,
           message.aim_angle    ?? 0,
           message.reload_ms    ?? 0,
+          message.mount_x      ?? 0,
+          message.mount_y      ?? 0,
         );
         break;
       }

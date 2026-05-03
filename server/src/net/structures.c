@@ -808,15 +808,18 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
             placed_structures[i].cannon_mounted_player_id = player->player_id;
             player->is_mounted = true;
             player->mounted_cannon_structure_id = placed_structures[i].id;
-            /* Position player 25 px behind barrel (barrel faces in direction of cannon_aim_angle) */
+            /* Position player behind the cannon breech */
+            float _mount_x, _mount_y;
             {
                 const float MOUNT_DIST = 25.0f;
                 float aim = placed_structures[i].cannon_aim_angle;
-                player->x = placed_structures[i].x - cosf(aim) * MOUNT_DIST;
-                player->y = placed_structures[i].y - sinf(aim) * MOUNT_DIST;
+                _mount_x = placed_structures[i].x - cosf(aim) * MOUNT_DIST;
+                _mount_y = placed_structures[i].y - sinf(aim) * MOUNT_DIST;
+                player->x = _mount_x;
+                player->y = _mount_y;
             }
             log_info("🎯 Player %u mounted to island cannon %u at (%.1f,%.1f)",
-                     player->player_id, placed_structures[i].id, player->x, player->y);
+                     player->player_id, placed_structures[i].id, _mount_x, _mount_y);
             /* Broadcast mount event */
             {
                 char bcast[160];
@@ -828,10 +831,12 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
             }
             snprintf(response, sizeof(response),
                      "{\"type\":\"island_cannon_mounted\",\"structure_id\":%u,"
-                     "\"aim_angle\":%.4f,\"reload_ms\":%u}",
+                     "\"aim_angle\":%.4f,\"reload_ms\":%u,"
+                     "\"mount_x\":%.2f,\"mount_y\":%.2f}",
                      placed_structures[i].id,
                      placed_structures[i].cannon_aim_angle,
-                     placed_structures[i].cannon_reload_ms);
+                     placed_structures[i].cannon_reload_ms,
+                     _mount_x, _mount_y);
             goto si_send;
         }
         snprintf(response, sizeof(response),

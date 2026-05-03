@@ -364,9 +364,22 @@ export class ClientApplication {
       this.networkManager.onModuleMountFailure = (reason) => {
         this.handleModuleMountFailure(reason);
       };
-      this.networkManager.onIslandCannonMounted = (structureId, _aimAngle, _reloadMs) => {
-        console.log(`🎯 [ISLAND CANNON] Mounted to island cannon ${structureId}`);
-        // Reuse ship-cannon input path: no shipId, module kind='CANNON', moduleId=structureId
+      this.networkManager.onIslandCannonMounted = (structureId, _aimAngle, _reloadMs, mountX, mountY) => {
+        console.log(`🎯 [ISLAND CANNON] Mounted to island cannon ${structureId} at (${mountX.toFixed(1)}, ${mountY.toFixed(1)})`);
+        // Snap player to the mount position optimistically (before next world-state echo).
+        // We reuse pendingMount so the same guard in the world-state loop keeps it applied.
+        this.pendingMount = { moduleId: structureId, moduleKind: 'CANNON' };
+        const pid = this.networkManager.getAssignedPlayerId();
+        const ws  = this.authoritativeWorldState || this.predictedWorldState;
+        if (pid !== null && ws) {
+          const p = ws.players.find(pl => pl.id === pid);
+          if (p) {
+            p.position = Vec2.from(mountX, mountY);
+            p.isMounted = true;
+            p.mountedModuleId = structureId;
+          }
+        }
+        // Enable aim/fire controls (no shipId — island cannon is not on a ship)
         this.inputManager?.setMountState(true, undefined, 'CANNON', structureId);
       };
       this.networkManager.onModuleDestroyed = (shipId, moduleId, damage, hitX, hitY) => {
