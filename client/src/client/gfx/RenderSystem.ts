@@ -64,6 +64,8 @@ type RenderIslandInput = {
   vertices?: { x: number; y: number }[];
   grassVertices?: { x: number; y: number }[];
   shallowVertices?: { x: number; y: number }[];
+  stonePolys?: { x: number; y: number }[][];
+  metalPolys?: { x: number; y: number }[][];
 };
 
 type RenderIsland = RenderIslandInput & {
@@ -3378,6 +3380,8 @@ export class RenderSystem {
         const shiftedVertices = this.offsetVertices(isl.vertices, off.dx, off.dy);
         const shiftedGrassVertices = this.offsetVertices(isl.grassVertices, off.dx, off.dy);
         const shiftedShallowVertices = this.offsetVertices(isl.shallowVertices, off.dx, off.dy);
+        const shiftedStonePolys = isl.stonePolys?.map(ring => this.offsetVertices(ring, off.dx, off.dy)!);
+        const shiftedMetalPolys = isl.metalPolys?.map(ring => this.offsetVertices(ring, off.dx, off.dy)!);
 
         const sc  = camera.worldToScreen(Vec2.from(islandX, islandY));
         const ctx = this.ctx;
@@ -3508,6 +3512,46 @@ export class RenderSystem {
         grassGrad.addColorStop(1.0, preset.grassColors[2]);
         ctx.fillStyle = grassGrad;
         ctx.fill();
+
+        // ── Stone biome overlay (above grass) ─────────────────────────────
+        if (shiftedStonePolys?.length) {
+          ctx.save();
+          for (const ring of shiftedStonePolys) {
+            if (!ring || ring.length < 3) continue;
+            ctx.beginPath();
+            ring.forEach((v, i) => {
+              const sp = camera.worldToScreen(Vec2.from(v.x, v.y));
+              i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
+            });
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(118, 90, 55, 0.55)';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(90, 65, 35, 0.7)';
+            ctx.lineWidth = Math.max(1, 1.5 * zoom);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+
+        // ── Metal biome overlay (above grass, same stone color) ────────────
+        if (shiftedMetalPolys?.length) {
+          ctx.save();
+          for (const ring of shiftedMetalPolys) {
+            if (!ring || ring.length < 3) continue;
+            ctx.beginPath();
+            ring.forEach((v, i) => {
+              const sp = camera.worldToScreen(Vec2.from(v.x, v.y));
+              i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y);
+            });
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(118, 90, 55, 0.55)';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(90, 65, 35, 0.7)';
+            ctx.lineWidth = Math.max(1, 1.5 * zoom);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
       } else {
         // ── Bump-circle island ────────────────────────────────────────────────
         // Sandy beach

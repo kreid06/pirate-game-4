@@ -2211,6 +2211,36 @@ int websocket_server_update(struct Sim* sim) {
                                                 /* shallowPolyScale removed — no longer used by client */
                                                 (void)isl->shallow_poly_scale;
                                             }
+                                            /* Stone biome polygons */
+                                            if (isl->stone_poly_count > 0) {
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"stonePolys\":[");
+                                                for (int pi = 0; pi < isl->stone_poly_count; pi++) {
+                                                    hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "%s[", pi ? "," : "");
+                                                    for (int vi = 0; vi < isl->stone_vc[pi]; vi++) {
+                                                        hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                                            "%s{\"x\":%.1f,\"y\":%.1f}",
+                                                                            vi ? "," : "",
+                                                                            isl->x + isl->stone_vx[pi][vi], isl->y + isl->stone_vy[pi][vi]);
+                                                    }
+                                                    hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
+                                                }
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
+                                            }
+                                            /* Metal biome polygons */
+                                            if (isl->metal_poly_count > 0) {
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"metalPolys\":[");
+                                                for (int pi = 0; pi < isl->metal_poly_count; pi++) {
+                                                    hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "%s[", pi ? "," : "");
+                                                    for (int vi = 0; vi < isl->metal_vc[pi]; vi++) {
+                                                        hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
+                                                                            "%s{\"x\":%.1f,\"y\":%.1f}",
+                                                                            vi ? "," : "",
+                                                                            isl->x + isl->metal_vx[pi][vi], isl->y + isl->metal_vy[pi][vi]);
+                                                    }
+                                                    hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
+                                                }
+                                                hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]");
+                                            }
                                             hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, ",\"resources\":[");
                                             for (int hri = 0; hri < isl->resource_count; hri++) {
                                                 const IslandResource *r = &isl->resources[hri];

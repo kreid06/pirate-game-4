@@ -331,6 +331,10 @@ export interface IslandDef {
   grassVertices?: { x: number; y: number }[];
   /** Explicit shallow water polygon vertices in world-space. Defines the outer boundary of the shallow zone. */
   shallowVertices?: { x: number; y: number }[];
+  /** Stone biome polygons in world-space (array of rings). Terrain overlay drawn above grass. */
+  stonePolys?: { x: number; y: number }[][];
+  /** Metal biome polygons in world-space (array of rings). Terrain overlay drawn above grass. */
+  metalPolys?: { x: number; y: number }[][];
 }
 
 /**

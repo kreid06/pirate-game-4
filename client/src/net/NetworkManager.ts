@@ -2457,6 +2457,12 @@ export class NetworkManager {
           shallowVertices: isl.shallowVertices
             ? (isl.shallowVertices as any[]).map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 }))
             : undefined,
+          stonePolys: isl.stonePolys
+            ? (isl.stonePolys as any[][]).map((ring: any[]) => ring.map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 })))
+            : undefined,
+          metalPolys: isl.metalPolys
+            ? (isl.metalPolys as any[][]).map((ring: any[]) => ring.map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 })))
+            : undefined,
         }));
         this.onIslands?.(islands);
         break;
