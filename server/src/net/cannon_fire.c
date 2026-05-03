@@ -13,6 +13,7 @@
 #include "net/module_interactions.h"
 #include "net/dock_physics.h"
 #include "sim/island.h"
+#include "util/time.h"
 
 int parse_json_uint32_array(const char* json, const char* key, uint32_t* out, int max_out) {
     // Build search pattern: "key":[
@@ -1928,11 +1929,14 @@ void check_projectile_static_collisions(struct Sim* sim) {
                             float ty = isl->y + res->oy;
                             float dx = px - tx;
                             float dy = py - ty;
-                            if (dx * dx + dy * dy <= TREE_COLLISION_R_PX * TREE_COLLISION_R_PX) {
+                            if (dx * dx + dy * dy <= (TREE_COLLISION_R_PX * res->size) * (TREE_COLLISION_R_PX * res->size)) {
                                 const int CANNON_TREE_DMG = 30;
                                 res->health -= CANNON_TREE_DMG;
                                 if (res->health < 0) res->health = 0;
-                                if (res->health == 0) island_mark_tree_dead(isl, ri);
+                                if (res->health == 0) {
+                                    island_mark_tree_dead(isl, ri);
+                                    res->respawn_at_ms = get_time_ms() + 120000u; /* 2 min */
+                                }
                                 char tmsg[160];
                                 snprintf(tmsg, sizeof(tmsg),
                                          "{\"type\":\"resource_damaged\",\"island_id\":%u"

@@ -8577,11 +8577,13 @@ void websocket_server_tick(float dt) {
                                  * Uses alive_wood list: skips depleted trees, O(alive) not O(total). */
                                 if (isl_mv) {
                                     const float PLAYER_R = 8.0f;
-                                    const float combined_r = PLAYER_R + TREE_TRUNK_R_PX;
                                     for (int ak = 0; ak < isl_mv->alive_wood_count; ak++) {
                                         int ri = isl_mv->alive_wood[ak];
-                                        float tx = isl_mv->x + isl_mv->resources[ri].ox;
-                                        float ty = isl_mv->y + isl_mv->resources[ri].oy;
+                                        const IslandResource *tr = &isl_mv->resources[ri];
+                                        float trunk_r    = TREE_TRUNK_R_PX * tr->size;
+                                        float combined_r = PLAYER_R + trunk_r;
+                                        float tx = isl_mv->x + tr->ox;
+                                        float ty = isl_mv->y + tr->oy;
                                         float dx = new_x - tx, dy = new_y - ty;
                                         float dist_sq = dx * dx + dy * dy;
                                         if (dist_sq < combined_r * combined_r && dist_sq > 0.0001f) {
