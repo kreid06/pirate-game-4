@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 #include "net/harvesting.h"
+#include "util/time.h"
 
 #define HARVEST_RANGE 110.0f      /* world-px, generous for feel */
 #define HARVEST_STAMINA_COST 15u   /* stamina drained per harvest action */
@@ -37,6 +38,7 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
         goto send_and_ret;
     }
     player->stamina -= HARVEST_STAMINA_COST;
+    player->stamina_last_used_ms = get_time_ms();
 
     /* Find the island definition */
     const IslandDef *isl = NULL;
@@ -278,6 +280,7 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
         goto send_rock_ret;
     }
     player->stamina -= HARVEST_STAMINA_COST;
+    player->stamina_last_used_ms = get_time_ms();
 
     {
         const IslandDef *isl = NULL;
@@ -432,7 +435,7 @@ send_stone_ret:;
 
 /**
  * Handle harvest_boulder: player presses E (with pickaxe) near a large boulder.
- * Grants 5 ITEM_METAL if a boulder resource node is within HARVEST_RANGE.
+ * Grants 5 ITEM_STONE if a boulder resource node is within HARVEST_RANGE.
  * Boulders have 400 max health and are a separate resource type from RES_ROCK.
  */
 void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* client) {
@@ -464,6 +467,7 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
         goto send_boulder_ret;
     }
     player->stamina -= HARVEST_STAMINA_COST;
+    player->stamina_last_used_ms = get_time_ms();
 
     {
         const IslandDef *isl = NULL;
@@ -516,16 +520,16 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
             websocket_server_broadcast(dmsg);
         }
 
-        /* Grant 5 metal */
-        if (!craft_grant(player, ITEM_METAL, 5)) {
+        /* Grant 5 stone */
+        if (!craft_grant(player, ITEM_STONE, 5)) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_boulder_failure\",\"reason\":\"inventory_full\"}");
             goto send_boulder_ret;
         }
 
-        log_info("⛏️  Player %u mined boulder → +5 metal", player->player_id);
+        log_info("⛏️  Player %u mined boulder → +5 stone", player->player_id);
         snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_boulder_success\",\"metal\":5}");
+                 "{\"type\":\"harvest_boulder_success\",\"stone\":5}");
     }
 
 send_boulder_ret:;

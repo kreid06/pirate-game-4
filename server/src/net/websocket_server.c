@@ -3007,6 +3007,7 @@ int websocket_server_update(struct Sim* sim) {
                                                     goto sword_attack_done;
                                                 }
                                                 player->stamina -= SWORD_STAMINA_COST;
+                                                player->stamina_last_used_ms = now_ms;
                                                 player->sword_last_attack_ms = now_ms;
 
                                                 const float SWORD_RANGE  = 45.0f;
@@ -8197,10 +8198,13 @@ void websocket_server_tick(float dt) {
                 } else {
                     /* ── Stamina drain (sprint) / regen ─────────────────────────────────
                      * Drain 40 ST/s while sprinting, regen 20 ST/s otherwise.
+                     * Regen is delayed 2 s after the last stamina use.
                      * Cancel sprint immediately if stamina hits 0. */
                     {
                         const float SPRINT_DRAIN_PER_S = 40.0f;
                         const float STAMINA_REGEN_PER_S = 20.0f;
+                        const uint32_t STAMINA_REGEN_DELAY_MS = 2000u;
+                        uint32_t now_st = get_time_ms();
                         if (ws_player->is_sprinting && ws_player->is_moving) {
                             uint16_t drain = (uint16_t)(SPRINT_DRAIN_PER_S * dt + 0.5f);
                             if (drain >= ws_player->stamina) {
@@ -8209,7 +8213,9 @@ void websocket_server_tick(float dt) {
                             } else {
                                 ws_player->stamina -= drain;
                             }
-                        } else if (ws_player->stamina < ws_player->max_stamina) {
+                            ws_player->stamina_last_used_ms = now_st;
+                        } else if (ws_player->stamina < ws_player->max_stamina
+                                   && (now_st - ws_player->stamina_last_used_ms) >= STAMINA_REGEN_DELAY_MS) {
                             uint16_t gain = (uint16_t)(STAMINA_REGEN_PER_S * dt + 0.5f);
                             uint32_t newSt = (uint32_t)ws_player->stamina + gain;
                             ws_player->stamina = (newSt > ws_player->max_stamina)

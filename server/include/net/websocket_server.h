@@ -420,6 +420,7 @@ typedef struct WebSocketPlayer {
     // Stamina pool — drained by sprinting, attacking, and harvesting; regens when idle
     uint16_t stamina;            // Current stamina (0–max_stamina)
     uint16_t max_stamina;        // Max stamina (base 100 + 10 * stat_stamina)
+    uint32_t stamina_last_used_ms; // Wall-clock ms of last stamina drain (regen delayed 2 s after)
 
     // Player XP / levelling (mirrors WorldNpc system)
     uint8_t  player_level;       // 1–120
