@@ -594,56 +594,49 @@ export class ClientApplication {
 
       this.networkManager.onHarvestResult = (success, wood, reason) => {
         if (success) {
-          this.renderSystem.showAnnouncement(`🪓 Harvested  +${wood} wood`, 'info', 2.5);
-        } else {
-          const msg: Record<string, string> = {
-            need_axe:        'Equip the axe to chop trees',
-            too_far:         'Move closer to a tree',
-            not_on_island:   'You must be on an island',
-            inventory_full:  'Inventory is full',
-          };
-          this.renderSystem.showAnnouncement(`🪓 ${msg[reason] ?? 'Cannot harvest right now'}`, 'info', 2.0);
+          const _ws0 = this.authoritativeWorldState ?? this.predictedWorldState;
+          const _id0 = this.networkManager.getAssignedPlayerId();
+          const _me0 = _id0 !== null && _ws0 ? _ws0.players.find(p => p.id === _id0) : null;
+          if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, `+${wood} wood`, '#c8a060');
         }
       };
 
       this.networkManager.onFiberHarvestResult = (success, fiber, reason, wood) => {
         if (success) {
-          const woodStr = wood ? `  +${wood} wood` : '';
-          this.renderSystem.showAnnouncement(`🌿 Gathered  +${fiber} fiber${woodStr}`, 'info', 2.5);
-        } else {
-          const msg: Record<string, string> = {
-            too_far:        'Move closer to a plant',
-            not_on_island:  'You must be on an island',
-            inventory_full: 'Inventory is full',
-          };
-          this.renderSystem.showAnnouncement(`🌿 ${msg[reason] ?? 'Cannot gather right now'}`, 'info', 2.0);
+          const _ws1 = this.authoritativeWorldState ?? this.predictedWorldState;
+          const _id1 = this.networkManager.getAssignedPlayerId();
+          const _me1 = _id1 !== null && _ws1 ? _ws1.players.find(p => p.id === _id1) : null;
+          if (_me1) {
+            this.renderSystem.spawnResourcePickup(_me1.position, `+${fiber} fiber`, '#60c870');
+            if (wood) this.renderSystem.spawnResourcePickup(_me1.position.add(Vec2.from(0, -20)), `+${wood} wood`, '#c8a060');
+          }
         }
       };
 
       this.networkManager.onRockHarvestResult = (success, metal, reason) => {
         if (success) {
-          this.renderSystem.showAnnouncement(`⛏ Mined  +${metal} metal`, 'info', 2.5);
-        } else {
-          const msg: Record<string, string> = {
-            need_pickaxe:   'Equip the pickaxe to mine rocks',
-            too_far:        'Move closer to a rock',
-            not_on_island:  'You must be on an island',
-            inventory_full: 'Inventory is full',
-          };
-          this.renderSystem.showAnnouncement(`⛏ ${msg[reason] ?? 'Cannot mine right now'}`, 'info', 2.0);
+          const ws = this.authoritativeWorldState ?? this.predictedWorldState;
+          const myId = this.networkManager.getAssignedPlayerId();
+          const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
+          if (me) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
         }
       };
 
       this.networkManager.onStoneHarvestResult = (success, stone, reason) => {
         if (success) {
-          this.renderSystem.showAnnouncement(`🪨 Picked up +${stone} stone`, 'info', 2.5);
-        } else {
-          const msg: Record<string, string> = {
-            too_far:        'Move closer to a rock',
-            not_on_island:  'You must be on an island',
-            inventory_full: 'Inventory is full',
-          };
-          this.renderSystem.showAnnouncement(`🪨 ${msg[reason] ?? 'No rock nearby'}`, 'info', 2.0);
+          const _ws3 = this.authoritativeWorldState ?? this.predictedWorldState;
+          const _id3 = this.networkManager.getAssignedPlayerId();
+          const _me3 = _id3 !== null && _ws3 ? _ws3.players.find(p => p.id === _id3) : null;
+          if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, `+${stone} stone`, '#b0b8c0');
+        }
+      };
+
+      this.networkManager.onBoulderHarvestResult = (success, metal, reason) => {
+        if (success) {
+          const ws = this.authoritativeWorldState ?? this.predictedWorldState;
+          const myId = this.networkManager.getAssignedPlayerId();
+          const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
+          if (me) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
         }
       };
 

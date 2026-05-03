@@ -89,6 +89,8 @@ export enum MessageType {
   HARVEST_STONE     = 'harvest_stone',
   HARVEST_STONE_SUCCESS = 'harvest_stone_success',
   HARVEST_STONE_FAILURE = 'harvest_stone_failure',
+  HARVEST_BOULDER_SUCCESS = 'harvest_boulder_success',
+  HARVEST_BOULDER_FAILURE = 'harvest_boulder_failure',
   PLACE_STRUCTURE  = 'place_structure',
   STRUCTURE_INTERACT = 'structure_interact',
   PLACE_MAST_AT = 'place_mast_at',
@@ -591,6 +593,8 @@ export class NetworkManager {
   public onRockHarvestResult: ((success: boolean, metal: number, reason: string) => void) | null = null;
   /** Fired when the server responds to a harvest_stone request. */
   public onStoneHarvestResult: ((success: boolean, stone: number, reason: string) => void) | null = null;
+  /** Fired when the server responds to a harvest_boulder request. */
+  public onBoulderHarvestResult: ((success: boolean, metal: number, reason: string) => void) | null = null;
   /**
    * Fired once on connect with the full list of server-defined islands.
    * Falls back to client defaults if the server never sends this.
@@ -2234,6 +2238,14 @@ export class NetworkManager {
 
       case MessageType.HARVEST_STONE_FAILURE:
         this.onStoneHarvestResult?.(false, 0, message.reason ?? 'unknown');
+        break;
+
+      case MessageType.HARVEST_BOULDER_SUCCESS:
+        this.onBoulderHarvestResult?.(true, message.metal ?? 0, '');
+        break;
+
+      case MessageType.HARVEST_BOULDER_FAILURE:
+        this.onBoulderHarvestResult?.(false, 0, message.reason ?? 'unknown');
         break;
 
       case 'npc_dialogue':

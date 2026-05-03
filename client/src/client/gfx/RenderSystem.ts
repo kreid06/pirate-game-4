@@ -941,6 +941,11 @@ export class RenderSystem {
     this.effectRenderer.createDamageNumber(worldPos, damage, isKill, team);
   }
 
+  /** Spawn a floating resource pickup label (e.g. "+3 metal") at a world position. */
+  spawnResourcePickup(worldPos: Vec2, label: string, color?: string): void {
+    this.effectRenderer.createResourcePickup(worldPos, label, color);
+  }
+
   /**
    * Record a damage hit on an entity so the next ~300 ms of frames
    * render a red flash overlay on that entity's circle.
