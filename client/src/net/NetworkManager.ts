@@ -554,7 +554,7 @@ export class NetworkManager {
     statPoints: number) => void) | null = null;
   /** Fired when the server confirms a player stat upgrade. */
   public onPlayerStatUp: ((stat: string, statLevel: number, xp: number,
-    maxHealth: number, playerLevel: number,
+    maxHealth: number, maxStamina: number, playerLevel: number,
     statHealth: number, statDamage: number, statStamina: number, statWeight: number,
     statPoints: number) => void) | null = null;
   /** Fired when the server sends {type:"ack"} — the final handshake confirmation that the
@@ -2254,7 +2254,8 @@ export class NetworkManager {
       case 'PLAYER_STAT_UP': {
         this.onPlayerStatUp?.(
           message.stat, message.level, message.xp,
-          message.maxHealth, message.playerLevel,
+          message.maxHealth, message.maxStamina ?? 100,
+          message.playerLevel,
           message.statHealth, message.statDamage, message.statStamina, message.statWeight,
           message.statPoints ?? 0,
         );

@@ -1827,7 +1827,7 @@ export class ClientApplication {
 
       // Handle PLAYER_STAT_UP broadcast: refresh world-state player fields
       this.networkManager.onPlayerStatUp = (_stat, _statLevel, xp,
-          maxHealth, playerLevel, statHealth, statDamage, statStamina, statWeight, statPoints) => {
+          maxHealth, maxStamina, playerLevel, statHealth, statDamage, statStamina, statWeight, statPoints) => {
         const playerId = this.networkManager.getAssignedPlayerId();
         if (playerId === null) return;
         for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
@@ -1836,6 +1836,7 @@ export class ClientApplication {
           if (!p) continue;
           p.xp         = xp;
           p.maxHealth  = maxHealth;
+          p.maxStamina = maxStamina;
           p.level      = playerLevel;
           p.statHealth  = statHealth;
           p.statDamage  = statDamage;

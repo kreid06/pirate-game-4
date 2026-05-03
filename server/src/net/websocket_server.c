@@ -5412,12 +5412,18 @@ int websocket_server_update(struct Sim* sim) {
                                             ups_player->player_level, ups_points_earned, ups_total_spent);
                                     } else {
                                         (*ups_stat_ptr)++;
-                                        /* Recalculate max HP if health stat upgraded */
+                                        /* Recalculate derived stats */
                                         if (ups_stat_ptr == &ups_player->stat_health) {
                                             uint16_t new_max = (uint16_t)(100 + ups_player->stat_health * 20);
                                             if (new_max > ups_player->max_health)
                                                 ups_player->health += (new_max - ups_player->max_health);
                                             ups_player->max_health = new_max;
+                                        }
+                                        if (ups_stat_ptr == &ups_player->stat_stamina) {
+                                            uint16_t new_max = (uint16_t)(100 + ups_player->stat_stamina * 10);
+                                            if (new_max > ups_player->max_stamina)
+                                                ups_player->stamina += (new_max - ups_player->max_stamina);
+                                            ups_player->max_stamina = new_max;
                                         }
                                         uint8_t ups_points_left = (uint8_t)(ups_points_earned - (ups_total_spent + 1));
                                         log_info("👤 Player %u upgraded %s → %u (level %u, %u stat points left)",
@@ -5427,11 +5433,12 @@ int websocket_server_update(struct Sim* sim) {
                                         char ups_msg[256];
                                         snprintf(ups_msg, sizeof(ups_msg),
                                             "{\"type\":\"PLAYER_STAT_UP\",\"playerId\":%u,\"stat\":\"%s\","
-                                            "\"level\":%u,\"xp\":%u,\"maxHealth\":%u,\"playerLevel\":%u,"
+                                            "\"level\":%u,\"xp\":%u,\"maxHealth\":%u,\"maxStamina\":%u,\"playerLevel\":%u,"
                                             "\"statHealth\":%u,\"statDamage\":%u,\"statStamina\":%u,\"statWeight\":%u,"
                                             "\"statPoints\":%u}",
                                             ups_player->player_id, ups_stat, *ups_stat_ptr,
                                             ups_player->player_xp, ups_player->max_health,
+                                            ups_player->max_stamina,
                                             ups_player->player_level,
                                             ups_player->stat_health, ups_player->stat_damage,
                                             ups_player->stat_stamina, ups_player->stat_weight,
