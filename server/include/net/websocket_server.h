@@ -304,6 +304,7 @@ typedef enum {
     STRUCT_SHIPYARD     = 5,  /* placed in shallow water near island — used to build ships */
     STRUCT_WRECK        = 6,  /* spawns at sea when a ship sinks — can be salvaged */
     STRUCT_CEILING      = 7,  /* wood ceiling tile — requires a wall or adjacent ceiling */
+    STRUCT_CANNON       = 8,  /* placed cannon on a floor tile — requires same-company floor */
 } PlacedStructureType;
 
 /** Shallow-water ring width as a multiple of the island's own radius.

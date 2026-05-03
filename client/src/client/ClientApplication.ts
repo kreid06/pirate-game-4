@@ -164,7 +164,7 @@ export class ClientApplication {
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
   /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
-  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | null = null;
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
@@ -1214,7 +1214,7 @@ export class ClientApplication {
           const pid = this.networkManager.getAssignedPlayerId();
           const p   = ws?.players.find(pl => pl.id === pid);
           const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
-          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling') {
+          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon') {
             // Compute snap at click time (not from stale render state)
             const pos = kind === 'wooden_floor'
               ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
@@ -1225,10 +1225,10 @@ export class ClientApplication {
               : kind === 'wood_ceiling'
               ? this.renderSystem.computeSnappedCeilingPos(worldPos.x, worldPos.y)
               : { x: worldPos.x, y: worldPos.y };
-            // Only floors, workbenches, and ceilings carry rotation
+            // Only floors, workbenches, ceilings, and cannons carry rotation
             const rot = kind === 'wooden_floor'
               ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
-              : (kind === 'workbench' || kind === 'shipyard') ? this.islandBuildRotationDeg
+              : (kind === 'workbench' || kind === 'shipyard' || kind === 'cannon') ? this.islandBuildRotationDeg
               : kind === 'wood_ceiling' ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
               : 0;
             this.networkManager.sendPlaceStructure(kind, pos.x, pos.y, rot);
@@ -2955,11 +2955,11 @@ export class ClientApplication {
     const inDeckBuildMode   = activeItem === 'deck';
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
-    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling');
+    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling' || activeItem === 'cannon');
     this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
     this.inputManager.islandBuildMode = this.islandBuildMode;
     this.renderSystem.setIslandBuildItem(
-      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling') : null
+      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon') : null
     );
     this.renderSystem.setIslandBuildRotation(this.islandBuildMode ? this.islandBuildRotationDeg : 0);
 

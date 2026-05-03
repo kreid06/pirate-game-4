@@ -169,6 +169,9 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     } else if (strcmp(stype, "wood_ceiling") == 0) {
         stype_enum    = STRUCT_CEILING;
         required_item = ITEM_WOOD_CEILING;
+    } else if (strcmp(stype, "cannon") == 0) {
+        stype_enum    = STRUCT_CANNON;
+        required_item = ITEM_CANNON;
     } else {
         snprintf(response, sizeof(response),
                  "{\"type\":\"place_structure_fail\",\"reason\":\"unknown_type\"}");
@@ -293,6 +296,37 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
             if (!placed_structures[si].active) continue;
             if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
             /* Rotate placement point into floor's local space */
+            float rad = placed_structures[si].rotation * (float)M_PI / 180.0f;
+            float c   = cosf(-rad), s = sinf(-rad);
+            float ddx = px - placed_structures[si].x;
+            float ddy = py - placed_structures[si].y;
+            float lx  = ddx * c - ddy * s;
+            float ly  = ddx * s + ddy * c;
+            if (fabsf(lx) <= HALF_TILE && fabsf(ly) <= HALF_TILE) {
+                if (placed_structures[si].company_id != (uint8_t)player->company_id)
+                    wrong_company = true;
+                else
+                    has_floor = true;
+                break;
+            }
+        }
+        if (!has_floor) {
+            snprintf(response, sizeof(response), wrong_company
+                     ? "{\"type\":\"place_structure_fail\",\"reason\":\"wrong_company\"}"
+                     : "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor\"}");
+            goto ps_send;
+        }
+    }
+
+    /* Cannon: centre point must fall inside the rotated floor tile (50x50 px)
+       AND that floor tile must belong to the same company as the placing player. */
+    if (stype_enum == STRUCT_CANNON) {
+        bool has_floor     = false;
+        bool wrong_company = false;
+        const float HALF_TILE = 25.0f;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
             float rad = placed_structures[si].rotation * (float)M_PI / 180.0f;
             float c   = cosf(-rad), s = sinf(-rad);
             float ddx = px - placed_structures[si].x;
@@ -491,9 +525,9 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                      "{\"type\":\"place_structure_fail\",\"reason\":\"needs_wall_or_ceiling\"}");
             goto ps_send;
         }
-        /* Must also have a same-company floor tile within 3 tile-widths (150 px) */
+        /* Must also have a same-company floor tile within 2 tile-widths (100 px) */
         {
-            const float FLOOR_UNDER_R = 150.0f;
+            const float FLOOR_UNDER_R = 100.0f;
             bool has_floor = false;
             for (uint32_t si = 0; si < placed_structure_count && !has_floor; si++) {
                 if (!placed_structures[si].active) continue;
@@ -571,7 +605,8 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     placed_structures[placed_structure_count].open       = false;
     placed_structures[placed_structure_count].rotation   =
         (stype_enum == STRUCT_WOODEN_FLOOR || stype_enum == STRUCT_WORKBENCH ||
-         stype_enum == STRUCT_SHIPYARD || stype_enum == STRUCT_CEILING) ? place_rotation : 0.0f;
+         stype_enum == STRUCT_SHIPYARD || stype_enum == STRUCT_CEILING ||
+         stype_enum == STRUCT_CANNON) ? place_rotation : 0.0f;
     placed_structure_count++;
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
