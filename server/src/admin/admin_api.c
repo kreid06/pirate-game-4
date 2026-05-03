@@ -845,6 +845,22 @@ int admin_api_islands(struct HttpResponse* resp) {
                 }
                 ISL_APPEND("]");
             }
+            if (isl->stone_vertex_count > 0) {
+                ISL_APPEND(",\"stoneVertCount\":%d,\"stoneVerts\":[", isl->stone_vertex_count);
+                for (int vi = 0; vi < isl->stone_vertex_count; vi++) {
+                    if (vi > 0) ISL_APPEND(",");
+                    ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->stvx[vi], isl->stvy[vi]);
+                }
+                ISL_APPEND("]");
+            }
+            if (isl->metal_vertex_count > 0) {
+                ISL_APPEND(",\"metalVertCount\":%d,\"metalVerts\":[", isl->metal_vertex_count);
+                for (int vi = 0; vi < isl->metal_vertex_count; vi++) {
+                    if (vi > 0) ISL_APPEND(",");
+                    ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->mtvx[vi], isl->mtvy[vi]);
+                }
+                ISL_APPEND("]");
+            }
         } else {
             /* Bump-circle island */
             ISL_APPEND(",\"beachRadius\":%.1f,\"grassRadius\":%.1f",

@@ -742,6 +742,10 @@ interface ServerIslandData {
   grassVerts?: Pt[];
   shallowVertCount?: number;
   shallowVerts?: Pt[];
+  stoneVertCount?: number;
+  stoneVerts?: Pt[];
+  metalVertCount?: number;
+  metalVerts?: Pt[];
   beachRadius?: number;
   grassRadius?: number;
 }
@@ -786,6 +790,14 @@ async function fetchFromServer(): Promise<void> {
         } else {
           // Regenerate shallow from updated sand
           layerData.delete(dataKey(local.id, 'outerShallow'));
+        }
+        // Load stone biome polygon from server if provided
+        if (srv.stoneVerts && srv.stoneVerts.length) {
+          layerData.set(dataKey(local.id, 'stoneZone'), [srv.stoneVerts.map(v => ({ x: v.x, y: v.y }))]);
+        }
+        // Load metal biome polygon from server if provided
+        if (srv.metalVerts && srv.metalVerts.length) {
+          layerData.set(dataKey(local.id, 'metalZone'), [srv.metalVerts.map(v => ({ x: v.x, y: v.y }))]);
         }
       }
       if (srv.beachRadius !== undefined) local.circleRadius = srv.beachRadius;
