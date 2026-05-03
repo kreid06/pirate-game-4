@@ -532,16 +532,16 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
             websocket_server_broadcast(dmsg);
         }
 
-        /* Grant 5 stone */
-        if (!craft_grant(player, ITEM_STONE, 5)) {
+        /* Grant 5 metal */
+        if (!craft_grant(player, ITEM_METAL, 5)) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_boulder_failure\",\"reason\":\"inventory_full\"}");
             goto send_boulder_ret;
         }
 
-        log_info("⛏️  Player %u mined boulder → +5 stone", player->player_id);
+        log_info("⛏️  Player %u mined boulder → +5 metal", player->player_id);
         snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_boulder_success\",\"stone\":5}");
+                 "{\"type\":\"harvest_boulder_success\",\"metal\":5}");
     }
 
 send_boulder_ret:;
