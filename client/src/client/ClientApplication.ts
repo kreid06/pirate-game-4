@@ -970,7 +970,11 @@ export class ClientApplication {
           if (player && player.carrierId === 0) {
             const nearbyDrops = this.renderSystem.getDroppedItemsInRange(80);
             if (nearbyDrops.length > 0) {
-              this.networkManager.sendPickupItem(nearbyDrops[0].id);
+              const _di = nearbyDrops[0];
+              const _ik = ITEM_ID_MAP[_di.itemKind];
+              const _dname = _ik ? (ITEM_DEFS[_ik]?.name ?? _ik) : 'item';
+              this.renderSystem.spawnResourcePickup(Vec2.from(_di.x, _di.y), `+${_di.quantity} ${_dname}`, '#80e880');
+              this.networkManager.sendPickupItem(_di.id);
               return;
             }
           }
@@ -1765,13 +1769,22 @@ export class ClientApplication {
 
       this.uiManager.playerMenu.onDropItem = (fromSlot) => {
         const pid = this.networkManager.getAssignedPlayerId();
+        let _dropLabel: string | null = null;
+        let _dropPos: import('../common/Vec2.js').Vec2 | null = null;
         for (const w of [this.authoritativeWorldState, this.predictedWorldState]) {
           const p = w?.players.find(pl => pl.id === pid);
           if (!p) continue;
+          const slot = p.inventory.slots[fromSlot];
+          if (!_dropLabel && slot && slot.item !== 'none' && slot.quantity > 0) {
+            const name = ITEM_DEFS[slot.item]?.name ?? slot.item;
+            _dropLabel = `\u2212${slot.quantity} ${name}`;
+            _dropPos = p.position;
+          }
           // Optimistic local clear
           p.inventory.slots[fromSlot] = { item: 'none' as any, quantity: 0 };
         }
         this.networkManager.sendDropItem(fromSlot);
+        if (_dropLabel && _dropPos) this.renderSystem.spawnResourcePickup(_dropPos, _dropLabel, '#e07070');
       };
 
       // Hand-craft from inventory (no workbench needed)
@@ -1797,6 +1810,13 @@ export class ClientApplication {
 
       // Handle drop picker item selection (hold-E near pile)
       this.uiManager.onDropPickerPick = (itemId) => {
+        const _ws = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _di = _ws?.droppedItems.find(d => d.id === itemId);
+        if (_di) {
+          const _ik = ITEM_ID_MAP[_di.itemKind];
+          const _dname = _ik ? (ITEM_DEFS[_ik]?.name ?? _ik) : 'item';
+          this.renderSystem.spawnResourcePickup(Vec2.from(_di.x, _di.y), `+${_di.quantity} ${_dname}`, '#80e880');
+        }
         this.networkManager.sendPickupItem(itemId);
       };
 
