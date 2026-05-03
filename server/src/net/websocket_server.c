@@ -2282,7 +2282,8 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_DOOR         ? "door" :
                                             placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
                                             placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
-                                            placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" : "unknown";
+                                            placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" :
+                                            placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
                                         bool hs_is_door = (placed_structures[si].type == STRUCT_DOOR);
                                         bool hs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
                                         /* Build extra fields for shipyard construction state */
@@ -6426,7 +6427,8 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_DOOR         ? "door" :
                                             placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
                                             placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
-                                            placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" : "unknown";
+                                            placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" :
+                                            placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
                                         bool is_door_s = (placed_structures[si].type == STRUCT_DOOR);
                                         bool is_sy_s   = (placed_structures[si].type == STRUCT_SHIPYARD);
                                         char sy_extra_s[256] = "";
@@ -6500,7 +6502,8 @@ int websocket_server_update(struct Sim* sim) {
                                         placed_structures[si].type == STRUCT_DOOR         ? "door" :
                                         placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
                                         placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
-                                        placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" : "unknown";
+                                        placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" :
+                                        placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
                                     bool gs_is_door = (placed_structures[si].type == STRUCT_DOOR);
                                     bool gs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
                                     char gs_sy_extra[256] = "";

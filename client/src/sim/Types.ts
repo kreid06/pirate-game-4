@@ -161,7 +161,7 @@ export interface ShipConstruction {
  */
 export interface PlacedStructure {
   id: number;
-  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling';
+  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon';
   islandId: number;
   x: number;
   y: number;

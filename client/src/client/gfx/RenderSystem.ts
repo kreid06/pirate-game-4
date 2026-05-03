@@ -208,7 +208,7 @@ export class RenderSystem {
     ox: number; oy: number; size: number;
   }> = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | null = null;
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
   private islandBuildRotationDeg = 0;
   private _wallGhostRotRad: number = 0; // rotation (radians) of wall/door ghost, inherited from floor edge
@@ -1830,8 +1830,8 @@ export class RenderSystem {
     this._blockerExpiry = id !== null ? performance.now() + durationMs : 0;
   }
 
-  /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, wood_ceiling, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | null): void {
+  /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, wood_ceiling, cannon, or clear it. */
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | null): void {
     this.islandBuildKind = kind;
   }
 
@@ -4094,10 +4094,10 @@ export class RenderSystem {
       }
     }
 
-    // Floors first, then walls/doors, then workbenches/shipyards
+    // Floors first, then walls/doors, then workbenches/cannons/shipyards
     const sorted = [...this.placedStructures].sort((a, b) => {
       const order = (t: PlacedStructure['type']) =>
-        t === 'wooden_floor' ? 0 : (t === 'wall' || t === 'door_frame') ? 1 : t === 'door' ? 1.5 : t === 'shipyard' ? 1.8 : 2;
+        t === 'wooden_floor' ? 0 : (t === 'wall' || t === 'door_frame') ? 1 : t === 'door' ? 1.5 : t === 'cannon' ? 1.6 : t === 'shipyard' ? 1.8 : 2;
       return order(a.type) - order(b.type);
     });
 
@@ -4678,6 +4678,52 @@ export class RenderSystem {
         }
         ctx.globalAlpha = 1;
         ctx.restore();
+      } else if (s.type === 'cannon') {
+        // ── Placed island cannon ──
+        const rotRad = (s.rotation ?? 0) * Math.PI / 180;
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const dmgDarken = (1 - hpFrac) * 0.5;
+        const barrelLen = Math.max(6, 28 * zoom);
+        const barrelW   = Math.max(3, 9 * zoom);
+        const wheelR    = Math.max(3, 11 * zoom);
+
+        ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(rotRad);
+
+        // Barrel
+        ctx.fillStyle   = isHovered ? '#aaaaaa' : '#888888';
+        ctx.strokeStyle = '#333333';
+        ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
+        ctx.beginPath();
+        ctx.rect(-barrelW / 2, -barrelLen * 0.65, barrelW, barrelLen);
+        ctx.fill();
+        ctx.stroke();
+
+        // Muzzle ring
+        ctx.beginPath();
+        ctx.arc(0, -barrelLen * 0.65, barrelW * 0.65, 0, Math.PI * 2);
+        ctx.fillStyle = '#555555';
+        ctx.fill();
+        ctx.stroke();
+
+        // Wheels (two circles at the sides)
+        ctx.fillStyle   = isHovered ? '#c8924a' : '#96642a';
+        ctx.strokeStyle = '#5a3a12';
+        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+        ctx.beginPath(); ctx.arc(-wheelR * 1.1, barrelLen * 0.25, wheelR, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.arc( wheelR * 1.1, barrelLen * 0.25, wheelR, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+        // Company color strip
+        ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
+        ctx.fillRect(-barrelW / 2 - wheelR * 0.5, barrelLen * 0.2, barrelW + wheelR, Math.max(1.5, 2.5 * zoom));
+
+        // Damage darkening
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          ctx.fillRect(-barrelW / 2 - wheelR, -barrelLen * 0.65, barrelW + wheelR * 2, barrelLen + wheelR * 2);
+        }
+        ctx.restore();
       }
     } // end for sorted
 
@@ -5227,7 +5273,7 @@ export class RenderSystem {
 
     // Workbench needs a floor tile whose AABB contains the cursor point
     let noFloor = false;
-    if (this.islandBuildKind === 'workbench') {
+    if (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') {
       noFloor = !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -5320,7 +5366,7 @@ export class RenderSystem {
     );
 
     // Workbench on enemy floor: a floor exists under cursor but belongs to a different company
-    const wrongCompany = this.islandBuildKind === 'workbench' && !noFloor &&
+    const wrongCompany = (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') && !noFloor &&
       !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -5343,7 +5389,7 @@ export class RenderSystem {
     const WALL_THICK = 0.18;
     const isWallOrDoor = this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame' || this.islandBuildKind === 'door';
     const buildKind    = this.islandBuildKind as string;
-    const isRotatable  = buildKind === 'wooden_floor' || buildKind === 'workbench' || buildKind === 'shipyard' || buildKind === 'wood_ceiling';
+    const isRotatable  = buildKind === 'wooden_floor' || buildKind === 'workbench' || buildKind === 'shipyard' || buildKind === 'wood_ceiling' || buildKind === 'cannon';
     const ghostRotRad  = isWallOrDoor ? this._wallGhostRotRad
                        : isRotatable ? effectiveRotDeg * Math.PI / 180 : 0;
     if (ghostRotRad !== 0) {
@@ -5437,6 +5483,7 @@ export class RenderSystem {
                   : this.islandBuildKind === 'door_frame' ? 'Door Frame'
                   : this.islandBuildKind === 'door' ? 'Door'
                   : this.islandBuildKind === 'wood_ceiling' ? 'Wood Ceiling'
+                  : this.islandBuildKind === 'cannon' ? 'Cannon'
                   : 'Workbench';
       ctx.fillText(label, msp.x, labelY);
     }
