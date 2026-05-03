@@ -2529,6 +2529,14 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "harvest_boulder") == 0) {
+                            // HARVEST BOULDER: player presses E with pickaxe near a boulder
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_harvest_boulder(player, client);
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "harvest_stone") == 0) {
                             // HARVEST STONE: player presses E near a rock (no tool required)
                             if (client->player_id != 0) {

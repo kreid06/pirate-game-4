@@ -1303,6 +1303,12 @@ export class NetworkManager {
     this.socket.send(JSON.stringify({ type: 'harvest_rock', timestamp: Date.now() }));
   }
 
+  /** Request server to mine the nearest boulder on the current island (requires pickaxe). */
+  sendHarvestBoulder(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'harvest_boulder', timestamp: Date.now() }));
+  }
+
   /** Request server to pick up stone from the nearest rock outcrop (no tool required). */
   sendHarvestStone(): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;

@@ -412,3 +412,101 @@ send_stone_ret:;
     if (frame_len > 0 && frame_len < sizeof(frame))
         send(client->fd, frame, frame_len, 0);
 }
+
+/**
+ * Handle harvest_boulder: player presses E (with pickaxe) near a large boulder.
+ * Grants 5 ITEM_METAL if a boulder resource node is within HARVEST_RANGE.
+ * Boulders have 400 max health and are a separate resource type from RES_ROCK.
+ */
+void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* client) {
+    char response[256];
+
+    if (player->on_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_boulder_failure\",\"reason\":\"not_on_island\"}");
+        goto send_boulder_ret;
+    }
+
+    /* Check pickaxe equipped */
+    {
+        bool has_pickaxe = false;
+        int active = player->inventory.active_slot;
+        if (player->inventory.slots[active].item == ITEM_PICKAXE)
+            has_pickaxe = true;
+        if (!has_pickaxe) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_boulder_failure\",\"reason\":\"need_pickaxe\"}");
+            goto send_boulder_ret;
+        }
+    }
+
+    {
+        const IslandDef *isl = NULL;
+        for (int i = 0; i < ISLAND_COUNT; i++) {
+            if (ISLAND_PRESETS[i].id == (int)player->on_island_id) {
+                isl = &ISLAND_PRESETS[i];
+                break;
+            }
+        }
+        if (!isl) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_boulder_failure\",\"reason\":\"island_not_found\"}");
+            goto send_boulder_ret;
+        }
+
+        float best_dist_sq = (float)(HARVEST_RANGE * HARVEST_RANGE);
+        bool  found = false;
+        int   best_ri = -1;
+        for (int ri = 0; ri < isl->resource_count; ri++) {
+            if (isl->resources[ri].type_id != RES_BOULDER) continue;
+            if (isl->resources[ri].health <= 0) continue; /* depleted */
+            float bx = isl->x + isl->resources[ri].ox;
+            float by_ = isl->y + isl->resources[ri].oy;
+            float dx = player->x - bx;
+            float dy = player->y - by_;
+            float dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= best_dist_sq) {
+                best_dist_sq = dist_sq;
+                best_ri = ri;
+                found = true;
+            }
+        }
+
+        if (!found) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_boulder_failure\",\"reason\":\"too_far\"}");
+            goto send_boulder_ret;
+        }
+
+        /* Deduct health and broadcast */
+        if (best_ri >= 0) {
+            IslandResource *res = &isl->resources[best_ri];
+            const int BOULDER_DAMAGE = 20;
+            res->health -= BOULDER_DAMAGE;
+            if (res->health < 0) res->health = 0;
+            char dmsg[160];
+            snprintf(dmsg, sizeof(dmsg),
+                     "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
+                     player->on_island_id, best_ri, res->ox, res->oy, res->health, res->max_health);
+            websocket_server_broadcast(dmsg);
+        }
+
+        /* Grant 5 metal */
+        if (!craft_grant(player, ITEM_METAL, 5)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_boulder_failure\",\"reason\":\"inventory_full\"}");
+            goto send_boulder_ret;
+        }
+
+        log_info("⛏️  Player %u mined boulder → +5 metal", player->player_id);
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_boulder_success\",\"metal\":5}");
+    }
+
+send_boulder_ret:;
+    char frame[512];
+    size_t frame_len = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (frame_len > 0 && frame_len < sizeof(frame))
+        send(client->fd, frame, frame_len, 0);
+}

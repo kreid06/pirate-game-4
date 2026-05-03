@@ -957,6 +957,11 @@ export class ClientApplication {
               this.networkManager.sendHarvestRock();
               return;
             }
+            const boulder = this.renderSystem.getHoveredBoulder();
+            if (boulder) {
+              this.networkManager.sendHarvestBoulder();
+              return;
+            }
           }
 
           // Collect tombstone: any player on foot within 80px → press E → open menu

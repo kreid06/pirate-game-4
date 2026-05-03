@@ -2025,6 +2025,15 @@ export class RenderSystem {
     return dx * dx + dy * dy <= range * range ? this._hoveredRock : null;
   }
 
+  getHoveredBoulder(range: number = 110): { wx: number; wy: number } | null {
+    if (!this._hoveredBoulder) return null;
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return null;
+    const dx = this._hoveredBoulder.wx - player.position.x;
+    const dy = this._hoveredBoulder.wy - player.position.y;
+    return dx * dx + dy * dy <= range * range ? this._hoveredBoulder : null;
+  }
+
   // ── Tombstone API ─────────────────────────────────────────────────────────
 
   /** Replace the full tombstone list (called on every GAME_STATE). */
