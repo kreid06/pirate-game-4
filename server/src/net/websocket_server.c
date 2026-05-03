@@ -2250,7 +2250,8 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
                                             placed_structures[si].type == STRUCT_DOOR         ? "door" :
                                             placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
-                                            placed_structures[si].type == STRUCT_WRECK        ? "wreck" : "unknown";
+                                            placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
+                                            placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" : "unknown";
                                         bool hs_is_door = (placed_structures[si].type == STRUCT_DOOR);
                                         bool hs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
                                         /* Build extra fields for shipyard construction state */

@@ -205,7 +205,7 @@ export class RenderSystem {
     ox: number; oy: number; size: number;
   }> = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | null = null;
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
   private islandBuildRotationDeg = 0;
   private _wallGhostRotRad: number = 0; // rotation (radians) of wall/door ghost, inherited from floor edge
@@ -1808,8 +1808,8 @@ export class RenderSystem {
     this._blockerExpiry = id !== null ? performance.now() + durationMs : 0;
   }
 
-  /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | null): void {
+  /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, wood_ceiling, or clear it. */
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | null): void {
     this.islandBuildKind = kind;
   }
 
@@ -1941,6 +1941,72 @@ export class RenderSystem {
       const dist2 = (s.x - wx) * (s.x - wx) + (s.y - wy) * (s.y - wy);
       if (dist2 < bestDist2) { bestDist2 = dist2; bestX = s.x; bestY = s.y; }
     }
+    return { x: bestX, y: bestY };
+  }
+
+  /**
+   * Compute the snapped world position for a wood_ceiling placement at (wx, wy).
+   * Valid snap targets:
+   *  1. Any floor-tile centre that has a wall/door_frame at one of its 4 edge-midpoints
+   *     (ceiling starts at a walled edge).
+   *  2. Any tile position adjacent (edge-touching) to an existing ceiling tile
+   *     (ceiling extends from another ceiling).
+   */
+  computeSnappedCeilingPos(wx: number, wy: number): { x: number; y: number } {
+    const TILE   = 50;
+    const HALF   = 25;
+    const SNAP_R = TILE * 0.7;
+    let bestDist2 = SNAP_R * SNAP_R;
+    let bestX = wx, bestY = wy;
+    // Candidate set: floor centres that have at least one wall, plus ceiling-adjacent positions
+    const candidates: { x: number; y: number; rot: number }[] = [];
+    for (const s of this.placedStructures) {
+      if (s.type === 'wooden_floor') {
+        // Is there a wall at any edge of this floor?
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const c = Math.cos(rad), sn = Math.sin(rad);
+        const EDGES = [
+          { ldx:  0,    ldy: -HALF },
+          { ldx:  0,    ldy:  HALF },
+          { ldx: -HALF, ldy:  0    },
+          { ldx:  HALF, ldy:  0    },
+        ];
+        const hasWall = EDGES.some(e => {
+          const ex = s.x + e.ldx * c - e.ldy * sn;
+          const ey = s.y + e.ldx * sn + e.ldy * c;
+          return this.placedStructures.some(
+            w => (w.type === 'wall' || w.type === 'door_frame') &&
+                 Math.abs(w.x - ex) < 3 && Math.abs(w.y - ey) < 3
+          );
+        });
+        if (hasWall) candidates.push({ x: s.x, y: s.y, rot: s.rotation ?? 0 });
+      } else if (s.type === 'wood_ceiling') {
+        // 4 adjacent tile positions from each existing ceiling
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const c = Math.cos(rad), sn = Math.sin(rad);
+        const DIRS = [
+          {  dx:  TILE * c,  dy:  TILE * sn },
+          {  dx: -TILE * c,  dy: -TILE * sn },
+          {  dx: -TILE * sn, dy:  TILE * c  },
+          {  dx:  TILE * sn, dy: -TILE * c  },
+        ];
+        for (const d of DIRS) {
+          const nx = s.x + d.dx, ny = s.y + d.dy;
+          const alreadyOccupied = this.placedStructures.some(
+            f => f.type === 'wood_ceiling' && Math.abs(f.x - nx) < 3 && Math.abs(f.y - ny) < 3
+          );
+          if (!alreadyOccupied) candidates.push({ x: nx, y: ny, rot: s.rotation ?? 0 });
+        }
+      }
+    }
+    for (const cand of candidates) {
+      const dist2 = (cand.x - wx) * (cand.x - wx) + (cand.y - wy) * (cand.y - wy);
+      if (dist2 < bestDist2) {
+        bestDist2 = dist2; bestX = cand.x; bestY = cand.y;
+        this._snappedBuildRotation = cand.rot;
+      }
+    }
+    if (bestDist2 >= SNAP_R * SNAP_R) this._snappedBuildRotation = null;
     return { x: bestX, y: bestY };
   }
 
@@ -3880,6 +3946,44 @@ export class RenderSystem {
       return order(a.type) - order(b.type);
     });
 
+    // BFS: find the set of ceiling tile IDs that are connected (same building) to the
+    // ceiling tile the local player is currently standing under.  Only those tiles fade.
+    const _fadedCeilingIds = new Set<number>();
+    {
+      const lp = this._cachedLocalPlayer;
+      if (lp && lp.carrierId === 0) {
+        const px = lp.position.x, py = lp.position.y;
+        const HALF_C = 25;
+        const CEIL_ADJ = 55; // max centre-to-centre distance to be "adjacent" (tile=50, small slack)
+        const ceilings = this.placedStructures.filter(c => c.type === 'wood_ceiling');
+        // Find the tile the player is directly under
+        let startTile: PlacedStructure | null = null;
+        for (const c of ceilings) {
+          const cr = (c.rotation ?? 0) * Math.PI / 180;
+          const cCos = Math.cos(-cr), cSin = Math.sin(-cr);
+          const lx = (px - c.x) * cCos - (py - c.y) * cSin;
+          const ly = (px - c.x) * cSin + (py - c.y) * cCos;
+          if (Math.abs(lx) <= HALF_C && Math.abs(ly) <= HALF_C) { startTile = c; break; }
+        }
+        if (startTile !== null) {
+          // BFS through ceiling tiles whose centres are within CEIL_ADJ of each other
+          const queue: PlacedStructure[] = [startTile];
+          _fadedCeilingIds.add(startTile.id);
+          while (queue.length > 0) {
+            const cur = queue.shift()!;
+            for (const c of ceilings) {
+              if (_fadedCeilingIds.has(c.id)) continue;
+              const dx = c.x - cur.x, dy = c.y - cur.y;
+              if (Math.sqrt(dx * dx + dy * dy) <= CEIL_ADJ) {
+                _fadedCeilingIds.add(c.id);
+                queue.push(c);
+              }
+            }
+          }
+        }
+      }
+    }
+
     for (const s of sorted) {
       const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
       const sz  = Math.max(4, 50 * zoom);
@@ -4403,6 +4507,60 @@ export class RenderSystem {
           ctx.fillText(`⚓ Wreck (${s.hp} loot)`, ssp.x, ssp.y - wrsz * 0.7);
           ctx.restore();
         }
+      } else if (s.type === 'wood_ceiling') {
+        // ── Wooden ceiling tile ──
+        // Fade this tile if it belongs to the same connected building the player is under.
+        const ceilAlpha = _fadedCeilingIds.has(s.id) ? 0.25 : 1.0;
+        const rotRad = (s.rotation ?? 0) * Math.PI / 180;
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const dmgDarken = (1 - hpFrac) * 0.5;
+
+        ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(rotRad);
+        ctx.translate(-ssp.x, -ssp.y);
+
+        // Main ceiling panel
+        ctx.globalAlpha = ceilAlpha;
+        ctx.fillStyle   = isHovered ? '#c8924a' : '#96642a';
+        ctx.strokeStyle = '#5a3a12';
+        ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
+        ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+        ctx.strokeRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+
+        // Cross-brace lines
+        ctx.strokeStyle = 'rgba(50, 25, 5, 0.5)';
+        ctx.lineWidth   = Math.max(0.5, 0.9 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(ssp.x - sz / 2, ssp.y - sz / 2);
+        ctx.lineTo(ssp.x + sz / 2, ssp.y + sz / 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(ssp.x + sz / 2, ssp.y - sz / 2);
+        ctx.lineTo(ssp.x - sz / 2, ssp.y + sz / 2);
+        ctx.stroke();
+
+        // Centre beam (horizontal plank line)
+        ctx.beginPath();
+        ctx.moveTo(ssp.x - sz / 2, ssp.y);
+        ctx.lineTo(ssp.x + sz / 2, ssp.y);
+        ctx.stroke();
+
+        // Company color strip
+        const ceilCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        const ceilStripH = Math.max(1, 2 * zoom);
+        ctx.globalAlpha = Math.min(ceilAlpha, 0.8);
+        ctx.fillStyle = ceilCompanyColor;
+        ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, ceilStripH);
+
+        // Damage darkening
+        if (dmgDarken > 0.01) {
+          ctx.globalAlpha = dmgDarken * ceilAlpha;
+          ctx.fillStyle = 'rgba(0,0,0,1)';
+          ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+        }
+        ctx.globalAlpha = 1;
+        ctx.restore();
       }
     } // end for sorted
 
@@ -4663,6 +4821,61 @@ export class RenderSystem {
         }
       }
       mx = bestX; my = bestY;
+    } else if (this.islandBuildKind === 'wood_ceiling' && this.placedStructures.length > 0) {
+      // Snap ceiling to: (1) floor centres with a wall at edge, or (2) adjacent ceiling positions
+      const SNAP_R = TILE * 0.7;
+      let bestDist2 = SNAP_R * SNAP_R;
+      let bestX = mx, bestY = my;
+      let bestRot: number | null = null;
+      const HALF = TILE / 2;
+      for (const s of this.placedStructures) {
+        if (s.type === 'wooden_floor') {
+          // Only a valid start position if it has a wall at one of its edges
+          const rad = (s.rotation ?? 0) * Math.PI / 180;
+          const c = Math.cos(rad), sn = Math.sin(rad);
+          const EDGES = [
+            { ldx:  0,    ldy: -HALF },
+            { ldx:  0,    ldy:  HALF },
+            { ldx: -HALF, ldy:  0    },
+            { ldx:  HALF, ldy:  0    },
+          ];
+          const hasWall = EDGES.some(e => {
+            const ex = s.x + e.ldx * c - e.ldy * sn;
+            const ey = s.y + e.ldx * sn + e.ldy * c;
+            return this.placedStructures.some(
+              w => (w.type === 'wall' || w.type === 'door_frame') &&
+                   Math.abs(w.x - ex) < 3 && Math.abs(w.y - ey) < 3
+            );
+          });
+          if (!hasWall) continue;
+          const alreadyCeiling = this.placedStructures.some(
+            f => f.type === 'wood_ceiling' && Math.abs(f.x - s.x) < 3 && Math.abs(f.y - s.y) < 3
+          );
+          if (alreadyCeiling) continue;
+          const dist2 = (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my);
+          if (dist2 < bestDist2) { bestDist2 = dist2; bestX = s.x; bestY = s.y; bestRot = s.rotation ?? 0; }
+        } else if (s.type === 'wood_ceiling') {
+          const rad = (s.rotation ?? 0) * Math.PI / 180;
+          const c = Math.cos(rad), sn = Math.sin(rad);
+          const DIRS = [
+            {  dx:  TILE * c,  dy:  TILE * sn },
+            {  dx: -TILE * c,  dy: -TILE * sn },
+            {  dx: -TILE * sn, dy:  TILE * c  },
+            {  dx:  TILE * sn, dy: -TILE * c  },
+          ];
+          for (const d of DIRS) {
+            const nx = s.x + d.dx, ny = s.y + d.dy;
+            const occ = this.placedStructures.some(
+              f => f.type === 'wood_ceiling' && Math.abs(f.x - nx) < 3 && Math.abs(f.y - ny) < 3
+            );
+            if (occ) continue;
+            const dist2 = (nx - mx) * (nx - mx) + (ny - my) * (ny - my);
+            if (dist2 < bestDist2) { bestDist2 = dist2; bestX = nx; bestY = ny; bestRot = s.rotation ?? 0; }
+          }
+        }
+      }
+      mx = bestX; my = bestY;
+      this._snappedBuildRotation = bestRot;
     }
     this._snappedBuildPos = { x: mx, y: my };
     // Effective rotation: snapped tile inherits source floor's rotation; free-placing uses user setting
@@ -4947,6 +5160,40 @@ export class RenderSystem {
       );
     }
 
+    // Ceiling needs a wall at one of its edges OR an adjacent ceiling tile
+    let noCeilingSupport = false;
+    let ceilingOccupied = false;
+    if (this.islandBuildKind === 'wood_ceiling') {
+      ceilingOccupied = this.placedStructures.some(
+        f => f.type === 'wood_ceiling' && Math.abs(f.x - mx) < 3 && Math.abs(f.y - my) < 3
+      );
+      if (!ceilingOccupied) {
+        const HALF_C = 25;
+        const ghostRad = (this._snappedBuildRotation ?? 0) * Math.PI / 180;
+        const cGc = Math.cos(ghostRad), cGs = Math.sin(ghostRad);
+        const EDGES_C = [
+          { ldx:  0,    ldy: -HALF_C },
+          { ldx:  0,    ldy:  HALF_C },
+          { ldx: -HALF_C, ldy: 0    },
+          { ldx:  HALF_C, ldy: 0    },
+        ];
+        const wallAtEdge = EDGES_C.some(e => {
+          const ex = mx + e.ldx * cGc - e.ldy * cGs;
+          const ey = my + e.ldx * cGs + e.ldy * cGc;
+          return this.placedStructures.some(
+            w => (w.type === 'wall' || w.type === 'door_frame') &&
+                 Math.abs(w.x - ex) < 3 && Math.abs(w.y - ey) < 3
+          );
+        });
+        const adjCeiling = this.placedStructures.some(
+          f => f.type === 'wood_ceiling' &&
+               Math.abs(f.x - mx) >= 3 &&  // not the same tile
+               Math.hypot(f.x - mx, f.y - my) < TILE * 1.1
+        );
+        noCeilingSupport = !wallAtEdge && !adjCeiling;
+      }
+    }
+
     // Enemy territory: any structure not belonging to the current company within 500 world px
     const myCompany = (this._localCompanyId ?? 0) as number;
     const enemyTerritory = this.placedStructures.some(s =>
@@ -4968,7 +5215,7 @@ export class RenderSystem {
     // Only floors are rejected for water placement — other types need a floor tile anyway
     const waterBlocked = inWater && this.islandBuildKind === 'wooden_floor';
     this._islandGhostTooFar = tooFar || waterBlocked;
-    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied;
+    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
@@ -4978,7 +5225,7 @@ export class RenderSystem {
     const WALL_THICK = 0.18;
     const isWallOrDoor = this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame' || this.islandBuildKind === 'door';
     const buildKind    = this.islandBuildKind as string;
-    const isRotatable  = buildKind === 'wooden_floor' || buildKind === 'workbench' || buildKind === 'shipyard';
+    const isRotatable  = buildKind === 'wooden_floor' || buildKind === 'workbench' || buildKind === 'shipyard' || buildKind === 'wood_ceiling';
     const ghostRotRad  = isWallOrDoor ? this._wallGhostRotRad
                        : isRotatable ? effectiveRotDeg * Math.PI / 180 : 0;
     if (ghostRotRad !== 0) {
@@ -4995,6 +5242,7 @@ export class RenderSystem {
                  : sz;
     const ghostH = this.islandBuildKind === 'workbench' ? sz * 0.62
                  : isWallOrDoor ? sz * WALL_THICK
+                 : this.islandBuildKind === 'wood_ceiling' ? sz * 0.9  // slightly smaller to distinguish
                  : sz;
 
     if (this.islandBuildKind === 'door_frame') {
@@ -5043,9 +5291,12 @@ export class RenderSystem {
     } else if (blockedByStructure) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('BLOCKED BY STRUCTURE', msp.x, labelY);
-    } else if (overlaps || wallOccupied || doorOccupied) {
+    } else if (overlaps || wallOccupied || doorOccupied || ceilingOccupied) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('OCCUPIED', msp.x, labelY);
+    } else if (noCeilingSupport) {
+      ctx.fillStyle = '#ff6644';
+      ctx.fillText('NEEDS WALL OR CEILING', msp.x, labelY);
     } else if (noDoorFrame) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('NEEDS DOOR FRAME', msp.x, labelY);
@@ -5067,6 +5318,7 @@ export class RenderSystem {
                   : this.islandBuildKind === 'wall' ? 'Wall'
                   : this.islandBuildKind === 'door_frame' ? 'Door Frame'
                   : this.islandBuildKind === 'door' ? 'Door'
+                  : this.islandBuildKind === 'wood_ceiling' ? 'Wood Ceiling'
                   : 'Workbench';
       ctx.fillText(label, msp.x, labelY);
     }
