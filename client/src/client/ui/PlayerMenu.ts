@@ -16,7 +16,7 @@ import {
   COMPANY_PIRATES,
   COMPANY_NAVY,
 } from '../../sim/Types.js';
-import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, ITEM_KIND_ID } from '../../sim/Inventory.js';
+import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, ITEM_KIND_ID, drawAxeIcon } from '../../sim/Inventory.js';
 
 // ── Shared palette (mirrors CompanyMenu) ─────────────────────────────────────
 
@@ -444,7 +444,8 @@ export class PlayerMenu {
           ctx.fillStyle    = '#fff';
           ctx.textAlign    = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(def.symbol, sx + ESLOTSZ / 2, sy + ESLOTSZ / 2);
+          if (item === 'axe') drawAxeIcon(ctx, sx + ESLOTSZ / 2, sy + ESLOTSZ / 2, ESLOTSZ);
+          else ctx.fillText(def.symbol, sx + ESLOTSZ / 2, sy + ESLOTSZ / 2);
         }
 
         ctx.font         = '10px Georgia, serif';
@@ -771,7 +772,8 @@ export class PlayerMenu {
         ctx.fillStyle    = '#fff';
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(outDef.symbol, iconX + ICON / 2, iconY + ICON / 2);
+        if (recipe.output === 'axe') drawAxeIcon(ctx, iconX + ICON / 2, iconY + ICON / 2, ICON);
+        else ctx.fillText(outDef.symbol, iconX + ICON / 2, iconY + ICON / 2);
 
         // Output name + qty
         const textX = iconX + ICON + 6;
@@ -931,7 +933,8 @@ export class PlayerMenu {
           ctx.fillStyle    = '#fff';
           ctx.textAlign    = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(def.symbol, sx + ISZ / 2, sy + ISZ / 2);
+          if (slot.item === 'axe') drawAxeIcon(ctx, sx + ISZ / 2, sy + ISZ / 2, ISZ);
+          else ctx.fillText(def.symbol, sx + ISZ / 2, sy + ISZ / 2);
 
           if (slot.quantity > 1) {
             ctx.font         = '10px Georgia, serif';
@@ -984,7 +987,8 @@ export class PlayerMenu {
         ctx.fillStyle = '#fff';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(def.symbol, gx + ISZ / 2, gy + ISZ / 2);
+        if (dragSlotData.item === 'axe') drawAxeIcon(ctx, gx + ISZ / 2, gy + ISZ / 2, ISZ);
+        else ctx.fillText(def.symbol, gx + ISZ / 2, gy + ISZ / 2);
         ctx.globalAlpha = 1.0;
         ctx.restore();
       }
