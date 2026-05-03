@@ -593,51 +593,68 @@ export class ClientApplication {
       };
 
       this.networkManager.onHarvestResult = (success, wood, reason) => {
+        const _ws0 = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _id0 = this.networkManager.getAssignedPlayerId();
+        const _me0 = _id0 !== null && _ws0 ? _ws0.players.find(p => p.id === _id0) : null;
         if (success) {
-          const _ws0 = this.authoritativeWorldState ?? this.predictedWorldState;
-          const _id0 = this.networkManager.getAssignedPlayerId();
-          const _me0 = _id0 !== null && _ws0 ? _ws0.players.find(p => p.id === _id0) : null;
           if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, `+${wood} wood`, '#c8a060');
+        } else if (reason === 'no_stamina') {
+          if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, 'No stamina!', '#e05050');
         }
       };
 
       this.networkManager.onFiberHarvestResult = (success, fiber, reason, wood) => {
+        const _ws1 = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _id1 = this.networkManager.getAssignedPlayerId();
+        const _me1 = _id1 !== null && _ws1 ? _ws1.players.find(p => p.id === _id1) : null;
         if (success) {
-          const _ws1 = this.authoritativeWorldState ?? this.predictedWorldState;
-          const _id1 = this.networkManager.getAssignedPlayerId();
-          const _me1 = _id1 !== null && _ws1 ? _ws1.players.find(p => p.id === _id1) : null;
           if (_me1) {
             this.renderSystem.spawnResourcePickup(_me1.position, `+${fiber} fiber`, '#60c870');
             if (wood) this.renderSystem.spawnResourcePickup(_me1.position.add(Vec2.from(0, -20)), `+${wood} wood`, '#c8a060');
           }
+        } else if (reason === 'no_stamina') {
+          if (_me1) this.renderSystem.spawnResourcePickup(_me1.position, 'No stamina!', '#e05050');
         }
       };
 
       this.networkManager.onRockHarvestResult = (success, metal, reason) => {
+        const ws = this.authoritativeWorldState ?? this.predictedWorldState;
+        const myId = this.networkManager.getAssignedPlayerId();
+        const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
         if (success) {
-          const ws = this.authoritativeWorldState ?? this.predictedWorldState;
-          const myId = this.networkManager.getAssignedPlayerId();
-          const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
           if (me) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
+        } else if (reason === 'no_stamina') {
+          if (me) this.renderSystem.spawnResourcePickup(me.position, 'No stamina!', '#e05050');
         }
       };
 
       this.networkManager.onStoneHarvestResult = (success, stone, reason) => {
+        const _ws3 = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _id3 = this.networkManager.getAssignedPlayerId();
+        const _me3 = _id3 !== null && _ws3 ? _ws3.players.find(p => p.id === _id3) : null;
         if (success) {
-          const _ws3 = this.authoritativeWorldState ?? this.predictedWorldState;
-          const _id3 = this.networkManager.getAssignedPlayerId();
-          const _me3 = _id3 !== null && _ws3 ? _ws3.players.find(p => p.id === _id3) : null;
           if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, `+${stone} stone`, '#b0b8c0');
+        } else if (reason === 'no_stamina') {
+          if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, 'No stamina!', '#e05050');
         }
       };
 
       this.networkManager.onBoulderHarvestResult = (success, metal, reason) => {
+        const ws = this.authoritativeWorldState ?? this.predictedWorldState;
+        const myId = this.networkManager.getAssignedPlayerId();
+        const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
         if (success) {
-          const ws = this.authoritativeWorldState ?? this.predictedWorldState;
-          const myId = this.networkManager.getAssignedPlayerId();
-          const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
           if (me) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
+        } else if (reason === 'no_stamina') {
+          if (me) this.renderSystem.spawnResourcePickup(me.position, 'No stamina!', '#e05050');
         }
+      };
+
+      this.networkManager.onNoStamina = () => {
+        const _wsS = this.authoritativeWorldState ?? this.predictedWorldState;
+        const _idS = this.networkManager.getAssignedPlayerId();
+        const _meS = _idS !== null && _wsS ? _wsS.players.find(p => p.id === _idS) : null;
+        if (_meS) this.renderSystem.spawnResourcePickup(_meS.position, 'No stamina!', '#e05050');
       };
 
       // Authoritative per-ship weapon group state from server

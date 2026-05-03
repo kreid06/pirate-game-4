@@ -595,6 +595,8 @@ export class NetworkManager {
   public onStoneHarvestResult: ((success: boolean, stone: number, reason: string) => void) | null = null;
   /** Fired when the server responds to a harvest_boulder request. */
   public onBoulderHarvestResult: ((success: boolean, metal: number, reason: string) => void) | null = null;
+  /** Fired when any action is rejected by the server due to insufficient stamina. */
+  public onNoStamina: (() => void) | null = null;
   /**
    * Fired once on connect with the full list of server-defined islands.
    * Falls back to client defaults if the server never sends this.
@@ -2185,6 +2187,8 @@ export class NetworkManager {
       case MessageType.MESSAGE_ACK:
         if (message.status === 'npc_moved_to_module') {
           this.onNpcMoveResult?.(true, message.npcId ?? 0);
+        } else if (message.status === 'no_stamina') {
+          this.onNoStamina?.();
         }
         break;
 
