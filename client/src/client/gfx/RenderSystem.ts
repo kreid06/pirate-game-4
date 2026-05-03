@@ -3882,7 +3882,7 @@ export class RenderSystem {
     const _fadedCeilingIds = new Set<number>();
     {
       const lp = this._cachedLocalPlayer;
-      if (lp && lp.carrierId === 0 && lp.onIslandId > 0) {
+      if (lp && lp.carrierId === 0) {
         const px = lp.position.x, py = lp.position.y;
         const HALF_T = 25;
         const ADJ   = 55;
@@ -4005,11 +4005,12 @@ export class RenderSystem {
       // ── Ceiling occlusion: suppress hover if mouse is under an opaque ceiling ──
       // If the mouse world position is inside a ceiling tile that is NOT faded
       // (i.e. the player is outside that building), don't highlight anything below.
-      if (this._hoveredStructure !== null && this._hoveredStructure.type !== 'wood_ceiling') {
+      if (this._hoveredStructure !== null) {
         const HALF_T = 25;
         for (const c of this.placedStructures) {
           if (c.type !== 'wood_ceiling') continue;
           if (_fadedCeilingIds.has(c.id)) continue; // faded = player is inside, hover allowed
+          if (c.id === this._hoveredStructure!.id) continue; // ceiling IS what's hovered — allow it
           const cr = (c.rotation ?? 0) * Math.PI / 180;
           let clx: number, cly: number;
           if (cr === 0) {
@@ -4624,7 +4625,7 @@ export class RenderSystem {
       // Walls/door_frames/doors derive orientation from the nearest floor tile:
       // the wall runs perpendicular to the floor-centre→wall-midpoint vector.
       let rotRad = 0;
-      if (s.type === 'wooden_floor' || s.type === 'workbench' || s.type === 'shipyard') {
+      if (s.type === 'wooden_floor' || s.type === 'workbench' || s.type === 'shipyard' || s.type === 'wood_ceiling') {
         rotRad = (s.rotation ?? 0) * Math.PI / 180;
       } else {
         let nearFloor: PlacedStructure | null = null;
