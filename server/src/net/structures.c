@@ -491,6 +491,24 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                      "{\"type\":\"place_structure_fail\",\"reason\":\"needs_wall_or_ceiling\"}");
             goto ps_send;
         }
+        /* Must also have a same-company floor tile within 3 tile-widths (150 px) */
+        {
+            const float FLOOR_UNDER_R = 150.0f;
+            bool has_floor = false;
+            for (uint32_t si = 0; si < placed_structure_count && !has_floor; si++) {
+                if (!placed_structures[si].active) continue;
+                if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
+                if (placed_structures[si].company_id != (uint8_t)player->company_id) continue;
+                float fdx = placed_structures[si].x - px;
+                float fdy = placed_structures[si].y - py;
+                if (fdx*fdx + fdy*fdy <= FLOOR_UNDER_R * FLOOR_UNDER_R) has_floor = true;
+            }
+            if (!has_floor) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor_nearby\"}");
+                goto ps_send;
+            }
+        }
     }
 
     /* Door (panel): must snap onto an existing door_frame at the same position */
@@ -1047,6 +1065,29 @@ void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketClient* 
                             websocket_server_broadcast(wcast);
                             continue;
                         }
+                    }
+                } else if (placed_structures[j].type == STRUCT_CEILING) {
+                    /* Ceiling needs a floor within 150 px — check if any remain */
+                    float cx2 = placed_structures[j].x;
+                    float cy2 = placed_structures[j].y;
+                    bool ceil_has_floor = false;
+                    for (uint32_t fi = 0; fi < placed_structure_count && !ceil_has_floor; fi++) {
+                        PlacedStructure* f = &placed_structures[fi];
+                        if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                        float fdx2 = f->x - cx2, fdy2 = f->y - cy2;
+                        if (fdx2*fdx2 + fdy2*fdy2 <= 150.0f * 150.0f) ceil_has_floor = true;
+                    }
+                    if (!ceil_has_floor) {
+                        uint32_t cid = placed_structures[j].id;
+                        for (uint32_t k = j; k + 1 < placed_structure_count; k++)
+                            placed_structures[k] = placed_structures[k + 1];
+                        placed_structure_count--;
+                        log_info("🔨 Cascade-demolished ceiling %u (floor %u removed)", cid, sid);
+                        char cccast[128];
+                        snprintf(cccast, sizeof(cccast),
+                                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", cid);
+                        websocket_server_broadcast(cccast);
+                        continue;
                     }
                 }
                 j++;
