@@ -4679,49 +4679,44 @@ export class RenderSystem {
         ctx.globalAlpha = 1;
         ctx.restore();
       } else if (s.type === 'cannon') {
-        // ── Placed island cannon ──
+        // ── Placed island cannon — same visual as ship cannon ──
         const rotRad = (s.rotation ?? 0) * Math.PI / 180;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = (1 - hpFrac) * 0.5;
-        const barrelLen = Math.max(6, 28 * zoom);
-        const barrelW   = Math.max(3, 9 * zoom);
-        const wheelR    = Math.max(3, 11 * zoom);
+        const lw = Math.max(0.5, 1.5 * zoom);
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
         ctx.rotate(rotRad);
 
-        // Barrel
-        ctx.fillStyle   = isHovered ? '#aaaaaa' : '#888888';
-        ctx.strokeStyle = '#333333';
-        ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
+        // Base (brown rectangle) — same proportions as ship cannon (30×20 world units)
+        ctx.fillStyle   = isHovered ? '#b06030' : '#8B4513';
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth   = lw;
+        ctx.fillRect(-15 * zoom, -10 * zoom, 30 * zoom, 20 * zoom);
+        ctx.strokeRect(-15 * zoom, -10 * zoom, 30 * zoom, 20 * zoom);
+
+        // Barrel — same proportions as ship cannon (16×40 world units), pointing up (−y)
+        ctx.fillStyle   = isHovered ? '#aaaaaa' : '#333333';
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth   = lw;
         ctx.beginPath();
-        ctx.rect(-barrelW / 2, -barrelLen * 0.65, barrelW, barrelLen);
+        ctx.moveTo(-8 * zoom,    0);
+        ctx.lineTo(-8 * zoom, -40 * zoom);
+        ctx.lineTo( 8 * zoom, -40 * zoom);
+        ctx.lineTo( 8 * zoom,    0);
+        ctx.closePath();
         ctx.fill();
         ctx.stroke();
-
-        // Muzzle ring
-        ctx.beginPath();
-        ctx.arc(0, -barrelLen * 0.65, barrelW * 0.65, 0, Math.PI * 2);
-        ctx.fillStyle = '#555555';
-        ctx.fill();
-        ctx.stroke();
-
-        // Wheels (two circles at the sides)
-        ctx.fillStyle   = isHovered ? '#c8924a' : '#96642a';
-        ctx.strokeStyle = '#5a3a12';
-        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-        ctx.beginPath(); ctx.arc(-wheelR * 1.1, barrelLen * 0.25, wheelR, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-        ctx.beginPath(); ctx.arc( wheelR * 1.1, barrelLen * 0.25, wheelR, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
 
         // Company color strip
         ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
-        ctx.fillRect(-barrelW / 2 - wheelR * 0.5, barrelLen * 0.2, barrelW + wheelR, Math.max(1.5, 2.5 * zoom));
+        ctx.fillRect(-8 * zoom, -4 * zoom, 16 * zoom, Math.max(1.5, 2.5 * zoom));
 
-        // Damage darkening
+        // Damage darkening overlay
         if (dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          ctx.fillRect(-barrelW / 2 - wheelR, -barrelLen * 0.65, barrelW + wheelR * 2, barrelLen + wheelR * 2);
+          ctx.fillRect(-15 * zoom, -40 * zoom, 30 * zoom, 50 * zoom);
         }
         ctx.restore();
       }
@@ -5427,6 +5422,18 @@ export class RenderSystem {
       ctx.beginPath();
       ctx.moveTo(msp.x - ghostW / 2 + POST, msp.y + ghostH / 2);
       ctx.lineTo(msp.x + ghostW / 2 - POST, msp.y + ghostH / 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    } else if (this.islandBuildKind === 'cannon') {
+      // Ghost shaped like ship cannon: brown base + dark barrel pointing up
+      ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+      // Base
+      ctx.fillRect(msp.x - 15 * zoom, msp.y - 10 * zoom, 30 * zoom, 20 * zoom);
+      ctx.strokeRect(msp.x - 15 * zoom, msp.y - 10 * zoom, 30 * zoom, 20 * zoom);
+      // Barrel
+      ctx.beginPath();
+      ctx.rect(msp.x - 8 * zoom, msp.y - 40 * zoom, 16 * zoom, 40 * zoom);
+      ctx.fill();
       ctx.stroke();
       ctx.setLineDash([]);
     } else {
