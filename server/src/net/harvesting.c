@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 #include "net/harvesting.h"
+#include "net/npc_agents.h"
 #include "util/time.h"
 
 #define HARVEST_RANGE 110.0f      /* world-px, generous for feel */
@@ -146,8 +147,9 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
             player->inventory.slots[grant_slot].quantity = 10;
         }
 
-        log_info("🪓 Player %u harvested wood → +10 wood (slot %d qty=%d)",
-                 player->player_id, grant_slot,
+        player_apply_xp(player, PLAYER_XP_PER_WOOD_HARVEST);
+        log_info("🪓 Player %u harvested wood → +10 wood +%u xp (slot %d qty=%d)",
+                 player->player_id, PLAYER_XP_PER_WOOD_HARVEST, grant_slot,
                  (int)player->inventory.slots[grant_slot].quantity);
         snprintf(response, sizeof(response),
                  "{\"type\":\"harvest_success\",\"wood\":10}");
@@ -238,8 +240,9 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
         int bonus_wood = (rand() % 10 == 0) ? 1 : 0;
         if (bonus_wood) craft_grant(player, ITEM_WOOD, 1); /* ignore full — fiber already granted */
 
-        log_info("🌿 Player %u gathered fiber → +5 fiber%s", player->player_id,
-                 bonus_wood ? " +1 wood (bonus)" : "");
+        player_apply_xp(player, PLAYER_XP_PER_FIBER_HARVEST);
+        log_info("🌿 Player %u gathered fiber → +5 fiber +%u xp%s", player->player_id,
+                 PLAYER_XP_PER_FIBER_HARVEST, bonus_wood ? " +1 wood (bonus)" : "");
         if (bonus_wood) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_fiber_success\",\"fiber\":5,\"wood\":1}");
@@ -349,7 +352,8 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
             goto send_rock_ret;
         }
 
-        log_info("⛏ Player %u mined rock → +3 metal", player->player_id);
+        player_apply_xp(player, PLAYER_XP_PER_ROCK_HARVEST);
+        log_info("⛏ Player %u mined rock → +3 metal +%u xp", player->player_id, PLAYER_XP_PER_ROCK_HARVEST);
         snprintf(response, sizeof(response),
                  "{\"type\":\"harvest_rock_success\",\"metal\":3}");
     }
@@ -431,7 +435,8 @@ void handle_harvest_stone(WebSocketPlayer* player, struct WebSocketClient* clien
             goto send_stone_ret;
         }
 
-        log_info("🪨 Player %u gathered stone → +2 stone", player->player_id);
+        player_apply_xp(player, PLAYER_XP_PER_STONE_HARVEST);
+        log_info("🪨 Player %u gathered stone → +2 stone +%u xp", player->player_id, PLAYER_XP_PER_STONE_HARVEST);
         snprintf(response, sizeof(response),
                  "{\"type\":\"harvest_stone_success\",\"stone\":2}");
     }
@@ -539,7 +544,8 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
             goto send_boulder_ret;
         }
 
-        log_info("⛏️  Player %u mined boulder → +5 metal", player->player_id);
+        player_apply_xp(player, PLAYER_XP_PER_BOULDER_HARVEST);
+        log_info("⛏️  Player %u mined boulder → +5 metal +%u xp", player->player_id, PLAYER_XP_PER_BOULDER_HARVEST);
         snprintf(response, sizeof(response),
                  "{\"type\":\"harvest_boulder_success\",\"metal\":5}");
     }

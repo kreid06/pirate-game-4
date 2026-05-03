@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": 1777849081,
+    "timestamp": 1777849760,
     "ship_count": 2,
     "npc_count": 18,
-    "structure_count": 36
+    "structure_count": 38
   },
   "ships": [
     {
@@ -1020,6 +1020,34 @@
       "x": 19478.000,
       "y": 14664.400,
       "rot": 0.000,
+      "island_id": 4,
+      "company": 3,
+      "hp": 100,
+      "max_hp": 100,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false
+    },
+    {
+      "id": 42,
+      "type": 0,
+      "x": 19357.699,
+      "y": 14672.400,
+      "rot": 0.000,
+      "island_id": 4,
+      "company": 3,
+      "hp": 100,
+      "max_hp": 100,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false
+    },
+    {
+      "id": 43,
+      "type": 8,
+      "x": 19364.000,
+      "y": 14672.000,
+      "rot": 330.000,
       "island_id": 4,
       "company": 3,
       "hp": 100,
