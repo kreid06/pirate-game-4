@@ -1930,6 +1930,9 @@ export class ClientApplication {
         this.renderSystem.setIslands(islands);
         this.uiManager.setIslandsForRespawn(islands);
         this.islandEditor?.setIslands(islands);
+        // Expose islands on world states so client-side collision prediction can use them
+        if (this.authoritativeWorldState) this.authoritativeWorldState.islands = islands;
+        if (this.predictedWorldState) this.predictedWorldState.islands = islands;
       };
 
       // Update a resource's HP when the server broadcasts resource_damaged
@@ -2679,6 +2682,11 @@ export class ClientApplication {
    * Handle authoritative world state from server
    */
   private onServerWorldState(worldState: WorldState): void {
+    // Carry islands forward — the server WorldState message doesn't include them
+    // (they arrive separately via onIslands), but client-side collision prediction needs them.
+    if (this.authoritativeWorldState?.islands) {
+      worldState.islands = this.authoritativeWorldState.islands;
+    }
     this.authoritativeWorldState = worldState;
 
     // Detect respawn: local player health transitions from ≤0 to >0 → flash white again
