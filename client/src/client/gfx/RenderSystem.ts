@@ -53,6 +53,7 @@ type ResourceNode = {
   hp: number;
   maxHp: number;
   depletedAt?: number;
+  metal?: boolean;
 };
 
 type RenderIslandInput = {
@@ -453,15 +454,21 @@ export class RenderSystem {
     return sprites;
   }
 
-  // ── Boulder sprite cache — 3 tones × 3 shapes (large rocks / boulders) ─────
+  // ── Boulder sprite cache — 3 stone tones + 3 metal tones × 5 shapes ────
   private static _boulderSprites: Map<string, OffscreenCanvas> | null = null;
   private static readonly BOULDER_SPRITE_SIZE = 160;
   private static readonly BOULDER_SPRITE_R    = 52; // reference half-size within sprite
   private static readonly BOULDER_TONES = [
+    // Stone tones (indices 0-2)
     { body: '#797975', shadow: '#44443f', hi: '#aaaaa4', crack: '#55554f', moss: '#5a7040' },
     { body: '#8a7860', shadow: '#504030', hi: '#b09880', crack: '#60503a', moss: '#607848' },
     { body: '#585858', shadow: '#303030', hi: '#888888', crack: '#404040', moss: '#4a6038' },
+    // Metal/iron tones (indices 3-5) — dark blue-grey iron with metallic sheen
+    { body: '#4a5260', shadow: '#252b35', hi: '#7a8898', crack: '#303840', moss: '#384858' },
+    { body: '#3e4a58', shadow: '#202830', hi: '#6a7a8a', crack: '#2a3240', moss: '#2e3e50' },
+    { body: '#525a6a', shadow: '#2a3040', hi: '#8090a4', crack: '#363e50', moss: '#404e60' },
   ];
+  private static readonly BOULDER_METAL_TONE_OFFSET = 3;
   private static readonly BOULDER_SHAPES: [number, number, number][] = [
     [1.00, 0.72, 0.0],   // flat classic
     [0.88, 0.88, 0.4],   // round
@@ -479,6 +486,7 @@ export class RenderSystem {
 
     for (let ti = 0; ti < RenderSystem.BOULDER_TONES.length; ti++) {
       const tone = RenderSystem.BOULDER_TONES[ti];
+      const isMetal = ti >= RenderSystem.BOULDER_METAL_TONE_OFFSET;
       for (let si = 0; si < RenderSystem.BOULDER_SHAPES.length; si++) {
         const [sx, sy, rot] = RenderSystem.BOULDER_SHAPES[si];
         for (const hovered of [false, true]) {
@@ -504,24 +512,31 @@ export class RenderSystem {
           ctx.lineWidth = hovered ? 3 : 2;
           ctx.stroke();
 
-          // Large highlight
+          // Large highlight — more pronounced metallic sheen for metal nodes
           ctx.beginPath();
           ctx.ellipse(cx - R * sx * 0.28, cy - R * sy * 0.28, R * sx * 0.38, R * sy * 0.26, rot - 0.6, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.fill();
+          ctx.fillStyle = isMetal ? 'rgba(160,200,255,0.28)' : 'rgba(255,255,255,0.22)'; ctx.fill();
 
           // Specular fleck
           ctx.beginPath();
           ctx.arc(cx - R * sx * 0.35, cy - R * sy * 0.38, R * 0.08, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255,255,255,0.40)'; ctx.fill();
+          ctx.fillStyle = isMetal ? 'rgba(180,220,255,0.55)' : 'rgba(255,255,255,0.40)'; ctx.fill();
 
-          // Moss patches (3 blobs near base)
-          for (let m = 0; m < 3; m++) {
-            const ma = rot + m * 0.7 + 0.3;
-            const mx = cx + Math.cos(ma) * R * sx * 0.55;
-            const my = cy + R * sy * 0.48 + Math.sin(ma) * R * sy * 0.12;
+          if (isMetal) {
+            // Metal: bright thin streak highlight instead of moss
             ctx.beginPath();
-            ctx.ellipse(mx, my, R * 0.14, R * 0.08, ma, 0, Math.PI * 2);
-            ctx.fillStyle = tone.moss; ctx.fill();
+            ctx.ellipse(cx - R * sx * 0.18, cy - R * sy * 0.22, R * sx * 0.15, R * sy * 0.06, rot - 0.3, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(190,220,255,0.35)'; ctx.fill();
+          } else {
+            // Stone: moss patches (3 blobs near base)
+            for (let m = 0; m < 3; m++) {
+              const ma = rot + m * 0.7 + 0.3;
+              const mx = cx + Math.cos(ma) * R * sx * 0.55;
+              const my = cy + R * sy * 0.48 + Math.sin(ma) * R * sy * 0.12;
+              ctx.beginPath();
+              ctx.ellipse(mx, my, R * 0.14, R * 0.08, ma, 0, Math.PI * 2);
+              ctx.fillStyle = tone.moss; ctx.fill();
+            }
           }
 
           // Two crack lines
@@ -3688,7 +3703,7 @@ export class RenderSystem {
       // Pass 2 – boulders (above rocks, below players)
       for (const e of visibleRes) {
         if (e.res.type !== 'boulder') continue;
-        this.drawIslandBoulder(e.sp.x, e.sp.y, zoom, e.isHovered, e.boulderAlpha * e.deathAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.wx, e.wy);
+        this.drawIslandBoulder(e.sp.x, e.sp.y, zoom, e.isHovered, e.boulderAlpha * e.deathAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.wx, e.wy, e.res.metal === true);
       }
       // Pass 3 – tree trunks (only visible when player is near or hovering)
       for (const e of visibleRes) {
@@ -3866,14 +3881,16 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandBoulder(sx: number, sy: number, zoom: number, hovered = false, alpha = 1.0, ox = 0, oy = 0, size = 1.0, wx?: number, wy?: number): void {
+  private drawIslandBoulder(sx: number, sy: number, zoom: number, hovered = false, alpha = 1.0, ox = 0, oy = 0, size = 1.0, wx?: number, wy?: number, metal = false): void {
     const ctx      = this.ctx;
     const R        = RenderSystem.BOULDER_SPRITE_R;
     const SIZE     = RenderSystem.BOULDER_SPRITE_SIZE;
     const r        = 40 * zoom * size;
     const drawSize = SIZE * (r / R);
     const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
-    const ti       = hash % RenderSystem.BOULDER_TONES.length;
+    const toneCount = 3; // 3 variants within stone or metal range
+    const tiBase   = metal ? RenderSystem.BOULDER_METAL_TONE_OFFSET : 0;
+    const ti       = tiBase + (hash % toneCount);
     const si       = (hash >> 4) % RenderSystem.BOULDER_SHAPES.length;
     const drawRot  = ((hash >> 8) & 0xFF) / 256 * Math.PI * 2;
     const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;

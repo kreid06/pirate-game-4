@@ -2434,10 +2434,33 @@ export class NetworkManager {
 
       case 'ISLANDS': {
         const now = performance.now();
-        const islands: IslandDef[] = (message.islands ?? []).map((isl: any) => ({
+        /** Ray-cast even-odd PIP for world-space polygon rings. */
+        const pipInRing = (poly: {x:number,y:number}[], wx: number, wy: number): boolean => {
+          let inside = false;
+          const n = poly.length;
+          for (let i = 0, j = n - 1; i < n; j = i++) {
+            const xi = poly[i].x, yi = poly[i].y;
+            const xj = poly[j].x, yj = poly[j].y;
+            if ((yi > wy) !== (yj > wy) && wx < (xj - xi) * (wy - yi) / (yj - yi) + xi)
+              inside = !inside;
+          }
+          return inside;
+        };
+        const isInMetalPolys = (metalPolys: {x:number,y:number}[][]|undefined, islX: number, islY: number, ox: number, oy: number): boolean => {
+          if (!metalPolys) return false;
+          const wx = islX + ox, wy = islY + oy;
+          return metalPolys.some(ring => pipInRing(ring, wx, wy));
+        };
+        const islands: IslandDef[] = (message.islands ?? []).map((isl: any) => {
+          const islX = isl.x ?? 0;
+          const islY = isl.y ?? 0;
+          const metalPolys: {x:number,y:number}[][] | undefined = isl.metalPolys
+            ? (isl.metalPolys as any[][]).map((ring: any[]) => ring.map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 })))
+            : undefined;
+          return {
           id:        isl.id       ?? 0,
-          x:         isl.x       ?? 0,
-          y:         isl.y       ?? 0,
+          x:         islX,
+          y:         islY,
           preset:    (isl.preset ?? 'tropical') as IslandPreset,
           resources: (isl.resources ?? []).map((r: any): IslandResource => ({
             ox:         r.ox    ?? 0,
@@ -2447,6 +2470,7 @@ export class NetworkManager {
             hp:         r.hp    ?? 100,
             maxHp:      r.maxHp ?? 100,
             depletedAt: (r.hp <= 0) ? now : undefined,
+            metal:      r.type === 'boulder' ? isInMetalPolys(metalPolys, islX, islY, r.ox ?? 0, r.oy ?? 0) : undefined,
           })),
           vertices: isl.vertices
             ? (isl.vertices as any[]).map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 }))
@@ -2460,10 +2484,9 @@ export class NetworkManager {
           stonePolys: isl.stonePolys
             ? (isl.stonePolys as any[][]).map((ring: any[]) => ring.map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 })))
             : undefined,
-          metalPolys: isl.metalPolys
-            ? (isl.metalPolys as any[][]).map((ring: any[]) => ring.map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 })))
-            : undefined,
-        }));
+          metalPolys,
+          };
+        });
         this.onIslands?.(islands);
         break;
       }

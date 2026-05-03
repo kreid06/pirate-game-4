@@ -313,6 +313,8 @@ export interface IslandResource {
   maxHp: number;
   /** Client-only: timestamp (performance.now()) when hp first reached 0. Used for fade-out. */
   depletedAt?: number;
+  /** Client-only: true if this boulder is inside a metal biome polygon (uses iron/dark sprite tones). */
+  metal?: boolean;
 }
 
 /**
