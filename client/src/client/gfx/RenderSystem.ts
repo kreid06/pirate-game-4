@@ -3948,35 +3948,52 @@ export class RenderSystem {
 
     // BFS: find the set of ceiling tile IDs that are connected (same building) to the
     // ceiling tile the local player is currently standing under.  Only those tiles fade.
+    // Guards:
+    //   • lp.onIslandId > 0  — player is actually on an island (not default/reload state)
+    //   • player must be standing on a wooden_floor tile — prevents fade when swimming or
+    //     walking outside the building but still near it
     const _fadedCeilingIds = new Set<number>();
     {
       const lp = this._cachedLocalPlayer;
-      if (lp && lp.carrierId === 0) {
+      if (lp && lp.carrierId === 0 && lp.onIslandId > 0) {
         const px = lp.position.x, py = lp.position.y;
-        const HALF_C = 25;
-        const CEIL_ADJ = 55; // max centre-to-centre distance to be "adjacent" (tile=50, small slack)
-        const ceilings = this.placedStructures.filter(c => c.type === 'wood_ceiling');
-        // Find the tile the player is directly under
-        let startTile: PlacedStructure | null = null;
-        for (const c of ceilings) {
-          const cr = (c.rotation ?? 0) * Math.PI / 180;
-          const cCos = Math.cos(-cr), cSin = Math.sin(-cr);
-          const lx = (px - c.x) * cCos - (py - c.y) * cSin;
-          const ly = (px - c.x) * cSin + (py - c.y) * cCos;
-          if (Math.abs(lx) <= HALF_C && Math.abs(ly) <= HALF_C) { startTile = c; break; }
-        }
-        if (startTile !== null) {
-          // BFS through ceiling tiles whose centres are within CEIL_ADJ of each other
-          const queue: PlacedStructure[] = [startTile];
-          _fadedCeilingIds.add(startTile.id);
-          while (queue.length > 0) {
-            const cur = queue.shift()!;
-            for (const c of ceilings) {
-              if (_fadedCeilingIds.has(c.id)) continue;
-              const dx = c.x - cur.x, dy = c.y - cur.y;
-              if (Math.sqrt(dx * dx + dy * dy) <= CEIL_ADJ) {
-                _fadedCeilingIds.add(c.id);
-                queue.push(c);
+        const HALF_T = 25; // half of 50px tile
+        const CEIL_ADJ = 55;
+
+        // Check the player is on a wooden_floor tile first
+        const onFloor = this.placedStructures.some(f => {
+          if (f.type !== 'wooden_floor') return false;
+          const fr = (f.rotation ?? 0) * Math.PI / 180;
+          const fc = Math.cos(-fr), fs = Math.sin(-fr);
+          const lx = (px - f.x) * fc - (py - f.y) * fs;
+          const ly = (px - f.x) * fs + (py - f.y) * fc;
+          return Math.abs(lx) <= HALF_T && Math.abs(ly) <= HALF_T;
+        });
+
+        if (onFloor) {
+          const ceilings = this.placedStructures.filter(c => c.type === 'wood_ceiling');
+          // Find the ceiling tile directly above the player
+          let startTile: PlacedStructure | null = null;
+          for (const c of ceilings) {
+            const cr = (c.rotation ?? 0) * Math.PI / 180;
+            const cCos = Math.cos(-cr), cSin = Math.sin(-cr);
+            const lx = (px - c.x) * cCos - (py - c.y) * cSin;
+            const ly = (px - c.x) * cSin + (py - c.y) * cCos;
+            if (Math.abs(lx) <= HALF_T && Math.abs(ly) <= HALF_T) { startTile = c; break; }
+          }
+          if (startTile !== null) {
+            // BFS through ceiling tiles whose centres are within CEIL_ADJ of each other
+            const queue: PlacedStructure[] = [startTile];
+            _fadedCeilingIds.add(startTile.id);
+            while (queue.length > 0) {
+              const cur = queue.shift()!;
+              for (const c of ceilings) {
+                if (_fadedCeilingIds.has(c.id)) continue;
+                const dx = c.x - cur.x, dy = c.y - cur.y;
+                if (Math.sqrt(dx * dx + dy * dy) <= CEIL_ADJ) {
+                  _fadedCeilingIds.add(c.id);
+                  queue.push(c);
+                }
               }
             }
           }
