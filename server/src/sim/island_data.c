@@ -798,15 +798,19 @@ void islands_apply_rotations(void)
             isl->svy[i] = x * s + y * c;
         }
         /* Also rotate stone/metal biome polygons loaded from JSON */
-        for (int i = 0; i < isl->stone_vertex_count; i++) {
-            float x = isl->stvx[i], y = isl->stvy[i];
-            isl->stvx[i] = x * c - y * s;
-            isl->stvy[i] = x * s + y * c;
+        for (int pi = 0; pi < isl->stone_poly_count; pi++) {
+            for (int i = 0; i < isl->stone_vc[pi]; i++) {
+                float x = isl->stone_vx[pi][i], y = isl->stone_vy[pi][i];
+                isl->stone_vx[pi][i] = x * c - y * s;
+                isl->stone_vy[pi][i] = x * s + y * c;
+            }
         }
-        for (int i = 0; i < isl->metal_vertex_count; i++) {
-            float x = isl->mtvx[i], y = isl->mtvy[i];
-            isl->mtvx[i] = x * c - y * s;
-            isl->mtvy[i] = x * s + y * c;
+        for (int pi = 0; pi < isl->metal_poly_count; pi++) {
+            for (int i = 0; i < isl->metal_vc[pi]; i++) {
+                float x = isl->metal_vx[pi][i], y = isl->metal_vy[pi][i];
+                isl->metal_vx[pi][i] = x * c - y * s;
+                isl->metal_vy[pi][i] = x * s + y * c;
+            }
         }
     }
 }
@@ -857,12 +861,15 @@ void islands_generate_zone_resources(void)
         IslandDef *isl = &ISLAND_PRESETS[ii];
 
         /* ── Stone biome → RES_ROCK ────────────────────────────────── */
-        if (isl->stone_vertex_count >= 3) {
+        for (int pi = 0; pi < isl->stone_poly_count; pi++) {
+            if (isl->stone_vc[pi] < 3) continue;
             float bx0, by0, bx1, by1;
-            biome_bbox(isl->x, isl->y, isl->stvx, isl->stvy, isl->stone_vertex_count,
+            biome_bbox(isl->x, isl->y,
+                       isl->stone_vx[pi], isl->stone_vy[pi], isl->stone_vc[pi],
                        &bx0, &by0, &bx1, &by1);
 
-            unsigned int seed = (unsigned int)((unsigned int)isl->id * 2654435761u);
+            unsigned int seed = (unsigned int)((unsigned int)isl->id * 2654435761u)
+                                + (unsigned int)(pi * 1234567u);
             int added = 0;
             for (float gx = bx0; gx <= bx1 && isl->resource_count < ISLAND_MAX_RESOURCES; gx += STONE_ZONE_SPACING) {
                 for (float gy = by0; gy <= by1 && isl->resource_count < ISLAND_MAX_RESOURCES; gy += STONE_ZONE_SPACING) {
@@ -871,8 +878,9 @@ void islands_generate_zone_resources(void)
                     seed = seed * 1664525u + 1013904223u;
                     float jy = ((float)(seed & 0xFFFFu) / 65535.0f - 0.5f) * (2.0f * STONE_ZONE_JITTER);
                     float wx = gx + jx, wy = gy + jy;
-                    if (!inside_biome_poly(isl->x, isl->y, isl->stvx, isl->stvy,
-                                          isl->stone_vertex_count, wx, wy)) continue;
+                    if (!inside_biome_poly(isl->x, isl->y,
+                                          isl->stone_vx[pi], isl->stone_vy[pi],
+                                          isl->stone_vc[pi], wx, wy)) continue;
                     IslandResource *r = &isl->resources[isl->resource_count];
                     r->ox         = wx - isl->x;
                     r->oy         = wy - isl->y;
@@ -884,16 +892,19 @@ void islands_generate_zone_resources(void)
                     added++;
                 }
             }
-            log_info("[islands] Island %d stone biome: placed %d rock nodes", isl->id, added);
+            log_info("[islands] Island %d stone biome poly %d: placed %d rock nodes", isl->id, pi, added);
         }
 
         /* ── Metal biome → RES_BOULDER ─────────────────────────────── */
-        if (isl->metal_vertex_count >= 3) {
+        for (int pi = 0; pi < isl->metal_poly_count; pi++) {
+            if (isl->metal_vc[pi] < 3) continue;
             float bx0, by0, bx1, by1;
-            biome_bbox(isl->x, isl->y, isl->mtvx, isl->mtvy, isl->metal_vertex_count,
+            biome_bbox(isl->x, isl->y,
+                       isl->metal_vx[pi], isl->metal_vy[pi], isl->metal_vc[pi],
                        &bx0, &by0, &bx1, &by1);
 
-            unsigned int seed = (unsigned int)((unsigned int)isl->id * 2246822519u);
+            unsigned int seed = (unsigned int)((unsigned int)isl->id * 2246822519u)
+                                + (unsigned int)(pi * 7654321u);
             int added = 0;
             for (float gx = bx0; gx <= bx1 && isl->resource_count < ISLAND_MAX_RESOURCES; gx += METAL_ZONE_SPACING) {
                 for (float gy = by0; gy <= by1 && isl->resource_count < ISLAND_MAX_RESOURCES; gy += METAL_ZONE_SPACING) {
@@ -902,8 +913,9 @@ void islands_generate_zone_resources(void)
                     seed = seed * 1664525u + 1013904223u;
                     float jy = ((float)(seed & 0xFFFFu) / 65535.0f - 0.5f) * (2.0f * METAL_ZONE_JITTER);
                     float wx = gx + jx, wy = gy + jy;
-                    if (!inside_biome_poly(isl->x, isl->y, isl->mtvx, isl->mtvy,
-                                          isl->metal_vertex_count, wx, wy)) continue;
+                    if (!inside_biome_poly(isl->x, isl->y,
+                                          isl->metal_vx[pi], isl->metal_vy[pi],
+                                          isl->metal_vc[pi], wx, wy)) continue;
                     IslandResource *r = &isl->resources[isl->resource_count];
                     r->ox         = wx - isl->x;
                     r->oy         = wy - isl->y;
@@ -915,7 +927,7 @@ void islands_generate_zone_resources(void)
                     added++;
                 }
             }
-            log_info("[islands] Island %d metal biome: placed %d boulder nodes", isl->id, added);
+            log_info("[islands] Island %d metal biome poly %d: placed %d boulder nodes", isl->id, pi, added);
         }
     }
 }

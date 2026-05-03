@@ -54,6 +54,30 @@ static int load_vert_array(struct json_object *arr,
     return load_vert_array_n(arr, dst_x, dst_y, ISLAND_MAX_VERTS);
 }
 
+/**
+ * Load an array-of-arrays (multi-polygon) into dst_vx/dst_vy/dst_vc.
+ * Each element of `polys` must be an array of {x,y} objects.
+ * Returns number of polygons loaded (clamped to max_polys).
+ */
+static int load_multi_poly(struct json_object *polys,
+                            float dst_vx[][ISLAND_BIOME_MAX_VERTS],
+                            float dst_vy[][ISLAND_BIOME_MAX_VERTS],
+                            int   dst_vc[],
+                            int   max_polys)
+{
+    if (!polys) return 0;
+    int np = (int)json_object_array_length(polys);
+    if (np > max_polys) {
+        log_warn("[islands] biome poly count %d exceeds limit %d, clamping", np, max_polys);
+        np = max_polys;
+    }
+    for (int pi = 0; pi < np; pi++) {
+        struct json_object *ring = json_object_array_get_idx(polys, pi);
+        dst_vc[pi] = load_vert_array_n(ring, dst_vx[pi], dst_vy[pi], ISLAND_BIOME_MAX_VERTS);
+    }
+    return np;
+}
+
 void islands_load_from_files(const char *dir)
 {
     for (int i = 0; i < ISLAND_COUNT; i++) {
@@ -108,23 +132,44 @@ void islands_load_from_files(const char *dir)
             isl->shallow_vertex_count = load_vert_array(shallow, isl->svx, isl->svy);
         }
 
-        /* ── Stone biome polygon ─────────────────────────────────────────── */
-        struct json_object *stone_j = NULL;
-        json_object_object_get_ex(root, "stone_verts_JSON", &stone_j);
-        if (stone_j)
-            isl->stone_vertex_count = load_vert_array(stone_j, isl->stvx, isl->stvy);
+        /* ── Stone biome polygon(s) ──────────────────────────────────────── */
+        struct json_object *stone_polys = NULL;
+        struct json_object *stone_j     = NULL;
+        json_object_object_get_ex(root, "stone_polys_JSON", &stone_polys);
+        if (stone_polys) {
+            isl->stone_poly_count = load_multi_poly(stone_polys,
+                isl->stone_vx, isl->stone_vy, isl->stone_vc, ISLAND_MAX_BIOME_POLYS);
+        } else {
+            /* fallback: old single-polygon key */
+            json_object_object_get_ex(root, "stone_verts_JSON", &stone_j);
+            if (stone_j) {
+                isl->stone_vc[0] = load_vert_array_n(stone_j,
+                    isl->stone_vx[0], isl->stone_vy[0], ISLAND_BIOME_MAX_VERTS);
+                isl->stone_poly_count = (isl->stone_vc[0] >= 3) ? 1 : 0;
+            }
+        }
 
-        /* ── Metal biome polygon ─────────────────────────────────────────── */
-        struct json_object *metal_j = NULL;
-        json_object_object_get_ex(root, "metal_verts_JSON", &metal_j);
-        if (metal_j)
-            isl->metal_vertex_count = load_vert_array(metal_j, isl->mtvx, isl->mtvy);
+        /* ── Metal biome polygon(s) ──────────────────────────────────────── */
+        struct json_object *metal_polys = NULL;
+        struct json_object *metal_j     = NULL;
+        json_object_object_get_ex(root, "metal_polys_JSON", &metal_polys);
+        if (metal_polys) {
+            isl->metal_poly_count = load_multi_poly(metal_polys,
+                isl->metal_vx, isl->metal_vy, isl->metal_vc, ISLAND_MAX_BIOME_POLYS);
+        } else {
+            json_object_object_get_ex(root, "metal_verts_JSON", &metal_j);
+            if (metal_j) {
+                isl->metal_vc[0] = load_vert_array_n(metal_j,
+                    isl->metal_vx[0], isl->metal_vy[0], ISLAND_BIOME_MAX_VERTS);
+                isl->metal_poly_count = (isl->metal_vc[0] >= 3) ? 1 : 0;
+            }
+        }
 
         json_object_put(root);
 
-        log_info("[islands] Loaded island %d from %s (sand=%d grass=%d shallow=%d stone=%d metal=%d)",
+        log_info("[islands] Loaded island %d from %s (sand=%d grass=%d shallow=%d stone_polys=%d metal_polys=%d)",
                  isl->id, path,
                  isl->vertex_count, isl->grass_vertex_count, isl->shallow_vertex_count,
-                 isl->stone_vertex_count, isl->metal_vertex_count);
+                 isl->stone_poly_count, isl->metal_poly_count);
     }
 }

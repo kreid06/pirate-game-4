@@ -845,19 +845,29 @@ int admin_api_islands(struct HttpResponse* resp) {
                 }
                 ISL_APPEND("]");
             }
-            if (isl->stone_vertex_count > 0) {
-                ISL_APPEND(",\"stoneVertCount\":%d,\"stoneVerts\":[", isl->stone_vertex_count);
-                for (int vi = 0; vi < isl->stone_vertex_count; vi++) {
-                    if (vi > 0) ISL_APPEND(",");
-                    ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->stvx[vi], isl->stvy[vi]);
+            if (isl->stone_poly_count > 0) {
+                ISL_APPEND(",\"stonePolys\":[");
+                for (int pi = 0; pi < isl->stone_poly_count; pi++) {
+                    if (pi > 0) ISL_APPEND(",");
+                    ISL_APPEND("[");
+                    for (int vi = 0; vi < isl->stone_vc[pi]; vi++) {
+                        if (vi > 0) ISL_APPEND(",");
+                        ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->stone_vx[pi][vi], isl->stone_vy[pi][vi]);
+                    }
+                    ISL_APPEND("]");
                 }
                 ISL_APPEND("]");
             }
-            if (isl->metal_vertex_count > 0) {
-                ISL_APPEND(",\"metalVertCount\":%d,\"metalVerts\":[", isl->metal_vertex_count);
-                for (int vi = 0; vi < isl->metal_vertex_count; vi++) {
-                    if (vi > 0) ISL_APPEND(",");
-                    ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->mtvx[vi], isl->mtvy[vi]);
+            if (isl->metal_poly_count > 0) {
+                ISL_APPEND(",\"metalPolys\":[");
+                for (int pi = 0; pi < isl->metal_poly_count; pi++) {
+                    if (pi > 0) ISL_APPEND(",");
+                    ISL_APPEND("[");
+                    for (int vi = 0; vi < isl->metal_vc[pi]; vi++) {
+                        if (vi > 0) ISL_APPEND(",");
+                        ISL_APPEND("{\"x\":%.1f,\"y\":%.1f}", isl->metal_vx[pi][vi], isl->metal_vy[pi][vi]);
+                    }
+                    ISL_APPEND("]");
                 }
                 ISL_APPEND("]");
             }
