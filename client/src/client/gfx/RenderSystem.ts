@@ -4732,7 +4732,7 @@ export class RenderSystem {
       // Walls/door_frames/doors derive orientation from the nearest floor tile:
       // the wall runs perpendicular to the floor-centre→wall-midpoint vector.
       let rotRad = 0;
-      if (s.type === 'wooden_floor' || s.type === 'workbench' || s.type === 'shipyard' || s.type === 'wood_ceiling') {
+      if (s.type === 'wooden_floor' || s.type === 'workbench' || s.type === 'shipyard' || s.type === 'wood_ceiling' || s.type === 'cannon') {
         rotRad = (s.rotation ?? 0) * Math.PI / 180;
       } else {
         let nearFloor: PlacedStructure | null = null;
@@ -4748,8 +4748,9 @@ export class RenderSystem {
       // Unrotated dimensions of the structure rect
       const THICK  = 0.18;
       const isWall = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
-      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'shipyard' ? sz * 6.8  : sz;
-      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'shipyard' ? sz * 17.8 : sz;
+      // Cannon: base is 30×20 world units, barrel extends 40 upward from centre → total 30×50
+      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'shipyard' ? sz * 6.8 : s.type === 'cannon' ? 30 * zoom : sz;
+      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'shipyard' ? sz * 17.8 : s.type === 'cannon' ? 50 * zoom : sz;
 
       // Axis-aligned bounding box after rotation (used for bar/tooltip screen positioning)
       const absC = Math.abs(Math.cos(rotRad)), absS = Math.abs(Math.sin(rotRad));
@@ -4769,7 +4770,14 @@ export class RenderSystem {
       ctx.lineWidth   = Math.max(1, 3 * zoom);
       ctx.translate(ssp.x, ssp.y);
       ctx.rotate(rotRad);
-      ctx.strokeRect(-rawW / 2, -rawH / 2, rawW, rawH);
+      if (s.type === 'cannon') {
+        // Draw highlight matching cannon shape: base rect + barrel rect
+        const baseW = 30 * zoom, baseH = 20 * zoom, barW = 16 * zoom, barH = 40 * zoom;
+        ctx.strokeRect(-baseW / 2, -baseH / 2, baseW, baseH);
+        ctx.strokeRect(-barW / 2, -barH, barW, barH);
+      } else {
+        ctx.strokeRect(-rawW / 2, -rawH / 2, rawW, rawH);
+      }
       ctx.restore();
 
       // ── HP bar (hover only) ────────────────────────────────────────────
@@ -4813,6 +4821,7 @@ export class RenderSystem {
                  : s.type === 'shipyard' ? 'Shipyard'
                  : s.type === 'wreck' ? 'Shipwreck'
                  : s.type === 'wood_ceiling' ? 'Wood Ceiling'
+                 : s.type === 'cannon' ? 'Cannon'
                  : 'Workbench';
 
       // Determine ownership line text + color
@@ -4849,6 +4858,7 @@ export class RenderSystem {
                            : s.type === 'door_frame' ? 'Hold [E] to demolish'
                            : s.type === 'shipyard' ? 'Hold [E] to build ships'
                            : s.type === 'wreck' ? '[E] to salvage loot'
+                           : s.type === 'cannon' ? 'Hold [E] to fire'
                            : 'Hold [E] to interact';
         ctx.fillText(interactHint, ssp.x, tipY - lineH * 2);
       } else {

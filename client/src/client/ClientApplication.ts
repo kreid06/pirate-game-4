@@ -1019,11 +1019,6 @@ export class ClientApplication {
               this.networkManager.sendStructureInteract(hovered.id);
               return;
             }
-            if (hovered?.type === 'cannon') {
-              console.log(`🎯 [INTERACT] Sending structure_interact for island cannon ${hovered.id}`);
-              this.networkManager.sendStructureInteract(hovered.id);
-              return;
-            }
           }
 
           // Module interaction takes priority over NPC menu
@@ -3666,6 +3661,16 @@ export class ClientApplication {
 
           // ── Dismount: player is already mounted ──────────────────────────────
           // No hover required — player is physically AT the mounted module.
+          // Island cannon: player stays on foot (carrierId === 0) but is still mounted.
+          if (meE.isMounted && meE.carrierId === 0) {
+            // Dismount from island cannon immediately
+            this._suppressLadderInteract = true;
+            this.networkManager.sendAction('dismount');
+            this.inputManager?.setMountState(false);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log('🎮 E: dismount island cannon');
+            break;
+          }
           if (meE.isMounted && meE.carrierId !== 0) {
             // Find the module by ID if known, else fall back to kind search on current ship
             const MOUNTABLE = new Set(['helm', 'cannon', 'mast', 'swivel']);
@@ -3847,6 +3852,18 @@ export class ClientApplication {
                   this.uiManager.setActiveMenuId(MENU_ID.SALVAGE);
                   this.uiManager.salvageMenu.open(struct.id, struct.hp ?? 1);
                 }, 400);
+              } else if (struct.type === 'cannon') {
+                // Cannon: tap E = mount; hold E = radial with Mount + Demolish
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  const cannonOpts: { id: string; label: string }[] = [
+                    { id: 'use', label: 'Mount Cannon' },
+                  ];
+                  if (isOwnCompany) cannonOpts.push({ id: 'demolish', label: 'Demolish Cannon' });
+                  this._radialMenu.open(mp2.x, mp2.y, cannonOpts);
+                }, 300);
               } else {
                 this._ladderHoldTimer = setTimeout(() => {
                   this._ladderHoldTimer = null;
@@ -4152,6 +4169,9 @@ export class ClientApplication {
           this.renderSystem.stopLadderHoldRing();
           if (structType === 'workbench') {
             // Tap E on workbench = open crafting menu
+            doUse();
+          } else if (structType === 'cannon') {
+            // Tap E on island cannon = mount
             doUse();
           } else if (structType === 'shipyard' && structId !== null) {
             // Tap E on shipyard = open menu with current local state
