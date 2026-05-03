@@ -3,6 +3,7 @@ import { AngleUtils } from '../common/AngleUtils.js';
 import { PolygonUtils } from '../common/PolygonUtils.js';
 import { WorldState, InputFrame, Ship, Player, PhysicsConfig } from './Types.js';
 import { CollisionSystem, CollisionResult } from './CollisionSystem.js';
+import { predictShipCollisions, predictIslandCollisions } from './PhysicsCollisionPredict.js';
 import { 
   CarrierDetectionState, 
   CarrierChangeEvent,
@@ -38,7 +39,8 @@ export function simulate(prevWorld: WorldState, inputFrame: InputFrame, dt: numb
     droppedItems: prevWorld.droppedItems ?? [],
     companies: prevWorld.companies ?? [],
     timestamp: prevWorld.timestamp + dt * 1000,
-    carrierDetection: new Map(prevWorld.carrierDetection)
+    carrierDetection: new Map(prevWorld.carrierDetection),
+    islands: prevWorld.islands,
   };
 
   // Update ship physics (forces, but not positions yet)
@@ -57,9 +59,12 @@ export function simulate(prevWorld: WorldState, inputFrame: InputFrame, dt: numb
       ship.rotation += ship.angularVelocity * subDt;
     }
     
-    // Check and resolve collisions
-    handleShipCollisions(newWorld.ships);
+    // Check and resolve collisions using server-mirrored CCD + SAT + impulse
+    predictShipCollisions(newWorld.ships, subDt);
   }
+
+  // Ship-island collision prediction (polygon islands only)
+  predictIslandCollisions(newWorld.ships, newWorld.islands ?? []);
 
   // Phase 2: Enhanced player update with carrier detection
   const allEvents: CarrierChangeEvent[] = [];

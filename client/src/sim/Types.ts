@@ -360,6 +360,9 @@ export interface WorldState {
   timestamp: number;
   // Phase 2: Add carrier detection state per player
   carrierDetection: Map<number, CarrierDetectionState>; // playerId -> detection state
+  /** Island definitions received from the server ISLANDS message.
+   *  Optional — populated by the network layer; used by client-side collision prediction. */
+  islands?: IslandDef[];
 }
 
 export interface DroppedItem {
