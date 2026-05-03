@@ -821,8 +821,8 @@ void islands_apply_rotations(void)
  */
 #define STONE_ZONE_SPACING 300.0f  /* grid spacing (px) for stone nodes */
 #define STONE_ZONE_JITTER  80.0f   /* max per-axis jitter */
-#define METAL_ZONE_SPACING 300.0f  /* grid spacing (px) for metal/boulder nodes */
-#define METAL_ZONE_JITTER   60.0f
+#define METAL_ZONE_SPACING 173.0f  /* grid spacing (px) for metal/boulder nodes — ~3x area density vs stone */
+#define METAL_ZONE_JITTER   35.0f
 
 /** Ray-cast even-odd point-in-polygon for a biome poly (local offsets + island centre). */
 static int inside_biome_poly(float cx, float cy,
@@ -936,7 +936,7 @@ void islands_generate_zone_resources(void)
                     r->ox         = wx - isl->x;
                     r->oy         = wy - isl->y;
                     r->type_id    = RES_BOULDER;
-                    r->size       = resource_size_from_offset(r->ox, r->oy) * 0.70f;
+                    r->size       = resource_size_from_offset(r->ox, r->oy) * 0.50f;
                     r->max_health = resource_max_health(RES_BOULDER);
                     r->health     = r->max_health;
                     isl->resource_count++;
