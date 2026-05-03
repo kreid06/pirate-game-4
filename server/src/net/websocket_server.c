@@ -2068,7 +2068,42 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                             }
                                             
-                                            ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "]}");
+                                            ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "]");
+                                            
+                                            // Include levelStats from sim ship (always on initial state)
+                                            {
+                                                const struct Ship* sim_ship = (ships[s].ship_id < SIM_SHIP_ID_SIZE)
+                                                    ? g_sim_ship_by_id[ships[s].ship_id] : NULL;
+                                                if (sim_ship) {
+                                                    uint16_t tp = ship_level_total_points(&sim_ship->level_stats);
+                                                    uint32_t next_cost = (tp < SHIP_LEVEL_TOTAL_POINT_CAP)
+                                                        ? SHIP_LEVEL_XP_BASE * (uint32_t)(tp + 1u) : 0u;
+                                                    ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
+                                                        ",\"levelStats\":{"
+                                                        "\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u,"
+                                                        "\"xp\":%u,\"maxCrew\":%u,"
+                                                        "\"shipLevel\":%u,\"totalPoints\":%u,\"totalCap\":%u,"
+                                                        "\"nextUpgradeCost\":%u,"
+                                                        "\"attrCaps\":{\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u}"
+                                                        "}",
+                                                        sim_ship->level_stats.levels[SHIP_ATTR_WEIGHT],
+                                                        sim_ship->level_stats.levels[SHIP_ATTR_RESISTANCE],
+                                                        sim_ship->level_stats.levels[SHIP_ATTR_DAMAGE],
+                                                        sim_ship->level_stats.levels[SHIP_ATTR_CREW],
+                                                        sim_ship->level_stats.levels[SHIP_ATTR_STURDINESS],
+                                                        sim_ship->level_stats.xp,
+                                                        (unsigned)ship_level_max_crew(&sim_ship->level_stats),
+                                                        tp, tp, SHIP_LEVEL_TOTAL_POINT_CAP,
+                                                        next_cost,
+                                                        ship_attr_point_cap(SHIP_ATTR_WEIGHT),
+                                                        ship_attr_point_cap(SHIP_ATTR_RESISTANCE),
+                                                        ship_attr_point_cap(SHIP_ATTR_DAMAGE),
+                                                        ship_attr_point_cap(SHIP_ATTR_CREW),
+                                                        ship_attr_point_cap(SHIP_ATTR_STURDINESS));
+                                                }
+                                            }
+
+                                            ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "}");
                                             first_ship = false;
                                         }
                                     }
