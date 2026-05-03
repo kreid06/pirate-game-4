@@ -525,9 +525,9 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                      "{\"type\":\"place_structure_fail\",\"reason\":\"needs_wall_or_ceiling\"}");
             goto ps_send;
         }
-        /* Must also have a same-company floor tile within 3 tile-widths (150 px) */
+        /* Must also have a same-company floor tile within 2 tile-widths (100 px) */
         {
-            const float FLOOR_UNDER_R = 150.0f;
+            const float FLOOR_UNDER_R = 100.0f;
             bool has_floor = false;
             for (uint32_t si = 0; si < placed_structure_count && !has_floor; si++) {
                 if (!placed_structures[si].active) continue;
