@@ -108,49 +108,23 @@ void islands_load_from_files(const char *dir)
             isl->shallow_vertex_count = load_vert_array(shallow, isl->svx, isl->svy);
         }
 
-        /* ── Stone zones ─────────────────────────────────────────────────── */
+        /* ── Stone biome polygon ─────────────────────────────────────────── */
         struct json_object *stone_j = NULL;
-        json_object_object_get_ex(root, "stone_zones", &stone_j);
-        if (stone_j) {
-            int nz = (int)json_object_array_length(stone_j);
-            if (nz > ISLAND_MAX_ZONES) nz = ISLAND_MAX_ZONES;
-            isl->stone_zone_count = 0;
-            for (int zi = 0; zi < nz; zi++) {
-                struct json_object *poly = json_object_array_get_idx(stone_j, zi);
-                int n = load_vert_array_n(poly,
-                    isl->stone_zones[zi].vx, isl->stone_zones[zi].vy,
-                    ISLAND_ZONE_MAX_VERTS);
-                if (n > 0) {
-                    isl->stone_zones[zi].count = n;
-                    isl->stone_zone_count++;
-                }
-            }
-        }
+        json_object_object_get_ex(root, "stone_verts_JSON", &stone_j);
+        if (stone_j)
+            isl->stone_vertex_count = load_vert_array(stone_j, isl->stvx, isl->stvy);
 
-        /* ── Metal zones ─────────────────────────────────────────────────── */
+        /* ── Metal biome polygon ─────────────────────────────────────────── */
         struct json_object *metal_j = NULL;
-        json_object_object_get_ex(root, "metal_zones", &metal_j);
-        if (metal_j) {
-            int nz = (int)json_object_array_length(metal_j);
-            if (nz > ISLAND_MAX_ZONES) nz = ISLAND_MAX_ZONES;
-            isl->metal_zone_count = 0;
-            for (int zi = 0; zi < nz; zi++) {
-                struct json_object *poly = json_object_array_get_idx(metal_j, zi);
-                int n = load_vert_array_n(poly,
-                    isl->metal_zones[zi].vx, isl->metal_zones[zi].vy,
-                    ISLAND_ZONE_MAX_VERTS);
-                if (n > 0) {
-                    isl->metal_zones[zi].count = n;
-                    isl->metal_zone_count++;
-                }
-            }
-        }
+        json_object_object_get_ex(root, "metal_verts_JSON", &metal_j);
+        if (metal_j)
+            isl->metal_vertex_count = load_vert_array(metal_j, isl->mtvx, isl->mtvy);
 
         json_object_put(root);
 
-        log_info("[islands] Loaded island %d from %s (sand=%d grass=%d shallow=%d stone_zones=%d metal_zones=%d)",
+        log_info("[islands] Loaded island %d from %s (sand=%d grass=%d shallow=%d stone=%d metal=%d)",
                  isl->id, path,
                  isl->vertex_count, isl->grass_vertex_count, isl->shallow_vertex_count,
-                 isl->stone_zone_count, isl->metal_zone_count);
+                 isl->stone_vertex_count, isl->metal_vertex_count);
     }
 }

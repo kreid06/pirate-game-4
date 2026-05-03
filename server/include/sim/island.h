@@ -26,16 +26,7 @@
 #define ISLAND_MAX_COUNT      16
 #define ISLAND_BUMP_COUNT     16
 #define ISLAND_MAX_VERTS      128
-#define ISLAND_MAX_ZONES      8     /* max stone/metal zone polygons per island */
-#define ISLAND_ZONE_MAX_VERTS 64    /* max vertices per zone polygon */
 
-/* A single resource-zone polygon (stone or metal).
- * Vertices are island-local offsets in world px (same coord space as vx/vy). */
-typedef struct {
-    int   count;
-    float vx[ISLAND_ZONE_MAX_VERTS];
-    float vy[ISLAND_ZONE_MAX_VERTS];
-} IslandZonePoly;
 
 /* Resource type enum — integer values used internally.
  * res_type_str() converts back to the string expected by the client. */
@@ -142,14 +133,18 @@ typedef struct {
     uint16_t alive_wood[ISLAND_MAX_RESOURCES];
     int      alive_wood_count;
 
-    /* ── Resource zones (loaded from island JSON by island_loader.c) ──────
-     * stone_zones: polygons where RES_ROCK nodes are procedurally placed.
-     * metal_zones: polygons where RES_BOULDER nodes are procedurally placed.
-     * Vertices are island-local offsets in world pixels. */
-    IslandZonePoly stone_zones[ISLAND_MAX_ZONES];
-    int            stone_zone_count;
-    IslandZonePoly metal_zones[ISLAND_MAX_ZONES];
-    int            metal_zone_count;
+    /* ── Stone biome polygon (loaded from island JSON by island_loader.c) ──
+     * RES_ROCK nodes are procedurally placed inside this polygon.
+     * Same coordinate space as gvx/gvy — offsets from island centre. */
+    int   stone_vertex_count;
+    float stvx[ISLAND_MAX_VERTS];
+    float stvy[ISLAND_MAX_VERTS];
+
+    /* ── Metal biome polygon ───────────────────────────────────────────────
+     * RES_BOULDER nodes are procedurally placed inside this polygon. */
+    int   metal_vertex_count;
+    float mtvx[ISLAND_MAX_VERTS];
+    float mtvy[ISLAND_MAX_VERTS];
 } IslandDef;
 
 /**
