@@ -1955,6 +1955,18 @@ export class ClientApplication {
         }
       };
 
+      this.networkManager.onResourceRespawned = (islandId, ri, ox, oy, hp, maxHp) => {
+        const isl = this.renderSystem.getIslands().find(i => i.id === islandId);
+        if (!isl) return;
+        // Prefer index-based lookup; fall back to position match for robustness
+        const res = isl.resources[ri] ?? isl.resources.find(r => Math.abs(r.ox - ox) < 0.5 && Math.abs(r.oy - oy) < 0.5);
+        if (res) {
+          res.hp = hp;
+          res.maxHp = maxHp;
+          res.depletedAt = undefined;
+        }
+      };
+
       // Handle placed structures
       this.networkManager.onStructuresList = (structs) => {
         this.renderSystem.setPlacedStructures(structs);

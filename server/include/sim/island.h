@@ -49,11 +49,12 @@ static inline const char *res_type_str(uint8_t t) {
 }
 
 typedef struct {
-    float   ox, oy;    /* Offset from island centre (world px) */
-    uint8_t type_id;   /* ResType — RES_WOOD / RES_FIBER / RES_ROCK / RES_FOOD */
-    float   size;      /* Size scale: 0.5–1.8 (1.0 = default). Derived from hash of ox/oy. */
-    int     health;    /* Current health */
-    int     max_health;/* Max health (set at init, depends on type) */
+    float    ox, oy;           /* Offset from island centre (world px) */
+    uint8_t  type_id;          /* ResType — RES_WOOD / RES_FIBER / RES_ROCK / RES_FOOD */
+    float    size;             /* Size scale: 0.5–1.8 (1.0 = default). Derived from hash of ox/oy. */
+    int      health;           /* Current health */
+    int      max_health;       /* Max health (set at init, depends on type) */
+    uint32_t respawn_at_ms;    /* Wall-clock ms when this node should respawn (0 = not depleted) */
 } IslandResource;
 
 /* ── Spatial grid for wood (tree) nodes ─────────────────────────────────────
@@ -382,6 +383,12 @@ void islands_build_grid(void);
  * @param ri   Index into isl->resources[].
  */
 void island_mark_tree_dead(IslandDef *isl, int ri);
+
+/**
+ * Restores a wood/tree resource into the alive list and spatial grid.
+ * Call when a depleted tree respawns.
+ */
+void island_mark_tree_alive(IslandDef *isl, int ri);
 
 /**
  * Returns true if the resource at (rx, ry) is allowed to respawn.

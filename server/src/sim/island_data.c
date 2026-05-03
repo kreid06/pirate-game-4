@@ -1092,6 +1092,26 @@ void island_mark_tree_dead(IslandDef *isl, int ri)
     }
 }
 
+void island_mark_tree_alive(IslandDef *isl, int ri)
+{
+    /* Guard: already in alive list? */
+    for (int k = 0; k < isl->alive_wood_count; k++) {
+        if (isl->alive_wood[k] == (uint16_t)ri) return;
+    }
+    /* Append to alive list (cap at MAX_ALIVE_WOOD if defined) */
+    if (isl->alive_wood_count < (int)(sizeof(isl->alive_wood) / sizeof(isl->alive_wood[0]))) {
+        isl->alive_wood[isl->alive_wood_count++] = (uint16_t)ri;
+    }
+    /* Re-insert into spatial grid */
+    int col = (int)((isl->x + isl->resources[ri].ox - isl->grid_ox) / ISLAND_GRID_CELL_PX);
+    int row = (int)((isl->y + isl->resources[ri].oy - isl->grid_oy) / ISLAND_GRID_CELL_PX);
+    if (col < 0 || col >= isl->grid_w || row < 0 || row >= isl->grid_h) return;
+    IslandGridCell *cell = &isl->wood_grid[row][col];
+    if (cell->count < (int)(sizeof(cell->ri) / sizeof(cell->ri[0]))) {
+        cell->ri[cell->count++] = (uint16_t)ri;
+    }
+}
+
 /**
  * Returns true if the resource at world position (rx, ry) may respawn.
  * Suppressed when any active structure is within RESPAWN_SUPPRESS_R px,

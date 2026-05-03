@@ -7436,6 +7436,40 @@ int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id) 
     return -1; // not found
 }
 
+/* ── Resource respawn tick ──────────────────────────────────────────────────
+ * Runs every server tick.  For each depleted resource whose timer has expired
+ * and whose footprint is clear of structures, restore health and broadcast. */
+static void tick_resource_respawn(void)
+{
+    uint32_t now = get_time_ms();
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        IslandDef *isl = &ISLAND_PRESETS[ii];
+        for (int ri = 0; ri < isl->resource_count; ri++) {
+            IslandResource *res = &isl->resources[ri];
+            if (res->health > 0 || res->respawn_at_ms == 0) continue;
+            if (now < res->respawn_at_ms) continue;
+            /* Check no structure is built over this spot */
+            float wx = isl->x + res->ox;
+            float wy = isl->y + res->oy;
+            if (!island_resource_can_respawn(wx, wy, placed_structures, placed_structure_count))
+                continue;
+            /* Restore the node */
+            res->health = res->max_health;
+            res->respawn_at_ms = 0;
+            if (res->type_id == RES_WOOD) {
+                island_mark_tree_alive(isl, ri);
+            }
+            /* Broadcast to all clients */
+            char rmsg[160];
+            snprintf(rmsg, sizeof(rmsg),
+                     "{\"type\":\"resource_respawned\",\"island_id\":%d,\"ri\":%d,"
+                     "\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
+                     isl->id, ri, res->ox, res->oy, res->health, res->max_health);
+            websocket_server_broadcast(rmsg);
+        }
+    }
+}
+
 // HYBRID: Apply movement state to all active players (called every server tick)
 void websocket_server_tick(float dt) {
     uint32_t current_time = get_time_ms();
@@ -8037,6 +8071,9 @@ void websocket_server_tick(float dt) {
 
     // ===== TICK GHOST SHIPS (wander + attack AI) =====
     tick_ghost_ships(dt);
+
+    // ===== TICK RESOURCE RESPAWNS =====
+    tick_resource_respawn();
 
     // ===== ADVANCE CANNON AIM TOWARD DESIRED (turn-speed limit) =====
     // Normal cannons: 60 deg/s.  Ghost ship cannons: 180 deg/s so their swept

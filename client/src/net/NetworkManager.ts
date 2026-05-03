@@ -605,6 +605,8 @@ export class NetworkManager {
   public mapWrap: boolean = true;
   /** Fired when the server broadcasts a resource_damaged event. */
   public onResourceDamaged: ((islandId: number, ox: number, oy: number, hp: number, maxHp: number) => void) | null = null;
+  /** Fired when a depleted resource respawns (resource_respawned event). */
+  public onResourceRespawned: ((islandId: number, ri: number, ox: number, oy: number, hp: number, maxHp: number) => void) | null = null;
 
   /** Fired when the server broadcasts a newly placed structure to all clients. */
   public onStructurePlaced: ((s: PlacedStructure) => void) | null = null;
@@ -2430,18 +2432,20 @@ export class NetworkManager {
       }
 
       case 'ISLANDS': {
+        const now = performance.now();
         const islands: IslandDef[] = (message.islands ?? []).map((isl: any) => ({
           id:        isl.id       ?? 0,
           x:         isl.x       ?? 0,
           y:         isl.y       ?? 0,
           preset:    (isl.preset ?? 'tropical') as IslandPreset,
           resources: (isl.resources ?? []).map((r: any): IslandResource => ({
-            ox:    r.ox    ?? 0,
-            oy:    r.oy    ?? 0,
-            type:  (r.type ?? 'wood') as IslandResource['type'],
-            size:  r.size  ?? 1.0,
-            hp:    r.hp    ?? 100,
-            maxHp: r.maxHp ?? 100,
+            ox:         r.ox    ?? 0,
+            oy:         r.oy    ?? 0,
+            type:       (r.type ?? 'wood') as IslandResource['type'],
+            size:       r.size  ?? 1.0,
+            hp:         r.hp    ?? 100,
+            maxHp:      r.maxHp ?? 100,
+            depletedAt: (r.hp <= 0) ? now : undefined,
           })),
           vertices: isl.vertices
             ? (isl.vertices as any[]).map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 }))
@@ -2464,6 +2468,18 @@ export class NetworkManager {
           message.oy        ?? 0,
           message.hp        ?? 0,
           message.maxHp     ?? 1,
+        );
+        break;
+      }
+
+      case 'resource_respawned': {
+        this.onResourceRespawned?.(
+          message.island_id ?? 0,
+          message.ri        ?? 0,
+          message.ox        ?? 0,
+          message.oy        ?? 0,
+          message.hp        ?? 100,
+          message.maxHp     ?? 100,
         );
         break;
       }

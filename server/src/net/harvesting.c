@@ -8,6 +8,12 @@
 #define HARVEST_RANGE 110.0f      /* world-px, generous for feel */
 #define HARVEST_STAMINA_COST 15u   /* stamina drained per harvest action */
 
+/* Respawn delays per resource type (milliseconds) */
+#define RESPAWN_MS_WOOD    120000u  /* 2 minutes */
+#define RESPAWN_MS_FIBER    60000u  /* 1 minute  */
+#define RESPAWN_MS_ROCK    180000u  /* 3 minutes */
+#define RESPAWN_MS_BOULDER 300000u  /* 5 minutes */
+
 void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* client) {
     char response[256];
 
@@ -92,7 +98,10 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
             const int WOOD_DAMAGE = 10;
             res->health -= WOOD_DAMAGE;
             if (res->health < 0) res->health = 0;
-            if (res->health == 0) island_mark_tree_dead(isl_chop, best_ri);
+            if (res->health == 0) {
+                island_mark_tree_dead(isl_chop, best_ri);
+                res->respawn_at_ms = get_time_ms() + RESPAWN_MS_WOOD;
+            }
             char dmsg[160];
             snprintf(dmsg, sizeof(dmsg),
                      "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
@@ -210,6 +219,7 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
             IslandResource *res = &isl->resources[best_ri];
             res->health -= 10;
             if (res->health < 0) res->health = 0;
+            if (res->health == 0) res->respawn_at_ms = get_time_ms() + RESPAWN_MS_FIBER;
             char dmsg[160];
             snprintf(dmsg, sizeof(dmsg),
                      "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
@@ -325,6 +335,7 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
             IslandResource *res = &isl->resources[best_ri];
             res->health -= 10;
             if (res->health < 0) res->health = 0;
+            if (res->health == 0) res->respawn_at_ms = get_time_ms() + RESPAWN_MS_ROCK;
             char dmsg[160];
             snprintf(dmsg, sizeof(dmsg),
                      "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
@@ -513,6 +524,7 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
             const int BOULDER_DAMAGE = 20;
             res->health -= BOULDER_DAMAGE;
             if (res->health < 0) res->health = 0;
+            if (res->health == 0) res->respawn_at_ms = get_time_ms() + RESPAWN_MS_BOULDER;
             char dmsg[160];
             snprintf(dmsg, sizeof(dmsg),
                      "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
