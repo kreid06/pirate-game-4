@@ -22,6 +22,34 @@ static bool occ_taken_by_other(const NpcOccEntry* buf, int cnt,
 }
 
 /**
+ * Allocate a slot in the world_npcs array.
+ * Reuses the first inactive slot if one exists, otherwise appends.
+ * Returns a pointer to a zeroed slot ready to be filled, or NULL if the
+ * hard cap is reached.  Trims world_npc_count from the tail after a slot
+ * is freed so the active count stays accurate.
+ */
+static WorldNpc* npc_alloc_slot(void)
+{
+    /* Trim trailing inactive slots so world_npc_count reflects live entries */
+    while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
+        world_npc_count--;
+
+    /* Reuse an inactive slot in the middle */
+    for (int i = 0; i < world_npc_count; i++) {
+        if (!world_npcs[i].active) {
+            memset(&world_npcs[i], 0, sizeof(WorldNpc));
+            return &world_npcs[i];
+        }
+    }
+
+    /* Append */
+    if (world_npc_count >= MAX_WORLD_NPCS) return NULL;
+    WorldNpc* slot = &world_npcs[world_npc_count++];
+    memset(slot, 0, sizeof(WorldNpc));
+    return slot;
+}
+
+/**
  * Compute the ship-local stand position (client units) for an NPC interacting
  * with a module.  Each module type gets a type-aware offset so NPCs stand
  * beside or behind the module rather than walking into its visual centre.
@@ -215,10 +243,6 @@ void handle_crew_assign(uint16_t ship_id, uint16_t npc_id, const char* task) {
  * Returns the new NPC id, or 0 on failure.
  */
 uint32_t spawn_ship_crew(uint16_t ship_id, const char* name) {
-    if (world_npc_count >= MAX_WORLD_NPCS) {
-        log_warn("spawn_ship_crew: MAX_WORLD_NPCS reached");
-        return 0;
-    }
     SimpleShip* ship = find_ship(ship_id);
     if (!ship) {
         log_warn("spawn_ship_crew: ship %u not found", ship_id);
@@ -240,8 +264,12 @@ uint32_t spawn_ship_crew(uint16_t ship_id, const char* name) {
             }
         }
     }
-    WorldNpc* npc = &world_npcs[world_npc_count++];
-    memset(npc, 0, sizeof(WorldNpc));
+    /* Trim + reuse inactive slots before checking global cap */
+    WorldNpc* npc = npc_alloc_slot();
+    if (!npc) {
+        log_warn("spawn_ship_crew: MAX_WORLD_NPCS reached");
+        return 0;
+    }
     npc->id             = next_world_npc_id++;
     npc->active         = true;
     npc->role           = NPC_ROLE_NONE;  /* assigned dynamically by manning panel */
@@ -285,7 +313,8 @@ uint32_t spawn_ship_crew(uint16_t ship_id, const char* name) {
  * index 0-2 produces a scatter offset so they don't all stack.
  * ========================================================================= */
 uint32_t spawn_unclaimed_npc(float wx, float wy, int index) {
-    if (world_npc_count >= MAX_WORLD_NPCS) {
+    WorldNpc* npc = npc_alloc_slot();
+    if (!npc) {
         log_warn("spawn_unclaimed_npc: MAX_WORLD_NPCS reached");
         return 0;
     }
@@ -300,8 +329,6 @@ uint32_t spawn_unclaimed_npc(float wx, float wy, int index) {
     float ox = OFFSETS_X[index < 3 ? index : 0];
     float oy = OFFSETS_Y[index < 3 ? index : 0];
 
-    WorldNpc* npc = &world_npcs[world_npc_count++];
-    memset(npc, 0, sizeof(WorldNpc));
     npc->id              = next_world_npc_id++;
     npc->active          = true;
     npc->role            = NPC_ROLE_NONE;
@@ -335,6 +362,9 @@ uint32_t spawn_unclaimed_npc(float wx, float wy, int index) {
  */
 void tick_world_npcs(float dt) {
     g_npcs_dirty = true; // NPCs ticked this frame — JSON must be rebuilt
+    /* Trim trailing inactive slots so world_npc_count stays accurate */
+    while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
+        world_npc_count--;
     // Plank centre positions in client-space local coords (match HULL_POINTS in modules.ts)
     // Order: bow_port, bow_starboard, 3× starboard, stern_starboard, stern_port, 3× port
     static const float s_plank_cx[10] = {

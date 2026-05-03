@@ -5754,11 +5754,6 @@ int websocket_server_update(struct Sim* sim) {
                                         "\"success\":false,"
                                         "\"text\":\"Unknown entity '%s'. Known: crewmember\"}",
                                         cmd_arg1);
-                                } else if (world_npc_count >= MAX_WORLD_NPCS) {
-                                    snprintf(response, sizeof(response),
-                                        "{\"type\":\"command_response\","
-                                        "\"success\":false,"
-                                        "\"text\":\"Cannot spawn: NPC cap reached.\"}");
                                 } else {
                                     /* Resolve company (default neutral) */
                                     uint8_t spawn_company = 0;
@@ -5770,8 +5765,23 @@ int websocket_server_update(struct Sim* sim) {
                                     float sx = issuer ? issuer->x : 0.0f;
                                     float sy = issuer ? issuer->y : 0.0f;
 
-                                    /* Spawn free-standing crewmember at that position */
-                                    WorldNpc *npc = &world_npcs[world_npc_count++];
+                                    /* Trim trailing inactive slots then reuse or append */
+                                    while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
+                                        world_npc_count--;
+                                    WorldNpc *npc = NULL;
+                                    for (int _si = 0; _si < world_npc_count; _si++) {
+                                        if (!world_npcs[_si].active) { npc = &world_npcs[_si]; break; }
+                                    }
+                                    if (!npc) {
+                                        if (world_npc_count >= MAX_WORLD_NPCS) {
+                                            snprintf(response, sizeof(response),
+                                                "{\"type\":\"command_response\","
+                                                "\"success\":false,"
+                                                "\"text\":\"Cannot spawn: NPC cap reached.\"}");
+                                            goto spawn_npc_done;
+                                        }
+                                        npc = &world_npcs[world_npc_count++];
+                                    }
                                     memset(npc, 0, sizeof(WorldNpc));
                                     npc->id              = next_world_npc_id++;
                                     npc->active          = true;
@@ -5809,6 +5819,7 @@ int websocket_server_update(struct Sim* sim) {
                                         "\"text\":\"Spawned crewmember (id %u) [%s] at your location.\"}",
                                         npc->id, cname);
                                 }
+                                spawn_npc_done:;
 
                             } else if (strcmp(cmd_name, "tpplayerto") == 0) {
                                 /* /TpPlayerTo <playername> <x> <y>
