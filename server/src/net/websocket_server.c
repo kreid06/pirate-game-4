@@ -8249,7 +8249,8 @@ void websocket_server_tick(float dt) {
                      * Cancel sprint immediately if stamina hits 0. */
                     {
                         const float SPRINT_DRAIN_PER_S = 40.0f;
-                        const float STAMINA_REGEN_PER_S = 20.0f;
+                        /* Regen at 20% of max_stamina per second — scales with upgrades */
+                        const float STAMINA_REGEN_PCT_PER_S = 0.20f;
                         const uint32_t STAMINA_REGEN_DELAY_MS = 2000u;
                         uint32_t now_st = get_time_ms();
                         if (ws_player->is_sprinting && ws_player->is_moving) {
@@ -8263,7 +8264,9 @@ void websocket_server_tick(float dt) {
                             ws_player->stamina_last_used_ms = now_st;
                         } else if (ws_player->stamina < ws_player->max_stamina
                                    && (now_st - ws_player->stamina_last_used_ms) >= STAMINA_REGEN_DELAY_MS) {
-                            uint16_t gain = (uint16_t)(STAMINA_REGEN_PER_S * dt + 0.5f);
+                            float regen_per_s = STAMINA_REGEN_PCT_PER_S * (float)ws_player->max_stamina;
+                            uint16_t gain = (uint16_t)(regen_per_s * dt + 0.5f);
+                            if (gain < 1) gain = 1; /* always regen at least 1 per tick */
                             uint32_t newSt = (uint32_t)ws_player->stamina + gain;
                             ws_player->stamina = (newSt > ws_player->max_stamina)
                                 ? ws_player->max_stamina : (uint16_t)newSt;
