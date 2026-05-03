@@ -49,7 +49,7 @@ const LAYERS: LayerDef[] = [
   { key: 'waterZone',    label: '💧 Water',   fill: 'rgba(30,144,255,0.35)',  stroke: '#1e8fff', multi: true  },
   { key: 'sandPatch',    label: '🏝 Patch',   fill: 'rgba(200,180,100,0.35)', stroke: '#c8b464', multi: true  },
   { key: 'stoneZone',    label: '⛰ Stone',   fill: 'rgba(130,100,70,0.40)',  stroke: '#a07840', multi: true },
-  { key: 'metalZone',    label: '⚙ Metal',   fill: 'rgba(70,110,140,0.40)',  stroke: '#5090b0', multi: true },
+  { key: 'metalZone',    label: '⚙ Metal',   fill: 'rgba(130,100,70,0.40)',  stroke: '#a07840', multi: true },
 ];
 
 const VERTEX_RADIUS = 6;

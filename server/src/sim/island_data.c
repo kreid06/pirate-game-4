@@ -895,7 +895,7 @@ void islands_generate_zone_resources(void)
             log_info("[islands] Island %d stone biome poly %d: placed %d rock nodes", isl->id, pi, added);
         }
 
-        /* ── Metal biome → RES_BOULDER ─────────────────────────────── */
+        /* ── Metal biome → 50% RES_ROCK + 50% RES_BOULDER ──────────── */
         for (int pi = 0; pi < isl->metal_poly_count; pi++) {
             if (isl->metal_vc[pi] < 3) continue;
             float bx0, by0, bx1, by1;
@@ -906,6 +906,7 @@ void islands_generate_zone_resources(void)
             unsigned int seed = (unsigned int)((unsigned int)isl->id * 2246822519u)
                                 + (unsigned int)(pi * 7654321u);
             int added = 0;
+            int toggle = 0; /* alternates 0=RES_BOULDER, 1=RES_ROCK */
             for (float gx = bx0; gx <= bx1 && isl->resource_count < ISLAND_MAX_RESOURCES; gx += METAL_ZONE_SPACING) {
                 for (float gy = by0; gy <= by1 && isl->resource_count < ISLAND_MAX_RESOURCES; gy += METAL_ZONE_SPACING) {
                     seed = seed * 1664525u + 1013904223u;
@@ -916,18 +917,20 @@ void islands_generate_zone_resources(void)
                     if (!inside_biome_poly(isl->x, isl->y,
                                           isl->metal_vx[pi], isl->metal_vy[pi],
                                           isl->metal_vc[pi], wx, wy)) continue;
+                    ResType rtype = (toggle & 1) ? RES_ROCK : RES_BOULDER;
+                    toggle++;
                     IslandResource *r = &isl->resources[isl->resource_count];
                     r->ox         = wx - isl->x;
                     r->oy         = wy - isl->y;
-                    r->type_id    = RES_BOULDER;
+                    r->type_id    = rtype;
                     r->size       = resource_size_from_offset(r->ox, r->oy);
-                    r->max_health = resource_max_health(RES_BOULDER);
+                    r->max_health = resource_max_health(rtype);
                     r->health     = r->max_health;
                     isl->resource_count++;
                     added++;
                 }
             }
-            log_info("[islands] Island %d metal biome poly %d: placed %d boulder nodes", isl->id, pi, added);
+            log_info("[islands] Island %d metal biome poly %d: placed %d mixed nodes", isl->id, pi, added);
         }
     }
 }
