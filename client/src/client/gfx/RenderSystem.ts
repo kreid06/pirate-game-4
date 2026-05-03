@@ -3877,6 +3877,70 @@ export class RenderSystem {
     const ctx  = this.ctx;
     const zoom = camera.getState().zoom;
 
+    // ── Faded ceiling IDs (player's current building) ────────────────────────
+    // Computed first so hover detection can use it for ceiling occlusion.
+    const _fadedCeilingIds = new Set<number>();
+    {
+      const lp = this._cachedLocalPlayer;
+      if (lp && lp.carrierId === 0 && lp.onIslandId > 0) {
+        const px = lp.position.x, py = lp.position.y;
+        const HALF_T = 25;
+        const ADJ   = 55;
+        const allFloors = this.placedStructures.filter(f => f.type === 'wooden_floor');
+        let startFloor: PlacedStructure | null = null;
+        for (const f of allFloors) {
+          const fr = (f.rotation ?? 0) * Math.PI / 180;
+          const fc = Math.cos(-fr), fs = Math.sin(-fr);
+          const lx = (px - f.x) * fc - (py - f.y) * fs;
+          const ly = (px - f.x) * fs + (py - f.y) * fc;
+          if (Math.abs(lx) <= HALF_T && Math.abs(ly) <= HALF_T) { startFloor = f; break; }
+        }
+        if (startFloor !== null) {
+          const connectedFloorIds = new Set<number>([startFloor.id]);
+          const floorQueue: PlacedStructure[] = [startFloor];
+          while (floorQueue.length > 0) {
+            const cur = floorQueue.shift()!;
+            for (const f of allFloors) {
+              if (connectedFloorIds.has(f.id)) continue;
+              const dx = f.x - cur.x, dy = f.y - cur.y;
+              if (Math.sqrt(dx * dx + dy * dy) <= ADJ) {
+                connectedFloorIds.add(f.id);
+                floorQueue.push(f);
+              }
+            }
+          }
+          const connectedFloors = allFloors.filter(f => connectedFloorIds.has(f.id));
+          const ceilings = this.placedStructures.filter(c => c.type === 'wood_ceiling');
+          let startCeil: PlacedStructure | null = null;
+          outer:
+          for (const c of ceilings) {
+            const cr = (c.rotation ?? 0) * Math.PI / 180;
+            const cc = Math.cos(-cr), cs = Math.sin(-cr);
+            for (const f of connectedFloors) {
+              const lx = (f.x - c.x) * cc - (f.y - c.y) * cs;
+              const ly = (f.x - c.x) * cs + (f.y - c.y) * cc;
+              if (Math.abs(lx) <= HALF_T && Math.abs(ly) <= HALF_T) { startCeil = c; break outer; }
+            }
+          }
+          if (startCeil !== null) {
+            const ceilQueue: PlacedStructure[] = [startCeil];
+            _fadedCeilingIds.add(startCeil.id);
+            while (ceilQueue.length > 0) {
+              const cur = ceilQueue.shift()!;
+              for (const c of ceilings) {
+                if (_fadedCeilingIds.has(c.id)) continue;
+                const dx = c.x - cur.x, dy = c.y - cur.y;
+                if (Math.sqrt(dx * dx + dy * dy) <= ADJ) {
+                  _fadedCeilingIds.add(c.id);
+                  ceilQueue.push(c);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
     // ── Update hovered structure ──────────────────────────────────────────────
     // Highlight whichever structure the mouse cursor is over (AABB for floor,
     // landscape rect for workbench).  Interaction hints additionally require
@@ -3937,6 +4001,30 @@ export class RenderSystem {
         }
       }
       if (this._hoveredStructure === null) this._hoveredStructure = floorHit;
+
+      // ── Ceiling occlusion: suppress hover if mouse is under an opaque ceiling ──
+      // If the mouse world position is inside a ceiling tile that is NOT faded
+      // (i.e. the player is outside that building), don't highlight anything below.
+      if (this._hoveredStructure !== null && this._hoveredStructure.type !== 'wood_ceiling') {
+        const HALF_T = 25;
+        for (const c of this.placedStructures) {
+          if (c.type !== 'wood_ceiling') continue;
+          if (_fadedCeilingIds.has(c.id)) continue; // faded = player is inside, hover allowed
+          const cr = (c.rotation ?? 0) * Math.PI / 180;
+          let clx: number, cly: number;
+          if (cr === 0) {
+            clx = mx - c.x; cly = my - c.y;
+          } else {
+            const cc2 = Math.cos(-cr), cs2 = Math.sin(-cr);
+            clx = (mx - c.x) * cc2 - (my - c.y) * cs2;
+            cly = (mx - c.x) * cs2 + (my - c.y) * cc2;
+          }
+          if (Math.abs(clx) <= HALF_T && Math.abs(cly) <= HALF_T) {
+            this._hoveredStructure = null;
+            break;
+          }
+        }
+      }
     }
 
     // Floors first, then walls/doors, then workbenches/shipyards
@@ -3945,83 +4033,6 @@ export class RenderSystem {
         t === 'wooden_floor' ? 0 : (t === 'wall' || t === 'door_frame') ? 1 : t === 'door' ? 1.5 : t === 'shipyard' ? 1.8 : 2;
       return order(a.type) - order(b.type);
     });
-
-    // BFS: fade ceiling tiles belonging to the same building the local player is walking in.
-    // Algorithm:
-    //   1. Find the wooden_floor tile under the player.
-    //   2. BFS all connected floor tiles (same building).
-    //   3. Find any ceiling tile whose centre aligns with one of those floor tiles.
-    //   4. BFS all connected ceiling tiles from there.
-    // Guards: carrierId===0 (on island, not ship) AND onIslandId>0 (real server state received).
-    const _fadedCeilingIds = new Set<number>();
-    {
-      const lp = this._cachedLocalPlayer;
-      if (lp && lp.carrierId === 0 && lp.onIslandId > 0) {
-        const px = lp.position.x, py = lp.position.y;
-        const HALF_T = 25;
-        const ADJ   = 55; // adjacency threshold (50px tile + slack)
-
-        // Step 1: floor tile under player
-        const allFloors = this.placedStructures.filter(f => f.type === 'wooden_floor');
-        let startFloor: PlacedStructure | null = null;
-        for (const f of allFloors) {
-          const fr = (f.rotation ?? 0) * Math.PI / 180;
-          const fc = Math.cos(-fr), fs = Math.sin(-fr);
-          const lx = (px - f.x) * fc - (py - f.y) * fs;
-          const ly = (px - f.x) * fs + (py - f.y) * fc;
-          if (Math.abs(lx) <= HALF_T && Math.abs(ly) <= HALF_T) { startFloor = f; break; }
-        }
-
-        if (startFloor !== null) {
-          // Step 2: BFS connected floor tiles
-          const connectedFloorIds = new Set<number>([startFloor.id]);
-          const floorQueue: PlacedStructure[] = [startFloor];
-          while (floorQueue.length > 0) {
-            const cur = floorQueue.shift()!;
-            for (const f of allFloors) {
-              if (connectedFloorIds.has(f.id)) continue;
-              const dx = f.x - cur.x, dy = f.y - cur.y;
-              if (Math.sqrt(dx * dx + dy * dy) <= ADJ) {
-                connectedFloorIds.add(f.id);
-                floorQueue.push(f);
-              }
-            }
-          }
-          const connectedFloors = allFloors.filter(f => connectedFloorIds.has(f.id));
-
-          // Step 3: find a ceiling tile above any connected floor tile
-          const ceilings = this.placedStructures.filter(c => c.type === 'wood_ceiling');
-          let startCeil: PlacedStructure | null = null;
-          outer:
-          for (const c of ceilings) {
-            const cr = (c.rotation ?? 0) * Math.PI / 180;
-            const cc = Math.cos(-cr), cs = Math.sin(-cr);
-            for (const f of connectedFloors) {
-              const lx = (f.x - c.x) * cc - (f.y - c.y) * cs;
-              const ly = (f.x - c.x) * cs + (f.y - c.y) * cc;
-              if (Math.abs(lx) <= HALF_T && Math.abs(ly) <= HALF_T) { startCeil = c; break outer; }
-            }
-          }
-
-          // Step 4: BFS connected ceiling tiles
-          if (startCeil !== null) {
-            const ceilQueue: PlacedStructure[] = [startCeil];
-            _fadedCeilingIds.add(startCeil.id);
-            while (ceilQueue.length > 0) {
-              const cur = ceilQueue.shift()!;
-              for (const c of ceilings) {
-                if (_fadedCeilingIds.has(c.id)) continue;
-                const dx = c.x - cur.x, dy = c.y - cur.y;
-                if (Math.sqrt(dx * dx + dy * dy) <= ADJ) {
-                  _fadedCeilingIds.add(c.id);
-                  ceilQueue.push(c);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
 
     for (const s of sorted) {
       const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));

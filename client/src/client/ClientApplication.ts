@@ -3799,8 +3799,16 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
+                  const _demolishLabel =
+                    struct.type === 'wood_ceiling' ? 'Demolish Ceiling'
+                    : struct.type === 'wall'        ? 'Demolish Wall'
+                    : struct.type === 'door_frame'  ? 'Demolish Door Frame'
+                    : struct.type === 'door'        ? 'Demolish Door'
+                    : struct.type === 'workbench'   ? 'Demolish Workbench'
+                    : struct.type === 'shipyard'    ? 'Demolish Shipyard'
+                    : 'Demolish Floor';
                   this._radialMenu.open(mp2.x, mp2.y, [
-                    { id: 'demolish', label: 'Demolish Floor' },
+                    { id: 'demolish', label: _demolishLabel },
                   ]);
                 }, 600);
               }
