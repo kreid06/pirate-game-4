@@ -416,6 +416,10 @@ typedef struct WebSocketPlayer {
     uint16_t health;             // Current HP (0 = dead)
     uint16_t max_health;         // Max HP (default 100)
 
+    // Stamina pool — drained by sprinting, attacking, and harvesting; regens when idle
+    uint16_t stamina;            // Current stamina (0–max_stamina)
+    uint16_t max_stamina;        // Max stamina (base 100 + 10 * stat_stamina)
+
     // Player XP / levelling (mirrors WorldNpc system)
     uint8_t  player_level;       // 1–120
     uint32_t player_xp;          // accumulated XP

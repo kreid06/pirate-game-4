@@ -2071,6 +2071,8 @@ export class NetworkManager {
             companyId: player.company ?? 0,
             health: player.health ?? 100,
             maxHealth: player.max_health ?? 100,
+            stamina: player.stamina ?? undefined,
+            maxStamina: player.max_stamina ?? 100,
             onIslandId: player.on_island ?? 0,
             level: player.player_level ?? 1,
             xp: player.player_xp ?? 0,

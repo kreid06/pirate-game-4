@@ -1188,6 +1188,8 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].movement_state = PLAYER_STATE_SWIMMING;
             players[i].health = 100;
             players[i].max_health = 100;
+            players[i].stamina = 100;
+            players[i].max_stamina = 100;
             players[i].player_level = 1;
             players[i].player_xp = 0;
             players[i].stat_health = 0;
@@ -1972,6 +1974,10 @@ int websocket_server_update(struct Sim* sim) {
 
                                     // Restore persistent data (position, XP, inventory, etc.)
                                     bool resumed = load_player_from_file(player);
+
+                                    // Re-derive max_stamina from loaded stat_stamina
+                                    player->max_stamina = (uint16_t)(100u + 10u * (uint32_t)player->stat_stamina);
+                                    player->stamina     = player->max_stamina; // always full on login
 
                                     // If position was restored, sync the sim entity position too
                                     if (resumed && global_sim && player->sim_entity_id != 0) {
@@ -2992,6 +2998,14 @@ int websocket_server_update(struct Sim* sim) {
                                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"sword_cooldown\"}");
                                                     goto sword_attack_done;
                                                 }
+                                                /* Stamina check — attacks cost 25 ST */
+                                                const uint16_t SWORD_STAMINA_COST = 25u;
+                                                if (player->stamina < SWORD_STAMINA_COST) {
+                                                    log_info("⚔️  Player %u attack rejected: no stamina (%u)", player->player_id, player->stamina);
+                                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_stamina\"}");
+                                                    goto sword_attack_done;
+                                                }
+                                                player->stamina -= SWORD_STAMINA_COST;
                                                 player->sword_last_attack_ms = now_ms;
 
                                                 const float SWORD_RANGE  = 45.0f;
@@ -6953,7 +6967,9 @@ int websocket_server_update(struct Sim* sim) {
                         "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
                         "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\","
                         "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
-                        "\"company\":%u,\"health\":%u,\"max_health\":%u,\"on_island\":%u,"
+                        "\"company\":%u,\"health\":%u,\"max_health\":%u,"
+                        "\"stamina\":%u,\"max_stamina\":%u,"
+                        "\"on_island\":%u,"
                         "\"player_level\":%u,\"player_xp\":%u,"
                         "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
                         "\"stat_points\":%u%s}",
@@ -6969,6 +6985,7 @@ int websocket_server_update(struct Sim* sim) {
                         players[p].controlling_ship_id,
                         players[p].company_id,
                         players[p].health, players[p].max_health,
+                        players[p].stamina, players[p].max_stamina,
                         players[p].on_island_id,
                         (unsigned)players[p].player_level,
                         (unsigned)players[p].player_xp,
@@ -8176,6 +8193,31 @@ void websocket_server_tick(float dt) {
                     ws_player->is_moving = false;
                     ws_player->movement_direction_x = 0.0f;
                     ws_player->movement_direction_y = 0.0f;
+                } else {
+                    /* ── Stamina drain (sprint) / regen ─────────────────────────────────
+                     * Drain 40 ST/s while sprinting, regen 20 ST/s otherwise.
+                     * Cancel sprint immediately if stamina hits 0. */
+                    {
+                        const float SPRINT_DRAIN_PER_S = 40.0f;
+                        const float STAMINA_REGEN_PER_S = 20.0f;
+                        if (ws_player->is_sprinting && ws_player->is_moving) {
+                            uint16_t drain = (uint16_t)(SPRINT_DRAIN_PER_S * dt + 0.5f);
+                            if (drain >= ws_player->stamina) {
+                                ws_player->stamina = 0;
+                                ws_player->is_sprinting = false; /* cancel sprint */
+                            } else {
+                                ws_player->stamina -= drain;
+                            }
+                        } else if (ws_player->stamina < ws_player->max_stamina) {
+                            uint16_t gain = (uint16_t)(STAMINA_REGEN_PER_S * dt + 0.5f);
+                            uint32_t newSt = (uint32_t)ws_player->stamina + gain;
+                            ws_player->stamina = (newSt > ws_player->max_stamina)
+                                ? ws_player->max_stamina : (uint16_t)newSt;
+                        }
+                    }
+                }
+                if (ws_player->health == 0) {
+                    /* already handled above — no-op block to keep else-chain correct */
                 } else if (ws_player->is_mounted) {
                     // Mounted players stay at their mount position
                     // Their world position still updates as the ship moves/rotates

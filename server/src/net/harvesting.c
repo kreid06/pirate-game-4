@@ -4,7 +4,8 @@
 #include <sys/socket.h>
 #include "net/harvesting.h"
 
-#define HARVEST_RANGE 110.0f   /* world-px, generous for feel */
+#define HARVEST_RANGE 110.0f      /* world-px, generous for feel */
+#define HARVEST_STAMINA_COST 15u   /* stamina drained per harvest action */
 
 void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* client) {
     char response[256];
@@ -28,6 +29,14 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
             goto send_and_ret;
         }
     }
+
+    /* Stamina check */
+    if (player->stamina < HARVEST_STAMINA_COST) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_failure\",\"reason\":\"no_stamina\"}");
+        goto send_and_ret;
+    }
+    player->stamina -= HARVEST_STAMINA_COST;
 
     /* Find the island definition */
     const IslandDef *isl = NULL;
@@ -262,6 +271,14 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
         }
     }
 
+    /* Stamina check */
+    if (player->stamina < HARVEST_STAMINA_COST) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_rock_failure\",\"reason\":\"no_stamina\"}");
+        goto send_rock_ret;
+    }
+    player->stamina -= HARVEST_STAMINA_COST;
+
     {
         const IslandDef *isl = NULL;
         for (int i = 0; i < ISLAND_COUNT; i++) {
@@ -439,6 +456,14 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
             goto send_boulder_ret;
         }
     }
+
+    /* Stamina check */
+    if (player->stamina < HARVEST_STAMINA_COST) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"harvest_boulder_failure\",\"reason\":\"no_stamina\"}");
+        goto send_boulder_ret;
+    }
+    player->stamina -= HARVEST_STAMINA_COST;
 
     {
         const IslandDef *isl = NULL;
