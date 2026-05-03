@@ -364,6 +364,11 @@ export class ClientApplication {
       this.networkManager.onModuleMountFailure = (reason) => {
         this.handleModuleMountFailure(reason);
       };
+      this.networkManager.onIslandCannonMounted = (structureId, _aimAngle, _reloadMs) => {
+        console.log(`🎯 [ISLAND CANNON] Mounted to island cannon ${structureId}`);
+        // Reuse ship-cannon input path: no shipId, module kind='CANNON', moduleId=structureId
+        this.inputManager?.setMountState(true, undefined, 'CANNON', structureId);
+      };
       this.networkManager.onModuleDestroyed = (shipId, moduleId, damage, hitX, hitY) => {
         // Spawn a kill damage number at the hit location
         // Prefer server-provided hit coords; fall back to module world position
@@ -1011,6 +1016,11 @@ export class ClientApplication {
             const hovered = this.renderSystem.getHoveredStructure();
             if (hovered?.type === 'workbench' || hovered?.type === 'shipyard') {
               console.log(`⚒ [INTERACT] Sending structure_interact for ${hovered.type} ${hovered.id}`);
+              this.networkManager.sendStructureInteract(hovered.id);
+              return;
+            }
+            if (hovered?.type === 'cannon') {
+              console.log(`🎯 [INTERACT] Sending structure_interact for island cannon ${hovered.id}`);
               this.networkManager.sendStructureInteract(hovered.id);
               return;
             }

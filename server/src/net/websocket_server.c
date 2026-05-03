@@ -3354,6 +3354,13 @@ int websocket_server_update(struct Sim* sim) {
                                              active_group_count > 2 ? ",..." : "");
                                     handle_cannon_aim(player, aim_angle, active_groups, active_group_count);
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"aim_updated\"}");
+                                } else if (player && player->mounted_cannon_structure_id != 0) {
+                                    /* Island cannon aim */
+                                    float aim_angle = 0.0f;
+                                    char* angle_start = strstr(payload, "\"aim_angle\":");
+                                    if (angle_start) sscanf(angle_start + 12, "%f", &aim_angle);
+                                    handle_island_cannon_aim(player, aim_angle);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"aim_updated\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 }
@@ -3416,6 +3423,14 @@ int websocket_server_update(struct Sim* sim) {
                                                        explicit_count > 0 ? explicit_ids : NULL,
                                                        explicit_count,
                                                        freefire);
+                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"cannons_fired\"}");
+                                } else if (player && player->mounted_cannon_structure_id != 0) {
+                                    /* Island cannon fire */
+                                    uint8_t ammo_type = PROJ_TYPE_CANNONBALL;
+                                    char* at = strstr(payload, "\"ammo_type\":");
+                                    if (at) ammo_type = (uint8_t)atoi(at + 12);
+                                    if (ammo_type > 1) ammo_type = PROJ_TYPE_CANNONBALL;
+                                    handle_island_cannon_fire(player, ammo_type);
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"cannons_fired\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
@@ -8126,6 +8141,19 @@ void websocket_server_tick(float dt) {
 
     // ===== TICK RESOURCE RESPAWNS =====
     tick_resource_respawn();
+
+    // ===== TICK ISLAND CANNON RELOAD TIMERS =====
+    {
+        uint32_t tick_ms = (uint32_t)(dt * 1000.0f + 0.5f);
+        for (uint32_t _csi = 0; _csi < placed_structure_count; _csi++) {
+            PlacedStructure* _cs = &placed_structures[_csi];
+            if (!_cs->active || _cs->type != STRUCT_CANNON) continue;
+            if (_cs->cannon_reload_ms > 0) {
+                _cs->cannon_reload_ms = (_cs->cannon_reload_ms > tick_ms)
+                    ? _cs->cannon_reload_ms - tick_ms : 0;
+            }
+        }
+    }
 
     // ===== ADVANCE CANNON AIM TOWARD DESIRED (turn-speed limit) =====
     // Normal cannons: 60 deg/s.  Ghost ship cannons: 180 deg/s so their swept

@@ -11,6 +11,7 @@
 #include "net/websocket_protocol.h"
 #include "net/structures.h"
 #include "net/dock_physics.h"
+#include "net/cannon_fire.h"
 #include "sim/island.h"
 
 /* ── Island structure placement ─────────────────────────────────────────────
@@ -786,6 +787,52 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
                      sid, placed_structures[i].open ? "true" : "false");
             websocket_server_broadcast(bcast);
             return; /* broadcast sent, no per-client response needed */
+        }
+        if (placed_structures[i].type == STRUCT_CANNON) {
+            /* Company check: must be same company or neutral */
+            if (placed_structures[i].company_id != 0 &&
+                player->company_id != 0 &&
+                placed_structures[i].company_id != player->company_id) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"structure_interact_fail\",\"reason\":\"wrong_company\"}");
+                goto si_send;
+            }
+            /* Occupancy check: another player is already on this cannon */
+            if (placed_structures[i].cannon_mounted_player_id != 0 &&
+                placed_structures[i].cannon_mounted_player_id != player->player_id) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"structure_interact_fail\",\"reason\":\"occupied\"}");
+                goto si_send;
+            }
+            /* Mount the player to the cannon */
+            placed_structures[i].cannon_mounted_player_id = player->player_id;
+            player->is_mounted = true;
+            player->mounted_cannon_structure_id = placed_structures[i].id;
+            /* Position player 25 px behind barrel (barrel faces in direction of cannon_aim_angle) */
+            {
+                const float MOUNT_DIST = 25.0f;
+                float aim = placed_structures[i].cannon_aim_angle;
+                player->x = placed_structures[i].x - cosf(aim) * MOUNT_DIST;
+                player->y = placed_structures[i].y - sinf(aim) * MOUNT_DIST;
+            }
+            log_info("🎯 Player %u mounted to island cannon %u at (%.1f,%.1f)",
+                     player->player_id, placed_structures[i].id, player->x, player->y);
+            /* Broadcast mount event */
+            {
+                char bcast[160];
+                snprintf(bcast, sizeof(bcast),
+                         "{\"type\":\"player_mounted\",\"player_id\":%u,"
+                         "\"structure_id\":%u,\"is_island_cannon\":true}",
+                         player->player_id, placed_structures[i].id);
+                websocket_server_broadcast(bcast);
+            }
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"island_cannon_mounted\",\"structure_id\":%u,"
+                     "\"aim_angle\":%.4f,\"reload_ms\":%u}",
+                     placed_structures[i].id,
+                     placed_structures[i].cannon_aim_angle,
+                     placed_structures[i].cannon_reload_ms);
+            goto si_send;
         }
         snprintf(response, sizeof(response),
                  "{\"type\":\"structure_interact_fail\",\"reason\":\"not_interactive\"}");

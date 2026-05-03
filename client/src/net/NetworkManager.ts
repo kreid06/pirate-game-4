@@ -567,6 +567,9 @@ export class NetworkManager {
   public onCannonFireEvent: ((cannonId: number, shipId: number, x: number, y: number,
     angle: number, projectileId: number, ammoType: number) => void) | null = null;
 
+  /** Fired when the server confirms the player has mounted an island cannon structure. */
+  public onIslandCannonMounted: ((structureId: number, aimAngle: number, reloadMs: number) => void) | null = null;
+
   public onEntityHit: ((entityType: 'npc' | 'player', id: number, x: number, y: number,
     damage: number, health: number, maxHealth: number, killed: boolean, killerShipId: number) => void) | null = null;
   /** Fired when liquid flame ignites an entity or wooden module. */
@@ -2693,6 +2696,15 @@ export class NetworkManager {
           message.angle       ?? 0,
           message.projectileId ?? 0,
           message.ammoType    ?? 0,
+        );
+        break;
+      }
+
+      case 'island_cannon_mounted': {
+        this.onIslandCannonMounted?.(
+          message.structure_id ?? 0,
+          message.aim_angle    ?? 0,
+          message.reload_ms    ?? 0,
         );
         break;
       }

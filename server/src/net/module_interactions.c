@@ -8,6 +8,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include "net/module_interactions.h"
+#include "net/structures.h"
 
 // ============================================================================
 // MODULE INTERACTION SYSTEM
@@ -560,6 +561,27 @@ void handle_module_unmount(WebSocketPlayer* player, struct WebSocketClient* clie
     if (!player->is_mounted) {
         log_warn("Player %u tried to unmount but is not mounted", player->player_id);
         send_interaction_failure(client, "not_mounted");
+        return;
+    }
+
+    /* ── Island cannon unmount path ─────────────────────────────────────── */
+    if (player->mounted_cannon_structure_id != 0) {
+        extern PlacedStructure placed_structures[];
+        extern uint32_t placed_structure_count;
+        for (uint32_t _i = 0; _i < placed_structure_count; _i++) {
+            if (!placed_structures[_i].active) continue;
+            if (placed_structures[_i].id != player->mounted_cannon_structure_id) continue;
+            placed_structures[_i].cannon_mounted_player_id = 0;
+            break;
+        }
+        player->is_mounted = false;
+        player->mounted_cannon_structure_id = 0;
+        send_interaction_success(client, "unmounted");
+        char bcast[96];
+        snprintf(bcast, sizeof(bcast),
+                 "{\"type\":\"player_unmounted\",\"player_id\":%u}", player->player_id);
+        websocket_server_broadcast(bcast);
+        log_info("🔓 Player %u unmounted from island cannon", player->player_id);
         return;
     }
     
