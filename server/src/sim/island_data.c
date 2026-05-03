@@ -841,6 +841,22 @@ static int inside_biome_poly(float cx, float cy,
     return inside;
 }
 
+/** Returns non-zero if (px, py) is inside ANY stone or metal biome polygon. */
+static int inside_any_stone_metal_biome(const IslandDef *isl, float px, float py)
+{
+    for (int pi = 0; pi < isl->stone_poly_count; pi++) {
+        if (inside_biome_poly(isl->x, isl->y,
+                              isl->stone_vx[pi], isl->stone_vy[pi],
+                              isl->stone_vc[pi], px, py)) return 1;
+    }
+    for (int pi = 0; pi < isl->metal_poly_count; pi++) {
+        if (inside_biome_poly(isl->x, isl->y,
+                              isl->metal_vx[pi], isl->metal_vy[pi],
+                              isl->metal_vc[pi], px, py)) return 1;
+    }
+    return 0;
+}
+
 /** Bounding box (world px) of a biome polygon. */
 static void biome_bbox(float cx, float cy,
                        const float *vx, const float *vy, int count,
@@ -895,7 +911,7 @@ void islands_generate_zone_resources(void)
             log_info("[islands] Island %d stone biome poly %d: placed %d rock nodes", isl->id, pi, added);
         }
 
-        /* ── Metal biome → 50% RES_ROCK + 50% RES_BOULDER ──────────── */
+        /* ── Metal biome → RES_BOULDER only ──────────────────────────── */
         for (int pi = 0; pi < isl->metal_poly_count; pi++) {
             if (isl->metal_vc[pi] < 3) continue;
             float bx0, by0, bx1, by1;
@@ -906,7 +922,6 @@ void islands_generate_zone_resources(void)
             unsigned int seed = (unsigned int)((unsigned int)isl->id * 2246822519u)
                                 + (unsigned int)(pi * 7654321u);
             int added = 0;
-            int toggle = 0; /* alternates 0=RES_BOULDER, 1=RES_ROCK */
             for (float gx = bx0; gx <= bx1 && isl->resource_count < ISLAND_MAX_RESOURCES; gx += METAL_ZONE_SPACING) {
                 for (float gy = by0; gy <= by1 && isl->resource_count < ISLAND_MAX_RESOURCES; gy += METAL_ZONE_SPACING) {
                     seed = seed * 1664525u + 1013904223u;
@@ -917,14 +932,12 @@ void islands_generate_zone_resources(void)
                     if (!inside_biome_poly(isl->x, isl->y,
                                           isl->metal_vx[pi], isl->metal_vy[pi],
                                           isl->metal_vc[pi], wx, wy)) continue;
-                    ResType rtype = (toggle & 1) ? RES_ROCK : RES_BOULDER;
-                    toggle++;
                     IslandResource *r = &isl->resources[isl->resource_count];
                     r->ox         = wx - isl->x;
                     r->oy         = wy - isl->y;
-                    r->type_id    = rtype;
+                    r->type_id    = RES_BOULDER;
                     r->size       = resource_size_from_offset(r->ox, r->oy);
-                    r->max_health = resource_max_health(rtype);
+                    r->max_health = resource_max_health(RES_BOULDER);
                     r->health     = r->max_health;
                     isl->resource_count++;
                     added++;
@@ -975,6 +988,7 @@ void islands_generate_trees(void)
                 float ty = gy + jy;
 
                 if (!inside_grass_poly(isl, tx, ty)) continue;
+                if (inside_any_stone_metal_biome(isl, tx, ty)) continue;
 
                 IslandResource *r = &isl->resources[isl->resource_count];
                 r->ox         = tx - isl->x;
@@ -1033,6 +1047,8 @@ void islands_generate_trees(void)
 
                 /* Must be inside the grass polygon (shrunk by FIBER_POLY_SCALE search area). */
                 if (!inside_grass_poly(isl, fx, fy)) continue;
+                /* Stone/metal biome zones override — no fiber spawns inside them. */
+                if (inside_any_stone_metal_biome(isl, fx, fy)) continue;
 
                 IslandResource *r = &isl->resources[isl->resource_count];
                 r->ox         = fx - isl->x;
