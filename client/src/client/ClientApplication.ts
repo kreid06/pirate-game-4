@@ -2837,8 +2837,14 @@ export class ClientApplication {
             console.log(`⚓ [MOUNT STATE] Server says player is mounted to module ${player.mountedModuleId}`);
             this.exitAllBuildModes();
             // Look up the module kind from the ship
-            let moduleKind = 'helm'; // default fallback
             const ship = worldState.ships.find(s => s.id === player.carrierId);
+            // Island cannon: player.carrierId == 0, ship not found — mount is
+            // already handled by onIslandCannonMounted; skip setMountState here
+            // so we don't overwrite mountKind with the 'helm' default fallback.
+            if (!ship && player.carrierId === 0) {
+              // island cannon already configured — nothing to do
+            } else {
+            let moduleKind = 'helm'; // default fallback (only reached with a real ship)
             if (ship && player.mountedModuleId) {
               const mod = ship.modules.find(m => m.id === player.mountedModuleId);
               if (mod) moduleKind = mod.kind.toLowerCase();
@@ -2856,6 +2862,7 @@ export class ClientApplication {
               this.preHelmZoom = this.camera.getState().zoom;
               this.targetZoom  = ClientApplication.HELM_ZOOM;
             }
+            } // end else (ship cannon / helm branch)
           } else {
             // Player is now dismounted - disable ship controls
             console.log(`⚓ [MOUNT STATE] Server says player is dismounted`);

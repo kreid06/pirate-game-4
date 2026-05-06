@@ -610,7 +610,7 @@ export class InputManager {
   
   /**
    * Handle cannon aiming (right-click + mouse movement)
-   * Calculates aim angle relative to ship rotation
+   * Calculates aim angle relative to ship rotation (or world angle for island cannons)
    */
   private handleCannonAiming(): void {
     // Only send aiming updates when right mouse is held
@@ -623,42 +623,49 @@ export class InputManager {
       return;
     }
 
-    // Need to be on a ship to aim cannons
-    if (this.currentShipId === null) {
+    // Island cannon: currentShipId is null — still allow aiming, send world angle
+    const isIslandCannon = this.currentShipId === null && this.mountKind === 'cannon';
+
+    // Ship-mounted cannons/helm/swivel still require a ship
+    if (!isIslandCannon && this.currentShipId === null) {
       return;
     }
-    
+
     // Calculate aim angle from player position to mouse position (world coordinates)
     const dx = this.inputState.mouseWorldPosition.x - this.playerPosition.x;
     const dy = this.inputState.mouseWorldPosition.y - this.playerPosition.y;
 
     // Always aim toward mouse — no range limit (server enforces fire range separately)
     const aimAngleWorld = Math.atan2(dy, dx);
-    
-    // Convert to ship-relative angle
-    // Ship rotation is the direction the ship is facing
-    // We want the angle relative to the ship's forward direction
-    let aimAngleRelative = aimAngleWorld - this.currentShipRotation;
+
+    // Island cannon: send raw world angle (server stores in cannon_aim_angle directly)
+    // Ship cannon: convert to ship-relative angle
+    let aimAngle: number;
+    if (isIslandCannon) {
+      aimAngle = aimAngleWorld;
+    } else {
+      aimAngle = aimAngleWorld - this.currentShipRotation;
+    }
 
     // Normalize to [-π, π] — O(1), immune to ±Infinity / NaN
-    if (!Number.isFinite(aimAngleRelative)) return;
+    if (!Number.isFinite(aimAngle)) return;
     const TWO_PI = 2 * Math.PI;
-    aimAngleRelative -= TWO_PI * Math.floor((aimAngleRelative + Math.PI) / TWO_PI);
-    
+    aimAngle -= TWO_PI * Math.floor((aimAngle + Math.PI) / TWO_PI);
+
     // Only send if aim changed significantly (>1 degree)
     const ANGLE_THRESHOLD = 0.017; // ~1 degree in radians
-    const angleDelta = Math.abs(aimAngleRelative - this.lastCannonAimAngle);
-    
+    const angleDelta = Math.abs(aimAngle - this.lastCannonAimAngle);
+
     if (angleDelta > ANGLE_THRESHOLD) {
       if (this.mountKind === 'swivel') {
         // Swivel: use dedicated swivel_aim message (server applies ±45° limit)
         if (this.onSwivelAim) {
-          this.onSwivelAim(aimAngleRelative);
+          this.onSwivelAim(aimAngle);
         }
       } else if (this.onCannonAim) {
-        this.onCannonAim(aimAngleRelative, [...this.activeWeaponGroups]);
+        this.onCannonAim(aimAngle, [...this.activeWeaponGroups]);
       }
-      this.lastCannonAimAngle = aimAngleRelative;
+      this.lastCannonAimAngle = aimAngle;
     }
   }
   
