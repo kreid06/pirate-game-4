@@ -2787,13 +2787,13 @@ export class ClientApplication {
         const isIslandCannon = !!this.pendingMount.mountWorldPos;
         if (isIslandCannon) {
           // Island cannon: server won't mirror the structure ID in mounted_module_id.
-          // Apply the position snap until the server confirms isMounted, then stop.
+          // Always apply position snap while pendingMount is active (until server confirms mount).
+          if (this.pendingMount.mountWorldPos) p.position = this.pendingMount.mountWorldPos;
           if (p.isMounted) {
             this.pendingMount = null; // server confirmed — stop overriding position
           } else {
-            // Not yet confirmed — keep the player snapped to mount position
-            p.isMounted   = true;
-            if (this.pendingMount.mountWorldPos) p.position = this.pendingMount.mountWorldPos;
+            // Not yet confirmed — force isMounted so UI/controls stay in mount state
+            p.isMounted = true;
           }
         } else if (p.isMounted && p.mountedModuleId === this.pendingMount.moduleId) {
           this.pendingMount = null; // server confirmed ship-mount — stop overriding

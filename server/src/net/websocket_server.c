@@ -8354,6 +8354,13 @@ void websocket_server_tick(float dt) {
                     if (on_ship && player_ship) {
                         ship_local_to_world(player_ship, ws_player->local_x, ws_player->local_y,
                                           &ws_player->x, &ws_player->y);
+                    } else {
+                        /* Island cannon: pin sim to ws mount position so the copy-back
+                         * below doesn't overwrite the mount coords with stale sim data. */
+                        sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->x));
+                        sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->y));
+                        sim_player->velocity.x = 0;
+                        sim_player->velocity.y = 0;
                     }
                     // Skip movement processing
                 } else if (ws_player->is_moving) {
