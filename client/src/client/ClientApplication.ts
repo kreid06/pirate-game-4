@@ -107,7 +107,7 @@ export class ClientApplication {
   private _structureCompanyMap = new Map<number, number>();
   // Optimistic mount state — held from module_interact_success until the server's
   // world-state echo confirms isMounted=true for the same module.
-  private pendingMount: { moduleId: number; moduleKind: string; mountOffset?: Vec2 } | null = null;
+  private pendingMount: { moduleId: number; moduleKind: string; mountOffset?: Vec2; mountWorldPos?: Vec2 } | null = null;
 
   // Camera zoom animation
   private targetZoom  = 1.0;  // Zoom level we're animating toward
@@ -366,19 +366,10 @@ export class ClientApplication {
       };
       this.networkManager.onIslandCannonMounted = (structureId, _aimAngle, _reloadMs, mountX, mountY) => {
         console.log(`🎯 [ISLAND CANNON] Mounted to island cannon ${structureId} at (${mountX.toFixed(1)}, ${mountY.toFixed(1)})`);
-        // Snap player to the mount position optimistically (before next world-state echo).
-        // We reuse pendingMount so the same guard in the world-state loop keeps it applied.
-        this.pendingMount = { moduleId: structureId, moduleKind: 'CANNON' };
-        const pid = this.networkManager.getAssignedPlayerId();
-        const ws  = this.authoritativeWorldState || this.predictedWorldState;
-        if (pid !== null && ws) {
-          const p = ws.players.find(pl => pl.id === pid);
-          if (p) {
-            p.position = Vec2.from(mountX, mountY);
-            p.isMounted = true;
-            p.mountedModuleId = structureId;
-          }
-        }
+        // Store world mount position so the pendingMount loop re-applies it every
+        // frame until the server's world-state echo confirms isMounted=true.
+        const mountPos = Vec2.from(mountX, mountY);
+        this.pendingMount = { moduleId: structureId, moduleKind: 'CANNON', mountWorldPos: mountPos };
         // Enable aim/fire controls (no shipId — island cannon is not on a ship)
         this.inputManager?.setMountState(true, undefined, 'CANNON', structureId);
       };
@@ -2799,7 +2790,8 @@ export class ClientApplication {
           // Keep local mount state visible until server catches up
           p.isMounted        = true;
           p.mountedModuleId  = this.pendingMount.moduleId;
-          if (this.pendingMount.mountOffset) p.mountOffset = this.pendingMount.mountOffset;
+          if (this.pendingMount.mountOffset)   p.mountOffset = this.pendingMount.mountOffset;
+          if (this.pendingMount.mountWorldPos) p.position    = this.pendingMount.mountWorldPos;
         }
       }
     }
