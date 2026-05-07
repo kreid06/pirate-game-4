@@ -2012,7 +2012,7 @@ void fire_island_cannon(PlacedStructure* str, WebSocketPlayer* player, uint8_t a
     str->cannon_reload_ms = (uint32_t)CANNON_RELOAD_TIME_MS;
 
     float aim = str->cannon_aim_angle;
-    const float BARREL_LENGTH = 30.0f;  /* px, same as ship cannon */
+    const float BARREL_LENGTH = 40.0f;  /* px — matches the 40-unit barrel drawn by the client */
     float spawn_x = str->x + cosf(aim) * BARREL_LENGTH;
     float spawn_y = str->y + sinf(aim) * BARREL_LENGTH;
 
