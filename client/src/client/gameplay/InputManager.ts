@@ -215,6 +215,10 @@ export class InputManager {
   /** ID of the cannon module the player is currently mounted to, or null. */
   public mountedCannonModuleId: number | null = null;
   private lastCannonAimAngle: number = 0;
+  /** Returns true when mounted to an island (non-ship) cannon. */
+  public get isOnIslandCannon(): boolean { return this.mountKind === 'cannon' && this.currentShipId === null; }
+  /** Returns the last computed cannon aim angle (world radians). */
+  public getLastCannonAimAngle(): number { return this.lastCannonAimAngle; }
   /** Selected ammo type: 0 = cannonball, 1 = bar shot. Toggle with X key. */
   public selectedAmmoType: number = 0;    // Pending ammo (to load after next fire)
   public loadedAmmoType: number = 0;      // What's physically in the barrel right now
@@ -480,13 +484,18 @@ export class InputManager {
   /**
    * Set mount state (called when player mounts/dismounts a module)
    */
-  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number): void {
+  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number, initialAimAngle?: number): void {
     this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast' | 'swivel') : 'none';
     this.currentShipId = shipId !== undefined ? shipId : null;
     this.mountedCannonModuleId = (mounted && (moduleKind.toLowerCase() === 'cannon' || moduleKind.toLowerCase() === 'swivel') && moduleId != null) ? moduleId : null;
 
     if (mounted) {
       console.log(`⚓ [INPUT] Player mounted to ${moduleKind} on ship ${shipId}`);
+      if (this.mountKind === 'cannon' && initialAimAngle !== undefined) {
+        // Seed lastCannonAimAngle so barrel visually starts at the server's current angle.
+        // Server sends world-space radians; barrelRot = aimAngle + π/2 in RenderSystem.
+        this.lastCannonAimAngle = initialAimAngle;
+      }
       if (this.mountKind === 'helm') {
         // Seed from the server's current sail openness so W/S work immediately
         const seeded = initialSailOpenness ?? 100;

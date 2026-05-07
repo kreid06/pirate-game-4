@@ -608,6 +608,12 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         (stype_enum == STRUCT_WOODEN_FLOOR || stype_enum == STRUCT_WORKBENCH ||
          stype_enum == STRUCT_SHIPYARD || stype_enum == STRUCT_CEILING ||
          stype_enum == STRUCT_CANNON) ? place_rotation : 0.0f;
+    /* Cannon: initialise aim angle to match the placement rotation so first fire goes the right way.
+       The barrel points "up" in local space (−y), which corresponds to rotRad − π/2 in world space. */
+    if (stype_enum == STRUCT_CANNON) {
+        placed_structures[placed_structure_count].cannon_aim_angle =
+            place_rotation * (float)M_PI / 180.0f - (float)(M_PI / 2.0);
+    }
     placed_structure_count++;
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",

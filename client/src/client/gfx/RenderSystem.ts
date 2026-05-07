@@ -148,6 +148,10 @@ export class RenderSystem {
   public showGroupOverlay: boolean = false;
   /** Currently selected weapon group indices — cannons in these groups are always highlighted. */
   public activeWeaponGroups: Set<number> = new Set();
+  /** Structure ID of the island cannon the local player is currently mounted to (for barrel rendering). */
+  public islandCannonId: number | null = null;
+  /** Live aim angle (world radians) for the mounted island cannon barrel. Null when not mounted. */
+  public islandCannonAimAngle: number | null = null;
   /** Cached local player company for the current frame — set at start of renderWorld. */
   private _localCompanyId: number = 0;
   /** Cached local player for the current frame — set once in renderWorld, shared by all draw methods. */
@@ -4685,18 +4689,35 @@ export class RenderSystem {
         const dmgDarken = (1 - hpFrac) * 0.5;
         const lw = Math.max(0.5, 1.5 * zoom);
 
+        // If locally mounted, use the live aim angle for the barrel; otherwise match base rotation.
+        // barrelRot: canvas ctx.rotate angle so barrel (pointing local −y) faces world aim direction.
+        // aimAngle = atan2(dy_screen, dx_screen) → barrelRot = aimAngle + π/2
+        const hasLiveAim = this.islandCannonId === s.id && this.islandCannonAimAngle !== null;
+        const barrelRot  = hasLiveAim ? (this.islandCannonAimAngle! + Math.PI / 2) : rotRad;
+
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
-        ctx.rotate(rotRad);
 
-        // Base (brown rectangle) — same proportions as ship cannon (30×20 world units)
+        // Base (brown rectangle) at placement rotation — stays fixed
+        ctx.save();
+        ctx.rotate(rotRad);
         ctx.fillStyle   = isHovered ? '#b06030' : '#8B4513';
         ctx.strokeStyle = '#000000';
         ctx.lineWidth   = lw;
         ctx.fillRect(-15 * zoom, -10 * zoom, 30 * zoom, 20 * zoom);
         ctx.strokeRect(-15 * zoom, -10 * zoom, 30 * zoom, 20 * zoom);
+        // Company color strip (on base)
+        ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
+        ctx.fillRect(-8 * zoom, -4 * zoom, 16 * zoom, Math.max(1.5, 2.5 * zoom));
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          ctx.fillRect(-15 * zoom, -10 * zoom, 30 * zoom, 20 * zoom);
+        }
+        ctx.restore();
 
-        // Barrel — same proportions as ship cannon (16×40 world units), pointing up (−y)
+        // Barrel — rotates to live aim angle when mounted
+        ctx.save();
+        ctx.rotate(barrelRot);
         ctx.fillStyle   = isHovered ? '#aaaaaa' : '#333333';
         ctx.strokeStyle = '#000000';
         ctx.lineWidth   = lw;
@@ -4708,16 +4729,12 @@ export class RenderSystem {
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
-
-        // Company color strip
-        ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
-        ctx.fillRect(-8 * zoom, -4 * zoom, 16 * zoom, Math.max(1.5, 2.5 * zoom));
-
-        // Damage darkening overlay
         if (dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          ctx.fillRect(-15 * zoom, -40 * zoom, 30 * zoom, 50 * zoom);
+          ctx.fillRect(-8 * zoom, -40 * zoom, 16 * zoom, 40 * zoom);
         }
+        ctx.restore();
+
         ctx.restore();
       }
     } // end for sorted

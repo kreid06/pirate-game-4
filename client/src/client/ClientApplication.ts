@@ -364,14 +364,15 @@ export class ClientApplication {
       this.networkManager.onModuleMountFailure = (reason) => {
         this.handleModuleMountFailure(reason);
       };
-      this.networkManager.onIslandCannonMounted = (structureId, _aimAngle, _reloadMs, mountX, mountY) => {
+      this.networkManager.onIslandCannonMounted = (structureId, aimAngle, _reloadMs, mountX, mountY) => {
         console.log(`🎯 [ISLAND CANNON] Mounted to island cannon ${structureId} at (${mountX.toFixed(1)}, ${mountY.toFixed(1)})`);
         // Store world mount position so the pendingMount loop re-applies it every
         // frame until the server's world-state echo confirms isMounted=true.
         const mountPos = Vec2.from(mountX, mountY);
         this.pendingMount = { moduleId: structureId, moduleKind: 'CANNON', mountWorldPos: mountPos };
-        // Enable aim/fire controls (no shipId — island cannon is not on a ship)
-        this.inputManager?.setMountState(true, undefined, 'CANNON', structureId);
+        // Enable aim/fire controls (no shipId — island cannon is not on a ship).
+        // Pass initial aim angle so the barrel starts at the server's stored direction.
+        this.inputManager?.setMountState(true, undefined, 'CANNON', structureId, undefined, aimAngle);
       };
       this.networkManager.onModuleDestroyed = (shipId, moduleId, damage, hitX, hitY) => {
         // Spawn a kill damage number at the hit location
@@ -2457,6 +2458,15 @@ export class ClientApplication {
       
       // Update module interactions
       this.moduleInteractionSystem.update(this.predictedWorldState || this.authoritativeWorldState, dt);
+    }
+
+    // Update island cannon aim angle for barrel rendering
+    if (this.inputManager.isOnIslandCannon) {
+      this.renderSystem.islandCannonId = this.inputManager.mountedCannonModuleId;
+      this.renderSystem.islandCannonAimAngle = this.inputManager.getLastCannonAimAngle();
+    } else {
+      this.renderSystem.islandCannonId = null;
+      this.renderSystem.islandCannonAimAngle = null;
     }
   }
   
