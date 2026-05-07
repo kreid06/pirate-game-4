@@ -374,6 +374,14 @@ export class ClientApplication {
         // Pass initial aim and facing angle so clamping and barrel rendering start correctly.
         this.inputManager?.setMountState(true, undefined, 'CANNON', structureId, undefined, aimAngle, facingAngle);
       };
+      this.networkManager.onNoAmmo = () => {
+        // Show floating "No cannonballs!" warning at the player's current position
+        const assignedId = this.networkManager.getAssignedPlayerId();
+        const ws = this.predictedWorldState || this.authoritativeWorldState;
+        const player = assignedId !== null ? ws?.players.find(p => p.id === assignedId) : ws?.players[0];
+        const pos = player?.position ?? Vec2.from(0, 0);
+        this.renderSystem.spawnResourcePickup(pos, 'No cannonballs!', '#ff4444');
+      };
       this.networkManager.onModuleDestroyed = (shipId, moduleId, damage, hitX, hitY) => {
         // Spawn a kill damage number at the hit location
         // Prefer server-provided hit coords; fall back to module world position

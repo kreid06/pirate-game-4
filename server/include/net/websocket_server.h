@@ -347,6 +347,7 @@ typedef struct {
     float    cannon_aim_angle;    /* current aim direction (radians, world space) */
     uint32_t cannon_reload_ms;    /* ms remaining until cannon can fire again (0 = ready) */
     uint32_t cannon_mounted_player_id; /* player_id currently mounted to this cannon (0 = none) */
+    bool     no_ammo_flag;        /* transient: set by fire_island_cannon when ammo was lacking */
     /* 64-byte string last (avoids breaking alignment of above) */
     char     placer_name[64];     /* display name of builder */
 } PlacedStructure;

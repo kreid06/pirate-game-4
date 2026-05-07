@@ -6,6 +6,9 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+/* Set to 1 to allow island cannons to fire without consuming ammo (testing). */
+#define ISLAND_CANNON_INFINITE_AMMO 1
 #include "net/structures.h"
 #include "net/websocket_server_internal.h"
 #include "net/cannon_fire.h"
@@ -1986,6 +1989,7 @@ void fire_island_cannon(PlacedStructure* str, WebSocketPlayer* player, uint8_t a
         return;
     }
 
+#if !ISLAND_CANNON_INFINITE_AMMO
     /* Consume 1 cannonball from the player's inventory */
     bool found_ammo = false;
     for (int s = 0; s < INVENTORY_SLOTS; s++) {
@@ -1998,9 +2002,11 @@ void fire_island_cannon(PlacedStructure* str, WebSocketPlayer* player, uint8_t a
         }
     }
     if (!found_ammo) {
-        /* Player has no cannonballs — silently fail (client can show "no ammo" if needed) */
+        /* Signal no-ammo to caller so it can send feedback to client */
+        str->no_ammo_flag = true;
         return;
     }
+#endif
 
     /* Set reload timer (matches ship cannon) */
     str->cannon_reload_ms = (uint32_t)CANNON_RELOAD_TIME_MS;
@@ -2086,13 +2092,17 @@ void handle_island_cannon_aim(WebSocketPlayer* player, float aim_angle) {
 /**
  * handle_island_cannon_fire – called when a player mounted on an island cannon
  * sends a cannon_fire message.
+ * Returns: 0 = fired OK, 1 = still reloading, 2 = no ammo.
  */
-void handle_island_cannon_fire(WebSocketPlayer* player, uint8_t ammo_type) {
-    if (!player || player->mounted_cannon_structure_id == 0) return;
+int handle_island_cannon_fire(WebSocketPlayer* player, uint8_t ammo_type) {
+    if (!player || player->mounted_cannon_structure_id == 0) return 1;
     for (uint32_t si = 0; si < placed_structure_count; si++) {
         if (!placed_structures[si].active) continue;
         if (placed_structures[si].id != player->mounted_cannon_structure_id) continue;
+        placed_structures[si].no_ammo_flag = false;
         fire_island_cannon(&placed_structures[si], player, ammo_type);
-        break;
+        if (placed_structures[si].no_ammo_flag) return 2; /* no ammo */
+        return 0; /* fired */
     }
+    return 1;
 }

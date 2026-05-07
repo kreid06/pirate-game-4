@@ -570,6 +570,8 @@ export class NetworkManager {
   /** Fired when the server confirms the player has mounted an island cannon structure.
    *  `mountX`/`mountY` are the world-space coordinates the player should snap to. */
   public onIslandCannonMounted: ((structureId: number, aimAngle: number, reloadMs: number, mountX: number, mountY: number, facingAngle: number) => void) | null = null;
+  /** Fired when the player tries to fire an island cannon but has no cannonballs. */
+  public onNoAmmo: (() => void) | null = null;
 
   public onEntityHit: ((entityType: 'npc' | 'player', id: number, x: number, y: number,
     damage: number, health: number, maxHealth: number, killed: boolean, killerShipId: number) => void) | null = null;
@@ -2861,6 +2863,12 @@ export class NetworkManager {
 
       case 'tombstone_collect_fail':
         // silently ignore — server already sent reason
+        break;
+
+      case 'message_ack':
+        if (message.status === 'no_ammo') {
+          this.onNoAmmo?.();
+        }
         break;
 
       default:

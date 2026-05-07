@@ -500,7 +500,9 @@ export class InputManager {
         this.lastCannonAimAngle = initialAimAngle;
       }
       if (this.mountKind === 'cannon' && islandCannonFacingAngle !== undefined) {
-        this.islandCannonFacingAngle = islandCannonFacingAngle;
+        // Server sends placement rotation in radians.
+        // Barrel faces at (rotation_rad − π/2) — subtract it to align with the server constraint.
+        this.islandCannonFacingAngle = islandCannonFacingAngle - Math.PI / 2;
       }
       if (this.mountKind === 'helm') {
         // Seed from the server's current sail openness so W/S work immediately

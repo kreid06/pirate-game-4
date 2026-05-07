@@ -3430,8 +3430,11 @@ int websocket_server_update(struct Sim* sim) {
                                     char* at = strstr(payload, "\"ammo_type\":");
                                     if (at) ammo_type = (uint8_t)atoi(at + 12);
                                     if (ammo_type > 1) ammo_type = PROJ_TYPE_CANNONBALL;
-                                    handle_island_cannon_fire(player, ammo_type);
-                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"cannons_fired\"}");
+                                    int fire_result = handle_island_cannon_fire(player, ammo_type);
+                                    if (fire_result == 2)
+                                        strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_ammo\"}");
+                                    else
+                                        strcpy(response, "{\"type\":\"message_ack\",\"status\":\"cannons_fired\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 }
