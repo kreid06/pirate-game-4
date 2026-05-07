@@ -2054,8 +2054,31 @@ void handle_island_cannon_aim(WebSocketPlayer* player, float aim_angle) {
     for (uint32_t si = 0; si < placed_structure_count; si++) {
         if (!placed_structures[si].active) continue;
         if (placed_structures[si].id != player->mounted_cannon_structure_id) continue;
-        placed_structures[si].cannon_aim_angle = aim_angle;
-        player->cannon_aim_angle = aim_angle;
+
+        /* Barrel faces at (rotation_deg × π/180 − π/2) in world space — same convention
+         * used in the client renderer (barrel points local −y, base rotation from placement). */
+        float facing = placed_structures[si].rotation * (float)(M_PI / 180.0) - (float)(M_PI / 2.0);
+
+        /* Compute signed offset from facing direction */
+        float offset = aim_angle - facing;
+        while (offset >  (float)M_PI) offset -= 2.0f * (float)M_PI;
+        while (offset < -(float)M_PI) offset += 2.0f * (float)M_PI;
+
+        /* Three zones — same as ship cannon:
+         *   |offset| ≤ 30°          → track normally
+         *   30° < |offset| ≤ 45°   → clamp to ±30° edge
+         *   |offset| > 45°         → reset barrel to facing direction */
+        const float AIM_RANGE  = 30.0f * ((float)M_PI / 180.0f);
+        const float RESET_MARGIN = 15.0f * ((float)M_PI / 180.0f);
+        if (fabsf(offset) > AIM_RANGE + RESET_MARGIN) {
+            offset = 0.0f;
+        } else if (fabsf(offset) > AIM_RANGE) {
+            offset = (offset > 0.0f) ? AIM_RANGE : -AIM_RANGE;
+        }
+
+        float clamped = facing + offset;
+        placed_structures[si].cannon_aim_angle = clamped;
+        player->cannon_aim_angle = clamped;
         break;
     }
 }

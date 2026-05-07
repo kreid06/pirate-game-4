@@ -484,7 +484,10 @@ export class InputManager {
   /**
    * Set mount state (called when player mounts/dismounts a module)
    */
-  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number, initialAimAngle?: number): void {
+  /** Facing direction of the currently mounted island cannon barrel (world radians). Used for aim clamping. */
+  private islandCannonFacingAngle: number = 0;
+
+  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number, initialAimAngle?: number, islandCannonFacingAngle?: number): void {
     this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast' | 'swivel') : 'none';
     this.currentShipId = shipId !== undefined ? shipId : null;
     this.mountedCannonModuleId = (mounted && (moduleKind.toLowerCase() === 'cannon' || moduleKind.toLowerCase() === 'swivel') && moduleId != null) ? moduleId : null;
@@ -495,6 +498,9 @@ export class InputManager {
         // Seed lastCannonAimAngle so barrel visually starts at the server's current angle.
         // Server sends world-space radians; barrelRot = aimAngle + π/2 in RenderSystem.
         this.lastCannonAimAngle = initialAimAngle;
+      }
+      if (this.mountKind === 'cannon' && islandCannonFacingAngle !== undefined) {
+        this.islandCannonFacingAngle = islandCannonFacingAngle;
       }
       if (this.mountKind === 'helm') {
         // Seed from the server's current sail openness so W/S work immediately
@@ -652,6 +658,19 @@ export class InputManager {
     let aimAngle: number;
     if (isIslandCannon) {
       aimAngle = aimAngleWorld;
+      // Apply ±30° arc limit around the cannon's facing direction (same as ship cannons)
+      const AIM_RANGE   = 30 * Math.PI / 180;
+      const RESET_RANGE = 45 * Math.PI / 180;
+      let offset = aimAngle - this.islandCannonFacingAngle;
+      // Normalize offset to [-π, π]
+      const TWO_PI2 = 2 * Math.PI;
+      offset -= TWO_PI2 * Math.floor((offset + Math.PI) / TWO_PI2);
+      if (Math.abs(offset) > RESET_RANGE) {
+        offset = 0;
+      } else if (Math.abs(offset) > AIM_RANGE) {
+        offset = offset > 0 ? AIM_RANGE : -AIM_RANGE;
+      }
+      aimAngle = this.islandCannonFacingAngle + offset;
     } else {
       aimAngle = aimAngleWorld - this.currentShipRotation;
     }

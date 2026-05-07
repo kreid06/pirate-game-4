@@ -569,7 +569,7 @@ export class NetworkManager {
 
   /** Fired when the server confirms the player has mounted an island cannon structure.
    *  `mountX`/`mountY` are the world-space coordinates the player should snap to. */
-  public onIslandCannonMounted: ((structureId: number, aimAngle: number, reloadMs: number, mountX: number, mountY: number) => void) | null = null;
+  public onIslandCannonMounted: ((structureId: number, aimAngle: number, reloadMs: number, mountX: number, mountY: number, facingAngle: number) => void) | null = null;
 
   public onEntityHit: ((entityType: 'npc' | 'player', id: number, x: number, y: number,
     damage: number, health: number, maxHealth: number, killed: boolean, killerShipId: number) => void) | null = null;
@@ -2708,6 +2708,7 @@ export class NetworkManager {
           message.reload_ms    ?? 0,
           message.mount_x      ?? 0,
           message.mount_y      ?? 0,
+          message.rotation     ?? 0,
         );
         break;
       }

@@ -838,11 +838,13 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
             snprintf(response, sizeof(response),
                      "{\"type\":\"island_cannon_mounted\",\"structure_id\":%u,"
                      "\"aim_angle\":%.4f,\"reload_ms\":%u,"
-                     "\"mount_x\":%.2f,\"mount_y\":%.2f}",
+                     "\"mount_x\":%.2f,\"mount_y\":%.2f,"
+                     "\"rotation\":%.4f}",
                      placed_structures[i].id,
                      placed_structures[i].cannon_aim_angle,
                      placed_structures[i].cannon_reload_ms,
-                     _mount_x, _mount_y);
+                     _mount_x, _mount_y,
+                     placed_structures[i].rotation * (float)M_PI / 180.0f);
             goto si_send;
         }
         snprintf(response, sizeof(response),
