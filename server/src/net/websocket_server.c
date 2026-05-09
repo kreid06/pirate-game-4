@@ -5533,6 +5533,54 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "player_level_up") == 0) {
+                            // PLAYER LEVEL UP: client requests to consume XP and advance one level.
+                            // {"type":"player_level_up"}
+                            // The server validates that the player has enough XP before promoting.
+                            WebSocketPlayer* lup_player = find_player(client->player_id);
+                            if (!lup_player) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"player_not_found\"}");
+                            } else if (lup_player->player_level >= PLAYER_MAX_LEVEL) {
+                                strcpy(response, "{\"type\":\"player_level_up_fail\",\"reason\":\"max_level\"}");
+                            } else {
+                                uint32_t cost = PLAYER_LEVEL_XP_BASE * (uint32_t)lup_player->player_level;
+                                if (lup_player->player_xp < cost) {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"player_level_up_fail\",\"reason\":\"not_enough_xp\","
+                                        "\"xp\":%u,\"cost\":%u}",
+                                        lup_player->player_xp, cost);
+                                } else {
+                                    lup_player->player_xp -= cost;
+                                    lup_player->player_level++;
+                                    log_info("🎉 Player %u levelled up to %u!", lup_player->player_id, (unsigned)lup_player->player_level);
+                                    /* Broadcast level-up to all clients */
+                                    char lup_msg[256];
+                                    uint8_t lup_pts_earned = (uint8_t)(lup_player->player_level > 1 ? lup_player->player_level - 1 : 0);
+                                    uint8_t lup_total_spent = (uint8_t)(lup_player->stat_health + lup_player->stat_damage + lup_player->stat_stamina + lup_player->stat_weight);
+                                    uint8_t lup_pts_left = (uint8_t)(lup_pts_earned > lup_total_spent ? lup_pts_earned - lup_total_spent : 0);
+                                    snprintf(lup_msg, sizeof(lup_msg),
+                                        "{\"type\":\"PLAYER_LEVEL_UP\",\"playerId\":%u,"
+                                        "\"playerLevel\":%u,\"xp\":%u,\"statPoints\":%u}",
+                                        lup_player->player_id, lup_player->player_level,
+                                        lup_player->player_xp, lup_pts_left);
+                                    uint8_t lup_frame[512];
+                                    size_t lup_flen = websocket_create_frame(WS_OPCODE_TEXT,
+                                        lup_msg, strlen(lup_msg), (char*)lup_frame, sizeof(lup_frame));
+                                    if (lup_flen > 0) {
+                                        for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                                            struct WebSocketClient* wc = &ws_server.clients[ci];
+                                            if (wc->connected && wc->handshake_complete)
+                                                send(wc->fd, lup_frame, lup_flen, 0);
+                                        }
+                                    }
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"message_ack\",\"status\":\"levelled_up\","
+                                        "\"playerLevel\":%u,\"xp\":%u,\"statPoints\":%u}",
+                                        lup_player->player_level, lup_player->player_xp, lup_pts_left);
+                                }
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "toggle_ladder") == 0) {
                             // TOGGLE LADDER: retract or extend a ladder on the player's current ship.
                             // {"type":"toggle_ladder","moduleId":N}

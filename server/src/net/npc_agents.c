@@ -15,9 +15,8 @@
 /* XP needed to advance from level L to L+1: NPC_LEVEL_XP_BASE * L */
 #define NPC_LEVEL_XP_BASE  100u
 
-/* ── Player levelling constants ────────────────────────────────────────────── */
-#define PLAYER_MAX_LEVEL     120u  /* 1 base + 119 upgrades */
-#define PLAYER_LEVEL_XP_BASE NPC_LEVEL_XP_BASE
+/* ── Player levelling constants ── (canonical values in npc_agents.h) ─────── */
+/* PLAYER_MAX_LEVEL and PLAYER_LEVEL_XP_BASE are defined in npc_agents.h */
 /* XP awarded per kill */
 #define PLAYER_XP_PER_NPC_KILL    25u
 #define PLAYER_XP_PER_PLAYER_KILL 75u
@@ -583,17 +582,11 @@ void npc_apply_xp(WorldNpc* npc, uint32_t xp_gain) {
 }
 
 /*
- * Grant XP to a player and apply any level-ups.
- * Each level-up gives 1 stat point (player_level - 1 - total_stats_spent).
+ * Grant XP to a player — XP accumulates; the player must manually level up
+ * when they have enough XP (client shows a blinking bar prompt).
  */
 void player_apply_xp(WebSocketPlayer* p, uint32_t xp_gain) {
     if (p->player_level >= PLAYER_MAX_LEVEL) return;
     p->player_xp += xp_gain;
-    while (p->player_level < PLAYER_MAX_LEVEL) {
-        uint32_t cost = PLAYER_LEVEL_XP_BASE * (uint32_t)p->player_level;
-        if (p->player_xp < cost) break;
-        p->player_xp -= cost;
-        p->player_level++;
-        log_info("🎉 Player %u levelled up to %u!", p->player_id, (unsigned)p->player_level);
-    }
+    /* No auto-promotion — the client blinks the XP bar when xp >= level*XP_BASE */
 }

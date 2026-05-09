@@ -1764,6 +1764,10 @@ export class ClientApplication {
         this.networkManager.sendPlayerStatUpgrade(stat);
       });
 
+      this.uiManager.onPlayerLevelUp = () => {
+        this.networkManager.sendPlayerLevelUp();
+      };
+
       // Wire respawn confirmation: flash white, snap camera, send network request immediately
       this.uiManager.setRespawnConfirmedCallback((shipId, worldX, worldY, islandId, spawnX, spawnY) => {
         // 1. Hold screen at full white
@@ -1885,15 +1889,15 @@ export class ClientApplication {
           if (!ws) continue;
           const p = ws.players.find(pl => pl.id === playerId);
           if (!p) continue;
-          p.xp         = xp;
-          p.maxHealth  = maxHealth;
-          p.maxStamina = maxStamina;
-          p.level      = playerLevel;
-          p.statHealth  = statHealth;
-          p.statDamage  = statDamage;
-          p.statStamina = statStamina;
-          p.statWeight  = statWeight;
-          p.statPoints  = statPoints;
+          if (xp !== undefined)         p.xp         = xp;
+          if (playerLevel !== undefined) p.level      = playerLevel;
+          if (maxHealth)                 p.maxHealth  = maxHealth;
+          if (maxStamina)                p.maxStamina = maxStamina;
+          if (statHealth !== undefined)  p.statHealth  = statHealth;
+          if (statDamage !== undefined)  p.statDamage  = statDamage;
+          if (statStamina !== undefined) p.statStamina = statStamina;
+          if (statWeight !== undefined)  p.statWeight  = statWeight;
+          if (statPoints !== undefined)  p.statPoints  = statPoints;
         }
       };
 

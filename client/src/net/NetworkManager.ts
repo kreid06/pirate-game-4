@@ -104,6 +104,7 @@ export enum MessageType {
   NPC_GOTO_MODULE = 'npc_goto_module',
   NPC_MOVE_TO_POS = 'npc_move_to_pos',
   UPGRADE_PLAYER_STAT = 'upgrade_player_stat',
+  PLAYER_LEVEL_UP = 'player_level_up',
   COMMAND = 'command',
   RESPAWN_REQUEST = 'respawn_request',
   RENAME_SHIP = 'rename_ship',
@@ -1614,6 +1615,11 @@ export class NetworkManager {
     this.socket.send(JSON.stringify({ type: MessageType.UPGRADE_PLAYER_STAT, stat }));
   }
 
+  sendPlayerLevelUp(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.PLAYER_LEVEL_UP }));
+  }
+
   /** Send a respawn request to the server.
    *  Pass shipId to spawn aboard a friendly ship, or worldX/worldY to spawn at a world position. */
   sendRespawnRequest(shipId?: number, worldX?: number, worldY?: number, islandId?: number): void {
@@ -2283,6 +2289,18 @@ export class NetworkManager {
           message.maxHealth, message.maxStamina ?? 100,
           message.playerLevel,
           message.statHealth, message.statDamage, message.statStamina, message.statWeight,
+          message.statPoints ?? 0,
+        );
+        break;
+      }
+
+      case 'PLAYER_LEVEL_UP': {
+        // Server confirmed a player level-up; refresh xp and playerLevel
+        this.onPlayerStatUp?.(
+          'level', 0, message.xp ?? 0,
+          0, 0,
+          message.playerLevel ?? 1,
+          0, 0, 0, 0,
           message.statPoints ?? 0,
         );
         break;

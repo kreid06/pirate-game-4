@@ -1236,6 +1236,32 @@ void destroy_placed_structure(uint32_t structure_id) {
                     }
                 }
 
+            } else if (c->type == STRUCT_CANNON) {
+                /* Cannon requires a same-company floor tile within its footprint.
+                 * Check using the same OBB test as place_cannon. */
+                const float HALF_TILE = 25.0f;
+                bool has_floor = false;
+                for (uint32_t fi = 0; fi < placed_structure_count && !has_floor; fi++) {
+                    PlacedStructure* f = &placed_structures[fi];
+                    if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                    if (f->company_id != c->company_id) continue;
+                    float rad = f->rotation * (float)M_PI / 180.0f;
+                    float fc  = cosf(-rad), fs = sinf(-rad);
+                    float ddx = c->x - f->x;
+                    float ddy = c->y - f->y;
+                    float lx  = ddx * fc - ddy * fs;
+                    float ly  = ddx * fs + ddy * fc;
+                    if (fabsf(lx) <= HALF_TILE && fabsf(ly) <= HALF_TILE) has_floor = true;
+                }
+                if (!has_floor) {
+                    c->active = false;
+                    char cm[128];
+                    snprintf(cm, sizeof(cm),
+                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}", c->id);
+                    websocket_server_broadcast(cm);
+                    log_info("🔨 Cascade-demolished cannon %u (floor %u removed)", c->id, structure_id);
+                }
+
             }
             /* Note: ceilings handled below by cascade_orphan_ceilings() — the
              * strict wall-connectivity rule supersedes any floor-proximity check. */

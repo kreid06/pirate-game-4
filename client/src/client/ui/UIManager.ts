@@ -163,6 +163,11 @@ export class UIManager {
     enemyClose: boolean;
   } | null = null;
 
+  /** Called when the player clicks the XP bar to level up (has enough XP). */
+  public onPlayerLevelUp: (() => void) | null = null;
+  /** Cached player level/xp for XP bar click detection. */
+  private _cachedPlayerLevel = 1;
+  private _cachedPlayerXp = 0;
   /** Called when the player clicks a build item button (cannon/sail/swivel). */
   public onBuildItemSelect: ((item: 'cannon' | 'sail' | 'swivel') => void) | null = null;
   /** Called when a weapon group has its mode cycled via right-click. */
@@ -476,6 +481,13 @@ export class UIManager {
       this._cachedControlGroups = context.controlGroups;
     } else {
       this._cachedControlGroups = null;
+    }
+    // Cache player level/xp for XP bar click detection in handleClick
+    const _localPlayerForCache = context.worldState.players.find(p => p.id === context.assignedPlayerId)
+      ?? context.worldState.players[0];
+    if (_localPlayerForCache) {
+      this._cachedPlayerLevel = _localPlayerForCache.level ?? 1;
+      this._cachedPlayerXp    = _localPlayerForCache.xp    ?? 0;
     }
 
     // Render elements in order
@@ -1229,6 +1241,26 @@ export class UIManager {
       const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
       const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
       const startX = Math.round((this.canvas.width - totalW) / 2);
+      const hotbarY = this.canvas.height - totalH - 8;
+
+      // XP bar click — check ABOVE the hotbar in the stats panel
+      const XP_BAR_H = 6, GAP = 3, BAR_H = 10, PANEL_PAD = 4;
+      const panelH = PANEL_PAD * 2 + XP_BAR_H + GAP + BAR_H * 2 + GAP;
+      const panelY = hotbarY - panelH - 4;
+      const barX   = startX + PANEL_PAD;
+      const barW   = totalW - PANEL_PAD * 2;
+      if (x >= barX && x <= barX + barW && y >= panelY + PANEL_PAD && y <= panelY + PANEL_PAD + XP_BAR_H + 4) {
+        const PLAYER_MAX_LEVEL = 120;
+        const lvl = this._cachedPlayerLevel;
+        const xp  = this._cachedPlayerXp;
+        const xpToNext = lvl * 100;
+        const canLevelUp = lvl < PLAYER_MAX_LEVEL && xp >= xpToNext;
+        if (canLevelUp && this.onPlayerLevelUp) {
+          this.onPlayerLevelUp();
+          return true;
+        }
+      }
+
       const startY = this.canvas.height - totalH - 8;
       if (y >= startY + PADDING && y <= startY + PADDING + SLOT_SIZE) {
         for (let i = 0; i < HOTBAR_SLOTS; i++) {
@@ -2076,6 +2108,8 @@ class HUDElement implements UIElement {
   visible = true;
   public mouseX = 0;
   public mouseY = 0;
+  private _cachedPlayerLevel = 1;
+  private _cachedPlayerXp    = 0;
   
   render(ctx: CanvasRenderingContext2D, context: UIRenderContext): void {
     // Find our player using the server-assigned player ID
@@ -2169,7 +2203,11 @@ class HUDElement implements UIElement {
     // Health / stamina bars above hotbar
     const maxSt = player.maxStamina ?? 100;
     const st    = player.stamina    ?? maxSt;
-    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, player.level ?? 1, player.xp ?? 0);
+    const _lvl = player.level ?? 1;
+    const _xp  = player.xp ?? 0;
+    this._cachedPlayerLevel = _lvl;
+    this._cachedPlayerXp    = _xp;
+    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, _lvl, _xp);
 
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
     const helmMode = context.mountKind === 'helm'
@@ -2191,7 +2229,7 @@ class HUDElement implements UIElement {
     level = 1,
     xp = 0,
   ): void {
-    const PLAYER_MAX_LEVEL = 66;
+    const PLAYER_MAX_LEVEL = 120;
     const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
     const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
     const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
@@ -2212,6 +2250,7 @@ class HUDElement implements UIElement {
     const isMaxLevel = level >= PLAYER_MAX_LEVEL;
     const xpToNext  = isMaxLevel ? PLAYER_MAX_LEVEL * 100 : level * 100;
     const xpRatio   = isMaxLevel ? 1 : Math.min(xp / xpToNext, 1);
+    const canLevelUp = !isMaxLevel && xp >= xpToNext;
 
     ctx.save();
 
@@ -2226,7 +2265,17 @@ class HUDElement implements UIElement {
     const xpY = panelY + PANEL_PAD;
     ctx.fillStyle = 'rgba(255,255,255,0.07)';
     ctx.fillRect(barX, xpY, barW, XP_BAR_H);
-    ctx.fillStyle = isMaxLevel ? '#ffdd44' : '#4488ff';
+    let xpBarColor: string;
+    if (isMaxLevel) {
+      xpBarColor = '#ffdd44';
+    } else if (canLevelUp) {
+      // Blink gold when enough XP to level up
+      const blinkOn = Math.floor(performance.now() / 400) % 2 === 0;
+      xpBarColor = blinkOn ? '#ffdd44' : '#4488ff';
+    } else {
+      xpBarColor = '#4488ff';
+    }
+    ctx.fillStyle = xpBarColor;
     ctx.fillRect(barX, xpY, Math.round(barW * xpRatio), XP_BAR_H);
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
     ctx.lineWidth = 1;

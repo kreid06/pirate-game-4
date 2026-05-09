@@ -1799,6 +1799,24 @@ void check_projectile_static_collisions(struct Sim* sim) {
             removed = true;
         }
 
+        /* Pass 3: island cannons — checked after floors so the cannon barrel
+         * takes direct hits rather than the underlying floor absorbing them. */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_CANNON) continue;
+            float dx = px - s->x;
+            float dy = py - s->y;
+            /* Circular hit-box ~15px radius covering the cannon mount */
+            if (dx * dx + dy * dy > 15.0f * 15.0f) continue;
+            /* Hit island cannon */
+            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+
         /* ── Test vs. island trees (spatial grid lookup) ────────────────── */
         if (!removed) {
             for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {

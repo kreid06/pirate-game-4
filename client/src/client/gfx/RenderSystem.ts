@@ -4081,8 +4081,21 @@ export class RenderSystem {
         const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'shipyard' ? 170 : half;
         const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'shipyard' ? 445 : half;
         if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) {
-          if (s.type === 'workbench' || s.type === 'shipyard') {
-            // Workbench/shipyard always wins — stop searching
+          if (s.type === 'shipyard') {
+            // For empty shipyard: only highlight the physical U-shaped dock arms,
+            // not the hollow interior water area. ARM_T = 50 world units (sz=50).
+            const SY_ARM_T = 50;
+            const isInHollow = s.construction?.phase !== 'building'
+              && Math.abs(lx) <= hw - SY_ARM_T
+              && ly > -hh + SY_ARM_T;
+            if (!isInHollow) {
+              this._hoveredStructure = s;
+              wallHit = null;
+              floorHit = null;
+              break;
+            }
+          } else if (s.type === 'workbench') {
+            // Workbench always wins — stop searching
             this._hoveredStructure = s;
             wallHit = null;
             floorHit = null;
@@ -4520,8 +4533,8 @@ export class RenderSystem {
         // ── Dark seafloor inside the bay ──────────────────────────────────────
         ctx.fillStyle = 'rgba(10, 40, 65, 0.72)';
         ctx.fillRect(cx - hw + ARM_T, cy - hh + BACK_T, INT_W, ARM_L);
-        // ── Brigantine hull silhouette (empty dock — ghost/placeholder) ────────
-        {
+        // ── Brigantine hull silhouette (only shown while a ship is under construction) ─
+        if (s.construction?.phase === 'building') {
           const shpHW  = INT_W * 0.36;
           const shpTop = cy - hh + BACK_T + ARM_L * 0.05;
           const shpBot = cy + hh          - ARM_L * 0.05;
@@ -4601,7 +4614,8 @@ export class RenderSystem {
           ctx.fillText('▲', cx - hw + ARM_T * 0.5, bayY1 - ARM_T * 0.5);
           ctx.fillText('▲', cx + hw - ARM_T * 0.5, bayY1 - ARM_T * 0.5);
         }
-        // Mast yard-arm crosses (fore + main)
+        // Mast yard-arm crosses and interior scaffolding (only while building)
+        if (s.construction?.phase === 'building') {
         ctx.strokeStyle = 'rgba(155, 115, 60, 0.65)';
         ctx.lineWidth   = Math.max(1, 2 * zoom);
         for (const mf of [0.28, 0.60]) {
@@ -4631,6 +4645,7 @@ export class RenderSystem {
           ctx.beginPath(); ctx.moveTo(cx + hw - ARM_T, y0); ctx.lineTo(cx + hw,         y1); ctx.stroke();
           ctx.beginPath(); ctx.moveTo(cx + hw,         y0); ctx.lineTo(cx + hw - ARM_T, y1); ctx.stroke();
         }
+        } // end if building
         // ── Mooring bollards at the mouth ──────────────────────────────────────
         ctx.fillStyle = 'rgba(190, 150, 85, 0.95)';
         const bollardR = Math.max(2, 3.5 * zoom);

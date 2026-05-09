@@ -1,6 +1,10 @@
 #pragma once
 #include "net/websocket_server_internal.h"
 
+/* XP constants shared between npc_agents.c and websocket_server.c */
+#define PLAYER_LEVEL_XP_BASE 100u
+#define PLAYER_MAX_LEVEL     120u
+
 void tick_npc_agents(float dt);
 void tick_cannon_needed_expiry(void);
 void tick_swivel_crew_demand(SimpleShip* ship);

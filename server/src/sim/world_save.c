@@ -133,6 +133,17 @@ int world_save(const char *path) {
         if (!first_ship) fprintf(f, ",");
         first_ship = false;
 
+        /* Check if the sim-layer ship still has SHIP_FLAG_SCAFFOLDED set */
+        bool is_scaffolded = false;
+        if (global_sim) {
+            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                if (global_sim->ships[si].id == (uint32_t)s->ship_id) {
+                    is_scaffolded = (global_sim->ships[si].flags & SHIP_FLAG_SCAFFOLDED) != 0;
+                    break;
+                }
+            }
+        }
+
         fprintf(f,
             "\n    {\n"
             "      \"id\": %u,\n"
@@ -150,6 +161,7 @@ int world_save(const char *path) {
             "      \"ammo\": %u,\n"
             "      \"infinite_ammo\": %s,\n"
             "      \"is_sinking\": %s,\n"
+            "      \"is_scaffolded\": %s,\n"
             "      \"modules\": [",
             (unsigned)s->ship_id,
             (unsigned)s->ship_seq,
@@ -165,7 +177,8 @@ int world_save(const char *path) {
             (double)s->desired_sail_angle,
             (unsigned)s->cannon_ammo,
             s->infinite_ammo  ? "true" : "false",
-            s->is_sinking     ? "true" : "false"
+            s->is_sinking     ? "true" : "false",
+            is_scaffolded     ? "true" : "false"
         );
 
         for (uint8_t m = 0; m < s->module_count; m++) {
@@ -280,7 +293,10 @@ int world_save(const char *path) {
             "      \"max_hp\": %u,\n"
             "      \"placer_id\": %u,\n"
             "      \"placer_name\": \"%s\",\n"
-            "      \"open\": %s\n"
+            "      \"open\": %s,\n"
+            "      \"construction_phase\": %u,\n"
+            "      \"construction_company\": %u,\n"
+            "      \"scaffolded_ship_id\": %u\n"
             "    }",
             (unsigned)ps->id,
             (unsigned)ps->type,
@@ -293,7 +309,10 @@ int world_save(const char *path) {
             (unsigned)ps->max_hp,
             (unsigned)ps->placer_id,
             ps->placer_name,
-            ps->open ? "true" : "false"
+            ps->open ? "true" : "false",
+            (unsigned)ps->construction_phase,
+            (unsigned)ps->construction_company,
+            (unsigned)ps->scaffolded_ship_id
         );
     }
     fprintf(f, "\n  ],\n");
@@ -448,7 +467,7 @@ int world_load(const char *path) {
                 float x = 0, y = 0, rot = 0, vx = 0, vy = 0, av = 0;
                 float sail_angle = 0;
                 unsigned sail_openness = 0, ammo = 0;
-                bool infinite_ammo = false, is_sinking = false;
+                bool infinite_ammo = false, is_sinking = false, is_scaffolded = false;
 
                 ws_json_uint(obj,  "id",            &id);
                 ws_json_uint(obj,  "seq",           &seq);
@@ -465,11 +484,14 @@ int world_load(const char *path) {
                 ws_json_uint(obj,  "ammo",          &ammo);
                 ws_json_bool(obj,  "infinite_ammo", &infinite_ammo);
                 ws_json_bool(obj,  "is_sinking",    &is_sinking);
+                ws_json_bool(obj,  "is_scaffolded", &is_scaffolded);
 
                 /* Recreate ship through the normal creation path */
                 if (ship_count < MAX_SIMPLE_SHIPS) {
+                    /* Scaffolded ships are bare skeletons; finished ships get all modules */
+                    uint8_t mods_placed = is_scaffolded ? 0 : 0xFF;
                     uint32_t new_id = websocket_server_create_ship(
-                        x, y, (uint8_t)company, 0xFF);
+                        x, y, (uint8_t)company, mods_placed);
                     /* Record old→new mapping so NPC ship_ids can be patched */
                     if (new_id && id && id_remap_count < MAX_SIMPLE_SHIPS) {
                         id_remap_old[id_remap_count] = (uint32_t)id;
@@ -504,6 +526,9 @@ int world_load(const char *path) {
                                     Q16_FROM_FLOAT(CLIENT_TO_SERVER(vy));
                                 global_sim->ships[si].angular_velocity =
                                     Q16_FROM_FLOAT(av);
+                                /* Restore scaffolded flag — prevents plank-drain sinking */
+                                if (is_scaffolded)
+                                    global_sim->ships[si].flags |= SHIP_FLAG_SCAFFOLDED;
                                 break;
                             }
                         }
@@ -667,22 +692,26 @@ int world_load(const char *path) {
 
                 unsigned id = 0, type = 0, island_id = 0, company = 0;
                 unsigned hp = 100, max_hp = 100, placer_id = 0;
+                unsigned construction_phase = 0, construction_company = 0, scaffolded_ship_id = 0;
                 float x = 0, y = 0, rot = 0;
                 bool open = false;
 
-                ws_json_uint(obj,  "id",          &id);
-                ws_json_uint(obj,  "type",        &type);
-                ws_json_float(obj, "x",           &x);
-                ws_json_float(obj, "y",           &y);
-                ws_json_float(obj, "rot",         &rot);
-                ws_json_uint(obj,  "island_id",   &island_id);
-                ws_json_uint(obj,  "company",     &company);
-                ws_json_uint(obj,  "hp",          &hp);
-                ws_json_uint(obj,  "max_hp",      &max_hp);
-                ws_json_uint(obj,  "placer_id",   &placer_id);
-                ws_json_str (obj,  "placer_name", ps->placer_name,
+                ws_json_uint(obj,  "id",                   &id);
+                ws_json_uint(obj,  "type",                 &type);
+                ws_json_float(obj, "x",                    &x);
+                ws_json_float(obj, "y",                    &y);
+                ws_json_float(obj, "rot",                  &rot);
+                ws_json_uint(obj,  "island_id",            &island_id);
+                ws_json_uint(obj,  "company",              &company);
+                ws_json_uint(obj,  "hp",                   &hp);
+                ws_json_uint(obj,  "max_hp",               &max_hp);
+                ws_json_uint(obj,  "placer_id",            &placer_id);
+                ws_json_str (obj,  "placer_name",          ps->placer_name,
                              sizeof(ps->placer_name));
-                ws_json_bool(obj,  "open",        &open);
+                ws_json_bool(obj,  "open",                 &open);
+                ws_json_uint(obj,  "construction_phase",   &construction_phase);
+                ws_json_uint(obj,  "construction_company", &construction_company);
+                ws_json_uint(obj,  "scaffolded_ship_id",   &scaffolded_ship_id);
 
                 ps->id         = id ? (uint16_t)id : next_structure_id;
                 ps->type       = (PlacedStructureType)type;
@@ -696,6 +725,20 @@ int world_load(const char *path) {
                 ps->placer_id  = placer_id;
                 ps->open       = open;
                 ps->active     = true;
+
+                /* Restore shipyard construction state */
+                ps->construction_phase   = (ShipConstructionPhase)construction_phase;
+                ps->construction_company = (uint8_t)construction_company;
+                /* Remap scaffolded_ship_id: old entity ID → new entity ID */
+                if (scaffolded_ship_id != 0) {
+                    for (int ri = 0; ri < id_remap_count; ri++) {
+                        if (id_remap_old[ri] == scaffolded_ship_id) {
+                            scaffolded_ship_id = id_remap_new[ri];
+                            break;
+                        }
+                    }
+                }
+                ps->scaffolded_ship_id = (uint16_t)scaffolded_ship_id;
 
                 /* Cannons: initialise aim to match base orientation so the barrel
                  * starts at "0 relative to base" rather than world-angle 0.
