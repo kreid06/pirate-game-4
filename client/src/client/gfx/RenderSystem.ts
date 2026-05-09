@@ -4912,15 +4912,22 @@ export class RenderSystem {
       ctx.translate(ssp.x, ssp.y);
       ctx.rotate(rotRad);
       if (s.type === 'cannon') {
-        // Draw highlight matching cannon shape: base rect + barrel rotated to aim angle
+        // Draw highlight matching cannon shape: base rect + barrel rect
+        // Base inherits rotRad from ctx.rotate(rotRad) above — correct.
         const baseW = 30 * zoom, baseH = 20 * zoom, barW = 16 * zoom, barH = 40 * zoom;
         ctx.strokeRect(-baseW / 2, -baseH / 2, baseW, baseH);
-        // Barrel rotates independently around the cannon pivot by its aim offset.
-        // cannonAimAngle is world-space; rotRad is the cannon's base orientation,
-        // so the local barrel angle = cannonAimAngle - rotRad.
-        const barrelAngle = s.cannonAimAngle != null ? (s.cannonAimAngle - rotRad) : 0;
+        // Barrel: must match the actual draw code's barrelRot exactly.
+        // Draw code: barrelRot = aimAngle + π/2, applied at translate(ssp) level (no rotRad stacked).
+        // Our ctx already has rotRad stacked, so we apply (barrelRot - rotRad) as the delta.
+        const hasLiveAim  = this.islandCannonId === s.id && this.islandCannonAimAngle !== null;
+        const hasServerAim = typeof s.cannonAimAngle === 'number';
+        const barrelRot = hasLiveAim
+          ? (this.islandCannonAimAngle! + Math.PI / 2)
+          : hasServerAim
+            ? (s.cannonAimAngle! + Math.PI / 2)
+            : rotRad; // no aim data → barrel aligned with base
         ctx.save();
-        ctx.rotate(barrelAngle);
+        ctx.rotate(barrelRot - rotRad); // net absolute = rotRad + (barrelRot - rotRad) = barrelRot ✓
         ctx.strokeRect(-barW / 2, -barH, barW, barH);
         ctx.restore();
       } else {
