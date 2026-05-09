@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 #include <sys/stat.h>
 #include <errno.h>
 
@@ -695,6 +696,15 @@ int world_load(const char *path) {
                 ps->placer_id  = placer_id;
                 ps->open       = open;
                 ps->active     = true;
+
+                /* Cannons: initialise aim to match base orientation so the barrel
+                 * starts at "0 relative to base" rather than world-angle 0.
+                 * Barrel points local −y, so facing world angle = rot°·π/180 − π/2. */
+                if (ps->type == STRUCT_CANNON) {
+                    ps->cannon_aim_angle =
+                        ps->rotation * (float)M_PI / 180.0f - (float)(M_PI / 2.0);
+                    ps->cannon_desired_aim_angle = ps->cannon_aim_angle;
+                }
 
                 if (ps->id >= next_structure_id) next_structure_id = ps->id + 1;
                 placed_structure_count++;

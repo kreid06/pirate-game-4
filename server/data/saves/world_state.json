@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": 1778302118,
+    "timestamp": 1778303243,
     "ship_count": 2,
     "npc_count": 18,
-    "structure_count": 39
+    "structure_count": 20
   },
   "ships": [
     {
@@ -7784,7 +7784,7 @@
         {"idx":881,"health":100,"alive":true,"respawn_at":0},
         {"idx":882,"health":100,"alive":true,"respawn_at":0},
         {"idx":883,"health":100,"alive":true,"respawn_at":0},
-        {"idx":884,"health":70,"alive":true,"respawn_at":0},
+        {"idx":884,"health":40,"alive":true,"respawn_at":0},
         {"idx":885,"health":100,"alive":true,"respawn_at":0},
         {"idx":886,"health":40,"alive":true,"respawn_at":0},
         {"idx":887,"health":100,"alive":true,"respawn_at":0},
