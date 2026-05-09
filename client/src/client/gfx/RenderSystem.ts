@@ -1809,7 +1809,15 @@ export class RenderSystem {
 
   /** Remove a single structure by id (e.g. after server confirms demolish). */
   removePlacedStructure(id: number): void {
-    this.placedStructures = this.placedStructures.filter(s => s.id !== id);
+    const s = this.placedStructures.find(p => p.id === id);
+    if (s) {
+      // Spawn destruction smoke + debris for solid structures (not cannons/shipyards)
+      const smokeTypes: PlacedStructure['type'][] = ['wooden_floor', 'wood_ceiling', 'wall', 'door', 'door_frame', 'workbench'];
+      if (smokeTypes.includes(s.type)) {
+        this.particleSystem.createStructureDestroy(Vec2.from(s.x, s.y));
+      }
+    }
+    this.placedStructures = this.placedStructures.filter(p => p.id !== id);
     this._rebuildWallSegs();
   }
 
@@ -4904,10 +4912,17 @@ export class RenderSystem {
       ctx.translate(ssp.x, ssp.y);
       ctx.rotate(rotRad);
       if (s.type === 'cannon') {
-        // Draw highlight matching cannon shape: base rect + barrel rect
+        // Draw highlight matching cannon shape: base rect + barrel rotated to aim angle
         const baseW = 30 * zoom, baseH = 20 * zoom, barW = 16 * zoom, barH = 40 * zoom;
         ctx.strokeRect(-baseW / 2, -baseH / 2, baseW, baseH);
+        // Barrel rotates independently around the cannon pivot by its aim offset.
+        // cannonAimAngle is world-space; rotRad is the cannon's base orientation,
+        // so the local barrel angle = cannonAimAngle - rotRad.
+        const barrelAngle = s.cannonAimAngle != null ? (s.cannonAimAngle - rotRad) : 0;
+        ctx.save();
+        ctx.rotate(barrelAngle);
         ctx.strokeRect(-barW / 2, -barH, barW, barH);
+        ctx.restore();
       } else {
         ctx.strokeRect(-rawW / 2, -rawH / 2, rawW, rawH);
       }
@@ -11599,10 +11614,13 @@ export class RenderSystem {
         const halfHeight = height / 2;
         this.ctx.strokeRect(-halfWidth, -halfHeight, width, height);
       } else if (moduleData.kind === 'cannon') {
-        // Draw cannon highlight
-        const width = 30;
-        const height = 20;
-        this.ctx.strokeRect(-width/2, -height/2, width, height);
+        // Draw cannon highlight: base rect + barrel at its current aim angle
+        this.ctx.strokeRect(-15, -10, 30, 20);
+        const turretAngle = (moduleData as any).aimDirection ?? 0;
+        this.ctx.save();
+        this.ctx.rotate(turretAngle);
+        this.ctx.strokeRect(-8, -40, 16, 40); // barrel: same dims as drawShipCannons
+        this.ctx.restore();
       } else if (moduleData.kind === 'ladder') {
         // Ladder renders as fillRect(-10, -20, 20, 40)
         this.ctx.strokeRect(-10, -20, 20, 40);
