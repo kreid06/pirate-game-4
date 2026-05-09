@@ -231,6 +231,8 @@ interface WorldStateMessage extends NetworkMessage {
 interface AckMessage extends NetworkMessage {
   type: MessageType.MESSAGE_ACK;
   status: string;
+  structure_id?: number;
+  cannon_aim_angle?: number;
 }
 
 /**
@@ -570,6 +572,8 @@ export class NetworkManager {
   /** Fired when the server confirms the player has mounted an island cannon structure.
    *  `mountX`/`mountY` are the world-space coordinates the player should snap to. */
   public onIslandCannonMounted: ((structureId: number, aimAngle: number, reloadMs: number, mountX: number, mountY: number, facingAngle: number) => void) | null = null;
+  /** Fired when server returns authoritative current island-cannon aim in message_ack. */
+  public onIslandCannonAimSync: ((structureId: number, aimAngle: number) => void) | null = null;
   /** Fired when the player tries to fire an island cannon but has no cannonballs. */
   public onNoAmmo: (() => void) | null = null;
 
@@ -2557,6 +2561,7 @@ export class NetworkManager {
           placerName: s.placer_name ?? '',
           doorOpen:  s.open ?? false,
           rotation:  s.rotation ?? 0,
+          cannonAimAngle: typeof s.cannon_aim_angle === 'number' ? s.cannon_aim_angle : undefined,
           construction: s.structure_type === 'shipyard' ? {
             phase: (s.construction_phase === 'building' ? 'building' : 'empty') as ConstructionPhase,
             modulesPlaced: Array.isArray(s.modules_placed) ? s.modules_placed : [],
@@ -2587,6 +2592,7 @@ export class NetworkManager {
           placerName: message.placer_name ?? '',
           doorOpen:  message.open ?? false,
           rotation:  message.rotation ?? 0,
+          cannonAimAngle: typeof message.cannon_aim_angle === 'number' ? message.cannon_aim_angle : undefined,
         };
         this.onStructurePlaced?.(sp);
         break;
@@ -2866,6 +2872,11 @@ export class NetworkManager {
         break;
 
       case 'message_ack':
+        if (message.status === 'aim_updated' &&
+            typeof message.structure_id === 'number' &&
+            typeof message.cannon_aim_angle === 'number') {
+          this.onIslandCannonAimSync?.(message.structure_id, message.cannon_aim_angle);
+        }
         if (message.status === 'no_ammo') {
           this.onNoAmmo?.();
         }

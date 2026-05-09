@@ -374,6 +374,9 @@ export class ClientApplication {
         // Pass initial aim and facing angle so clamping and barrel rendering start correctly.
         this.inputManager?.setMountState(true, undefined, 'CANNON', structureId, undefined, aimAngle, facingAngle);
       };
+      this.networkManager.onIslandCannonAimSync = (structureId, aimAngle) => {
+        this.inputManager?.syncIslandCannonAim(structureId, aimAngle);
+      };
       this.networkManager.onNoAmmo = () => {
         // Show floating "No cannonballs!" warning at the player's current position
         const assignedId = this.networkManager.getAssignedPlayerId();

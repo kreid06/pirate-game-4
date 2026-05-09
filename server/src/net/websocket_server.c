@@ -2286,8 +2286,10 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
                                         bool hs_is_door = (placed_structures[si].type == STRUCT_DOOR);
                                         bool hs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
+                                        bool hs_is_cannon = (placed_structures[si].type == STRUCT_CANNON);
                                         /* Build extra fields for shipyard construction state */
                                         char hs_sy_extra[256] = "";
+                                        char hs_cannon_extra[64] = "";
                                         if (hs_is_sy) {
                                             char hs_mj[128] = "[]";
                                             if (placed_structures[si].modules_placed) {
@@ -2310,11 +2312,16 @@ int websocket_server_update(struct Sim* sim) {
                                                      ",\"construction_phase\":\"%s\",\"modules_placed\":%s",
                                                      hs_phase, hs_mj);
                                         }
+                                        if (hs_is_cannon) {
+                                            snprintf(hs_cannon_extra, sizeof(hs_cannon_extra),
+                                                     ",\"cannon_aim_angle\":%.4f",
+                                                     placed_structures[si].cannon_aim_angle);
+                                        }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
                                                           "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                           "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                           "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-                                                          ",\"rotation\":%.2f%s%s}",
+                                                          ",\"rotation\":%.2f%s%s%s}",
                                                           hs_sfirst ? "" : ",",
                                                           placed_structures[si].id, hs_stype,
                                                           placed_structures[si].island_id,
@@ -2325,7 +2332,8 @@ int websocket_server_update(struct Sim* sim) {
                                                           placed_structures[si].placer_name,
                                                           placed_structures[si].rotation,
                                                           hs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
-                                                          hs_sy_extra);
+                                                          hs_sy_extra,
+                                                          hs_cannon_extra);
                                             hs_sfirst = false;
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp, "]}");
@@ -3360,7 +3368,20 @@ int websocket_server_update(struct Sim* sim) {
                                     char* angle_start = strstr(payload, "\"aim_angle\":");
                                     if (angle_start) sscanf(angle_start + 12, "%f", &aim_angle);
                                     handle_island_cannon_aim(player, aim_angle);
-                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"aim_updated\"}");
+                                    {
+                                        float cur_aim = aim_angle;
+                                        for (uint32_t _si = 0; _si < placed_structure_count; _si++) {
+                                            if (!placed_structures[_si].active) continue;
+                                            if (placed_structures[_si].id != player->mounted_cannon_structure_id) continue;
+                                            cur_aim = placed_structures[_si].cannon_aim_angle;
+                                            break;
+                                        }
+                                        snprintf(response, sizeof(response),
+                                                 "{\"type\":\"message_ack\",\"status\":\"aim_updated\","
+                                                 "\"structure_id\":%u,\"cannon_aim_angle\":%.4f}",
+                                                 (unsigned)player->mounted_cannon_structure_id,
+                                                 cur_aim);
+                                    }
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 }
@@ -6449,7 +6470,9 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
                                         bool is_door_s = (placed_structures[si].type == STRUCT_DOOR);
                                         bool is_sy_s   = (placed_structures[si].type == STRUCT_SHIPYARD);
+                                        bool is_cannon_s = (placed_structures[si].type == STRUCT_CANNON);
                                         char sy_extra_s[256] = "";
+                                        char cannon_extra_s[64] = "";
                                         if (is_sy_s) {
                                             char smj[128] = "[]";
                                             if (placed_structures[si].modules_placed) {
@@ -6472,11 +6495,16 @@ int websocket_server_update(struct Sim* sim) {
                                                      ",\"construction_phase\":\"%s\",\"modules_placed\":%s",
                                                      sphase, smj);
                                         }
+                                        if (is_cannon_s) {
+                                            snprintf(cannon_extra_s, sizeof(cannon_extra_s),
+                                                     ",\"cannon_aim_angle\":%.4f",
+                                                     placed_structures[si].cannon_aim_angle);
+                                        }
                                         spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                          "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-                                                         ",\"rotation\":%.2f%s%s}",
+                                                         ",\"rotation\":%.2f%s%s%s}",
                                                          sfirst ? "" : ",",
                                                          placed_structures[si].id,
                                                          stype_str,
@@ -6489,7 +6517,8 @@ int websocket_server_update(struct Sim* sim) {
                                                          placed_structures[si].placer_name,
                                                          placed_structures[si].rotation,
                                                          is_door_s ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
-                                                         sy_extra_s);
+                                                         sy_extra_s,
+                                                         cannon_extra_s);
                                         sfirst = false;
                                     }
                                     spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos, "]}");
@@ -6524,7 +6553,9 @@ int websocket_server_update(struct Sim* sim) {
                                         placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
                                     bool gs_is_door = (placed_structures[si].type == STRUCT_DOOR);
                                     bool gs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
+                                    bool gs_is_cannon = (placed_structures[si].type == STRUCT_CANNON);
                                     char gs_sy_extra[256] = "";
+                                    char gs_cannon_extra[64] = "";
                                     if (gs_is_sy) {
                                         char gmj[128] = "[]";
                                         if (placed_structures[si].modules_placed) {
@@ -6547,11 +6578,16 @@ int websocket_server_update(struct Sim* sim) {
                                                  ",\"construction_phase\":\"%s\",\"modules_placed\":%s",
                                                  gphase, gmj);
                                     }
+                                                                        if (gs_is_cannon) {
+                                                                                snprintf(gs_cannon_extra, sizeof(gs_cannon_extra),
+                                                                                                 ",\"cannon_aim_angle\":%.4f",
+                                                                                                 placed_structures[si].cannon_aim_angle);
+                                                                        }
                                     gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
                                                    "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                    "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                    "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-                                                   ",\"rotation\":%.2f%s%s}",
+                                                                                                     ",\"rotation\":%.2f%s%s%s}",
                                                    gfirst ? "" : ",",
                                                    placed_structures[si].id, gs_type,
                                                    placed_structures[si].island_id,
@@ -6562,7 +6598,8 @@ int websocket_server_update(struct Sim* sim) {
                                                    placed_structures[si].placer_name,
                                                    placed_structures[si].rotation,
                                                    gs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
-                                                   gs_sy_extra);
+                                                                                                     gs_sy_extra,
+                                                                                                     gs_cannon_extra);
                                     gfirst = false;
                                 }
                                 gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp, "]}");

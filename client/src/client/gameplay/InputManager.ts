@@ -220,6 +220,14 @@ export class InputManager {
   public get isOnIslandCannon(): boolean { return this.mountKind === 'cannon' && this.currentShipId === null; }
   /** Returns the last computed cannon aim angle (world radians). */
   public getLastCannonAimAngle(): number { return this.lastCannonAimAngle; }
+  /** Apply authoritative island-cannon aim from server for mounted cannon visuals. */
+  public syncIslandCannonAim(structureId: number, aimAngle: number): void {
+    if (!this.isOnIslandCannon) return;
+    if (this.mountedCannonModuleId !== structureId) return;
+    if (!Number.isFinite(aimAngle)) return;
+    this.lastCannonAimAngle = aimAngle;
+    this.islandCannonDesiredAimAngle = aimAngle;
+  }
   /** Selected ammo type: 0 = cannonball, 1 = bar shot. Toggle with X key. */
   public selectedAmmoType: number = 0;    // Pending ammo (to load after next fire)
   public loadedAmmoType: number = 0;      // What's physically in the barrel right now

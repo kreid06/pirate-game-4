@@ -171,6 +171,7 @@ export interface PlacedStructure {
   placerName: string;  // display name of the player who built this
   doorOpen?: boolean;  // doors only: true = open (passable)
   rotation?: number;   // rotation in degrees (default 0); applies to wooden_floor and workbench
+  cannonAimAngle?: number; // cannons only: world-space aim angle in radians
   /** Shipyard only — current ship under construction. Absent when empty. */
   construction?: ShipConstruction;
 }

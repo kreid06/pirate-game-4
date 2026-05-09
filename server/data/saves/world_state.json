@@ -1,6 +1,6 @@
 {
   "meta": {
-    "timestamp": 1778295661,
+    "timestamp": 1778298827,
     "ship_count": 2,
     "npc_count": 18,
     "structure_count": 39
@@ -1008,7 +1008,7 @@
       "rot": 0.000,
       "island_id": 4,
       "company": 3,
-      "hp": 100,
+      "hp": 75,
       "max_hp": 100,
       "placer_id": 1000,
       "placer_name": "test",

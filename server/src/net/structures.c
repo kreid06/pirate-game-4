@@ -626,16 +626,24 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     /* Broadcast to all clients */
     char bcast[384];
     bool new_is_door = (stype_enum == STRUCT_DOOR);
+    bool new_is_cannon = (stype_enum == STRUCT_CANNON);
     float bcast_rot  = placed_structures[placed_structure_count - 1].rotation;
+    char cannon_extra[64] = "";
+    if (new_is_cannon) {
+        snprintf(cannon_extra, sizeof(cannon_extra),
+                 ",\"cannon_aim_angle\":%.4f",
+                 placed_structures[placed_structure_count - 1].cannon_aim_angle);
+    }
     snprintf(bcast, sizeof(bcast),
              "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
              "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-             ",\"rotation\":%.2f%s}",
+             ",\"rotation\":%.2f%s%s}",
              new_id, stype, target_island_id, px, py,
              (unsigned)player->company_id, 100u, 100u, player->name,
              bcast_rot,
-             new_is_door ? ",\"open\":false" : "");
+             new_is_door ? ",\"open\":false" : "",
+             cannon_extra);
     websocket_server_broadcast(bcast);
     return; /* already sent via broadcast */
 

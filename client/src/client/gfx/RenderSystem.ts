@@ -4801,7 +4801,12 @@ export class RenderSystem {
         // barrelRot: canvas ctx.rotate angle so barrel (pointing local −y) faces world aim direction.
         // aimAngle = atan2(dy_screen, dx_screen) → barrelRot = aimAngle + π/2
         const hasLiveAim = this.islandCannonId === s.id && this.islandCannonAimAngle !== null;
-        const barrelRot  = hasLiveAim ? (this.islandCannonAimAngle! + Math.PI / 2) : rotRad;
+        const hasServerAim = typeof s.cannonAimAngle === 'number';
+        const barrelRot  = hasLiveAim
+          ? (this.islandCannonAimAngle! + Math.PI / 2)
+          : hasServerAim
+            ? (s.cannonAimAngle! + Math.PI / 2)
+            : rotRad;
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
