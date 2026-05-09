@@ -1164,6 +1164,89 @@ void destroy_placed_structure(uint32_t structure_id) {
         }
     }
 
+    /* ── Cascade: wall or door_frame destroyed → re-check ceiling connectivity ──
+     * Strict rule: every ceiling must be reachable to a wall/door_frame
+     * (at one of its 4 edge midpoints) via a chain of edge-adjacent ceilings.
+     * Implemented as iterative BFS-style flood-fill: any ceiling whose support
+     * is lost transitively gets cascade-demolished. */
+    if (dtype == STRUCT_WALL || dtype == STRUCT_DOOR_FRAME) {
+        const float EDGE_TOL  = 3.0f;
+        const float HALF_TILE = 25.0f;
+        const float TILE      = 50.0f;
+        bool reached[MAX_PLACED_STRUCTURES] = {false};
+
+        /* Seed: ceilings with direct wall/door_frame support at any edge midpoint. */
+        for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
+            PlacedStructure* c = &placed_structures[ci];
+            if (!c->active || c->type != STRUCT_CEILING) continue;
+            float cr = c->rotation * (float)M_PI / 180.0f;
+            float cc = cosf(cr), cs = sinf(cr);
+            const struct { float ldx; float ldy; } edge_offs[4] = {
+                {  0.0f,      -HALF_TILE },
+                {  0.0f,       HALF_TILE },
+                { -HALF_TILE,  0.0f      },
+                {  HALF_TILE,  0.0f      },
+            };
+            for (int ei = 0; ei < 4 && !reached[ci]; ei++) {
+                float ex = c->x + edge_offs[ei].ldx * cc - edge_offs[ei].ldy * cs;
+                float ey = c->y + edge_offs[ei].ldx * cs + edge_offs[ei].ldy * cc;
+                for (uint32_t si = 0; si < placed_structure_count; si++) {
+                    PlacedStructure* w = &placed_structures[si];
+                    if (!w->active) continue;
+                    if (w->type != STRUCT_WALL && w->type != STRUCT_DOOR_FRAME) continue;
+                    if (fabsf(w->x - ex) < EDGE_TOL && fabsf(w->y - ey) < EDGE_TOL) {
+                        reached[ci] = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        /* Iterate: spread reachability to edge-adjacent ceilings until stable. */
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (uint32_t ai = 0; ai < placed_structure_count; ai++) {
+                if (!reached[ai]) continue;
+                PlacedStructure* a = &placed_structures[ai];
+                if (!a->active || a->type != STRUCT_CEILING) continue;
+                float ar = a->rotation * (float)M_PI / 180.0f;
+                float ac = cosf(ar), as = sinf(ar);
+                const struct { float ldx; float ldy; } adj[4] = {
+                    {  TILE, 0.0f }, { -TILE, 0.0f },
+                    { 0.0f,  TILE }, { 0.0f, -TILE },
+                };
+                for (int k = 0; k < 4; k++) {
+                    float nx = a->x + adj[k].ldx * ac - adj[k].ldy * as;
+                    float ny = a->y + adj[k].ldx * as + adj[k].ldy * ac;
+                    for (uint32_t bi = 0; bi < placed_structure_count; bi++) {
+                        if (reached[bi]) continue;
+                        PlacedStructure* b = &placed_structures[bi];
+                        if (!b->active || b->type != STRUCT_CEILING) continue;
+                        if (fabsf(b->x - nx) < EDGE_TOL && fabsf(b->y - ny) < EDGE_TOL) {
+                            reached[bi] = true;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        /* Demolish any unreached ceiling. */
+        for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
+            PlacedStructure* c = &placed_structures[ci];
+            if (!c->active || c->type != STRUCT_CEILING) continue;
+            if (reached[ci]) continue;
+            c->active = false;
+            char cm[128];
+            snprintf(cm, sizeof(cm),
+                     "{\"type\":\"structure_demolished\",\"structure_id\":%u}", c->id);
+            websocket_server_broadcast(cm);
+            log_info("🔨 Cascade-demolished ceiling %u (lost wall connectivity after %s %u removed)",
+                     c->id, dtype == STRUCT_WALL ? "wall" : "door_frame", structure_id);
+        }
+    }
+
     /* ── Compact inactive entries out of the array in one pass ─────────── */
     uint32_t write = 0;
     for (uint32_t read = 0; read < placed_structure_count; read++) {
