@@ -816,13 +816,18 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
             placed_structures[i].cannon_mounted_player_id = player->player_id;
             player->is_mounted = true;
             player->mounted_cannon_structure_id = placed_structures[i].id;
-            /* Position player behind the cannon breech */
+            /* Position player behind the cannon base (opposite the barrel).
+               Use the fixed placement rotation so the mount point is always at the
+               back of the cannon carriage regardless of current aim angle.
+               The barrel points in direction (rotRad - π/2), so the back is +π/2
+               from rotRad: back_dir = (-sin(rotRad), cos(rotRad)). */
             float _mount_x, _mount_y;
             {
-                const float MOUNT_DIST = 25.0f;
-                float aim = placed_structures[i].cannon_aim_angle;
-                _mount_x = placed_structures[i].x - cosf(aim) * MOUNT_DIST;
-                _mount_y = placed_structures[i].y - sinf(aim) * MOUNT_DIST;
+                const float MOUNT_DIST = 30.0f;
+                float rot_rad = placed_structures[i].rotation * (float)M_PI / 180.0f;
+                /* back of cannon = opposite of barrel direction = rotRad + π/2 offset */
+                _mount_x = placed_structures[i].x + (-sinf(rot_rad)) * MOUNT_DIST;
+                _mount_y = placed_structures[i].y + ( cosf(rot_rad)) * MOUNT_DIST;
                 player->x = _mount_x;
                 player->y = _mount_y;
             }
