@@ -6,7 +6,8 @@
 #include "net/npc_agents.h"
 #include "util/time.h"
 
-#define HARVEST_RANGE 110.0f      /* world-px, generous for feel */
+/* Players must be within half a floor-tile (50px / 2 = 25px) to harvest a resource. */
+#define HARVEST_RANGE 25.0f
 #define HARVEST_STAMINA_COST 15u   /* stamina drained per harvest action */
 
 /* Respawn delays per resource type (milliseconds) */

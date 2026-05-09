@@ -2040,7 +2040,7 @@ export class RenderSystem {
    * Return the nearest workbench within `range` world-px of the local player,
    * or null if none found. Used to decide whether E-key triggers interact.
    */
-  getHoveredWorkbench(range: number = 110): PlacedStructure | null {
+  getHoveredWorkbench(range: number = 25): PlacedStructure | null {
     const player = this._cachedLocalPlayer;
     if (!player) return null;
     const px = player.position.x;
@@ -2066,7 +2066,7 @@ export class RenderSystem {
    * of it (so E-key only fires when actually reachable). Returns null if no
    * structure is moused-over or the player is too far / on a ship.
    */
-  getHoveredStructure(range: number = 110): PlacedStructure | null {
+  getHoveredStructure(range: number = 25): PlacedStructure | null {
     if (!this._hoveredStructure) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
@@ -2088,7 +2088,7 @@ export class RenderSystem {
   }
 
   /** Return hovered tree world pos if player is in range and off-ship, else null. */
-  getHoveredTree(range: number = 110): { wx: number; wy: number } | null {
+  getHoveredTree(range: number = 25): { wx: number; wy: number } | null {
     if (!this._hoveredTree) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
@@ -2098,7 +2098,7 @@ export class RenderSystem {
   }
 
   /** Return hovered fiber plant world pos if player is in range and off-ship, else null. */
-  getHoveredFiberPlant(range: number = 110): { wx: number; wy: number } | null {
+  getHoveredFiberPlant(range: number = 25): { wx: number; wy: number } | null {
     if (!this._hoveredFiberPlant) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
@@ -2108,7 +2108,7 @@ export class RenderSystem {
   }
 
   /** Return hovered rock world pos if player is in range and off-ship, else null. */
-  getHoveredRock(range: number = 110): { wx: number; wy: number } | null {
+  getHoveredRock(range: number = 25): { wx: number; wy: number } | null {
     if (!this._hoveredRock) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
@@ -2117,7 +2117,7 @@ export class RenderSystem {
     return dx * dx + dy * dy <= range * range ? this._hoveredRock : null;
   }
 
-  getHoveredBoulder(range: number = 110): { wx: number; wy: number } | null {
+  getHoveredBoulder(range: number = 25): { wx: number; wy: number } | null {
     if (!this._hoveredBoulder) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
@@ -3369,7 +3369,7 @@ export class RenderSystem {
     })();
     this._pendingAxeEquipped     = axeEquipped;
     this._pendingPickaxeEquipped = pickaxeEquipped;
-    const HARVEST_RANGE_SQ = 110 * 110;
+    const HARVEST_RANGE_SQ = 25 * 25; // half floor-tile (50px / 2) — matches server HARVEST_RANGE
     const PLANT_HOVER_SQ = (30 * zoom) * (30 * zoom);
     const ROCK_HOVER_SQ  = (22 * zoom) * (22 * zoom);
     const LEAF_FADE_OUTER = 420;
@@ -4016,7 +4016,7 @@ export class RenderSystem {
     // landscape rect for workbench).  Interaction hints additionally require
     // the player to be off-ship and within range.
     const player = this._cachedLocalPlayer;
-    const INTERACT_R = 110; // world px — must match getHoveredStructure range
+    const INTERACT_R = 25; // world px — half floor-tile; must match getHoveredStructure range and server STRUCT_INTERACT_R
     this._hoveredStructure = null;
     if (this.mouseWorldPos && !this.islandBuildKind) {
       const mx = this.mouseWorldPos.x;
@@ -4828,7 +4828,7 @@ export class RenderSystem {
         }
         const dx = s.x - player.position.x;
         const dy = s.y - player.position.y;
-        return dx * dx + dy * dy <= 110 * 110;
+        return dx * dx + dy * dy <= 25 * 25;
       })();
 
       const label = s.type === 'wooden_floor' ? 'Wooden Floor'
