@@ -4087,14 +4087,23 @@ export class RenderSystem {
       if (this._hoveredStructure === null) this._hoveredStructure = wallHit ?? floorHit;
     }
 
-    // Pre-compute which ceiling tiles are visible from the player via LOS through wall segments.
-    // A ceiling tile is "visible" when the player→center ray is not blocked by any wall segment.
-    // Visible ceilings draw semi-transparent; occluded ceilings draw fully opaque.
-    const visibleCeilingIds = new Set<number>();
+    // Pre-compute the player's visibility polygon. This polygon (in world space)
+    // bounds the area the player has line-of-sight to. Each ceiling tile is rendered
+    // fully opaque, then the lit area (vis poly) is punched to a lower alpha — producing
+    // a clean shadow edge along the true LOS line.
+    const MIN_CEIL_ALPHA = 0.25;
+    const ceilingAlpha = new Map<number, number>(); // tile-average alpha — used for hover blocking
+    let visPolyValid = false;
     if (player && this._wallSegs.length > 0) {
       const ppx = player.position.x, ppy = player.position.y;
+      // Rebuild vis poly each frame the player moves > 1 unit OR walls change.
+      const moved = Math.abs(ppx - this._visPolyPx) > 1 || Math.abs(ppy - this._visPolyPy) > 1;
+      if (moved || this._visPolyPts.length === 0) this._buildVisibilityPoly(ppx, ppy);
+      visPolyValid = this._visPolyPts.length >= 6;
+
+      // Approximate per-tile alpha for hover-blocking by sampling 5 points (center + corners).
       const wseg = this._wallSegs;
-      const ceilLosBlocked = (tx: number, ty: number): boolean => {
+      const losBlocked = (tx: number, ty: number): boolean => {
         const d1x = tx - ppx, d1y = ty - ppy;
         for (let i = 0; i < wseg.length; i += 4) {
           const d2x = wseg[i+2] - wseg[i], d2y = wseg[i+3] - wseg[i+1];
@@ -4107,21 +4116,36 @@ export class RenderSystem {
         }
         return false;
       };
+      const SAMPLE_INSET = 22;
       for (const s of this.placedStructures) {
         if (s.type !== 'wood_ceiling') continue;
-        if (!ceilLosBlocked(s.x, s.y)) visibleCeilingIds.add(s.id);
+        const cRot = (s.rotation ?? 0) * Math.PI / 180;
+        const cosC = Math.cos(cRot), sinC = Math.sin(cRot);
+        const samples: [number, number][] = [
+          [s.x, s.y],
+          [s.x + (-SAMPLE_INSET) * cosC - (-SAMPLE_INSET) * sinC, s.y + (-SAMPLE_INSET) * sinC + (-SAMPLE_INSET) * cosC],
+          [s.x + ( SAMPLE_INSET) * cosC - (-SAMPLE_INSET) * sinC, s.y + ( SAMPLE_INSET) * sinC + (-SAMPLE_INSET) * cosC],
+          [s.x + ( SAMPLE_INSET) * cosC - ( SAMPLE_INSET) * sinC, s.y + ( SAMPLE_INSET) * sinC + ( SAMPLE_INSET) * cosC],
+          [s.x + (-SAMPLE_INSET) * cosC - ( SAMPLE_INSET) * sinC, s.y + (-SAMPLE_INSET) * sinC + ( SAMPLE_INSET) * cosC],
+        ];
+        let unblocked = 0;
+        for (const [sx, sy] of samples) if (!losBlocked(sx, sy)) unblocked++;
+        const visFrac = unblocked / samples.length;
+        ceilingAlpha.set(s.id, 1 - visFrac * (1 - MIN_CEIL_ALPHA));
       }
     }
+    const visPolyPts = this._visPolyPts;
 
-    // Override hover: if the mouse is over a fully-opaque ceiling tile, that ceiling takes
-    // priority over everything beneath it (workbench, walls, floors) since the player
-    // can't see through it. Visible (semi-transparent) ceilings don't occlude interaction.
+    // Override hover: a ceiling tile blocks interaction with what's beneath it only if
+    // it's mostly opaque. Mostly-transparent ceilings (player has good LOS) don't occlude.
     if (this.mouseWorldPos && !this.islandBuildKind) {
       const mx = this.mouseWorldPos.x, my = this.mouseWorldPos.y;
       const half = 25;
+      const HOVER_BLOCK_ALPHA = 0.7; // ceilings denser than this block clicks/hover
       for (const s of this.placedStructures) {
         if (s.type !== 'wood_ceiling') continue;
-        if (visibleCeilingIds.has(s.id)) continue; // transparent — doesn't block
+        const a = ceilingAlpha.get(s.id) ?? 1;
+        if (a < HOVER_BLOCK_ALPHA) continue; // see-through enough — doesn't block
         const rot = (s.rotation ?? 0) * Math.PI / 180;
         let lx: number, ly: number;
         if (rot === 0) {
@@ -4670,60 +4694,101 @@ export class RenderSystem {
           ctx.restore();
         }
       } else if (s.type === 'wood_ceiling') {
-        // ── Wooden ceiling tile ──
-        // When the player has LOS to this tile, draw it semi-transparent so the interior
-        // is visible beneath. Fully occluded tiles draw at full opacity.
-        const ceilAlpha = visibleCeilingIds.has(s.id) ? 0.25 : 1;
-
+        // ── Wooden ceiling tile with true-LOS shadow edge ──
+        // Strategy: clip-and-draw twice. The lit region (inside the visibility
+        // polygon) draws ceiling content at MIN_CEIL_ALPHA so the floor beneath
+        // shows through. The shadow region (outside the vis poly) draws the
+        // ceiling fully opaque. NO destination-out — we never punch holes in
+        // the canvas, so layers behind us (e.g. ocean) stay covered.
         const rotRad = (s.rotation ?? 0) * Math.PI / 180;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = (1 - hpFrac) * 0.5;
+        const half = sz / 2;
+        const fillCol  = isHovered ? '#c8924a' : '#96642a';
+        const stripCol = RenderSystem.structureCompanyColor(s.companyId);
+        const stripH   = Math.max(1, 2 * zoom);
+
+        // Inline draw of the full ceiling content at the current globalAlpha factor.
+        const drawCeilContent = (alphaFactor: number): void => {
+          ctx.globalAlpha = alphaFactor;
+          ctx.fillStyle = fillCol;
+          ctx.fillRect(-half, -half, sz, sz);
+
+          ctx.strokeStyle = 'rgba(50, 25, 5, 0.5)';
+          ctx.lineWidth = Math.max(0.5, 0.9 * zoom);
+          ctx.beginPath();
+          ctx.moveTo(-half, -half); ctx.lineTo(half, half);
+          ctx.moveTo(half, -half);  ctx.lineTo(-half, half);
+          ctx.moveTo(-half, 0);     ctx.lineTo(half, 0);
+          ctx.stroke();
+
+          ctx.globalAlpha = 0.8 * alphaFactor;
+          ctx.fillStyle = stripCol;
+          ctx.fillRect(-half, -half, sz, stripH);
+
+          if (dmgDarken > 0.01) {
+            ctx.globalAlpha = dmgDarken * alphaFactor;
+            ctx.fillStyle = 'rgba(0,0,0,1)';
+            ctx.fillRect(-half, -half, sz, sz);
+          }
+        };
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
         ctx.rotate(rotRad);
-        ctx.translate(-ssp.x, -ssp.y);
 
-        // Main ceiling panel
-        ctx.globalAlpha = ceilAlpha;
-        ctx.fillStyle   = isHovered ? '#c8924a' : '#96642a';
-        ctx.strokeStyle = '#5a3a12';
-        ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
-        ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
-        ctx.strokeRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+        if (visPolyValid) {
+          // Pre-compute vis poly in this tile's local space (post-rotate frame),
+          // SCALED to screen pixels (multiply by zoom) so it matches the screen-pixel
+          // clip rect (-half, -half, sz, sz) where sz = 50 * zoom.
+          const cosR = Math.cos(-rotRad), sinR = Math.sin(-rotRad);
+          const vp = new Float32Array(visPolyPts.length);
+          for (let i = 0; i < visPolyPts.length; i += 2) {
+            const dx = (visPolyPts[i]   - s.x) * zoom;
+            const dy = (visPolyPts[i+1] - s.y) * zoom;
+            vp[i]   = dx * cosR - dy * sinR;
+            vp[i+1] = dx * sinR + dy * cosR;
+          }
 
-        // Cross-brace lines
-        ctx.strokeStyle = 'rgba(50, 25, 5, 0.5)';
-        ctx.lineWidth   = Math.max(0.5, 0.9 * zoom);
-        ctx.beginPath();
-        ctx.moveTo(ssp.x - sz / 2, ssp.y - sz / 2);
-        ctx.lineTo(ssp.x + sz / 2, ssp.y + sz / 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(ssp.x + sz / 2, ssp.y - sz / 2);
-        ctx.lineTo(ssp.x - sz / 2, ssp.y + sz / 2);
-        ctx.stroke();
+          // 1. SHADOW region = tile rect MINUS vis poly (even-odd fill rule).
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-half, -half, sz, sz);
+          ctx.moveTo(vp[0], vp[1]);
+          for (let i = 2; i < vp.length; i += 2) ctx.lineTo(vp[i], vp[i+1]);
+          ctx.closePath();
+          ctx.clip('evenodd');
+          drawCeilContent(1);
+          ctx.restore();
 
-        // Centre beam (horizontal plank line)
-        ctx.beginPath();
-        ctx.moveTo(ssp.x - sz / 2, ssp.y);
-        ctx.lineTo(ssp.x + sz / 2, ssp.y);
-        ctx.stroke();
-
-        // Company color strip
-        const ceilCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
-        const ceilStripH = Math.max(1, 2 * zoom);
-        ctx.globalAlpha = 0.8 * ceilAlpha;
-        ctx.fillStyle = ceilCompanyColor;
-        ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, ceilStripH);
-
-        // Damage darkening
-        if (dmgDarken > 0.01) {
-          ctx.globalAlpha = dmgDarken * ceilAlpha;
-          ctx.fillStyle = 'rgba(0,0,0,1)';
-          ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+          // 2. LIT region = tile rect ∩ vis poly, drawn semi-transparent.
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-half, -half, sz, sz);
+          ctx.clip();
+          ctx.beginPath();
+          ctx.moveTo(vp[0], vp[1]);
+          for (let i = 2; i < vp.length; i += 2) ctx.lineTo(vp[i], vp[i+1]);
+          ctx.closePath();
+          ctx.clip();
+          drawCeilContent(MIN_CEIL_ALPHA);
+          ctx.restore();
+        } else {
+          // No vis poly → draw fully opaque (clipped to tile rect for clean edges).
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-half, -half, sz, sz);
+          ctx.clip();
+          drawCeilContent(1);
+          ctx.restore();
         }
+
+        // Outer border (always at full alpha — single clean rect over the whole tile).
         ctx.globalAlpha = 1;
+        ctx.strokeStyle = '#5a3a12';
+        ctx.lineWidth = Math.max(0.5, 1.5 * zoom);
+        ctx.strokeRect(-half, -half, sz, sz);
+
         ctx.restore();
       } else if (s.type === 'cannon') {
         // ── Placed island cannon — same visual as ship cannon ──
@@ -6038,7 +6103,23 @@ export class RenderSystem {
     const nSegs = segs.length / 4;
     if (nSegs === 0) { this._visPolyPts = new Float32Array(0); return; }
 
-    // Collect unique angles toward every wall endpoint
+    // Bounding box around the player, FAR units to each side. Acts as a guaranteed
+    // backstop so rays in directions with no wall still terminate at a finite distance.
+    const FAR = 2000;
+    const bx0 = px - FAR, by0 = py - FAR;
+    const bx1 = px + FAR, by1 = py + FAR;
+    // Treat box edges as 4 extra wall segments so every ray hits something.
+    const allSegsLen = segs.length + 16;
+    const all = new Float32Array(allSegsLen);
+    all.set(segs);
+    let bi = segs.length;
+    all[bi++] = bx0; all[bi++] = by0; all[bi++] = bx1; all[bi++] = by0; // top
+    all[bi++] = bx1; all[bi++] = by0; all[bi++] = bx1; all[bi++] = by1; // right
+    all[bi++] = bx1; all[bi++] = by1; all[bi++] = bx0; all[bi++] = by1; // bottom
+    all[bi++] = bx0; all[bi++] = by1; all[bi++] = bx0; all[bi++] = by0; // left
+
+    // Collect angles toward every wall endpoint (±epsilon to peek around corners),
+    // plus the 4 box corners so the polygon is well-defined in empty directions.
     const angles: number[] = [];
     for (let i = 0; i < segs.length; i += 4) {
       for (let k = 0; k < 2; k++) {
@@ -6047,14 +6128,18 @@ export class RenderSystem {
         angles.push(a - 0.0001, a, a + 0.0001);
       }
     }
+    angles.push(
+      Math.atan2(by0 - py, bx0 - px),
+      Math.atan2(by0 - py, bx1 - px),
+      Math.atan2(by1 - py, bx1 - px),
+      Math.atan2(by1 - py, bx0 - px),
+    );
 
-    // For a given angle, find the closest wall intersection distance (or FAR)
-    const FAR = 2000;
     const rayHit = (angle: number): [number, number] => {
       const rdx = Math.cos(angle), rdy = Math.sin(angle);
-      let minT = FAR;
-      for (let i = 0; i < segs.length; i += 4) {
-        const sx = segs[i], sy = segs[i+1], ex = segs[i+2], ey = segs[i+3];
+      let minT = FAR * 2;
+      for (let i = 0; i < all.length; i += 4) {
+        const sx = all[i], sy = all[i+1], ex = all[i+2], ey = all[i+3];
         const sdx = ex - sx, sdy = ey - sy;
         const denom = rdx * sdy - rdy * sdx;
         if (Math.abs(denom) < 1e-9) continue;
@@ -6065,7 +6150,6 @@ export class RenderSystem {
       return [px + rdx * minT, py + rdy * minT];
     };
 
-    // Sort angles, cast a ray for each, collect hit points
     angles.sort((a, b) => a - b);
     const pts = new Float32Array(angles.length * 2);
     for (let i = 0; i < angles.length; i++) {
