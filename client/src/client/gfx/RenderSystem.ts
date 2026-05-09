@@ -169,7 +169,8 @@ export class RenderSystem {
   private _visPolyPts: Float32Array = new Float32Array(0);
   private _visPolyPx = NaN;
   private _visPolyPy = NaN;
-  private _visPolyWallRev = 0; // incremented on every _rebuildWallSegs
+  private _visPolyWallRev = 0;  // incremented on every _rebuildWallSegs
+  private _visPolyLastRev = -1; // last rev seen when poly was built — rebuild when different
   /** Active tombstone item caches in the world. */
   private _tombstones: import('../../sim/Types').Tombstone[] = [];
   /** Ship-local attachment data for tombstones that spawned on a ship. */
@@ -4098,7 +4099,9 @@ export class RenderSystem {
       const ppx = player.position.x, ppy = player.position.y;
       // Rebuild vis poly each frame the player moves > 1 unit OR walls change.
       const moved = Math.abs(ppx - this._visPolyPx) > 1 || Math.abs(ppy - this._visPolyPy) > 1;
-      if (moved || this._visPolyPts.length === 0) this._buildVisibilityPoly(ppx, ppy);
+      const wallsChanged = this._visPolyWallRev !== this._visPolyLastRev;
+      if (wallsChanged) this._visPolyLastRev = this._visPolyWallRev;
+      if (moved || wallsChanged || this._visPolyPts.length === 0) this._buildVisibilityPoly(ppx, ppy);
       visPolyValid = this._visPolyPts.length >= 6;
 
       // Approximate per-tile alpha for hover-blocking by sampling 5 points (center + corners).
