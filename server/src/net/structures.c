@@ -15,6 +15,114 @@
 #include "net/crafting.h"
 #include "sim/island.h"
 
+/* ── Spatial hash for ceiling-connectivity flood-fill (O(N) cascade) ─────────
+ * Tiles sit on a 50-px grid; walls sit at edge midpoints (25-px offset). We key
+ * by 25-px cells so both ceilings and walls/door_frames have unique integer
+ * coordinates. Open-addressing linear-probe hash, capacity = MAX_PLACED_STRUCTURES*4
+ * (load factor ≤ 0.25, no resize ever needed). */
+#define CELL_HASH_CAP (MAX_PLACED_STRUCTURES * 4)
+typedef struct { int32_t cx, cy, idx; } CellEntry;
+
+static inline int32_t cell_x(float x) { return (int32_t)lroundf(x / 25.0f); }
+static inline int32_t cell_y(float y) { return (int32_t)lroundf(y / 25.0f); }
+
+static inline uint32_t cell_hash(int32_t cx, int32_t cy) {
+    uint32_t h = (uint32_t)cx * 2654435761u ^ (uint32_t)cy * 40503u;
+    return h & (CELL_HASH_CAP - 1);
+}
+
+static void cell_put(CellEntry *t, int32_t cx, int32_t cy, int32_t idx) {
+    uint32_t h = cell_hash(cx, cy);
+    while (t[h].idx >= 0) {
+        if (t[h].cx == cx && t[h].cy == cy) { t[h].idx = idx; return; }
+        h = (h + 1) & (CELL_HASH_CAP - 1);
+    }
+    t[h].cx = cx; t[h].cy = cy; t[h].idx = idx;
+}
+
+static int32_t cell_get(const CellEntry *t, int32_t cx, int32_t cy) {
+    uint32_t h = cell_hash(cx, cy);
+    while (t[h].idx >= 0) {
+        if (t[h].cx == cx && t[h].cy == cy) return t[h].idx;
+        h = (h + 1) & (CELL_HASH_CAP - 1);
+    }
+    return -1;
+}
+
+/*
+ * cascade_orphan_ceilings — flood-fill from walls/door_frames through edge-adjacent
+ * ceilings; demolish any ceiling not reachable to a wall.
+ *
+ * O(N) using two spatial hashes (walls + ceilings) and a BFS queue. Ceilings are
+ * square 50×50 tiles, so rotation only permutes the 4 edge offsets — they always
+ * map to the same set of 4 cells regardless of placement angle.
+ *
+ * Caller must already have removed/marked-inactive the wall that triggered this.
+ */
+static void cascade_orphan_ceilings(uint32_t trigger_id, const char *trigger_kind) {
+    static CellEntry walls[CELL_HASH_CAP];
+    static CellEntry ceils[CELL_HASH_CAP];
+    static int32_t   queue[MAX_PLACED_STRUCTURES];
+    static bool      reached[MAX_PLACED_STRUCTURES];
+
+    for (uint32_t i = 0; i < CELL_HASH_CAP; i++) { walls[i].idx = -1; ceils[i].idx = -1; }
+    for (uint32_t i = 0; i < placed_structure_count; i++) reached[i] = false;
+    int32_t qh = 0, qt = 0;
+
+    /* Build wall-support map */
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        const PlacedStructure *s = &placed_structures[i];
+        if (!s->active) continue;
+        if (s->type != STRUCT_WALL && s->type != STRUCT_DOOR_FRAME) continue;
+        cell_put(walls, cell_x(s->x), cell_y(s->y), (int32_t)i);
+    }
+
+    /* Build ceiling map and seed the queue with directly-supported ceilings */
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        const PlacedStructure *c = &placed_structures[i];
+        if (!c->active || c->type != STRUCT_CEILING) continue;
+        int32_t cx = cell_x(c->x), cy = cell_y(c->y);
+        cell_put(ceils, cx, cy, (int32_t)i);
+        if (cell_get(walls, cx,     cy - 1) >= 0 ||
+            cell_get(walls, cx,     cy + 1) >= 0 ||
+            cell_get(walls, cx - 1, cy    ) >= 0 ||
+            cell_get(walls, cx + 1, cy    ) >= 0) {
+            reached[i] = true;
+            queue[qt++] = (int32_t)i;
+        }
+    }
+
+    /* BFS: spread reachability through edge-adjacent ceilings (Δ = ±2 cells = ±50px) */
+    while (qh < qt) {
+        int32_t ai = queue[qh++];
+        const PlacedStructure *a = &placed_structures[ai];
+        int32_t cx = cell_x(a->x), cy = cell_y(a->y);
+        const int32_t dx[4] = {  2, -2,  0,  0 };
+        const int32_t dy[4] = {  0,  0,  2, -2 };
+        for (int k = 0; k < 4; k++) {
+            int32_t bi = cell_get(ceils, cx + dx[k], cy + dy[k]);
+            if (bi >= 0 && !reached[bi]) {
+                reached[bi] = true;
+                queue[qt++] = bi;
+            }
+        }
+    }
+
+    /* Demolish unreached ceilings */
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *c = &placed_structures[i];
+        if (!c->active || c->type != STRUCT_CEILING) continue;
+        if (reached[i]) continue;
+        c->active = false;
+        char cm[128];
+        snprintf(cm, sizeof(cm),
+                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", c->id);
+        websocket_server_broadcast(cm);
+        log_info("🔨 Cascade-demolished ceiling %u (lost wall connectivity after %s %u removed)",
+                 c->id, trigger_kind, trigger_id);
+    }
+}
+
 /* ── Island structure placement ─────────────────────────────────────────────
  * place_structure: payload = {"type":"place_structure","structure_type":"wooden_floor","x":123,"y":456}
  * Validates: player on island, item in active slot, workbench needs floor under it.
@@ -1128,24 +1236,9 @@ void destroy_placed_structure(uint32_t structure_id) {
                     }
                 }
 
-            } else if (c->type == STRUCT_CEILING) {
-                /* Ceiling needs a floor within 150 px */
-                bool has = false;
-                for (uint32_t fi = 0; fi < placed_structure_count && !has; fi++) {
-                    PlacedStructure* f = &placed_structures[fi];
-                    if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
-                    float dx2 = f->x - c->x, dy2 = f->y - c->y;
-                    if (dx2*dx2 + dy2*dy2 <= 150.0f * 150.0f) has = true;
-                }
-                if (!has) {
-                    c->active = false;
-                    char cm[128];
-                    snprintf(cm, sizeof(cm),
-                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}", c->id);
-                    websocket_server_broadcast(cm);
-                    log_info("🔨 Cascade-demolished ceiling %u (floor %u removed)", c->id, structure_id);
-                }
             }
+            /* Note: ceilings handled below by cascade_orphan_ceilings() — the
+             * strict wall-connectivity rule supersedes any floor-proximity check. */
         }
     }
 
@@ -1164,87 +1257,17 @@ void destroy_placed_structure(uint32_t structure_id) {
         }
     }
 
-    /* ── Cascade: wall or door_frame destroyed → re-check ceiling connectivity ──
-     * Strict rule: every ceiling must be reachable to a wall/door_frame
-     * (at one of its 4 edge midpoints) via a chain of edge-adjacent ceilings.
-     * Implemented as iterative BFS-style flood-fill: any ceiling whose support
-     * is lost transitively gets cascade-demolished. */
-    if (dtype == STRUCT_WALL || dtype == STRUCT_DOOR_FRAME) {
-        const float EDGE_TOL  = 3.0f;
-        const float HALF_TILE = 25.0f;
-        const float TILE      = 50.0f;
-        bool reached[MAX_PLACED_STRUCTURES] = {false};
-
-        /* Seed: ceilings with direct wall/door_frame support at any edge midpoint. */
-        for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
-            PlacedStructure* c = &placed_structures[ci];
-            if (!c->active || c->type != STRUCT_CEILING) continue;
-            float cr = c->rotation * (float)M_PI / 180.0f;
-            float cc = cosf(cr), cs = sinf(cr);
-            const struct { float ldx; float ldy; } edge_offs[4] = {
-                {  0.0f,      -HALF_TILE },
-                {  0.0f,       HALF_TILE },
-                { -HALF_TILE,  0.0f      },
-                {  HALF_TILE,  0.0f      },
-            };
-            for (int ei = 0; ei < 4 && !reached[ci]; ei++) {
-                float ex = c->x + edge_offs[ei].ldx * cc - edge_offs[ei].ldy * cs;
-                float ey = c->y + edge_offs[ei].ldx * cs + edge_offs[ei].ldy * cc;
-                for (uint32_t si = 0; si < placed_structure_count; si++) {
-                    PlacedStructure* w = &placed_structures[si];
-                    if (!w->active) continue;
-                    if (w->type != STRUCT_WALL && w->type != STRUCT_DOOR_FRAME) continue;
-                    if (fabsf(w->x - ex) < EDGE_TOL && fabsf(w->y - ey) < EDGE_TOL) {
-                        reached[ci] = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        /* Iterate: spread reachability to edge-adjacent ceilings until stable. */
-        bool changed = true;
-        while (changed) {
-            changed = false;
-            for (uint32_t ai = 0; ai < placed_structure_count; ai++) {
-                if (!reached[ai]) continue;
-                PlacedStructure* a = &placed_structures[ai];
-                if (!a->active || a->type != STRUCT_CEILING) continue;
-                float ar = a->rotation * (float)M_PI / 180.0f;
-                float ac = cosf(ar), as = sinf(ar);
-                const struct { float ldx; float ldy; } adj[4] = {
-                    {  TILE, 0.0f }, { -TILE, 0.0f },
-                    { 0.0f,  TILE }, { 0.0f, -TILE },
-                };
-                for (int k = 0; k < 4; k++) {
-                    float nx = a->x + adj[k].ldx * ac - adj[k].ldy * as;
-                    float ny = a->y + adj[k].ldx * as + adj[k].ldy * ac;
-                    for (uint32_t bi = 0; bi < placed_structure_count; bi++) {
-                        if (reached[bi]) continue;
-                        PlacedStructure* b = &placed_structures[bi];
-                        if (!b->active || b->type != STRUCT_CEILING) continue;
-                        if (fabsf(b->x - nx) < EDGE_TOL && fabsf(b->y - ny) < EDGE_TOL) {
-                            reached[bi] = true;
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        /* Demolish any unreached ceiling. */
-        for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
-            PlacedStructure* c = &placed_structures[ci];
-            if (!c->active || c->type != STRUCT_CEILING) continue;
-            if (reached[ci]) continue;
-            c->active = false;
-            char cm[128];
-            snprintf(cm, sizeof(cm),
-                     "{\"type\":\"structure_demolished\",\"structure_id\":%u}", c->id);
-            websocket_server_broadcast(cm);
-            log_info("🔨 Cascade-demolished ceiling %u (lost wall connectivity after %s %u removed)",
-                     c->id, dtype == STRUCT_WALL ? "wall" : "door_frame", structure_id);
-        }
+    /* ── Cascade: any wall/door_frame loss may orphan ceilings ──────────────
+     * Fires for direct wall/door_frame demolish AND for floor demolish (since
+     * the floor-cascade above may have just removed walls without re-checking
+     * ceilings). cascade_orphan_ceilings() rebuilds the wall map from current
+     * active state, so it's safe and idempotent. */
+    if (dtype == STRUCT_WALL || dtype == STRUCT_DOOR_FRAME ||
+        dtype == STRUCT_WOODEN_FLOOR) {
+        const char *kind = dtype == STRUCT_WALL       ? "wall"
+                         : dtype == STRUCT_DOOR_FRAME ? "door_frame"
+                                                      : "floor";
+        cascade_orphan_ceilings(structure_id, kind);
     }
 
     /* ── Compact inactive entries out of the array in one pass ─────────── */
