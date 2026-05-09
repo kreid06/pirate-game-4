@@ -215,6 +215,7 @@ export class InputManager {
   /** ID of the cannon module the player is currently mounted to, or null. */
   public mountedCannonModuleId: number | null = null;
   private lastCannonAimAngle: number = 0;
+  private lastSentCannonAimAngle: number = 0;
   /** Returns true when mounted to an island (non-ship) cannon. */
   public get isOnIslandCannon(): boolean { return this.mountKind === 'cannon' && this.currentShipId === null; }
   /** Returns the last computed cannon aim angle (world radians). */
@@ -308,7 +309,7 @@ export class InputManager {
     this.updateGamepad();
     
     // Handle cannon aiming (works whether on ship or not)
-    this.handleCannonAiming();
+    this.handleCannonAiming(deltaTime / 1000);
     
     // If mounted to helm, handle ship controls instead of player movement
     if (this.mountKind === 'helm') {
@@ -486,6 +487,7 @@ export class InputManager {
    */
   /** Facing direction of the currently mounted island cannon barrel (world radians). Used for aim clamping. */
   private islandCannonFacingAngle: number = 0;
+  private islandCannonDesiredAimAngle: number = 0;
 
   setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number, initialAimAngle?: number, islandCannonFacingAngle?: number): void {
     this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast' | 'swivel') : 'none';
@@ -498,6 +500,8 @@ export class InputManager {
         // Seed lastCannonAimAngle so barrel visually starts at the server's current angle.
         // Server sends world-space radians; barrelRot = aimAngle + π/2 in RenderSystem.
         this.lastCannonAimAngle = initialAimAngle;
+        this.lastSentCannonAimAngle = initialAimAngle;
+        this.islandCannonDesiredAimAngle = initialAimAngle;
       }
       if (this.mountKind === 'cannon' && islandCannonFacingAngle !== undefined) {
         // Server sends placement rotation in radians.
@@ -525,6 +529,8 @@ export class InputManager {
       console.log(`⚓ [INPUT] Player dismounted - player controls active`);
       this.activeWeaponGroup = -1;
       this.activeWeaponGroups.clear();
+      this.lastSentCannonAimAngle = 0;
+      this.islandCannonDesiredAimAngle = 0;
       // Stop any active flame stream on dismount
       if (this.flameStreamTimer !== null) {
         clearInterval(this.flameStreamTimer);
@@ -629,9 +635,24 @@ export class InputManager {
    * Handle cannon aiming (right-click + mouse movement)
    * Calculates aim angle relative to ship rotation (or world angle for island cannons)
    */
-  private handleCannonAiming(): void {
+  private handleCannonAiming(dt: number): void {
+    const isIslandCannon = this.currentShipId === null && this.mountKind === 'cannon';
+
     // Only send aiming updates when right mouse is held
     if (!this.inputState.rightMouseDown) {
+      if (isIslandCannon) {
+        const TURN_RATE = 60 * Math.PI / 180;
+        const TWO_PI = 2 * Math.PI;
+        const maxStep = TURN_RATE * Math.max(0, dt);
+        let renderDiff = this.islandCannonDesiredAimAngle - this.lastCannonAimAngle;
+        renderDiff -= TWO_PI * Math.floor((renderDiff + Math.PI) / TWO_PI);
+        if (Math.abs(renderDiff) <= maxStep) {
+          this.lastCannonAimAngle = this.islandCannonDesiredAimAngle;
+        } else {
+          this.lastCannonAimAngle += renderDiff > 0 ? maxStep : -maxStep;
+          this.lastCannonAimAngle -= TWO_PI * Math.floor((this.lastCannonAimAngle + Math.PI) / TWO_PI);
+        }
+      }
       return;
     }
 
@@ -639,9 +660,6 @@ export class InputManager {
     if (this.mountKind !== 'helm' && this.mountKind !== 'cannon' && this.mountKind !== 'swivel') {
       return;
     }
-
-    // Island cannon: currentShipId is null — still allow aiming, send world angle
-    const isIslandCannon = this.currentShipId === null && this.mountKind === 'cannon';
 
     // Ship-mounted cannons/helm/swivel still require a ship
     if (!isIslandCannon && this.currentShipId === null) {
@@ -673,8 +691,21 @@ export class InputManager {
         offset = offset > 0 ? AIM_RANGE : -AIM_RANGE;
       }
       aimAngle = this.islandCannonFacingAngle + offset;
+      this.islandCannonDesiredAimAngle = aimAngle;
+
+      const TURN_RATE = 60 * Math.PI / 180;
+      const maxStep = TURN_RATE * Math.max(0, dt);
+      let renderDiff = aimAngle - this.lastCannonAimAngle;
+      renderDiff -= TWO_PI2 * Math.floor((renderDiff + Math.PI) / TWO_PI2);
+      if (Math.abs(renderDiff) <= maxStep) {
+        this.lastCannonAimAngle = aimAngle;
+      } else {
+        this.lastCannonAimAngle += renderDiff > 0 ? maxStep : -maxStep;
+        this.lastCannonAimAngle -= TWO_PI2 * Math.floor((this.lastCannonAimAngle + Math.PI) / TWO_PI2);
+      }
     } else {
       aimAngle = aimAngleWorld - this.currentShipRotation;
+      this.lastCannonAimAngle = aimAngle;
     }
 
     // Normalize to [-π, π] — O(1), immune to ±Infinity / NaN
@@ -684,7 +715,7 @@ export class InputManager {
 
     // Only send if aim changed significantly (>1 degree)
     const ANGLE_THRESHOLD = 0.017; // ~1 degree in radians
-    const angleDelta = Math.abs(aimAngle - this.lastCannonAimAngle);
+    const angleDelta = Math.abs(aimAngle - this.lastSentCannonAimAngle);
 
     if (angleDelta > ANGLE_THRESHOLD) {
       if (this.mountKind === 'swivel') {
@@ -695,7 +726,7 @@ export class InputManager {
       } else if (this.onCannonAim) {
         this.onCannonAim(aimAngle, [...this.activeWeaponGroups]);
       }
-      this.lastCannonAimAngle = aimAngle;
+      this.lastSentCannonAimAngle = aimAngle;
     }
   }
   
@@ -1216,7 +1247,7 @@ export class InputManager {
             }
             // Force next handleCannonAiming() to re-send aim with updated group list
             // even if the mouse hasn't moved, so the server learns about the new selection.
-            this.lastCannonAimAngle = Infinity;
+            this.lastSentCannonAimAngle = Infinity;
             if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           }
           event.preventDefault();
@@ -1241,7 +1272,7 @@ export class InputManager {
               this.activeWeaponGroups.add(groupIdx);
               this.activeWeaponGroup = groupIdx;
             }
-            this.lastCannonAimAngle = Infinity;
+            this.lastSentCannonAimAngle = Infinity;
             if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           }
           event.preventDefault();

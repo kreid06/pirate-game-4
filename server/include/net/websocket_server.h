@@ -345,6 +345,7 @@ typedef struct {
     uint32_t wreck_expires_ms;   /* wall-clock ms for auto-despawn; 0 = persist */
     /* Island cannon state (STRUCT_CANNON only) */
     float    cannon_aim_angle;    /* current aim direction (radians, world space) */
+        float    cannon_desired_aim_angle; /* desired aim direction (radians, world space) */
     uint32_t cannon_reload_ms;    /* ms remaining until cannon can fire again (0 = ready) */
     uint32_t cannon_mounted_player_id; /* player_id currently mounted to this cannon (0 = none) */
     bool     no_ammo_flag;        /* transient: set by fire_island_cannon when ammo was lacking */

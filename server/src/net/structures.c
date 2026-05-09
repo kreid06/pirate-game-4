@@ -615,6 +615,8 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     if (stype_enum == STRUCT_CANNON) {
         placed_structures[placed_structure_count].cannon_aim_angle =
             place_rotation * (float)M_PI / 180.0f - (float)(M_PI / 2.0);
+        placed_structures[placed_structure_count].cannon_desired_aim_angle =
+            placed_structures[placed_structure_count].cannon_aim_angle;
     }
     placed_structure_count++;
 

@@ -8163,6 +8163,25 @@ void websocket_server_tick(float dt) {
     // barrels track the oscillation without visible lag.
     {
         const float CANNON_TURN_SPEED        = 60.0f  * (float)(M_PI / 180.0f); // rad/s
+        for (uint32_t _csi = 0; _csi < placed_structure_count; _csi++) {
+            PlacedStructure* _cs = &placed_structures[_csi];
+            if (!_cs->active || _cs->type != STRUCT_CANNON) continue;
+            float cur  = _cs->cannon_aim_angle;
+            float tgt  = _cs->cannon_desired_aim_angle;
+            float diff = tgt - cur;
+            while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+            while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+            const float max_step = CANNON_TURN_SPEED * dt;
+            if (fabsf(diff) <= max_step) {
+                cur = tgt;
+            } else {
+                cur += (diff > 0.0f ? max_step : -max_step);
+            }
+            while (cur >  (float)M_PI) cur -= 2.0f * (float)M_PI;
+            while (cur < -(float)M_PI) cur += 2.0f * (float)M_PI;
+            _cs->cannon_aim_angle = cur;
+        }
+
         const float GHOST_CANNON_TURN_SPEED  = 180.0f * (float)(M_PI / 180.0f); // rad/s
         for (int s = 0; s < ship_count; s++) {
             if (!ships[s].active) continue;

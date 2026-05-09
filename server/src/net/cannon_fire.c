@@ -2083,7 +2083,7 @@ void handle_island_cannon_aim(WebSocketPlayer* player, float aim_angle) {
         }
 
         float clamped = facing + offset;
-        placed_structures[si].cannon_aim_angle = clamped;
+        placed_structures[si].cannon_desired_aim_angle = clamped;
         player->cannon_aim_angle = clamped;
         break;
     }
