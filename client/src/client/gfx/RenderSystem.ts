@@ -5836,9 +5836,17 @@ export class RenderSystem {
       }
     }
     
-    // Queue players (layer 2)
+    // Queue players (layer 2 normally; layer 3 priority 5 when in shipyard build mode
+    // so the local player renders above placed planks/modules)
+    const inBuildMode = this.buildMode || this.cannonBuildMode || this.mastBuildMode
+                     || this.swivelBuildMode || this.helmBuildMode || this.deckBuildMode;
     for (const player of renderPlayers) {
-      this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
+      const isLocal = player.id === this.localPlayerId;
+      if (isLocal && inBuildMode) {
+        this.queueRenderItem(3, 'players', () => this.drawPlayer(player, worldState, camera), 5);
+      } else {
+        this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
+      }
     }
     
     // Queue ship planks (layer 3 — ghost ships have no physical planks, purely hull-fade driven)
