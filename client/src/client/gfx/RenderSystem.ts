@@ -5441,7 +5441,7 @@ export class RenderSystem {
       // Check if a workbench or door panel occupies this slot
       if (!wallOccupied && !noEdge) {
         blockedByStructure = this.placedStructures.some(s => {
-          if (s.type === 'wooden_floor' || s.type === 'wall' || s.type === 'door_frame') return false;
+          if (s.type === 'wooden_floor' || s.type === 'wall' || s.type === 'door_frame' || s.type === 'wood_ceiling') return false;
           return Math.hypot(s.x - mx, s.y - my) < 35;
         });
       }

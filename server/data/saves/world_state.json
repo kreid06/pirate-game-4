@@ -1,6 +1,6 @@
 {
   "meta": {
-    "timestamp": 1778290353,
+    "timestamp": 1778292135,
     "ship_count": 2,
     "npc_count": 18,
     "structure_count": 48
@@ -567,20 +567,6 @@
       "open": false
     },
     {
-      "id": 7,
-      "type": 0,
-      "x": 19414.301,
-      "y": 14517.100,
-      "rot": 0.000,
-      "island_id": 4,
-      "company": 3,
-      "hp": 100,
-      "max_hp": 100,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false
-    },
-    {
       "id": 8,
       "type": 0,
       "x": 19414.301,
@@ -655,34 +641,6 @@
       "type": 2,
       "x": 19289.301,
       "y": 14467.100,
-      "rot": 0.000,
-      "island_id": 4,
-      "company": 3,
-      "hp": 100,
-      "max_hp": 100,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false
-    },
-    {
-      "id": 17,
-      "type": 2,
-      "x": 19414.301,
-      "y": 14542.100,
-      "rot": 0.000,
-      "island_id": 4,
-      "company": 3,
-      "hp": 100,
-      "max_hp": 100,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false
-    },
-    {
-      "id": 18,
-      "type": 2,
-      "x": 19439.301,
-      "y": 14517.100,
       "rot": 0.000,
       "island_id": 4,
       "company": 3,
@@ -924,7 +882,7 @@
       "rot": 0.000,
       "island_id": 4,
       "company": 3,
-      "hp": 100,
+      "hp": 50,
       "max_hp": 100,
       "placer_id": 1000,
       "placer_name": "test",
