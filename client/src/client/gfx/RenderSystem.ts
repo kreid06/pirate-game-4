@@ -2555,10 +2555,11 @@ export class RenderSystem {
     const template = this.getPlankTemplate();
 
     for (const ship of worldState.ships) {
-      // Collect all present plank slots
+      // Collect all present (placed, health > 0) plank slots.
+      // Slots with health = 0 are absent and should be hoverable for placement.
       const presentKeys = new Set<string>();
       for (const mod of ship.modules) {
-        if (mod.kind === 'plank' && mod.moduleData?.kind === 'plank') {
+        if (mod.kind === 'plank' && mod.moduleData?.kind === 'plank' && mod.moduleData.health > 0) {
           presentKeys.add(`${mod.moduleData.sectionName}_${mod.moduleData.segmentIndex}`);
         }
       }
@@ -6989,10 +6990,11 @@ export class RenderSystem {
   private drawMissingPlankGhosts(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
-    // Build set of present plank slot keys
+    // Build set of present plank slot keys — only slots with health > 0 are "placed".
+    // Slots with health = 0 are absent (not yet built) and should show ghost highlights.
     const presentKeys = new Set<string>();
     for (const mod of ship.modules) {
-      if (mod.kind === 'plank' && mod.moduleData?.kind === 'plank') {
+      if (mod.kind === 'plank' && mod.moduleData?.kind === 'plank' && mod.moduleData.health > 0) {
         presentKeys.add(`${mod.moduleData.sectionName}_${mod.moduleData.segmentIndex}`);
       }
     }
