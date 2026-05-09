@@ -16,6 +16,31 @@
 #define RESPAWN_MS_ROCK    180000u  /* 3 minutes */
 #define RESPAWN_MS_BOULDER 300000u  /* 5 minutes */
 
+/* ── Shared harvest helpers ─────────────────────────────────────────────── */
+
+const IslandDef *get_island_for_player(const WebSocketPlayer *player) {
+    for (int i = 0; i < ISLAND_COUNT; i++) {
+        if ((uint32_t)ISLAND_PRESETS[i].id == player->on_island_id)
+            return &ISLAND_PRESETS[i];
+    }
+    return NULL;
+}
+
+int find_nearest_resource(const IslandDef *isl, float px, float py,
+                          int res_type, float range_sq) {
+    float best = range_sq;
+    int   best_ri = -1;
+    for (int ri = 0; ri < isl->resource_count; ri++) {
+        if (isl->resources[ri].type_id != res_type) continue;
+        if (isl->resources[ri].health <= 0) continue;
+        float dx = px - (isl->x + isl->resources[ri].ox);
+        float dy = py - (isl->y + isl->resources[ri].oy);
+        float d2 = dx * dx + dy * dy;
+        if (d2 <= best) { best = d2; best_ri = ri; }
+    }
+    return best_ri;
+}
+
 void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* client) {
     char response[256];
 
@@ -49,13 +74,7 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
     player->stamina_last_used_ms = get_time_ms();
 
     /* Find the island definition */
-    const IslandDef *isl = NULL;
-    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
-        if ((uint32_t)ISLAND_PRESETS[ii].id == player->on_island_id) {
-            isl = &ISLAND_PRESETS[ii];
-            break;
-        }
-    }
+    IslandDef *isl = (IslandDef *)get_island_for_player(player);
     if (!isl) {
         snprintf(response, sizeof(response),
                  "{\"type\":\"harvest_failure\",\"reason\":\"island_not_found\"}");
@@ -63,24 +82,9 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
     }
 
     /* Find the nearest 'wood' resource node within range */
-    float best_dist_sq = HARVEST_RANGE * HARVEST_RANGE;
-    bool found = false;
-    int best_ri = -1;
-    for (int ri = 0; ri < isl->resource_count; ri++) {
-        if (isl->resources[ri].type_id != RES_WOOD) continue;
-        if (isl->resources[ri].health <= 0) continue; /* depleted */
-        float wx = isl->x + isl->resources[ri].ox;
-        float wy = isl->y + isl->resources[ri].oy;
-        float dx = player->x - wx;
-        float dy = player->y - wy;
-        float d2 = dx * dx + dy * dy;
-        if (d2 <= best_dist_sq) {
-            best_dist_sq = d2;
-            best_ri = ri;
-            found = true;
-        }
-    }
-    if (!found) {
+    int best_ri = find_nearest_resource(isl, player->x, player->y,
+                                        RES_WOOD, HARVEST_RANGE * HARVEST_RANGE);
+    if (best_ri < 0) {
         snprintf(response, sizeof(response),
                  "{\"type\":\"harvest_failure\",\"reason\":\"too_far\"}");
         goto send_and_ret;
@@ -88,28 +92,19 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
 
     /* Deduct health from the resource and broadcast damage */
     {
-        IslandDef *isl_chop = NULL;
-        for (int ii = 0; ii < ISLAND_COUNT; ii++) {
-            if ((uint32_t)ISLAND_PRESETS[ii].id == player->on_island_id) {
-                isl_chop = &ISLAND_PRESETS[ii];
-                break;
-            }
+        IslandResource *res = &isl->resources[best_ri];
+        const int WOOD_DAMAGE = 10;
+        res->health -= WOOD_DAMAGE;
+        if (res->health < 0) res->health = 0;
+        if (res->health == 0) {
+            island_mark_tree_dead(isl, best_ri);
+            res->respawn_at_ms = get_time_ms() + RESPAWN_MS_WOOD;
         }
-        if (isl_chop) {
-            IslandResource *res = &isl_chop->resources[best_ri];
-            const int WOOD_DAMAGE = 10;
-            res->health -= WOOD_DAMAGE;
-            if (res->health < 0) res->health = 0;
-            if (res->health == 0) {
-                island_mark_tree_dead(isl_chop, best_ri);
-                res->respawn_at_ms = get_time_ms() + RESPAWN_MS_WOOD;
-            }
-            char dmsg[160];
-            snprintf(dmsg, sizeof(dmsg),
-                     "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
-                     player->on_island_id, best_ri, res->ox, res->oy, res->health, res->max_health);
-            websocket_server_broadcast(dmsg);
-        }
+        char dmsg[160];
+        snprintf(dmsg, sizeof(dmsg),
+                 "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
+                 player->on_island_id, best_ri, res->ox, res->oy, res->health, res->max_health);
+        websocket_server_broadcast(dmsg);
     }
 
     /* Grant 2 planks — find an existing plank stack or a free slot */
@@ -179,13 +174,7 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
 
     {
         /* Find the island */
-        const IslandDef *isl = NULL;
-        for (int i = 0; i < ISLAND_COUNT; i++) {
-            if (ISLAND_PRESETS[i].id == (int)player->on_island_id) {
-                isl = &ISLAND_PRESETS[i];
-                break;
-            }
-        }
+        const IslandDef *isl = get_island_for_player(player);
         if (!isl) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_fiber_failure\",\"reason\":\"island_not_found\"}");
@@ -193,32 +182,16 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
         }
 
         /* Find nearest fiber node within range */
-        float best_dist_sq = (float)(HARVEST_RANGE * HARVEST_RANGE);
-        bool  found = false;
-        int   best_ri = -1;
-        for (int ri = 0; ri < isl->resource_count; ri++) {
-            if (isl->resources[ri].type_id != RES_FIBER) continue;
-            if (isl->resources[ri].health <= 0) continue; /* depleted */
-            float fx = isl->x + isl->resources[ri].ox;
-            float fy = isl->y + isl->resources[ri].oy;
-            float dx = player->x - fx;
-            float dy = player->y - fy;
-            float dist_sq = dx * dx + dy * dy;
-            if (dist_sq <= best_dist_sq) {
-                best_dist_sq = dist_sq;
-                best_ri = ri;
-                found = true;
-            }
-        }
-
-        if (!found) {
+        int best_ri = find_nearest_resource(isl, player->x, player->y,
+                                            RES_FIBER, HARVEST_RANGE * HARVEST_RANGE);
+        if (best_ri < 0) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_fiber_failure\",\"reason\":\"too_far\"}");
             goto send_fiber_ret;
         }
 
         /* Deduct health and broadcast */
-        if (best_ri >= 0) {
+        {
             IslandResource *res = &isl->resources[best_ri];
             res->health -= 10;
             if (res->health < 0) res->health = 0;
@@ -229,8 +202,6 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
                      player->on_island_id, best_ri, res->ox, res->oy, res->health, res->max_health);
             websocket_server_broadcast(dmsg);
         }
-
-        /* Grant 5 fiber */
         if (!craft_grant(player, ITEM_FIBER, 5)) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_fiber_failure\",\"reason\":\"inventory_full\"}");
@@ -297,45 +268,23 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
     player->stamina_last_used_ms = get_time_ms();
 
     {
-        const IslandDef *isl = NULL;
-        for (int i = 0; i < ISLAND_COUNT; i++) {
-            if (ISLAND_PRESETS[i].id == (int)player->on_island_id) {
-                isl = &ISLAND_PRESETS[i];
-                break;
-            }
-        }
+        const IslandDef *isl = get_island_for_player(player);
         if (!isl) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_rock_failure\",\"reason\":\"island_not_found\"}");
             goto send_rock_ret;
         }
 
-        float best_dist_sq = (float)(HARVEST_RANGE * HARVEST_RANGE);
-        bool  found = false;
-        int   best_ri = -1;
-        for (int ri = 0; ri < isl->resource_count; ri++) {
-            if (isl->resources[ri].type_id != RES_ROCK) continue;
-            if (isl->resources[ri].health <= 0) continue; /* depleted */
-            float rx = isl->x + isl->resources[ri].ox;
-            float ry = isl->y + isl->resources[ri].oy;
-            float dx = player->x - rx;
-            float dy = player->y - ry;
-            float dist_sq = dx * dx + dy * dy;
-            if (dist_sq <= best_dist_sq) {
-                best_dist_sq = dist_sq;
-                best_ri = ri;
-                found = true;
-            }
-        }
-
-        if (!found) {
+        int best_ri = find_nearest_resource(isl, player->x, player->y,
+                                            RES_ROCK, HARVEST_RANGE * HARVEST_RANGE);
+        if (best_ri < 0) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_rock_failure\",\"reason\":\"too_far\"}");
             goto send_rock_ret;
         }
 
         /* Deduct health and broadcast */
-        if (best_ri >= 0) {
+        {
             IslandResource *res = &isl->resources[best_ri];
             res->health -= 10;
             if (res->health < 0) res->health = 0;
@@ -381,45 +330,23 @@ void handle_harvest_stone(WebSocketPlayer* player, struct WebSocketClient* clien
     }
 
     {
-        const IslandDef *isl = NULL;
-        for (int i = 0; i < ISLAND_COUNT; i++) {
-            if (ISLAND_PRESETS[i].id == (int)player->on_island_id) {
-                isl = &ISLAND_PRESETS[i];
-                break;
-            }
-        }
+        const IslandDef *isl = get_island_for_player(player);
         if (!isl) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_stone_failure\",\"reason\":\"island_not_found\"}");
             goto send_stone_ret;
         }
 
-        float best_dist_sq = (float)(HARVEST_RANGE * HARVEST_RANGE);
-        bool  found = false;
-        int   best_ri = -1;
-        for (int ri = 0; ri < isl->resource_count; ri++) {
-            if (isl->resources[ri].type_id != RES_ROCK) continue;
-            if (isl->resources[ri].health <= 0) continue; /* depleted */
-            float rx = isl->x + isl->resources[ri].ox;
-            float ry = isl->y + isl->resources[ri].oy;
-            float dx = player->x - rx;
-            float dy = player->y - ry;
-            float dist_sq = dx * dx + dy * dy;
-            if (dist_sq <= best_dist_sq) {
-                best_dist_sq = dist_sq;
-                best_ri = ri;
-                found = true;
-            }
-        }
-
-        if (!found) {
+        int best_ri = find_nearest_resource(isl, player->x, player->y,
+                                            RES_ROCK, HARVEST_RANGE * HARVEST_RANGE);
+        if (best_ri < 0) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_stone_failure\",\"reason\":\"too_far\"}");
             goto send_stone_ret;
         }
 
         /* Deduct health and broadcast */
-        if (best_ri >= 0) {
+        {
             IslandResource *res = &isl->resources[best_ri];
             res->health -= 10;
             if (res->health < 0) res->health = 0;
@@ -487,45 +414,23 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
     player->stamina_last_used_ms = get_time_ms();
 
     {
-        const IslandDef *isl = NULL;
-        for (int i = 0; i < ISLAND_COUNT; i++) {
-            if (ISLAND_PRESETS[i].id == (int)player->on_island_id) {
-                isl = &ISLAND_PRESETS[i];
-                break;
-            }
-        }
+        const IslandDef *isl = get_island_for_player(player);
         if (!isl) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_boulder_failure\",\"reason\":\"island_not_found\"}");
             goto send_boulder_ret;
         }
 
-        float best_dist_sq = (float)(HARVEST_RANGE * HARVEST_RANGE);
-        bool  found = false;
-        int   best_ri = -1;
-        for (int ri = 0; ri < isl->resource_count; ri++) {
-            if (isl->resources[ri].type_id != RES_BOULDER) continue;
-            if (isl->resources[ri].health <= 0) continue; /* depleted */
-            float bx = isl->x + isl->resources[ri].ox;
-            float by_ = isl->y + isl->resources[ri].oy;
-            float dx = player->x - bx;
-            float dy = player->y - by_;
-            float dist_sq = dx * dx + dy * dy;
-            if (dist_sq <= best_dist_sq) {
-                best_dist_sq = dist_sq;
-                best_ri = ri;
-                found = true;
-            }
-        }
-
-        if (!found) {
+        int best_ri = find_nearest_resource(isl, player->x, player->y,
+                                            RES_BOULDER, HARVEST_RANGE * HARVEST_RANGE);
+        if (best_ri < 0) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_boulder_failure\",\"reason\":\"too_far\"}");
             goto send_boulder_ret;
         }
 
         /* Deduct health and broadcast */
-        if (best_ri >= 0) {
+        {
             IslandResource *res = &isl->resources[best_ri];
             const int BOULDER_DAMAGE = 20;
             res->health -= BOULDER_DAMAGE;

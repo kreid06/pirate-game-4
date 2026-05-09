@@ -1753,23 +1753,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
             float ly = dx * wsn + dy * wc;
             if (fabsf(lx) > 25.0f || fabsf(ly) > 5.0f) continue;
             /* Hit wall */
-            uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
-            s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
-            char msg[192];
-            if (s->hp == 0) {
-                s->active = false;
-                snprintf(msg, sizeof(msg),
-                         "{\"type\":\"structure_demolished\",\"structure_id\":%u"
-                         ",\"x\":%.1f,\"y\":%.1f}",
-                         s->id, s->x, s->y);
-            } else {
-                snprintf(msg, sizeof(msg),
-                         "{\"type\":\"structure_hp_changed\","
-                         "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
-                         ",\"x\":%.1f,\"y\":%.1f}",
-                         s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
-            }
-            websocket_server_broadcast(msg);
+            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1789,23 +1773,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
             if (!(dx >= -STRUCT_WB_HALF_W && dx <= STRUCT_WB_HALF_W &&
                   dy >= -STRUCT_WB_HALF_H && dy <= STRUCT_WB_HALF_H)) continue;
             /* Hit workbench */
-            uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
-            s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
-            char msg[192];
-            if (s->hp == 0) {
-                s->active = false;
-                snprintf(msg, sizeof(msg),
-                         "{\"type\":\"structure_demolished\",\"structure_id\":%u"
-                         ",\"x\":%.1f,\"y\":%.1f}",
-                         s->id, s->x, s->y);
-            } else {
-                snprintf(msg, sizeof(msg),
-                         "{\"type\":\"structure_hp_changed\","
-                         "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
-                         ",\"x\":%.1f,\"y\":%.1f}",
-                         s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
-            }
-            websocket_server_broadcast(msg);
+            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1823,84 +1791,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
             if (!(dx >= -STRUCT_FLOOR_HALF_EXT && dx <= STRUCT_FLOOR_HALF_EXT &&
                   dy >= -STRUCT_FLOOR_HALF_EXT && dy <= STRUCT_FLOOR_HALF_EXT)) continue;
             /* Hit floor */
-            uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
-            s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
-            char msg[192];
-            if (s->hp == 0) {
-                float kx = s->x, ky = s->y;
-                s->active = false;
-                snprintf(msg, sizeof(msg),
-                         "{\"type\":\"structure_demolished\",\"structure_id\":%u"
-                         ",\"x\":%.1f,\"y\":%.1f}",
-                         s->id, kx, ky);
-                websocket_server_broadcast(msg);
-                /* Cascade: floor destroyed — demolish workbenches that were resting
-                 * on this floor and have no other active floor still supporting them,
-                 * and demolish walls at its edges with no other supporting floor.
-                 * (The killed floor is already inactive so the inner scan finds only
-                 * surviving floors.) */
-                for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
-                    PlacedStructure* wb = &placed_structures[ci];
-                    if (!wb->active) continue;
-                    if (wb->type == STRUCT_WORKBENCH) {
-                        if (fabsf(wb->x - kx) > 25.0f || fabsf(wb->y - ky) > 25.0f) continue;
-                        bool has_support = false;
-                        for (uint32_t fi = 0; fi < placed_structure_count && !has_support; fi++) {
-                            PlacedStructure* f = &placed_structures[fi];
-                            if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
-                            if (fabsf(wb->x - f->x) <= 25.0f && fabsf(wb->y - f->y) <= 25.0f)
-                                has_support = true;
-                        }
-                        if (!has_support) {
-                            wb->active = false;
-                            char cwmsg[192];
-                            snprintf(cwmsg, sizeof(cwmsg),
-                                     "{\"type\":\"structure_demolished\","
-                                     "\"structure_id\":%u,\"x\":%.1f,\"y\":%.1f}",
-                                     wb->id, wb->x, wb->y);
-                            websocket_server_broadcast(cwmsg);
-                        }
-                    } else if (wb->type == STRUCT_WALL || wb->type == STRUCT_DOOR_FRAME) {
-                        /* Is this wall/door_frame adjacent to the demolished floor? */
-                        float _at_dx = wb->x - kx, _at_dy = wb->y - ky;
-                        if (_at_dx*_at_dx + _at_dy*_at_dy > 30.0f * 30.0f) continue;
-                        bool has_support = wall_has_support(wb->x, wb->y);
-                        if (!has_support) {
-                            float dfx = wb->x, dfy = wb->y;
-                            bool is_frame = (wb->type == STRUCT_DOOR_FRAME);
-                            wb->active = false;
-                            char cwmsg[192];
-                            snprintf(cwmsg, sizeof(cwmsg),
-                                     "{\"type\":\"structure_demolished\","
-                                     "\"structure_id\":%u,\"x\":%.1f,\"y\":%.1f}",
-                                     wb->id, wb->x, wb->y);
-                            websocket_server_broadcast(cwmsg);
-                            /* If a door_frame was lost, cascade any door sitting on it */
-                            if (is_frame) {
-                                for (uint32_t di = 0; di < placed_structure_count; di++) {
-                                    PlacedStructure* dp = &placed_structures[di];
-                                    if (!dp->active || dp->type != STRUCT_DOOR) continue;
-                                    if (fabsf(dp->x - dfx) >= 3.0f || fabsf(dp->y - dfy) >= 3.0f) continue;
-                                    dp->active = false;
-                                    char dmsg[128];
-                                    snprintf(dmsg, sizeof(dmsg),
-                                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}",
-                                             dp->id);
-                                    websocket_server_broadcast(dmsg);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                snprintf(msg, sizeof(msg),
-                         "{\"type\":\"structure_hp_changed\","
-                         "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
-                         ",\"x\":%.1f,\"y\":%.1f}",
-                         s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
-                websocket_server_broadcast(msg);
-            }
+            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));

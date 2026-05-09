@@ -162,6 +162,34 @@ static void send_interaction_success(struct WebSocketClient* client, const char*
 }
 
 /**
+ * Return true if an enemy NPC is actively stationed at the given module,
+ * blocking a player (identified by player_company_id) from mounting it.
+ * Neutral NPCs (company 0) and friendly NPCs never block.
+ */
+static bool npc_blocks_module(uint32_t module_id, uint8_t player_company_id) {
+    for (int _ni = 0; _ni < world_npc_count; _ni++) {
+        WorldNpc* _npc = &world_npcs[_ni];
+        if (!_npc->active) continue;
+        if (_npc->assigned_weapon_id != module_id) continue;
+        if (_npc->state != WORLD_NPC_STATE_AT_GUN && _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
+        if (_npc->company_id == 0) continue;                            // neutral never blocks
+        if (player_company_id != 0 && _npc->company_id == player_company_id) continue; // friendly OK
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Return true if the player's company is incompatible with the ship's company
+ * (i.e. the player cannot mount modules on this ship).
+ */
+static bool player_company_conflicts(const WebSocketPlayer* player, const SimpleShip* ship) {
+    return ship->company_id != COMPANY_NEUTRAL &&
+           player->company_id != COMPANY_NEUTRAL &&
+           player->company_id != ship->company_id;
+}
+
+/**
  * Broadcast player mounted state to nearby players
  */
 static void broadcast_player_mounted(WebSocketPlayer* player, ShipModule* module, SimpleShip* ship) {
@@ -187,22 +215,14 @@ static void handle_cannon_interact(WebSocketPlayer* player, struct WebSocketClie
         }
     }
 
-    // NPC occupancy check: block mounting if an enemy NPC gunner is stationed here.
-    for (int _ni = 0; _ni < world_npc_count; _ni++) {
-        WorldNpc* _npc = &world_npcs[_ni];
-        if (!_npc->active) continue;
-        if (_npc->assigned_weapon_id != module->id) continue;
-        if (_npc->state != WORLD_NPC_STATE_AT_GUN && _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
-        if (_npc->company_id == 0) continue;           // neutral never blocks
-        if (player->company_id != 0 && _npc->company_id == player->company_id) continue; // friendly OK
+    // NPC occupancy check: block mounting if an enemy NPC is stationed here.
+    if (npc_blocks_module(module->id, player->company_id)) {
         send_interaction_failure(client, "npc_occupied");
         return;
     }
 
     /* Company check: cannot mount a cannon on an enemy ship */
-    if (ship->company_id != COMPANY_NEUTRAL &&
-        player->company_id != COMPANY_NEUTRAL &&
-        player->company_id != ship->company_id) {
+    if (player_company_conflicts(player, ship)) {
         send_interaction_failure(client, "wrong_company");
         return;
     }
@@ -246,13 +266,7 @@ static void handle_helm_interact(WebSocketPlayer* player, struct WebSocketClient
     }
 
     // NPC occupancy check: if an enemy NPC helmsman is stationed at this helm, block mounting.
-    for (int _ni = 0; _ni < world_npc_count; _ni++) {
-        WorldNpc* _npc = &world_npcs[_ni];
-        if (!_npc->active) continue;
-        if (_npc->assigned_weapon_id != module->id) continue;
-        if (_npc->state != WORLD_NPC_STATE_AT_GUN && _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
-        if (_npc->company_id == 0) continue;  // neutral never blocks
-        if (player->company_id != 0 && _npc->company_id == player->company_id) continue;  // friendly OK
+    if (npc_blocks_module(module->id, player->company_id)) {
         send_interaction_failure(client, "npc_occupied");
         return;
     }
@@ -433,22 +447,14 @@ static void handle_swivel_interact(WebSocketPlayer* player, struct WebSocketClie
         return;
     }
 
-    // NPC occupancy check: block mounting if an enemy NPC gunner is stationed here.
-    for (int _ni = 0; _ni < world_npc_count; _ni++) {
-        WorldNpc* _npc = &world_npcs[_ni];
-        if (!_npc->active) continue;
-        if (_npc->assigned_weapon_id != module->id) continue;
-        if (_npc->state != WORLD_NPC_STATE_AT_GUN && _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
-        if (_npc->company_id == 0) continue;           // neutral never blocks
-        if (player->company_id != 0 && _npc->company_id == player->company_id) continue; // friendly OK
+    // NPC occupancy check: block mounting if an enemy NPC is stationed here.
+    if (npc_blocks_module(module->id, player->company_id)) {
         send_interaction_failure(client, "npc_occupied");
         return;
     }
 
     /* Company check: cannot mount a swivel on an enemy ship */
-    if (ship->company_id != COMPANY_NEUTRAL &&
-        player->company_id != COMPANY_NEUTRAL &&
-        player->company_id != ship->company_id) {
+    if (player_company_conflicts(player, ship)) {
         send_interaction_failure(client, "wrong_company");
         return;
     }
@@ -494,9 +500,7 @@ void handle_swivel_aim(WebSocketPlayer* player, float aim_angle) {
     if (!ship) return;
 
     /* Defense-in-depth: refuse aim if player company doesn't match ship company */
-    if (ship->company_id != COMPANY_NEUTRAL &&
-        player->company_id != COMPANY_NEUTRAL &&
-        player->company_id != ship->company_id) return;
+    if (player_company_conflicts(player, ship)) return;
 
     ShipModule* module = find_module_by_id(ship, player->mounted_module_id);
     if (!module || module->type_id != MODULE_TYPE_SWIVEL) return;
@@ -692,25 +696,11 @@ void handle_module_interact(WebSocketPlayer* player, struct WebSocketClient* cli
 
     // NPC occupancy check: if an enemy NPC is currently stationed at this module, block it.
     // (Enemy ship modules are otherwise freely usable — only NPC presence blocks access.)
-    if (!is_ladder) {
-        for (int _ni = 0; _ni < world_npc_count; _ni++) {
-            WorldNpc* _npc = &world_npcs[_ni];
-            if (!_npc->active) continue;
-            if (_npc->assigned_weapon_id != module->id) continue;
-            // Only block when the NPC is physically at the module, not just en route
-            if (_npc->state != WORLD_NPC_STATE_AT_GUN &&
-                _npc->state != WORLD_NPC_STATE_REPAIRING) continue;
-            // Neutral NPCs (company 0) never block anyone
-            if (_npc->company_id == 0) continue;
-            // Friendly NPC — fine to share the module
-            if (player->company_id != 0 && _npc->company_id == player->company_id) continue;
-            // Enemy NPC is stationed here
-            log_warn("⛔ Player %u (company %u) blocked from module %u: NPC %u (company %u) is stationed there",
-                     player->player_id, player->company_id, module_id,
-                     _npc->id, _npc->company_id);
-            send_interaction_failure(client, "npc_occupied");
-            return;
-        }
+    if (!is_ladder && npc_blocks_module(module->id, player->company_id)) {
+        log_warn("⛔ Player %u (company %u) blocked from module %u: enemy NPC stationed there",
+                 player->player_id, player->company_id, module_id);
+        send_interaction_failure(client, "npc_occupied");
+        return;
     }
 
     // For non-ladder modules, player must be on the same ship

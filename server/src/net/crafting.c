@@ -10,7 +10,7 @@
 
 
 /** Count total quantity of an item across all inventory slots. */
-static int craft_count_item(WebSocketPlayer* player, ItemKind item) {
+int craft_count_item(WebSocketPlayer* player, ItemKind item) {
     int total = 0;
     for (int s = 0; s < INVENTORY_SLOTS; s++) {
         if (player->inventory.slots[s].item == item)
@@ -20,7 +20,7 @@ static int craft_count_item(WebSocketPlayer* player, ItemKind item) {
 }
 
 /** Consume `amount` units of `item` from inventory. Returns true on success. */
-static bool craft_consume(WebSocketPlayer* player, ItemKind item, int amount) {
+bool craft_consume(WebSocketPlayer* player, ItemKind item, int amount) {
     int remaining = amount;
     for (int s = 0; s < INVENTORY_SLOTS && remaining > 0; s++) {
         if (player->inventory.slots[s].item == item) {

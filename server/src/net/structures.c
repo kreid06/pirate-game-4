@@ -12,6 +12,7 @@
 #include "net/structures.h"
 #include "net/dock_physics.h"
 #include "net/cannon_fire.h"
+#include "net/crafting.h"
 #include "sim/island.h"
 
 /* ── Island structure placement ─────────────────────────────────────────────
@@ -952,36 +953,14 @@ void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClient* cli
             goto sya_send;
         }
         /* Count totals (may span multiple slots) */
-        int wood_total = 0, fiber_total = 0;
-        for (int s2 = 0; s2 < INVENTORY_SLOTS; s2++) {
-            if (player->inventory.slots[s2].item == ITEM_WOOD)  wood_total  += player->inventory.slots[s2].quantity;
-            if (player->inventory.slots[s2].item == ITEM_FIBER) fiber_total += player->inventory.slots[s2].quantity;
-        }
-        if (wood_total < 20 || fiber_total < 10) {
+        if (craft_count_item(player, ITEM_WOOD) < 20 || craft_count_item(player, ITEM_FIBER) < 10) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"shipyard_action_fail\",\"reason\":\"missing_materials\"}");
             goto sya_send;
         }
         /* Consume */
-        int need_wood = 20, need_fiber = 10;
-        for (int s2 = 0; s2 < INVENTORY_SLOTS && (need_wood > 0 || need_fiber > 0); s2++) {
-            if (need_wood > 0 && player->inventory.slots[s2].item == ITEM_WOOD) {
-                int take = player->inventory.slots[s2].quantity < need_wood
-                           ? player->inventory.slots[s2].quantity : need_wood;
-                player->inventory.slots[s2].quantity -= (uint8_t)take;
-                if (player->inventory.slots[s2].quantity == 0)
-                    player->inventory.slots[s2].item = ITEM_NONE;
-                need_wood -= take;
-            }
-            if (need_fiber > 0 && player->inventory.slots[s2].item == ITEM_FIBER) {
-                int take = player->inventory.slots[s2].quantity < need_fiber
-                           ? player->inventory.slots[s2].quantity : need_fiber;
-                player->inventory.slots[s2].quantity -= (uint8_t)take;
-                if (player->inventory.slots[s2].quantity == 0)
-                    player->inventory.slots[s2].item = ITEM_NONE;
-                need_fiber -= take;
-            }
-        }
+        craft_consume(player, ITEM_WOOD, 20);
+        craft_consume(player, ITEM_FIBER, 10);
         /* Spawn a real empty ship (modules_placed = 0 → bare hull only) */
         uint16_t new_ship_id = websocket_server_create_ship(sy->x, sy->y + 450.0f, player->company_id, 0);
         if (new_ship_id == 0) {
@@ -1061,6 +1040,163 @@ sya_send:;
 }
 
 /*
+ * destroy_placed_structure — shared destruction helper.
+ *
+ * 1. Finds the structure by ID, marks it inactive, broadcasts structure_demolished.
+ * 2. If it was a floor, cascade-destroys dependent workbenches, walls, door_frames,
+ *    ceilings, and doors (using active=false + broadcast for each).
+ * 3. If it was a door_frame, cascade-destroys any door sitting on it.
+ * 4. Compacts inactive entries from placed_structures[] in one final pass so the
+ *    array stays dense and placed_structure_count stays accurate.
+ *
+ * Safe to call from any code path (demolish, cannon hit, etc.).
+ */
+void destroy_placed_structure(uint32_t structure_id) {
+    /* Find the target */
+    uint32_t idx = UINT32_MAX;
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        if (placed_structures[i].active && placed_structures[i].id == structure_id) {
+            idx = i; break;
+        }
+    }
+    if (idx == UINT32_MAX) return; /* not found */
+
+    PlacedStructureType dtype = placed_structures[idx].type;
+    float fx = placed_structures[idx].x;
+    float fy = placed_structures[idx].y;
+
+    /* Mark primary dead and broadcast */
+    placed_structures[idx].active = false;
+    char msg[192];
+    snprintf(msg, sizeof(msg),
+             "{\"type\":\"structure_demolished\",\"structure_id\":%u}", structure_id);
+    websocket_server_broadcast(msg);
+    log_info("🔨 Destroyed structure %u (type %d)", structure_id, (int)dtype);
+
+    /* ── Cascade: floor destroyed ──────────────────────────────────────── */
+    if (dtype == STRUCT_WOODEN_FLOOR) {
+        for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
+            PlacedStructure* c = &placed_structures[ci];
+            if (!c->active) continue;
+
+            if (c->type == STRUCT_WORKBENCH) {
+                if (fabsf(c->x - fx) > 25.0f || fabsf(c->y - fy) > 25.0f) continue;
+                /* Any other active floor still supporting this workbench? */
+                bool has = false;
+                for (uint32_t fi = 0; fi < placed_structure_count && !has; fi++) {
+                    PlacedStructure* f = &placed_structures[fi];
+                    if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                    if (fabsf(c->x - f->x) <= 25.0f && fabsf(c->y - f->y) <= 25.0f) has = true;
+                }
+                if (!has) {
+                    c->active = false;
+                    char cm[128];
+                    snprintf(cm, sizeof(cm),
+                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}", c->id);
+                    websocket_server_broadcast(cm);
+                    log_info("🔨 Cascade-demolished workbench %u (floor %u removed)", c->id, structure_id);
+                }
+
+            } else if (c->type == STRUCT_WALL || c->type == STRUCT_DOOR_FRAME ||
+                       c->type == STRUCT_DOOR) {
+                /* Is this wall/door adjacent to the demolished floor? */
+                float at_dx = c->x - fx, at_dy = c->y - fy;
+                if (at_dx*at_dx + at_dy*at_dy > 30.0f * 30.0f) continue;
+                bool has = wall_has_support(c->x, c->y);
+                if (!has) {
+                    bool was_frame = (c->type == STRUCT_DOOR_FRAME);
+                    float dfx = c->x, dfy = c->y;
+                    c->active = false;
+                    char cm[128];
+                    snprintf(cm, sizeof(cm),
+                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}", c->id);
+                    websocket_server_broadcast(cm);
+                    log_info("🔨 Cascade-demolished wall/frame/door %u (floor %u removed)", c->id, structure_id);
+                    /* door_frame lost: cascade any door on it */
+                    if (was_frame) {
+                        for (uint32_t di = 0; di < placed_structure_count; di++) {
+                            PlacedStructure* dp = &placed_structures[di];
+                            if (!dp->active || dp->type != STRUCT_DOOR) continue;
+                            if (fabsf(dp->x - dfx) >= 3.0f || fabsf(dp->y - dfy) >= 3.0f) continue;
+                            dp->active = false;
+                            char dm[128];
+                            snprintf(dm, sizeof(dm),
+                                     "{\"type\":\"structure_demolished\",\"structure_id\":%u}", dp->id);
+                            websocket_server_broadcast(dm);
+                            break;
+                        }
+                    }
+                }
+
+            } else if (c->type == STRUCT_CEILING) {
+                /* Ceiling needs a floor within 150 px */
+                bool has = false;
+                for (uint32_t fi = 0; fi < placed_structure_count && !has; fi++) {
+                    PlacedStructure* f = &placed_structures[fi];
+                    if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                    float dx2 = f->x - c->x, dy2 = f->y - c->y;
+                    if (dx2*dx2 + dy2*dy2 <= 150.0f * 150.0f) has = true;
+                }
+                if (!has) {
+                    c->active = false;
+                    char cm[128];
+                    snprintf(cm, sizeof(cm),
+                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}", c->id);
+                    websocket_server_broadcast(cm);
+                    log_info("🔨 Cascade-demolished ceiling %u (floor %u removed)", c->id, structure_id);
+                }
+            }
+        }
+    }
+
+    /* ── Cascade: door_frame destroyed ────────────────────────────────── */
+    if (dtype == STRUCT_DOOR_FRAME) {
+        for (uint32_t di = 0; di < placed_structure_count; di++) {
+            PlacedStructure* dp = &placed_structures[di];
+            if (!dp->active || dp->type != STRUCT_DOOR) continue;
+            if (fabsf(dp->x - fx) >= 3.0f || fabsf(dp->y - fy) >= 3.0f) continue;
+            dp->active = false;
+            char dm[128];
+            snprintf(dm, sizeof(dm),
+                     "{\"type\":\"structure_demolished\",\"structure_id\":%u}", dp->id);
+            websocket_server_broadcast(dm);
+            break;
+        }
+    }
+
+    /* ── Compact inactive entries out of the array in one pass ─────────── */
+    uint32_t write = 0;
+    for (uint32_t read = 0; read < placed_structure_count; read++) {
+        if (placed_structures[read].active)
+            placed_structures[write++] = placed_structures[read];
+    }
+    placed_structure_count = write;
+}
+
+/*
+ * apply_structure_damage — shared hit-damage helper.
+ * Subtracts dmg from s->hp, broadcasts structure_hp_changed on partial damage,
+ * and delegates to destroy_placed_structure on death.
+ * Returns true if the structure was destroyed (s is then stale).
+ */
+bool apply_structure_damage(PlacedStructure *s, uint16_t dmg) {
+    s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
+    if (s->hp == 0) {
+        uint32_t sid = s->id;
+        destroy_placed_structure(sid);
+        return true;
+    }
+    char msg[192];
+    snprintf(msg, sizeof(msg),
+             "{\"type\":\"structure_hp_changed\","
+             "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
+             ",\"x\":%.1f,\"y\":%.1f}",
+             s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
+    websocket_server_broadcast(msg);
+    return false;
+}
+
+/*
  * demolish_structure: player holds E on a placed structure to remove it.
  * Validates proximity, then removes from placed_structures[] and broadcasts.
  */
@@ -1086,16 +1222,11 @@ void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketClient* 
                      "{\"type\":\"demolish_fail\",\"reason\":\"wrong_company\"}");
             goto ds_send;
         }
-        /* Save position/type before compacting — needed for cascade below */
-        PlacedStructureType demolished_type = placed_structures[i].type;
-        float fx = placed_structures[i].x;
-        float fy = placed_structures[i].y;
         /* Shipyard: auto-release any scaffolded ship before demolishing */
-        if (demolished_type == STRUCT_SHIPYARD
+        if (placed_structures[i].type == STRUCT_SHIPYARD
             && placed_structures[i].construction_phase == CONSTRUCTION_BUILDING
             && placed_structures[i].scaffolded_ship_id != 0) {
             uint32_t rel_id = placed_structures[i].scaffolded_ship_id;
-            /* Clear scaffold flag and set initial_plank_count so normal sinking applies */
             if (global_sim) {
                 for (uint32_t si = 0; si < global_sim->ship_count; si++) {
                     if (global_sim->ships[si].id == rel_id) {
@@ -1110,119 +1241,12 @@ void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketClient* 
                      "{\"type\":\"ship_auto_released\",\"ship_id\":%u}", rel_id);
             websocket_server_broadcast(abcast);
             log_info("⚓ Shipyard %u demolished — auto-released ship %u", sid, rel_id);
-            /* Clear construction state before array compact */
             placed_structures[i].construction_phase  = CONSTRUCTION_EMPTY;
             placed_structures[i].modules_placed      = 0;
             placed_structures[i].scaffolded_ship_id  = 0;
         }
-        /* Shift subsequent entries down to keep the array dense */
-        for (uint32_t j = i; j + 1 < placed_structure_count; j++)
-            placed_structures[j] = placed_structures[j + 1];
-        placed_structure_count--;
         log_info("🔨 Player %u demolished structure %u", player->player_id, sid);
-        /* Broadcast removal to all clients */
-        char bcast[128];
-        snprintf(bcast, sizeof(bcast),
-                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", sid);
-        websocket_server_broadcast(bcast);
-        /* Cascade: if a floor was demolished, remove any workbenches sitting on it
-           and any walls at its edges that have no other supporting floor. */
-        if (demolished_type == STRUCT_WOODEN_FLOOR) {
-            uint32_t j = 0;
-            while (j < placed_structure_count) {
-                if (placed_structures[j].type == STRUCT_WORKBENCH) {
-                    float wdx = fabsf(placed_structures[j].x - fx);
-                    float wdy = fabsf(placed_structures[j].y - fy);
-                    if (wdx <= 25.0f && wdy <= 25.0f) {
-                        uint32_t wid = placed_structures[j].id;
-                        for (uint32_t k = j; k + 1 < placed_structure_count; k++)
-                            placed_structures[k] = placed_structures[k + 1];
-                        placed_structure_count--;
-                        log_info("🔨 Cascade-demolished workbench %u (floor %u removed)", wid, sid);
-                        char wbcast[128];
-                        snprintf(wbcast, sizeof(wbcast),
-                                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", wid);
-                        websocket_server_broadcast(wbcast);
-                        continue; /* don't increment — array shifted left */
-                    }
-                } else if (placed_structures[j].type == STRUCT_WALL ||
-                           placed_structures[j].type == STRUCT_DOOR_FRAME ||
-                           placed_structures[j].type == STRUCT_DOOR) {
-                    /* Wall is at one of the 4 edge midpoints of the demolished floor? */
-                    float wx = placed_structures[j].x;
-                    float wy = placed_structures[j].y;
-                    bool at_edge =
-                        (fabsf(wx - fx) < 3.0f && fabsf(fabsf(wy - fy) - 25.0f) < 3.0f) ||
-                        (fabsf(wy - fy) < 3.0f && fabsf(fabsf(wx - fx) - 25.0f) < 3.0f);
-                    if (at_edge) {
-                        /* Check if another active floor still supports this wall edge */
-                        bool has_support = false;
-                        for (uint32_t fi = 0; fi < placed_structure_count && !has_support; fi++) {
-                            PlacedStructure* f = &placed_structures[fi];
-                            if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
-                            bool supports =
-                                (fabsf(wx - f->x) < 3.0f && fabsf(fabsf(wy - f->y) - 25.0f) < 3.0f) ||
-                                (fabsf(wy - f->y) < 3.0f && fabsf(fabsf(wx - f->x) - 25.0f) < 3.0f);
-                            if (supports) has_support = true;
-                        }
-                        if (!has_support) {
-                            uint32_t wid = placed_structures[j].id;
-                            for (uint32_t k = j; k + 1 < placed_structure_count; k++)
-                                placed_structures[k] = placed_structures[k + 1];
-                            placed_structure_count--;
-                            log_info("🔨 Cascade-demolished wall %u (floor %u removed)", wid, sid);
-                            char wcast[128];
-                            snprintf(wcast, sizeof(wcast),
-                                     "{\"type\":\"structure_demolished\",\"structure_id\":%u}", wid);
-                            websocket_server_broadcast(wcast);
-                            continue;
-                        }
-                    }
-                } else if (placed_structures[j].type == STRUCT_CEILING) {
-                    /* Ceiling needs a floor within 150 px — check if any remain */
-                    float cx2 = placed_structures[j].x;
-                    float cy2 = placed_structures[j].y;
-                    bool ceil_has_floor = false;
-                    for (uint32_t fi = 0; fi < placed_structure_count && !ceil_has_floor; fi++) {
-                        PlacedStructure* f = &placed_structures[fi];
-                        if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
-                        float fdx2 = f->x - cx2, fdy2 = f->y - cy2;
-                        if (fdx2*fdx2 + fdy2*fdy2 <= 150.0f * 150.0f) ceil_has_floor = true;
-                    }
-                    if (!ceil_has_floor) {
-                        uint32_t cid = placed_structures[j].id;
-                        for (uint32_t k = j; k + 1 < placed_structure_count; k++)
-                            placed_structures[k] = placed_structures[k + 1];
-                        placed_structure_count--;
-                        log_info("🔨 Cascade-demolished ceiling %u (floor %u removed)", cid, sid);
-                        char cccast[128];
-                        snprintf(cccast, sizeof(cccast),
-                                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", cid);
-                        websocket_server_broadcast(cccast);
-                        continue;
-                    }
-                }
-                j++;
-            }
-        }
-        /* door_frame demolished: cascade any door panel sitting on it */
-        if (demolished_type == STRUCT_DOOR_FRAME) {
-            for (uint32_t j = 0; j < placed_structure_count; j++) {
-                if (placed_structures[j].type != STRUCT_DOOR) continue;
-                if (fabsf(placed_structures[j].x - fx) >= 3.0f ||
-                    fabsf(placed_structures[j].y - fy) >= 3.0f) continue;
-                uint32_t dpid = placed_structures[j].id;
-                for (uint32_t k = j; k + 1 < placed_structure_count; k++)
-                    placed_structures[k] = placed_structures[k + 1];
-                placed_structure_count--;
-                log_info("\U0001F528 Cascade-demolished door panel %u (frame removed)", dpid);
-                char dpcast[128];
-                snprintf(dpcast, sizeof(dpcast),
-                         "{\"type\":\"structure_demolished\",\"structure_id\":%u}", dpid);
-                websocket_server_broadcast(dpcast);
-                break;
-            }
-        }
+        destroy_placed_structure(sid);
         return; /* already sent via broadcast */
     }
 
