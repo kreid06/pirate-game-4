@@ -158,6 +158,18 @@ export class RenderSystem {
   private _cachedLocalPlayer: Player | null = null;
   /** Placed island structures — updated via addPlacedStructure / setPlacedStructures. */
   private placedStructures: PlacedStructure[] = [];
+  /**
+   * Pre-computed wall segments — rebuilt whenever placedStructures changes.
+   * Each entry: [x1, y1, x2, y2] in world space.  Used for O(1)-per-frame
+   * ceiling-transparency ray tests instead of recomputing each draw call.
+   */
+  private _wallSegs: Float32Array = new Float32Array(0);
+  private _wallSegsFloorCount = 0; // floor count at last rebuild (tracks floor changes too)
+  /** Cached visibility polygon (world-space points) for the building shadow overlay. */
+  private _visPolyPts: Float32Array = new Float32Array(0);
+  private _visPolyPx = NaN;
+  private _visPolyPy = NaN;
+  private _visPolyWallRev = 0; // incremented on every _rebuildWallSegs
   /** Active tombstone item caches in the world. */
   private _tombstones: import('../../sim/Types').Tombstone[] = [];
   /** Ship-local attachment data for tombstones that spawned on a ship. */
@@ -1785,16 +1797,50 @@ export class RenderSystem {
     const idx = this.placedStructures.findIndex(p => p.id === s.id);
     if (idx >= 0) this.placedStructures[idx] = s;
     else this.placedStructures.push(s);
+    this._rebuildWallSegs();
   }
 
   /** Replace the full placed-structure list (e.g. on join). */
   setPlacedStructures(arr: PlacedStructure[]): void {
     this.placedStructures = [...arr];
+    this._rebuildWallSegs();
   }
 
   /** Remove a single structure by id (e.g. after server confirms demolish). */
   removePlacedStructure(id: number): void {
     this.placedStructures = this.placedStructures.filter(s => s.id !== id);
+    this._rebuildWallSegs();
+  }
+
+  /**
+   * Rebuild the cached wall-segment flat array from the current placedStructures.
+   * Called only when the structure list mutates — not every frame.
+   * Layout: [x1, y1, x2, y2,  x1, y1, x2, y2, ...]
+   */
+  private _rebuildWallSegs(): void {
+    const WALL_HALF = 26;
+    const floors = this.placedStructures.filter(f => f.type === 'wooden_floor');
+    const solids  = this.placedStructures.filter(
+      w => w.type === 'wall' || (w.type === 'door' && !w.doorOpen)
+    );
+    const buf = new Float32Array(solids.length * 4);
+    let i = 0;
+    for (const w of solids) {
+      let nearFloor: PlacedStructure | null = null;
+      let nearDist2 = Infinity;
+      for (const f of floors) {
+        const d2 = (f.x - w.x) ** 2 + (f.y - w.y) ** 2;
+        if (d2 < nearDist2) { nearDist2 = d2; nearFloor = f; }
+      }
+      const ang = nearFloor
+        ? Math.atan2(w.y - nearFloor.y, w.x - nearFloor.x) + Math.PI / 2
+        : 0;
+      const ca = Math.cos(ang) * WALL_HALF, sa = Math.sin(ang) * WALL_HALF;
+      buf[i++] = w.x + ca; buf[i++] = w.y + sa;
+      buf[i++] = w.x - ca; buf[i++] = w.y - sa;
+    }
+    this._wallSegs = buf;
+    this._visPolyWallRev++; // invalidate cached visibility polygon
   }
 
   /** Update a structure's company ownership (one-way promotion from server). */
@@ -1811,7 +1857,10 @@ export class RenderSystem {
   /** Update door open/closed state after a door_toggled broadcast. */
   updateStructureDoorOpen(id: number, open: boolean): void {
     const s = this.placedStructures.find(p => p.id === id);
-    if (s && s.type === 'door') s.doorOpen = open;
+    if (s && s.type === 'door') {
+      s.doorOpen = open;
+      this._rebuildWallSegs(); // open/closed changes which segments block LOS
+    }
   }
 
   /** Update ship construction state after a shipyard_state broadcast. */
@@ -3947,70 +3996,32 @@ export class RenderSystem {
     const ctx  = this.ctx;
     const zoom = camera.getState().zoom;
 
-    // ── Faded ceiling IDs (player's current building) ────────────────────────
-    // Computed first so hover detection can use it for ceiling occlusion.
-    const _fadedCeilingIds = new Set<number>();
-    {
-      const lp = this._cachedLocalPlayer;
-      if (lp && lp.carrierId === 0) {
-        const px = lp.position.x, py = lp.position.y;
-        const HALF_T = 25;
-        const ADJ   = 55;
-        const allFloors = this.placedStructures.filter(f => f.type === 'wooden_floor');
-        let startFloor: PlacedStructure | null = null;
-        for (const f of allFloors) {
-          const fr = (f.rotation ?? 0) * Math.PI / 180;
-          const fc = Math.cos(-fr), fs = Math.sin(-fr);
-          const lx = (px - f.x) * fc - (py - f.y) * fs;
-          const ly = (px - f.x) * fs + (py - f.y) * fc;
-          if (Math.abs(lx) <= HALF_T && Math.abs(ly) <= HALF_T) { startFloor = f; break; }
-        }
-        if (startFloor !== null) {
-          const connectedFloorIds = new Set<number>([startFloor.id]);
-          const floorQueue: PlacedStructure[] = [startFloor];
-          while (floorQueue.length > 0) {
-            const cur = floorQueue.shift()!;
-            for (const f of allFloors) {
-              if (connectedFloorIds.has(f.id)) continue;
-              const dx = f.x - cur.x, dy = f.y - cur.y;
-              if (Math.sqrt(dx * dx + dy * dy) <= ADJ) {
-                connectedFloorIds.add(f.id);
-                floorQueue.push(f);
-              }
-            }
-          }
-          const connectedFloors = allFloors.filter(f => connectedFloorIds.has(f.id));
-          const ceilings = this.placedStructures.filter(c => c.type === 'wood_ceiling');
-          let startCeil: PlacedStructure | null = null;
-          outer:
-          for (const c of ceilings) {
-            const cr = (c.rotation ?? 0) * Math.PI / 180;
-            const cc = Math.cos(-cr), cs = Math.sin(-cr);
-            for (const f of connectedFloors) {
-              const lx = (f.x - c.x) * cc - (f.y - c.y) * cs;
-              const ly = (f.x - c.x) * cs + (f.y - c.y) * cc;
-              if (Math.abs(lx) <= HALF_T && Math.abs(ly) <= HALF_T) { startCeil = c; break outer; }
-            }
-          }
-          if (startCeil !== null) {
-            const ceilQueue: PlacedStructure[] = [startCeil];
-            _fadedCeilingIds.add(startCeil.id);
-            while (ceilQueue.length > 0) {
-              const cur = ceilQueue.shift()!;
-              for (const c of ceilings) {
-                if (_fadedCeilingIds.has(c.id)) continue;
-                const dx = c.x - cur.x, dy = c.y - cur.y;
-                if (Math.sqrt(dx * dx + dy * dy) <= ADJ) {
-                  _fadedCeilingIds.add(c.id);
-                  ceilQueue.push(c);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
+    // ── Update hovered structure ──────────────────────────────────────────────
 
+        // Strict segment-segment intersection (cross-product sign method).
+        // Returns false for collinear / touching endpoints — we don't need those cases.
+        const cross2d = (ox: number, oy: number, ax: number, ay: number, bx: number, by: number) =>
+          (ax - ox) * (by - oy) - (ay - oy) * (bx - ox);
+        const segsCross = (ax: number, ay: number, bx: number, by: number,
+                           cx: number, cy: number, dx: number, dy: number): boolean => {
+          const d1 = cross2d(cx, cy, dx, dy, ax, ay);
+          const d2 = cross2d(cx, cy, dx, dy, bx, by);
+          const d3 = cross2d(ax, ay, bx, by, cx, cy);
+          const d4 = cross2d(ax, ay, bx, by, dx, dy);
+          return (d1 * d2 < 0) && (d3 * d4 < 0);
+        };
+
+        const rayBlocked = (ax: number, ay: number, bx: number, by: number): boolean => {
+          const n = wallSegs.length;
+          for (let i = 0; i < n; i += 4) {
+            if (segsCross(ax, ay, bx, by, wallSegs[i], wallSegs[i+1], wallSegs[i+2], wallSegs[i+3])) return true;
+          }
+          return false;
+        };
+
+        // ── Seed: ceiling tiles the player can reach without crossing a wall ──
+        // No floor tile required — also works outside, on bare ground, through
+        // open doorways (door_frame without a door panel).
     // ── Update hovered structure ──────────────────────────────────────────────
     // Highlight whichever structure the mouse cursor is over (AABB for floor,
     // landscape rect for workbench).  Interaction hints additionally require
@@ -4022,7 +4033,8 @@ export class RenderSystem {
       const mx = this.mouseWorldPos.x;
       const my = this.mouseWorldPos.y;
       const half = 25; // half of 50px tile
-      let floorHit: PlacedStructure | null = null;
+      let wallHit:  PlacedStructure | null = null; // wall / door_frame / door
+      let floorHit: PlacedStructure | null = null; // wooden_floor / wood_ceiling
       for (const s of this.placedStructures) {
         if (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') {
           // Derive wall orientation from nearest floor tile, then rotate mouse into local space
@@ -4041,7 +4053,7 @@ export class RenderSystem {
           const lx = ddx * wc - ddy * ws;
           const ly = ddx * ws + ddy * wc;
           if (Math.abs(lx) <= 25 && Math.abs(ly) <= 8) {
-            floorHit = s; // walls/door frames/panels treated like floors — workbench still wins
+            wallHit = s; // walls/door frames/panels beat floors/ceilings
           }
           continue;
         }
@@ -4062,38 +4074,67 @@ export class RenderSystem {
           if (s.type === 'workbench' || s.type === 'shipyard') {
             // Workbench/shipyard always wins — stop searching
             this._hoveredStructure = s;
+            wallHit = null;
             floorHit = null;
             break;
           } else {
-            // Floor match — keep looking in case a workbench overlaps
+            // Floor/ceiling match — keep looking in case a wall or workbench overlaps
             floorHit = s;
           }
         }
       }
-      if (this._hoveredStructure === null) this._hoveredStructure = floorHit;
+      // Priority: workbench/shipyard (set directly) > wall/door_frame/door > floor/ceiling
+      if (this._hoveredStructure === null) this._hoveredStructure = wallHit ?? floorHit;
+    }
 
-      // ── Ceiling occlusion: suppress hover if mouse is under an opaque ceiling ──
-      // If the mouse world position is inside a ceiling tile that is NOT faded
-      // (i.e. the player is outside that building), don't highlight anything below.
-      if (this._hoveredStructure !== null) {
-        const HALF_T = 25;
-        for (const c of this.placedStructures) {
-          if (c.type !== 'wood_ceiling') continue;
-          if (_fadedCeilingIds.has(c.id)) continue; // faded = player is inside, hover allowed
-          if (c.id === this._hoveredStructure!.id) continue; // ceiling IS what's hovered — allow it
-          const cr = (c.rotation ?? 0) * Math.PI / 180;
-          let clx: number, cly: number;
-          if (cr === 0) {
-            clx = mx - c.x; cly = my - c.y;
-          } else {
-            const cc2 = Math.cos(-cr), cs2 = Math.sin(-cr);
-            clx = (mx - c.x) * cc2 - (my - c.y) * cs2;
-            cly = (mx - c.x) * cs2 + (my - c.y) * cc2;
-          }
-          if (Math.abs(clx) <= HALF_T && Math.abs(cly) <= HALF_T) {
-            this._hoveredStructure = null;
-            break;
-          }
+    // Pre-compute which ceiling tiles are visible from the player via LOS through wall segments.
+    // A ceiling tile is "visible" when the player→center ray is not blocked by any wall segment.
+    // Visible ceilings draw semi-transparent; occluded ceilings draw fully opaque.
+    const visibleCeilingIds = new Set<number>();
+    if (player && this._wallSegs.length > 0) {
+      const ppx = player.position.x, ppy = player.position.y;
+      const wseg = this._wallSegs;
+      const ceilLosBlocked = (tx: number, ty: number): boolean => {
+        const d1x = tx - ppx, d1y = ty - ppy;
+        for (let i = 0; i < wseg.length; i += 4) {
+          const d2x = wseg[i+2] - wseg[i], d2y = wseg[i+3] - wseg[i+1];
+          const denom = d1x * d2y - d1y * d2x;
+          if (Math.abs(denom) < 1e-9) continue;
+          const sx = ppx - wseg[i], sy = ppy - wseg[i+1];
+          const t = (d2x * sy - d2y * sx) / denom;
+          const u = (d1x * sy - d1y * sx) / denom;
+          if (t > 1e-6 && t < 1 - 1e-6 && u > 1e-6 && u < 1 - 1e-6) return true;
+        }
+        return false;
+      };
+      for (const s of this.placedStructures) {
+        if (s.type !== 'wood_ceiling') continue;
+        if (!ceilLosBlocked(s.x, s.y)) visibleCeilingIds.add(s.id);
+      }
+    }
+
+    // Override hover: if the mouse is over a fully-opaque ceiling tile, that ceiling takes
+    // priority over everything beneath it (workbench, walls, floors) since the player
+    // can't see through it. Visible (semi-transparent) ceilings don't occlude interaction.
+    if (this.mouseWorldPos && !this.islandBuildKind) {
+      const mx = this.mouseWorldPos.x, my = this.mouseWorldPos.y;
+      const half = 25;
+      for (const s of this.placedStructures) {
+        if (s.type !== 'wood_ceiling') continue;
+        if (visibleCeilingIds.has(s.id)) continue; // transparent — doesn't block
+        const rot = (s.rotation ?? 0) * Math.PI / 180;
+        let lx: number, ly: number;
+        if (rot === 0) {
+          lx = mx - s.x; ly = my - s.y;
+        } else {
+          const c = Math.cos(-rot), sn = Math.sin(-rot);
+          const dx = mx - s.x, dy = my - s.y;
+          lx = dx * c - dy * sn;
+          ly = dx * sn + dy * c;
+        }
+        if (Math.abs(lx) <= half && Math.abs(ly) <= half) {
+          this._hoveredStructure = s; // opaque ceiling wins over anything beneath it
+          break;
         }
       }
     }
@@ -4630,8 +4671,10 @@ export class RenderSystem {
         }
       } else if (s.type === 'wood_ceiling') {
         // ── Wooden ceiling tile ──
-        // Fade this tile if it belongs to the same connected building the player is under.
-        const ceilAlpha = _fadedCeilingIds.has(s.id) ? 0.25 : 1.0;
+        // When the player has LOS to this tile, draw it semi-transparent so the interior
+        // is visible beneath. Fully occluded tiles draw at full opacity.
+        const ceilAlpha = visibleCeilingIds.has(s.id) ? 0.25 : 1;
+
         const rotRad = (s.rotation ?? 0) * Math.PI / 180;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = (1 - hpFrac) * 0.5;
@@ -4670,7 +4713,7 @@ export class RenderSystem {
         // Company color strip
         const ceilCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
         const ceilStripH = Math.max(1, 2 * zoom);
-        ctx.globalAlpha = Math.min(ceilAlpha, 0.8);
+        ctx.globalAlpha = 0.8 * ceilAlpha;
         ctx.fillStyle = ceilCompanyColor;
         ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, ceilStripH);
 
@@ -5980,6 +6023,197 @@ export class RenderSystem {
     const idx = layer < 0 ? 0 : layer;
     this.renderBuckets[idx].push({ layer, layerName, renderFn, priority });
   }
+
+  // ── Building shadow (visibility polygon) ─────────────────────────────────
+
+  /**
+   * Compute a 2D visibility polygon from the player position using the cached
+   * wall segments.  Rays are cast toward every wall endpoint (+ ±0.0001 rad
+   * offset to cleanly handle corners).  The result is stored in _visPolyPts
+   * as a flat [x0,y0, x1,y1, ...] world-space array, sorted by angle.
+   * Only recomputed when the player moves or walls change.
+   */
+  private _buildVisibilityPoly(px: number, py: number): void {
+    const segs = this._wallSegs;
+    const nSegs = segs.length / 4;
+    if (nSegs === 0) { this._visPolyPts = new Float32Array(0); return; }
+
+    // Collect unique angles toward every wall endpoint
+    const angles: number[] = [];
+    for (let i = 0; i < segs.length; i += 4) {
+      for (let k = 0; k < 2; k++) {
+        const ex = segs[i + k * 2], ey = segs[i + k * 2 + 1];
+        const a = Math.atan2(ey - py, ex - px);
+        angles.push(a - 0.0001, a, a + 0.0001);
+      }
+    }
+
+    // For a given angle, find the closest wall intersection distance (or FAR)
+    const FAR = 2000;
+    const rayHit = (angle: number): [number, number] => {
+      const rdx = Math.cos(angle), rdy = Math.sin(angle);
+      let minT = FAR;
+      for (let i = 0; i < segs.length; i += 4) {
+        const sx = segs[i], sy = segs[i+1], ex = segs[i+2], ey = segs[i+3];
+        const sdx = ex - sx, sdy = ey - sy;
+        const denom = rdx * sdy - rdy * sdx;
+        if (Math.abs(denom) < 1e-9) continue;
+        const t1 = ((sx - px) * sdy - (sy - py) * sdx) / denom;
+        const t2 = ((sx - px) * rdy - (sy - py) * rdx) / denom;
+        if (t1 >= 0 && t2 >= 0 && t2 <= 1 && t1 < minT) minT = t1;
+      }
+      return [px + rdx * minT, py + rdy * minT];
+    };
+
+    // Sort angles, cast a ray for each, collect hit points
+    angles.sort((a, b) => a - b);
+    const pts = new Float32Array(angles.length * 2);
+    for (let i = 0; i < angles.length; i++) {
+      const [hx, hy] = rayHit(angles[i]);
+      pts[i * 2]     = hx;
+      pts[i * 2 + 1] = hy;
+    }
+    this._visPolyPts = pts;
+    this._visPolyPx  = px;
+    this._visPolyPy  = py;
+  }
+
+  /**
+   * Draw a dark shadow mask over building interiors that are not in the
+   * player's line of sight.  Only active when the player is on foot and
+   * there are walls present.
+   *
+   * Technique:
+   *  1. Fill an offscreen canvas fully black (the "dark" layer).
+   *  2. Punch out the visibility polygon using 'destination-out' compositing.
+   *  3. Blit the result onto the main canvas.
+   */
+  private _shadowCanvas: OffscreenCanvas | null = null;
+  private _shadowCtx: OffscreenCanvasRenderingContext2D | null = null;
+
+  drawBuildingShadow(camera: Camera): void {
+    const lp = this._cachedLocalPlayer;
+    if (!lp || lp.carrierId !== 0) return;  // only on foot
+    if (this._wallSegs.length === 0) return; // no walls → no shadow
+
+    const px = lp.position.x, py = lp.position.y;
+
+    // Collect all floor tiles of every building near enough to be visible.
+    const SHADOW_RANGE = 600; // world units — covers typical screen at any zoom
+    const ADJ = 55;
+    const allFloors = this.placedStructures.filter(f => f.type === 'wooden_floor');
+
+    const seedFloors = allFloors.filter(f => {
+      const dx = f.x - px, dy = f.y - py;
+      return dx * dx + dy * dy <= SHADOW_RANGE * SHADOW_RANGE;
+    });
+    if (seedFloors.length === 0) return;
+
+    // Flood-fill to include all tiles in any building that has at least one seed tile.
+    const shadowFloorIds = new Set<number>(seedFloors.map(f => f.id));
+    const floorQueue: PlacedStructure[] = [...seedFloors];
+    while (floorQueue.length > 0) {
+      const cur = floorQueue.shift()!;
+      for (const f of allFloors) {
+        if (shadowFloorIds.has(f.id)) continue;
+        const dx = f.x - cur.x, dy = f.y - cur.y;
+        if (dx * dx + dy * dy <= ADJ * ADJ) { shadowFloorIds.add(f.id); floorQueue.push(f); }
+      }
+    }
+    const connectedFloors = allFloors.filter(f => shadowFloorIds.has(f.id));
+
+    const cw = this.canvas.width, ch = this.canvas.height;
+    if (!this._shadowCanvas || this._shadowCanvas.width !== cw || this._shadowCanvas.height !== ch) {
+      this._shadowCanvas = new OffscreenCanvas(cw, ch);
+      this._shadowCtx    = this._shadowCanvas.getContext('2d')!;
+    }
+    const sc = this._shadowCtx!;
+    sc.clearRect(0, 0, cw, ch);
+
+    // Inline world→screen.
+    const camState = camera.getState();
+    const camX = camState.position.x, camY = camState.position.y;
+    const zoom  = camState.zoom;
+    const rot   = -camState.rotation;
+    const cosR  = Math.cos(rot), sinR = Math.sin(rot);
+    const hw = cw / 2, hh = ch / 2;
+    const toSx = (wx: number, wy: number) => {
+      const tx = (wx - camX) * zoom, ty = (wy - camY) * zoom;
+      return tx * cosR - ty * sinR + hw;
+    };
+    const toSy = (wx: number, wy: number) => {
+      const tx = (wx - camX) * zoom, ty = (wy - camY) * zoom;
+      return tx * sinR + ty * cosR + hh;
+    };
+
+    // ── Per-tile line-of-sight: a tile is "hidden" if a wall segment crosses
+    //    every ray from the player to all 4 corners (plus center). If ANY of
+    //    those 5 sample points is unblocked, the tile is visible → no shadow.
+    const segs = this._wallSegs;
+    // Strict segment-vs-segment intersection (cross-product sign method).
+    const segIntersects = (
+      ax: number, ay: number, bx: number, by: number,
+      cx: number, cy: number, dx: number, dy: number,
+    ): boolean => {
+      const d1x = bx - ax, d1y = by - ay;
+      const d2x = dx - cx, d2y = dy - cy;
+      const denom = d1x * d2y - d1y * d2x;
+      if (Math.abs(denom) < 1e-9) return false;
+      const sx = ax - cx, sy = ay - cy;
+      const t = (d2x * sy - d2y * sx) / denom;
+      const u = (d1x * sy - d1y * sx) / denom;
+      return t > 1e-6 && t < 1 - 1e-6 && u > 1e-6 && u < 1 - 1e-6;
+    };
+    const losBlocked = (tx: number, ty: number): boolean => {
+      for (let i = 0; i < segs.length; i += 4) {
+        if (segIntersects(px, py, tx, ty, segs[i], segs[i+1], segs[i+2], segs[i+3])) return true;
+      }
+      return false;
+    };
+
+    sc.globalCompositeOperation = 'source-over';
+    sc.fillStyle = 'rgba(0,0,0,0.78)';
+    const tileHalf = 26; // 25 + 1px to close seams between adjacent tiles
+    const sampleHalf = 22; // sample slightly inside the tile to avoid grazing wall endpoints
+    sc.beginPath();
+    let drewAny = false;
+    for (const f of connectedFloors) {
+      const fRot = (f.rotation ?? 0) * Math.PI / 180;
+      const cosF = Math.cos(fRot), sinF = Math.sin(fRot);
+
+      // Sample points (center + 4 inset corners). Tile is hidden only if ALL are blocked.
+      const samples: [number, number][] = [
+        [f.x, f.y],
+        [f.x + (-sampleHalf) * cosF - (-sampleHalf) * sinF, f.y + (-sampleHalf) * sinF + (-sampleHalf) * cosF],
+        [f.x + ( sampleHalf) * cosF - (-sampleHalf) * sinF, f.y + ( sampleHalf) * sinF + (-sampleHalf) * cosF],
+        [f.x + ( sampleHalf) * cosF - ( sampleHalf) * sinF, f.y + ( sampleHalf) * sinF + ( sampleHalf) * cosF],
+        [f.x + (-sampleHalf) * cosF - ( sampleHalf) * sinF, f.y + (-sampleHalf) * sinF + ( sampleHalf) * cosF],
+      ];
+      let allBlocked = true;
+      for (const [sx, sy] of samples) {
+        if (!losBlocked(sx, sy)) { allBlocked = false; break; }
+      }
+      if (!allBlocked) continue; // tile visible from player → leave it lit
+
+      // Draw the full tile quad (tileHalf, slight overrun to close seams).
+      const corners: [number, number][] = [
+        [f.x + (-tileHalf) * cosF - (-tileHalf) * sinF, f.y + (-tileHalf) * sinF + (-tileHalf) * cosF],
+        [f.x + ( tileHalf) * cosF - (-tileHalf) * sinF, f.y + ( tileHalf) * sinF + (-tileHalf) * cosF],
+        [f.x + ( tileHalf) * cosF - ( tileHalf) * sinF, f.y + ( tileHalf) * sinF + ( tileHalf) * cosF],
+        [f.x + (-tileHalf) * cosF - ( tileHalf) * sinF, f.y + (-tileHalf) * sinF + ( tileHalf) * cosF],
+      ];
+      sc.moveTo(toSx(corners[0][0], corners[0][1]), toSy(corners[0][0], corners[0][1]));
+      for (let i = 1; i < 4; i++) sc.lineTo(toSx(corners[i][0], corners[i][1]), toSy(corners[i][0], corners[i][1]));
+      sc.closePath();
+      drewAny = true;
+    }
+    if (!drewAny) return;
+    sc.fill();
+
+    this.ctx.drawImage(this._shadowCanvas, 0, 0);
+  }
+
+
   
   private executeRenderQueue(): void {
     // Iterate pre-allocated layer buckets in order (bucket 0 = layer -1, 1-9 = layers 1-9).
