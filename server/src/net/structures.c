@@ -448,6 +448,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                 if (placed_structures[si].type == STRUCT_WALL) continue;
                 if (placed_structures[si].type == STRUCT_DOOR_FRAME) continue;
                 if (placed_structures[si].type == STRUCT_DOOR) continue;
+                if (placed_structures[si].type == STRUCT_CEILING) continue;
                 float dpx = placed_structures[si].x - px;
                 float dpy = placed_structures[si].y - py;
                 if (dpx*dpx + dpy*dpy < BLOCK_R * BLOCK_R) struct_in_way = true;
