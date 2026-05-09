@@ -317,7 +317,8 @@ export class InputManager {
     this.updateGamepad();
     
     // Handle cannon aiming (works whether on ship or not)
-    this.handleCannonAiming(deltaTime / 1000);
+    // deltaTime is already in seconds (see ClientApplication.updateClient)
+    this.handleCannonAiming(deltaTime);
     
     // If mounted to helm, handle ship controls instead of player movement
     if (this.mountKind === 'helm') {
