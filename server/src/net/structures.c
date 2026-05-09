@@ -23,7 +23,7 @@
 #define STRUCT_PLACE_RANGE  200.0f  /* player must be within this range of placement point */
 #define STRUCT_FLOOR_REQ_R   55.0f  /* workbench centre must be within this of a floor tile */
 /* Half the floor-tile side length (50px / 2 = 25px). Players must be this close to interact. */
-#define STRUCT_INTERACT_R    25.0f  /* E-key interact range (world-px) */
+#define STRUCT_INTERACT_R    50.0f  /* E-key interact range (world-px) — one full floor tile */
 #define SHIPYARD_INTERACT_R 700.0f  /* larger range for the big shipyard structure */
 
 /*
