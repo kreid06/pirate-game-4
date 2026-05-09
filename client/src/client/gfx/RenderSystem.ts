@@ -5857,7 +5857,9 @@ export class RenderSystem {
                      || this.swivelBuildMode || this.helmBuildMode || this.deckBuildMode;
     for (const player of renderPlayers) {
       const isLocal = player.id === this.localPlayerId;
-      if (isLocal && inBuildMode) {
+      // Also render above planks when on a scaffolded ship (building in shipyard) even without explicit build mode
+      const onScaffoldedShip = isLocal && player.carrierId !== 0 && this._scaffoldedShips.has(player.carrierId);
+      if (isLocal && (inBuildMode || onScaffoldedShip)) {
         this.queueRenderItem(3, 'players', () => this.drawPlayer(player, worldState, camera), 5);
       } else {
         this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
@@ -7134,6 +7136,8 @@ export class RenderSystem {
   private _fireDbgLastLog = 0;
   private drawBurningModules(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+    // Suppress fire overlays for ships under construction in a shipyard
+    if (this._scaffoldedShips.has(ship.id)) return;
     const cosR = Math.cos(ship.rotation);
     const sinR = Math.sin(ship.rotation);
     const zoom = camera.getState().zoom;

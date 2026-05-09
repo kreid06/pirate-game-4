@@ -29,6 +29,7 @@
 #include "net/websocket_server_internal.h"
 #include "net/module_interactions.h"
 #include "sim/island.h"
+#include "sim/module_types.h"
 #include "util/log.h"
 
 /* ── Tiny JSON helpers ─────────────────────────────────────────────────────── */
@@ -296,6 +297,7 @@ int world_save(const char *path) {
             "      \"open\": %s,\n"
             "      \"construction_phase\": %u,\n"
             "      \"construction_company\": %u,\n"
+            "      \"modules_placed\": %u,\n"
             "      \"scaffolded_ship_id\": %u\n"
             "    }",
             (unsigned)ps->id,
@@ -312,6 +314,7 @@ int world_save(const char *path) {
             ps->open ? "true" : "false",
             (unsigned)ps->construction_phase,
             (unsigned)ps->construction_company,
+            (unsigned)ps->modules_placed,
             (unsigned)ps->scaffolded_ship_id
         );
     }
@@ -538,29 +541,75 @@ int world_load(const char *path) {
                         if (marr && s) {
                             char *mobj;
                             uint8_t mi = 0;
-                            while ((mobj = next_json_object(&marr)) != NULL
-                                   && mi < s->module_count) {
-                                unsigned mtype = 0, mhealth = 0, mmax = 0;
-                                float mlx = 0, mly = 0;
-                                ws_json_uint(mobj,  "type",       &mtype);
-                                ws_json_float(mobj, "lx",         &mlx);
-                                ws_json_float(mobj, "ly",         &mly);
-                                ws_json_uint(mobj,  "health",     &mhealth);
-                                ws_json_uint(mobj,  "max_health", &mmax);
-
-                                /* Match module by type + approximate position */
-                                for (uint8_t k = 0; k < s->module_count; k++) {
-                                    ShipModule *m = &s->modules[k];
-                                    if ((unsigned)m->type_id != mtype) continue;
-                                    float dx = (float)m->local_pos.x / 65536.0f - mlx;
-                                    float dy = (float)m->local_pos.y / 65536.0f - mly;
-                                    if (dx * dx + dy * dy > 0.01f) continue;
-                                    m->health = (int32_t)mhealth;
-                                    if (mmax > 0) m->max_health = (int32_t)mmax;
-                                    break;
+                            if (is_scaffolded) {
+                                /* Scaffolded ship: no default modules were created.
+                                 * Add each saved module directly using the new ship_seq. */
+                                struct Ship *sim_ship = NULL;
+                                if (global_sim) {
+                                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                        if ((uint32_t)global_sim->ships[si].id == new_id) {
+                                            sim_ship = &global_sim->ships[si];
+                                            break;
+                                        }
+                                    }
                                 }
-                                free(mobj);
-                                mi++;
+                                while ((mobj = next_json_object(&marr)) != NULL) {
+                                    unsigned saved_id = 0, mtype = 0, mhealth = 0, mmax = 0;
+                                    float mlx = 0, mly = 0, mlr = 0;
+                                    ws_json_uint(mobj,  "id",         &saved_id);
+                                    ws_json_uint(mobj,  "type",       &mtype);
+                                    ws_json_float(mobj, "lx",         &mlx);
+                                    ws_json_float(mobj, "ly",         &mly);
+                                    ws_json_float(mobj, "lr",         &mlr);
+                                    ws_json_uint(mobj,  "health",     &mhealth);
+                                    ws_json_uint(mobj,  "max_health", &mmax);
+                                    /* Rebuild MID with new ship_seq, preserving the offset */
+                                    uint8_t offset = (uint8_t)(saved_id & 0xFF);
+                                    uint16_t new_mid = (uint16_t)((s->ship_seq << 8) | offset);
+                                    Vec2Q16 pos = {
+                                        (q16_t)(int32_t)(mlx * 65536.0f),
+                                        (q16_t)(int32_t)(mly * 65536.0f)
+                                    };
+                                    q16_t rot = (q16_t)(int32_t)(mlr * 65536.0f);
+                                    ShipModule new_mod = module_create(new_mid, (ModuleTypeId)mtype, pos, rot);
+                                    new_mod.health     = (int32_t)mhealth;
+                                    new_mod.max_health = (int32_t)(mmax > 0 ? mmax : (unsigned)new_mod.max_health);
+                                    /* Add to SimpleShip layer */
+                                    if (s->module_count < MAX_MODULES_PER_SHIP)
+                                        s->modules[s->module_count++] = new_mod;
+                                    /* Add to sim layer */
+                                    if (sim_ship && sim_ship->module_count < MAX_MODULES_PER_SHIP)
+                                        sim_ship->modules[sim_ship->module_count++] = new_mod;
+                                    free(mobj);
+                                    mi++;
+                                }
+                            } else {
+                                /* Finished ship: modules were created by websocket_server_create_ship;
+                                 * match saved modules by type + position to restore health. */
+                                while ((mobj = next_json_object(&marr)) != NULL
+                                       && mi < s->module_count) {
+                                    unsigned mtype = 0, mhealth = 0, mmax = 0;
+                                    float mlx = 0, mly = 0;
+                                    ws_json_uint(mobj,  "type",       &mtype);
+                                    ws_json_float(mobj, "lx",         &mlx);
+                                    ws_json_float(mobj, "ly",         &mly);
+                                    ws_json_uint(mobj,  "health",     &mhealth);
+                                    ws_json_uint(mobj,  "max_health", &mmax);
+
+                                    /* Match module by type + approximate position */
+                                    for (uint8_t k = 0; k < s->module_count; k++) {
+                                        ShipModule *m = &s->modules[k];
+                                        if ((unsigned)m->type_id != mtype) continue;
+                                        float dx = (float)m->local_pos.x / 65536.0f - mlx;
+                                        float dy = (float)m->local_pos.y / 65536.0f - mly;
+                                        if (dx * dx + dy * dy > 0.01f) continue;
+                                        m->health = (int32_t)mhealth;
+                                        if (mmax > 0) m->max_health = (int32_t)mmax;
+                                        break;
+                                    }
+                                    free(mobj);
+                                    mi++;
+                                }
                             }
                         }
                     }
@@ -693,6 +742,7 @@ int world_load(const char *path) {
                 unsigned id = 0, type = 0, island_id = 0, company = 0;
                 unsigned hp = 100, max_hp = 100, placer_id = 0;
                 unsigned construction_phase = 0, construction_company = 0, scaffolded_ship_id = 0;
+                unsigned modules_placed_saved = 0;
                 float x = 0, y = 0, rot = 0;
                 bool open = false;
 
@@ -711,6 +761,7 @@ int world_load(const char *path) {
                 ws_json_bool(obj,  "open",                 &open);
                 ws_json_uint(obj,  "construction_phase",   &construction_phase);
                 ws_json_uint(obj,  "construction_company", &construction_company);
+                ws_json_uint(obj,  "modules_placed",       &modules_placed_saved);
                 ws_json_uint(obj,  "scaffolded_ship_id",   &scaffolded_ship_id);
 
                 ps->id         = id ? (uint16_t)id : next_structure_id;
@@ -729,6 +780,7 @@ int world_load(const char *path) {
                 /* Restore shipyard construction state */
                 ps->construction_phase   = (ShipConstructionPhase)construction_phase;
                 ps->construction_company = (uint8_t)construction_company;
+                ps->modules_placed       = (uint8_t)modules_placed_saved;
                 /* Remap scaffolded_ship_id: old entity ID → new entity ID */
                 if (scaffolded_ship_id != 0) {
                     for (int ri = 0; ri < id_remap_count; ri++) {

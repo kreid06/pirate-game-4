@@ -2207,7 +2207,7 @@ class HUDElement implements UIElement {
     const _xp  = player.xp ?? 0;
     this._cachedPlayerLevel = _lvl;
     this._cachedPlayerXp    = _xp;
-    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, _lvl, _xp);
+    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, _lvl, _xp, player.statPoints ?? 0);
 
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
     const helmMode = context.mountKind === 'helm'
@@ -2228,6 +2228,7 @@ class HUDElement implements UIElement {
     maxStamina: number,
     level = 1,
     xp = 0,
+    statPoints = 0,
   ): void {
     const PLAYER_MAX_LEVEL = 120;
     const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
@@ -2268,15 +2269,18 @@ class HUDElement implements UIElement {
     let xpBarColor: string;
     if (isMaxLevel) {
       xpBarColor = '#ffdd44';
-    } else if (canLevelUp) {
-      // Blink gold when enough XP to level up
-      const blinkOn = Math.floor(performance.now() / 400) % 2 === 0;
-      xpBarColor = blinkOn ? '#ffdd44' : '#4488ff';
+    } else if (canLevelUp || statPoints > 0) {
+      // Flash gold when stat points are pending (pulse brightness instead of toggling colour)
+      const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 300);
+      const gold = Math.round(pulse * 255).toString(16).padStart(2, '0');
+      xpBarColor = `#ffdd${gold}`;
     } else {
       xpBarColor = '#4488ff';
     }
+    // When points are available, always show the bar at full to signal the milestone
+    const xpDrawRatio = (canLevelUp || statPoints > 0) ? 1 : xpRatio;
     ctx.fillStyle = xpBarColor;
-    ctx.fillRect(barX, xpY, Math.round(barW * xpRatio), XP_BAR_H);
+    ctx.fillRect(barX, xpY, Math.round(barW * xpDrawRatio), XP_BAR_H);
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
     ctx.lineWidth = 1;
     ctx.strokeRect(barX, xpY, barW, XP_BAR_H);
@@ -2287,6 +2291,13 @@ class HUDElement implements UIElement {
     ctx.fillStyle = 'rgba(255,255,255,0.70)';
     ctx.fillText(`Lv.${level}${isMaxLevel ? ' MAX' : ''}`, barX + 3, xpY + XP_BAR_H / 2);
     ctx.textAlign = 'right';
+    if (statPoints > 0 && !isMaxLevel) {
+      // Overlay stat point count in the centre of the bar
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(`★ ${statPoints} pt${statPoints !== 1 ? 's' : ''} to spend`, barX + barW / 2, xpY + XP_BAR_H / 2);
+      ctx.textAlign = 'right';
+    }
     ctx.fillStyle = 'rgba(180,200,255,0.65)';
     ctx.fillText(isMaxLevel ? 'MAX' : `${xp}/${xpToNext} XP`, barX + barW - 3, xpY + XP_BAR_H / 2);
 

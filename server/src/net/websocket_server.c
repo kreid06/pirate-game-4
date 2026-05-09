@@ -2309,8 +2309,8 @@ int websocket_server_update(struct Sim* sim) {
                                             }
                                             const char* hs_phase = placed_structures[si].construction_phase == CONSTRUCTION_BUILDING ? "building" : "empty";
                                             snprintf(hs_sy_extra, sizeof(hs_sy_extra),
-                                                     ",\"construction_phase\":\"%s\",\"modules_placed\":%s",
-                                                     hs_phase, hs_mj);
+                                                     ",\"construction_phase\":\"%s\",\"modules_placed\":%s,\"scaffolded_ship_id\":%u",
+                                                     hs_phase, hs_mj, (unsigned)placed_structures[si].scaffolded_ship_id);
                                         }
                                         if (hs_is_cannon) {
                                             snprintf(hs_cannon_extra, sizeof(hs_cannon_extra),
@@ -3839,9 +3839,15 @@ int websocket_server_update(struct Sim* sim) {
                                                 };
                                                 ShipModule new_plank = module_create(
                                                     plank_id, MODULE_TYPE_PLANK, plank_pos, 0);
-                                                // New planks start at 10% HP and heal passively
-                                                new_plank.health = new_plank.max_health / 10;
-                                                new_plank.state_bits |= MODULE_STATE_DAMAGED;
+                                                // Planks on scaffolded ships (construction) start at full HP;
+                                                // planks placed on a live ship start at 10% and heal passively.
+                                                bool placing_on_scaffold = (sim_ship->flags & SHIP_FLAG_SCAFFOLDED) != 0;
+                                                if (placing_on_scaffold) {
+                                                    new_plank.health = new_plank.max_health;
+                                                } else {
+                                                    new_plank.health = new_plank.max_health / 10;
+                                                    new_plank.state_bits |= MODULE_STATE_DAMAGED;
+                                                }
                                                 // Add to sim ship (physics) and SimpleShip (broadcast) layers
                                                 sim_ship->modules[sim_ship->module_count++] = new_plank;
                                                 if (simple_ship->module_count < MAX_MODULES_PER_SHIP)
@@ -8433,7 +8439,8 @@ void websocket_server_tick(float dt) {
                         const float STAMINA_REGEN_PCT_PER_S = 0.20f;
                         const uint32_t STAMINA_REGEN_DELAY_MS = 2000u;
                         uint32_t now_st = get_time_ms();
-                        if (ws_player->is_sprinting && ws_player->is_moving) {
+                        bool is_swimming = (ws_player->movement_state == PLAYER_STATE_SWIMMING);
+                        if (ws_player->is_sprinting && ws_player->is_moving && !is_swimming) {
                             uint16_t drain = (uint16_t)(SPRINT_DRAIN_PER_S * dt + 0.5f);
                             if (drain >= ws_player->stamina) {
                                 ws_player->stamina = 0;
@@ -8451,6 +8458,19 @@ void websocket_server_tick(float dt) {
                             ws_player->stamina = (newSt > ws_player->max_stamina)
                                 ? ws_player->max_stamina : (uint16_t)newSt;
                         }
+                    }
+                    /* ── Passive HP regeneration ─────────────────────────────────────────
+                     * Recover 1 HP every 10 seconds when alive and not at full health. */
+                    if (ws_player->health > 0 && ws_player->health < ws_player->max_health) {
+                        ws_player->hp_regen_accum_ms += (uint32_t)(dt * 1000.0f + 0.5f);
+                        if (ws_player->hp_regen_accum_ms >= 10000u) {
+                            ws_player->hp_regen_accum_ms -= 10000u;
+                            ws_player->health++;
+                            if (ws_player->health > ws_player->max_health)
+                                ws_player->health = ws_player->max_health;
+                        }
+                    } else {
+                        ws_player->hp_regen_accum_ms = 0; /* reset when dead or full */
                     }
                 }
                 if (ws_player->health == 0) {

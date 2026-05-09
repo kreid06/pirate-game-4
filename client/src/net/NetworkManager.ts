@@ -2583,6 +2583,7 @@ export class NetworkManager {
           construction: s.structure_type === 'shipyard' ? {
             phase: (s.construction_phase === 'building' ? 'building' : 'empty') as ConstructionPhase,
             modulesPlaced: Array.isArray(s.modules_placed) ? s.modules_placed : [],
+            scaffoldedShipId: s.scaffolded_ship_id ?? 0,
           } : undefined,
         }));
         this.onStructuresList?.(structs);

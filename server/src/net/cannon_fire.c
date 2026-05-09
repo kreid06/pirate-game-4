@@ -1817,6 +1817,46 @@ void check_projectile_static_collisions(struct Sim* sim) {
             removed = true;
         }
 
+        /* Pass 4: shipyards — U-shaped dock arms and back wall. */
+        /* Dock local constants (client px, matching dock_physics.c) */
+        #define SY_HW      170.0f   /* half total width */
+        #define SY_HH      445.0f   /* half total height */
+        #define SY_ARM_T    50.0f   /* arm thickness */
+        #define SY_BACK_T   50.0f   /* back wall thickness */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_SHIPYARD) continue;
+            /* Broad radial cull (bounding circle of 170×445 box ≈ 476) */
+            float bdx = px - s->x, bdy = py - s->y;
+            if (bdx * bdx + bdy * bdy > 476.0f * 476.0f) continue;
+            /* Transform into dock-local space */
+            float lx, ly;
+            dock_world_to_local(s, px, py, &lx, &ly);
+            /* Check against the three physical members of the U-shape:
+             * Left arm:  lx ∈ [−SY_HW, −(SY_HW − SY_ARM_T)], ly ∈ [−SY_HH, +SY_HH]
+             * Right arm: lx ∈ [+(SY_HW − SY_ARM_T), +SY_HW],  ly ∈ [−SY_HH, +SY_HH]
+             * Back wall: lx ∈ [−SY_HW, +SY_HW], ly ∈ [−SY_HH, −SY_HH + SY_BACK_T] */
+            const float ai = SY_HW - SY_ARM_T;   /* arm inner edge = 120 */
+            bool in_left  = (lx >= -SY_HW && lx <= -ai)
+                         && (ly >= -SY_HH && ly <= SY_HH);
+            bool in_right = (lx >=  ai    && lx <=  SY_HW)
+                         && (ly >= -SY_HH && ly <= SY_HH);
+            bool in_back  = (fabsf(lx) <= SY_HW)
+                         && (ly >= -SY_HH && ly <= -SY_HH + SY_BACK_T);
+            if (!in_left && !in_right && !in_back) continue;
+            /* Hit shipyard */
+            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+        #undef SY_HW
+        #undef SY_HH
+        #undef SY_ARM_T
+        #undef SY_BACK_T
+
         /* ── Test vs. island trees (spatial grid lookup) ────────────────── */
         if (!removed) {
             for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {
@@ -1869,6 +1909,43 @@ void check_projectile_static_collisions(struct Sim* sim) {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        /* ── Test vs. island boulders (linear scan, boulders are sparse) ─ */
+        if (!removed) {
+            const float BOULDER_BASE_HIT_R = 38.0f; /* matches client-side boulder radius */
+            const int   CANNON_BOULDER_DMG  = 50;
+            for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {
+                IslandDef* isl = &ISLAND_PRESETS[ii];
+                for (int ri = 0; ri < isl->resource_count && !removed; ri++) {
+                    IslandResource* res = &isl->resources[ri];
+                    if (res->type_id != RES_BOULDER) continue;
+                    if (res->health <= 0) continue;
+                    float bx = isl->x + res->ox;
+                    float by = isl->y + res->oy;
+                    float dx = px - bx;
+                    float dy = py - by;
+                    float hitR = BOULDER_BASE_HIT_R * res->size;
+                    if (dx * dx + dy * dy > hitR * hitR) continue;
+                    /* Hit boulder */
+                    res->health -= CANNON_BOULDER_DMG;
+                    if (res->health < 0) res->health = 0;
+                    if (res->health == 0) {
+                        res->respawn_at_ms = get_time_ms() + 180000u; /* 3 min */
+                    }
+                    char bmsg[160];
+                    snprintf(bmsg, sizeof(bmsg),
+                             "{\"type\":\"resource_damaged\",\"island_id\":%u"
+                             ",\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
+                             (unsigned)isl->id, ri, res->ox, res->oy, res->health, res->max_health);
+                    websocket_server_broadcast(bmsg);
+                    memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                            ((size_t)sim->projectile_count - (size_t)i - 1u)
+                            * sizeof(struct Projectile));
+                    sim->projectile_count--;
+                    removed = true;
                 }
             }
         }

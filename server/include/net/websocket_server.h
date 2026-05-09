@@ -429,6 +429,7 @@ typedef struct WebSocketPlayer {
     uint16_t stamina;            // Current stamina (0–max_stamina)
     uint16_t max_stamina;        // Max stamina (base 100 + 10 * stat_stamina)
     uint32_t stamina_last_used_ms; // Wall-clock ms of last stamina drain (regen delayed 2 s after)
+    uint32_t hp_regen_accum_ms;   // Accumulated ms since last passive HP regen tick
 
     // Player XP / levelling (mirrors WorldNpc system)
     uint8_t  player_level;       // 1–120
