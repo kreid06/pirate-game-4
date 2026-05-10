@@ -2803,9 +2803,11 @@ export class RenderSystem {
     const waterFill = Math.max(0, Math.min(1, 1 - hullPct));
     const floodTint = waterFill >= 0.75 ? (waterFill - 0.75) / 0.25 : 0;
 
-    // Start the clock for any live ship the moment hullHealth hits 0 (fallback if SHIP_SINKING arrives late)
-    const zeroThreshold = ship.shipType === SHIP_TYPE_GHOST ? 1 : 0;
-    if (ship.hullHealth <= zeroThreshold && !this.sinkTimestamps.has(ship.id)) {
+    // Start the clock for any live ship the moment hullHealth hits 0 (fallback if SHIP_SINKING arrives late).
+    // Ghost ships rely exclusively on the explicit markShipSinking() call from the SHIP_SINKING server
+    // message — do NOT auto-trigger here.  Their hullHealth field may be 0 or unset even while alive,
+    // because the server tracks their HP on a different scale (0–60000) and may not populate the field.
+    if (ship.shipType !== SHIP_TYPE_GHOST && ship.hullHealth <= 0 && !this.sinkTimestamps.has(ship.id)) {
       this.sinkTimestamps.set(ship.id, performance.now());
     }
 
