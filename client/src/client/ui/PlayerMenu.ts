@@ -123,6 +123,18 @@ const HAND_RECIPES: HandRecipe[] = [
   { output: 'workbench',     outputQty: 1, cost: [{ item: 'wood',  qty: 10 }],                                    category: 'CONSTRUCTION' },
 ];
 
+/** Mirrors server player_armor_value() — sum of flat armour from cloth gear. */
+function _calcArmorValue(eq: { helm: ItemKind; torso: ItemKind; legs: ItemKind; feet: ItemKind; hands: ItemKind; shield: ItemKind }): number {
+  let v = 0;
+  if (eq.helm   === 'cloth_hat')    v += 5;
+  if (eq.torso  === 'cloth_shirt')  v += 20;
+  if (eq.torso  === 'cloth_armor')  v += 5;  // legacy
+  if (eq.legs   === 'cloth_pants')  v += 15;
+  if (eq.feet   === 'cloth_shoes')  v += 8;
+  if (eq.hands  === 'cloth_gloves') v += 7;
+  return v;
+}
+
 export class PlayerMenu {
   public visible = false;
   private activeTab: 'character' | 'skills' = 'character';
@@ -291,11 +303,7 @@ export class PlayerMenu {
     if (toSlot !== -1 && toSlot !== fromSlot) {
       this.onSwapRequest?.(fromSlot, toSlot);
     } else if (toSlot === fromSlot) {
-      // Click on same slot — equip if it's an armour/shield item
-      const item = this._lastInv?.slots[fromSlot]?.item ?? 'none';
-      if (item !== 'none' && (ITEM_DEFS[item]?.category === 'armor' || ITEM_DEFS[item]?.category === 'shield')) {
-        this.onEquipItem?.(fromSlot);
-      }
+      // Drag released on same slot — treat as click, no equip on left-release
     } else {
       // Check if dropped onto an equipment slot — equip the dragged item
       const equipHit = this._equipSlotHits.find(
@@ -306,6 +314,25 @@ export class PlayerMenu {
       }
     }
     return true;
+  }
+
+  /**
+   * Handle a right-click inside the player menu (character tab).
+   * Right-clicking an armour/shield item in the inventory bag equips it.
+   * Returns true if consumed.
+   */
+  handleRightClick(x: number, y: number, inv: { slots: { item: ItemKind; quantity: number }[] }): boolean {
+    if (!this.visible || this.activeTab !== 'character') return false;
+    const slot = this._slotAt(x, y);
+    if (slot === -1) return false;
+    const item = inv.slots[slot]?.item ?? 'none';
+    if (item === 'none') return false;
+    const cat = ITEM_DEFS[item]?.category;
+    if (cat === 'armor' || cat === 'shield') {
+      this.onEquipItem?.(slot);
+      return true;
+    }
+    return false;
   }
 
   /** Returns the inventory slot index under (x, y), or -1 if none. */
@@ -564,6 +591,9 @@ export class PlayerMenu {
     statusRows.push(['Speed', spd.toFixed(2) + ' u/s']);
     const deg = ((player.rotation * 180 / Math.PI) % 360 + 360) % 360;
     statusRows.push(['Facing', deg.toFixed(1) + '°']);
+    // Armor value from equipped cloth gear
+    const armorVal = _calcArmorValue(player.inventory.equipment);
+    statusRows.push(['Armor', armorVal > 0 ? `${armorVal} DEF` : 'None', armorVal > 0 ? '#8bc4ff' : TEXT_DIM]);
 
     for (let i = 0; i < statusRows.length; i++) {
       const [label, value, valColor] = statusRows[i];
