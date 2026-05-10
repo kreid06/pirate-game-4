@@ -274,6 +274,12 @@ typedef enum {
     ITEM_STONE         = 27,
     ITEM_WOOD_CEILING  = 28,
     ITEM_CLAIM_FLAG    = 29,  /* Claiming flag — plant on an enemy ship to capture it */
+    /* ── Cloth armour set ──────────────────────────────────────────── */
+    ITEM_CLOTH_HAT     = 30,  /* helm  slot — 5 armour  */
+    ITEM_CLOTH_SHIRT   = 31,  /* torso slot — 20 armour */
+    ITEM_CLOTH_PANTS   = 32,  /* legs  slot — 15 armour */
+    ITEM_CLOTH_SHOES   = 33,  /* feet  slot — 8 armour  */
+    ITEM_CLOTH_GLOVES  = 34,  /* hands slot — 7 armour  */
 } ItemKind;
 
 /* ── Ship Claiming Flag ────────────────────────────────────────────────────── */

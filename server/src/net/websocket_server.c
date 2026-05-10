@@ -723,6 +723,23 @@ static void tombstone_world_pos(const Tombstone* t, float* wx, float* wy) {
  * 2. Wipes the player's inventory.
  * 3. Broadcasts tombstone_spawned to all clients.
  */
+
+/**
+ * Returns total flat armour value for a player based on equipped cloth gear.
+ * Damage is reduced by this amount (minimum 1 per hit).
+ */
+static int player_armor_value(const WebSocketPlayer* p) {
+    int v = 0;
+    const PlayerEquipment* eq = &p->inventory.equipment;
+    if (eq->helm  == ITEM_CLOTH_HAT)    v += 5;
+    if (eq->torso == ITEM_CLOTH_SHIRT)  v += 20;
+    if (eq->torso == ITEM_CLOTH_ARMOR)  v += 5;   /* legacy generic cloth */
+    if (eq->legs  == ITEM_CLOTH_PANTS)  v += 15;
+    if (eq->feet  == ITEM_CLOTH_SHOES)  v += 8;
+    if (eq->hands == ITEM_CLOTH_GLOVES) v += 7;
+    return v;
+}
+
 void player_die(WebSocketPlayer* player) {
     /* Check whether the player has any items worth dropping */
     bool has_items = false;
@@ -3133,7 +3150,9 @@ int websocket_server_update(struct Sim* sim) {
                                                     while (pdiff < -(float)M_PI) pdiff += 2.0f*(float)M_PI;
                                                     if (fabsf(pdiff) > (float)M_PI / 3.0f * 2.0f) continue;
 
-                                                    uint16_t dmg16 = (uint16_t)SWORD_DAMAGE;
+                                                    int _raw_dmg = (int)SWORD_DAMAGE;
+                                                    int _arm_val = player_armor_value(tp);
+                                                    uint16_t dmg16 = (uint16_t)(_raw_dmg - _arm_val > 1 ? _raw_dmg - _arm_val : 1);
                                                     bool killed_player = (tp->health <= dmg16);
                                                     if (killed_player) tp->health = 0;
                                                     else tp->health -= dmg16;
@@ -3556,6 +3575,101 @@ int websocket_server_update(struct Sim* sim) {
                                 if (player) {
                                     player->inventory.active_slot = 255;
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"unequipped\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "equip_armor") == 0) {
+                            // INVENTORY: player equips an armour piece from a specific inventory slot
+                            // payload: {"type":"equip_armor","slot_idx":<N>}
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    int slot_idx = -1;
+                                    const char* si_ptr = strstr(payload, "\"slot_idx\":");
+                                    if (si_ptr) sscanf(si_ptr + 11, "%d", &slot_idx);
+
+                                    if (slot_idx < 0 || slot_idx >= INVENTORY_SLOTS) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"invalid_slot\"}");
+                                    } else {
+                                        InventorySlot* src  = &player->inventory.slots[slot_idx];
+                                        ItemKind       item = src->item;
+                                        PlayerEquipment* eq = &player->inventory.equipment;
+                                        ItemKind* eq_slot   = NULL;
+
+                                        switch (item) {
+                                            case ITEM_CLOTH_HAT:     eq_slot = &eq->helm;   break;
+                                            case ITEM_CLOTH_SHIRT:   eq_slot = &eq->torso;  break;
+                                            case ITEM_CLOTH_ARMOR:   eq_slot = &eq->torso;  break; /* legacy */
+                                            case ITEM_CLOTH_PANTS:   eq_slot = &eq->legs;   break;
+                                            case ITEM_CLOTH_SHOES:   eq_slot = &eq->feet;   break;
+                                            case ITEM_CLOTH_GLOVES:  eq_slot = &eq->hands;  break;
+                                            case ITEM_WOODEN_SHIELD: eq_slot = &eq->shield; break;
+                                            case ITEM_IRON_SHIELD:   eq_slot = &eq->shield; break;
+                                            case ITEM_LEATHER_ARMOR: eq_slot = &eq->torso;  break;
+                                            case ITEM_IRON_ARMOR:    eq_slot = &eq->torso;  break;
+                                            default: break;
+                                        }
+
+                                        if (eq_slot == NULL || item == ITEM_NONE) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"not_equippable\"}");
+                                        } else {
+                                            /* If something already equipped in that slot, return it to inventory */
+                                            if (*eq_slot != ITEM_NONE) {
+                                                craft_grant(player, *eq_slot, 1);
+                                            }
+                                            /* Equip */
+                                            *eq_slot       = item;
+                                            src->item      = ITEM_NONE;
+                                            src->quantity  = 0;
+                                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"armor_equipped\"}");
+                                        }
+                                    }
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "unequip_armor") == 0) {
+                            // INVENTORY: player removes an armour piece from an equipment slot
+                            // payload: {"type":"unequip_armor","slot":"helm"|"torso"|"legs"|"feet"|"hands"|"shield"}
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    char slot_name[16] = {0};
+                                    const char* sn_ptr = strstr(payload, "\"slot\":");
+                                    if (sn_ptr) {
+                                        sn_ptr += 7;
+                                        while (*sn_ptr == ' ' || *sn_ptr == '"') sn_ptr++;
+                                        int si = 0;
+                                        while (*sn_ptr && *sn_ptr != '"' && si < 15)
+                                            slot_name[si++] = *sn_ptr++;
+                                        slot_name[si] = '\0';
+                                    }
+
+                                    PlayerEquipment* eq = &player->inventory.equipment;
+                                    ItemKind* eq_slot   = NULL;
+                                    if      (strcmp(slot_name, "helm")   == 0) eq_slot = &eq->helm;
+                                    else if (strcmp(slot_name, "torso")  == 0) eq_slot = &eq->torso;
+                                    else if (strcmp(slot_name, "legs")   == 0) eq_slot = &eq->legs;
+                                    else if (strcmp(slot_name, "feet")   == 0) eq_slot = &eq->feet;
+                                    else if (strcmp(slot_name, "hands")  == 0) eq_slot = &eq->hands;
+                                    else if (strcmp(slot_name, "shield") == 0) eq_slot = &eq->shield;
+
+                                    if (eq_slot == NULL || *eq_slot == ITEM_NONE) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"slot_empty\"}");
+                                    } else {
+                                        craft_grant(player, *eq_slot, 1);
+                                        *eq_slot = ITEM_NONE;
+                                        strcpy(response, "{\"type\":\"message_ack\",\"status\":\"armor_unequipped\"}");
+                                    }
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                                 }
@@ -8069,7 +8183,9 @@ void websocket_server_tick(float dt) {
                         wp->fire_timer_ms = FIRE_DURATION_MS;
                     }
                 } else {
-                    uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
+                    int _raw_dmg_p = (int)damage;
+                    int _arm_val_p = player_armor_value(wp);
+                    uint16_t dmg16 = (uint16_t)(_raw_dmg_p - _arm_val_p > 1 ? _raw_dmg_p - _arm_val_p : 1);
                     if (wp->health <= dmg16) { wp->health = 0; player_die(wp); } else { wp->health -= dmg16; }
                     if (!wp->is_mounted) {
                         float dist = sqrtf(dx * dx + dy * dy);

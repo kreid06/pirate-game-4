@@ -1835,6 +1835,16 @@ export class ClientApplication {
         this.networkManager.sendCraftItem(recipeId);
       };
 
+      // Equip armour item from inventory slot (click on armor item in bag)
+      this.uiManager.playerMenu.onEquipItem = (slotIdx) => {
+        this.networkManager.sendEquipArmor(slotIdx);
+      };
+
+      // Unequip armour from equipment slot (click on filled equipment slot)
+      this.uiManager.playerMenu.onUnequipSlot = (slot) => {
+        this.networkManager.sendUnequipArmor(slot);
+      };
+
       // Wreck salvage menu
       this.uiManager.salvageMenu.onTakeItem = (wreckId) => {
         this.networkManager.sendStructureInteract(wreckId);

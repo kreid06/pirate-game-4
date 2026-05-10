@@ -108,8 +108,12 @@ interface HandRecipe {
 const HAND_RECIPES: HandRecipe[] = [
   // Survival
   { output: 'repair_kit',    outputQty: 1, cost: [{ item: 'wood',  qty: 4  }],                                    category: 'SURVIVAL'     },
-  // Armor
-  { output: 'cloth_armor',   outputQty: 1, cost: [{ item: 'fiber', qty: 8  }],                                    category: 'ARMOR'        },
+  // Armor — cloth set
+  { output: 'cloth_hat',     outputQty: 1, cost: [{ item: 'fiber', qty: 8  }],                                    category: 'ARMOR'        },
+  { output: 'cloth_shirt',   outputQty: 1, cost: [{ item: 'fiber', qty: 25 }],                                    category: 'ARMOR'        },
+  { output: 'cloth_pants',   outputQty: 1, cost: [{ item: 'fiber', qty: 20 }],                                    category: 'ARMOR'        },
+  { output: 'cloth_shoes',   outputQty: 1, cost: [{ item: 'fiber', qty: 12 }],                                    category: 'ARMOR'        },
+  { output: 'cloth_gloves',  outputQty: 1, cost: [{ item: 'fiber', qty: 10 }],                                    category: 'ARMOR'        },
   { output: 'wooden_shield', outputQty: 1, cost: [{ item: 'wood',  qty: 6  }],                                    category: 'ARMOR'        },
   // Tools
   { output: 'axe',           outputQty: 1, cost: [{ item: 'wood',  qty: 3  }, { item: 'stone', qty: 2 }],         category: 'TOOLS'        },
@@ -137,6 +141,15 @@ export class PlayerMenu {
   /** Called when player clicks an affordable CRAFT button. */
   public onCraftRequest: ((outputItem: ItemKind, qty: number) => void) | null = null;
 
+  /** Called when player clicks an armour item in their inventory to equip it. */
+  public onEquipItem: ((slotIdx: number) => void) | null = null;
+
+  /** Called when player clicks a filled equipment slot to unequip it. */
+  public onUnequipSlot: ((slot: string) => void) | null = null;
+
+  // Equipment slot hit-test records (slot name → canvas rect) set each frame
+  private _equipSlotHits: Array<{ slot: string; x: number; y: number; w: number; h: number }> = [];
+
   // Inventory grid scroll state
   private _invScrollY    = 0;
   private _invGridY      = 0;   // canvas-y where the grid slots start
@@ -150,6 +163,7 @@ export class PlayerMenu {
   private _dragISZ     = 0;    // slot size at drag start (for ghost sizing)
   private _dragStartIX = 0;    // startIX at drag start
   private _dragStride  = 0;    // STRIDE at drag start
+  private _lastInv: { slots: { item: ItemKind; quantity: number }[] } | null = null;
 
   /** Called when the player drags a slot onto another; args are (fromSlot, toSlot). */
   public onSwapRequest: ((fromSlot: number, toSlot: number) => void) | null = null;
@@ -212,6 +226,15 @@ export class PlayerMenu {
       }
     }
 
+    // Equipment slot clicks — unequip filled slots
+    for (const hit of this._equipSlotHits) {
+      if (x >= hit.x && x <= hit.x + hit.w &&
+          y >= hit.y && y <= hit.y + hit.h) {
+        this.onUnequipSlot?.(hit.slot);
+        return true;
+      }
+    }
+
     return true; // click inside panel — consume to avoid accidental close
   }
 
@@ -234,6 +257,7 @@ export class PlayerMenu {
     this._dragSlot = slot;
     this._dragX    = x;
     this._dragY    = y;
+    this._lastInv  = inv;
     return true;
   }
 
@@ -266,6 +290,12 @@ export class PlayerMenu {
     const toSlot = this._slotAt(x, y);
     if (toSlot !== -1 && toSlot !== fromSlot) {
       this.onSwapRequest?.(fromSlot, toSlot);
+    } else if (toSlot === fromSlot) {
+      // Click on same slot — equip if it's an armour/shield item
+      const item = this._lastInv?.slots[fromSlot]?.item ?? 'none';
+      if (item !== 'none' && (ITEM_DEFS[item]?.category === 'armor' || ITEM_DEFS[item]?.category === 'shield')) {
+        this.onEquipItem?.(fromSlot);
+      }
     }
     return true;
   }
@@ -408,31 +438,37 @@ export class PlayerMenu {
     const equipX     = px + PAD;
     const equipTop   = py;
 
+    // Clear equipment slot hit-test records for this frame
+    this._equipSlotHits = [];
+
     // ── Equipment grid ──────────────────────────────────────────────────────
     // row 0:  [  –  ] [ Helm ] [  –  ]
     // row 1:  [Gloves] [Chest] [Shield]
     // row 2:  [  –  ] [ Legs ] [  –  ]
     // row 3:  [  –  ] [ Boots] [  –  ]
-    type SlotSpec = { label: string; item: ItemKind } | null;
+    type SlotSpec = { label: string; slotKey: string; item: ItemKind } | null;
     const grid: SlotSpec[][] = [
-      [null,                                   { label: 'Helm',   item: equip.helm   }, null],
-      [{ label: 'Gloves', item: equip.hands }, { label: 'Chest',  item: equip.torso  }, { label: 'Shield', item: equip.shield }],
-      [null,                                   { label: 'Legs',   item: equip.legs   }, null],
-      [null,                                   { label: 'Boots',  item: equip.feet   }, null],
+      [null,                                                      { label: 'Helm',   slotKey: 'helm',   item: equip.helm   }, null],
+      [{ label: 'Gloves', slotKey: 'hands',  item: equip.hands }, { label: 'Chest',  slotKey: 'torso',  item: equip.torso  }, { label: 'Shield', slotKey: 'shield', item: equip.shield }],
+      [null,                                                      { label: 'Legs',   slotKey: 'legs',   item: equip.legs   }, null],
+      [null,                                                      { label: 'Boots',  slotKey: 'feet',   item: equip.feet   }, null],
     ];
 
     for (let row = 0; row < grid.length; row++) {
       for (let col = 0; col < 3; col++) {
         const spec = grid[row][col];
         if (!spec) continue;
-        const { label, item } = spec;
+        const { label, slotKey, item } = spec;
         const def = ITEM_DEFS[item] ?? ITEM_DEFS['none'];
         const sx  = equipX + col * (ESLOTSZ + ESGAP);
         const sy  = equipTop + row * ROW_STRIDE;
 
-        ctx.fillStyle   = item !== 'none' ? 'rgba(60,50,25,0.95)' : 'rgba(25,25,38,0.9)';
+        const isHovered = mouseX >= sx && mouseX <= sx + ESLOTSZ && mouseY >= sy && mouseY <= sy + ESLOTSZ;
+        ctx.fillStyle   = item !== 'none'
+          ? (isHovered ? 'rgba(80,65,30,0.95)' : 'rgba(60,50,25,0.95)')
+          : 'rgba(25,25,38,0.9)';
         ctx.fillRect(sx, sy, ESLOTSZ, ESLOTSZ);
-        ctx.strokeStyle = item !== 'none' ? def.borderColor : '#445';
+        ctx.strokeStyle = item !== 'none' ? (isHovered ? '#ddaa44' : def.borderColor) : '#445';
         ctx.lineWidth   = 1;
         ctx.strokeRect(sx, sy, ESLOTSZ, ESLOTSZ);
 
@@ -446,6 +482,9 @@ export class PlayerMenu {
           ctx.textBaseline = 'middle';
           if (item === 'axe') drawAxeIcon(ctx, sx + ESLOTSZ / 2, sy + ESLOTSZ / 2, ESLOTSZ);
           else ctx.fillText(def.symbol, sx + ESLOTSZ / 2, sy + ESLOTSZ / 2);
+
+          // Register click hit for unequip
+          this._equipSlotHits.push({ slot: slotKey, x: sx, y: sy, w: ESLOTSZ, h: ESLOTSZ });
         }
 
         ctx.font         = '10px Georgia, serif';
@@ -453,6 +492,26 @@ export class PlayerMenu {
         ctx.textBaseline = 'top';
         ctx.fillStyle    = item !== 'none' ? TEXT_HEAD : TEXT_DIM;
         ctx.fillText(label, sx + ESLOTSZ / 2, sy + ESLOTSZ + 2);
+
+        // Hover tooltip: item name + "click to unequip"
+        if (item !== 'none' && isHovered) {
+          const tipLines = [def.name, 'click to unequip'];
+          const TIP_PAD = 5;
+          ctx.font = '10px Georgia, serif';
+          const tipW = Math.max(...tipLines.map(l => ctx.measureText(l).width)) + TIP_PAD * 2;
+          const tipH = tipLines.length * 14 + TIP_PAD * 2;
+          const tipX = Math.min(sx + ESLOTSZ + 4, equipX + 3 * ESLOTSZ + 2 * ESGAP - tipW - 2);
+          const tipY = sy;
+          ctx.fillStyle   = '#1a1a2c';
+          ctx.strokeStyle = '#667';
+          ctx.lineWidth   = 1;
+          ctx.fillRect(tipX, tipY, tipW, tipH);
+          ctx.strokeRect(tipX, tipY, tipW, tipH);
+          ctx.fillStyle    = '#ccd';
+          ctx.textAlign    = 'left';
+          ctx.textBaseline = 'top';
+          tipLines.forEach((line, li) => ctx.fillText(line, tipX + TIP_PAD, tipY + TIP_PAD + li * 14));
+        }
       }
     }
 

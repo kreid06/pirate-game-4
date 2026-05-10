@@ -1257,6 +1257,25 @@ export class NetworkManager {
   }
 
   /**
+   * Equip an armour item from the given inventory slot index.
+   * The server determines which equipment slot based on the item type.
+   */
+  sendEquipArmor(slotIdx: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'equip_armor', slot_idx: slotIdx, timestamp: Date.now() }));
+  }
+
+  /**
+   * Unequip an armour piece from the given equipment slot name
+   * (helm | torso | legs | feet | hands | shield).
+   * The item is returned to the player's inventory.
+   */
+  sendUnequipArmor(slot: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'unequip_armor', slot, timestamp: Date.now() }));
+  }
+
+  /**
    * Give an item directly to the local player (admin/test helper).
    * Sends a give_item message to the server.
    */

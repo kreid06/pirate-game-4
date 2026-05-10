@@ -95,6 +95,13 @@ void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* client, 
     static const CraftRecipe recipes[] = {
         /* Hand-craft recipes (no workbench required) */
         { "craft_repair_kit",    ITEM_REPAIR_KIT,   1, { {ITEM_WOOD,  4}, {0,0}             }, 1 },
+        /* Cloth armour set */
+        { "craft_cloth_hat",     ITEM_CLOTH_HAT,    1, { {ITEM_FIBER,  8}, {0,0}            }, 1 },
+        { "craft_cloth_shirt",   ITEM_CLOTH_SHIRT,  1, { {ITEM_FIBER, 25}, {0,0}            }, 1 },
+        { "craft_cloth_pants",   ITEM_CLOTH_PANTS,  1, { {ITEM_FIBER, 20}, {0,0}            }, 1 },
+        { "craft_cloth_shoes",   ITEM_CLOTH_SHOES,  1, { {ITEM_FIBER, 12}, {0,0}            }, 1 },
+        { "craft_cloth_gloves",  ITEM_CLOTH_GLOVES, 1, { {ITEM_FIBER, 10}, {0,0}            }, 1 },
+        /* Legacy generic cloth armor — kept for save compatibility */
         { "craft_cloth_armor",   ITEM_CLOTH_ARMOR,  1, { {ITEM_FIBER, 8}, {0,0}             }, 1 },
         { "craft_wooden_shield", ITEM_WOODEN_SHIELD,1, { {ITEM_WOOD,  6}, {0,0}             }, 1 },
         { "craft_axe",           ITEM_AXE,          1, { {ITEM_WOOD,  3}, {ITEM_STONE, 2}   }, 2 },
