@@ -296,6 +296,14 @@ export class PlayerMenu {
       if (item !== 'none' && (ITEM_DEFS[item]?.category === 'armor' || ITEM_DEFS[item]?.category === 'shield')) {
         this.onEquipItem?.(fromSlot);
       }
+    } else {
+      // Check if dropped onto an equipment slot — equip the dragged item
+      const equipHit = this._equipSlotHits.find(
+        h => x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h
+      );
+      if (equipHit) {
+        this.onEquipItem?.(fromSlot);
+      }
     }
     return true;
   }
@@ -482,10 +490,10 @@ export class PlayerMenu {
           ctx.textBaseline = 'middle';
           if (item === 'axe') drawAxeIcon(ctx, sx + ESLOTSZ / 2, sy + ESLOTSZ / 2, ESLOTSZ);
           else ctx.fillText(def.symbol, sx + ESLOTSZ / 2, sy + ESLOTSZ / 2);
-
-          // Register click hit for unequip
-          this._equipSlotHits.push({ slot: slotKey, x: sx, y: sy, w: ESLOTSZ, h: ESLOTSZ });
         }
+
+        // Always register hit region — filled slots: click to unequip; empty slots: drop target for equip
+        this._equipSlotHits.push({ slot: slotKey, x: sx, y: sy, w: ESLOTSZ, h: ESLOTSZ });
 
         ctx.font         = '10px Georgia, serif';
         ctx.textAlign    = 'center';
