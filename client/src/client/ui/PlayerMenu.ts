@@ -160,7 +160,7 @@ export class PlayerMenu {
   public onUnequipSlot: ((slot: string) => void) | null = null;
 
   // Equipment slot hit-test records (slot name → canvas rect) set each frame
-  private _equipSlotHits: Array<{ slot: string; x: number; y: number; w: number; h: number }> = [];
+  private _equipSlotHits: Array<{ slot: string; item: ItemKind; x: number; y: number; w: number; h: number }> = [];
 
   // Inventory grid scroll state
   private _invScrollY    = 0;
@@ -323,6 +323,14 @@ export class PlayerMenu {
    */
   handleRightClick(x: number, y: number, inv: { slots: { item: ItemKind; quantity: number }[] }): boolean {
     if (!this.visible || this.activeTab !== 'character') return false;
+    // Right-click on a filled equipment slot → unequip
+    for (const hit of this._equipSlotHits) {
+      if (hit.item !== 'none' && x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+        this.onUnequipSlot?.(hit.slot);
+        return true;
+      }
+    }
+    // Right-click on an armour/shield item in the bag → equip
     const slot = this._slotAt(x, y);
     if (slot === -1) return false;
     const item = inv.slots[slot]?.item ?? 'none';
@@ -520,7 +528,7 @@ export class PlayerMenu {
         }
 
         // Always register hit region — filled slots: click to unequip; empty slots: drop target for equip
-        this._equipSlotHits.push({ slot: slotKey, x: sx, y: sy, w: ESLOTSZ, h: ESLOTSZ });
+        this._equipSlotHits.push({ slot: slotKey, item, x: sx, y: sy, w: ESLOTSZ, h: ESLOTSZ });
 
         ctx.font         = '10px Georgia, serif';
         ctx.textAlign    = 'center';
