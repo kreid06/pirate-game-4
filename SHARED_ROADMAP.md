@@ -37,11 +37,29 @@ client/wasm/               TypeScript bridge
 
 ---
 
-## Phase 1: Math Module + WASM Setup ✅ COMPLETE
+## Current Verified Status
+
+- Shared C modules exist for math, fixed-point math, collision, and ship physics.
+- Shared tests exist for math, fixed-point math, and collision.
+- Server CMake links the shared static library.
+- TypeScript WASM wrappers exist for math, collision, and physics.
+- Client runtime is not yet switched over to use the WASM physics path.
+- Browser/WASM build success is not currently verified in this workspace.
+
+### Remaining Required Changes
+
+1. Fix the client `build:wasm` script so it works on Windows and copies the actual Emscripten outputs to `client/public/wasm/`.
+2. Generate and verify `client/public/wasm/pirate-sim.js` and `client/public/wasm/pirate-sim.wasm`.
+3. Wire one real client path to `PhysicsBridge` and `CollisionBridge` instead of leaving them as standalone wrappers.
+4. Validate determinism and performance before marking Phase 3 complete.
+
+---
+
+## Phase 1: Math Module + WASM Setup ✅ STRUCTURALLY COMPLETE
 
 **Duration**: 1-2 weeks  
 **Goal**: Prove WASM architecture works with simple math functions  
-**Status**: Core files created
+**Status**: Core files created; browser build automation still needs verification
 
 ### Deliverables
 
@@ -100,15 +118,15 @@ client/wasm/               TypeScript bridge
 
 ### Success Criteria
 
-- [x] WASM module compiles without errors (emcc 5.0.7 → pirate-sim.js 13K + pirate-sim.wasm 21K)
-- [x] TypeScript bridge loads module in browser (onRuntimeInitialized pattern)
-- [x] Math functions return correct values (test_math passes)
+- [ ] WASM module compiles without errors in the current workspace
+- [ ] TypeScript bridge loads module in browser with generated assets present
+- [ ] Math functions return correct values in a browser smoke test
 - [ ] Zero memory leaks (Valgrind clean)
-- [x] Builds pass on Linux
+- [ ] Build script works on supported developer platforms
 
 ---
 
-## Phase 2: Collision Detection ✅ COMPLETE
+## Phase 2: Collision Detection ✅ CODE COMPLETE
 
 **Duration**: 1.5-2 weeks  
 **Goal**: Port existing server collision code to shared C  
@@ -147,29 +165,30 @@ client/wasm/               TypeScript bridge
 
 ### Success Criteria
 
-- [x] Collision results match server exactly (test_collision passes)
-- [x] WASM module produces identical results (poly_vs_poly_wasm exported)
+- [x] Shared collision API and tests exist
+- [x] WASM exports for collision exist
+- [ ] Collision results verified against the live server path
 - [ ] No performance regression (profiling pending)
 
 ---
 
-## Phase 3: Full Physics Engine ✅ COMPLETE (partial)
+## Phase 3: Shared Physics API 🚧 PARTIALLY INTEGRATED
 
 **Duration**: 3-4 weeks  
-**Goal**: Migrate all physics to shared C  
+**Goal**: Migrate all physics-critical logic to shared C  
 **Depends on**: Phase 2
 
 ### Tasks
 
 1. **Create physics headers**
-   - `physics.h` — Main engine state
-   - `ship.h` — Ship state/behavior
-   - `world.h` — World management
+   - Keep `ship_physics.h` as the shared float API for ship, player, and projectile state
+   - Add narrower shared headers only when a real integration boundary requires them
+   - Avoid introducing parallel placeholder headers that are not used by the server or client
 
 2. **Extract from server**
-   - `server/src/sim/physics.c` → `shared/sim/physics.c`
-   - `server/src/sim/ship.c` → `shared/sim/ship.c`
-   - Remove TypeScript physics from client
+   - Create and maintain shared ship/player/projectile physics in `shared/sim/ship_physics.c`
+   - Reconcile shared implementations against server authoritative behavior
+   - Remove or bypass duplicated TypeScript prediction logic where shared physics takes over
 
 3. **Determinism verification**
    - Replay test suite (deterministic seeds)
@@ -181,10 +200,10 @@ client/wasm/               TypeScript bridge
    - Ship state queries
    - Projectile spawn/queries
 
-5. **Client physics removal**
-   - Delete `/client/src/sim/Physics.ts`
-   - Switch to WASM calls
-   - Update input system to use WASM
+5. **Client physics adoption**
+   - Switch at least one prediction or simulation path to WASM calls
+   - Update input and reconciliation code to use shared physics where appropriate
+   - Remove or retire duplicate TypeScript logic only after parity is proven
 
 6. **Server refactoring**
    - Link `libpirate-sim.a`
@@ -193,11 +212,11 @@ client/wasm/               TypeScript bridge
 
 ### Success Criteria
 
-- [x] ship_physics.h + ship_physics.c created (Brigantine config defined)
-- [x] WASM bridge exports: ship_step_wasm, player_step_wasm, projectile_step_wasm
-- [x] PhysicsBridge.ts wraps all three step functions
-- [ ] Client and server physics are identical (determinism audit pending)
-- [ ] Client-side prediction wired to WASM
+- [x] `ship_physics.h` and `ship_physics.c` created
+- [x] WASM bridge exports `ship_step_wasm`, `player_step_wasm`, and `projectile_step_wasm`
+- [x] `PhysicsBridge.ts` wraps all three step functions
+- [ ] Client and server physics are identical in verified runtime tests
+- [ ] Client-side prediction or simulation is actually wired to WASM
 
 ---
 
@@ -245,14 +264,14 @@ client/wasm/               TypeScript bridge
 
 ## How to Use This Roadmap
 
-**Starting Phase 1:**
+**Starting from the current state:**
 ```bash
-# Already done! Navigate to Phase 1 tasks above
+# Fix the build script first, then build the WASM artifacts
 cd shared
 mkdir build-wasm
 cd build-wasm
 emconfigure cmake -DCMAKE_BUILD_TYPE=Release ..
-emmake make
+emmake make pirate-sim.wasm
 ```
 
 **Tracking progress:**

@@ -8,7 +8,7 @@ This directory contains pure C code that is:
 - **Compiled for server** → Static library (`libpirate-sim.a`) linked to C server
 - **Compiled for client** → WebAssembly (`pirate-sim.wasm`) via Emscripten
 
-This ensures **deterministic gameplay**: server and client produce identical physics results.
+This is intended to become the single source of truth for deterministic gameplay. The shared code and wrappers exist, but full client runtime adoption and parity verification are still in progress.
 
 ## Structure
 
@@ -17,13 +17,13 @@ shared/
 ├── include/              Public API headers
 │   ├── pirate_math.h     Vector2, Matrix3, circles
 │   ├── collision.h       (Phase 2) Collision detection
-│   ├── physics.h         (Phase 3) Main physics engine
+│   ├── ship_physics.h    (Phase 3) Ship, player, projectile physics
 │   └── ...
 │
 ├── sim/                  Implementation
 │   ├── math.c            Math operations
 │   ├── collision.c       (Phase 2) Collision algorithms
-│   ├── physics.c         (Phase 3) Physics simulation
+│   ├── ship_physics.c    (Phase 3) Ship, player, projectile simulation
 │   └── ...
 │
 ├── protocol/             Shared asset definitions (JSON)
@@ -105,10 +105,10 @@ const [nx, ny] = wasmBridge.vec2Normalize(3, 4); // [0.6, 0.8]
 | Vec2 math | 1 | ✅ | ✓ | ✓ |
 | Matrix3 math | 1 | ✅ | ✓ | ✓ |
 | Circle collision | 1 | ✅ | ✓ | ✓ |
-| Polygon SAT collision | 2 | ⏳ | ✓ | ✓ |
-| Physics simulation | 3 | ⏳ | ✓ | ✓ |
-| Ship dynamics | 3 | ⏳ | ✓ | ✓ |
-| Projectile logic | 3 | ⏳ | ✓ | ✓ |
+| Polygon SAT collision | 2 | Code complete | ✓ | Wrapper exists |
+| Physics simulation | 3 | Partial | ✓ | Wrapper exists |
+| Ship dynamics | 3 | Partial | ✓ | Wrapper exists |
+| Projectile logic | 3 | Partial | ✓ | Wrapper exists |
 
 See [`SHARED_ROADMAP.md`](../SHARED_ROADMAP.md) for detailed phase information.
 
@@ -131,8 +131,8 @@ See [`SHARED_ROADMAP.md`](../SHARED_ROADMAP.md) for detailed phase information.
 
 4. **Safety**
    - Bounds checking where needed
-   - No undefined behavior (validated with Clang, GCC, MSVC)
-   - Valgrind/ASAN clean
+  - No undefined behavior goal across Clang, GCC, MSVC
+  - Leak and sanitizer verification pending
 
 ## Adding New Functions
 
@@ -185,10 +185,16 @@ myFunctionCalculate(x: number, y: number): [number, number] {
 Module is not defined
 ```
 
-Make sure `pirate-sim.js` is loaded first. Check:
+Make sure `pirate-sim.js` is generated and loaded first. Check:
 - File exists in `client/public/wasm/`
 - Path in `WasmBridge.initialize()` is correct
 - Browser console for script errors
+
+### Current Known Gaps
+
+- The client build script still needs platform-safe path and copy handling.
+- The browser runtime has not yet been switched to use the WASM physics path end-to-end.
+- Shared C parity is not yet verified with runtime integration tests.
 
 ### Compilation Errors
 
