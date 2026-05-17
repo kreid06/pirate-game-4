@@ -4,6 +4,10 @@
 
 #include "pirate_math.h"
 
+/* Convenience aliases for internal use */
+#define PI      PIRATE_PI
+#define TWO_PI  PIRATE_TWO_PI
+
 /* ──────────────────────────────────────────────────────────────────────────
    Vec2 Implementation
    ────────────────────────────────────────────────────────────────────────── */

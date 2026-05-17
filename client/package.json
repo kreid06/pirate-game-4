@@ -9,7 +9,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest",
-    "golden-replay": "npm run test -- --run golden-replay"
+    "golden-replay": "npm run test -- --run golden-replay",
+    "build:wasm": "cd ../shared && mkdir -p build-wasm && cd build-wasm && emcmake cmake -DCMAKE_BUILD_TYPE=Release .. && emmake make pirate-sim.wasm -j$(nproc) && cp pirate-sim.wasm.js ../client/public/wasm/pirate-sim.js && cp pirate-sim.wasm.wasm ../client/public/wasm/pirate-sim.wasm"
   },
   "devDependencies": {
     "@types/node": "^20.5.0",

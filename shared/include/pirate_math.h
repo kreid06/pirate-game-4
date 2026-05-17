@@ -1,8 +1,11 @@
 /**
  * pirate_math.h — Shared math library for physics engine
- * 
+ *
  * Pure C, zero dependencies. Used by both server and client (via WASM).
  * All functions are deterministic and reproducible across platforms.
+ *
+ * Float-precision API. For Q16.16 fixed-point (server determinism), see
+ * pirate_fixed.h.
  */
 
 #ifndef PIRATE_MATH_H
@@ -102,8 +105,8 @@ float mat3_determinant(Mat3 m);
    Utilities
    ────────────────────────────────────────────────────────────────────────── */
 
-#define PI 3.14159265359f
-#define TWO_PI (2.0f * PI)
+#define PIRATE_PI  3.14159265359f
+#define PIRATE_TWO_PI (2.0f * PIRATE_PI)
 
 float deg_to_rad(float degrees);
 float rad_to_deg(float radians);

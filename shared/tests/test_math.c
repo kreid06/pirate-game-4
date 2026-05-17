@@ -11,11 +11,13 @@
 #include <math.h>
 #include "pirate_math.h"
 
+#define PI PIRATE_PI  /* convenience alias for tests */
+
 #define EPSILON 1e-5f
 #define ASSERT_FLOAT_NEAR(a, b) assert(fabsf((a) - (b)) < EPSILON)
-#define ASSERT_VEC2_NEAR(v, x, y) \
-  ASSERT_FLOAT_NEAR((v).x, (x)); \
-  ASSERT_FLOAT_NEAR((v).y, (y))
+#define ASSERT_VEC2_NEAR(v, ex, ey) \
+  ASSERT_FLOAT_NEAR((v).x, (ex)); \
+  ASSERT_FLOAT_NEAR((v).y, (ey))
 
 void test_vec2_basic(void) {
   printf("Testing Vec2 basic operations...\n");
