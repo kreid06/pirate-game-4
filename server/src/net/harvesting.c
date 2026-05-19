@@ -28,16 +28,22 @@ const IslandDef *get_island_for_player(const WebSocketPlayer *player) {
 }
 
 int find_nearest_resource(const IslandDef *isl, float px, float py,
-                          int res_type, float range_sq) {
-    float best = range_sq;
-    int   best_ri = -1;
+                          int res_type, float base_range) {
+    /* Effective range scales with node size: larger nodes are easier to reach.
+     * size < 1.0 → still uses base_range (no penalty for small nodes).
+     * We track best as (d / eff_range)^2 so different-sized nodes are compared fairly. */
+    float best_score = 1.0f;  /* 1.0 = exactly at the boundary; < 1.0 = inside */
+    int   best_ri    = -1;
     for (int ri = 0; ri < isl->resource_count; ri++) {
-        if (isl->resources[ri].type_id != res_type) continue;
-        if (isl->resources[ri].health <= 0) continue;
-        float dx = px - (isl->x + isl->resources[ri].ox);
-        float dy = py - (isl->y + isl->resources[ri].oy);
-        float d2 = dx * dx + dy * dy;
-        if (d2 <= best) { best = d2; best_ri = ri; }
+        const IslandResource *r = &isl->resources[ri];
+        if (r->type_id != res_type) continue;
+        if (r->health  <= 0)        continue;
+        float dx   = px - (isl->x + r->ox);
+        float dy   = py - (isl->y + r->oy);
+        float d2   = dx * dx + dy * dy;
+        float eff  = base_range * (r->size >= 1.0f ? r->size : 1.0f);
+        float score = d2 / (eff * eff);
+        if (score <= 1.0f && score < best_score) { best_score = score; best_ri = ri; }
     }
     return best_ri;
 }
@@ -84,7 +90,7 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
 
     /* Find the nearest 'wood' resource node within range */
     int best_ri = find_nearest_resource(isl, player->x, player->y,
-                                        RES_WOOD, HARVEST_RANGE * HARVEST_RANGE);
+                                        RES_WOOD, HARVEST_RANGE);
     if (best_ri < 0) {
         snprintf(response, sizeof(response),
                  "{\"type\":\"harvest_failure\",\"reason\":\"too_far\"}");
@@ -194,7 +200,7 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
 
         /* Find nearest fiber node within range */
         int best_ri = find_nearest_resource(isl, player->x, player->y,
-                                            RES_FIBER, HARVEST_RANGE * HARVEST_RANGE);
+                                            RES_FIBER, HARVEST_RANGE);
         if (best_ri < 0) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_fiber_failure\",\"reason\":\"too_far\"}");
@@ -288,7 +294,7 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
         }
 
         int best_ri = find_nearest_resource(isl, player->x, player->y,
-                                            RES_ROCK, HARVEST_RANGE * HARVEST_RANGE);
+                                            RES_ROCK, HARVEST_RANGE);
         if (best_ri < 0) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_rock_failure\",\"reason\":\"too_far\"}");
@@ -350,7 +356,7 @@ void handle_harvest_stone(WebSocketPlayer* player, struct WebSocketClient* clien
         }
 
         int best_ri = find_nearest_resource(isl, player->x, player->y,
-                                            RES_ROCK, HARVEST_RANGE * HARVEST_RANGE);
+                                            RES_ROCK, HARVEST_RANGE);
         if (best_ri < 0) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_stone_failure\",\"reason\":\"too_far\"}");
@@ -434,8 +440,15 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
             goto send_boulder_ret;
         }
 
+        /* Find the nearest boulder — check stone boulders first, then metal */
         int best_ri = find_nearest_resource(isl, player->x, player->y,
-                                            RES_BOULDER, HARVEST_RANGE * HARVEST_RANGE);
+                                            RES_STONE_BOULDER, HARVEST_RANGE);
+        int best_type = RES_STONE_BOULDER;
+        if (best_ri < 0) {
+            best_ri   = find_nearest_resource(isl, player->x, player->y,
+                                              RES_BOULDER, HARVEST_RANGE);
+            best_type = RES_BOULDER;
+        }
         if (best_ri < 0) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_boulder_failure\",\"reason\":\"too_far\"}");
@@ -456,17 +469,19 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
             websocket_server_broadcast(dmsg);
         }
 
-        /* Grant 5 metal */
-        if (!craft_grant(player, ITEM_METAL, 5)) {
+        /* Grant 5 stone or 5 metal depending on boulder type */
+        const int grant_item  = (best_type == RES_BOULDER) ? ITEM_METAL : ITEM_STONE;
+        const char *item_name = (best_type == RES_BOULDER) ? "metal" : "stone";
+        if (!craft_grant(player, grant_item, 5)) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_boulder_failure\",\"reason\":\"inventory_full\"}");
             goto send_boulder_ret;
         }
 
         player_apply_xp(player, PLAYER_XP_PER_BOULDER_HARVEST);
-        log_info("⛏️  Player %u mined boulder → +5 metal +%u xp", player->player_id, PLAYER_XP_PER_BOULDER_HARVEST);
+        log_info("⛏️  Player %u mined boulder → +5 %s +%u xp", player->player_id, item_name, PLAYER_XP_PER_BOULDER_HARVEST);
         snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_boulder_success\",\"metal\":5}");
+                 "{\"type\":\"harvest_boulder_success\",\"%s\":5}", item_name);
     }
 
 send_boulder_ret:;

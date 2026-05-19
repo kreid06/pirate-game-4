@@ -662,12 +662,13 @@ export class ClientApplication {
         }
       };
 
-      this.networkManager.onBoulderHarvestResult = (success, metal, reason) => {
+      this.networkManager.onBoulderHarvestResult = (success, metal, stone, reason) => {
         const ws = this.authoritativeWorldState ?? this.predictedWorldState;
         const myId = this.networkManager.getAssignedPlayerId();
         const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
         if (success) {
-          if (me) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
+          if (me && metal > 0) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
+          if (me && stone > 0) this.renderSystem.spawnResourcePickup(me.position, `+${stone} stone`, '#c8b89a');
         } else if (reason === 'no_stamina') {
           if (me) this.renderSystem.spawnResourcePickup(me.position, 'No stamina!', '#e05050');
         }

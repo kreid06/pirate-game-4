@@ -605,7 +605,7 @@ export class NetworkManager {
   /** Fired when the server responds to a harvest_stone request. */
   public onStoneHarvestResult: ((success: boolean, stone: number, reason: string) => void) | null = null;
   /** Fired when the server responds to a harvest_boulder request. */
-  public onBoulderHarvestResult: ((success: boolean, metal: number, reason: string) => void) | null = null;
+  public onBoulderHarvestResult: ((success: boolean, metal: number, stone: number, reason: string) => void) | null = null;
   /** Fired when any action is rejected by the server due to insufficient stamina. */
   public onNoStamina: (() => void) | null = null;
   /**
@@ -2286,11 +2286,11 @@ export class NetworkManager {
         break;
 
       case MessageType.HARVEST_BOULDER_SUCCESS:
-        this.onBoulderHarvestResult?.(true, message.metal ?? 0, '');
+        this.onBoulderHarvestResult?.(true, message.metal ?? 0, message.stone ?? 0, '');
         break;
 
       case MessageType.HARVEST_BOULDER_FAILURE:
-        this.onBoulderHarvestResult?.(false, 0, message.reason ?? 'unknown');
+        this.onBoulderHarvestResult?.(false, 0, 0, message.reason ?? 'unknown');
         break;
 
       case 'npc_dialogue':

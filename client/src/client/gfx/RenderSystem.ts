@@ -3456,7 +3456,8 @@ export class RenderSystem {
     })();
     this._pendingAxeEquipped     = axeEquipped;
     this._pendingPickaxeEquipped = pickaxeEquipped;
-    const HARVEST_RANGE_SQ = 50 * 50; // one full floor-tile (50px) — matches server HARVEST_RANGE
+    const HARVEST_RANGE = 50; // base range (px) — matches server HARVEST_RANGE
+    // Effective range per node = HARVEST_RANGE * Math.max(1.0, size) — larger nodes extend reach
     const PLANT_HOVER_SQ = (30 * zoom) * (30 * zoom);
     const ROCK_HOVER_SQ  = (22 * zoom) * (22 * zoom);
     const LEAF_FADE_OUTER = 420;
@@ -3465,7 +3466,6 @@ export class RenderSystem {
     const BUSH_FADE_OUTER = 320;
     const BUSH_FADE_INNER = 90;
     const MIN_BUSH_ALPHA  = 0.30;
-    const BOULDER_HOVER_SQ = (44 * zoom) * (44 * zoom);
     const DEATH_FADE_MS   = 2000;
     const now = performance.now();
     const cw = this.canvas.width;
@@ -3757,20 +3757,25 @@ export class RenderSystem {
         if (res.type === 'wood') {
           const treeHoverR = 18 * (res.size ?? 1.0) * zoom;
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= treeHoverR * treeHoverR; }
-          inRange    = !!(axeEquipped && localPlayer && pdSq <= HARVEST_RANGE_SQ);
+          const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
+          inRange    = !!(axeEquipped && localPlayer && pdSq <= effR * effR);
           playerNear = !!(localPlayer && playerDist < LEAF_FADE_OUTER);
           if (isHovered) this._hoveredTree = { wx, wy };
         } else if (res.type === 'fiber') {
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= PLANT_HOVER_SQ; }
-          inRange = !!(localPlayer && localPlayer.carrierId === 0 && pdSq <= HARVEST_RANGE_SQ);
+          const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
+          inRange = !!(localPlayer && localPlayer.carrierId === 0 && pdSq <= effR * effR);
           if (isHovered) this._hoveredFiberPlant = { wx, wy };
         } else if (res.type === 'rock') {
-          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= ROCK_HOVER_SQ; }
-          inRange = !!(localPlayer && pdSq <= HARVEST_RANGE_SQ);
+          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= ROCK_HOVER_SQ * (res.size ?? 1.0); }
+          const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
+          inRange = !!(localPlayer && pdSq <= effR * effR);
           if (isHovered) this._hoveredRock = { wx, wy };
         } else if (res.type === 'boulder') {
-          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= BOULDER_HOVER_SQ; }
-          inRange = !!(pickaxeEquipped && localPlayer && pdSq <= HARVEST_RANGE_SQ);
+          const bHoverR = 44 * (res.size ?? 1.0) * zoom;
+          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= bHoverR * bHoverR; }
+          const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
+          inRange = !!(pickaxeEquipped && localPlayer && pdSq <= effR * effR);
           if (isHovered) this._hoveredBoulder = { wx, wy };
         }
         // Smooth leaf-fade alpha: 1.0 (far) → MIN_LEAF_ALPHA (inside LEAF_FADE_INNER)

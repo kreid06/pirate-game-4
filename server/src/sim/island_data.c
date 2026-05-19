@@ -307,11 +307,12 @@ static float resource_size_from_offset(float ox, float oy)
 static int resource_max_health(uint8_t type_id)
 {
     switch (type_id) {
-        case RES_WOOD:    return 100;
-        case RES_ROCK:    return  60;
-        case RES_BOULDER: return 400;
-        case RES_FIBER:   return  30;
-        default:          return  50;
+        case RES_WOOD:         return 100;
+        case RES_ROCK:         return  60;
+        case RES_BOULDER:      return 400;  /* metal boulder */
+        case RES_STONE_BOULDER:return 400;  /* stone boulder */
+        case RES_FIBER:        return  30;
+        default:               return  50;
     }
 }
 
@@ -716,9 +717,9 @@ void islands_generate_trees(void)
                 IslandResource *r = &isl->resources[isl->resource_count];
                 r->ox         = bx - isl->x;
                 r->oy         = by - isl->y;
-                r->type_id    = RES_BOULDER;
+                r->type_id    = RES_STONE_BOULDER;
                 r->size       = 0.8f + ((float)((seed >> 8) & 0xFFu) / 255.0f) * 0.8f; /* 0.8–1.6 */
-                r->max_health = resource_max_health(RES_BOULDER);
+                r->max_health = resource_max_health(RES_STONE_BOULDER);
                 r->health     = r->max_health;
                 isl->resource_count++;
             }
