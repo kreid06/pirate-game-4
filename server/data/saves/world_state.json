@@ -1,6 +1,6 @@
 {
   "meta": {
-    "timestamp": 1779158071,
+    "timestamp": 1779225755,
     "ship_count": 3,
     "npc_count": 22,
     "structure_count": 19
@@ -7122,7 +7122,7 @@
         {"idx":17,"health":400,"alive":true,"respawn_at":0},
         {"idx":18,"health":400,"alive":true,"respawn_at":0},
         {"idx":19,"health":400,"alive":true,"respawn_at":0},
-        {"idx":20,"health":400,"alive":true,"respawn_at":0},
+        {"idx":20,"health":360,"alive":true,"respawn_at":0},
         {"idx":21,"health":400,"alive":true,"respawn_at":0},
         {"idx":22,"health":400,"alive":true,"respawn_at":0},
         {"idx":23,"health":400,"alive":true,"respawn_at":0},
@@ -10276,7 +10276,7 @@
         {"idx":3171,"health":60,"alive":true,"respawn_at":0},
         {"idx":3172,"health":60,"alive":true,"respawn_at":0},
         {"idx":3173,"health":60,"alive":true,"respawn_at":0},
-        {"idx":3174,"health":60,"alive":true,"respawn_at":0},
+        {"idx":3174,"health":0,"alive":false,"respawn_at":0},
         {"idx":3175,"health":60,"alive":true,"respawn_at":0},
         {"idx":3176,"health":60,"alive":true,"respawn_at":0},
         {"idx":3177,"health":60,"alive":true,"respawn_at":0},
@@ -10535,7 +10535,7 @@
         {"idx":3430,"health":400,"alive":true,"respawn_at":0},
         {"idx":3431,"health":400,"alive":true,"respawn_at":0},
         {"idx":3432,"health":400,"alive":true,"respawn_at":0},
-        {"idx":3433,"health":400,"alive":true,"respawn_at":0},
+        {"idx":3433,"health":340,"alive":true,"respawn_at":0},
         {"idx":3434,"health":400,"alive":true,"respawn_at":0},
         {"idx":3435,"health":400,"alive":true,"respawn_at":0},
         {"idx":3436,"health":400,"alive":true,"respawn_at":0},
@@ -10549,7 +10549,7 @@
         {"idx":3444,"health":400,"alive":true,"respawn_at":0},
         {"idx":3445,"health":400,"alive":true,"respawn_at":0},
         {"idx":3446,"health":400,"alive":true,"respawn_at":0},
-        {"idx":3447,"health":400,"alive":true,"respawn_at":0},
+        {"idx":3447,"health":320,"alive":true,"respawn_at":0},
         {"idx":3448,"health":400,"alive":true,"respawn_at":0},
         {"idx":3449,"health":400,"alive":true,"respawn_at":0},
         {"idx":3450,"health":400,"alive":true,"respawn_at":0},
