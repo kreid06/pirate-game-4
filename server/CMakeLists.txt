@@ -61,6 +61,7 @@ set(NET_SOURCES
     src/net/websocket_protocol.c
     src/net/websocket_auth.c
     src/net/cannon_fire.c
+    src/net/claim.c
     src/net/crafting.c
     src/net/dock_physics.c
     src/net/harvesting.c

@@ -161,7 +161,7 @@ export interface ShipConstruction {
  */
 export interface PlacedStructure {
   id: number;
-  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon';
+  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag';
   islandId: number;
   x: number;
   y: number;
@@ -174,10 +174,21 @@ export interface PlacedStructure {
   cannonAimAngle?: number; // cannons only: world-space aim angle in radians
   /** Shipyard only — current ship under construction. Absent when empty. */
   construction?: ShipConstruction;
+  /** Claiming flag: 0‡60000 ms capture progress */
+  claimProgress?: number;
+  /** Claiming flag: true when an enemy is nearby, reversing the timer */
+  claimContested?: boolean;
 }
 
 // Company identifiers (mirror server COMPANY_* constants)
 export const COMPANY_UNCLAIMED = 0; // No owner — ship/NPC has no faction
+
+/** Represents an island territory claim. */
+export interface IslandClaim {
+  islandId: number;
+  companyId: number;
+  fortStructureId: number;
+}
 export const COMPANY_NEUTRAL   = 0; // Alias for COMPANY_UNCLAIMED (backward compat)
 export const COMPANY_SOLO      = 1; // Player-owned, no guild affiliation
 export const COMPANY_PIRATES   = 2; // Pirates guild faction

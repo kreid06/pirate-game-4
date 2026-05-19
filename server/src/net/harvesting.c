@@ -4,6 +4,7 @@
 #include <sys/socket.h>
 #include "net/harvesting.h"
 #include "net/npc_agents.h"
+#include "net/claim.h"
 #include "util/time.h"
 
 /* Players must be within one full floor-tile (50px) to harvest a resource. */
@@ -109,6 +110,16 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
 
     /* Grant 2 planks — find an existing plank stack or a free slot */
     {
+        int gross_wood = 10;
+        int net_wood = claim_apply_harvest_tax(player, player->x, player->y,
+                                               gross_wood, ITEM_WOOD);
+        if (net_wood <= 0) {
+            /* All taxed away (edge case) — still count as success */
+            player_apply_xp(player, PLAYER_XP_PER_WOOD_HARVEST);
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_success\",\"wood\":0}");
+            goto send_and_ret;
+        }
         int grant_slot = -1;
         /* Prefer an existing wood stack that isn't full */
         for (int s = 0; s < INVENTORY_SLOTS; s++) {
@@ -135,20 +146,20 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
         }
 
         if (player->inventory.slots[grant_slot].item == ITEM_WOOD) {
-            int new_qty = (int)player->inventory.slots[grant_slot].quantity + 10;
+            int new_qty = (int)player->inventory.slots[grant_slot].quantity + net_wood;
             if (new_qty > 99) new_qty = 99;
             player->inventory.slots[grant_slot].quantity = (uint8_t)new_qty;
         } else {
             player->inventory.slots[grant_slot].item     = ITEM_WOOD;
-            player->inventory.slots[grant_slot].quantity = 10;
+            player->inventory.slots[grant_slot].quantity = (uint8_t)net_wood;
         }
 
         player_apply_xp(player, PLAYER_XP_PER_WOOD_HARVEST);
-        log_info("🪓 Player %u harvested wood → +10 wood +%u xp (slot %d qty=%d)",
-                 player->player_id, PLAYER_XP_PER_WOOD_HARVEST, grant_slot,
+        log_info("🪓 Player %u harvested wood → +%d wood +%u xp (slot %d qty=%d)",
+                 player->player_id, net_wood, PLAYER_XP_PER_WOOD_HARVEST, grant_slot,
                  (int)player->inventory.slots[grant_slot].quantity);
         snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_success\",\"wood\":10}");
+                 "{\"type\":\"harvest_success\",\"wood\":%d}", net_wood);
     }
 
 send_and_ret:;
@@ -202,7 +213,8 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
                      player->on_island_id, best_ri, res->ox, res->oy, res->health, res->max_health);
             websocket_server_broadcast(dmsg);
         }
-        if (!craft_grant(player, ITEM_FIBER, 5)) {
+        if (!craft_grant(player, ITEM_FIBER,
+                         claim_apply_harvest_tax(player, player->x, player->y, 5, ITEM_FIBER))) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_fiber_failure\",\"reason\":\"inventory_full\"}");
             goto send_fiber_ret;
@@ -357,7 +369,8 @@ void handle_harvest_stone(WebSocketPlayer* player, struct WebSocketClient* clien
             websocket_server_broadcast(dmsg);
         }
 
-        if (!craft_grant(player, ITEM_STONE, 2)) {
+        if (!craft_grant(player, ITEM_STONE,
+                         claim_apply_harvest_tax(player, player->x, player->y, 2, ITEM_STONE))) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_stone_failure\",\"reason\":\"inventory_full\"}");
             goto send_stone_ret;

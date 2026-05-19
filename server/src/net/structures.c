@@ -13,6 +13,7 @@
 #include "net/dock_physics.h"
 #include "net/cannon_fire.h"
 #include "net/crafting.h"
+#include "net/claim.h"
 #include "sim/island.h"
 
 /* ── Spatial hash for ceiling-connectivity flood-fill (O(N) cascade) ─────────
@@ -283,25 +284,33 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     } else if (strcmp(stype, "cannon") == 0) {
         stype_enum    = STRUCT_CANNON;
         required_item = ITEM_CANNON;
+    } else if (strcmp(stype, "flag_fort") == 0) {
+        stype_enum    = STRUCT_FLAG_FORT;
+        required_item = ITEM_FLAG_FORT;  /* crafted from 40 wood + 40 stone */
+    } else if (strcmp(stype, "claim_flag") == 0) {
+        stype_enum    = STRUCT_CLAIM_FLAG;
+        required_item = ITEM_CLAIM_FLAG;
     } else {
         snprintf(response, sizeof(response),
                  "{\"type\":\"place_structure_fail\",\"reason\":\"unknown_type\"}");
         goto ps_send;
     }
 
-    /* Player must have the item somewhere in their inventory */
+    /* Player must have the item somewhere in their inventory (skip for ITEM_NONE) */
     int found_slot = -1;
-    for (int s = 0; s < INVENTORY_SLOTS; s++) {
-        if (player->inventory.slots[s].item == required_item &&
-            player->inventory.slots[s].quantity > 0) {
-            found_slot = s;
-            break;
+    if (required_item != ITEM_NONE) {
+        for (int s = 0; s < INVENTORY_SLOTS; s++) {
+            if (player->inventory.slots[s].item == required_item &&
+                player->inventory.slots[s].quantity > 0) {
+                found_slot = s;
+                break;
+            }
         }
-    }
-    if (found_slot < 0) {
-        snprintf(response, sizeof(response),
-                 "{\"type\":\"place_structure_fail\",\"reason\":\"missing_item\"}");
-        goto ps_send;
+        if (found_slot < 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"missing_item\"}");
+            goto ps_send;
+        }
     }
 
     /* Player must be reasonably close to placement point */
@@ -330,6 +339,75 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
             snprintf(response, sizeof(response),
                      "{\"type\":\"place_structure_fail\",\"reason\":\"enemy_territory\"}");
             goto ps_send;
+        }
+    }
+
+    /* ── Flag Fort: validate island is unclaimed; register claim on placement ── */
+    if (stype_enum == STRUCT_FLAG_FORT) {
+        if (target_island_id == 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"not_on_island\"}");
+            goto ps_send;
+        }
+        if (island_get_claim((uint8_t)target_island_id)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"island_already_claimed\"}");
+            goto ps_send;
+        }
+        /* Only one fort per company per island */
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            PlacedStructure *ex = &placed_structures[si];
+            if (!ex->active) continue;
+            if (ex->type != STRUCT_FLAG_FORT) continue;
+            if ((uint8_t)ex->island_id == (uint8_t)target_island_id) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"fort_exists\"}");
+                goto ps_send;
+            }
+        }
+        /* Item (ITEM_FLAG_FORT) is consumed by the normal item-slot path below */
+    }
+
+    /* ── Claiming Flag: must be placed in contested territory, linked to a fort ── */
+    if (stype_enum == STRUCT_CLAIM_FLAG) {
+        if (!territory_is_contested(px, py)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"not_contested_territory\"}");
+            goto ps_send;
+        }
+        /* Verify the player's company has an active fort on some island */
+        bool has_fort = false;
+        uint32_t linked_fort = 0;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            PlacedStructure *ex = &placed_structures[si];
+            if (!ex->active) continue;
+            if (ex->type != STRUCT_FLAG_FORT) continue;
+            if (ex->company_id != (uint8_t)player->company_id) continue;
+            has_fort   = true;
+            linked_fort = ex->id;
+            break;
+        }
+        if (!has_fort) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"no_flag_fort\"}");
+            goto ps_send;
+        }
+        /* Stash linked_fort in place_rotation_deg temporarily — will apply below */
+        (void)linked_fort;  /* applied in post-placement block */
+    }
+
+    /* Cannot place within claim radius of an enemy non-orphaned structure
+       (orphaned structures = dead fort — they are passable for building purposes) */
+    if (stype_enum != STRUCT_CLAIM_FLAG) {  /* claim flags are placed IN contested territory */
+        bool enemy_block = territory_is_claimed_by_any(px, py, NULL);
+        if (enemy_block) {
+            uint32_t owner_co = 0;
+            territory_is_claimed_by_any(px, py, &owner_co);
+            if (owner_co != 0 && owner_co != (uint32_t)player->company_id) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"enemy_territory\"}");
+                goto ps_send;
+            }
         }
     }
 
@@ -692,7 +770,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
 
     /* Consume 1 item from the found slot */
-    {
+    if (found_slot >= 0) {
         player->inventory.slots[found_slot].quantity--;
         if (player->inventory.slots[found_slot].quantity == 0)
             player->inventory.slots[found_slot].item = ITEM_NONE;
@@ -728,6 +806,34 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
             placed_structures[placed_structure_count].cannon_aim_angle;
     }
     placed_structure_count++;
+
+    /* ── Post-placement: register claims ─────────────────────────────────── */
+
+    /* Flag Fort: override HP and register the island claim */
+    if (stype_enum == STRUCT_FLAG_FORT) {
+        placed_structures[placed_structure_count - 1].max_hp = 500;
+        placed_structures[placed_structure_count - 1].hp     = 500;
+        claim_register_fort((uint8_t)target_island_id,
+                            (uint32_t)player->company_id,
+                            (uint32_t)new_id,
+                            player->player_id);
+    }
+
+    /* Claim Flag: link to originating fort and start with progress = 0 */
+    if (stype_enum == STRUCT_CLAIM_FLAG) {
+        uint32_t lf = 0;
+        for (uint32_t si = 0; si < placed_structure_count - 1; si++) {
+            PlacedStructure *ex = &placed_structures[si];
+            if (!ex->active) continue;
+            if (ex->type != STRUCT_FLAG_FORT) continue;
+            if (ex->company_id != (uint8_t)player->company_id) continue;
+            lf = ex->id;
+            break;
+        }
+        placed_structures[placed_structure_count - 1].claim_linked_fort  = lf;
+        placed_structures[placed_structure_count - 1].claim_progress_ms  = 0.0f;
+        placed_structures[placed_structure_count - 1].claim_contested     = false;
+    }
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
              player->player_id, stype, new_id, px, py, target_island_id);
@@ -1180,6 +1286,11 @@ void destroy_placed_structure(uint32_t structure_id) {
              "{\"type\":\"structure_demolished\",\"structure_id\":%u}", structure_id);
     websocket_server_broadcast(msg);
     log_info("🔨 Destroyed structure %u (type %d)", structure_id, (int)dtype);
+
+    /* ── Territory claim: fort destroyed → drop island claim ─────────── */
+    if (dtype == STRUCT_FLAG_FORT) {
+        claim_on_fort_destroyed(structure_id);
+    }
 
     /* ── Cascade: floor destroyed ──────────────────────────────────────── */
     if (dtype == STRUCT_WOODEN_FLOOR) {

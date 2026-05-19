@@ -158,6 +158,10 @@ export class RenderSystem {
   private _cachedLocalPlayer: Player | null = null;
   /** Placed island structures — updated via addPlacedStructure / setPlacedStructures. */
   private placedStructures: PlacedStructure[] = [];
+  /** islandId → companyId: active island territory claims. */
+  private _islandClaims: Map<number, number> = new Map();
+  /** When true, draws the territory overlay (Alt held). */
+  private _showTerritoryOverlay = false;
   /**
    * Pre-computed wall segments — rebuilt whenever placedStructures changes.
    * Each entry: [x1, y1, x2, y2] in world space.  Used for O(1)-per-frame
@@ -225,7 +229,7 @@ export class RenderSystem {
     ox: number; oy: number; size: number;
   }> = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | null = null;
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
   private islandBuildRotationDeg = 0;
   private _wallGhostRotRad: number = 0; // rotation (radians) of wall/door ghost, inherited from floor edge
@@ -1801,6 +1805,23 @@ export class RenderSystem {
     this._rebuildWallSegs();
   }
 
+  // ── Territory claim API ────────────────────────────────────────────────────
+
+  setTerritoryOverlay(on: boolean): void { this._showTerritoryOverlay = on; }
+
+  setIslandClaim(islandId: number, companyId: number): void {
+    this._islandClaims.set(islandId, companyId);
+  }
+
+  clearIslandClaim(islandId: number): void {
+    this._islandClaims.delete(islandId);
+  }
+
+  updateClaimFlagProgress(structId: number, progressMs: number, contested: boolean): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (s) { s.claimProgress = progressMs; s.claimContested = contested; }
+  }
+
   /** Replace the full placed-structure list (e.g. on join). */
   setPlacedStructures(arr: PlacedStructure[]): void {
     this.placedStructures = [...arr];
@@ -1893,7 +1914,7 @@ export class RenderSystem {
   }
 
   /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, wood_ceiling, cannon, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | null): void {
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | null): void {
     this.islandBuildKind = kind;
   }
 
@@ -2977,6 +2998,11 @@ export class RenderSystem {
     // Execute render queue in layer order
     this.executeRenderQueue();
 
+    // ── Territory claim overlay (drawn when Alt is held) ─────────────────────
+    if (this._showTerritoryOverlay) {
+      this.drawTerritoryOverlay(camera);
+    }
+
     // ── Fiber bushes — above players, below tree leaves ──────────────────────
     const zoom = camera.getState().zoom;
     for (const b of this._pendingBushes) {
@@ -4024,9 +4050,9 @@ export class RenderSystem {
         };
 
         const rayBlocked = (ax: number, ay: number, bx: number, by: number): boolean => {
-          const n = wallSegs.length;
+          const n = this._wallSegs.length;
           for (let i = 0; i < n; i += 4) {
-            if (segsCross(ax, ay, bx, by, wallSegs[i], wallSegs[i+1], wallSegs[i+2], wallSegs[i+3])) return true;
+            if (segsCross(ax, ay, bx, by, this._wallSegs[i], this._wallSegs[i+1], this._wallSegs[i+2], this._wallSegs[i+3])) return true;
           }
           return false;
         };
@@ -4878,6 +4904,89 @@ export class RenderSystem {
         ctx.restore();
 
         ctx.restore();
+      } else if (s.type === 'flag_fort') {
+        // ── Flag Fort — tower icon with a waving flag ──
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const dmgDarken = (1 - hpFrac) * 0.5;
+        const ts = 38 * zoom;
+
+        // Tower body
+        ctx.fillStyle   = isHovered ? '#ffcc66' : '#cc8822';
+        ctx.strokeStyle = '#664400';
+        ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
+        ctx.fillRect(-ts * 0.4, -ts * 0.5, ts * 0.8, ts);
+        ctx.strokeRect(-ts * 0.4, -ts * 0.5, ts * 0.8, ts);
+
+        // Battlements (3 merlons)
+        ctx.fillStyle = isHovered ? '#ffddaa' : '#ddaa44';
+        for (let m = -1; m <= 1; m++) {
+          ctx.fillRect((m * ts * 0.28) - ts * 0.12, -ts * 0.5 - ts * 0.18, ts * 0.22, ts * 0.18);
+        }
+
+        // Flag pole
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = Math.max(1, 1.5 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(ts * 0.15, -ts * 0.5 - ts * 0.18);
+        ctx.lineTo(ts * 0.15, -ts * 0.5 - ts * 0.58);
+        ctx.stroke();
+
+        // Flag triangle
+        const companyColor = this._companyColor(s.companyId);
+        ctx.fillStyle = companyColor;
+        ctx.beginPath();
+        ctx.moveTo(ts * 0.15, -ts * 0.5 - ts * 0.58);
+        ctx.lineTo(ts * 0.45, -ts * 0.5 - ts * 0.44);
+        ctx.lineTo(ts * 0.15, -ts * 0.5 - ts * 0.30);
+        ctx.closePath();
+        ctx.fill();
+
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          ctx.fillRect(-ts * 0.4, -ts * 0.5, ts * 0.8, ts);
+        }
+      } else if (s.type === 'claim_flag') {
+        // ── Claiming Flag — progress ring + pole ──
+        const progress = (s.claimProgress ?? 0) / 60000;   // 0→1
+        const contested = s.claimContested ?? false;
+        const CAPTURE_MS = 60000;
+        const ringR = 18 * zoom;
+        const companyColor = this._companyColor(s.companyId);
+
+        // Background ring
+        ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+        ctx.lineWidth   = Math.max(2, 3 * zoom);
+        ctx.beginPath();
+        ctx.arc(0, 0, ringR, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Progress arc (clockwise from top)
+        if (progress > 0) {
+          ctx.strokeStyle = contested ? '#ff6600' : companyColor;
+          ctx.lineWidth   = Math.max(2, 3 * zoom);
+          ctx.beginPath();
+          ctx.arc(0, 0, ringR, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+          ctx.stroke();
+        }
+
+        // Flag pole
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth   = Math.max(1, 1.5 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(0, ringR);
+        ctx.lineTo(0, -ringR - 12 * zoom);
+        ctx.stroke();
+
+        // Flag
+        ctx.fillStyle = isHovered ? '#ff8888' : companyColor;
+        ctx.beginPath();
+        ctx.moveTo(0,       -ringR - 12 * zoom);
+        ctx.lineTo(12 * zoom, -ringR - 4 * zoom);
+        ctx.lineTo(0,       -ringR + 4 * zoom);
+        ctx.closePath();
+        ctx.fill();
+
+        void CAPTURE_MS; // referenced via progress = claimProgress / 60000
       }
     } // end for sorted
 
@@ -4995,6 +5104,8 @@ export class RenderSystem {
                  : s.type === 'wreck' ? 'Shipwreck'
                  : s.type === 'wood_ceiling' ? 'Wood Ceiling'
                  : s.type === 'cannon' ? 'Cannon'
+                 : s.type === 'flag_fort' ? 'Flag Fort'
+                 : s.type === 'claim_flag' ? 'Claiming Flag'
                  : 'Workbench';
 
       // Determine ownership line text + color
@@ -5674,6 +5785,7 @@ export class RenderSystem {
                   : this.islandBuildKind === 'door' ? 'Door'
                   : this.islandBuildKind === 'wood_ceiling' ? 'Wood Ceiling'
                   : this.islandBuildKind === 'cannon' ? 'Cannon'
+                  : this.islandBuildKind === 'flag_fort' ? 'Flag Fort'
                   : 'Workbench';
       ctx.fillText(label, msp.x, labelY);
     }
@@ -8510,6 +8622,86 @@ export class RenderSystem {
       }
     }
     return tMin;
+  }
+
+  // ── Territory helpers ───────────────────────────────────────────────────────
+
+  /** Returns a CSS color string for a given company id. */
+  private _companyColor(companyId: number): string {
+    if (companyId === 0) return '#888888';
+    if (companyId === 1) return '#ddaa00';  // COMPANY_SOLO — gold
+    if (companyId === 2) return '#cc3333';  // COMPANY_PIRATES — red
+    if (companyId === 3) return '#3366cc';  // COMPANY_NAVY — blue
+    if (companyId === 99) return '#33cc99'; // COMPANY_GHOST — teal
+    // Dynamic companies (≥100): hash into a palette
+    const palette = ['#e06c22','#22a0e0','#22e06c','#e022a0','#a0e022','#6c22e0','#e0a022','#22e0a0'];
+    return palette[(companyId - 100) % palette.length];
+  }
+
+  /**
+   * Draw the territory claim overlay for all claimed islands.
+   * Called each frame when Alt is held.
+   */
+  private drawTerritoryOverlay(camera: Camera): void {
+    const ctx = this.ctx;
+    const zoom = camera.getState().zoom;
+
+    for (const isl of this.islands) {
+      const claimCompany = this._islandClaims.get(isl.id);
+      if (claimCompany === undefined || claimCompany === 0) continue;
+
+      const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
+      for (const off of wrapOffsets) {
+        const islandX = isl.x + off.dx;
+        const islandY = isl.y + off.dy;
+
+        const color = this._companyColor(claimCompany);
+        const companyName = this._cachedCompanies.find(c => c.id === claimCompany)?.name
+          ?? (claimCompany === 1 ? 'Solo' : claimCompany === 2 ? 'Pirates' : claimCompany === 3 ? 'Navy' : `Company #${claimCompany}`);
+
+        ctx.save();
+
+        // Fill the island polygon with the company color (semi-transparent)
+        if (isl.vertices && isl.vertices.length > 2) {
+          const screenVerts = isl.vertices.map(v =>
+            camera.worldToScreen(Vec2.from(v.x + off.dx, v.y + off.dy))
+          );
+          ctx.beginPath();
+          screenVerts.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
+          ctx.closePath();
+          ctx.fillStyle = color + '44'; // 27% opacity
+          ctx.fill();
+          ctx.strokeStyle = color + 'aa';
+          ctx.lineWidth = Math.max(1, 2.5 * zoom);
+          ctx.stroke();
+        } else {
+          // Fallback: circle
+          const sc = camera.worldToScreen(Vec2.from(islandX, islandY));
+          const r = Math.max(40, 150 * zoom);
+          ctx.beginPath();
+          ctx.arc(sc.x, sc.y, r, 0, Math.PI * 2);
+          ctx.fillStyle = color + '44';
+          ctx.fill();
+          ctx.strokeStyle = color + 'aa';
+          ctx.lineWidth = Math.max(1, 2.5 * zoom);
+          ctx.stroke();
+        }
+
+        // Company label in the centre
+        const sc = camera.worldToScreen(Vec2.from(islandX, islandY));
+        const fontSize = Math.max(11, Math.round(13 * zoom));
+        ctx.font = `bold ${fontSize}px Georgia, serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        ctx.lineWidth = Math.max(2, 3 * zoom);
+        ctx.strokeText(companyName, sc.x, sc.y);
+        ctx.fillText(companyName, sc.x, sc.y);
+
+        ctx.restore();
+      }
+    }
   }
 
   private drawCannonGroupOverlay(ship: Ship, camera: Camera): void {

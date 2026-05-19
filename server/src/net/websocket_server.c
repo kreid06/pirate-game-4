@@ -1364,6 +1364,7 @@ static void remove_player(uint32_t player_id) {
 
 // ── Cannon aim, fire, weapon groups ─────────────────────────────────────────
 #include "net/cannon_fire.h"
+#include "net/claim.h"
 
 // Forward declarations now in ship_init.h
 
@@ -9940,6 +9941,9 @@ void websocket_server_tick(float dt) {
      * so the dock constraint is the last thing to write angular_velocity
      * before sim_step integrates it into position. */
     handle_ship_dock_collisions();
+
+    /* Advance claiming-flag timers */
+    claim_tick((uint32_t)(dt * 1000.0f));
 
     // Tick processing complete
 }

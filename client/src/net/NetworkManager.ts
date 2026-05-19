@@ -647,6 +647,12 @@ export class NetworkManager {
   public onCraftingOpen: ((structureId: number, structureType: string) => void) | null = null;
   /** Fired when the server confirms a craft_item request. */
   public onCraftResult: ((success: boolean, recipeId: string, reason?: string) => void) | null = null;
+  /** Fired when an island territory changes ownership (flag fort placed or destroyed). */
+  public onTerritoryUpdate: ((islandId: number, companyId: number, claimed: boolean) => void) | null = null;
+  /** Fired when a claiming flag's progress changes. */
+  public onClaimFlagProgress: ((structId: number, progressMs: number, contested: boolean) => void) | null = null;
+  /** Fired when a claiming flag finishes capturing territory. */
+  public onTerritoryCaptured: ((islandId: number, newCompanyId: number) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
   public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number) => void) | null = null;
   /** Fired when the server rejects a structure placement with a reason string. */
@@ -1375,7 +1381,7 @@ export class NetworkManager {
    * The server validates that the player is on an island, has the item, and for
    * workbench that a floor tile is close enough.
    */
-  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon', x: number, y: number, rotationDeg = 0): void {
+  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort', x: number, y: number, rotationDeg = 0): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y, rotation: rotationDeg });
   }
@@ -2588,6 +2594,8 @@ export class NetworkManager {
                    : s.structure_type === 'wreck'        ? 'wreck'
                    : s.structure_type === 'wood_ceiling' ? 'wood_ceiling'
                    : s.structure_type === 'cannon'       ? 'cannon'
+                   : s.structure_type === 'flag_fort'    ? 'flag_fort'
+                   : s.structure_type === 'claim_flag'   ? 'claim_flag'
                    : 'wooden_floor',
           islandId:  s.island_id ?? 0,
           x:         s.x ?? 0,
@@ -2620,6 +2628,8 @@ export class NetworkManager {
                    : message.structure_type === 'wreck'        ? 'wreck'
                    : message.structure_type === 'wood_ceiling' ? 'wood_ceiling'
                    : message.structure_type === 'cannon'       ? 'cannon'
+                   : message.structure_type === 'flag_fort'    ? 'flag_fort'
+                   : message.structure_type === 'claim_flag'   ? 'claim_flag'
                    : 'wooden_floor',
           islandId:  message.island_id ?? 0,
           x:         message.x ?? 0,
@@ -2631,6 +2641,8 @@ export class NetworkManager {
           doorOpen:  message.open ?? false,
           rotation:  message.rotation ?? 0,
           cannonAimAngle: typeof message.cannon_aim_angle === 'number' ? message.cannon_aim_angle : undefined,
+          claimProgress: typeof message.claim_progress_ms === 'number' ? message.claim_progress_ms : undefined,
+          claimContested: message.claim_contested === true,
         };
         this.onStructurePlaced?.(sp);
         break;
@@ -2656,6 +2668,29 @@ export class NetworkManager {
       case 'wreck_removed':
         this.onWreckRemoved?.(message.id ?? 0);
         this.onStructureDemolished?.(message.id ?? 0);
+        break;
+
+      case 'territory_update':
+        this.onTerritoryUpdate?.(
+          message.island_id   ?? 0,
+          message.company_id  ?? 0,
+          message.claimed === true,
+        );
+        break;
+
+      case 'claim_flag_progress':
+        this.onClaimFlagProgress?.(
+          message.structure_id ?? message.id ?? 0,
+          message.progress_ms  ?? 0,
+          message.contested    === true,
+        );
+        break;
+
+      case 'territory_captured':
+        this.onTerritoryCaptured?.(
+          message.island_id      ?? 0,
+          message.new_company_id ?? message.company_id ?? 0,
+        );
         break;
 
       case 'door_toggled':

@@ -209,6 +209,19 @@ const RECIPES: Recipe[] = [
       { label: 'Wood', count: 5 },
     ],
   },
+  {
+    id: 'craft_flag_fort',
+    category: 'Structures',
+    outputName: 'Flag Fort',
+    outputCount: 1,
+    symbol: '🏰',
+    color: '#cc8822',
+    borderColor: '#886611',
+    ingredients: [
+      { label: 'Wood',  count: 40 },
+      { label: 'Stone', count: 40 },
+    ],
+  },
   // ── Ship ──────────────────────────────────────────────────────────────────
   {
     id: 'craft_plank',

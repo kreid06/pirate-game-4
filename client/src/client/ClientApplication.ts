@@ -164,7 +164,7 @@ export class ClientApplication {
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
   /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
-  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | null = null;
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
@@ -193,6 +193,8 @@ export class ClientApplication {
   private islandEditor: IslandEditor | null = null;
   /** True when the player's active slot is wooden_floor or workbench on an island. */
   private islandBuildMode = false;
+  /** When true, renders the territory claim overlay (Alt key held). */
+  private showTerritoryOverlay = false;
   private accumulator = 0;
   private readonly clientTickDuration: number; // milliseconds per client tick
   
@@ -1235,7 +1237,7 @@ export class ClientApplication {
           const pid = this.networkManager.getAssignedPlayerId();
           const p   = ws?.players.find(pl => pl.id === pid);
           const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
-          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon') {
+          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon' || kind === 'flag_fort') {
             // Compute snap at click time (not from stale render state)
             const pos = kind === 'wooden_floor'
               ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
@@ -2101,6 +2103,22 @@ export class ClientApplication {
         this._structureCompanyMap.set(s.id, s.companyId ?? 0);
         this.renderSystem.addPlacedStructure(s);
       };
+
+      // Territory claim events
+      this.networkManager.onTerritoryUpdate = (islandId, companyId, claimed) => {
+        if (claimed) {
+          this.renderSystem.setIslandClaim(islandId, companyId);
+        } else {
+          this.renderSystem.clearIslandClaim(islandId);
+        }
+      };
+      this.networkManager.onTerritoryCaptured = (islandId, newCompanyId) => {
+        this.renderSystem.setIslandClaim(islandId, newCompanyId);
+        this.renderSystem.showAnnouncement(`🏰 Island ${islandId} captured!`, 'info', 3.0);
+      };
+      this.networkManager.onClaimFlagProgress = (structId, progressMs, contested) => {
+        this.renderSystem.updateClaimFlagProgress(structId, progressMs, contested);
+      };
       this.networkManager.onPlacementFailed = (reason, _x, _y, _structureType, blockerId) => {
         const REASONS: Record<string, string> = {
           occupied:          'Space already occupied',
@@ -2109,7 +2127,12 @@ export class ClientApplication {
           needs_floor_edge:  'Must snap to a floor edge',
           needs_door_frame:  'Requires a door frame',
           wrong_company:     'Belongs to another company',
-          enemy_territory:   'Enemy territory',
+          enemy_territory:       'Enemy territory',
+          island_already_claimed: 'Island already claimed',
+          fort_exists:            'Fort already exists on this island',
+          not_on_island:          'Must be placed on an island',
+          not_contested_territory: 'Not in contested territory',
+          no_flag_fort:           'Your company has no flag fort',
           blocked_by_player: 'Blocked by a player',
           too_far:           'Too far away',
           in_water:          'Cannot place in water',
@@ -3018,11 +3041,11 @@ export class ClientApplication {
     const inDeckBuildMode   = activeItem === 'deck';
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
-    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling' || activeItem === 'cannon');
+    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling' || activeItem === 'cannon' || activeItem === 'flag_fort');
     this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
     this.inputManager.islandBuildMode = this.islandBuildMode;
     this.renderSystem.setIslandBuildItem(
-      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon') : null
+      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort') : null
     );
     this.renderSystem.setIslandBuildRotation(this.islandBuildMode ? this.islandBuildRotationDeg : 0);
 
@@ -4107,6 +4130,21 @@ export class ClientApplication {
           e.preventDefault();
           break;
         }
+      }
+    });
+
+    // Alt key — show territory claim overlay while held
+    window.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Alt') {
+        ev.preventDefault(); // suppress browser menu activation
+        this.showTerritoryOverlay = true;
+        this.renderSystem.setTerritoryOverlay(true);
+      }
+    });
+    window.addEventListener('keyup', (ev) => {
+      if (ev.key === 'Alt') {
+        this.showTerritoryOverlay = false;
+        this.renderSystem.setTerritoryOverlay(false);
       }
     });
 
