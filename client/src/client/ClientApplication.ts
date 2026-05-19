@@ -3063,6 +3063,10 @@ export class ClientApplication {
     );
     this.renderSystem.setIslandBuildRotation(this.islandBuildMode ? this.islandBuildRotationDeg : 0);
 
+    // Show territory claim overlay when Alt is held OR a territory item is active in the hotbar
+    const territoryHotbarActive = activeItem === 'flag_fort' || activeItem === 'claim_flag' || activeItem === 'company_fortress';
+    this.renderSystem.setTerritoryOverlay(this.showTerritoryOverlay || territoryHotbarActive);
+
     // Track whether the active item changed while in explicit build mode
     if (this.explicitBuildMode) {
       if (activeItem === 'cannon' || activeItem === 'sail' || activeItem === 'swivel') {

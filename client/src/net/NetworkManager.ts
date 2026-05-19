@@ -2614,6 +2614,12 @@ export class NetworkManager {
           doorOpen:  s.open ?? false,
           rotation:  s.rotation ?? 0,
           cannonAimAngle: typeof s.cannon_aim_angle === 'number' ? s.cannon_aim_angle : undefined,
+          claimProgress:         typeof s.claim_progress_ms === 'number' ? s.claim_progress_ms : undefined,
+          claimContested:        s.claim_contested        === true,
+          claimTargetsFortress:  s.claim_targets_fortress  === true,
+          fortressBuildProgress: typeof s.fortress_build_progress === 'number' ? s.fortress_build_progress : undefined,
+          fortressComplete:      s.fortress_complete       === true,
+          fortressContested:     s.fortress_contested      === true,
           construction: s.structure_type === 'shipyard' ? {
             phase: (s.construction_phase === 'building' ? 'building' : 'empty') as ConstructionPhase,
             modulesPlaced: Array.isArray(s.modules_placed) ? s.modules_placed : [],

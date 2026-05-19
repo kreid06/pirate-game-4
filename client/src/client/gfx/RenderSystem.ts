@@ -4949,17 +4949,19 @@ export class RenderSystem {
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
 
-        // Claim radius circle (always visible for own fort, faint for others)
-        const ringAlpha = isOwn ? 0.18 : (isHovered ? 0.12 : 0.07);
-        ctx.beginPath();
-        ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
-        ctx.fillStyle = companyColor + Math.round(ringAlpha * 255).toString(16).padStart(2, '0');
-        ctx.fill();
-        ctx.strokeStyle = companyColor + 'aa';
-        ctx.lineWidth = Math.max(1, 1.5 * zoom);
-        ctx.setLineDash([Math.max(4, 8 * zoom), Math.max(3, 5 * zoom)]);
-        ctx.stroke();
-        ctx.setLineDash([]);
+        // Claim radius circle — only visible when territory overlay is active
+        if (this._showTerritoryOverlay) {
+          const ringAlpha = isOwn ? 0.18 : (isHovered ? 0.12 : 0.07);
+          ctx.beginPath();
+          ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
+          ctx.fillStyle = companyColor + Math.round(ringAlpha * 255).toString(16).padStart(2, '0');
+          ctx.fill();
+          ctx.strokeStyle = companyColor + 'aa';
+          ctx.lineWidth = Math.max(1, 1.5 * zoom);
+          ctx.setLineDash([Math.max(4, 8 * zoom), Math.max(3, 5 * zoom)]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
 
         // Tower base (stone)
         const stoneR = Math.round(hpFrac * 120 + 60);
@@ -5012,30 +5014,32 @@ export class RenderSystem {
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
 
-        if (complete) {
-          // Completed: show whole-island tinted ring (faint fill) + full fortress
-          const ringAlpha = isOwn ? 0.12 : (isHovered ? 0.09 : 0.05);
-          ctx.beginPath();
-          ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
-          ctx.fillStyle = companyColor + Math.round(ringAlpha * 255).toString(16).padStart(2, '0');
-          ctx.fill();
-          ctx.strokeStyle = companyColor + 'dd';
-          ctx.lineWidth = Math.max(1.5, 2.5 * zoom);
-          ctx.setLineDash([]);
-          ctx.stroke();
-        } else {
-          // Under construction: dashed ring + scaffold fill
-          const ringAlpha = 0.06;
-          ctx.beginPath();
-          ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
-          ctx.fillStyle = companyColor + Math.round(ringAlpha * 255).toString(16).padStart(2, '0');
-          ctx.fill();
-          const dashLen = Math.max(5, 10 * zoom);
-          ctx.strokeStyle = companyColor + (contested ? 'ff' : '88');
-          ctx.lineWidth = Math.max(1, 2 * zoom);
-          ctx.setLineDash([dashLen, dashLen]);
-          ctx.stroke();
-          ctx.setLineDash([]);
+        if (this._showTerritoryOverlay) {
+          if (complete) {
+            // Completed: show whole-island tinted ring (faint fill) + full fortress
+            const ringAlpha = isOwn ? 0.12 : (isHovered ? 0.09 : 0.05);
+            ctx.beginPath();
+            ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
+            ctx.fillStyle = companyColor + Math.round(ringAlpha * 255).toString(16).padStart(2, '0');
+            ctx.fill();
+            ctx.strokeStyle = companyColor + 'dd';
+            ctx.lineWidth = Math.max(1.5, 2.5 * zoom);
+            ctx.setLineDash([]);
+            ctx.stroke();
+          } else {
+            // Under construction: dashed ring + scaffold fill
+            const ringAlpha = 0.06;
+            ctx.beginPath();
+            ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
+            ctx.fillStyle = companyColor + Math.round(ringAlpha * 255).toString(16).padStart(2, '0');
+            ctx.fill();
+            const dashLen = Math.max(5, 10 * zoom);
+            ctx.strokeStyle = companyColor + (contested ? 'ff' : '88');
+            ctx.lineWidth = Math.max(1, 2 * zoom);
+            ctx.setLineDash([dashLen, dashLen]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
         }
 
         // Stone walls (larger than flag_fort)
@@ -8875,6 +8879,25 @@ export class RenderSystem {
           ctx.stroke();
           ctx.setLineDash([]);
         }
+
+        // Per-structure build-prevention radius (400px) — shows the no-build zone each structure extends
+        const CLAIM_RADIUS_DEFAULT = 400;
+        const islStructs = this.placedStructures.filter(
+          ps => ps.islandId === isl.id && ps.companyId === claimCompany
+        );
+        ctx.setLineDash([Math.max(3, 5 * zoom), Math.max(3, 5 * zoom)]);
+        ctx.lineWidth = Math.max(0.5, 1 * zoom);
+        for (const ps of islStructs) {
+          // Skip the fort structures (already drawn their own larger ring above)
+          if (ps.type === 'flag_fort' || ps.type === 'company_fortress') continue;
+          const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
+          const psR = CLAIM_RADIUS_DEFAULT * zoom;
+          ctx.beginPath();
+          ctx.arc(psScrn.x, psScrn.y, psR, 0, Math.PI * 2);
+          ctx.strokeStyle = color + '66';
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
 
         // Company label in the centre
         const sc = camera.worldToScreen(Vec2.from(islandX, islandY));
