@@ -8880,22 +8880,63 @@ export class RenderSystem {
           ctx.setLineDash([]);
         }
 
-        // Per-structure build-prevention radius (400px) — shows the no-build zone each structure extends
+        // Per-structure claim radius (400px) — active (connected to fort) vs inactive
         const CLAIM_RADIUS_DEFAULT = 400;
         const islStructs = this.placedStructures.filter(
           ps => ps.islandId === isl.id && ps.companyId === claimCompany
         );
-        ctx.setLineDash([Math.max(3, 5 * zoom), Math.max(3, 5 * zoom)]);
+        const fortStructs  = islStructs.filter(ps => ps.type === 'flag_fort' || ps.type === 'company_fortress');
+        const nonFortStructs = islStructs.filter(ps => ps.type !== 'flag_fort' && ps.type !== 'company_fortress');
+
+        // BFS: find all structures connected (within 400px chain) from any fort
+        const connected = new Set<number>();
+        const bfsQueue: typeof nonFortStructs = [];
+        for (const ps of nonFortStructs) {
+          for (const fort of fortStructs) {
+            const dx = ps.x - fort.x, dy = ps.y - fort.y;
+            if (dx * dx + dy * dy <= CLAIM_RADIUS_DEFAULT * CLAIM_RADIUS_DEFAULT) {
+              connected.add(ps.id);
+              bfsQueue.push(ps);
+              break;
+            }
+          }
+        }
+        let qi = 0;
+        while (qi < bfsQueue.length) {
+          const cur = bfsQueue[qi++];
+          for (const ps of nonFortStructs) {
+            if (connected.has(ps.id)) continue;
+            const dx = ps.x - cur.x, dy = ps.y - cur.y;
+            if (dx * dx + dy * dy <= CLAIM_RADIUS_DEFAULT * CLAIM_RADIUS_DEFAULT) {
+              connected.add(ps.id);
+              bfsQueue.push(ps);
+            }
+          }
+        }
+
+        const psR = CLAIM_RADIUS_DEFAULT * zoom;
         ctx.lineWidth = Math.max(0.5, 1 * zoom);
-        for (const ps of islStructs) {
-          // Skip the fort structures (already drawn their own larger ring above)
-          if (ps.type === 'flag_fort' || ps.type === 'company_fortress') continue;
+        for (const ps of nonFortStructs) {
           const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
-          const psR = CLAIM_RADIUS_DEFAULT * zoom;
+          const isConn = connected.has(ps.id);
           ctx.beginPath();
           ctx.arc(psScrn.x, psScrn.y, psR, 0, Math.PI * 2);
-          ctx.strokeStyle = color + '66';
-          ctx.stroke();
+          if (isConn) {
+            // Active — colored fill + solid stroke, extends territory
+            ctx.fillStyle = color + '18';
+            ctx.fill();
+            ctx.setLineDash([]);
+            ctx.strokeStyle = color + '88';
+            ctx.stroke();
+          } else {
+            // Inactive — greyed out, dashed, not contributing to territory
+            ctx.fillStyle = 'rgba(128,128,128,0.05)';
+            ctx.fill();
+            ctx.setLineDash([Math.max(3, 4 * zoom), Math.max(3, 4 * zoom)]);
+            ctx.strokeStyle = 'rgba(160,160,160,0.35)';
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
         }
         ctx.setLineDash([]);
 
