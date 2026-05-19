@@ -5109,14 +5109,18 @@ export class RenderSystem {
                  : 'Workbench';
 
       // Determine ownership line text + color
-      const COMPANY_NAMES: Record<number, string> = { 1: 'Pirates', 2: 'Navy', 99: 'Ghosts' };
+      // Company IDs match server constants: SOLO=1, PIRATES=2, NAVY=3, GHOST=99, dynamic≥100
+      const COMPANY_NAMES: Record<number, string> = { 1: 'Solo', 2: 'Pirates', 3: 'Navy', 99: 'Ghosts' };
       let ownerText: string;
       if (s.companyId !== 0 && COMPANY_NAMES[s.companyId]) {
         ownerText = COMPANY_NAMES[s.companyId];
       } else if (s.companyId !== 0 && s.companyId >= 100) {
         ownerText = this._cachedCompanies.find(c => c.id === s.companyId)?.name ?? `Company #${s.companyId}`;
-      } else if (s.placerName) {
+      } else if (s.companyId === 1 && s.placerName) {
+        // COMPANY_SOLO: show "Player: name" since solo means individual ownership
         ownerText = `Player: ${s.placerName}`;
+      } else if (s.placerName) {
+        ownerText = s.placerName;
       } else {
         ownerText = 'Unclaimed';
       }

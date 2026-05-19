@@ -849,13 +849,15 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                  ",\"cannon_aim_angle\":%.4f",
                  placed_structures[placed_structure_count - 1].cannon_aim_angle);
     }
+    uint16_t bcast_hp     = placed_structures[placed_structure_count - 1].hp;
+    uint16_t bcast_max_hp = placed_structures[placed_structure_count - 1].max_hp;
     snprintf(bcast, sizeof(bcast),
              "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
              "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
              ",\"rotation\":%.2f%s%s}",
              new_id, stype, target_island_id, px, py,
-             (unsigned)player->company_id, 100u, 100u, player->name,
+             (unsigned)player->company_id, (unsigned)bcast_hp, (unsigned)bcast_max_hp, player->name,
              bcast_rot,
              new_is_door ? ",\"open\":false" : "",
              cannon_extra);
