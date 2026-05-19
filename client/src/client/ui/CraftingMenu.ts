@@ -222,6 +222,20 @@ const RECIPES: Recipe[] = [
       { label: 'Stone', count: 40 },
     ],
   },
+  {
+    id: 'craft_company_fortress',
+    category: 'Structures',
+    outputName: 'Company Fortress',
+    outputCount: 1,
+    symbol: '🏯',
+    color: '#8844cc',
+    borderColor: '#5522aa',
+    ingredients: [
+      { label: 'Wood',  count: 100 },
+      { label: 'Stone', count: 100 },
+      { label: 'Metal', count: 20 },
+    ],
+  },
   // ── Ship ──────────────────────────────────────────────────────────────────
   {
     id: 'craft_plank',

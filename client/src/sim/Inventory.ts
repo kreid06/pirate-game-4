@@ -44,6 +44,7 @@ export type ItemKind =
   | 'wood_ceiling'
   | 'claim_flag'
   | 'flag_fort'
+  | 'company_fortress'
   | 'cloth_hat'
   | 'cloth_shirt'
   | 'cloth_pants'
@@ -101,7 +102,8 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   stone:         { kind: 'stone',         name: 'Stone',         category: 'none',     maxStack: 99, color: '#9a9a9c', borderColor: '#666668', symbol: 'St', description: 'Raw stone gathered from rocky outcroppings. Used for crafting.' },
   wood_ceiling:  { kind: 'wood_ceiling',  name: 'Wood Ceiling',  category: 'building', maxStack: 20, color: '#b8832b', borderColor: '#7a5520', symbol: '\u25a6', description: 'A wooden ceiling tile. Fits over a floor section.' },
   claim_flag:    { kind: 'claim_flag',    name: 'Claiming Flag', category: 'building', maxStack: 5,  color: '#dd3333', borderColor: '#991111', symbol: '\uD83D\uDEA9', description: 'Plant in contested territory to capture it for your company over 60 seconds.' },
-  flag_fort:     { kind: 'flag_fort',     name: 'Flag Fort',     category: 'building', maxStack: 1,  color: '#cc8822', borderColor: '#886611', symbol: '\uD83C\uDFF0', description: 'Place on an unclaimed island to establish your company\u2019s territory claim.' },
+  flag_fort:       { kind: 'flag_fort',       name: 'Flag Fort',        category: 'building', maxStack: 1,  color: '#cc8822', borderColor: '#886611', symbol: '\uD83C\uDFF0', description: 'Place on an unclaimed island to establish your company\u2019s territory claim.' },
+  company_fortress: { kind: 'company_fortress', name: 'Company Fortress', category: 'building', maxStack: 1,  color: '#8844cc', borderColor: '#5522aa', symbol: '\uD83C\uDFAF', description: 'Place on an island to begin a 15-minute build. Claims the entire island when complete.' },
   /* ── Cloth armour set ─────────────────────────────────────────────────── */
   cloth_hat:     { kind: 'cloth_hat',     name: 'Cloth Hat',     category: 'armor',    maxStack: 1,  color: '#9e8f5a', borderColor: '#6b5f35', symbol: '\u26D1', description: 'Light cloth helm. +5 armour. Reduces incoming damage.' },
   cloth_shirt:   { kind: 'cloth_shirt',   name: 'Cloth Shirt',   category: 'armor',    maxStack: 1,  color: '#8b7f4a', borderColor: '#5c5430', symbol: 'Cs', description: 'Light cloth chest. +20 armour. Reduces incoming damage.' },
@@ -147,6 +149,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   28: 'wood_ceiling',
   29: 'claim_flag',
   35: 'flag_fort',
+  36: 'company_fortress',
   30: 'cloth_hat',
   31: 'cloth_shirt',
   32: 'cloth_pants',

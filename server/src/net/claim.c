@@ -52,33 +52,53 @@ static inline float dist2(float ax, float ay, float bx, float by) {
 
 /** Effective claim radius for a structure type. */
 static inline float struct_claim_radius(PlacedStructureType t) {
-    return (t == STRUCT_FLAG_FORT) ? CLAIM_RADIUS_FLAG_FORT : CLAIM_RADIUS_DEFAULT;
+    if (t == STRUCT_FLAG_FORT)      return CLAIM_RADIUS_FLAG_FORT;
+    if (t == STRUCT_COMPANY_FORTRESS) return CLAIM_RADIUS_COMPANY_FORT;
+    return CLAIM_RADIUS_DEFAULT;
 }
 
 /** Broadcast a territory_update JSON message with optional fort position. */
 static void broadcast_territory_update(uint8_t island_id, uint32_t company_id,
                                        bool claimed) {
-    /* Find the fort position for this island (so client can draw the radius ring) */
+    /* Find the Company Fortress position for this island */
     float fort_x = 0.0f, fort_y = 0.0f;
+    bool  is_company_fort = false;
     if (claimed) {
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             PlacedStructure *s = &placed_structures[si];
             if (!s->active) continue;
-            if (s->type != STRUCT_FLAG_FORT) continue;
-            if (s->island_id == island_id && s->company_id == (uint8_t)company_id) {
+            if (s->island_id != island_id) continue;
+            if (s->company_id != (uint8_t)company_id) continue;
+            if (s->type == STRUCT_COMPANY_FORTRESS && s->fortress_complete) {
                 fort_x = s->x;
                 fort_y = s->y;
+                is_company_fort = true;
                 break;
             }
         }
+        if (!is_company_fort) {
+            /* Fall back to flag fort position */
+            for (uint32_t si = 0; si < placed_structure_count; si++) {
+                PlacedStructure *s = &placed_structures[si];
+                if (!s->active) continue;
+                if (s->type != STRUCT_FLAG_FORT) continue;
+                if (s->island_id == island_id && s->company_id == (uint8_t)company_id) {
+                    fort_x = s->x;
+                    fort_y = s->y;
+                    break;
+                }
+            }
+        }
     }
-    char msg[192];
+    char msg[256];
     snprintf(msg, sizeof(msg),
              "{\"type\":\"territory_update\",\"island_id\":%u,"
              "\"company_id\":%u,\"claimed\":%s"
-             ",\"fort_x\":%.1f,\"fort_y\":%.1f,\"fort_radius\":%.0f}",
+             ",\"fort_x\":%.1f,\"fort_y\":%.1f,\"fort_radius\":%.0f"
+             ",\"is_company_fortress\":%s}",
              island_id, company_id, claimed ? "true" : "false",
-             fort_x, fort_y, (float)CLAIM_RADIUS_FLAG_FORT);
+             fort_x, fort_y, (float)CLAIM_RADIUS_FLAG_FORT,
+             is_company_fort ? "true" : "false");
     websocket_server_broadcast(msg);
 }
 
@@ -166,34 +186,74 @@ IslandClaim *island_get_claim(uint8_t island_id) {
 }
 
 /**
- * Register a new island claim when a flag fort is successfully placed.
- * Returns false if the island is already claimed.
+ * Called when a Flag Fort is placed. Flag Forts project a radius but do NOT
+ * register an IslandClaim (only a completed Company Fortress does that).
+ * Returns true always (placement is handled by structures.c).
  */
 bool claim_register_fort(uint8_t island_id, uint32_t company_id,
                          uint32_t fort_struct_id, uint32_t placer_id) {
-    if (island_get_claim(island_id)) return false;  /* already claimed */
+    (void)island_id; (void)company_id; (void)fort_struct_id; (void)placer_id;
+    log_info("🚩 Flag Fort #%u placed by company %u on island %u (radius claim)",
+             fort_struct_id, company_id, island_id);
+    return true;
+}
 
-    /* Find or allocate a slot */
-    IslandClaim *slot = NULL;
-    for (int i = 0; i < island_claim_count; i++) {
-        if (!island_claims[i].active) { slot = &island_claims[i]; break; }
+/**
+ * Register a completed Company Fortress island claim.
+ * Destroys ALL other incomplete Company Fortresses on this island (any company).
+ * Returns false if the island already has a completed Company Fortress.
+ */
+bool claim_register_company_fortress(uint8_t island_id, uint32_t company_id,
+                                     uint32_t struct_id, uint32_t placer_id) {
+    /* Reject if already claimed by another company's fortress */
+    IslandClaim *existing = island_get_claim(island_id);
+    if (existing && existing->company_id != company_id) {
+        /* Another company already owns this island — should not happen due to contest */
+        return false;
     }
-    if (!slot) {
-        if (island_claim_count >= MAX_ISLAND_CLAIMS) return false;
-        slot = &island_claims[island_claim_count++];
+    if (existing && existing->company_id == company_id) {
+        /* We already have a claim — update to new struct_id */
+        existing->fort_structure_id = struct_id;
+        existing->fort_placer_id    = placer_id;
+    } else {
+        /* Allocate new slot */
+        IslandClaim *slot = NULL;
+        for (int i = 0; i < island_claim_count; i++) {
+            if (!island_claims[i].active) { slot = &island_claims[i]; break; }
+        }
+        if (!slot) {
+            if (island_claim_count >= MAX_ISLAND_CLAIMS) return false;
+            slot = &island_claims[island_claim_count++];
+        }
+        memset(slot, 0, sizeof(*slot));
+        slot->active            = true;
+        slot->island_id         = island_id;
+        slot->company_id        = company_id;
+        slot->fort_structure_id = struct_id;
+        slot->fort_placer_id    = placer_id;
     }
-    memset(slot, 0, sizeof(*slot));
-    slot->active          = true;
-    slot->island_id       = island_id;
-    slot->company_id      = company_id;
-    slot->fort_structure_id = fort_struct_id;
-    slot->fort_placer_id  = placer_id;
 
-    /* Initial graph build — the fort is the only structure so far. */
-    claim_rebuild_graph((uint16_t)fort_struct_id, company_id);
+    /* Destroy ALL other incomplete Company Fortresses on this island */
+    int destroyed = 0;
+    for (uint32_t si = 0; si < placed_structure_count; si++) {
+        PlacedStructure *s = &placed_structures[si];
+        if (!s->active) continue;
+        if (s->type != STRUCT_COMPANY_FORTRESS) continue;
+        if (s->island_id != island_id) continue;
+        if (s->id == struct_id) continue;              /* keep the one that just completed */
+        if (s->fortress_complete) continue;            /* keep other completed ones (shouldn't exist) */
+        s->active = false;
+        char dmsg[128];
+        snprintf(dmsg, sizeof(dmsg),
+                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", s->id);
+        websocket_server_broadcast(dmsg);
+        destroyed++;
+    }
+    if (destroyed > 0)
+        log_info("🏰 Destroyed %d incomplete fortress(es) on island %u", destroyed, island_id);
 
-    log_info("🏴 Island %u claimed by company %u (fort #%u, placer %u)",
-             island_id, company_id, fort_struct_id, placer_id);
+    log_info("🏰 Island %u claimed by company %u via Company Fortress #%u (placer %u)",
+             island_id, company_id, struct_id, placer_id);
     broadcast_territory_update(island_id, company_id, true);
     return true;
 }
@@ -204,61 +264,17 @@ void claim_on_fort_destroyed(uint32_t fort_structure_id) {
         if (!ic->active) continue;
         if (ic->fort_structure_id != fort_structure_id) continue;
 
-        uint8_t  isl_id  = ic->island_id;
-        uint32_t old_co  = ic->company_id;
+        uint8_t  isl_id = ic->island_id;
+        uint32_t old_co = ic->company_id;
 
-        /* --- Check for an active claim flag on this island that was contesting
-               this claim; if so, award territory to the contester. --- */
-        uint32_t conquer_company = 0;
-        float    best_progress   = 0.0f;
-        for (uint32_t si = 0; si < placed_structure_count; si++) {
-            PlacedStructure *s = &placed_structures[si];
-            if (!s->active) continue;
-            if (s->type != STRUCT_CLAIM_FLAG) continue;
-            if (s->island_id != isl_id) continue;
-            if (s->company_id == old_co) continue;
-            if (s->claim_progress_ms > best_progress) {
-                best_progress   = s->claim_progress_ms;
-                conquer_company = s->company_id;
-            }
-        }
-
-        /* Drop the claim */
         ic->active = false;
 
-        /* Orphan all structures that were part of this claim */
-        for (uint32_t si = 0; si < placed_structure_count; si++) {
-            PlacedStructure *s = &placed_structures[si];
-            if (!s->active) continue;
-            if (s->company_id != old_co) continue;
-            if (s->island_id  != isl_id) continue;
-            s->claim_orphaned = true;
-        }
-
-        log_info("🏴 Island %u claim by company %u LOST (fort #%u destroyed)",
+        log_info("🏰 Island %u Company Fortress claim by company %u LOST (struct #%u destroyed)",
                  isl_id, old_co, fort_structure_id);
         broadcast_territory_update(isl_id, old_co, false);
-
-        /* If a contester exists, immediately re-register with them */
-        if (conquer_company != 0) {
-            /* Find any claim flag structure from the conquering company as the
-               new "fort" — they'll need to place a real fort to become permanent */
-            for (uint32_t si = 0; si < placed_structure_count; si++) {
-                PlacedStructure *cf = &placed_structures[si];
-                if (!cf->active) continue;
-                if (cf->type != STRUCT_CLAIM_FLAG) continue;
-                if (cf->island_id != isl_id) continue;
-                if (cf->company_id != conquer_company) continue;
-                /* Transfer ownership of the island temporarily — contested territory
-                   now belongs to the conquering company */
-                log_info("🏴 Island %u contested territory awarded to company %u",
-                         isl_id, conquer_company);
-                broadcast_territory_update(isl_id, conquer_company, true);
-                break;
-            }
-        }
         return;
     }
+    /* Not found in IslandClaim table — was a flag fort (radius-only) or incomplete fortress */
 }
 
 /* ── Territory query ─────────────────────────────────────────────────────── */
@@ -333,38 +349,77 @@ static bool claim_flag_is_contested(float fx, float fy,
 /**
  * Transfer all structures within radius of (fx,fy) from old_co → new_co.
  */
-static void claim_flag_convert_territory(float fx, float fy,
-                                         uint32_t old_co, uint32_t new_co,
-                                         uint8_t island_id,
-                                         uint32_t linked_fort) {
-    const float R2 = CLAIM_RADIUS_DEFAULT * CLAIM_RADIUS_DEFAULT;
-    int converted = 0;
+/* ── Company Fortress build-tick ─────────────────────────────────────────
+   Advances/pauses the 15-minute build timer on every incomplete fortress.   */
+static uint32_t fortress_broadcast_acc_ms = 0;
+static void fortress_tick(uint32_t delta_ms) {
+    fortress_broadcast_acc_ms += delta_ms;
+    bool do_broadcast = (fortress_broadcast_acc_ms >= 1000u);
+    if (do_broadcast) fortress_broadcast_acc_ms = 0;
+
     for (uint32_t si = 0; si < placed_structure_count; si++) {
         PlacedStructure *s = &placed_structures[si];
         if (!s->active) continue;
-        if (s->island_id != island_id) continue;
-        if (s->company_id != old_co) continue;
-        if (dist2(fx, fy, s->x, s->y) > R2) continue;
-        s->company_id = (uint8_t)new_co;
-        s->claim_orphaned = false;
-        converted++;
+        if (s->type != STRUCT_COMPANY_FORTRESS) continue;
+        if (s->fortress_complete) continue;
 
-        /* Broadcast individual structure ownership change */
-        char msg[128];
-        snprintf(msg, sizeof(msg),
-                 "{\"type\":\"structure_captured\",\"id\":%u,\"company_id\":%u}",
-                 s->id, new_co);
-        websocket_server_broadcast(msg);
+        float    fx  = s->x, fy = s->y;
+        uint8_t  isl = s->island_id;
+        uint8_t  co  = s->company_id;
+
+        /* Detect any enemy player within contest radius */
+        bool contested = false;
+        for (uint32_t pi = 0; pi < MAX_PLAYERS; pi++) {
+            WebSocketPlayer *p = &players[pi];
+            if (!p->active || p->player_id == 0) continue;
+            if ((uint8_t)p->company_id == co) continue;
+            if ((uint8_t)p->on_island_id != isl) continue;
+            float dx = p->x - fx, dy = p->y - fy;
+            if (dx*dx + dy*dy <= CLAIM_RADIUS_COMPANY_FORT * CLAIM_RADIUS_COMPANY_FORT) {
+                contested = true;
+                break;
+            }
+        }
+        s->claim_contested = contested;
+
+        if (!contested) {
+            s->claim_progress_ms += (float)delta_ms;
+            if (s->claim_progress_ms >= (float)COMPANY_FORTRESS_BUILD_MS) {
+                s->claim_progress_ms = (float)COMPANY_FORTRESS_BUILD_MS;
+                s->fortress_complete = true;
+                s->hp                = s->max_hp;
+
+                log_info("🏰 Company Fortress #%u (company %u, island %u) COMPLETED!",
+                         s->id, co, isl);
+                claim_register_company_fortress(isl, (uint32_t)co,
+                                                s->id, s->placer_id);
+                char msg[192];
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"fortress_complete\",\"structure_id\":%u"
+                         ",\"company_id\":%u,\"island_id\":%u}", s->id, co, isl);
+                websocket_server_broadcast(msg);
+                continue;
+            }
+        }
+
+        if (do_broadcast) {
+            char msg[192];
+            snprintf(msg, sizeof(msg),
+                     "{\"type\":\"fortress_build_progress\",\"structure_id\":%u"
+                     ",\"company_id\":%u,\"island_id\":%u"
+                     ",\"progress_ms\":%.0f,\"total_ms\":%u,\"contested\":%s}",
+                     s->id, co, isl, s->claim_progress_ms,
+                     COMPANY_FORTRESS_BUILD_MS, contested ? "true" : "false");
+            websocket_server_broadcast(msg);
+        }
     }
-
-    /* Re-link converted structures to the conquering fort */
-    claim_rebuild_graph((uint16_t)linked_fort, new_co);
-
-    log_info("🏴 Claim flag converted %d structures from company %u → %u (island %u)",
-             converted, old_co, new_co, island_id);
 }
 
 void claim_tick(uint32_t delta_ms) {
+    /* Advance Company Fortress build timers */
+    fortress_tick(delta_ms);
+
+    /* ── Claim-flag progress ──────────────────────────────────────────── */
     for (uint32_t si = 0; si < placed_structure_count; si++) {
         PlacedStructure *s = &placed_structures[si];
         if (!s->active) continue;
@@ -372,20 +427,38 @@ void claim_tick(uint32_t delta_ms) {
 
         float dt = (float)delta_ms;
 
-        /* Update contested state */
+        /* Find the target structure (flag fort or company fortress) */
+        PlacedStructureType target_type = s->claim_targets_fortress
+                                         ? STRUCT_COMPANY_FORTRESS
+                                         : STRUCT_FLAG_FORT;
+        PlacedStructure *target = NULL;
+        for (uint32_t ti = 0; ti < placed_structure_count; ti++) {
+            PlacedStructure *t = &placed_structures[ti];
+            if (!t->active) continue;
+            if (t->type != target_type) continue;
+            if (t->id == s->claim_linked_fort) { target = t; break; }
+        }
+        if (!target) {
+            s->active = false;
+            char dmsg[128];
+            snprintf(dmsg, sizeof(dmsg),
+                     "{\"type\":\"structure_demolished\",\"structure_id\":%u}", s->id);
+            websocket_server_broadcast(dmsg);
+            continue;
+        }
+
+        /* Contested = defender (target owner) inside our flag's radius */
         s->claim_contested = claim_flag_is_contested(
             s->x, s->y, s->company_id, s->island_id);
 
         if (s->claim_contested) {
-            /* Reverse — timer goes backward at ISLAND_CLAIM_REVERSE speed */
             s->claim_progress_ms -= dt * ISLAND_CLAIM_REVERSE;
             if (s->claim_progress_ms < 0.0f) s->claim_progress_ms = 0.0f;
         } else {
-            /* Advance */
             s->claim_progress_ms += dt;
         }
 
-        /* Broadcast progress update to all clients (throttle: once per second) */
+        /* Broadcast progress ~once per second */
         {
             static uint32_t last_broadcast_ms = 0;
             uint32_t now = get_time_ms();
@@ -395,50 +468,69 @@ void claim_tick(uint32_t delta_ms) {
                 snprintf(msg, sizeof(msg),
                          "{\"type\":\"claim_flag_progress\",\"id\":%u,"
                          "\"island_id\":%u,\"company_id\":%u,"
-                         "\"progress\":%.0f,\"total\":%.0f,\"contested\":%s}",
+                         "\"progress\":%.0f,\"total\":%.0f,\"contested\":%s,"
+                         "\"targets_fortress\":%s}",
                          s->id, s->island_id, s->company_id,
                          s->claim_progress_ms,
                          (float)ISLAND_CLAIM_CAPTURE_MS,
-                         s->claim_contested ? "true" : "false");
+                         s->claim_contested ? "true" : "false",
+                         s->claim_targets_fortress ? "true" : "false");
                 websocket_server_broadcast(msg);
             }
         }
 
-        /* Capture complete? */
         if (s->claim_progress_ms >= (float)ISLAND_CLAIM_CAPTURE_MS) {
-            /* Determine the enemy company being contested */
-            uint32_t enemy_co = 0;
-            IslandClaim *ic = island_get_claim(s->island_id);
-            if (ic) enemy_co = ic->company_id;
+            /* ── Capture! ── */
+            if (s->claim_targets_fortress) {
+                /* Flip Company Fortress: winner starts rebuild from 0 */
+                uint32_t old_co = target->company_id;
+                uint8_t  isl    = target->island_id;
+                target->company_id        = s->company_id;
+                target->claim_progress_ms = 0.0f;
+                target->fortress_complete = false;
+                target->hp                = 1;
+                target->claim_contested   = false;
 
-            /* Find linked fort ID */
-            uint32_t lf = s->claim_linked_fort;
+                /* Drop old IslandClaim */
+                for (int ii = 0; ii < island_claim_count; ii++) {
+                    if (island_claims[ii].active
+                            && island_claims[ii].island_id == isl
+                            && island_claims[ii].company_id == old_co) {
+                        island_claims[ii].active = false;
+                        break;
+                    }
+                }
+                broadcast_territory_update(isl, old_co, false);
 
-            log_info("🏴 Claim flag #%u captured territory for company %u (island %u)",
-                     s->id, s->company_id, s->island_id);
-
-            /* Convert structures in radius */
-            if (enemy_co != 0 && enemy_co != s->company_id)
-                claim_flag_convert_territory(s->x, s->y, enemy_co,
-                                             s->company_id, s->island_id, lf);
-
-            /* Broadcast capture event */
-            {
-                char msg[128];
+                char msg[256];
                 snprintf(msg, sizeof(msg),
-                         "{\"type\":\"territory_captured\",\"island_id\":%u,"
-                         "\"company_id\":%u,\"x\":%.1f,\"y\":%.1f}",
-                         s->island_id, s->company_id, s->x, s->y);
+                         "{\"type\":\"fortress_captured\",\"structure_id\":%u"
+                         ",\"new_company_id\":%u,\"old_company_id\":%u"
+                         ",\"island_id\":%u}",
+                         target->id, s->company_id, old_co, isl);
                 websocket_server_broadcast(msg);
+                log_info("🏴 Company Fortress #%u on island %u captured by company %u from %u",
+                         target->id, isl, s->company_id, old_co);
+            } else {
+                /* Flag Fort capture: flip owner */
+                uint32_t old_co = target->company_id;
+                uint8_t  isl    = target->island_id;
+                target->company_id = s->company_id;
+                broadcast_territory_update(isl, s->company_id, true);
+                log_info("🏴 Flag Fort #%u on island %u captured by company %u from %u",
+                         target->id, isl, s->company_id, old_co);
             }
 
-            /* Remove the claim flag (it consumed itself) */
+            /* Consume the claim flag */
             s->active = false;
+            char dmsg[128];
+            snprintf(dmsg, sizeof(dmsg),
+                     "{\"type\":\"structure_demolished\",\"structure_id\":%u}", s->id);
+            websocket_server_broadcast(dmsg);
         }
     }
 
-    /* After each tick, rebuild claim graphs for any company that had a structure
-       orphaned (simple heuristic: rebuild all active claims). */
+    /* Rebuild claim graphs */
     for (int i = 0; i < island_claim_count; i++) {
         IslandClaim *ic = &island_claims[i];
         if (!ic->active) continue;

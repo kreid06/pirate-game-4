@@ -161,7 +161,7 @@ export interface ShipConstruction {
  */
 export interface PlacedStructure {
   id: number;
-  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag';
+  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress';
   islandId: number;
   x: number;
   y: number;
@@ -178,6 +178,14 @@ export interface PlacedStructure {
   claimProgress?: number;
   /** Claiming flag: true when an enemy is nearby, reversing the timer */
   claimContested?: boolean;
+  /** Claiming flag: true when this flag targets a Company Fortress instead of a Flag Fort */
+  claimTargetsFortress?: boolean;
+  /** Company Fortress: 0 → COMPANY_FORTRESS_BUILD_MS (900000) build progress in ms */
+  fortressBuildProgress?: number;
+  /** Company Fortress: true when the 15-minute build is complete */
+  fortressComplete?: boolean;
+  /** Company Fortress: true when an enemy is inside the radius, pausing the build */
+  fortressContested?: boolean;
 }
 
 // Company identifiers (mirror server COMPANY_* constants)

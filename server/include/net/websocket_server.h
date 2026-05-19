@@ -274,7 +274,8 @@ typedef enum {
     ITEM_STONE         = 27,
     ITEM_WOOD_CEILING  = 28,
     ITEM_CLAIM_FLAG    = 29,  /* Claiming flag — plant on enemy ship OR contested island territory */
-    ITEM_FLAG_FORT     = 35,  /* Flag fort — claims an island (40 wood + 40 stone to craft) */
+    ITEM_FLAG_FORT     = 35,  /* Flag fort — claims radius around it (40 wood + 40 stone) */
+    ITEM_COMPANY_FORTRESS = 36, /* Company fortress — claims whole island, 15-min build (100w+100s+20m) */
     /* ── Cloth armour set ──────────────────────────────────────────── */
     ITEM_CLOTH_HAT     = 30,  /* helm  slot — 5 armour  */
     ITEM_CLOTH_SHIRT   = 31,  /* torso slot — 20 armour */
@@ -304,28 +305,30 @@ extern int       claim_flag_count;
 /* ── Island Territory Claim System ───────────────────────────────────────── */
 #define CLAIM_RADIUS_DEFAULT    400.0f   /* px — each structure projects this radius   */
 #define CLAIM_RADIUS_FLAG_FORT  600.0f   /* px — flag fort has a larger base radius    */
+#define CLAIM_RADIUS_COMPANY_FORT 600.0f /* px — company fortress contest/claim radius */
 #define ISLAND_CLAIM_CAPTURE_MS 60000u   /* 60 s uncontested to capture via claim flag */
 #define ISLAND_CLAIM_REVERSE    3.0f     /* contested reversal speed multiplier        */
 #define ISLAND_CLAIM_TAX_RATE   0.10f    /* 10 % of each harvest goes to island owner  */
 #define MAX_ISLAND_CLAIMS       16       /* max simultaneous island claim records      */
+#define COMPANY_FORTRESS_BUILD_MS 900000u /* 15 min to complete a company fortress     */
 
 /**
- * IslandClaim — one per island that has been claimed by a flag fort.
- * The claim is VALID only while the anchor fort (fort_structure_id) is alive.
- * When destroyed the claim drops and orphaned structures lose claim projection.
+ * IslandClaim — records a COMPLETED Company Fortress on an island.
+ * While active, the fortress company claims the whole island (minus enemy Flag Fort radii).
+ * The claim drops when the fortress is destroyed or captured.
  */
 typedef struct {
     bool     active;
     uint8_t  island_id;          /* which island (ISLAND_PRESETS index id) */
-    uint32_t company_id;         /* owning company (>= COMPANY_DYNAMIC_BASE or COMPANY_SOLO) */
-    uint32_t fort_structure_id;  /* PlacedStructure.id of the flag fort anchor */
-    uint32_t fort_placer_id;     /* player_id who placed the fort             */
+    uint32_t company_id;         /* company that owns the fortress          */
+    uint32_t fort_structure_id;  /* PlacedStructure.id of the Company Fortress */
+    uint32_t fort_placer_id;     /* player_id who placed the fortress       */
 } IslandClaim;
 
 extern IslandClaim island_claims[MAX_ISLAND_CLAIMS];
 extern int         island_claim_count;
 
-/** Return the IslandClaim for island_id, or NULL if unclaimed. */
+/** Return the IslandClaim for island_id, or NULL if no Company Fortress is complete. */
 IslandClaim *island_get_claim(uint8_t island_id);
 
 /**
@@ -337,17 +340,26 @@ bool territory_is_claimed_by_any(float wx, float wy, uint32_t *out_company_id);
 bool territory_is_contested(float wx, float wy);
 
 /**
- * Called on fort destruction. Drops the island claim instantly and
- * flood-fills the claim graph to find orphaned structures.
- * Contested territory is awarded to the contesting company if one exists.
+ * Register a completed Company Fortress island claim.
+ * Destroys all other incomplete Company Fortresses on the island.
+ */
+bool claim_register_company_fortress(uint8_t island_id, uint32_t company_id,
+                                     uint32_t struct_id, uint32_t placer_id);
+
+/**
+ * Called on fort destruction. Drops the island claim instantly.
  */
 void claim_on_fort_destroyed(uint32_t fort_structure_id);
 
 /**
- * Tick the claiming-flag timers. Call once per server tick.
- * Completes captures and updates contested state.
+ * Tick fortress build timers and claim-flag capture timers.
+ * Call once per server tick.
  */
 void claim_tick(uint32_t delta_ms);
+
+/* ── Register a Flag Fort placed on an island (no longer registers IslandClaim) ── */
+bool claim_register_fort(uint8_t island_id, uint32_t company_id,
+                         uint32_t fort_struct_id, uint32_t placer_id);
 
 /* ── Island structures ────────────────────────────────────────────────────── */
 typedef enum {
@@ -360,8 +372,9 @@ typedef enum {
     STRUCT_WRECK        = 6,  /* spawns at sea when a ship sinks — can be salvaged */
     STRUCT_CEILING      = 7,  /* wood ceiling tile — requires a wall or adjacent ceiling */
     STRUCT_CANNON       = 8,  /* placed cannon on a floor tile — requires same-company floor */
-    STRUCT_FLAG_FORT    = 9,  /* island claim anchor — one per island, 40 wood + 40 stone */
-    STRUCT_CLAIM_FLAG   = 10, /* territory claiming flag — placed in contested zone, timer-based */
+    STRUCT_FLAG_FORT    = 9,  /* radius claim anchor — one per island, 40 wood + 40 stone */
+    STRUCT_CLAIM_FLAG   = 10, /* territory claiming flag — placed in enemy radius, timer-based */
+    STRUCT_COMPANY_FORTRESS = 11, /* whole-island claim — 15-min build, 100w+100s+20m */
 } PlacedStructureType;
 
 /** Shallow-water ring width as a multiple of the island's own radius.
@@ -406,11 +419,15 @@ typedef struct {
     uint32_t cannon_reload_ms;    /* ms remaining until cannon can fire again (0 = ready) */
     uint32_t cannon_mounted_player_id; /* player_id currently mounted to this cannon (0 = none) */
     bool     no_ammo_flag;        /* transient: set by fire_island_cannon when ammo was lacking */
-    /* ── Territory claim fields (STRUCT_FLAG_FORT / STRUCT_CLAIM_FLAG) ── */
+    /* ── Territory claim fields (STRUCT_FLAG_FORT / STRUCT_CLAIM_FLAG / STRUCT_COMPANY_FORTRESS) ── */
     bool     claim_orphaned;      /* fort destroyed — structure projects no claim radius        */
     uint32_t claim_linked_fort;   /* STRUCT_CLAIM_FLAG: structure id of originating flag fort  */
-    float    claim_progress_ms;   /* STRUCT_CLAIM_FLAG: 0 → ISLAND_CLAIM_CAPTURE_MS = captured */
+    float    claim_progress_ms;   /* STRUCT_CLAIM_FLAG: 0→ISLAND_CLAIM_CAPTURE_MS = captured   */
+                                  /* STRUCT_COMPANY_FORTRESS: 0→COMPANY_FORTRESS_BUILD_MS = built */
     bool     claim_contested;     /* STRUCT_CLAIM_FLAG: enemy in range — timer reverses         */
+                                  /* STRUCT_COMPANY_FORTRESS: enemy in radius — build paused    */
+    bool     fortress_complete;   /* STRUCT_COMPANY_FORTRESS: build finished                    */
+    bool     claim_targets_fortress; /* STRUCT_CLAIM_FLAG: targets a Company Fortress (not Flag Fort) */
     /* 64-byte string last (avoids breaking alignment of above) */
     char     placer_name[64];     /* display name of builder */
 } PlacedStructure;

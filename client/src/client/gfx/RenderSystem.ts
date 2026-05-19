@@ -159,7 +159,7 @@ export class RenderSystem {
   /** Placed island structures — updated via addPlacedStructure / setPlacedStructures. */
   private placedStructures: PlacedStructure[] = [];
   /** islandId → companyId: active island territory claims. */
-  private _islandClaims: Map<number, { companyId: number; fortX: number; fortY: number; fortRadius: number }> = new Map();
+  private _islandClaims: Map<number, { companyId: number; fortX: number; fortY: number; fortRadius: number; isCompanyFortress: boolean }> = new Map();
   /** When true, draws the territory overlay (Alt held). */
   private _showTerritoryOverlay = false;
   /**
@@ -229,7 +229,7 @@ export class RenderSystem {
     ox: number; oy: number; size: number;
   }> = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | null = null;
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
   private islandBuildRotationDeg = 0;
   private _wallGhostRotRad: number = 0; // rotation (radians) of wall/door ghost, inherited from floor edge
@@ -1809,17 +1809,45 @@ export class RenderSystem {
 
   setTerritoryOverlay(on: boolean): void { this._showTerritoryOverlay = on; }
 
-  setIslandClaim(islandId: number, companyId: number, fortX = 0, fortY = 0, fortRadius = 600): void {
-    this._islandClaims.set(islandId, { companyId, fortX, fortY, fortRadius });
+  setIslandClaim(islandId: number, companyId: number, fortX = 0, fortY = 0, fortRadius = 600, isCompanyFortress = false): void {
+    this._islandClaims.set(islandId, { companyId, fortX, fortY, fortRadius, isCompanyFortress });
   }
 
   clearIslandClaim(islandId: number): void {
     this._islandClaims.delete(islandId);
   }
 
-  updateClaimFlagProgress(structId: number, progressMs: number, contested: boolean): void {
+  updateClaimFlagProgress(structId: number, progressMs: number, contested: boolean, targetsFortress = false): void {
     const s = this.placedStructures.find(p => p.id === structId);
-    if (s) { s.claimProgress = progressMs; s.claimContested = contested; }
+    if (s) {
+      s.claimProgress = progressMs;
+      s.claimContested = contested;
+      s.claimTargetsFortress = targetsFortress;
+    }
+  }
+
+  updateFortressBuildProgress(structId: number, _companyId: number, _islandId: number, progressMs: number, totalMs: number, contested: boolean): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (s) {
+      s.fortressBuildProgress = progressMs;
+      s.fortressContested = contested;
+      s.fortressComplete = progressMs >= totalMs;
+    }
+  }
+
+  onFortressComplete(structId: number, _companyId: number, _islandId: number): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (s) { s.fortressComplete = true; s.fortressContested = false; }
+  }
+
+  onFortressCaptured(structId: number, newCompanyId: number, _islandId: number): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (s) {
+      s.companyId = newCompanyId;
+      s.fortressBuildProgress = 0;
+      s.fortressComplete = false;
+      s.fortressContested = false;
+    }
   }
 
   /** Replace the full placed-structure list (e.g. on join). */
@@ -1914,7 +1942,7 @@ export class RenderSystem {
   }
 
   /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, wood_ceiling, cannon, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | null): void {
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | null): void {
     this.islandBuildKind = kind;
   }
 
@@ -4969,6 +4997,119 @@ export class RenderSystem {
         ctx.fill();
 
         ctx.restore();
+      } else if (s.type === 'company_fortress') {
+        // ── Company Fortress — grand fortification (under construction or complete) ──
+        const companyColor = this._companyColor(s.companyId);
+        const isOwn = s.companyId !== 0 && s.companyId === this._localCompanyId;
+        const complete = s.fortressComplete ?? false;
+        const progress = (s.fortressBuildProgress ?? 0) / 900000; // 0→1
+        const contested = s.fortressContested ?? false;
+        const FORT_RADIUS_PX = 600;
+        const fortRadiusScreen = FORT_RADIUS_PX * zoom;
+        const ts = Math.max(14, 60 * zoom);
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+
+        ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+
+        if (complete) {
+          // Completed: show whole-island tinted ring (faint fill) + full fortress
+          const ringAlpha = isOwn ? 0.12 : (isHovered ? 0.09 : 0.05);
+          ctx.beginPath();
+          ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
+          ctx.fillStyle = companyColor + Math.round(ringAlpha * 255).toString(16).padStart(2, '0');
+          ctx.fill();
+          ctx.strokeStyle = companyColor + 'dd';
+          ctx.lineWidth = Math.max(1.5, 2.5 * zoom);
+          ctx.setLineDash([]);
+          ctx.stroke();
+        } else {
+          // Under construction: dashed ring + scaffold fill
+          const ringAlpha = 0.06;
+          ctx.beginPath();
+          ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
+          ctx.fillStyle = companyColor + Math.round(ringAlpha * 255).toString(16).padStart(2, '0');
+          ctx.fill();
+          const dashLen = Math.max(5, 10 * zoom);
+          ctx.strokeStyle = companyColor + (contested ? 'ff' : '88');
+          ctx.lineWidth = Math.max(1, 2 * zoom);
+          ctx.setLineDash([dashLen, dashLen]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        // Stone walls (larger than flag_fort)
+        const stoneR = Math.round(hpFrac * 110 + 60);
+        const stoneG = Math.round(hpFrac * 90  + 45);
+        const stoneB = Math.round(hpFrac * 70  + 35);
+        const wallColor = complete
+          ? (isHovered ? '#c8a860' : `rgb(${stoneR},${stoneG},${stoneB})`)
+          : '#887766';
+        ctx.fillStyle = wallColor;
+        ctx.strokeStyle = '#2a1a0a';
+        ctx.lineWidth = Math.max(1.5, 2 * zoom);
+        ctx.fillRect(-ts * 0.5, -ts * 0.5, ts, ts);
+        ctx.strokeRect(-ts * 0.5, -ts * 0.5, ts, ts);
+
+        // Corner towers (4 small squares)
+        const ctw = ts * 0.22;
+        for (const [cx2, cy2] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as [number,number][]) {
+          ctx.fillRect(cx2 * ts * 0.5 - ctw * (cx2 > 0 ? 0 : 1),
+                       cy2 * ts * 0.5 - ctw * (cy2 > 0 ? 0 : 1),
+                       ctw, ctw);
+          ctx.strokeRect(cx2 * ts * 0.5 - ctw * (cx2 > 0 ? 0 : 1),
+                         cy2 * ts * 0.5 - ctw * (cy2 > 0 ? 0 : 1),
+                         ctw, ctw);
+        }
+
+        if (complete) {
+          // Flag pole + large pennant
+          ctx.strokeStyle = '#555';
+          ctx.lineWidth = Math.max(1, 2 * zoom);
+          ctx.beginPath();
+          ctx.moveTo(0, -ts * 0.5);
+          ctx.lineTo(0, -ts * 0.5 - ts * 1.0);
+          ctx.stroke();
+          ctx.fillStyle = companyColor;
+          ctx.beginPath();
+          ctx.moveTo(0,           -ts * 0.5 - ts * 1.0);
+          ctx.lineTo(ts * 0.55,  -ts * 0.5 - ts * 0.7);
+          ctx.lineTo(0,           -ts * 0.5 - ts * 0.4);
+          ctx.closePath();
+          ctx.fill();
+        } else {
+          // Scaffold overlay
+          ctx.strokeStyle = '#b8a060cc';
+          ctx.lineWidth = Math.max(0.5, 1 * zoom);
+          ctx.beginPath();
+          ctx.moveTo(-ts * 0.5, -ts * 0.5); ctx.lineTo(ts * 0.5, ts * 0.5);
+          ctx.moveTo(ts * 0.5, -ts * 0.5);  ctx.lineTo(-ts * 0.5, ts * 0.5);
+          ctx.stroke();
+
+          // Build progress bar below the structure
+          const barW = ts * 1.2, barH = Math.max(3, 6 * zoom);
+          const barX = -barW * 0.5, barY = ts * 0.55;
+          ctx.fillStyle = '#333333cc';
+          ctx.fillRect(barX, barY, barW, barH);
+          const fillColor = contested ? '#e04040' : companyColor;
+          ctx.fillStyle = fillColor;
+          ctx.fillRect(barX, barY, barW * progress, barH);
+          ctx.strokeStyle = '#000';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(barX, barY, barW, barH);
+
+          // Contested pulse
+          if (contested) {
+            const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 300);
+            ctx.beginPath();
+            ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(220,40,40,${0.3 * pulse})`;
+            ctx.lineWidth = Math.max(2, 4 * zoom);
+            ctx.stroke();
+          }
+        }
+
+        ctx.restore();
       } else if (s.type === 'claim_flag') {
         // ── Claiming Flag — progress ring + pole ──
         const progress = (s.claimProgress ?? 0) / 60000;   // 0→1
@@ -5131,6 +5272,7 @@ export class RenderSystem {
                  : s.type === 'wood_ceiling' ? 'Wood Ceiling'
                  : s.type === 'cannon' ? 'Cannon'
                  : s.type === 'flag_fort' ? 'Flag Fort'
+                 : s.type === 'company_fortress' ? 'Company Fortress'
                  : s.type === 'claim_flag' ? 'Claiming Flag'
                  : 'Workbench';
 
@@ -5816,6 +5958,7 @@ export class RenderSystem {
                   : this.islandBuildKind === 'wood_ceiling' ? 'Wood Ceiling'
                   : this.islandBuildKind === 'cannon' ? 'Cannon'
                   : this.islandBuildKind === 'flag_fort' ? 'Flag Fort'
+                  : this.islandBuildKind === 'company_fortress' ? 'Company Fortress'
                   : 'Workbench';
       ctx.fillText(label, msp.x, labelY);
     }

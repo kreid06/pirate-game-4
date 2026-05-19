@@ -88,7 +88,7 @@ void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* client, 
         const char* id;
         ItemKind    output;
         int         output_count;
-        CraftIng    ing[2];
+        CraftIng    ing[3];
         int         ing_count;
     } CraftRecipe;
 
@@ -127,8 +127,9 @@ void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* client, 
         { "craft_stone_axe",     ITEM_AXE,           1, { {ITEM_WOOD,  2}, {ITEM_STONE,  5}  }, 2 },
         { "craft_stone_pickaxe", ITEM_PICKAXE,       1, { {ITEM_WOOD,  2}, {ITEM_STONE,  4}  }, 2 },
         { "craft_hammer",        ITEM_HAMMER,        1, { {ITEM_WOOD,  4}, {0,0}             }, 1 },
-        { "craft_claim_flag",    ITEM_CLAIM_FLAG,    1, { {ITEM_WOOD,  5}, {0,0}             }, 1 },
-        { "craft_flag_fort",     ITEM_FLAG_FORT,     1, { {ITEM_WOOD, 40}, {ITEM_STONE, 40}  }, 2 },
+        { "craft_claim_flag",       ITEM_CLAIM_FLAG,      1, { {ITEM_WOOD,  5}, {0,0},          {0,0}            }, 1 },
+        { "craft_flag_fort",         ITEM_FLAG_FORT,       1, { {ITEM_WOOD, 40}, {ITEM_STONE, 40},{0,0}            }, 2 },
+        { "craft_company_fortress",  ITEM_COMPANY_FORTRESS,1, { {ITEM_WOOD,100}, {ITEM_STONE,100},{ITEM_METAL, 20} }, 3 },
     };
     const int num_recipes = (int)(sizeof(recipes) / sizeof(recipes[0]));
 

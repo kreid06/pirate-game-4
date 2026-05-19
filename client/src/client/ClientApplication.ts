@@ -164,7 +164,7 @@ export class ClientApplication {
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
   /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
-  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | null = null;
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
@@ -1238,7 +1238,7 @@ export class ClientApplication {
           const pid = this.networkManager.getAssignedPlayerId();
           const p   = ws?.players.find(pl => pl.id === pid);
           const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
-          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon' || kind === 'flag_fort') {
+          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon' || kind === 'flag_fort' || kind === 'company_fortress') {
             // Compute snap at click time (not from stale render state)
             const pos = kind === 'wooden_floor'
               ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
@@ -1255,7 +1255,7 @@ export class ClientApplication {
               : (kind === 'workbench' || kind === 'shipyard' || kind === 'cannon') ? this.islandBuildRotationDeg
               : kind === 'wood_ceiling' ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
               : 0;
-            this.networkManager.sendPlaceStructure(kind, pos.x, pos.y, rot);
+            this.networkManager.sendPlaceStructure(kind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress', pos.x, pos.y, rot);
           }
           return;
         }
@@ -2106,9 +2106,9 @@ export class ClientApplication {
       };
 
       // Territory claim events
-      this.networkManager.onTerritoryUpdate = (islandId, companyId, claimed, fortX, fortY, fortRadius) => {
+      this.networkManager.onTerritoryUpdate = (islandId, companyId, claimed, fortX, fortY, fortRadius, isCompanyFortress) => {
         if (claimed) {
-          this.renderSystem.setIslandClaim(islandId, companyId, fortX, fortY, fortRadius);
+          this.renderSystem.setIslandClaim(islandId, companyId, fortX, fortY, fortRadius, isCompanyFortress);
         } else {
           this.renderSystem.clearIslandClaim(islandId);
         }
@@ -2117,8 +2117,19 @@ export class ClientApplication {
         this.renderSystem.setIslandClaim(islandId, newCompanyId);
         this.renderSystem.showAnnouncement(`🏰 Island ${islandId} captured!`, 'info', 3.0);
       };
-      this.networkManager.onClaimFlagProgress = (structId, progressMs, contested) => {
-        this.renderSystem.updateClaimFlagProgress(structId, progressMs, contested);
+      this.networkManager.onClaimFlagProgress = (structId, progressMs, contested, targetsFortress) => {
+        this.renderSystem.updateClaimFlagProgress(structId, progressMs, contested, targetsFortress);
+      };
+      this.networkManager.onFortressBuildProgress = (structId, companyId, islandId, progressMs, totalMs, contested) => {
+        this.renderSystem.updateFortressBuildProgress(structId, companyId, islandId, progressMs, totalMs, contested);
+      };
+      this.networkManager.onFortressComplete = (structId, companyId, islandId) => {
+        this.renderSystem.onFortressComplete(structId, companyId, islandId);
+        this.renderSystem.showAnnouncement(`🏰 Company Fortress complete! Island ${islandId} claimed!`, 'info', 5.0);
+      };
+      this.networkManager.onFortressCaptured = (structId, newCompanyId, _oldCompanyId, islandId) => {
+        this.renderSystem.onFortressCaptured(structId, newCompanyId, islandId);
+        this.renderSystem.showAnnouncement(`⚔️ Company Fortress captured! Island ${islandId} changing hands…`, 'info', 5.0);
       };
       this.networkManager.onPlacementFailed = (reason, _x, _y, _structureType, blockerId) => {
         const REASONS: Record<string, string> = {
@@ -2133,7 +2144,8 @@ export class ClientApplication {
           fort_exists:            'Fort already exists on this island',
           not_on_island:          'Must be placed on an island',
           not_contested_territory: 'Not in contested territory',
-          not_in_fort_radius:      'Must be placed within the enemy fort’s radius',
+          not_in_fort_radius:      'Must be placed within an enemy fort or fortress radius',
+          not_in_fort_or_fortress_radius: 'Must be inside an enemy fort or fortress radius',
           no_flag_fort:            'Your company has no flag fort',
           blocked_by_player: 'Blocked by a player',
           too_far:           'Too far away',
@@ -3043,11 +3055,11 @@ export class ClientApplication {
     const inDeckBuildMode   = activeItem === 'deck';
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
-    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling' || activeItem === 'cannon' || activeItem === 'flag_fort');
+    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling' || activeItem === 'cannon' || activeItem === 'flag_fort' || activeItem === 'company_fortress');
     this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
     this.inputManager.islandBuildMode = this.islandBuildMode;
     this.renderSystem.setIslandBuildItem(
-      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort') : null
+      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress') : null
     );
     this.renderSystem.setIslandBuildRotation(this.islandBuildMode ? this.islandBuildRotationDeg : 0);
 

@@ -648,11 +648,17 @@ export class NetworkManager {
   /** Fired when the server confirms a craft_item request. */
   public onCraftResult: ((success: boolean, recipeId: string, reason?: string) => void) | null = null;
   /** Fired when an island territory changes ownership (flag fort placed or destroyed). */
-  public onTerritoryUpdate: ((islandId: number, companyId: number, claimed: boolean, fortX: number, fortY: number, fortRadius: number) => void) | null = null;
+  public onTerritoryUpdate: ((islandId: number, companyId: number, claimed: boolean, fortX: number, fortY: number, fortRadius: number, isCompanyFortress: boolean) => void) | null = null;
   /** Fired when a claiming flag's progress changes. */
-  public onClaimFlagProgress: ((structId: number, progressMs: number, contested: boolean) => void) | null = null;
+  public onClaimFlagProgress: ((structId: number, progressMs: number, contested: boolean, targetsFortress: boolean) => void) | null = null;
   /** Fired when a claiming flag finishes capturing territory. */
   public onTerritoryCaptured: ((islandId: number, newCompanyId: number) => void) | null = null;
+  /** Fired when a Company Fortress build timer updates (≈1/s). */
+  public onFortressBuildProgress: ((structId: number, companyId: number, islandId: number, progressMs: number, totalMs: number, contested: boolean) => void) | null = null;
+  /** Fired when a Company Fortress finishes building (15 min complete). */
+  public onFortressComplete: ((structId: number, companyId: number, islandId: number) => void) | null = null;
+  /** Fired when a Company Fortress is captured by an enemy claim flag. */
+  public onFortressCaptured: ((structId: number, newCompanyId: number, oldCompanyId: number, islandId: number) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
   public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number) => void) | null = null;
   /** Fired when the server rejects a structure placement with a reason string. */
@@ -1381,7 +1387,7 @@ export class NetworkManager {
    * The server validates that the player is on an island, has the item, and for
    * workbench that a floor tile is close enough.
    */
-  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort', x: number, y: number, rotationDeg = 0): void {
+  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress', x: number, y: number, rotationDeg = 0): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y, rotation: rotationDeg });
   }
@@ -2596,6 +2602,7 @@ export class NetworkManager {
                    : s.structure_type === 'cannon'       ? 'cannon'
                    : s.structure_type === 'flag_fort'    ? 'flag_fort'
                    : s.structure_type === 'claim_flag'   ? 'claim_flag'
+                   : s.structure_type === 'company_fortress' ? 'company_fortress'
                    : 'wooden_floor',
           islandId:  s.island_id ?? 0,
           x:         s.x ?? 0,
@@ -2630,6 +2637,7 @@ export class NetworkManager {
                    : message.structure_type === 'cannon'       ? 'cannon'
                    : message.structure_type === 'flag_fort'    ? 'flag_fort'
                    : message.structure_type === 'claim_flag'   ? 'claim_flag'
+                   : message.structure_type === 'company_fortress' ? 'company_fortress'
                    : 'wooden_floor',
           islandId:  message.island_id ?? 0,
           x:         message.x ?? 0,
@@ -2641,8 +2649,12 @@ export class NetworkManager {
           doorOpen:  message.open ?? false,
           rotation:  message.rotation ?? 0,
           cannonAimAngle: typeof message.cannon_aim_angle === 'number' ? message.cannon_aim_angle : undefined,
-          claimProgress: typeof message.claim_progress_ms === 'number' ? message.claim_progress_ms : undefined,
-          claimContested: message.claim_contested === true,
+          claimProgress:        typeof message.claim_progress_ms === 'number' ? message.claim_progress_ms : undefined,
+          claimContested:       message.claim_contested        === true,
+          claimTargetsFortress: message.claim_targets_fortress  === true,
+          fortressBuildProgress: typeof message.fortress_build_progress === 'number' ? message.fortress_build_progress : undefined,
+          fortressComplete:     message.fortress_complete       === true,
+          fortressContested:    message.fortress_contested      === true,
         };
         this.onStructurePlaced?.(sp);
         break;
@@ -2672,20 +2684,50 @@ export class NetworkManager {
 
       case 'territory_update':
         this.onTerritoryUpdate?.(
-          message.island_id   ?? 0,
-          message.company_id  ?? 0,
+          message.island_id          ?? 0,
+          message.company_id         ?? 0,
           message.claimed === true,
-          message.fort_x      ?? 0,
-          message.fort_y      ?? 0,
-          message.fort_radius ?? 600,
+          message.fort_x             ?? 0,
+          message.fort_y             ?? 0,
+          message.fort_radius        ?? 600,
+          message.is_company_fortress === true,
         );
         break;
 
       case 'claim_flag_progress':
         this.onClaimFlagProgress?.(
-          message.structure_id ?? message.id ?? 0,
-          message.progress_ms  ?? 0,
-          message.contested    === true,
+          message.structure_id       ?? message.id ?? 0,
+          message.progress_ms        ?? message.progress ?? 0,
+          message.contested          === true,
+          message.targets_fortress   === true,
+        );
+        break;
+
+      case 'fortress_build_progress':
+        this.onFortressBuildProgress?.(
+          message.structure_id  ?? 0,
+          message.company_id    ?? 0,
+          message.island_id     ?? 0,
+          message.progress_ms   ?? 0,
+          message.total_ms      ?? 900000,
+          message.contested     === true,
+        );
+        break;
+
+      case 'fortress_complete':
+        this.onFortressComplete?.(
+          message.structure_id  ?? 0,
+          message.company_id    ?? 0,
+          message.island_id     ?? 0,
+        );
+        break;
+
+      case 'fortress_captured':
+        this.onFortressCaptured?.(
+          message.structure_id   ?? 0,
+          message.new_company_id ?? 0,
+          message.old_company_id ?? 0,
+          message.island_id      ?? 0,
         );
         break;
 

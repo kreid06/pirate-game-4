@@ -287,6 +287,9 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     } else if (strcmp(stype, "flag_fort") == 0) {
         stype_enum    = STRUCT_FLAG_FORT;
         required_item = ITEM_FLAG_FORT;  /* crafted from 40 wood + 40 stone */
+    } else if (strcmp(stype, "company_fortress") == 0) {
+        stype_enum    = STRUCT_COMPANY_FORTRESS;
+        required_item = ITEM_COMPANY_FORTRESS;  /* 100 wood + 100 stone + 20 metal */
     } else if (strcmp(stype, "claim_flag") == 0) {
         stype_enum    = STRUCT_CLAIM_FLAG;
         required_item = ITEM_CLAIM_FLAG;
@@ -369,34 +372,50 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
 
     /* ── Claiming Flag: must be placed in contested territory, linked to a fort ── */
-    /* ── Claiming Flag: must be placed within the enemy fort's radius ── */
+    /* ── Claiming Flag: must be placed within enemy Flag Fort radius OR enemy Company Fortress radius ── */
     if (stype_enum == STRUCT_CLAIM_FLAG) {
-        /* Find the enemy flag fort on the target island */
-        bool in_fort_radius = false;
+        /* Check enemy Flag Fort radius */
+        bool in_flag_fort_radius = false;
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             PlacedStructure *ex = &placed_structures[si];
             if (!ex->active) continue;
             if (ex->type != STRUCT_FLAG_FORT) continue;
             if (ex->island_id != target_island_id) continue;
-            if (ex->company_id == (uint8_t)player->company_id) continue; /* own fort */
+            if (ex->company_id == (uint8_t)player->company_id) continue;
             float dx = px - ex->x, dy = py - ex->y;
-            float dist2 = dx * dx + dy * dy;
-            if (dist2 <= CLAIM_RADIUS_FLAG_FORT * CLAIM_RADIUS_FLAG_FORT) {
-                in_fort_radius = true;
+            if (dx*dx + dy*dy <= CLAIM_RADIUS_FLAG_FORT * CLAIM_RADIUS_FLAG_FORT) {
+                in_flag_fort_radius = true;
                 break;
             }
         }
-        if (!in_fort_radius) {
+        /* Check enemy Company Fortress radius (complete or under construction) */
+        bool in_company_fort_radius = false;
+        uint32_t target_company_fort_id = 0;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            PlacedStructure *ex = &placed_structures[si];
+            if (!ex->active) continue;
+            if (ex->type != STRUCT_COMPANY_FORTRESS) continue;
+            if (ex->island_id != target_island_id) continue;
+            if (ex->company_id == (uint8_t)player->company_id) continue;
+            if (!ex->fortress_complete) continue; /* can only contest a completed fortress */
+            float dx = px - ex->x, dy = py - ex->y;
+            if (dx*dx + dy*dy <= CLAIM_RADIUS_COMPANY_FORT * CLAIM_RADIUS_COMPANY_FORT) {
+                in_company_fort_radius = true;
+                target_company_fort_id = ex->id;
+                break;
+            }
+        }
+        if (!in_flag_fort_radius && !in_company_fort_radius) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_fort_radius\"}");
             goto ps_send;
         }
-        /* Verify the player's company has an active fort somewhere (their own base) */
+        /* Verify the player's company has an active flag fort or company fortress somewhere */
         bool has_own_fort = false;
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             PlacedStructure *ex = &placed_structures[si];
             if (!ex->active) continue;
-            if (ex->type != STRUCT_FLAG_FORT) continue;
+            if (ex->type != STRUCT_FLAG_FORT && ex->type != STRUCT_COMPANY_FORTRESS) continue;
             if (ex->company_id != (uint8_t)player->company_id) continue;
             has_own_fort = true;
             break;
@@ -406,7 +425,20 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                      "{\"type\":\"place_structure_fail\",\"reason\":\"no_flag_fort\"}");
             goto ps_send;
         }
+        /* Stash which kind of target this flag will contest (resolved in post-placement) */
+        (void)target_company_fort_id;
+        (void)in_company_fort_radius;
         /* Applied in post-placement block */
+    }
+
+    /* ── Company Fortress: must be on an island ── */
+    if (stype_enum == STRUCT_COMPANY_FORTRESS) {
+        if (target_island_id == 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"not_on_island\"}");
+            goto ps_send;
+        }
+        /* Multiple in-progress fortresses are allowed; only one can complete */
     }
 
     /* Cannot place within claim radius of an enemy non-orphaned structure
@@ -832,20 +864,51 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                             player->player_id);
     }
 
-    /* Claim Flag: link to originating fort and start with progress = 0 */
+    /* Company Fortress: start build timer (HP = 1 until complete) */
+    if (stype_enum == STRUCT_COMPANY_FORTRESS) {
+        placed_structures[placed_structure_count - 1].max_hp            = 1000;
+        placed_structures[placed_structure_count - 1].hp                = 1;   /* incomplete */
+        placed_structures[placed_structure_count - 1].claim_progress_ms = 0.0f;
+        placed_structures[placed_structure_count - 1].fortress_complete  = false;
+        placed_structures[placed_structure_count - 1].claim_contested    = false;
+        log_info("🏰 Player %u started building Company Fortress #%u on island %u",
+                 player->player_id, new_id, target_island_id);
+    }
+
+    /* Claim Flag: link to target (flag fort or company fortress), start progress = 0 */
     if (stype_enum == STRUCT_CLAIM_FLAG) {
+        /* Determine target: prefer company fortress over flag fort */
+        bool targets_cfrt = false;
         uint32_t lf = 0;
         for (uint32_t si = 0; si < placed_structure_count - 1; si++) {
             PlacedStructure *ex = &placed_structures[si];
             if (!ex->active) continue;
-            if (ex->type != STRUCT_FLAG_FORT) continue;
-            if (ex->company_id != (uint8_t)player->company_id) continue;
-            lf = ex->id;
-            break;
+            if (ex->island_id != target_island_id) continue;
+            if (ex->company_id == (uint8_t)player->company_id) continue;
+            if (ex->type == STRUCT_COMPANY_FORTRESS && ex->fortress_complete) {
+                float dx = px - ex->x, dy = py - ex->y;
+                if (dx*dx + dy*dy <= CLAIM_RADIUS_COMPANY_FORT * CLAIM_RADIUS_COMPANY_FORT) {
+                    lf = ex->id;
+                    targets_cfrt = true;
+                    break;
+                }
+            }
         }
-        placed_structures[placed_structure_count - 1].claim_linked_fort  = lf;
-        placed_structures[placed_structure_count - 1].claim_progress_ms  = 0.0f;
-        placed_structures[placed_structure_count - 1].claim_contested     = false;
+        if (!targets_cfrt) {
+            /* Fall back to flag fort */
+            for (uint32_t si = 0; si < placed_structure_count - 1; si++) {
+                PlacedStructure *ex = &placed_structures[si];
+                if (!ex->active) continue;
+                if (ex->type != STRUCT_FLAG_FORT) continue;
+                if (ex->company_id == (uint8_t)player->company_id) continue;
+                lf = ex->id;
+                break;
+            }
+        }
+        placed_structures[placed_structure_count - 1].claim_linked_fort        = lf;
+        placed_structures[placed_structure_count - 1].claim_progress_ms        = 0.0f;
+        placed_structures[placed_structure_count - 1].claim_contested           = false;
+        placed_structures[placed_structure_count - 1].claim_targets_fortress   = targets_cfrt;
     }
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
@@ -1302,9 +1365,12 @@ void destroy_placed_structure(uint32_t structure_id) {
     websocket_server_broadcast(msg);
     log_info("🔨 Destroyed structure %u (type %d)", structure_id, (int)dtype);
 
-    /* ── Territory claim: fort destroyed → drop island claim ─────────── */
+    /* ── Territory claim: fort/company-fortress destroyed → drop island claim ─ */
     if (dtype == STRUCT_FLAG_FORT) {
         claim_on_fort_destroyed(structure_id);
+    }
+    if (dtype == STRUCT_COMPANY_FORTRESS) {
+        claim_on_fort_destroyed(structure_id);  /* same handler — drops IslandClaim if one exists */
     }
 
     /* ── Cascade: floor destroyed ──────────────────────────────────────── */
