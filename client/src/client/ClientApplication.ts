@@ -2105,9 +2105,9 @@ export class ClientApplication {
       };
 
       // Territory claim events
-      this.networkManager.onTerritoryUpdate = (islandId, companyId, claimed) => {
+      this.networkManager.onTerritoryUpdate = (islandId, companyId, claimed, fortX, fortY, fortRadius) => {
         if (claimed) {
-          this.renderSystem.setIslandClaim(islandId, companyId);
+          this.renderSystem.setIslandClaim(islandId, companyId, fortX, fortY, fortRadius);
         } else {
           this.renderSystem.clearIslandClaim(islandId);
         }
@@ -2132,7 +2132,8 @@ export class ClientApplication {
           fort_exists:            'Fort already exists on this island',
           not_on_island:          'Must be placed on an island',
           not_contested_territory: 'Not in contested territory',
-          no_flag_fort:           'Your company has no flag fort',
+          not_in_fort_radius:      'Must be placed within the enemy fort’s radius',
+          no_flag_fort:            'Your company has no flag fort',
           blocked_by_player: 'Blocked by a player',
           too_far:           'Too far away',
           in_water:          'Cannot place in water',

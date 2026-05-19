@@ -55,14 +55,30 @@ static inline float struct_claim_radius(PlacedStructureType t) {
     return (t == STRUCT_FLAG_FORT) ? CLAIM_RADIUS_FLAG_FORT : CLAIM_RADIUS_DEFAULT;
 }
 
-/** Broadcast a territory_update JSON message. */
+/** Broadcast a territory_update JSON message with optional fort position. */
 static void broadcast_territory_update(uint8_t island_id, uint32_t company_id,
                                        bool claimed) {
-    char msg[128];
+    /* Find the fort position for this island (so client can draw the radius ring) */
+    float fort_x = 0.0f, fort_y = 0.0f;
+    if (claimed) {
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            PlacedStructure *s = &placed_structures[si];
+            if (!s->active) continue;
+            if (s->type != STRUCT_FLAG_FORT) continue;
+            if (s->island_id == island_id && s->company_id == (uint8_t)company_id) {
+                fort_x = s->x;
+                fort_y = s->y;
+                break;
+            }
+        }
+    }
+    char msg[192];
     snprintf(msg, sizeof(msg),
              "{\"type\":\"territory_update\",\"island_id\":%u,"
-             "\"company_id\":%u,\"claimed\":%s}",
-             island_id, company_id, claimed ? "true" : "false");
+             "\"company_id\":%u,\"claimed\":%s"
+             ",\"fort_x\":%.1f,\"fort_y\":%.1f,\"fort_radius\":%.0f}",
+             island_id, company_id, claimed ? "true" : "false",
+             fort_x, fort_y, (float)CLAIM_RADIUS_FLAG_FORT);
     websocket_server_broadcast(msg);
 }
 

@@ -648,7 +648,7 @@ export class NetworkManager {
   /** Fired when the server confirms a craft_item request. */
   public onCraftResult: ((success: boolean, recipeId: string, reason?: string) => void) | null = null;
   /** Fired when an island territory changes ownership (flag fort placed or destroyed). */
-  public onTerritoryUpdate: ((islandId: number, companyId: number, claimed: boolean) => void) | null = null;
+  public onTerritoryUpdate: ((islandId: number, companyId: number, claimed: boolean, fortX: number, fortY: number, fortRadius: number) => void) | null = null;
   /** Fired when a claiming flag's progress changes. */
   public onClaimFlagProgress: ((structId: number, progressMs: number, contested: boolean) => void) | null = null;
   /** Fired when a claiming flag finishes capturing territory. */
@@ -2675,6 +2675,9 @@ export class NetworkManager {
           message.island_id   ?? 0,
           message.company_id  ?? 0,
           message.claimed === true,
+          message.fort_x      ?? 0,
+          message.fort_y      ?? 0,
+          message.fort_radius ?? 600,
         );
         break;
 

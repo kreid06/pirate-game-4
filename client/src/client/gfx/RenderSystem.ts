@@ -159,7 +159,7 @@ export class RenderSystem {
   /** Placed island structures — updated via addPlacedStructure / setPlacedStructures. */
   private placedStructures: PlacedStructure[] = [];
   /** islandId → companyId: active island territory claims. */
-  private _islandClaims: Map<number, number> = new Map();
+  private _islandClaims: Map<number, { companyId: number; fortX: number; fortY: number; fortRadius: number }> = new Map();
   /** When true, draws the territory overlay (Alt held). */
   private _showTerritoryOverlay = false;
   /**
@@ -1809,8 +1809,8 @@ export class RenderSystem {
 
   setTerritoryOverlay(on: boolean): void { this._showTerritoryOverlay = on; }
 
-  setIslandClaim(islandId: number, companyId: number): void {
-    this._islandClaims.set(islandId, companyId);
+  setIslandClaim(islandId: number, companyId: number, fortX = 0, fortY = 0, fortRadius = 600): void {
+    this._islandClaims.set(islandId, { companyId, fortX, fortY, fortRadius });
   }
 
   clearIslandClaim(islandId: number): void {
@@ -4905,53 +4905,74 @@ export class RenderSystem {
 
         ctx.restore();
       } else if (s.type === 'flag_fort') {
-        // ── Flag Fort — tower icon with a waving flag ──
+        // ── Flag Fort — stone tower with claim-radius circle ──
+        const companyColor = this._companyColor(s.companyId);
+        const isOwn = s.companyId !== 0 && s.companyId === this._localCompanyId;
+        const FORT_RADIUS_PX = 600; // matches server CLAIM_RADIUS_FLAG_FORT
+        const fortRadiusScreen = FORT_RADIUS_PX * zoom;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = (1 - hpFrac) * 0.5;
-        const ts = 38 * zoom;
+        const ts = Math.max(10, 44 * zoom);
 
-        // Tower body
-        ctx.fillStyle   = isHovered ? '#ffcc66' : '#cc8822';
-        ctx.strokeStyle = '#664400';
-        ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
-        ctx.fillRect(-ts * 0.4, -ts * 0.5, ts * 0.8, ts);
-        ctx.strokeRect(-ts * 0.4, -ts * 0.5, ts * 0.8, ts);
+        ctx.save();
+        ctx.translate(ssp.x, ssp.y);
 
-        // Battlements (3 merlons)
-        ctx.fillStyle = isHovered ? '#ffddaa' : '#ddaa44';
+        // Claim radius circle (always visible for own fort, faint for others)
+        const ringAlpha = isOwn ? 0.18 : (isHovered ? 0.12 : 0.07);
+        ctx.beginPath();
+        ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
+        ctx.fillStyle = companyColor + Math.round(ringAlpha * 255).toString(16).padStart(2, '0');
+        ctx.fill();
+        ctx.strokeStyle = companyColor + 'aa';
+        ctx.lineWidth = Math.max(1, 1.5 * zoom);
+        ctx.setLineDash([Math.max(4, 8 * zoom), Math.max(3, 5 * zoom)]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Tower base (stone)
+        const stoneR = Math.round(hpFrac * 120 + 60);
+        const stoneG = Math.round(hpFrac * 100 + 50);
+        const stoneB = Math.round(hpFrac * 80 + 40);
+        ctx.fillStyle = isHovered ? '#c8a860' : `rgb(${stoneR},${stoneG},${stoneB})`;
+        ctx.strokeStyle = '#2a1a0a';
+        ctx.lineWidth = Math.max(1, 1.5 * zoom);
+        ctx.fillRect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
+        ctx.strokeRect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
+
+        // Battlements — 3 merlons along top edge
+        ctx.fillStyle = isHovered ? '#ddb870' : `rgb(${Math.min(255, stoneR+15)},${Math.min(255, stoneG+10)},${Math.min(255, stoneB+8)})`;
+        const mw = ts * 0.22, mh = ts * 0.2;
         for (let m = -1; m <= 1; m++) {
-          ctx.fillRect((m * ts * 0.28) - ts * 0.12, -ts * 0.5 - ts * 0.18, ts * 0.22, ts * 0.18);
+          ctx.fillRect(m * ts * 0.3 - mw / 2, -ts * 0.45 - mh, mw, mh);
+          ctx.strokeRect(m * ts * 0.3 - mw / 2, -ts * 0.45 - mh, mw, mh);
         }
 
         // Flag pole
-        ctx.strokeStyle = '#333';
+        ctx.strokeStyle = '#555';
         ctx.lineWidth = Math.max(1, 1.5 * zoom);
         ctx.beginPath();
-        ctx.moveTo(ts * 0.15, -ts * 0.5 - ts * 0.18);
-        ctx.lineTo(ts * 0.15, -ts * 0.5 - ts * 0.58);
+        ctx.moveTo(ts * 0.08, -ts * 0.45);
+        ctx.lineTo(ts * 0.08, -ts * 0.45 - ts * 0.75);
         ctx.stroke();
 
-        // Flag triangle
-        const companyColor = this._companyColor(s.companyId);
+        // Flag (triangular pennant)
         ctx.fillStyle = companyColor;
         ctx.beginPath();
-        ctx.moveTo(ts * 0.15, -ts * 0.5 - ts * 0.58);
-        ctx.lineTo(ts * 0.45, -ts * 0.5 - ts * 0.44);
-        ctx.lineTo(ts * 0.15, -ts * 0.5 - ts * 0.30);
+        ctx.moveTo(ts * 0.08, -ts * 0.45 - ts * 0.75);
+        ctx.lineTo(ts * 0.08 + ts * 0.4, -ts * 0.45 - ts * 0.55);
+        ctx.lineTo(ts * 0.08, -ts * 0.45 - ts * 0.35);
         ctx.closePath();
         ctx.fill();
 
-        if (dmgDarken > 0.01) {
-          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          ctx.fillRect(-ts * 0.4, -ts * 0.5, ts * 0.8, ts);
-        }
+        ctx.restore();
       } else if (s.type === 'claim_flag') {
         // ── Claiming Flag — progress ring + pole ──
         const progress = (s.claimProgress ?? 0) / 60000;   // 0→1
         const contested = s.claimContested ?? false;
-        const CAPTURE_MS = 60000;
-        const ringR = 18 * zoom;
+        const ringR = Math.max(10, 18 * zoom);
         const companyColor = this._companyColor(s.companyId);
+
+        ctx.save();
+        ctx.translate(ssp.x, ssp.y);
 
         // Background ring
         ctx.strokeStyle = 'rgba(0,0,0,0.4)';
@@ -4963,30 +4984,30 @@ export class RenderSystem {
         // Progress arc (clockwise from top)
         if (progress > 0) {
           ctx.strokeStyle = contested ? '#ff6600' : companyColor;
-          ctx.lineWidth   = Math.max(2, 3 * zoom);
+          ctx.lineWidth   = Math.max(2, 3.5 * zoom);
           ctx.beginPath();
           ctx.arc(0, 0, ringR, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
           ctx.stroke();
         }
 
         // Flag pole
-        ctx.strokeStyle = '#333';
+        ctx.strokeStyle = '#444';
         ctx.lineWidth   = Math.max(1, 1.5 * zoom);
         ctx.beginPath();
-        ctx.moveTo(0, ringR);
-        ctx.lineTo(0, -ringR - 12 * zoom);
+        ctx.moveTo(0, ringR * 0.6);
+        ctx.lineTo(0, -ringR - 14 * zoom);
         ctx.stroke();
 
         // Flag
-        ctx.fillStyle = isHovered ? '#ff8888' : companyColor;
+        ctx.fillStyle = companyColor;
         ctx.beginPath();
-        ctx.moveTo(0,       -ringR - 12 * zoom);
-        ctx.lineTo(12 * zoom, -ringR - 4 * zoom);
-        ctx.lineTo(0,       -ringR + 4 * zoom);
+        ctx.moveTo(0,           -ringR - 14 * zoom);
+        ctx.lineTo(13 * zoom,   -ringR - 5 * zoom);
+        ctx.lineTo(0,           -ringR + 4 * zoom);
         ctx.closePath();
         ctx.fill();
 
-        void CAPTURE_MS; // referenced via progress = claimProgress / 60000
+        ctx.restore();
       }
     } // end for sorted
 
@@ -8651,8 +8672,9 @@ export class RenderSystem {
     const zoom = camera.getState().zoom;
 
     for (const isl of this.islands) {
-      const claimCompany = this._islandClaims.get(isl.id);
-      if (claimCompany === undefined || claimCompany === 0) continue;
+      const claim = this._islandClaims.get(isl.id);
+      if (claim === undefined || claim.companyId === 0) continue;
+      const claimCompany = claim.companyId;
 
       const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
       for (const off of wrapOffsets) {
@@ -8689,6 +8711,21 @@ export class RenderSystem {
           ctx.strokeStyle = color + 'aa';
           ctx.lineWidth = Math.max(1, 2.5 * zoom);
           ctx.stroke();
+        }
+
+        // Fort radius ring (when fort position is known)
+        if (claim.fortX !== 0 || claim.fortY !== 0) {
+          const fortScrn = camera.worldToScreen(Vec2.from(claim.fortX + off.dx, claim.fortY + off.dy));
+          const fortR = claim.fortRadius * zoom;
+          ctx.beginPath();
+          ctx.arc(fortScrn.x, fortScrn.y, fortR, 0, Math.PI * 2);
+          ctx.fillStyle = color + '22';
+          ctx.fill();
+          ctx.strokeStyle = color + 'dd';
+          ctx.lineWidth = Math.max(1.5, 2 * zoom);
+          ctx.setLineDash([Math.max(5, 10 * zoom), Math.max(4, 6 * zoom)]);
+          ctx.stroke();
+          ctx.setLineDash([]);
         }
 
         // Company label in the centre

@@ -188,6 +188,11 @@ export interface IslandClaim {
   islandId: number;
   companyId: number;
   fortStructureId: number;
+  /** World position of the flag fort (for drawing radius ring). */
+  fortX: number;
+  fortY: number;
+  /** Claim radius in world units (matches server CLAIM_RADIUS_FLAG_FORT). */
+  fortRadius: number;
 }
 export const COMPANY_NEUTRAL   = 0; // Alias for COMPANY_UNCLAIMED (backward compat)
 export const COMPANY_SOLO      = 1; // Player-owned, no guild affiliation

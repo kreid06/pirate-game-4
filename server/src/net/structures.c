@@ -369,31 +369,44 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
 
     /* ── Claiming Flag: must be placed in contested territory, linked to a fort ── */
+    /* ── Claiming Flag: must be placed within the enemy fort's radius ── */
     if (stype_enum == STRUCT_CLAIM_FLAG) {
-        if (!territory_is_contested(px, py)) {
+        /* Find the enemy flag fort on the target island */
+        bool in_fort_radius = false;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            PlacedStructure *ex = &placed_structures[si];
+            if (!ex->active) continue;
+            if (ex->type != STRUCT_FLAG_FORT) continue;
+            if (ex->island_id != target_island_id) continue;
+            if (ex->company_id == (uint8_t)player->company_id) continue; /* own fort */
+            float dx = px - ex->x, dy = py - ex->y;
+            float dist2 = dx * dx + dy * dy;
+            if (dist2 <= CLAIM_RADIUS_FLAG_FORT * CLAIM_RADIUS_FLAG_FORT) {
+                in_fort_radius = true;
+                break;
+            }
+        }
+        if (!in_fort_radius) {
             snprintf(response, sizeof(response),
-                     "{\"type\":\"place_structure_fail\",\"reason\":\"not_contested_territory\"}");
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_fort_radius\"}");
             goto ps_send;
         }
-        /* Verify the player's company has an active fort on some island */
-        bool has_fort = false;
-        uint32_t linked_fort = 0;
+        /* Verify the player's company has an active fort somewhere (their own base) */
+        bool has_own_fort = false;
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             PlacedStructure *ex = &placed_structures[si];
             if (!ex->active) continue;
             if (ex->type != STRUCT_FLAG_FORT) continue;
             if (ex->company_id != (uint8_t)player->company_id) continue;
-            has_fort   = true;
-            linked_fort = ex->id;
+            has_own_fort = true;
             break;
         }
-        if (!has_fort) {
+        if (!has_own_fort) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"place_structure_fail\",\"reason\":\"no_flag_fort\"}");
             goto ps_send;
         }
-        /* Stash linked_fort in place_rotation_deg temporarily — will apply below */
-        (void)linked_fort;  /* applied in post-placement block */
+        /* Applied in post-placement block */
     }
 
     /* Cannot place within claim radius of an enemy non-orphaned structure
