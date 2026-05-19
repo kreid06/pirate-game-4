@@ -6642,7 +6642,7 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 /* Send current placed structures */
                                 {
-                                    static char structs_buf[8192];
+                                    static char structs_buf[16384];
                                     int spos = 0;
                                     spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
                                                      "{\"type\":\"STRUCTURES\",\"structures\":[");
@@ -6658,12 +6658,19 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
                                             placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
                                             placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" :
-                                            placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
-                                        bool is_door_s = (placed_structures[si].type == STRUCT_DOOR);
-                                        bool is_sy_s   = (placed_structures[si].type == STRUCT_SHIPYARD);
+                                            placed_structures[si].type == STRUCT_CANNON       ? "cannon" :
+                                            placed_structures[si].type == STRUCT_FLAG_FORT    ? "flag_fort" :
+                                            placed_structures[si].type == STRUCT_CLAIM_FLAG   ? "claim_flag" :
+                                            placed_structures[si].type == STRUCT_COMPANY_FORTRESS ? "company_fortress" :
+                                            "unknown";
+                                        bool is_door_s   = (placed_structures[si].type == STRUCT_DOOR);
+                                        bool is_sy_s     = (placed_structures[si].type == STRUCT_SHIPYARD);
                                         bool is_cannon_s = (placed_structures[si].type == STRUCT_CANNON);
+                                        bool is_cfrt_s   = (placed_structures[si].type == STRUCT_COMPANY_FORTRESS);
+                                        bool is_cflag_s  = (placed_structures[si].type == STRUCT_CLAIM_FLAG);
                                         char sy_extra_s[256] = "";
                                         char cannon_extra_s[64] = "";
+                                        char claim_extra_s[128] = "";
                                         if (is_sy_s) {
                                             char smj[128] = "[]";
                                             if (placed_structures[si].modules_placed) {
@@ -6691,11 +6698,25 @@ int websocket_server_update(struct Sim* sim) {
                                                      ",\"cannon_aim_angle\":%.4f",
                                                      placed_structures[si].cannon_aim_angle);
                                         }
+                                        if (is_cfrt_s) {
+                                            snprintf(claim_extra_s, sizeof(claim_extra_s),
+                                                     ",\"fortress_build_progress\":%.0f,\"fortress_complete\":%s,\"fortress_contested\":%s",
+                                                     placed_structures[si].claim_progress_ms,
+                                                     placed_structures[si].fortress_complete ? "true" : "false",
+                                                     placed_structures[si].claim_contested   ? "true" : "false");
+                                        }
+                                        if (is_cflag_s) {
+                                            snprintf(claim_extra_s, sizeof(claim_extra_s),
+                                                     ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_targets_fortress\":%s",
+                                                     placed_structures[si].claim_progress_ms,
+                                                     placed_structures[si].claim_contested        ? "true" : "false",
+                                                     placed_structures[si].claim_targets_fortress ? "true" : "false");
+                                        }
                                         spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                          "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-                                                         ",\"rotation\":%.2f%s%s%s}",
+                                                         ",\"rotation\":%.2f%s%s%s%s}",
                                                          sfirst ? "" : ",",
                                                          placed_structures[si].id,
                                                          stype_str,
@@ -6709,11 +6730,12 @@ int websocket_server_update(struct Sim* sim) {
                                                          placed_structures[si].rotation,
                                                          is_door_s ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
                                                          sy_extra_s,
-                                                         cannon_extra_s);
+                                                         cannon_extra_s,
+                                                         claim_extra_s);
                                         sfirst = false;
                                     }
                                     spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos, "]}");
-                                    char sf[8448];
+                                    char sf[16640];
                                     size_t sflen = websocket_create_frame(
                                         WS_OPCODE_TEXT, structs_buf, (size_t)spos, sf, sizeof(sf));
                                     if (sflen > 0 && sflen < sizeof(sf))
@@ -6725,7 +6747,7 @@ int websocket_server_update(struct Sim* sim) {
                         } else if (strncmp(payload, "GET_STRUCTURES", 14) == 0) {
                             /* Re-send the full placed-structures list to this client. */
                             {
-                                static char gs_buf[8192];
+                                static char gs_buf[16384];
                                 int gp = 0;
                                 gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
                                                "{\"type\":\"STRUCTURES\",\"structures\":[");
@@ -6741,12 +6763,19 @@ int websocket_server_update(struct Sim* sim) {
                                         placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
                                         placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
                                         placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" :
-                                        placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
-                                    bool gs_is_door = (placed_structures[si].type == STRUCT_DOOR);
-                                    bool gs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
+                                        placed_structures[si].type == STRUCT_CANNON       ? "cannon" :
+                                        placed_structures[si].type == STRUCT_FLAG_FORT    ? "flag_fort" :
+                                        placed_structures[si].type == STRUCT_CLAIM_FLAG   ? "claim_flag" :
+                                        placed_structures[si].type == STRUCT_COMPANY_FORTRESS ? "company_fortress" :
+                                        "unknown";
+                                    bool gs_is_door   = (placed_structures[si].type == STRUCT_DOOR);
+                                    bool gs_is_sy     = (placed_structures[si].type == STRUCT_SHIPYARD);
                                     bool gs_is_cannon = (placed_structures[si].type == STRUCT_CANNON);
+                                    bool gs_is_cfrt   = (placed_structures[si].type == STRUCT_COMPANY_FORTRESS);
+                                    bool gs_is_cflag  = (placed_structures[si].type == STRUCT_CLAIM_FLAG);
                                     char gs_sy_extra[256] = "";
                                     char gs_cannon_extra[64] = "";
+                                    char gs_claim_extra[128] = "";
                                     if (gs_is_sy) {
                                         char gmj[128] = "[]";
                                         if (placed_structures[si].modules_placed) {
@@ -6774,11 +6803,25 @@ int websocket_server_update(struct Sim* sim) {
                                                                                                  ",\"cannon_aim_angle\":%.4f",
                                                                                                  placed_structures[si].cannon_aim_angle);
                                                                         }
+                                    if (gs_is_cfrt) {
+                                        snprintf(gs_claim_extra, sizeof(gs_claim_extra),
+                                                 ",\"fortress_build_progress\":%.0f,\"fortress_complete\":%s,\"fortress_contested\":%s",
+                                                 placed_structures[si].claim_progress_ms,
+                                                 placed_structures[si].fortress_complete ? "true" : "false",
+                                                 placed_structures[si].claim_contested   ? "true" : "false");
+                                    }
+                                    if (gs_is_cflag) {
+                                        snprintf(gs_claim_extra, sizeof(gs_claim_extra),
+                                                 ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_targets_fortress\":%s",
+                                                 placed_structures[si].claim_progress_ms,
+                                                 placed_structures[si].claim_contested        ? "true" : "false",
+                                                 placed_structures[si].claim_targets_fortress ? "true" : "false");
+                                    }
                                     gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
                                                    "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                    "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                    "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-                                                                                                     ",\"rotation\":%.2f%s%s%s}",
+                                                                                                     ",\"rotation\":%.2f%s%s%s%s}",
                                                    gfirst ? "" : ",",
                                                    placed_structures[si].id, gs_type,
                                                    placed_structures[si].island_id,
@@ -6790,11 +6833,12 @@ int websocket_server_update(struct Sim* sim) {
                                                    placed_structures[si].rotation,
                                                    gs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
                                                                                                      gs_sy_extra,
-                                                                                                     gs_cannon_extra);
+                                                                                                     gs_cannon_extra,
+                                                                                                     gs_claim_extra);
                                     gfirst = false;
                                 }
                                 gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp, "]}");
-                                char gf[8448];
+                                char gf[16640];
                                 size_t gflen = websocket_create_frame(
                                     WS_OPCODE_TEXT, gs_buf, (size_t)gp, gf, sizeof(gf));
                                 if (gflen > 0 && gflen < sizeof(gf))
