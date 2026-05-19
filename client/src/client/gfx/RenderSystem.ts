@@ -167,7 +167,7 @@ export class RenderSystem {
    * Keyed by islandId. Invalidated whenever placedStructures or _localCompanyId changes.
    * null entries mean the bitmap needs to be redrawn.
    */
-  private _claimOverlayCache: Map<number, { canvas: OffscreenCanvas; zoom: number; companyId: number } | null> = new Map();
+  private _claimOverlayCache: Map<number, { canvas: OffscreenCanvas; borderCanvas: OffscreenCanvas; zoom: number; companyId: number } | null> = new Map();
   private _claimOverlayDirty = true;
   /**
    * Pre-computed wall segments — rebuilt whenever placedStructures changes.
@@ -8992,9 +8992,13 @@ export class RenderSystem {
           const cacheKey = isl.id;
           const cached = this._claimOverlayCache.get(cacheKey);
           const zoomChanged = !cached || Math.abs(cached.zoom - zoom) / zoom > 0.01;
+          const borderWidth = Math.max(2, 3 * zoom);
+
+          let fillCanvas: OffscreenCanvas;
+          let borderCanvas: OffscreenCanvas;
 
           if (!cached || zoomChanged) {
-            // Rebuild: draw all circles solid onto offscreen canvas
+            // ── Build fill blob (union of circles) ──────────────────────────
             const tmp = new OffscreenCanvas(cvs.width, cvs.height);
             const tc  = tmp.getContext('2d')!;
             tc.fillStyle = color;
@@ -9004,27 +9008,36 @@ export class RenderSystem {
               tc.arc(psScrn.x, psScrn.y, psR, 0, Math.PI * 2);
               tc.fill();
             }
-            this._claimOverlayCache.set(cacheKey, { canvas: tmp, zoom, companyId: myCompany });
 
-            ctx.globalAlpha = 0.18;
-            ctx.drawImage(tmp, 0, 0);
-            ctx.globalAlpha = 1.0;
+            // ── Build perimeter border via expanded-minus-original ───────────
+            // Step 1: draw circles inflated by borderWidth → covers outer ring
+            const border = new OffscreenCanvas(cvs.width, cvs.height);
+            const bdc = border.getContext('2d')!;
+            bdc.fillStyle = color;
+            for (const ps of connectedList) {
+              const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
+              bdc.beginPath();
+              bdc.arc(psScrn.x, psScrn.y, psR + borderWidth, 0, Math.PI * 2);
+              bdc.fill();
+            }
+            // Step 2: erase the interior (where the original blob was)
+            bdc.globalCompositeOperation = 'destination-out';
+            bdc.drawImage(tmp, 0, 0);
+
+            fillCanvas   = tmp;
+            borderCanvas = border;
+            this._claimOverlayCache.set(cacheKey, { canvas: tmp, borderCanvas: border, zoom, companyId: myCompany });
           } else {
-            // Fast path: blit cached canvas
-            ctx.globalAlpha = 0.18;
-            ctx.drawImage(cached.canvas, 0, 0);
-            ctx.globalAlpha = 1.0;
+            fillCanvas   = cached.canvas;
+            borderCanvas = cached.borderCanvas;
           }
 
-          // Faint stroke outlines for individual radii visibility
-          ctx.lineWidth = Math.max(1, 1.5 * zoom);
-          ctx.strokeStyle = color + '50';
-          for (const ps of connectedList) {
-            const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
-            ctx.beginPath();
-            ctx.arc(psScrn.x, psScrn.y, psR, 0, Math.PI * 2);
-            ctx.stroke();
-          }
+          // Draw fill at low opacity, then perimeter border at higher opacity
+          ctx.globalAlpha = 0.15;
+          ctx.drawImage(fillCanvas, 0, 0);
+          ctx.globalAlpha = 0.75;
+          ctx.drawImage(borderCanvas, 0, 0);
+          ctx.globalAlpha = 1.0;
         }
 
         ctx.restore();
