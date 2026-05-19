@@ -163,6 +163,13 @@ export class RenderSystem {
   /** When true, draws the territory overlay (Alt held). */
   private _showTerritoryOverlay = false;
   /**
+   * Cached offscreen bitmaps for the territory claim overlay.
+   * Keyed by islandId. Invalidated whenever placedStructures or _localCompanyId changes.
+   * null entries mean the bitmap needs to be redrawn.
+   */
+  private _claimOverlayCache: Map<number, { canvas: OffscreenCanvas; zoom: number; companyId: number } | null> = new Map();
+  private _claimOverlayDirty = true;
+  /**
    * Pre-computed wall segments — rebuilt whenever placedStructures changes.
    * Each entry: [x1, y1, x2, y2] in world space.  Used for O(1)-per-frame
    * ceiling-transparency ray tests instead of recomputing each draw call.
@@ -1803,18 +1810,24 @@ export class RenderSystem {
     if (idx >= 0) this.placedStructures[idx] = s;
     else this.placedStructures.push(s);
     this._rebuildWallSegs();
+    this._claimOverlayDirty = true;
   }
 
   // ── Territory claim API ────────────────────────────────────────────────────
 
-  setTerritoryOverlay(on: boolean): void { this._showTerritoryOverlay = on; }
+  setTerritoryOverlay(on: boolean): void {
+    if (on && !this._showTerritoryOverlay) this._claimOverlayDirty = true; // invalidate on show
+    this._showTerritoryOverlay = on;
+  }
 
   setIslandClaim(islandId: number, companyId: number, fortX = 0, fortY = 0, fortRadius = 600, isCompanyFortress = false): void {
     this._islandClaims.set(islandId, { companyId, fortX, fortY, fortRadius, isCompanyFortress });
+    this._claimOverlayDirty = true;
   }
 
   clearIslandClaim(islandId: number): void {
     this._islandClaims.delete(islandId);
+    this._claimOverlayDirty = true;
   }
 
   updateClaimFlagProgress(structId: number, progressMs: number, contested: boolean, targetsFortress = false): void {
@@ -1854,6 +1867,7 @@ export class RenderSystem {
   setPlacedStructures(arr: PlacedStructure[]): void {
     this.placedStructures = [...arr];
     this._rebuildWallSegs();
+    this._claimOverlayDirty = true;
   }
 
   /** Remove a single structure by id (e.g. after server confirms demolish). */
@@ -1868,6 +1882,7 @@ export class RenderSystem {
     }
     this.placedStructures = this.placedStructures.filter(p => p.id !== id);
     this._rebuildWallSegs();
+    this._claimOverlayDirty = true;
   }
 
   /**
@@ -8900,9 +8915,16 @@ export class RenderSystem {
     }
 
     // ── Pass 2: per-structure claim radius for ALL islands (own structures) ──
-    // Shows active (connected to a fort) vs inactive (isolated) radii for every
-    // structure belonging to the local player's company, regardless of island claim state.
     if (myCompany === 0) return;
+
+    // Invalidate cache if company changed
+    if (this._claimOverlayDirty) {
+      this._claimOverlayCache.clear();
+      this._claimOverlayDirty = false;
+    }
+
+    const cvs = ctx.canvas;
+    const CLAIM_RADIUS_DEFAULT = 400;
 
     for (const isl of this.islands) {
       const ownStructs = this.placedStructures.filter(
@@ -8944,32 +8966,68 @@ export class RenderSystem {
           }
         }
 
+        const connectedList = nonFortStructs.filter(ps => connected.has(ps.id));
+        const inactiveList  = nonFortStructs.filter(ps => !connected.has(ps.id));
         const psR = CLAIM_RADIUS_DEFAULT * zoom;
+
         ctx.save();
+
+        // ── Inactive structures: grey dashed circles (cheap, no cache needed) ─
         ctx.lineWidth = Math.max(0.5, 1 * zoom);
-        for (const ps of nonFortStructs) {
+        for (const ps of inactiveList) {
           const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
-          const isConn = connected.has(ps.id);
           ctx.beginPath();
           ctx.arc(psScrn.x, psScrn.y, psR, 0, Math.PI * 2);
-          if (isConn) {
-            // Active — colored fill + solid stroke, structure extends territory
-            ctx.fillStyle = color + '18';
-            ctx.fill();
-            ctx.setLineDash([]);
-            ctx.strokeStyle = color + '88';
-            ctx.stroke();
+          ctx.fillStyle = 'rgba(128,128,128,0.04)';
+          ctx.fill();
+          ctx.setLineDash([Math.max(3, 4 * zoom), Math.max(3, 4 * zoom)]);
+          ctx.strokeStyle = 'rgba(160,160,160,0.30)';
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        // ── Active (connected) structures: cached merged paint blob ───────────
+        // The OffscreenCanvas is rebuilt only when _claimOverlayDirty was set
+        // (structure list changed, claim changed, or zoom changed by >1%).
+        if (connectedList.length > 0) {
+          const cacheKey = isl.id;
+          const cached = this._claimOverlayCache.get(cacheKey);
+          const zoomChanged = !cached || Math.abs(cached.zoom - zoom) / zoom > 0.01;
+
+          if (!cached || zoomChanged) {
+            // Rebuild: draw all circles solid onto offscreen canvas
+            const tmp = new OffscreenCanvas(cvs.width, cvs.height);
+            const tc  = tmp.getContext('2d')!;
+            tc.fillStyle = color;
+            for (const ps of connectedList) {
+              const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
+              tc.beginPath();
+              tc.arc(psScrn.x, psScrn.y, psR, 0, Math.PI * 2);
+              tc.fill();
+            }
+            this._claimOverlayCache.set(cacheKey, { canvas: tmp, zoom, companyId: myCompany });
+
+            ctx.globalAlpha = 0.18;
+            ctx.drawImage(tmp, 0, 0);
+            ctx.globalAlpha = 1.0;
           } else {
-            // Inactive — grey dashed, structure is isolated from any fort
-            ctx.fillStyle = 'rgba(128,128,128,0.05)';
-            ctx.fill();
-            ctx.setLineDash([Math.max(3, 4 * zoom), Math.max(3, 4 * zoom)]);
-            ctx.strokeStyle = 'rgba(160,160,160,0.35)';
+            // Fast path: blit cached canvas
+            ctx.globalAlpha = 0.18;
+            ctx.drawImage(cached.canvas, 0, 0);
+            ctx.globalAlpha = 1.0;
+          }
+
+          // Faint stroke outlines for individual radii visibility
+          ctx.lineWidth = Math.max(1, 1.5 * zoom);
+          ctx.strokeStyle = color + '50';
+          for (const ps of connectedList) {
+            const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
+            ctx.beginPath();
+            ctx.arc(psScrn.x, psScrn.y, psR, 0, Math.PI * 2);
             ctx.stroke();
-            ctx.setLineDash([]);
           }
         }
-        ctx.setLineDash([]);
+
         ctx.restore();
       }
     }
