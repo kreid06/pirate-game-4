@@ -8822,7 +8822,10 @@ export class RenderSystem {
   private drawTerritoryOverlay(camera: Camera): void {
     const ctx = this.ctx;
     const zoom = camera.getState().zoom;
+    const CLAIM_RADIUS_DEFAULT = 400;
+    const myCompany = this._localCompanyId;
 
+    // ── Pass 1: claimed-island territory fill + fort rings + labels ──────────
     for (const isl of this.islands) {
       const claim = this._islandClaims.get(isl.id);
       if (claim === undefined || claim.companyId === 0) continue;
@@ -8880,15 +8883,42 @@ export class RenderSystem {
           ctx.setLineDash([]);
         }
 
-        // Per-structure claim radius (400px) — active (connected to fort) vs inactive
-        const CLAIM_RADIUS_DEFAULT = 400;
-        const islStructs = this.placedStructures.filter(
-          ps => ps.islandId === isl.id && ps.companyId === claimCompany
-        );
-        const fortStructs  = islStructs.filter(ps => ps.type === 'flag_fort' || ps.type === 'company_fortress');
-        const nonFortStructs = islStructs.filter(ps => ps.type !== 'flag_fort' && ps.type !== 'company_fortress');
+        // Company label in the centre
+        const sc = camera.worldToScreen(Vec2.from(islandX, islandY));
+        const fontSize = Math.max(11, Math.round(13 * zoom));
+        ctx.font = `bold ${fontSize}px Georgia, serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        ctx.lineWidth = Math.max(2, 3 * zoom);
+        ctx.strokeText(companyName, sc.x, sc.y);
+        ctx.fillText(companyName, sc.x, sc.y);
 
-        // BFS: find all structures connected (within 400px chain) from any fort
+        ctx.restore();
+      }
+    }
+
+    // ── Pass 2: per-structure claim radius for ALL islands (own structures) ──
+    // Shows active (connected to a fort) vs inactive (isolated) radii for every
+    // structure belonging to the local player's company, regardless of island claim state.
+    if (myCompany === 0) return;
+
+    for (const isl of this.islands) {
+      const ownStructs = this.placedStructures.filter(
+        ps => ps.islandId === isl.id && ps.companyId === myCompany
+      );
+      if (ownStructs.length === 0) continue;
+
+      const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
+      for (const off of wrapOffsets) {
+        const color = this._companyColor(myCompany);
+
+        const fortStructs    = ownStructs.filter(ps => ps.type === 'flag_fort' || ps.type === 'company_fortress');
+        const nonFortStructs = ownStructs.filter(ps => ps.type !== 'flag_fort' && ps.type !== 'company_fortress');
+        if (nonFortStructs.length === 0) continue;
+
+        // BFS: find all structures reachable (≤400px) from any fort via chain
         const connected = new Set<number>();
         const bfsQueue: typeof nonFortStructs = [];
         for (const ps of nonFortStructs) {
@@ -8915,6 +8945,7 @@ export class RenderSystem {
         }
 
         const psR = CLAIM_RADIUS_DEFAULT * zoom;
+        ctx.save();
         ctx.lineWidth = Math.max(0.5, 1 * zoom);
         for (const ps of nonFortStructs) {
           const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
@@ -8922,14 +8953,14 @@ export class RenderSystem {
           ctx.beginPath();
           ctx.arc(psScrn.x, psScrn.y, psR, 0, Math.PI * 2);
           if (isConn) {
-            // Active — colored fill + solid stroke, extends territory
+            // Active — colored fill + solid stroke, structure extends territory
             ctx.fillStyle = color + '18';
             ctx.fill();
             ctx.setLineDash([]);
             ctx.strokeStyle = color + '88';
             ctx.stroke();
           } else {
-            // Inactive — greyed out, dashed, not contributing to territory
+            // Inactive — grey dashed, structure is isolated from any fort
             ctx.fillStyle = 'rgba(128,128,128,0.05)';
             ctx.fill();
             ctx.setLineDash([Math.max(3, 4 * zoom), Math.max(3, 4 * zoom)]);
@@ -8939,19 +8970,6 @@ export class RenderSystem {
           }
         }
         ctx.setLineDash([]);
-
-        // Company label in the centre
-        const sc = camera.worldToScreen(Vec2.from(islandX, islandY));
-        const fontSize = Math.max(11, Math.round(13 * zoom));
-        ctx.font = `bold ${fontSize}px Georgia, serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = '#ffffff';
-        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
-        ctx.lineWidth = Math.max(2, 3 * zoom);
-        ctx.strokeText(companyName, sc.x, sc.y);
-        ctx.fillText(companyName, sc.x, sc.y);
-
         ctx.restore();
       }
     }
