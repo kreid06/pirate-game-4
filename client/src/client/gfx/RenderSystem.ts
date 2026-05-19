@@ -167,7 +167,7 @@ export class RenderSystem {
    * Keyed by islandId. Invalidated whenever placedStructures or _localCompanyId changes.
    * null entries mean the bitmap needs to be redrawn.
    */
-  private _claimOverlayCache: Map<number, { canvas: OffscreenCanvas; borderCanvas: OffscreenCanvas; zoom: number; companyId: number } | null> = new Map();
+  private _claimOverlayCache: Map<number, { connectedIds: Set<number>; inactiveIds: Set<number>; companyId: number }> = new Map();
   private _claimOverlayDirty = true;
   /**
    * Pre-computed wall segments — rebuilt whenever placedStructures changes.
@@ -8883,20 +8883,6 @@ export class RenderSystem {
           ctx.stroke();
         }
 
-        // Fort radius ring (when fort position is known)
-        if (claim.fortX !== 0 || claim.fortY !== 0) {
-          const fortScrn = camera.worldToScreen(Vec2.from(claim.fortX + off.dx, claim.fortY + off.dy));
-          const fortR = claim.fortRadius * zoom;
-          ctx.beginPath();
-          ctx.arc(fortScrn.x, fortScrn.y, fortR, 0, Math.PI * 2);
-          ctx.fillStyle = color + '22';
-          ctx.fill();
-          ctx.strokeStyle = color + 'dd';
-          ctx.lineWidth = Math.max(1.5, 2 * zoom);
-          ctx.setLineDash([Math.max(5, 10 * zoom), Math.max(4, 6 * zoom)]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
 
         // Company label in the centre
         const sc = camera.worldToScreen(Vec2.from(islandX, islandY));
@@ -8914,10 +8900,10 @@ export class RenderSystem {
       }
     }
 
-    // ── Pass 2: per-structure claim radius for ALL islands (own structures) ──
+    // ── Pass 2: per-structure + fort claim radius for own company ─────────────
     if (myCompany === 0) return;
 
-    // Invalidate cache if company changed
+    // Rebuild BFS cache when structure/claim data changed (world-space, camera-independent)
     if (this._claimOverlayDirty) {
       this._claimOverlayCache.clear();
       this._claimOverlayDirty = false;
@@ -8931,22 +8917,20 @@ export class RenderSystem {
       );
       if (ownStructs.length === 0) continue;
 
-      const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
-      for (const off of wrapOffsets) {
-        const color = this._companyColor(myCompany);
-
+      // ── BFS: compute connected/inactive sets (world-space, cached) ──────
+      if (!this._claimOverlayCache.has(isl.id)) {
         const fortStructs    = ownStructs.filter(ps => ps.type === 'flag_fort' || ps.type === 'company_fortress');
         const nonFortStructs = ownStructs.filter(ps => ps.type !== 'flag_fort' && ps.type !== 'company_fortress');
-        if (nonFortStructs.length === 0) continue;
 
-        // BFS: find all structures reachable (≤400px) from any fort via chain
-        const connected = new Set<number>();
+        // Forts are always active — they ARE the claim root
+        const connectedIds = new Set<number>(fortStructs.map(ps => ps.id));
         const bfsQueue: typeof nonFortStructs = [];
+
         for (const ps of nonFortStructs) {
           for (const fort of fortStructs) {
             const dx = ps.x - fort.x, dy = ps.y - fort.y;
             if (dx * dx + dy * dy <= CLAIM_RADIUS_DEFAULT * CLAIM_RADIUS_DEFAULT) {
-              connected.add(ps.id);
+              connectedIds.add(ps.id);
               bfsQueue.push(ps);
               break;
             }
@@ -8956,22 +8940,34 @@ export class RenderSystem {
         while (qi < bfsQueue.length) {
           const cur = bfsQueue[qi++];
           for (const ps of nonFortStructs) {
-            if (connected.has(ps.id)) continue;
+            if (connectedIds.has(ps.id)) continue;
             const dx = ps.x - cur.x, dy = ps.y - cur.y;
             if (dx * dx + dy * dy <= CLAIM_RADIUS_DEFAULT * CLAIM_RADIUS_DEFAULT) {
-              connected.add(ps.id);
+              connectedIds.add(ps.id);
               bfsQueue.push(ps);
             }
           }
         }
 
-        const connectedList = nonFortStructs.filter(ps => connected.has(ps.id));
-        const inactiveList  = nonFortStructs.filter(ps => !connected.has(ps.id));
-        const psR = CLAIM_RADIUS_DEFAULT * zoom;
+        const inactiveIds = new Set<number>(
+          nonFortStructs.filter(ps => !connectedIds.has(ps.id)).map(ps => ps.id)
+        );
+        this._claimOverlayCache.set(isl.id, { connectedIds, inactiveIds, companyId: myCompany });
+      }
+
+      const bfs = this._claimOverlayCache.get(isl.id)!;
+      const connectedList = ownStructs.filter(ps => bfs.connectedIds.has(ps.id));
+      const inactiveList  = ownStructs.filter(ps => bfs.inactiveIds.has(ps.id));
+      const psR = CLAIM_RADIUS_DEFAULT * zoom;
+
+      // ── Screen-space draw (per frame, uses current camera transform) ─────
+      const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
+      for (const off of wrapOffsets) {
+        const color = this._companyColor(myCompany);
 
         ctx.save();
 
-        // ── Inactive structures: grey dashed circles (cheap, no cache needed) ─
+        // Inactive structures: grey dashed circles
         ctx.lineWidth = Math.max(0.5, 1 * zoom);
         for (const ps of inactiveList) {
           const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
@@ -8985,58 +8981,41 @@ export class RenderSystem {
           ctx.setLineDash([]);
         }
 
-        // ── Active (connected) structures: cached merged paint blob ───────────
-        // The OffscreenCanvas is rebuilt only when _claimOverlayDirty was set
-        // (structure list changed, claim changed, or zoom changed by >1%).
+        // Active + forts: merged paint blob (rebuilt per frame from current screen coords)
         if (connectedList.length > 0) {
-          const cacheKey = isl.id;
-          const cached = this._claimOverlayCache.get(cacheKey);
-          const zoomChanged = !cached || Math.abs(cached.zoom - zoom) / zoom > 0.01;
           const borderWidth = Math.max(2, 3 * zoom);
 
-          let fillCanvas: OffscreenCanvas;
-          let borderCanvas: OffscreenCanvas;
+          // Collect screen positions once
+          const screenPts = connectedList.map(ps =>
+            camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy))
+          );
 
-          if (!cached || zoomChanged) {
-            // ── Build fill blob (union of circles) ──────────────────────────
-            const tmp = new OffscreenCanvas(cvs.width, cvs.height);
-            const tc  = tmp.getContext('2d')!;
-            tc.fillStyle = color;
-            for (const ps of connectedList) {
-              const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
-              tc.beginPath();
-              tc.arc(psScrn.x, psScrn.y, psR, 0, Math.PI * 2);
-              tc.fill();
-            }
-
-            // ── Build perimeter border via expanded-minus-original ───────────
-            // Step 1: draw circles inflated by borderWidth → covers outer ring
-            const border = new OffscreenCanvas(cvs.width, cvs.height);
-            const bdc = border.getContext('2d')!;
-            bdc.fillStyle = color;
-            for (const ps of connectedList) {
-              const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
-              bdc.beginPath();
-              bdc.arc(psScrn.x, psScrn.y, psR + borderWidth, 0, Math.PI * 2);
-              bdc.fill();
-            }
-            // Step 2: erase the interior (where the original blob was)
-            bdc.globalCompositeOperation = 'destination-out';
-            bdc.drawImage(tmp, 0, 0);
-
-            fillCanvas   = tmp;
-            borderCanvas = border;
-            this._claimOverlayCache.set(cacheKey, { canvas: tmp, borderCanvas: border, zoom, companyId: myCompany });
-          } else {
-            fillCanvas   = cached.canvas;
-            borderCanvas = cached.borderCanvas;
+          // Fill blob: union of all circles
+          const tmp = new OffscreenCanvas(cvs.width, cvs.height);
+          const tc  = tmp.getContext('2d')!;
+          tc.fillStyle = color;
+          for (const sp of screenPts) {
+            tc.beginPath();
+            tc.arc(sp.x, sp.y, psR, 0, Math.PI * 2);
+            tc.fill();
           }
 
-          // Draw fill at low opacity, then perimeter border at higher opacity
+          // Border: expanded circles minus original blob = perimeter ring only
+          const border = new OffscreenCanvas(cvs.width, cvs.height);
+          const bdc    = border.getContext('2d')!;
+          bdc.fillStyle = color;
+          for (const sp of screenPts) {
+            bdc.beginPath();
+            bdc.arc(sp.x, sp.y, psR + borderWidth, 0, Math.PI * 2);
+            bdc.fill();
+          }
+          bdc.globalCompositeOperation = 'destination-out';
+          bdc.drawImage(tmp, 0, 0);
+
           ctx.globalAlpha = 0.15;
-          ctx.drawImage(fillCanvas, 0, 0);
+          ctx.drawImage(tmp, 0, 0);
           ctx.globalAlpha = 0.75;
-          ctx.drawImage(borderCanvas, 0, 0);
+          ctx.drawImage(border, 0, 0);
           ctx.globalAlpha = 1.0;
         }
 
