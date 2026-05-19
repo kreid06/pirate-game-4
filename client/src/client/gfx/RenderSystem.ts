@@ -8924,7 +8924,6 @@ export class RenderSystem {
     }
 
     const cvs = ctx.canvas;
-    const CLAIM_RADIUS_DEFAULT = 400;
 
     for (const isl of this.islands) {
       const ownStructs = this.placedStructures.filter(
