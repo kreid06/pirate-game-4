@@ -7757,13 +7757,18 @@ int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id) 
              * (non-solo, non-neutral), upgrade every neutral OR solo-owned structure
              * this player placed to that company.  Structures already claimed by a
              * real company are never changed.  Going back to SOLO leaves all
-             * company-owned structures with their current company. */
+             * company-owned structures with their current company.
+             * Flag forts and company fortresses are intentionally excluded —
+             * territorial ownership transfers will be handled separately. */
             if (company_id != COMPANY_NEUTRAL && company_id != COMPANY_SOLO) {
                 for (uint32_t si = 0; si < placed_structure_count; si++) {
                     if (!placed_structures[si].active) continue;
                     if (placed_structures[si].placer_id != player_id) continue;
                     if (placed_structures[si].company_id != COMPANY_NEUTRAL &&
                         placed_structures[si].company_id != COMPANY_SOLO) continue;
+                    /* Territorial anchors must never auto-transfer when a player changes company */
+                    if (placed_structures[si].type == STRUCT_FLAG_FORT ||
+                        placed_structures[si].type == STRUCT_COMPANY_FORTRESS) continue;
                     placed_structures[si].company_id = company_id;
                     char upd[128];
                     snprintf(upd, sizeof(upd),
