@@ -8882,8 +8882,9 @@ export class RenderSystem {
         const isOwn = cid === myCompany;
 
         // ── Resolve fort position for this company ──────────────────────────
-        // For own company: match by island + type only (companyId may lag during capture).
-        // For other companies: also filter by companyId to avoid misattribution.
+        // For non-solo own company: match by island + type only (companyId may lag during capture).
+        // Solo players and other companies must match by companyId to avoid claiming enemy forts.
+        const isOwnNonSolo = isOwn && cid !== COMPANY_SOLO;
         let fortX = 0, fortY = 0, fortSeedR = CLAIM_RADIUS_FORT;
 
         if (islClaim?.companyId === cid && (islClaim.fortX !== 0 || islClaim.fortY !== 0)) {
@@ -8894,7 +8895,7 @@ export class RenderSystem {
           const placedFort = this.placedStructures.find(
             ps => ps.islandId === isl.id
                && (ps.type === 'flag_fort' || ps.type === 'company_fortress')
-               && (isOwn || ps.companyId === cid)
+               && (isOwnNonSolo || ps.companyId === cid)
           );
           if (placedFort) {
             fortX     = placedFort.x;

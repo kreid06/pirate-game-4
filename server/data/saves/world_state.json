@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": 1779331974,
+    "timestamp": 1779399984,
     "ship_count": 3,
     "npc_count": 22,
-    "structure_count": 26
+    "structure_count": 27
   },
   "ships": [
     {
@@ -570,7 +570,7 @@
       "id": 9022,
       "name": "Crewmember",
       "role": 0,
-      "company": 1,
+      "company": 3,
       "x": 0.000,
       "y": 0.000,
       "rot": -0.519146,
@@ -588,13 +588,13 @@
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
       "npc_state": 0,
-      "owner_player_id": 1000
+      "owner_player_id": 0
     },
     {
       "id": 9026,
       "name": "Crewmember",
       "role": 0,
-      "company": 1,
+      "company": 3,
       "x": -4.459,
       "y": 20.000,
       "rot": 3.044084,
@@ -612,13 +612,13 @@
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
       "npc_state": 0,
-      "owner_player_id": 1000
+      "owner_player_id": 0
     },
     {
       "id": 9030,
       "name": "Crewmember",
       "role": 0,
-      "company": 1,
+      "company": 3,
       "x": -50.000,
       "y": 0.000,
       "rot": 0.000000,
@@ -636,13 +636,13 @@
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
       "npc_state": 0,
-      "owner_player_id": 1000
+      "owner_player_id": 0
     },
     {
       "id": 9031,
       "name": "Crewmember",
       "role": 0,
-      "company": 1,
+      "company": 3,
       "x": 0.000,
       "y": 0.000,
       "rot": 0.000000,
@@ -660,7 +660,7 @@
       "assigned_weapon_id": 0,
       "wants_cannon": 0,
       "npc_state": 0,
-      "owner_player_id": 1000
+      "owner_player_id": 0
     }
   ],
   "placed_structures": [
@@ -1119,6 +1119,24 @@
       "type": 0,
       "x": 17338.400,
       "y": 13653.300,
+      "rot": 0.000,
+      "island_id": 4,
+      "company": 3,
+      "hp": 100,
+      "max_hp": 100,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false,
+      "construction_phase": 0,
+      "construction_company": 0,
+      "modules_placed": 0,
+      "scaffolded_ship_id": 0
+    },
+    {
+      "id": 152,
+      "type": 0,
+      "x": 18902.900,
+      "y": 14369.300,
       "rot": 0.000,
       "island_id": 4,
       "company": 3,
