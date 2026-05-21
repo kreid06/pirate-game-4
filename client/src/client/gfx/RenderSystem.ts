@@ -8911,12 +8911,32 @@ export class RenderSystem {
     const cvs = ctx.canvas;
 
     for (const isl of this.islands) {
-      // Use IslandClaim as the authoritative source for the fort (avoids companyId mismatch
-      // on the PlacedStructure which may still be 0 during capture).
       const islClaim = this._islandClaims.get(isl.id);
-      const hasFort  = !!islClaim && islClaim.companyId === myCompany
-                       && (islClaim.fortX !== 0 || islClaim.fortY !== 0);
-      const fortSeedR = islClaim?.fortRadius ?? CLAIM_RADIUS_DEFAULT;
+
+      // ── Resolve fort position ─────────────────────────────────────────────
+      // Prefer IslandClaim (authoritative territory data).
+      // Fall back to PlacedStructure: onTerritoryCaptured sets claim without
+      // fort coords, so fort position may only be known via PlacedStructure.
+      let fortX = 0, fortY = 0, fortSeedR = CLAIM_RADIUS_DEFAULT;
+
+      if (islClaim?.companyId === myCompany && (islClaim.fortX !== 0 || islClaim.fortY !== 0)) {
+        fortX     = islClaim.fortX;
+        fortY     = islClaim.fortY;
+        fortSeedR = islClaim.fortRadius;
+      } else {
+        const placedFort = this.placedStructures.find(
+          ps => ps.islandId === isl.id
+             && ps.companyId === myCompany
+             && (ps.type === 'flag_fort' || ps.type === 'company_fortress')
+        );
+        if (placedFort) {
+          fortX     = placedFort.x;
+          fortY     = placedFort.y;
+          fortSeedR = islClaim?.fortRadius ?? CLAIM_RADIUS_DEFAULT;
+        }
+      }
+
+      const hasFort = fortX !== 0 || fortY !== 0;
 
       // Non-fort structures owned by the local company on this island
       const ownStructs = this.placedStructures.filter(
@@ -8928,21 +8948,20 @@ export class RenderSystem {
 
       if (!hasFort && ownStructs.length === 0) continue;
 
-      // ── BFS cache (world-space) ────────────────────────────────────────────
+      // ── BFS cache (world-space, camera-independent) ────────────────────────
       if (!this._claimOverlayCache.has(isl.id)) {
         const connectedIds = new Set<number>();
         const bfsQueue: typeof ownStructs = [];
 
         if (hasFort) {
           for (const ps of ownStructs) {
-            const dx = ps.x - islClaim!.fortX, dy = ps.y - islClaim!.fortY;
+            const dx = ps.x - fortX, dy = ps.y - fortY;
             if (dx * dx + dy * dy <= fortSeedR * fortSeedR) {
               connectedIds.add(ps.id);
               bfsQueue.push(ps);
             }
           }
         }
-
         let qi = 0;
         while (qi < bfsQueue.length) {
           const cur = bfsQueue[qi++];
@@ -8962,10 +8981,10 @@ export class RenderSystem {
         this._claimOverlayCache.set(isl.id, { connectedIds, inactiveIds, companyId: myCompany });
       }
 
-      const bfs = this._claimOverlayCache.get(isl.id)!;
+      const bfs           = this._claimOverlayCache.get(isl.id)!;
       const connectedList = ownStructs.filter(ps => bfs.connectedIds.has(ps.id));
       const inactiveList  = ownStructs.filter(ps => bfs.inactiveIds.has(ps.id));
-      const psR    = CLAIM_RADIUS_DEFAULT * zoom;
+      const psR      = CLAIM_RADIUS_DEFAULT * zoom;
       const fortVisR = fortSeedR * zoom;
 
       const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
@@ -8973,7 +8992,7 @@ export class RenderSystem {
         const color = this._companyColor(myCompany);
         ctx.save();
 
-        // ── Inactive structures: grey dashed circles ───────────────────────
+        // ── Inactive structures: grey dashed circles ─────────────────────
         for (const ps of inactiveList) {
           const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
           ctx.beginPath();
@@ -8982,27 +9001,31 @@ export class RenderSystem {
           ctx.fill();
           ctx.setLineDash([Math.max(3, 4 * zoom), Math.max(3, 4 * zoom)]);
           ctx.strokeStyle = 'rgba(160,160,160,0.30)';
+          ctx.lineWidth = 1;
           ctx.stroke();
           ctx.setLineDash([]);
         }
 
-        // ── Active blob: fort circle (from IslandClaim) + connected structures
-        // Fort and structures are always in the same OffscreenCanvas so they
-        // merge into one unified paint area with a single perimeter border.
+        // ── Active blob: fort + connected structures → one merged paint area ─
+        // Fort and all connected structures go into the SAME OffscreenCanvas
+        // so their circles merge. The perimeter ring is computed via the
+        // expanded-minus-original (destination-out) technique.
         const screenPts: Array<{ x: number; y: number; r: number }> = [];
 
         if (hasFort) {
-          const fs = camera.worldToScreen(Vec2.from(islClaim!.fortX + off.dx, islClaim!.fortY + off.dy));
+          const fs = camera.worldToScreen(Vec2.from(fortX + off.dx, fortY + off.dy));
           screenPts.push({ x: fs.x, y: fs.y, r: fortVisR });
         }
         for (const ps of connectedList) {
-          const ps2 = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
-          screenPts.push({ x: ps2.x, y: ps2.y, r: psR });
+          const sp = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
+          screenPts.push({ x: sp.x, y: sp.y, r: psR });
         }
 
         if (screenPts.length > 0) {
-          const borderWidth = Math.max(2, 3 * zoom);
+          // Wide enough to be clearly visible at any zoom
+          const borderWidth = Math.max(8, 10 * zoom);
 
+          // Fill blob: union of all circles at their real radii
           const tmp = new OffscreenCanvas(cvs.width, cvs.height);
           const tc  = tmp.getContext('2d')!;
           tc.fillStyle = color;
@@ -9010,19 +9033,21 @@ export class RenderSystem {
             tc.beginPath(); tc.arc(x, y, r, 0, Math.PI * 2); tc.fill();
           }
 
-          const border = new OffscreenCanvas(cvs.width, cvs.height);
-          const bdc    = border.getContext('2d')!;
-          bdc.fillStyle = color;
+          // Perimeter ring: expanded circles minus fill blob → outer ring only
+          const ring = new OffscreenCanvas(cvs.width, cvs.height);
+          const rc   = ring.getContext('2d')!;
+          rc.fillStyle = color;
           for (const { x, y, r } of screenPts) {
-            bdc.beginPath(); bdc.arc(x, y, r + borderWidth, 0, Math.PI * 2); bdc.fill();
+            rc.beginPath(); rc.arc(x, y, r + borderWidth, 0, Math.PI * 2); rc.fill();
           }
-          bdc.globalCompositeOperation = 'destination-out';
-          bdc.drawImage(tmp, 0, 0);
+          rc.globalCompositeOperation = 'destination-out';
+          rc.drawImage(tmp, 0, 0);
 
-          ctx.globalAlpha = 0.15;
+          // Composite: semi-transparent fill, fully solid perimeter border
+          ctx.globalAlpha = 0.12;
           ctx.drawImage(tmp, 0, 0);
-          ctx.globalAlpha = 0.75;
-          ctx.drawImage(border, 0, 0);
+          ctx.globalAlpha = 0.90;
+          ctx.drawImage(ring, 0, 0);
           ctx.globalAlpha = 1.0;
         }
 
