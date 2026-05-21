@@ -328,12 +328,30 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         }
     }
 
-    /* Cannot place within 500 px of an enemy-company structure */
-    {
+    /* Cannot place within 500 px of an enemy-company structure
+       — unless the placement point is inside the player's own company's claim area,
+         in which case the claim system takes priority over the build-prevention radius. */
+    if (player->company_id != 0 &&
+        !territory_is_claimed_by(px, py, (uint32_t)player->company_id)) {
         bool enemy_block = false;
         for (uint32_t si = 0; si < placed_structure_count && !enemy_block; si++) {
             if (!placed_structures[si].active) continue;
             if (placed_structures[si].company_id == (uint8_t)player->company_id) continue; /* own */
+            float dx = placed_structures[si].x - px;
+            float dy = placed_structures[si].y - py;
+            if (dx*dx + dy*dy < 500.0f * 500.0f) enemy_block = true;
+        }
+        if (enemy_block) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"enemy_territory\"}");
+            goto ps_send;
+        }
+    } else if (player->company_id == 0) {
+        /* No company: original behavior — any enemy structure within 500 px blocks. */
+        bool enemy_block = false;
+        for (uint32_t si = 0; si < placed_structure_count && !enemy_block; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].company_id == (uint8_t)player->company_id) continue;
             float dx = placed_structures[si].x - px;
             float dy = placed_structures[si].y - py;
             if (dx*dx + dy*dy < 500.0f * 500.0f) enemy_block = true;
