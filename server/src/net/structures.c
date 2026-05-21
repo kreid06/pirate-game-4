@@ -357,12 +357,18 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                      "{\"type\":\"place_structure_fail\",\"reason\":\"island_already_claimed\"}");
             goto ps_send;
         }
-        /* Only one fort per company per island */
-        for (uint32_t si = 0; si < placed_structure_count; si++) {
-            PlacedStructure *ex = &placed_structures[si];
-            if (!ex->active) continue;
-            if (ex->type != STRUCT_FLAG_FORT) continue;
-            if ((uint8_t)ex->island_id == (uint8_t)target_island_id) {
+        /* Max 3 flag forts per company per island */
+        {
+            int company_fort_count = 0;
+            for (uint32_t si = 0; si < placed_structure_count; si++) {
+                PlacedStructure *ex = &placed_structures[si];
+                if (!ex->active) continue;
+                if (ex->type != STRUCT_FLAG_FORT) continue;
+                if ((uint8_t)ex->island_id != (uint8_t)target_island_id) continue;
+                if (ex->company_id != (uint8_t)player->company_id) continue;
+                company_fort_count++;
+            }
+            if (company_fort_count >= 3) {
                 snprintf(response, sizeof(response),
                          "{\"type\":\"place_structure_fail\",\"reason\":\"fort_exists\"}");
                 goto ps_send;

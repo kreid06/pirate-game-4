@@ -2141,7 +2141,7 @@ export class ClientApplication {
           wrong_company:     'Belongs to another company',
           enemy_territory:       'Enemy territory',
           island_already_claimed: 'Island already claimed',
-          fort_exists:            'Fort already exists on this island',
+          fort_exists:            'Company fort limit reached (max 3 per island)',
           not_on_island:          'Must be placed on an island',
           not_contested_territory: 'Not in contested territory',
           not_in_fort_radius:      'Must be placed within an enemy fort or fortress radius',
