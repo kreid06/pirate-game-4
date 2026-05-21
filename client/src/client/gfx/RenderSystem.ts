@@ -8900,10 +8900,9 @@ export class RenderSystem {
       }
     }
 
-    // ── Pass 2: per-structure + fort claim radius for own company ─────────────
+    // ── Pass 2: own-company territory blob (fort + connected structures) ─────
     if (myCompany === 0) return;
 
-    // Rebuild BFS cache when structure/claim data changed (world-space, camera-independent)
     if (this._claimOverlayDirty) {
       this._claimOverlayCache.clear();
       this._claimOverlayDirty = false;
@@ -8912,38 +8911,42 @@ export class RenderSystem {
     const cvs = ctx.canvas;
 
     for (const isl of this.islands) {
+      // Use IslandClaim as the authoritative source for the fort (avoids companyId mismatch
+      // on the PlacedStructure which may still be 0 during capture).
+      const islClaim = this._islandClaims.get(isl.id);
+      const hasFort  = !!islClaim && islClaim.companyId === myCompany
+                       && (islClaim.fortX !== 0 || islClaim.fortY !== 0);
+      const fortSeedR = islClaim?.fortRadius ?? CLAIM_RADIUS_DEFAULT;
+
+      // Non-fort structures owned by the local company on this island
       const ownStructs = this.placedStructures.filter(
-        ps => ps.islandId === isl.id && ps.companyId === myCompany
+        ps => ps.islandId === isl.id
+           && ps.companyId === myCompany
+           && ps.type !== 'flag_fort'
+           && ps.type !== 'company_fortress'
       );
-      if (ownStructs.length === 0) continue;
 
-      // ── BFS: compute connected/inactive sets (world-space, cached) ──────
+      if (!hasFort && ownStructs.length === 0) continue;
+
+      // ── BFS cache (world-space) ────────────────────────────────────────────
       if (!this._claimOverlayCache.has(isl.id)) {
-        const fortStructs    = ownStructs.filter(ps => ps.type === 'flag_fort' || ps.type === 'company_fortress');
-        const nonFortStructs = ownStructs.filter(ps => ps.type !== 'flag_fort' && ps.type !== 'company_fortress');
+        const connectedIds = new Set<number>();
+        const bfsQueue: typeof ownStructs = [];
 
-        // Use server-provided fort radius for seeding; falls back to CLAIM_RADIUS_DEFAULT
-        const islClaim = this._islandClaims.get(isl.id);
-        const fortSeedR = islClaim?.fortRadius ?? CLAIM_RADIUS_DEFAULT;
-
-        // Forts are always active — they ARE the claim root
-        const connectedIds = new Set<number>(fortStructs.map(ps => ps.id));
-        const bfsQueue: typeof nonFortStructs = [];
-
-        for (const ps of nonFortStructs) {
-          for (const fort of fortStructs) {
-            const dx = ps.x - fort.x, dy = ps.y - fort.y;
+        if (hasFort) {
+          for (const ps of ownStructs) {
+            const dx = ps.x - islClaim!.fortX, dy = ps.y - islClaim!.fortY;
             if (dx * dx + dy * dy <= fortSeedR * fortSeedR) {
               connectedIds.add(ps.id);
               bfsQueue.push(ps);
-              break;
             }
           }
         }
+
         let qi = 0;
         while (qi < bfsQueue.length) {
           const cur = bfsQueue[qi++];
-          for (const ps of nonFortStructs) {
+          for (const ps of ownStructs) {
             if (connectedIds.has(ps.id)) continue;
             const dx = ps.x - cur.x, dy = ps.y - cur.y;
             if (dx * dx + dy * dy <= CLAIM_RADIUS_DEFAULT * CLAIM_RADIUS_DEFAULT) {
@@ -8954,7 +8957,7 @@ export class RenderSystem {
         }
 
         const inactiveIds = new Set<number>(
-          nonFortStructs.filter(ps => !connectedIds.has(ps.id)).map(ps => ps.id)
+          ownStructs.filter(ps => !connectedIds.has(ps.id)).map(ps => ps.id)
         );
         this._claimOverlayCache.set(isl.id, { connectedIds, inactiveIds, companyId: myCompany });
       }
@@ -8963,19 +8966,14 @@ export class RenderSystem {
       const connectedList = ownStructs.filter(ps => bfs.connectedIds.has(ps.id));
       const inactiveList  = ownStructs.filter(ps => bfs.inactiveIds.has(ps.id));
       const psR    = CLAIM_RADIUS_DEFAULT * zoom;
-      // Forts use the server's declared territory radius for their visual circle
-      const islClaim   = this._islandClaims.get(isl.id);
-      const fortVisR   = (islClaim?.fortRadius ?? CLAIM_RADIUS_DEFAULT) * zoom;
+      const fortVisR = fortSeedR * zoom;
 
-      // ── Screen-space draw (per frame, uses current camera transform) ─────
       const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
       for (const off of wrapOffsets) {
         const color = this._companyColor(myCompany);
-
         ctx.save();
 
-        // Inactive structures: grey dashed circles
-        ctx.lineWidth = Math.max(0.5, 1 * zoom);
+        // ── Inactive structures: grey dashed circles ───────────────────────
         for (const ps of inactiveList) {
           const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
           ctx.beginPath();
@@ -8988,34 +8986,35 @@ export class RenderSystem {
           ctx.setLineDash([]);
         }
 
-        // Active + forts: merged paint blob (rebuilt per frame from current screen coords)
-        if (connectedList.length > 0) {
+        // ── Active blob: fort circle (from IslandClaim) + connected structures
+        // Fort and structures are always in the same OffscreenCanvas so they
+        // merge into one unified paint area with a single perimeter border.
+        const screenPts: Array<{ x: number; y: number; r: number }> = [];
+
+        if (hasFort) {
+          const fs = camera.worldToScreen(Vec2.from(islClaim!.fortX + off.dx, islClaim!.fortY + off.dy));
+          screenPts.push({ x: fs.x, y: fs.y, r: fortVisR });
+        }
+        for (const ps of connectedList) {
+          const ps2 = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
+          screenPts.push({ x: ps2.x, y: ps2.y, r: psR });
+        }
+
+        if (screenPts.length > 0) {
           const borderWidth = Math.max(2, 3 * zoom);
 
-          // Collect screen positions and per-structure radii once
-          const screenPts = connectedList.map(ps => ({
-            sp:  camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy)),
-            r:   (ps.type === 'flag_fort' || ps.type === 'company_fortress') ? fortVisR : psR,
-          }));
-
-          // Fill blob: union of all circles
           const tmp = new OffscreenCanvas(cvs.width, cvs.height);
           const tc  = tmp.getContext('2d')!;
           tc.fillStyle = color;
-          for (const { sp, r } of screenPts) {
-            tc.beginPath();
-            tc.arc(sp.x, sp.y, r, 0, Math.PI * 2);
-            tc.fill();
+          for (const { x, y, r } of screenPts) {
+            tc.beginPath(); tc.arc(x, y, r, 0, Math.PI * 2); tc.fill();
           }
 
-          // Border: expanded circles minus original blob = perimeter ring only
           const border = new OffscreenCanvas(cvs.width, cvs.height);
           const bdc    = border.getContext('2d')!;
           bdc.fillStyle = color;
-          for (const { sp, r } of screenPts) {
-            bdc.beginPath();
-            bdc.arc(sp.x, sp.y, r + borderWidth, 0, Math.PI * 2);
-            bdc.fill();
+          for (const { x, y, r } of screenPts) {
+            bdc.beginPath(); bdc.arc(x, y, r + borderWidth, 0, Math.PI * 2); bdc.fill();
           }
           bdc.globalCompositeOperation = 'destination-out';
           bdc.drawImage(tmp, 0, 0);
