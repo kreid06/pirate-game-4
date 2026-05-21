@@ -8951,18 +8951,42 @@ export class RenderSystem {
         const color = this._companyColor(myCompany);
         ctx.save();
 
-        // ── Inactive structures: grey dashed circles ─────────────────────
-        for (const ps of inactiveList) {
-          const psScrn = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
-          ctx.beginPath();
-          ctx.arc(psScrn.x, psScrn.y, psR, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(128,128,128,0.04)';
-          ctx.fill();
-          ctx.setLineDash([Math.max(3, 4 * zoom), Math.max(3, 4 * zoom)]);
-          ctx.strokeStyle = 'rgba(160,160,160,0.30)';
-          ctx.lineWidth = 1;
-          ctx.stroke();
-          ctx.setLineDash([]);
+        // ── Inactive structures: merged grey blob with perimeter outline ───
+        // Same compositing technique as the active blob, but using a muted
+        // grey palette to indicate these structures aren't connected to a fort.
+        if (inactiveList.length > 0) {
+          const inactivePts: Array<{ x: number; y: number; r: number }> = [];
+          for (const ps of inactiveList) {
+            const sp = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
+            inactivePts.push({ x: sp.x, y: sp.y, r: psR });
+          }
+
+          const borderWidth = Math.max(8, 10 * zoom);
+          const greyFill   = '#888888';
+          const greyBorder = '#666666';
+
+          const tmp = new OffscreenCanvas(cvs.width, cvs.height);
+          const tc  = tmp.getContext('2d')!;
+          tc.fillStyle = greyFill;
+          for (const { x, y, r } of inactivePts) {
+            tc.beginPath(); tc.arc(x, y, r, 0, Math.PI * 2); tc.fill();
+          }
+
+          const ring = new OffscreenCanvas(cvs.width, cvs.height);
+          const rc   = ring.getContext('2d')!;
+          rc.fillStyle = greyBorder;
+          for (const { x, y, r } of inactivePts) {
+            rc.beginPath(); rc.arc(x, y, r + borderWidth, 0, Math.PI * 2); rc.fill();
+          }
+          rc.globalCompositeOperation = 'destination-out';
+          rc.drawImage(tmp, 0, 0);
+
+          // Lower opacity than active blob so disconnected status reads clearly
+          ctx.globalAlpha = 0.08;
+          ctx.drawImage(tmp, 0, 0);
+          ctx.globalAlpha = 0.55;
+          ctx.drawImage(ring, 0, 0);
+          ctx.globalAlpha = 1.0;
         }
 
         // ── Active blob: fort + connected structures → one merged paint area ─
