@@ -5930,7 +5930,7 @@ export class RenderSystem {
       ctx.fillText('IN WATER', msp.x, labelY);
     } else if (enemyTerritory) {
       ctx.fillStyle = '#ff3333';
-      ctx.fillText('ENEMY FLOOR', msp.x, labelY);
+      ctx.fillText('ENEMY TERRITORY', msp.x, labelY);
     } else if (blockedByTree) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('BLOCKED', msp.x, labelY);
