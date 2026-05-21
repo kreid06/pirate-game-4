@@ -9079,20 +9079,28 @@ export class RenderSystem {
             const ring = new OffscreenCanvas(cvs.width, cvs.height);
             const rc   = ring.getContext('2d')!;
             rc.fillStyle = color;
+            // (1) Fill with my circles dilated by borderWidth — this is the
+            //     outer envelope from which we'll carve the inner fill.
             for (const { x, y, r } of screenPts) {
               rc.beginPath(); rc.arc(x, y, r + borderWidth, 0, Math.PI * 2); rc.fill();
             }
-            // Subtract enemy circles from the ring so the border traces the
-            // clipped silhouette instead of bleeding into enemy territory.
+            // (2) Erode the envelope along enemy boundaries: carve out enemy
+            //     circles shrunk by borderWidth. This leaves a band of width
+            //     borderWidth on the enemy-interior side of every enemy arc
+            //     that intrudes into my territory — i.e. the contested edge
+            //     keeps a fully-coloured border just like the outer rim.
             if (enemyPts.length > 0) {
               rc.globalCompositeOperation = 'destination-out';
               for (const { x, y, r } of enemyPts) {
-                rc.beginPath(); rc.arc(x, y, r, 0, Math.PI * 2); rc.fill();
+                const rr = r - borderWidth;
+                if (rr <= 0) continue;
+                rc.beginPath(); rc.arc(x, y, rr, 0, Math.PI * 2); rc.fill();
               }
-              rc.fillStyle = color; // restore for any later draws
             } else {
               rc.globalCompositeOperation = 'destination-out';
             }
+            // (3) Carve the clipped fill (tmp = my_inner ∖ enemy_inner) so
+            //     only the border band remains.
             rc.drawImage(tmp, 0, 0);
 
             // Own company: full fill + solid border.

@@ -1,8 +1,8 @@
 {
   "name": "test",
   "player_id": 1000,
-  "x": 17924.926,
-  "y": 14270.038,
+  "x": 17957.426,
+  "y": 14146.336,
   "parent_ship_id": 0,
   "local_x": 0.000,
   "local_y": 0.000,
@@ -15,12 +15,12 @@
   "stat_stamina": 5,
   "stat_weight": 1,
   "company_id": 1,
-  "active_slot": 255,
+  "active_slot": 5,
   "helm": 0,
   "torso": 31,
   "legs": 32,
   "feet": 33,
   "hands": 34,
   "shield": 0,
-  "slots": [{"item":25,"qty":1},{"item":15,"qty":1},{"item":29,"qty":4},{"item":18,"qty":14},{"item":1,"qty":3},{"item":35,"qty":1},{"item":9,"qty":1},{"item":30,"qty":1},{"item":17,"qty":2},{"item":16,"qty":2},{"item":4,"qty":1},{"item":24,"qty":30},{"item":0,"qty":0},{"item":24,"qty":99},{"item":14,"qty":1},{"item":24,"qty":79},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":23,"qty":44},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":22,"qty":30},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":27,"qty":69},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0}]
+  "slots": [{"item":25,"qty":1},{"item":15,"qty":1},{"item":29,"qty":4},{"item":18,"qty":14},{"item":1,"qty":3},{"item":0,"qty":0},{"item":9,"qty":1},{"item":30,"qty":1},{"item":17,"qty":2},{"item":16,"qty":2},{"item":4,"qty":1},{"item":24,"qty":30},{"item":0,"qty":0},{"item":24,"qty":99},{"item":14,"qty":1},{"item":24,"qty":79},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":23,"qty":44},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":22,"qty":30},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":27,"qty":69},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0}]
 }
