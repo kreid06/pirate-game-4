@@ -8791,7 +8791,8 @@ export class RenderSystem {
   private drawTerritoryOverlay(camera: Camera): void {
     const ctx = this.ctx;
     const zoom = camera.getState().zoom;
-    const CLAIM_RADIUS_DEFAULT = 400;
+    const CLAIM_RADIUS_DEFAULT = 400;  // server CLAIM_RADIUS_DEFAULT
+    const CLAIM_RADIUS_FORT    = 600;  // server CLAIM_RADIUS_FLAG_FORT / COMPANY_FORT
     const myCompany = this._localCompanyId;
 
     // ── Pass 1: claimed-island territory fill + fort rings + labels ──────────
@@ -8874,7 +8875,7 @@ export class RenderSystem {
       // companyId can lag (set to 0 during capture, only updated post-capture).
       // Since the user's structures live on this island under myCompany, any
       // flag_fort/company_fortress on this island is effectively their fort.
-      let fortX = 0, fortY = 0, fortSeedR = CLAIM_RADIUS_DEFAULT;
+      let fortX = 0, fortY = 0, fortSeedR = CLAIM_RADIUS_FORT;
 
       if (islClaim?.companyId === myCompany && (islClaim.fortX !== 0 || islClaim.fortY !== 0)) {
         fortX     = islClaim.fortX;
@@ -8890,7 +8891,7 @@ export class RenderSystem {
         if (placedFort) {
           fortX     = placedFort.x;
           fortY     = placedFort.y;
-          fortSeedR = islClaim?.fortRadius ?? CLAIM_RADIUS_DEFAULT;
+          fortSeedR = islClaim?.fortRadius ?? CLAIM_RADIUS_FORT;
         }
       }
 
