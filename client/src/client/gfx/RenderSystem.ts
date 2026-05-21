@@ -236,7 +236,7 @@ export class RenderSystem {
     ox: number; oy: number; size: number;
   }> = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | null = null;
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
   private islandBuildRotationDeg = 0;
   private _wallGhostRotRad: number = 0; // rotation (radians) of wall/door ghost, inherited from floor edge
@@ -1957,7 +1957,7 @@ export class RenderSystem {
   }
 
   /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, wood_ceiling, cannon, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | null): void {
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | null): void {
     this.islandBuildKind = kind;
   }
 
@@ -5830,7 +5830,7 @@ export class RenderSystem {
         if (bestCo === myCompany) inMyDominantArea = true;
       }
     }
-    const enemyTerritory = !inMyDominantArea && this.placedStructures.some(s =>
+    const enemyTerritory = !inMyDominantArea && this.islandBuildKind !== 'claim_flag' && this.placedStructures.some(s =>
       s.companyId !== myCompany &&
       (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) < 500 * 500
     );
