@@ -4953,30 +4953,13 @@ export class RenderSystem {
 
         ctx.restore();
       } else if (s.type === 'flag_fort') {
-        // ── Flag Fort — stone tower with claim-radius circle ──
+        // ── Flag Fort — stone tower (claim radius is drawn by drawTerritoryOverlay) ──
         const companyColor = this._companyColor(s.companyId);
-        const isOwn = s.companyId !== 0 && s.companyId === this._localCompanyId;
-        const FORT_RADIUS_PX = 600; // matches server CLAIM_RADIUS_FLAG_FORT
-        const fortRadiusScreen = FORT_RADIUS_PX * zoom;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const ts = Math.max(10, 44 * zoom);
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
-
-        // Claim radius circle — only visible when territory overlay is active
-        if (this._showTerritoryOverlay) {
-          const ringAlpha = isOwn ? 0.18 : (isHovered ? 0.12 : 0.07);
-          ctx.beginPath();
-          ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
-          ctx.fillStyle = companyColor + Math.round(ringAlpha * 255).toString(16).padStart(2, '0');
-          ctx.fill();
-          ctx.strokeStyle = companyColor + 'aa';
-          ctx.lineWidth = Math.max(1, 1.5 * zoom);
-          ctx.setLineDash([Math.max(4, 8 * zoom), Math.max(3, 5 * zoom)]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
 
         // Tower base (stone)
         const stoneR = Math.round(hpFrac * 120 + 60);
@@ -5015,9 +4998,8 @@ export class RenderSystem {
 
         ctx.restore();
       } else if (s.type === 'company_fortress') {
-        // ── Company Fortress — grand fortification (under construction or complete) ──
+        // ── Company Fortress — grand fortification (claim radius drawn by drawTerritoryOverlay) ──
         const companyColor = this._companyColor(s.companyId);
-        const isOwn = s.companyId !== 0 && s.companyId === this._localCompanyId;
         const complete = s.fortressComplete ?? false;
         const progress = (s.fortressBuildProgress ?? 0) / 900000; // 0→1
         const contested = s.fortressContested ?? false;
@@ -5028,34 +5010,6 @@ export class RenderSystem {
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
-
-        if (this._showTerritoryOverlay) {
-          if (complete) {
-            // Completed: show whole-island tinted ring (faint fill) + full fortress
-            const ringAlpha = isOwn ? 0.12 : (isHovered ? 0.09 : 0.05);
-            ctx.beginPath();
-            ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
-            ctx.fillStyle = companyColor + Math.round(ringAlpha * 255).toString(16).padStart(2, '0');
-            ctx.fill();
-            ctx.strokeStyle = companyColor + 'dd';
-            ctx.lineWidth = Math.max(1.5, 2.5 * zoom);
-            ctx.setLineDash([]);
-            ctx.stroke();
-          } else {
-            // Under construction: dashed ring + scaffold fill
-            const ringAlpha = 0.06;
-            ctx.beginPath();
-            ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
-            ctx.fillStyle = companyColor + Math.round(ringAlpha * 255).toString(16).padStart(2, '0');
-            ctx.fill();
-            const dashLen = Math.max(5, 10 * zoom);
-            ctx.strokeStyle = companyColor + (contested ? 'ff' : '88');
-            ctx.lineWidth = Math.max(1, 2 * zoom);
-            ctx.setLineDash([dashLen, dashLen]);
-            ctx.stroke();
-            ctx.setLineDash([]);
-          }
-        }
 
         // Stone walls (larger than flag_fort)
         const stoneR = Math.round(hpFrac * 110 + 60);
