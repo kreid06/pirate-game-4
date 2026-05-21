@@ -8949,6 +8949,8 @@ export class RenderSystem {
       const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
       for (const off of wrapOffsets) {
         const color = this._companyColor(myCompany);
+        const companyName = this._cachedCompanies.find(c => c.id === myCompany)?.name
+          ?? (myCompany === 1 ? 'Solo' : myCompany === 2 ? 'Pirates' : myCompany === 3 ? 'Navy' : `Company #${myCompany}`);
         ctx.save();
 
         // ── Inactive structures: merged grey blob with perimeter outline ───
@@ -8987,6 +8989,27 @@ export class RenderSystem {
           ctx.globalAlpha = 0.55;
           ctx.drawImage(ring, 0, 0);
           ctx.globalAlpha = 1.0;
+
+          // Label: company name + "(inactive)" centered on blob's centroid
+          let cx = 0, cy = 0;
+          for (const p of inactivePts) { cx += p.x; cy += p.y; }
+          cx /= inactivePts.length; cy /= inactivePts.length;
+
+          const fontSize = Math.max(11, Math.round(13 * zoom));
+          ctx.font = `bold ${fontSize}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.lineWidth = Math.max(2, 3 * zoom);
+          ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+
+          const lineGap = fontSize * 1.2;
+          ctx.fillStyle = '#ffffff';
+          ctx.strokeText(companyName, cx, cy - lineGap / 2);
+          ctx.fillText(companyName, cx, cy - lineGap / 2);
+
+          ctx.fillStyle = '#ff5555';
+          ctx.strokeText('(inactive)', cx, cy + lineGap / 2);
+          ctx.fillText('(inactive)', cx, cy + lineGap / 2);
         }
 
         // ── Active blob: fort + connected structures → one merged paint area ─
@@ -9032,6 +9055,21 @@ export class RenderSystem {
           ctx.globalAlpha = 0.90;
           ctx.drawImage(ring, 0, 0);
           ctx.globalAlpha = 1.0;
+
+          // Label: company name centered on blob's centroid
+          let cx = 0, cy = 0;
+          for (const p of screenPts) { cx += p.x; cy += p.y; }
+          cx /= screenPts.length; cy /= screenPts.length;
+
+          const fontSize = Math.max(12, Math.round(14 * zoom));
+          ctx.font = `bold ${fontSize}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.lineWidth = Math.max(2, 3 * zoom);
+          ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+          ctx.fillStyle = '#ffffff';
+          ctx.strokeText(companyName, cx, cy);
+          ctx.fillText(companyName, cx, cy);
         }
 
         ctx.restore();
