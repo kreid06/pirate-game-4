@@ -5793,16 +5793,44 @@ export class RenderSystem {
     }
 
     // Enemy territory: any structure not belonging to the current company within 500 world px.
-    // Mirrors server logic: skip this block when the placement point is inside the player's
-    // own company claim area (any own structure within CLAIM_RADIUS_DEFAULT=400px, or
-    // own flag_fort / company_fortress within CLAIM_RADIUS_FORT=600px).
+    // Mirrors server logic: bypassed when the placement point lies inside the player's own
+    // claim area AND the player's company is the dominant claimant on this island
+    // (Company Fortress > Flag Fort > older fort id). Same dominance rule used by the
+    // territory overlay renderer.
     const myCompany = (this._localCompanyId ?? 0) as number;
-    const isInOwnClaimArea = myCompany > 0 && this.placedStructures.some(s => {
-      if (s.companyId !== myCompany) return false;
-      const cr = (s.type === 'flag_fort' || s.type === 'company_fortress') ? 600 : 400;
-      return (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) <= cr * cr;
-    });
-    const enemyTerritory = !isInOwnClaimArea && this.placedStructures.some(s =>
+    let inMyDominantArea = false;
+    if (myCompany > 0) {
+      const ownsPoint = this.placedStructures.some(s => {
+        if (s.companyId !== myCompany) return false;
+        const cr = (s.type === 'flag_fort' || s.type === 'company_fortress') ? 600 : 400;
+        return (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) <= cr * cr;
+      });
+      if (ownsPoint) {
+        // Determine dominant company on the same island as the cursor.
+        // Use the cursor's island via any nearby fort's island_id, falling back to
+        // scanning all forts and picking the dominant one whose claim covers (mx,my).
+        let bestCo = 0, bestTier = 0, bestId = Number.MAX_SAFE_INTEGER;
+        for (const s of this.placedStructures) {
+          let tier = 0;
+          if (s.type === 'company_fortress') tier = 2;
+          else if (s.type === 'flag_fort') tier = 1;
+          else continue;
+          if ((s.companyId ?? 0) === 0) continue;
+          // Restrict to forts whose claim radius covers the cursor point —
+          // an approximation for "same island" without explicit island IDs here.
+          const cr = 600;
+          if ((s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) > cr * cr) continue;
+          const sid = (s as any).id ?? Number.MAX_SAFE_INTEGER;
+          if (tier > bestTier || (tier === bestTier && sid < bestId)) {
+            bestTier = tier;
+            bestId = sid;
+            bestCo = s.companyId!;
+          }
+        }
+        if (bestCo === myCompany) inMyDominantArea = true;
+      }
+    }
+    const enemyTerritory = !inMyDominantArea && this.placedStructures.some(s =>
       s.companyId !== myCompany &&
       (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) < 500 * 500
     );

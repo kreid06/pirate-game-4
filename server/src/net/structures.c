@@ -169,6 +169,33 @@ static bool floor_tiles_overlap(float ax, float ay, float a_rad,
     return true;
 }
 
+/* Dominant company on an island, matching the client's territory-overlay
+ * dominance rule:
+ *   - Completed Company Fortress  > Flag Fort > none
+ *   - Within the same tier, the lower structure id (earlier placement) wins
+ * Returns 0 if no company has a fort/fortress on the island. */
+static uint32_t island_dominant_company(uint32_t island_id) {
+    uint32_t best_co  = 0;
+    int      best_tier = 0;       /* 0=none, 1=flag_fort, 2=completed_company_fortress */
+    uint32_t best_id  = UINT32_MAX;
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *s = &placed_structures[i];
+        if (!s->active) continue;
+        if (s->claim_orphaned) continue;
+        if ((uint32_t)s->island_id != island_id) continue;
+        int tier;
+        if (s->type == STRUCT_COMPANY_FORTRESS && s->fortress_complete) tier = 2;
+        else if (s->type == STRUCT_FLAG_FORT)                           tier = 1;
+        else continue;
+        if (tier > best_tier || (tier == best_tier && s->id < best_id)) {
+            best_tier = tier;
+            best_id   = s->id;
+            best_co   = s->company_id;
+        }
+    }
+    return best_co;
+}
+
 void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
     char response[256];
 
@@ -328,30 +355,28 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         }
     }
 
+    /* ── Dominance bypass ────────────────────────────────────────────────
+     * If the placement point lies inside the player's own company claim area
+     * AND the player's company is the dominant claimant on this island
+     * (Company Fortress > Flag Fort > older id), then enemy claim areas are
+     * subordinate at this point and do not block placement. This matches the
+     * client's territory-overlay dominance rendering. */
+    bool in_my_dominant_area = false;
+    if (player->company_id != 0 && target_island_id != 0 &&
+        territory_is_claimed_by(px, py, (uint32_t)player->company_id)) {
+        uint32_t dom_co = island_dominant_company((uint32_t)target_island_id);
+        if (dom_co == (uint32_t)player->company_id) {
+            in_my_dominant_area = true;
+        }
+    }
+
     /* Cannot place within 500 px of an enemy-company structure
-       — unless the placement point is inside the player's own company's claim area,
-         in which case the claim system takes priority over the build-prevention radius. */
-    if (player->company_id != 0 &&
-        !territory_is_claimed_by(px, py, (uint32_t)player->company_id)) {
+       — bypassed when the player is inside their own dominant claim area. */
+    if (!in_my_dominant_area) {
         bool enemy_block = false;
         for (uint32_t si = 0; si < placed_structure_count && !enemy_block; si++) {
             if (!placed_structures[si].active) continue;
             if (placed_structures[si].company_id == (uint8_t)player->company_id) continue; /* own */
-            float dx = placed_structures[si].x - px;
-            float dy = placed_structures[si].y - py;
-            if (dx*dx + dy*dy < 500.0f * 500.0f) enemy_block = true;
-        }
-        if (enemy_block) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"place_structure_fail\",\"reason\":\"enemy_territory\"}");
-            goto ps_send;
-        }
-    } else if (player->company_id == 0) {
-        /* No company: original behavior — any enemy structure within 500 px blocks. */
-        bool enemy_block = false;
-        for (uint32_t si = 0; si < placed_structure_count && !enemy_block; si++) {
-            if (!placed_structures[si].active) continue;
-            if (placed_structures[si].company_id == (uint8_t)player->company_id) continue;
             float dx = placed_structures[si].x - px;
             float dy = placed_structures[si].y - py;
             if (dx*dx + dy*dy < 500.0f * 500.0f) enemy_block = true;
@@ -466,8 +491,10 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
 
     /* Cannot place within claim radius of an enemy non-orphaned structure
-       (orphaned structures = dead fort — they are passable for building purposes) */
-    if (stype_enum != STRUCT_CLAIM_FLAG) {  /* claim flags are placed IN contested territory */
+       (orphaned structures = dead fort — they are passable for building purposes).
+       Bypassed when the player is inside their own dominant claim area, mirroring
+       the client's overlay logic where subordinate enemy claims are visually carved out. */
+    if (stype_enum != STRUCT_CLAIM_FLAG && !in_my_dominant_area) {  /* claim flags are placed IN contested territory */
         bool enemy_block = territory_is_claimed_by_any(px, py, NULL);
         if (enemy_block) {
             uint32_t owner_co = 0;
