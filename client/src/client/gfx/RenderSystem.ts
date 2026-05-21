@@ -8915,8 +8915,11 @@ export class RenderSystem {
 
       // ── Resolve fort position ─────────────────────────────────────────────
       // Prefer IslandClaim (authoritative territory data).
-      // Fall back to PlacedStructure: onTerritoryCaptured sets claim without
-      // fort coords, so fort position may only be known via PlacedStructure.
+      // Fall back to PlacedStructure: server may not always send fort coords
+      // in territory_update (e.g. onTerritoryCaptured), and the fort's own
+      // companyId can lag (set to 0 during capture, only updated post-capture).
+      // Since the user's structures live on this island under myCompany, any
+      // flag_fort/company_fortress on this island is effectively their fort.
       let fortX = 0, fortY = 0, fortSeedR = CLAIM_RADIUS_DEFAULT;
 
       if (islClaim?.companyId === myCompany && (islClaim.fortX !== 0 || islClaim.fortY !== 0)) {
@@ -8924,9 +8927,10 @@ export class RenderSystem {
         fortY     = islClaim.fortY;
         fortSeedR = islClaim.fortRadius;
       } else {
+        // Match by island + type only — companyId on the fort PlacedStructure
+        // may be stale (0) during capture transitions.
         const placedFort = this.placedStructures.find(
           ps => ps.islandId === isl.id
-             && ps.companyId === myCompany
              && (ps.type === 'flag_fort' || ps.type === 'company_fortress')
         );
         if (placedFort) {
