@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": 1779401579,
+    "timestamp": 1779403013,
     "ship_count": 3,
     "npc_count": 22,
-    "structure_count": 27
+    "structure_count": 28
   },
   "ships": [
     {
@@ -1142,6 +1142,24 @@
       "company": 3,
       "hp": 100,
       "max_hp": 100,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false,
+      "construction_phase": 0,
+      "construction_company": 0,
+      "modules_placed": 0,
+      "scaffolded_ship_id": 0
+    },
+    {
+      "id": 153,
+      "type": 9,
+      "x": 18022.000,
+      "y": 14258.200,
+      "rot": 0.000,
+      "island_id": 4,
+      "company": 1,
+      "hp": 500,
+      "max_hp": 500,
       "placer_id": 1000,
       "placer_name": "test",
       "open": false,

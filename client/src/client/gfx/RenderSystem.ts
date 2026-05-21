@@ -8875,86 +8875,104 @@ export class RenderSystem {
 
     const cvs = ctx.canvas;
 
+    // ── Helper: resolve a company's active claim circles in world space ──
+    // Returns { worldCircles: [{x, y, r}], inactiveList, hasFort } where the
+    // first entry of worldCircles is the fort (if present) at its larger radius,
+    // followed by every BFS-connected non-fort structure at CLAIM_RADIUS_DEFAULT.
+    type CompanyClaim = {
+      worldCircles: Array<{ x: number; y: number; r: number }>;
+      inactiveList: PlacedStructure[];
+      hasFort: boolean;
+    };
+    type IslandClaimEntry = ReturnType<typeof this._islandClaims.get>;
+    const resolveCompanyClaim = (islId: number, cid: number, claim: IslandClaimEntry): CompanyClaim => {
+      // ── Resolve fort position (territory_update map is authoritative) ─────
+      let fortX = 0, fortY = 0, fortSeedR = CLAIM_RADIUS_FORT;
+      if (claim?.companyId === cid && (claim.fortX !== 0 || claim.fortY !== 0)) {
+        fortX     = claim.fortX;
+        fortY     = claim.fortY;
+        fortSeedR = claim.fortRadius;
+      } else {
+        const placedFort = this.placedStructures.find(
+          ps => ps.islandId === islId
+             && (ps.type === 'flag_fort' || ps.type === 'company_fortress')
+             && ps.companyId === cid
+        );
+        if (placedFort) {
+          fortX     = placedFort.x;
+          fortY     = placedFort.y;
+          fortSeedR = claim?.fortRadius ?? CLAIM_RADIUS_FORT;
+        }
+      }
+      const hasFort = fortX !== 0 || fortY !== 0;
+
+      const companyStructs = this.placedStructures.filter(
+        ps => ps.islandId === islId
+           && ps.companyId === cid
+           && ps.type !== 'flag_fort'
+           && ps.type !== 'company_fortress'
+      );
+
+      // ── BFS cache (world-space, camera-independent) ─────────────────────
+      const cacheKey = `${islId}_${cid}`;
+      if (!this._claimOverlayCache.has(cacheKey)) {
+        const connectedIds = new Set<number>();
+        const bfsQueue: PlacedStructure[] = [];
+        if (hasFort) {
+          for (const ps of companyStructs) {
+            const dx = ps.x - fortX, dy = ps.y - fortY;
+            if (dx * dx + dy * dy <= fortSeedR * fortSeedR) {
+              connectedIds.add(ps.id);
+              bfsQueue.push(ps);
+            }
+          }
+        }
+        let qi = 0;
+        while (qi < bfsQueue.length) {
+          const cur = bfsQueue[qi++];
+          for (const ps of companyStructs) {
+            if (connectedIds.has(ps.id)) continue;
+            const dx = ps.x - cur.x, dy = ps.y - cur.y;
+            if (dx * dx + dy * dy <= CLAIM_RADIUS_DEFAULT * CLAIM_RADIUS_DEFAULT) {
+              connectedIds.add(ps.id);
+              bfsQueue.push(ps);
+            }
+          }
+        }
+        const inactiveIds = new Set<number>(
+          companyStructs.filter(ps => !connectedIds.has(ps.id)).map(ps => ps.id)
+        );
+        this._claimOverlayCache.set(cacheKey, { connectedIds, inactiveIds });
+      }
+      const bfs           = this._claimOverlayCache.get(cacheKey)!;
+      const connectedList = companyStructs.filter(ps => bfs.connectedIds.has(ps.id));
+      const inactiveList  = companyStructs.filter(ps => bfs.inactiveIds.has(ps.id));
+
+      const worldCircles: Array<{ x: number; y: number; r: number }> = [];
+      if (hasFort) worldCircles.push({ x: fortX, y: fortY, r: fortSeedR });
+      for (const ps of connectedList) worldCircles.push({ x: ps.x, y: ps.y, r: CLAIM_RADIUS_DEFAULT });
+      return { worldCircles, inactiveList, hasFort };
+    };
+
     for (const isl of this.islands) {
       const islClaim = this._islandClaims.get(isl.id);
 
+      // Pre-compute each company's claim circles for this island once.
+      // Used both to render that company's own blob and to clip enemy overlap
+      // out of every other company's blob.
+      const islandClaimsByCo = new Map<number, CompanyClaim>();
+      for (const cid of allCompanyIds) {
+        islandClaimsByCo.set(cid, resolveCompanyClaim(isl.id, cid, islClaim));
+      }
+
       for (const cid of allCompanyIds) {
         const isOwn = cid === myCompany;
+        const myClaim = islandClaimsByCo.get(cid)!;
+        const { worldCircles, inactiveList, hasFort } = myClaim;
 
-        // ── Resolve fort position for this company ──────────────────────────
-        // Always match by companyId — the _islandClaims map (populated via territory_update
-        // events) is the authoritative source; placedStructures is only a fallback for forts
-        // that belong to the correct company but whose claim event hasn't arrived yet.
-        let fortX = 0, fortY = 0, fortSeedR = CLAIM_RADIUS_FORT;
+        if (worldCircles.length === 0 && inactiveList.length === 0) continue;
 
-        if (islClaim?.companyId === cid && (islClaim.fortX !== 0 || islClaim.fortY !== 0)) {
-          fortX     = islClaim.fortX;
-          fortY     = islClaim.fortY;
-          fortSeedR = islClaim.fortRadius;
-        } else {
-          const placedFort = this.placedStructures.find(
-            ps => ps.islandId === isl.id
-               && (ps.type === 'flag_fort' || ps.type === 'company_fortress')
-               && ps.companyId === cid
-          );
-          if (placedFort) {
-            fortX     = placedFort.x;
-            fortY     = placedFort.y;
-            fortSeedR = islClaim?.fortRadius ?? CLAIM_RADIUS_FORT;
-          }
-        }
-
-        const hasFort = fortX !== 0 || fortY !== 0;
-
-        // Non-fort structures owned by this company on this island
-        const companyStructs = this.placedStructures.filter(
-          ps => ps.islandId === isl.id
-             && ps.companyId === cid
-             && ps.type !== 'flag_fort'
-             && ps.type !== 'company_fortress'
-        );
-
-        if (!hasFort && companyStructs.length === 0) continue;
-
-        // ── BFS cache (world-space, camera-independent) ──────────────────────
-        const cacheKey = `${isl.id}_${cid}`;
-        if (!this._claimOverlayCache.has(cacheKey)) {
-          const connectedIds = new Set<number>();
-          const bfsQueue: typeof companyStructs = [];
-
-          if (hasFort) {
-            for (const ps of companyStructs) {
-              const dx = ps.x - fortX, dy = ps.y - fortY;
-              if (dx * dx + dy * dy <= fortSeedR * fortSeedR) {
-                connectedIds.add(ps.id);
-                bfsQueue.push(ps);
-              }
-            }
-          }
-          let qi = 0;
-          while (qi < bfsQueue.length) {
-            const cur = bfsQueue[qi++];
-            for (const ps of companyStructs) {
-              if (connectedIds.has(ps.id)) continue;
-              const dx = ps.x - cur.x, dy = ps.y - cur.y;
-              if (dx * dx + dy * dy <= CLAIM_RADIUS_DEFAULT * CLAIM_RADIUS_DEFAULT) {
-                connectedIds.add(ps.id);
-                bfsQueue.push(ps);
-              }
-            }
-          }
-
-          const inactiveIds = new Set<number>(
-            companyStructs.filter(ps => !connectedIds.has(ps.id)).map(ps => ps.id)
-          );
-          this._claimOverlayCache.set(cacheKey, { connectedIds, inactiveIds });
-        }
-
-        const bfs           = this._claimOverlayCache.get(cacheKey)!;
-        const connectedList = companyStructs.filter(ps => bfs.connectedIds.has(ps.id));
-        const inactiveList  = companyStructs.filter(ps => bfs.inactiveIds.has(ps.id));
-        const psR      = CLAIM_RADIUS_DEFAULT * zoom;
-        const fortVisR = fortSeedR * zoom;
+        const psR = CLAIM_RADIUS_DEFAULT * zoom;
 
         const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
         for (const off of wrapOffsets) {
@@ -9021,24 +9039,41 @@ export class RenderSystem {
 
           // ── Active blob: fort + connected structures ───────────────────────
           const screenPts: Array<{ x: number; y: number; r: number }> = [];
-
-          if (hasFort) {
-            const fs = camera.worldToScreen(Vec2.from(fortX + off.dx, fortY + off.dy));
-            screenPts.push({ x: fs.x, y: fs.y, r: fortVisR });
-          }
-          for (const ps of connectedList) {
-            const sp = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
-            screenPts.push({ x: sp.x, y: sp.y, r: psR });
+          for (const wc of worldCircles) {
+            const sp = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
+            screenPts.push({ x: sp.x, y: sp.y, r: wc.r * zoom });
           }
 
           if (screenPts.length > 0) {
             const borderWidth = Math.max(8, 10 * zoom);
+
+            // ── Enemy clip: union of every other active company's claim
+            // circles on this island, in screen space. Used to carve enemy
+            // overlap out of both the fill and the border so the rendered
+            // claim becomes (my circle ∖ enemy circles). The "first to claim
+            // wins" precedence is handled by the server build-block rules. ──
+            const enemyPts: Array<{ x: number; y: number; r: number }> = [];
+            for (const [otherCid, otherClaim] of islandClaimsByCo) {
+              if (otherCid === cid) continue;
+              for (const wc of otherClaim.worldCircles) {
+                const sp = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
+                enemyPts.push({ x: sp.x, y: sp.y, r: wc.r * zoom });
+              }
+            }
 
             const tmp = new OffscreenCanvas(cvs.width, cvs.height);
             const tc  = tmp.getContext('2d')!;
             tc.fillStyle = color;
             for (const { x, y, r } of screenPts) {
               tc.beginPath(); tc.arc(x, y, r, 0, Math.PI * 2); tc.fill();
+            }
+            // Subtract enemy circles from the fill
+            if (enemyPts.length > 0) {
+              tc.globalCompositeOperation = 'destination-out';
+              for (const { x, y, r } of enemyPts) {
+                tc.beginPath(); tc.arc(x, y, r, 0, Math.PI * 2); tc.fill();
+              }
+              tc.globalCompositeOperation = 'source-over';
             }
 
             const ring = new OffscreenCanvas(cvs.width, cvs.height);
@@ -9047,7 +9082,17 @@ export class RenderSystem {
             for (const { x, y, r } of screenPts) {
               rc.beginPath(); rc.arc(x, y, r + borderWidth, 0, Math.PI * 2); rc.fill();
             }
-            rc.globalCompositeOperation = 'destination-out';
+            // Subtract enemy circles from the ring so the border traces the
+            // clipped silhouette instead of bleeding into enemy territory.
+            if (enemyPts.length > 0) {
+              rc.globalCompositeOperation = 'destination-out';
+              for (const { x, y, r } of enemyPts) {
+                rc.beginPath(); rc.arc(x, y, r, 0, Math.PI * 2); rc.fill();
+              }
+              rc.fillStyle = color; // restore for any later draws
+            } else {
+              rc.globalCompositeOperation = 'destination-out';
+            }
             rc.drawImage(tmp, 0, 0);
 
             // Own company: full fill + solid border.
