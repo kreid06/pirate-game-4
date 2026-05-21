@@ -167,7 +167,7 @@ export class RenderSystem {
    * Keyed by islandId. Invalidated whenever placedStructures or _localCompanyId changes.
    * null entries mean the bitmap needs to be redrawn.
    */
-  private _claimOverlayCache: Map<number, { connectedIds: Set<number>; inactiveIds: Set<number>; companyId: number }> = new Map();
+  private _claimOverlayCache: Map<string, { connectedIds: Set<number>; inactiveIds: Set<number> }> = new Map();
   private _claimOverlayDirty = true;
   /**
    * Pre-computed wall segments — rebuilt whenever placedStructures changes.
@@ -8855,224 +8855,226 @@ export class RenderSystem {
       }
     }
 
-    // ── Pass 2: own-company territory blob (fort + connected structures) ─────
-    if (myCompany === 0) return;
+    // ── Pass 2: territory blobs for all companies with structures ─────────
+    // Own company gets full rendering (inactive grey blob + active fill+ring).
+    // Other companies get a ring-only treatment at reduced opacity so players
+    // can read the full territorial picture after leaving or when spectating.
 
     if (this._claimOverlayDirty) {
       this._claimOverlayCache.clear();
       this._claimOverlayDirty = false;
     }
 
+    // Collect all company IDs that have placed structures on any island
+    const allCompanyIds = new Set<number>();
+    for (const ps of this.placedStructures) {
+      if (ps.companyId && ps.companyId !== 0) allCompanyIds.add(ps.companyId);
+    }
+    if (myCompany !== 0) allCompanyIds.add(myCompany);
+    if (allCompanyIds.size === 0) return;
+
     const cvs = ctx.canvas;
 
     for (const isl of this.islands) {
       const islClaim = this._islandClaims.get(isl.id);
 
-      // ── Resolve fort position ─────────────────────────────────────────────
-      // Prefer IslandClaim (authoritative territory data).
-      // Fall back to PlacedStructure: server may not always send fort coords
-      // in territory_update (e.g. onTerritoryCaptured), and the fort's own
-      // companyId can lag (set to 0 during capture, only updated post-capture).
-      // Since the user's structures live on this island under myCompany, any
-      // flag_fort/company_fortress on this island is effectively their fort.
-      let fortX = 0, fortY = 0, fortSeedR = CLAIM_RADIUS_FORT;
+      for (const cid of allCompanyIds) {
+        const isOwn = cid === myCompany;
 
-      if (islClaim?.companyId === myCompany && (islClaim.fortX !== 0 || islClaim.fortY !== 0)) {
-        fortX     = islClaim.fortX;
-        fortY     = islClaim.fortY;
-        fortSeedR = islClaim.fortRadius;
-      } else {
-        // Match by island + type only — companyId on the fort PlacedStructure
-        // may be stale (0) during capture transitions.
-        const placedFort = this.placedStructures.find(
+        // ── Resolve fort position for this company ──────────────────────────
+        // For own company: match by island + type only (companyId may lag during capture).
+        // For other companies: also filter by companyId to avoid misattribution.
+        let fortX = 0, fortY = 0, fortSeedR = CLAIM_RADIUS_FORT;
+
+        if (islClaim?.companyId === cid && (islClaim.fortX !== 0 || islClaim.fortY !== 0)) {
+          fortX     = islClaim.fortX;
+          fortY     = islClaim.fortY;
+          fortSeedR = islClaim.fortRadius;
+        } else {
+          const placedFort = this.placedStructures.find(
+            ps => ps.islandId === isl.id
+               && (ps.type === 'flag_fort' || ps.type === 'company_fortress')
+               && (isOwn || ps.companyId === cid)
+          );
+          if (placedFort) {
+            fortX     = placedFort.x;
+            fortY     = placedFort.y;
+            fortSeedR = islClaim?.fortRadius ?? CLAIM_RADIUS_FORT;
+          }
+        }
+
+        const hasFort = fortX !== 0 || fortY !== 0;
+
+        // Non-fort structures owned by this company on this island
+        const companyStructs = this.placedStructures.filter(
           ps => ps.islandId === isl.id
-             && (ps.type === 'flag_fort' || ps.type === 'company_fortress')
+             && ps.companyId === cid
+             && ps.type !== 'flag_fort'
+             && ps.type !== 'company_fortress'
         );
-        if (placedFort) {
-          fortX     = placedFort.x;
-          fortY     = placedFort.y;
-          fortSeedR = islClaim?.fortRadius ?? CLAIM_RADIUS_FORT;
-        }
-      }
 
-      const hasFort = fortX !== 0 || fortY !== 0;
+        if (!hasFort && companyStructs.length === 0) continue;
 
-      // Non-fort structures owned by the local company on this island
-      const ownStructs = this.placedStructures.filter(
-        ps => ps.islandId === isl.id
-           && ps.companyId === myCompany
-           && ps.type !== 'flag_fort'
-           && ps.type !== 'company_fortress'
-      );
+        // ── BFS cache (world-space, camera-independent) ──────────────────────
+        const cacheKey = `${isl.id}_${cid}`;
+        if (!this._claimOverlayCache.has(cacheKey)) {
+          const connectedIds = new Set<number>();
+          const bfsQueue: typeof companyStructs = [];
 
-      if (!hasFort && ownStructs.length === 0) continue;
-
-      // ── BFS cache (world-space, camera-independent) ────────────────────────
-      if (!this._claimOverlayCache.has(isl.id)) {
-        const connectedIds = new Set<number>();
-        const bfsQueue: typeof ownStructs = [];
-
-        if (hasFort) {
-          for (const ps of ownStructs) {
-            const dx = ps.x - fortX, dy = ps.y - fortY;
-            if (dx * dx + dy * dy <= fortSeedR * fortSeedR) {
-              connectedIds.add(ps.id);
-              bfsQueue.push(ps);
+          if (hasFort) {
+            for (const ps of companyStructs) {
+              const dx = ps.x - fortX, dy = ps.y - fortY;
+              if (dx * dx + dy * dy <= fortSeedR * fortSeedR) {
+                connectedIds.add(ps.id);
+                bfsQueue.push(ps);
+              }
             }
           }
-        }
-        let qi = 0;
-        while (qi < bfsQueue.length) {
-          const cur = bfsQueue[qi++];
-          for (const ps of ownStructs) {
-            if (connectedIds.has(ps.id)) continue;
-            const dx = ps.x - cur.x, dy = ps.y - cur.y;
-            if (dx * dx + dy * dy <= CLAIM_RADIUS_DEFAULT * CLAIM_RADIUS_DEFAULT) {
-              connectedIds.add(ps.id);
-              bfsQueue.push(ps);
+          let qi = 0;
+          while (qi < bfsQueue.length) {
+            const cur = bfsQueue[qi++];
+            for (const ps of companyStructs) {
+              if (connectedIds.has(ps.id)) continue;
+              const dx = ps.x - cur.x, dy = ps.y - cur.y;
+              if (dx * dx + dy * dy <= CLAIM_RADIUS_DEFAULT * CLAIM_RADIUS_DEFAULT) {
+                connectedIds.add(ps.id);
+                bfsQueue.push(ps);
+              }
             }
           }
+
+          const inactiveIds = new Set<number>(
+            companyStructs.filter(ps => !connectedIds.has(ps.id)).map(ps => ps.id)
+          );
+          this._claimOverlayCache.set(cacheKey, { connectedIds, inactiveIds });
         }
 
-        const inactiveIds = new Set<number>(
-          ownStructs.filter(ps => !connectedIds.has(ps.id)).map(ps => ps.id)
-        );
-        this._claimOverlayCache.set(isl.id, { connectedIds, inactiveIds, companyId: myCompany });
-      }
+        const bfs           = this._claimOverlayCache.get(cacheKey)!;
+        const connectedList = companyStructs.filter(ps => bfs.connectedIds.has(ps.id));
+        const inactiveList  = companyStructs.filter(ps => bfs.inactiveIds.has(ps.id));
+        const psR      = CLAIM_RADIUS_DEFAULT * zoom;
+        const fortVisR = fortSeedR * zoom;
 
-      const bfs           = this._claimOverlayCache.get(isl.id)!;
-      const connectedList = ownStructs.filter(ps => bfs.connectedIds.has(ps.id));
-      const inactiveList  = ownStructs.filter(ps => bfs.inactiveIds.has(ps.id));
-      const psR      = CLAIM_RADIUS_DEFAULT * zoom;
-      const fortVisR = fortSeedR * zoom;
+        const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
+        for (const off of wrapOffsets) {
+          const color = this._companyColor(cid);
+          const companyName = this._cachedCompanies.find(c => c.id === cid)?.name
+            ?? (cid === 1 ? 'Solo' : cid === 2 ? 'Pirates' : cid === 3 ? 'Navy' : `Company #${cid}`);
+          ctx.save();
 
-      const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
-      for (const off of wrapOffsets) {
-        const color = this._companyColor(myCompany);
-        const companyName = this._cachedCompanies.find(c => c.id === myCompany)?.name
-          ?? (myCompany === 1 ? 'Solo' : myCompany === 2 ? 'Pirates' : myCompany === 3 ? 'Navy' : `Company #${myCompany}`);
-        ctx.save();
+          // ── Inactive structures (own company only) ─────────────────────────
+          if (isOwn && inactiveList.length > 0) {
+            const inactivePts: Array<{ x: number; y: number; r: number }> = [];
+            for (const ps of inactiveList) {
+              const sp = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
+              inactivePts.push({ x: sp.x, y: sp.y, r: psR });
+            }
 
-        // ── Inactive structures: merged grey blob with perimeter outline ───
-        // Same compositing technique as the active blob, but using a muted
-        // grey palette to indicate these structures aren't connected to a fort.
-        if (inactiveList.length > 0) {
-          const inactivePts: Array<{ x: number; y: number; r: number }> = [];
-          for (const ps of inactiveList) {
+            const borderWidth = Math.max(8, 10 * zoom);
+            const greyFill   = '#888888';
+            const greyBorder = '#666666';
+
+            const tmp = new OffscreenCanvas(cvs.width, cvs.height);
+            const tc  = tmp.getContext('2d')!;
+            tc.fillStyle = greyFill;
+            for (const { x, y, r } of inactivePts) {
+              tc.beginPath(); tc.arc(x, y, r, 0, Math.PI * 2); tc.fill();
+            }
+
+            const ring = new OffscreenCanvas(cvs.width, cvs.height);
+            const rc   = ring.getContext('2d')!;
+            rc.fillStyle = greyBorder;
+            for (const { x, y, r } of inactivePts) {
+              rc.beginPath(); rc.arc(x, y, r + borderWidth, 0, Math.PI * 2); rc.fill();
+            }
+            rc.globalCompositeOperation = 'destination-out';
+            rc.drawImage(tmp, 0, 0);
+
+            ctx.globalAlpha = 0.08;
+            ctx.drawImage(tmp, 0, 0);
+            ctx.globalAlpha = 0.55;
+            ctx.drawImage(ring, 0, 0);
+            ctx.globalAlpha = 1.0;
+
+            // Label: company name + "(inactive)" at blob centroid
+            let cx = 0, cy = 0;
+            for (const p of inactivePts) { cx += p.x; cy += p.y; }
+            cx /= inactivePts.length; cy /= inactivePts.length;
+
+            const fontSize = Math.max(11, Math.round(13 * zoom));
+            ctx.font = `bold ${fontSize}px Georgia, serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.lineWidth = Math.max(2, 3 * zoom);
+            ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+
+            const lineGap = fontSize * 1.2;
+            ctx.fillStyle = '#ffffff';
+            ctx.strokeText(companyName, cx, cy - lineGap / 2);
+            ctx.fillText(companyName, cx, cy - lineGap / 2);
+
+            ctx.fillStyle = '#ff5555';
+            ctx.strokeText('(inactive)', cx, cy + lineGap / 2);
+            ctx.fillText('(inactive)', cx, cy + lineGap / 2);
+          }
+
+          // ── Active blob: fort + connected structures ───────────────────────
+          const screenPts: Array<{ x: number; y: number; r: number }> = [];
+
+          if (hasFort) {
+            const fs = camera.worldToScreen(Vec2.from(fortX + off.dx, fortY + off.dy));
+            screenPts.push({ x: fs.x, y: fs.y, r: fortVisR });
+          }
+          for (const ps of connectedList) {
             const sp = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
-            inactivePts.push({ x: sp.x, y: sp.y, r: psR });
+            screenPts.push({ x: sp.x, y: sp.y, r: psR });
           }
 
-          const borderWidth = Math.max(8, 10 * zoom);
-          const greyFill   = '#888888';
-          const greyBorder = '#666666';
+          if (screenPts.length > 0) {
+            const borderWidth = Math.max(8, 10 * zoom);
 
-          const tmp = new OffscreenCanvas(cvs.width, cvs.height);
-          const tc  = tmp.getContext('2d')!;
-          tc.fillStyle = greyFill;
-          for (const { x, y, r } of inactivePts) {
-            tc.beginPath(); tc.arc(x, y, r, 0, Math.PI * 2); tc.fill();
+            const tmp = new OffscreenCanvas(cvs.width, cvs.height);
+            const tc  = tmp.getContext('2d')!;
+            tc.fillStyle = color;
+            for (const { x, y, r } of screenPts) {
+              tc.beginPath(); tc.arc(x, y, r, 0, Math.PI * 2); tc.fill();
+            }
+
+            const ring = new OffscreenCanvas(cvs.width, cvs.height);
+            const rc   = ring.getContext('2d')!;
+            rc.fillStyle = color;
+            for (const { x, y, r } of screenPts) {
+              rc.beginPath(); rc.arc(x, y, r + borderWidth, 0, Math.PI * 2); rc.fill();
+            }
+            rc.globalCompositeOperation = 'destination-out';
+            rc.drawImage(tmp, 0, 0);
+
+            // Own company: full fill + solid border.
+            // Other companies: subtle fill + softer border (still readable, less prominent).
+            ctx.globalAlpha = isOwn ? 0.12 : 0.06;
+            ctx.drawImage(tmp, 0, 0);
+            ctx.globalAlpha = isOwn ? 0.90 : 0.50;
+            ctx.drawImage(ring, 0, 0);
+            ctx.globalAlpha = 1.0;
+
+            // Label at blob centroid
+            let cx = 0, cy = 0;
+            for (const p of screenPts) { cx += p.x; cy += p.y; }
+            cx /= screenPts.length; cy /= screenPts.length;
+
+            const fontSize = Math.max(12, Math.round(14 * zoom));
+            ctx.font = `bold ${fontSize}px Georgia, serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.lineWidth = Math.max(2, 3 * zoom);
+            ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+            ctx.fillStyle = '#ffffff';
+            ctx.strokeText(companyName, cx, cy);
+            ctx.fillText(companyName, cx, cy);
           }
 
-          const ring = new OffscreenCanvas(cvs.width, cvs.height);
-          const rc   = ring.getContext('2d')!;
-          rc.fillStyle = greyBorder;
-          for (const { x, y, r } of inactivePts) {
-            rc.beginPath(); rc.arc(x, y, r + borderWidth, 0, Math.PI * 2); rc.fill();
-          }
-          rc.globalCompositeOperation = 'destination-out';
-          rc.drawImage(tmp, 0, 0);
-
-          // Lower opacity than active blob so disconnected status reads clearly
-          ctx.globalAlpha = 0.08;
-          ctx.drawImage(tmp, 0, 0);
-          ctx.globalAlpha = 0.55;
-          ctx.drawImage(ring, 0, 0);
-          ctx.globalAlpha = 1.0;
-
-          // Label: company name + "(inactive)" centered on blob's centroid
-          let cx = 0, cy = 0;
-          for (const p of inactivePts) { cx += p.x; cy += p.y; }
-          cx /= inactivePts.length; cy /= inactivePts.length;
-
-          const fontSize = Math.max(11, Math.round(13 * zoom));
-          ctx.font = `bold ${fontSize}px Georgia, serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.lineWidth = Math.max(2, 3 * zoom);
-          ctx.strokeStyle = 'rgba(0,0,0,0.75)';
-
-          const lineGap = fontSize * 1.2;
-          ctx.fillStyle = '#ffffff';
-          ctx.strokeText(companyName, cx, cy - lineGap / 2);
-          ctx.fillText(companyName, cx, cy - lineGap / 2);
-
-          ctx.fillStyle = '#ff5555';
-          ctx.strokeText('(inactive)', cx, cy + lineGap / 2);
-          ctx.fillText('(inactive)', cx, cy + lineGap / 2);
+          ctx.restore();
         }
-
-        // ── Active blob: fort + connected structures → one merged paint area ─
-        // Fort and all connected structures go into the SAME OffscreenCanvas
-        // so their circles merge. The perimeter ring is computed via the
-        // expanded-minus-original (destination-out) technique.
-        const screenPts: Array<{ x: number; y: number; r: number }> = [];
-
-        if (hasFort) {
-          const fs = camera.worldToScreen(Vec2.from(fortX + off.dx, fortY + off.dy));
-          screenPts.push({ x: fs.x, y: fs.y, r: fortVisR });
-        }
-        for (const ps of connectedList) {
-          const sp = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
-          screenPts.push({ x: sp.x, y: sp.y, r: psR });
-        }
-
-        if (screenPts.length > 0) {
-          // Wide enough to be clearly visible at any zoom
-          const borderWidth = Math.max(8, 10 * zoom);
-
-          // Fill blob: union of all circles at their real radii
-          const tmp = new OffscreenCanvas(cvs.width, cvs.height);
-          const tc  = tmp.getContext('2d')!;
-          tc.fillStyle = color;
-          for (const { x, y, r } of screenPts) {
-            tc.beginPath(); tc.arc(x, y, r, 0, Math.PI * 2); tc.fill();
-          }
-
-          // Perimeter ring: expanded circles minus fill blob → outer ring only
-          const ring = new OffscreenCanvas(cvs.width, cvs.height);
-          const rc   = ring.getContext('2d')!;
-          rc.fillStyle = color;
-          for (const { x, y, r } of screenPts) {
-            rc.beginPath(); rc.arc(x, y, r + borderWidth, 0, Math.PI * 2); rc.fill();
-          }
-          rc.globalCompositeOperation = 'destination-out';
-          rc.drawImage(tmp, 0, 0);
-
-          // Composite: semi-transparent fill, fully solid perimeter border
-          ctx.globalAlpha = 0.12;
-          ctx.drawImage(tmp, 0, 0);
-          ctx.globalAlpha = 0.90;
-          ctx.drawImage(ring, 0, 0);
-          ctx.globalAlpha = 1.0;
-
-          // Label: company name centered on blob's centroid
-          let cx = 0, cy = 0;
-          for (const p of screenPts) { cx += p.x; cy += p.y; }
-          cx /= screenPts.length; cy /= screenPts.length;
-
-          const fontSize = Math.max(12, Math.round(14 * zoom));
-          ctx.font = `bold ${fontSize}px Georgia, serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.lineWidth = Math.max(2, 3 * zoom);
-          ctx.strokeStyle = 'rgba(0,0,0,0.75)';
-          ctx.fillStyle = '#ffffff';
-          ctx.strokeText(companyName, cx, cy);
-          ctx.fillText(companyName, cx, cy);
-        }
-
-        ctx.restore();
       }
     }
   }

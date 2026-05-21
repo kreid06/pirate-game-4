@@ -7753,14 +7753,17 @@ int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id) 
                          npc->id, npc->name, company_id, player_id);
             }
 
-            /* One-way structure promotion: if the new company is non-neutral,
-             * upgrade every neutral structure this player placed to that company.
-             * Structures already claimed by a non-neutral company are never changed. */
-            if (company_id != COMPANY_NEUTRAL) {
+            /* One-way structure promotion: when the player joins a real company
+             * (non-solo, non-neutral), upgrade every neutral OR solo-owned structure
+             * this player placed to that company.  Structures already claimed by a
+             * real company are never changed.  Going back to SOLO leaves all
+             * company-owned structures with their current company. */
+            if (company_id != COMPANY_NEUTRAL && company_id != COMPANY_SOLO) {
                 for (uint32_t si = 0; si < placed_structure_count; si++) {
                     if (!placed_structures[si].active) continue;
                     if (placed_structures[si].placer_id != player_id) continue;
-                    if (placed_structures[si].company_id != COMPANY_NEUTRAL) continue;
+                    if (placed_structures[si].company_id != COMPANY_NEUTRAL &&
+                        placed_structures[si].company_id != COMPANY_SOLO) continue;
                     placed_structures[si].company_id = company_id;
                     char upd[128];
                     snprintf(upd, sizeof(upd),
