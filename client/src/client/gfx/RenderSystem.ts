@@ -5792,9 +5792,17 @@ export class RenderSystem {
       }
     }
 
-    // Enemy territory: any structure not belonging to the current company within 500 world px
+    // Enemy territory: any structure not belonging to the current company within 500 world px.
+    // Mirrors server logic: skip this block when the placement point is inside the player's
+    // own company claim area (any own structure within CLAIM_RADIUS_DEFAULT=400px, or
+    // own flag_fort / company_fortress within CLAIM_RADIUS_FORT=600px).
     const myCompany = (this._localCompanyId ?? 0) as number;
-    const enemyTerritory = this.placedStructures.some(s =>
+    const isInOwnClaimArea = myCompany > 0 && this.placedStructures.some(s => {
+      if (s.companyId !== myCompany) return false;
+      const cr = (s.type === 'flag_fort' || s.type === 'company_fortress') ? 600 : 400;
+      return (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) <= cr * cr;
+    });
+    const enemyTerritory = !isInOwnClaimArea && this.placedStructures.some(s =>
       s.companyId !== myCompany &&
       (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) < 500 * 500
     );
