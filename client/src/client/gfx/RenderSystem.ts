@@ -9076,32 +9076,88 @@ export class RenderSystem {
               tc.globalCompositeOperation = 'source-over';
             }
 
+            // ── Border (ring) construction ────────────────────────────────
+            // Each contested arc gets a doubled border (2×borderWidth total),
+            // split so the band on each side carries the colour of whichever
+            // circle's interior that side falls in. For company A overlapping
+            // company B this means:
+            //   • arc-a (A's perimeter inside B): A inside (overlap), B outside (B-only)
+            //   • arc-b (B's perimeter inside A): B inside (overlap), A outside (A-only)
+            // Non-contested perimeter keeps the standard outer 1× band.
+            //
+            // For THIS company we paint our colour on three regions:
+            //   (1) (own_dilated ∖ own_inner) ∖ enemy_inner
+            //       — standard outer rim where outside is not in enemy
+            //   (2) (own_inner ∖ own_eroded) ∩ enemy_inner
+            //       — inner rim along our contested arc (overlap side)
+            //   (3) (enemy_dilated ∖ enemy_inner) ∩ own_inner
+            //       — outer rim of enemy's contested arc, lying in our territory
+            // Enemy companies run the same code with own/enemy swapped, so the
+            // opposite halves of every contested arc fill in with their colour.
+
+            // Helper masks reused across pieces.
+            const ownInnerCv = new OffscreenCanvas(cvs.width, cvs.height);
+            const oic = ownInnerCv.getContext('2d')!;
+            oic.fillStyle = color;
+            for (const { x, y, r } of screenPts) {
+              oic.beginPath(); oic.arc(x, y, r, 0, Math.PI * 2); oic.fill();
+            }
+
+            let enemyInnerCv: OffscreenCanvas | null = null;
+            if (enemyPts.length > 0) {
+              enemyInnerCv = new OffscreenCanvas(cvs.width, cvs.height);
+              const eic = enemyInnerCv.getContext('2d')!;
+              eic.fillStyle = color;
+              for (const { x, y, r } of enemyPts) {
+                eic.beginPath(); eic.arc(x, y, r, 0, Math.PI * 2); eic.fill();
+              }
+            }
+
             const ring = new OffscreenCanvas(cvs.width, cvs.height);
             const rc   = ring.getContext('2d')!;
             rc.fillStyle = color;
-            // (1) Fill with my circles dilated by borderWidth — this is the
-            //     outer envelope from which we'll carve the inner fill.
+
+            // Piece (1): own_dilated, then carve own_inner and enemy_inner
             for (const { x, y, r } of screenPts) {
               rc.beginPath(); rc.arc(x, y, r + borderWidth, 0, Math.PI * 2); rc.fill();
             }
-            // (2) Erode the envelope along enemy boundaries: carve out enemy
-            //     circles shrunk by borderWidth. This leaves a band of width
-            //     borderWidth on the enemy-interior side of every enemy arc
-            //     that intrudes into my territory — i.e. the contested edge
-            //     keeps a fully-coloured border just like the outer rim.
-            if (enemyPts.length > 0) {
-              rc.globalCompositeOperation = 'destination-out';
-              for (const { x, y, r } of enemyPts) {
+            rc.globalCompositeOperation = 'destination-out';
+            rc.drawImage(ownInnerCv, 0, 0);
+            if (enemyInnerCv) rc.drawImage(enemyInnerCv, 0, 0);
+
+            if (enemyInnerCv) {
+              // Piece (2): inner annulus of own ∩ enemy_inner, in own colour.
+              const p2 = new OffscreenCanvas(cvs.width, cvs.height);
+              const p2c = p2.getContext('2d')!;
+              p2c.fillStyle = color;
+              for (const { x, y, r } of screenPts) {
+                p2c.beginPath(); p2c.arc(x, y, r, 0, Math.PI * 2); p2c.fill();
+              }
+              p2c.globalCompositeOperation = 'destination-out';
+              for (const { x, y, r } of screenPts) {
                 const rr = r - borderWidth;
                 if (rr <= 0) continue;
-                rc.beginPath(); rc.arc(x, y, rr, 0, Math.PI * 2); rc.fill();
+                p2c.beginPath(); p2c.arc(x, y, rr, 0, Math.PI * 2); p2c.fill();
               }
-            } else {
-              rc.globalCompositeOperation = 'destination-out';
+              p2c.globalCompositeOperation = 'destination-in';
+              p2c.drawImage(enemyInnerCv, 0, 0);
+
+              // Piece (3): outer annulus of enemy ∩ own_inner, in own colour.
+              const p3 = new OffscreenCanvas(cvs.width, cvs.height);
+              const p3c = p3.getContext('2d')!;
+              p3c.fillStyle = color;
+              for (const { x, y, r } of enemyPts) {
+                p3c.beginPath(); p3c.arc(x, y, r + borderWidth, 0, Math.PI * 2); p3c.fill();
+              }
+              p3c.globalCompositeOperation = 'destination-out';
+              p3c.drawImage(enemyInnerCv, 0, 0);
+              p3c.globalCompositeOperation = 'destination-in';
+              p3c.drawImage(ownInnerCv, 0, 0);
+
+              rc.globalCompositeOperation = 'source-over';
+              rc.drawImage(p2, 0, 0);
+              rc.drawImage(p3, 0, 0);
             }
-            // (3) Carve the clipped fill (tmp = my_inner ∖ enemy_inner) so
-            //     only the border band remains.
-            rc.drawImage(tmp, 0, 0);
 
             // Own company: full fill + solid border.
             // Other companies: subtle fill + softer border (still readable, less prominent).
