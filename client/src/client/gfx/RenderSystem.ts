@@ -8922,6 +8922,10 @@ export class RenderSystem {
         const fortStructs    = ownStructs.filter(ps => ps.type === 'flag_fort' || ps.type === 'company_fortress');
         const nonFortStructs = ownStructs.filter(ps => ps.type !== 'flag_fort' && ps.type !== 'company_fortress');
 
+        // Use server-provided fort radius for seeding; falls back to CLAIM_RADIUS_DEFAULT
+        const islClaim = this._islandClaims.get(isl.id);
+        const fortSeedR = islClaim?.fortRadius ?? CLAIM_RADIUS_DEFAULT;
+
         // Forts are always active — they ARE the claim root
         const connectedIds = new Set<number>(fortStructs.map(ps => ps.id));
         const bfsQueue: typeof nonFortStructs = [];
@@ -8929,7 +8933,7 @@ export class RenderSystem {
         for (const ps of nonFortStructs) {
           for (const fort of fortStructs) {
             const dx = ps.x - fort.x, dy = ps.y - fort.y;
-            if (dx * dx + dy * dy <= CLAIM_RADIUS_DEFAULT * CLAIM_RADIUS_DEFAULT) {
+            if (dx * dx + dy * dy <= fortSeedR * fortSeedR) {
               connectedIds.add(ps.id);
               bfsQueue.push(ps);
               break;
@@ -8958,7 +8962,10 @@ export class RenderSystem {
       const bfs = this._claimOverlayCache.get(isl.id)!;
       const connectedList = ownStructs.filter(ps => bfs.connectedIds.has(ps.id));
       const inactiveList  = ownStructs.filter(ps => bfs.inactiveIds.has(ps.id));
-      const psR = CLAIM_RADIUS_DEFAULT * zoom;
+      const psR    = CLAIM_RADIUS_DEFAULT * zoom;
+      // Forts use the server's declared territory radius for their visual circle
+      const islClaim   = this._islandClaims.get(isl.id);
+      const fortVisR   = (islClaim?.fortRadius ?? CLAIM_RADIUS_DEFAULT) * zoom;
 
       // ── Screen-space draw (per frame, uses current camera transform) ─────
       const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
@@ -8985,18 +8992,19 @@ export class RenderSystem {
         if (connectedList.length > 0) {
           const borderWidth = Math.max(2, 3 * zoom);
 
-          // Collect screen positions once
-          const screenPts = connectedList.map(ps =>
-            camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy))
-          );
+          // Collect screen positions and per-structure radii once
+          const screenPts = connectedList.map(ps => ({
+            sp:  camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy)),
+            r:   (ps.type === 'flag_fort' || ps.type === 'company_fortress') ? fortVisR : psR,
+          }));
 
           // Fill blob: union of all circles
           const tmp = new OffscreenCanvas(cvs.width, cvs.height);
           const tc  = tmp.getContext('2d')!;
           tc.fillStyle = color;
-          for (const sp of screenPts) {
+          for (const { sp, r } of screenPts) {
             tc.beginPath();
-            tc.arc(sp.x, sp.y, psR, 0, Math.PI * 2);
+            tc.arc(sp.x, sp.y, r, 0, Math.PI * 2);
             tc.fill();
           }
 
@@ -9004,9 +9012,9 @@ export class RenderSystem {
           const border = new OffscreenCanvas(cvs.width, cvs.height);
           const bdc    = border.getContext('2d')!;
           bdc.fillStyle = color;
-          for (const sp of screenPts) {
+          for (const { sp, r } of screenPts) {
             bdc.beginPath();
-            bdc.arc(sp.x, sp.y, psR + borderWidth, 0, Math.PI * 2);
+            bdc.arc(sp.x, sp.y, r + borderWidth, 0, Math.PI * 2);
             bdc.fill();
           }
           bdc.globalCompositeOperation = 'destination-out';
