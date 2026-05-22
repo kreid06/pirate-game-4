@@ -9411,7 +9411,7 @@ export class RenderSystem {
             const hasActiveClaimFlag = this.placedStructures.some(
               s => s.type === 'claim_flag'
                 && !s.claimOrphaned
-                && s.islandId === islId
+                && s.islandId === isl.id
                 && (s.companyId ?? 0) === cid
             );
             if (hasActiveClaimFlag && allEnemyInnerCv) {
