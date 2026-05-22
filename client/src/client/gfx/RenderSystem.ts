@@ -1890,6 +1890,57 @@ export class RenderSystem {
     return false;
   }
 
+  /** True if (px,py) lies inside one of my own structures' claim radii AND
+   * none of that structure's enemy dominators also covers the point. This is
+   * the per-pixel "I own this point under Render Rule X" check for my own
+   * (non-captured) territory. */
+  private pointInMyOwnUncarvedTerritory(islandId: number, myCompany: number, px: number, py: number): boolean {
+    if (!myCompany) return false;
+    const radiusOf = (s: PlacedStructure): number => {
+      if (s.type === 'flag_fort' || s.type === 'company_fortress') return 600;
+      return 400;
+    };
+    for (const s of this.placedStructures) {
+      if (s.companyId !== myCompany) continue;
+      if (s.islandId !== islandId) continue;
+      if (s.claimOrphaned) continue;
+      // Only structures that project a claim radius count.
+      if (s.type !== 'flag_fort' && s.type !== 'company_fortress' && s.type !== 'claim_flag') {
+        // Non-fort claim sources still project the default radius via the
+        // BFS overlay; include them so cursor logic mirrors the overlay.
+      }
+      const sr = radiusOf(s);
+      const dx = px - s.x, dy = py - s.y;
+      if (dx * dx + dy * dy > sr * sr) continue;
+      // Check no enemy dominator of S also covers the point.
+      let carved = false;
+      if (s.dominators && s.dominators.length > 0) {
+        for (const dId of s.dominators) {
+          const d = this.placedStructures.find(p => p.id === dId);
+          if (!d) continue;
+          if (d.companyId === myCompany) continue; // same-company never carves
+          if (d.claimOrphaned) continue;
+          const dr = radiusOf(d);
+          const ddx = px - d.x, ddy = py - d.y;
+          if (ddx * ddx + ddy * ddy <= dr * dr) { carved = true; break; }
+        }
+      }
+      if (!carved) return true;
+    }
+    return false;
+  }
+
+  /** Dominators-only effective territory test: I own (px,py) iff either
+   * (a) one of my own structures covers it and no enemy dominator carves
+   *     it, or
+   * (b) an enemy structure covers it and one of my structures sits in that
+   *     enemy's dominators list (captured area). */
+  private pointInMyEffectiveTerritory(islandId: number, myCompany: number, px: number, py: number): boolean {
+    if (this.pointInMyOwnUncarvedTerritory(islandId, myCompany, px, py)) return true;
+    if (this.pointInMyDominatedArea(islandId, myCompany, px, py)) return true;
+    return false;
+  }
+
   updateFortressBuildProgress(structId: number, _companyId: number, _islandId: number, progressMs: number, totalMs: number, contested: boolean): void {
     const s = this.placedStructures.find(p => p.id === structId);
     if (s) {
@@ -5930,51 +5981,23 @@ export class RenderSystem {
     // territory overlay renderer.
     const myCompany = (this._localCompanyId ?? 0) as number;
     let inMyDominantArea = false;
+    let cursorIsl = 0;
     if (myCompany > 0) {
-      const ownsPoint = this.placedStructures.some(s => {
-        if (s.companyId !== myCompany) return false;
+      // Find which island the cursor is on by scanning any claim circle that
+      // contains it (forts use 600px, others use 400px).
+      for (const s of this.placedStructures) {
+        if ((s.companyId ?? 0) === 0) continue;
         const cr = (s.type === 'flag_fort' || s.type === 'company_fortress') ? 600 : 400;
-        return (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) <= cr * cr;
-      });
-      if (ownsPoint) {
-        // Dominance for placement bypass mirrors the overlay rule:
-        //   1. Per pair, a claim-flag override wins outright.
-        //   2. Otherwise the company with the EARLIEST fort (lowest id)
-        //      covering the cursor wins — first to claim keeps it.
-        // I'm the dominant company on this point iff I dominate every other
-        // company whose fort covers the cursor.
-        let myEarliestId = Number.MAX_SAFE_INTEGER;
-        const otherEarliestByCo = new Map<number, number>();
-        let cursorIsl = 0;
-        for (const s of this.placedStructures) {
-          if (s.type !== 'company_fortress' && s.type !== 'flag_fort') continue;
-          if ((s.companyId ?? 0) === 0) continue;
-          const cr = 600;
-          if ((s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) > cr * cr) continue;
-          if (cursorIsl === 0) cursorIsl = (s.islandId ?? 0) as number;
-          const sid = (s as any).id ?? Number.MAX_SAFE_INTEGER;
-          if (s.companyId === myCompany) {
-            if (sid < myEarliestId) myEarliestId = sid;
-          } else {
-            const prev = otherEarliestByCo.get(s.companyId!);
-            if (prev === undefined || sid < prev) otherEarliestByCo.set(s.companyId!, sid);
-          }
+        if ((s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) <= cr * cr) {
+          cursorIsl = (s.islandId ?? 0) as number;
+          if (cursorIsl !== 0) break;
         }
-        if (cursorIsl !== 0 && myEarliestId !== Number.MAX_SAFE_INTEGER) {
-          let dominatesAll = true;
-          for (const [, oid] of otherEarliestByCo) {
-            if (myEarliestId < oid) continue;
-            dominatesAll = false; break;
-          }
-          if (dominatesAll) inMyDominantArea = true;
-        }
-        // Region-based override: cursor inside a captured area where I'm
-        // the dominator counts as my territory, regardless of fort order.
-        if (!inMyDominantArea && cursorIsl !== 0 && myCompany) {
-          if (this.pointInMyDominatedArea(cursorIsl, myCompany, mx, my)) {
-            inMyDominantArea = true;
-          }
-        }
+      }
+      // Dominators-only law: I own this point iff per-pixel Render-Rule-X
+      // assigns it to my company (own uncarved territory OR captured enemy
+      // overlap).
+      if (cursorIsl !== 0) {
+        inMyDominantArea = this.pointInMyEffectiveTerritory(cursorIsl, myCompany, mx, my);
       }
     }
     const enemyTerritory = !inMyDominantArea && this.islandBuildKind !== 'claim_flag' && this.placedStructures.some(s =>
@@ -9341,21 +9364,13 @@ export class RenderSystem {
 
               const otherFortId = otherClaim.fortId;
               const otherIsCF   = otherClaim.fortIsCompanyFortress;
-              void otherIsCF; void myIsCF; // CF tier no longer affects dominance
-              // Dominance rules (per-pair):
-              //   1. Otherwise the EARLIER fort (lower fortId) wins — whoever
-              //      claimed the area first keeps it. Placing a higher-tier
-              //      structure next to a neighbor never silently consumes
-              //      their territory; capture requires a claim flag (which
-              //      then produces a region-based override applied in a
-              //      separate overlay pass — see end of drawTerritoryOverlay).
-              let iDominate: boolean;
-              if (myFortId === 0 && otherFortId === 0) iDominate = cid < otherCid;
-              else if (myFortId === 0)    iDominate = false;
-              else if (otherFortId === 0) iDominate = true;
-              else                         iDominate = myFortId < otherFortId;
-
-              const bucket = iDominate ? dominatedPts : dominantPts;
+              void otherIsCF; void myIsCF; void myFortId; void otherFortId;
+              // Dominators-only law: there is NO per-company-pair dominance
+              // any more. Every enemy circle uniformly carves my base fill,
+              // and Pass 3 then paints (X.circle ∩ D.circle) in D's colour
+              // for each D in X.dominators — that pass is the single source
+              // of truth for who "owns" overlapping pixels.
+              const bucket = dominantPts;
               for (const wc of otherClaim.worldCircles) {
                 const sp = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
                 bucket.push({ x: sp.x, y: sp.y, r: wc.r * zoom });

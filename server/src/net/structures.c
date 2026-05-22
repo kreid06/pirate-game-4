@@ -177,6 +177,7 @@ static bool floor_tiles_overlap(float ax, float ay, float a_rad,
  *     company places forts/structures next door.
  * Returns the unique company that dominates ALL others on the island, or 0
  * if there is no fort/fortress on the island or no unique dominator. */
+static uint32_t island_dominant_company(uint32_t island_id) __attribute__((unused));
 static uint32_t island_dominant_company(uint32_t island_id) {
     /* Gather forts per company on this island (oldest id per company). */
     typedef struct { uint32_t co; uint32_t id; } CoFort;
@@ -380,18 +381,15 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
 
     /* ── Dominance bypass ────────────────────────────────────────────────
-     * If the placement point lies inside the player's own company claim area
-     * AND the player's company is the dominant claimant on this island
-     * (Company Fortress > Flag Fort > older id), then enemy claim areas are
-     * subordinate at this point and do not block placement. This matches the
-     * client's territory-overlay dominance rendering. */
+     * Dominators-only law (matches client Render Rule X):
+     * if the placement point is owned by the player's company per the
+     * per-pixel dominators test (own uncarved territory OR captured enemy
+     * overlap), then enemy claim areas are subordinate at this point and
+     * do not block placement. */
     bool in_my_dominant_area = false;
     if (player->company_id != 0 && target_island_id != 0 &&
-        territory_is_claimed_by(px, py, (uint32_t)player->company_id)) {
-        uint32_t dom_co = island_dominant_company((uint32_t)target_island_id);
-        if (dom_co == (uint32_t)player->company_id) {
-            in_my_dominant_area = true;
-        }
+        claim_point_in_my_territory(px, py, (uint32_t)player->company_id)) {
+        in_my_dominant_area = true;
     }
 
     /* Cannot place within 500 px of an enemy-company structure

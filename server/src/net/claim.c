@@ -377,6 +377,63 @@ bool territory_is_contested(float wx, float wy) {
     return false;
 }
 
+/* Lookup a placed structure by id. Returns NULL if not found / inactive. */
+static PlacedStructure *find_placed(uint32_t id) {
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        if (placed_structures[i].id == id) return &placed_structures[i];
+    }
+    return NULL;
+}
+
+bool claim_point_in_my_territory(float wx, float wy, uint32_t my_company) {
+    if (my_company == 0) return false;
+
+    /* (a) my own structures, uncarved by any enemy dominator. */
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *s = &placed_structures[i];
+        if (!s->active) continue;
+        if (s->claim_orphaned) continue;
+        if (s->company_id != my_company) continue;
+        float sr = struct_claim_radius(s->type);
+        if (dist2(wx, wy, s->x, s->y) > sr * sr) continue;
+
+        bool carved = false;
+        for (uint8_t k = 0; k < s->dominator_count; k++) {
+            PlacedStructure *d = find_placed(s->dominators[k]);
+            if (!d) continue;
+            if (!d->active) continue;
+            if (d->claim_orphaned) continue;
+            if (d->company_id == my_company) continue; /* same-company never carves */
+            float dr = struct_claim_radius(d->type);
+            if (dist2(wx, wy, d->x, d->y) <= dr * dr) { carved = true; break; }
+        }
+        if (!carved) return true;
+    }
+
+    /* (b) enemy structures whose dominators list contains one of mine. */
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *victim = &placed_structures[i];
+        if (!victim->active) continue;
+        if (victim->claim_orphaned) continue;
+        if (victim->company_id == my_company) continue;
+        if (victim->company_id == COMPANY_UNCLAIMED) continue;
+        if (victim->dominator_count == 0) continue;
+        float vr = struct_claim_radius(victim->type);
+        if (dist2(wx, wy, victim->x, victim->y) > vr * vr) continue;
+
+        for (uint8_t k = 0; k < victim->dominator_count; k++) {
+            PlacedStructure *d = find_placed(victim->dominators[k]);
+            if (!d) continue;
+            if (!d->active) continue;
+            if (d->claim_orphaned) continue;
+            if (d->company_id != my_company) continue;
+            float dr = struct_claim_radius(d->type);
+            if (dist2(wx, wy, d->x, d->y) <= dr * dr) return true;
+        }
+    }
+    return false;
+}
+
 /* ── Claim flag tick ─────────────────────────────────────────────────────── */
 
 /**

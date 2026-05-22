@@ -348,6 +348,18 @@ bool territory_is_claimed_by_any(float wx, float wy, uint32_t *out_company_id);
 bool territory_is_contested(float wx, float wy);
 
 /**
+ * Dominators-only per-pixel ownership test (Render Rule X).
+ * Returns true iff (wx,wy) is owned by `my_company` under the dominators law:
+ *   (a) one of my company's active non-orphaned structures covers the point
+ *       AND none of its enemy dominators also covers the point, OR
+ *   (b) an enemy structure covers the point AND one of my company's structures
+ *       sits in that enemy's `dominators[]` (captured area).
+ * Intended as the replacement for the legacy
+ * `territory_is_claimed_by + island_dominant_company` placement gate.
+ */
+bool claim_point_in_my_territory(float wx, float wy, uint32_t my_company);
+
+/**
  * Register a completed Company Fortress island claim.
  * Destroys all other incomplete Company Fortresses on the island.
  */
