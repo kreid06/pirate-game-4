@@ -9428,14 +9428,16 @@ export class RenderSystem {
                // ants" feel without the harsh blink.
               const hatch = new OffscreenCanvas(cvs.width, cvs.height);
               const hc = hatch.getContext('2d')!;
-              const stripeGap = Math.max(8, 14 * zoom);
+              // Spacing between stripe CENTRES; line width = half of that so
+              // painted bands and gaps are equal width.
+              const stripeGap = Math.max(16, 28 * zoom);
               hc.strokeStyle = color;
-              hc.lineWidth   = Math.max(1.5, 2.5 * zoom);
+              hc.lineWidth   = stripeGap / 2;
               // World-anchored phase: project world origin onto stripe-perp
               // axis (x - y). Adding camera-anchored offset makes stripes
               // appear to stay glued to the world as the camera pans.
               const worldOrigin = camera.worldToScreen(Vec2.from(off.dx, off.dy));
-              const animSpeedPxPerMs = 0.02; // ~20 px/sec at zoom 1
+              const animSpeedPxPerMs = 0.006; // ~6 px/sec at zoom 1
               const phase = ((worldOrigin.x - worldOrigin.y)
                            + performance.now() * animSpeedPxPerMs) % stripeGap;
               const diagLen = cvs.width + cvs.height;
