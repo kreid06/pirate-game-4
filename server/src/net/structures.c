@@ -371,8 +371,10 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
 
     /* Cannot place within 500 px of an enemy-company structure
-       — bypassed when the player is inside their own dominant claim area. */
-    if (!in_my_dominant_area) {
+       — bypassed when the player is inside their own dominant claim area.
+       Also bypassed for claim flags: they are intentionally placed where
+       enemy structures are present (the contested area). */
+    if (stype_enum != STRUCT_CLAIM_FLAG && !in_my_dominant_area) {
         bool enemy_block = false;
         for (uint32_t si = 0; si < placed_structure_count && !enemy_block; si++) {
             if (!placed_structures[si].active) continue;
