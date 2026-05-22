@@ -170,6 +170,13 @@ export class RenderSystem {
   private _claimOverlayCache: Map<string, { connectedIds: Set<number>; inactiveIds: Set<number> }> = new Map();
   private _claimOverlayDirty = true;
   /**
+   * Dominance overrides from successful claim flag captures.
+   * Key: `${islandId}_${dominantCo}_${subordinateCo}`. While present, the
+   * dominantCo wins the per-pair dominance rule against subordinateCo on that
+   * island, regardless of CF/FlagFort/age.
+   */
+  private _dominanceOverrides: Set<string> = new Set();
+  /**
    * Pre-computed wall segments — rebuilt whenever placedStructures changes.
    * Each entry: [x1, y1, x2, y2] in world space.  Used for O(1)-per-frame
    * ceiling-transparency ray tests instead of recomputing each draw call.
@@ -1849,6 +1856,30 @@ export class RenderSystem {
       s.claimOrphaned = orphaned;
       this._claimOverlayDirty = true;
     }
+  }
+
+  /** Record a dominance override (claim flag captured a contested area). */
+  addDominanceOverride(islandId: number, dominantCo: number, subordinateCo: number): void {
+    if (!dominantCo || !subordinateCo || dominantCo === subordinateCo) return;
+    // Remove the reverse override if present (dominance just flipped back).
+    this._dominanceOverrides.delete(`${islandId}_${subordinateCo}_${dominantCo}`);
+    this._dominanceOverrides.add(`${islandId}_${dominantCo}_${subordinateCo}`);
+    this._claimOverlayDirty = true;
+  }
+
+  /** Replace the full set of dominance overrides (used on join snapshot). */
+  setDominanceOverrides(list: Array<{ islandId: number; dominantCo: number; subordinateCo: number }>): void {
+    this._dominanceOverrides.clear();
+    for (const o of list) {
+      if (!o.dominantCo || !o.subordinateCo || o.dominantCo === o.subordinateCo) continue;
+      this._dominanceOverrides.add(`${o.islandId}_${o.dominantCo}_${o.subordinateCo}`);
+    }
+    this._claimOverlayDirty = true;
+  }
+
+  /** True if `a` dominates `b` on this island by an override. */
+  private hasDominanceOverride(islandId: number, a: number, b: number): boolean {
+    return this._dominanceOverrides.has(`${islandId}_${a}_${b}`);
   }
 
   updateFortressBuildProgress(structId: number, _companyId: number, _islandId: number, progressMs: number, totalMs: number, contested: boolean): void {
@@ -5902,6 +5933,7 @@ export class RenderSystem {
         // Use the cursor's island via any nearby fort's island_id, falling back to
         // scanning all forts and picking the dominant one whose claim covers (mx,my).
         let bestCo = 0, bestTier = 0, bestId = Number.MAX_SAFE_INTEGER;
+        let bestIsl = 0;
         for (const s of this.placedStructures) {
           let tier = 0;
           if (s.type === 'company_fortress') tier = 2;
@@ -5917,9 +5949,17 @@ export class RenderSystem {
             bestTier = tier;
             bestId = sid;
             bestCo = s.companyId!;
+            bestIsl = (s.islandId ?? 0) as number;
           }
         }
         if (bestCo === myCompany) inMyDominantArea = true;
+        // Dominance override: even if the natural rule picks an enemy as the
+        // dominant company, an active claim-flag capture flips the result in
+        // my company's favor for that island/pair.
+        else if (bestCo !== 0 && bestIsl !== 0 &&
+                 this.hasDominanceOverride(bestIsl, myCompany, bestCo)) {
+          inMyDominantArea = true;
+        }
       }
     }
     const enemyTerritory = !inMyDominantArea && this.islandBuildKind !== 'claim_flag' && this.placedStructures.some(s =>
@@ -9287,7 +9327,11 @@ export class RenderSystem {
               const otherFortId = otherClaim.fortId;
               const otherIsCF   = otherClaim.fortIsCompanyFortress;
               let iDominate: boolean;
-              if (myIsCF && !otherIsCF)        iDominate = true;
+              // Dominance overrides (from successful claim flag captures)
+              // win outright over the natural CF/age rule for this pair.
+              if (this.hasDominanceOverride(isl.id, cid, otherCid))      iDominate = true;
+              else if (this.hasDominanceOverride(isl.id, otherCid, cid)) iDominate = false;
+              else if (myIsCF && !otherIsCF)        iDominate = true;
               else if (!myIsCF && otherIsCF)   iDominate = false;
               else if (myFortId === 0 && otherFortId === 0)
                                                 iDominate = cid < otherCid;
@@ -9412,8 +9456,6 @@ export class RenderSystem {
             // Other companies: subtle fill + softer border (still readable, less prominent).
             ctx.globalAlpha = isOwn ? 0.12 : 0.06;
             ctx.drawImage(tmp, 0, 0);
-            ctx.globalAlpha = isOwn ? 0.90 : 0.50;
-            ctx.drawImage(ring, 0, 0);
             ctx.globalAlpha = 1.0;
 
             // ── Contested area: solid diagonal hatching ───────────────────
@@ -9426,6 +9468,17 @@ export class RenderSystem {
                 && !s.claimOrphaned
                 && s.islandId === isl.id
                 && (s.companyId ?? 0) === cid
+            );
+            // True when ANY of this company's active claim flags on this
+            // island is currently in the CONTEST state (claimState === 0).
+            // Used to flicker the hatching so contested areas read as
+            // visually unstable.
+            const isContestFlickering = hasActiveClaimFlag && this.placedStructures.some(
+              s => s.type === 'claim_flag'
+                && !s.claimOrphaned
+                && s.islandId === isl.id
+                && (s.companyId ?? 0) === cid
+                && (s.claimState ?? 0) === 0
             );
             if (hasActiveClaimFlag && allEnemyInnerCv) {
               // Build intersection mask: own ∩ all_enemy
@@ -9467,9 +9520,20 @@ export class RenderSystem {
               hc.drawImage(intMask, 0, 0);
 
               ctx.globalAlpha = 0.30;
+              if (isContestFlickering) {
+                // Sine-wave flicker between ~0.10 and ~0.50, ~1.4 Hz.
+                const t = performance.now() * 0.009;
+                ctx.globalAlpha = 0.30 + 0.20 * Math.sin(t);
+              }
               ctx.drawImage(hatch, 0, 0);
               ctx.globalAlpha = 1.0;
             }
+
+            // Borders (including the dashed subordinate "inner" border) are
+            // drawn LAST so they sit above the contested-area hatching.
+            ctx.globalAlpha = isOwn ? 0.90 : 0.50;
+            ctx.drawImage(ring, 0, 0);
+            ctx.globalAlpha = 1.0;
 
             // Label at blob centroid
             let cx = 0, cy = 0;

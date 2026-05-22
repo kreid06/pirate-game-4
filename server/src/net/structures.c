@@ -173,11 +173,14 @@ static bool floor_tiles_overlap(float ax, float ay, float a_rad,
  * dominance rule:
  *   - Completed Company Fortress  > Flag Fort > none
  *   - Within the same tier, the lower structure id (earlier placement) wins
- * Returns 0 if no company has a fort/fortress on the island. */
+ *   - A dominance override (from a successful claim flag) replaces the
+ *     natural rule for the (overridden) company pair.
+ * Returns 0 if no company has a fort/fortress on the island, or if no
+ * single company dominates ALL others. */
 static uint32_t island_dominant_company(uint32_t island_id) {
-    uint32_t best_co  = 0;
-    int      best_tier = 0;       /* 0=none, 1=flag_fort, 2=completed_company_fortress */
-    uint32_t best_id  = UINT32_MAX;
+    /* Gather forts per company on this island (best-tier/oldest id). */
+    typedef struct { uint32_t co; int tier; uint32_t id; } CoFort;
+    CoFort forts[32]; int nf = 0;
     for (uint32_t i = 0; i < placed_structure_count; i++) {
         PlacedStructure *s = &placed_structures[i];
         if (!s->active) continue;
@@ -187,13 +190,44 @@ static uint32_t island_dominant_company(uint32_t island_id) {
         if (s->type == STRUCT_COMPANY_FORTRESS && s->fortress_complete) tier = 2;
         else if (s->type == STRUCT_FLAG_FORT)                           tier = 1;
         else continue;
-        if (tier > best_tier || (tier == best_tier && s->id < best_id)) {
-            best_tier = tier;
-            best_id   = s->id;
-            best_co   = s->company_id;
+        /* Merge into existing slot for this company (keep best tier / lowest id). */
+        bool merged = false;
+        for (int k = 0; k < nf; k++) {
+            if (forts[k].co == s->company_id) {
+                if (tier > forts[k].tier ||
+                    (tier == forts[k].tier && s->id < forts[k].id)) {
+                    forts[k].tier = tier; forts[k].id = s->id;
+                }
+                merged = true; break;
+            }
+        }
+        if (!merged && nf < 32) {
+            forts[nf].co = s->company_id; forts[nf].tier = tier; forts[nf].id = s->id;
+            nf++;
         }
     }
-    return best_co;
+    if (nf == 0) return 0;
+    if (nf == 1) return forts[0].co;
+    /* Per-pair dominance with overrides. A company is "the" dominant company
+     * iff it dominates every other company on the island. */
+    for (int a = 0; a < nf; a++) {
+        bool dominates_all = true;
+        for (int b = 0; b < nf; b++) {
+            if (a == b) continue;
+            /* Override wins outright. */
+            if (dominance_override_check((uint8_t)island_id, forts[a].co, forts[b].co)) continue;
+            if (dominance_override_check((uint8_t)island_id, forts[b].co, forts[a].co)) {
+                dominates_all = false; break;
+            }
+            /* Natural rule: higher tier wins; tie → lower fort id wins. */
+            if (forts[a].tier > forts[b].tier) continue;
+            if (forts[a].tier < forts[b].tier) { dominates_all = false; break; }
+            if (forts[a].id   < forts[b].id)   continue;
+            dominates_all = false; break;
+        }
+        if (dominates_all) return forts[a].co;
+    }
+    return 0;
 }
 
 void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
@@ -478,15 +512,35 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                      "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_contested_area\"}");
             goto ps_send;
         }
-        /* Uniqueness: no other active claim flag from my company with the same
-         * (mine, enemy) source pair. */
+        /* Uniqueness: one active claim flag per (my company, enemy company,
+         * island). A "contested area" between two companies on the same island
+         * is treated as a single region — my company may only contest it with
+         * one flag at a time, regardless of which fort/structure pair was
+         * chosen as the (mine, enemy) source. */
+        uint8_t enemy_company = 0;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            PlacedStructure *ex = &placed_structures[si];
+            if (ex->active && ex->id == cf_src_enemy) {
+                enemy_company = ex->company_id;
+                break;
+            }
+        }
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             PlacedStructure *ex = &placed_structures[si];
             if (!ex->active) continue;
             if (ex->type != STRUCT_CLAIM_FLAG) continue;
             if (ex->company_id != (uint8_t)player->company_id) continue;
-            if (ex->claim_linked_fort   == cf_src_mine &&
-                ex->claim_source_enemy  == cf_src_enemy) {
+            if (ex->island_id  != (uint8_t)target_island_id) continue;
+            /* Find this existing flag's enemy company. */
+            uint8_t ex_enemy_company = 0;
+            for (uint32_t sj = 0; sj < placed_structure_count; sj++) {
+                PlacedStructure *es = &placed_structures[sj];
+                if (es->active && es->id == ex->claim_source_enemy) {
+                    ex_enemy_company = es->company_id;
+                    break;
+                }
+            }
+            if (ex_enemy_company == enemy_company) {
                 snprintf(response, sizeof(response),
                          "{\"type\":\"place_structure_fail\",\"reason\":\"contested_area_already_claimed\"}");
                 goto ps_send;

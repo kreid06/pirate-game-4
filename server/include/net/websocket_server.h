@@ -369,6 +369,30 @@ void claim_tick(uint32_t delta_ms);
 bool claim_register_fort(uint8_t island_id, uint32_t company_id,
                          uint32_t fort_struct_id, uint32_t placer_id);
 
+/* ── Dominance overrides ──────────────────────────────────────────────────
+ * When a Claim Flag successfully captures a contested area, the claimer's
+ * company gains a permanent dominance override on that island against the
+ * defender's company. While the override is active, the natural per-pair
+ * dominance rule (Company Fortress > Flag Fort > older fort id) is replaced
+ * with "claimer dominates defender" for that island/company-pair.
+ * Overrides are dropped if either company loses all its forts on the island.
+ */
+#define MAX_DOMINANCE_OVERRIDES 64
+typedef struct {
+    bool     active;
+    uint8_t  island_id;
+    uint32_t dominant_co;
+    uint32_t subordinate_co;
+} DominanceOverride;
+extern DominanceOverride dominance_overrides[MAX_DOMINANCE_OVERRIDES];
+extern int               dominance_override_count;
+
+/** Returns true if `a` dominates `b` on the given island by override. */
+bool dominance_override_check(uint8_t island_id, uint32_t a_co, uint32_t b_co);
+
+/** Records (or refreshes) "dominant_co dominates subordinate_co" on island_id. */
+void dominance_override_add(uint8_t island_id, uint32_t dominant_co, uint32_t subordinate_co);
+
 /* ── Island structures ────────────────────────────────────────────────────── */
 typedef enum {
     STRUCT_WOODEN_FLOOR = 0,

@@ -652,6 +652,10 @@ export class NetworkManager {
   /** Fired when a claiming flag's progress changes. */
   public onClaimFlagProgress: ((structId: number, progressMs: number, contested: boolean, targetsFortress: boolean, state?: number, graceMs?: number, graceTotal?: number, total?: number) => void) | null = null;
   public onTerritoryFlipped: ((flagId: number, orphanedStructureId: number, oldCompanyId: number, newCompanyId: number, islandId: number) => void) | null = null;
+  /** Fired when the server records or refreshes a dominance override (claim flag captured an area). */
+  public onDominanceOverride: ((islandId: number, dominantCo: number, subordinateCo: number) => void) | null = null;
+  /** Fired with the full list of active dominance overrides on join. */
+  public onDominanceOverridesList: ((overrides: Array<{ islandId: number; dominantCo: number; subordinateCo: number }>) => void) | null = null;
   /** Fired when a claiming flag finishes capturing territory. */
   public onTerritoryCaptured: ((islandId: number, newCompanyId: number) => void) | null = null;
   /** Fired when a Company Fortress build timer updates (≈1/s). */
@@ -2729,6 +2733,25 @@ export class NetworkManager {
           message.island_id ?? 0,
         );
         break;
+
+      case 'dominance_override':
+        this.onDominanceOverride?.(
+          message.island_id      ?? 0,
+          message.dominant_co    ?? 0,
+          message.subordinate_co ?? 0,
+        );
+        break;
+
+      case 'DOMINANCE_OVERRIDES': {
+        const list: Array<{ islandId: number; dominantCo: number; subordinateCo: number }> =
+          (message.overrides ?? []).map((o: any) => ({
+            islandId:      o.island_id      ?? 0,
+            dominantCo:    o.dominant_co    ?? 0,
+            subordinateCo: o.subordinate_co ?? 0,
+          }));
+        this.onDominanceOverridesList?.(list);
+        break;
+      }
 
       case 'fortress_build_progress':
         this.onFortressBuildProgress?.(

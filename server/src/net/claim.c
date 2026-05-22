@@ -43,6 +43,49 @@
 IslandClaim island_claims[MAX_ISLAND_CLAIMS];
 int         island_claim_count = 0;
 
+/* ── Dominance overrides ─────────────────────────────────────────────────── */
+
+DominanceOverride dominance_overrides[MAX_DOMINANCE_OVERRIDES];
+int               dominance_override_count = 0;
+
+bool dominance_override_check(uint8_t island_id, uint32_t a_co, uint32_t b_co) {
+    for (int i = 0; i < dominance_override_count; i++) {
+        DominanceOverride *o = &dominance_overrides[i];
+        if (!o->active) continue;
+        if (o->island_id == island_id &&
+            o->dominant_co == a_co &&
+            o->subordinate_co == b_co) return true;
+    }
+    return false;
+}
+
+void dominance_override_add(uint8_t island_id, uint32_t dominant_co, uint32_t subordinate_co) {
+    if (dominant_co == 0 || subordinate_co == 0 || dominant_co == subordinate_co) return;
+    /* If the reverse override exists, remove it (dominance just flipped back). */
+    for (int i = 0; i < dominance_override_count; i++) {
+        DominanceOverride *o = &dominance_overrides[i];
+        if (o->active && o->island_id == island_id &&
+            o->dominant_co == subordinate_co && o->subordinate_co == dominant_co) {
+            o->active = false;
+        }
+    }
+    /* If already recorded, keep it. */
+    if (dominance_override_check(island_id, dominant_co, subordinate_co)) return;
+    /* Find free slot. */
+    DominanceOverride *slot = NULL;
+    for (int i = 0; i < dominance_override_count; i++) {
+        if (!dominance_overrides[i].active) { slot = &dominance_overrides[i]; break; }
+    }
+    if (!slot) {
+        if (dominance_override_count >= MAX_DOMINANCE_OVERRIDES) return;
+        slot = &dominance_overrides[dominance_override_count++];
+    }
+    slot->active         = true;
+    slot->island_id      = island_id;
+    slot->dominant_co    = dominant_co;
+    slot->subordinate_co = subordinate_co;
+}
+
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
 static inline float dist2(float ax, float ay, float bx, float by) {
@@ -562,6 +605,18 @@ void claim_tick(uint32_t delta_ms) {
             websocket_server_broadcast(cmsg);
             log_info("🏴 Claim Flag #%u captured contested area: structure #%u (company %u) orphaned by company %u",
                      s->id, orphaned_id, old_co, s->company_id);
+
+            /* Record dominance override: claimer dominates defender on this
+             * island until either company loses all forts on it. */
+            dominance_override_add(isl, s->company_id, old_co);
+            {
+                char omsg[192];
+                snprintf(omsg, sizeof(omsg),
+                         "{\"type\":\"dominance_override\",\"island_id\":%u"
+                         ",\"dominant_co\":%u,\"subordinate_co\":%u}",
+                         isl, s->company_id, old_co);
+                websocket_server_broadcast(omsg);
+            }
 
             /* Consume the claim flag */
             s->active = false;

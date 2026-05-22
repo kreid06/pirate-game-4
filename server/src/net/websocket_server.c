@@ -2394,6 +2394,30 @@ int websocket_server_update(struct Sim* sim) {
                                                  placed_structure_count, client->player_id);
                                     }
 
+                                    // Send any active dominance overrides
+                                    {
+                                        char hs_dov_buf[2048];
+                                        int  hs_dvp = snprintf(hs_dov_buf, sizeof(hs_dov_buf),
+                                            "{\"type\":\"DOMINANCE_OVERRIDES\",\"overrides\":[");
+                                        bool hs_dvf = true;
+                                        for (int oi = 0; oi < dominance_override_count; oi++) {
+                                            DominanceOverride *o = &dominance_overrides[oi];
+                                            if (!o->active) continue;
+                                            hs_dvp += snprintf(hs_dov_buf + hs_dvp, sizeof(hs_dov_buf) - hs_dvp,
+                                                "%s{\"island_id\":%u,\"dominant_co\":%u,\"subordinate_co\":%u}",
+                                                hs_dvf ? "" : ",",
+                                                o->island_id, o->dominant_co, o->subordinate_co);
+                                            hs_dvf = false;
+                                        }
+                                        hs_dvp += snprintf(hs_dov_buf + hs_dvp, sizeof(hs_dov_buf) - hs_dvp, "]}");
+                                        char hs_dovf[2304];
+                                        size_t hs_dovflen = websocket_create_frame(
+                                            WS_OPCODE_TEXT, hs_dov_buf, (size_t)hs_dvp,
+                                            hs_dovf, sizeof(hs_dovf));
+                                        if (hs_dovflen > 0 && hs_dovflen < sizeof(hs_dovf))
+                                            send(client->fd, hs_dovf, hs_dovflen, 0);
+                                    }
+
                                     // Skip normal response sending since we already sent
                                     ws_server.packets_sent += 2;
                                     ws_server.packets_received++;
@@ -6755,6 +6779,29 @@ int websocket_server_update(struct Sim* sim) {
                                     if (sflen > 0 && sflen < sizeof(sf))
                                         send(client->fd, sf, sflen, 0);
                                 }
+                                /* Send any active dominance overrides */
+                                {
+                                    char j_dov_buf[2048];
+                                    int  j_dvp = snprintf(j_dov_buf, sizeof(j_dov_buf),
+                                        "{\"type\":\"DOMINANCE_OVERRIDES\",\"overrides\":[");
+                                    bool j_dvf = true;
+                                    for (int oi = 0; oi < dominance_override_count; oi++) {
+                                        DominanceOverride *o = &dominance_overrides[oi];
+                                        if (!o->active) continue;
+                                        j_dvp += snprintf(j_dov_buf + j_dvp, sizeof(j_dov_buf) - j_dvp,
+                                            "%s{\"island_id\":%u,\"dominant_co\":%u,\"subordinate_co\":%u}",
+                                            j_dvf ? "" : ",",
+                                            o->island_id, o->dominant_co, o->subordinate_co);
+                                        j_dvf = false;
+                                    }
+                                    j_dvp += snprintf(j_dov_buf + j_dvp, sizeof(j_dov_buf) - j_dvp, "]}");
+                                    char j_dovf[2304];
+                                    size_t j_dovflen = websocket_create_frame(
+                                        WS_OPCODE_TEXT, j_dov_buf, (size_t)j_dvp,
+                                        j_dovf, sizeof(j_dovf));
+                                    if (j_dovflen > 0 && j_dovflen < sizeof(j_dovf))
+                                        send(client->fd, j_dovf, j_dovflen, 0);
+                                }
                             }
                             handled = true;
                             
@@ -6866,6 +6913,29 @@ int websocket_server_update(struct Sim* sim) {
                                     send(client->fd, gf, gflen, 0);
                                 log_info("📦 Sent STRUCTURES (%u) on GET_STRUCTURES to player %u",
                                          placed_structure_count, client->player_id);
+                            }
+                            /* Send any active dominance overrides */
+                            {
+                                char gs_dov_buf[2048];
+                                int  gs_dvp = snprintf(gs_dov_buf, sizeof(gs_dov_buf),
+                                    "{\"type\":\"DOMINANCE_OVERRIDES\",\"overrides\":[");
+                                bool gs_dvf = true;
+                                for (int oi = 0; oi < dominance_override_count; oi++) {
+                                    DominanceOverride *o = &dominance_overrides[oi];
+                                    if (!o->active) continue;
+                                    gs_dvp += snprintf(gs_dov_buf + gs_dvp, sizeof(gs_dov_buf) - gs_dvp,
+                                        "%s{\"island_id\":%u,\"dominant_co\":%u,\"subordinate_co\":%u}",
+                                        gs_dvf ? "" : ",",
+                                        o->island_id, o->dominant_co, o->subordinate_co);
+                                    gs_dvf = false;
+                                }
+                                gs_dvp += snprintf(gs_dov_buf + gs_dvp, sizeof(gs_dov_buf) - gs_dvp, "]}");
+                                char gs_dovf[2304];
+                                size_t gs_dovflen = websocket_create_frame(
+                                    WS_OPCODE_TEXT, gs_dov_buf, (size_t)gs_dvp,
+                                    gs_dovf, sizeof(gs_dovf));
+                                if (gs_dovflen > 0 && gs_dovflen < sizeof(gs_dovf))
+                                    send(client->fd, gs_dovf, gs_dovflen, 0);
                             }
                             strcpy(response, "{\"type\":\"ack\"}");
                             handled = true;
