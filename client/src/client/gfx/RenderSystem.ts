@@ -9117,26 +9117,38 @@ export class RenderSystem {
       );
 
       // ── BFS cache (world-space, camera-independent) ─────────────────────
+      // Connectivity rule (matches server `claim_rebuild_graph`): two
+      // structures are connected when their claim circles OVERLAP, i.e. the
+      // distance between centres is ≤ (r_a + r_b).
       const cacheKey = `${islId}_${cid}`;
       if (!this._claimOverlayCache.has(cacheKey)) {
         const connectedIds = new Set<number>();
         const bfsQueue: PlacedStructure[] = [];
         if (hasFort) {
+          // Seed from the fort: any structure whose own circle (radius
+          // CLAIM_RADIUS_DEFAULT) overlaps the fort circle.
+          const seedR = fortSeedR + CLAIM_RADIUS_DEFAULT;
+          const seedR2 = seedR * seedR;
           for (const ps of companyStructs) {
             const dx = ps.x - fortX, dy = ps.y - fortY;
-            if (dx * dx + dy * dy <= fortSeedR * fortSeedR) {
+            if (dx * dx + dy * dy <= seedR2) {
               connectedIds.add(ps.id);
               bfsQueue.push(ps);
             }
           }
         }
+        // Step rule: two non-fort structures both have radius
+        // CLAIM_RADIUS_DEFAULT, so they connect when centre distance
+        // ≤ 2 × CLAIM_RADIUS_DEFAULT.
+        const stepR = 2 * CLAIM_RADIUS_DEFAULT;
+        const stepR2 = stepR * stepR;
         let qi = 0;
         while (qi < bfsQueue.length) {
           const cur = bfsQueue[qi++];
           for (const ps of companyStructs) {
             if (connectedIds.has(ps.id)) continue;
             const dx = ps.x - cur.x, dy = ps.y - cur.y;
-            if (dx * dx + dy * dy <= CLAIM_RADIUS_DEFAULT * CLAIM_RADIUS_DEFAULT) {
+            if (dx * dx + dy * dy <= stepR2) {
               connectedIds.add(ps.id);
               bfsQueue.push(ps);
             }
