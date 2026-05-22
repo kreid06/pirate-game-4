@@ -9428,11 +9428,13 @@ export class RenderSystem {
                // ants" feel without the harsh blink.
               const hatch = new OffscreenCanvas(cvs.width, cvs.height);
               const hc = hatch.getContext('2d')!;
-              // Spacing between stripe CENTRES; line width = half of that so
-              // painted bands and gaps are equal width.
+              // `stripeGap` is the x-axis spacing between consecutive 45°
+              // strokes. Their PERPENDICULAR spacing is stripeGap / √2, so
+              // for equal painted-band and gap widths, lineWidth must be
+              // half of that perpendicular spacing.
               const stripeGap = Math.max(16, 28 * zoom);
               hc.strokeStyle = color;
-              hc.lineWidth   = stripeGap / 2;
+              hc.lineWidth   = stripeGap / (2 * Math.SQRT2);
               // World-anchored phase: project world origin onto stripe-perp
               // axis (x - y). Adding camera-anchored offset makes stripes
               // appear to stay glued to the world as the camera pans.
