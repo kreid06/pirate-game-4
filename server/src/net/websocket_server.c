@@ -9032,7 +9032,7 @@ void websocket_server_tick(float dt) {
                                     static const float BSR[5] = { 0.00f, 0.40f, -0.20f, 1.20f, 0.15f };
                                     for (int ri = 0; ri < isl_mv->resource_count; ri++) {
                                         const IslandResource *res = &isl_mv->resources[ri];
-                                        if (res->type_id != RES_BOULDER) continue;
+                                        if (res->type_id != RES_BOULDER && res->type_id != RES_STONE_BOULDER) continue;
                                         if (res->health <= 0) continue;
                                         uint32_t bseed = ((uint32_t)((int)res->ox * 73856093)) ^
                                                          ((uint32_t)((int)res->oy * 19349663));

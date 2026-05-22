@@ -2768,7 +2768,7 @@ static void handle_player_boulder_collisions(struct Sim* sim) {
             const IslandDef *isl = &ISLAND_PRESETS[ii];
             for (int ri = 0; ri < isl->resource_count; ri++) {
                 const IslandResource *res = &isl->resources[ri];
-                if (res->type_id != RES_BOULDER) continue;
+                if (res->type_id != RES_BOULDER && res->type_id != RES_STONE_BOULDER) continue;
                 if (res->health <= 0) continue;
 
                 float bx_cli = isl->x + res->ox;

@@ -454,11 +454,14 @@ void claim_tick(uint32_t delta_ms) {
             else                                          enemy_present = true;
         }
 
-        /* Desired state from presence */
+        /* Desired state from presence:
+         *  - enemy in area → CONTEST (stall), regardless of whether allies are present
+         *  - enemy absent, ally present → CLAIMING
+         *  - nobody present → CONTEST (stall — unclaimed area, no one pushing) */
         uint8_t desired;
-        if (enemy_present && !ally_present)      desired = CLAIM_FLAG_STATE_REVERSING;
-        else if (ally_present && !enemy_present) desired = CLAIM_FLAG_STATE_CLAIMING;
-        else                                      desired = CLAIM_FLAG_STATE_CONTEST;
+        if (enemy_present)                       desired = CLAIM_FLAG_STATE_CONTEST;
+        else if (ally_present)                   desired = CLAIM_FLAG_STATE_CLAIMING;
+        else                                     desired = CLAIM_FLAG_STATE_CONTEST;
 
         /* Apply state transitions:
          *  - going TO contest is immediate
