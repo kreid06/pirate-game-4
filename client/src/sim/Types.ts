@@ -174,12 +174,16 @@ export interface PlacedStructure {
   cannonAimAngle?: number; // cannons only: world-space aim angle in radians
   /** Shipyard only — current ship under construction. Absent when empty. */
   construction?: ShipConstruction;
-  /** Claiming flag: 0‡60000 ms capture progress */
+  /** Claiming flag: countdown progress in ms (starts at FLAG_CLAIM_DURATION_MS=300000, reaches 0 to capture) */
   claimProgress?: number;
-  /** Claiming flag: true when an enemy is nearby, reversing the timer */
+  /** Claiming flag: convenience flag, true while state == CONTEST */
   claimContested?: boolean;
-  /** Claiming flag: true when this flag targets a Company Fortress instead of a Flag Fort */
+  /** Claiming flag: legacy field, always false in current server protocol */
   claimTargetsFortress?: boolean;
+  /** Claiming flag: 0=CONTEST, 1=CLAIMING_GRACE, 2=CLAIMING, 3=REVERSING_GRACE, 4=REVERSING */
+  claimState?: number;
+  /** Claiming flag: accumulated time (ms) toward leaving the current grace state */
+  claimGraceMs?: number;
   /** Company Fortress: 0 → COMPANY_FORTRESS_BUILD_MS (900000) build progress in ms */
   fortressBuildProgress?: number;
   /** Company Fortress: true when the 15-minute build is complete */

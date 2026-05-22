@@ -2314,7 +2314,7 @@ int websocket_server_update(struct Sim* sim) {
                                         /* Build extra fields for shipyard construction state */
                                         char hs_sy_extra[256] = "";
                                         char hs_cannon_extra[64] = "";
-                                        char hs_claim_extra[128] = "";
+                                        char hs_claim_extra[192] = "";
                                         if (hs_is_sy) {
                                             char hs_mj[128] = "[]";
                                             if (placed_structures[si].modules_placed) {
@@ -2351,9 +2351,11 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                         if (hs_is_cflag) {
                                             snprintf(hs_claim_extra, sizeof(hs_claim_extra),
-                                                     ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_targets_fortress\":%s",
+                                                     ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_state\":%u,\"claim_grace_ms\":%.0f,\"claim_targets_fortress\":%s",
                                                      placed_structures[si].claim_progress_ms,
                                                      placed_structures[si].claim_contested         ? "true" : "false",
+                                                     (unsigned)placed_structures[si].claim_state,
+                                                     placed_structures[si].claim_grace_ms,
                                                      placed_structures[si].claim_targets_fortress  ? "true" : "false");
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
@@ -6670,7 +6672,7 @@ int websocket_server_update(struct Sim* sim) {
                                         bool is_cflag_s  = (placed_structures[si].type == STRUCT_CLAIM_FLAG);
                                         char sy_extra_s[256] = "";
                                         char cannon_extra_s[64] = "";
-                                        char claim_extra_s[128] = "";
+                                        char claim_extra_s[192] = "";
                                         if (is_sy_s) {
                                             char smj[128] = "[]";
                                             if (placed_structures[si].modules_placed) {
@@ -6707,9 +6709,11 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                         if (is_cflag_s) {
                                             snprintf(claim_extra_s, sizeof(claim_extra_s),
-                                                     ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_targets_fortress\":%s",
+                                                     ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_state\":%u,\"claim_grace_ms\":%.0f,\"claim_targets_fortress\":%s",
                                                      placed_structures[si].claim_progress_ms,
                                                      placed_structures[si].claim_contested        ? "true" : "false",
+                                                     (unsigned)placed_structures[si].claim_state,
+                                                     placed_structures[si].claim_grace_ms,
                                                      placed_structures[si].claim_targets_fortress ? "true" : "false");
                                         }
                                         spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
@@ -6775,7 +6779,7 @@ int websocket_server_update(struct Sim* sim) {
                                     bool gs_is_cflag  = (placed_structures[si].type == STRUCT_CLAIM_FLAG);
                                     char gs_sy_extra[256] = "";
                                     char gs_cannon_extra[64] = "";
-                                    char gs_claim_extra[128] = "";
+                                    char gs_claim_extra[192] = "";
                                     if (gs_is_sy) {
                                         char gmj[128] = "[]";
                                         if (placed_structures[si].modules_placed) {
@@ -6812,9 +6816,11 @@ int websocket_server_update(struct Sim* sim) {
                                     }
                                     if (gs_is_cflag) {
                                         snprintf(gs_claim_extra, sizeof(gs_claim_extra),
-                                                 ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_targets_fortress\":%s",
+                                                 ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_state\":%u,\"claim_grace_ms\":%.0f,\"claim_targets_fortress\":%s",
                                                  placed_structures[si].claim_progress_ms,
                                                  placed_structures[si].claim_contested        ? "true" : "false",
+                                                 (unsigned)placed_structures[si].claim_state,
+                                                 placed_structures[si].claim_grace_ms,
                                                  placed_structures[si].claim_targets_fortress ? "true" : "false");
                                     }
                                     gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,

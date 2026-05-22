@@ -2117,8 +2117,14 @@ export class ClientApplication {
         this.renderSystem.setIslandClaim(islandId, newCompanyId);
         this.renderSystem.showAnnouncement(`🏰 Island ${islandId} captured!`, 'info', 3.0);
       };
-      this.networkManager.onClaimFlagProgress = (structId, progressMs, contested, targetsFortress) => {
-        this.renderSystem.updateClaimFlagProgress(structId, progressMs, contested, targetsFortress);
+      this.networkManager.onClaimFlagProgress = (structId, progressMs, contested, targetsFortress, state, graceMs) => {
+        this.renderSystem.updateClaimFlagProgress(structId, progressMs, contested, targetsFortress, state, graceMs);
+      };
+      this.networkManager.onTerritoryFlipped = (_flagId, _orphanedId, oldCompanyId, newCompanyId, islandId) => {
+        this.renderSystem.showAnnouncement(
+          `🏴 Territory flipped on island ${islandId}: company ${oldCompanyId} → ${newCompanyId}`,
+          'info', 4.0,
+        );
       };
       this.networkManager.onFortressBuildProgress = (structId, companyId, islandId, progressMs, totalMs, contested) => {
         this.renderSystem.updateFortressBuildProgress(structId, companyId, islandId, progressMs, totalMs, contested);

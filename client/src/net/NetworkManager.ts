@@ -650,7 +650,8 @@ export class NetworkManager {
   /** Fired when an island territory changes ownership (flag fort placed or destroyed). */
   public onTerritoryUpdate: ((islandId: number, companyId: number, claimed: boolean, fortX: number, fortY: number, fortRadius: number, isCompanyFortress: boolean) => void) | null = null;
   /** Fired when a claiming flag's progress changes. */
-  public onClaimFlagProgress: ((structId: number, progressMs: number, contested: boolean, targetsFortress: boolean) => void) | null = null;
+  public onClaimFlagProgress: ((structId: number, progressMs: number, contested: boolean, targetsFortress: boolean, state?: number, graceMs?: number, graceTotal?: number, total?: number) => void) | null = null;
+  public onTerritoryFlipped: ((flagId: number, orphanedStructureId: number, oldCompanyId: number, newCompanyId: number, islandId: number) => void) | null = null;
   /** Fired when a claiming flag finishes capturing territory. */
   public onTerritoryCaptured: ((islandId: number, newCompanyId: number) => void) | null = null;
   /** Fired when a Company Fortress build timer updates (≈1/s). */
@@ -2617,6 +2618,8 @@ export class NetworkManager {
           claimProgress:         typeof s.claim_progress_ms === 'number' ? s.claim_progress_ms : undefined,
           claimContested:        s.claim_contested        === true,
           claimTargetsFortress:  s.claim_targets_fortress  === true,
+          claimState:            typeof s.claim_state === 'number' ? s.claim_state : undefined,
+          claimGraceMs:          typeof s.claim_grace_ms === 'number' ? s.claim_grace_ms : undefined,
           fortressBuildProgress: typeof s.fortress_build_progress === 'number' ? s.fortress_build_progress : undefined,
           fortressComplete:      s.fortress_complete       === true,
           fortressContested:     s.fortress_contested      === true,
@@ -2658,6 +2661,8 @@ export class NetworkManager {
           claimProgress:        typeof message.claim_progress_ms === 'number' ? message.claim_progress_ms : undefined,
           claimContested:       message.claim_contested        === true,
           claimTargetsFortress: message.claim_targets_fortress  === true,
+          claimState:           typeof message.claim_state === 'number' ? message.claim_state : undefined,
+          claimGraceMs:         typeof message.claim_grace_ms === 'number' ? message.claim_grace_ms : undefined,
           fortressBuildProgress: typeof message.fortress_build_progress === 'number' ? message.fortress_build_progress : undefined,
           fortressComplete:     message.fortress_complete       === true,
           fortressContested:    message.fortress_contested      === true,
@@ -2706,6 +2711,20 @@ export class NetworkManager {
           message.progress_ms        ?? message.progress ?? 0,
           message.contested          === true,
           message.targets_fortress   === true,
+          typeof message.state === 'number' ? message.state : undefined,
+          typeof message.grace_ms === 'number' ? message.grace_ms : undefined,
+          typeof message.grace_total === 'number' ? message.grace_total : undefined,
+          typeof message.total === 'number' ? message.total : undefined,
+        );
+        break;
+
+      case 'territory_flipped':
+        this.onTerritoryFlipped?.(
+          message.flag_id ?? 0,
+          message.orphaned_structure_id ?? 0,
+          message.old_company_id ?? 0,
+          message.new_company_id ?? 0,
+          message.island_id ?? 0,
         );
         break;
 

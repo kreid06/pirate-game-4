@@ -1830,12 +1830,15 @@ export class RenderSystem {
     this._claimOverlayDirty = true;
   }
 
-  updateClaimFlagProgress(structId: number, progressMs: number, contested: boolean, targetsFortress = false): void {
+  updateClaimFlagProgress(structId: number, progressMs: number, contested: boolean, targetsFortress = false,
+                          state?: number, graceMs?: number): void {
     const s = this.placedStructures.find(p => p.id === structId);
     if (s) {
       s.claimProgress = progressMs;
       s.claimContested = contested;
       s.claimTargetsFortress = targetsFortress;
+      if (state !== undefined) s.claimState = state;
+      if (graceMs !== undefined) s.claimGraceMs = graceMs;
     }
   }
 
@@ -5085,10 +5088,21 @@ export class RenderSystem {
         ctx.restore();
       } else if (s.type === 'claim_flag') {
         // ── Claiming Flag — progress ring + pole ──
-        const progress = (s.claimProgress ?? 0) / 60000;   // 0→1
-        const contested = s.claimContested ?? false;
+        // Server protocol: claimProgress counts DOWN from FLAG_CLAIM_DURATION_MS (300000) to 0.
+        // claimState: 0=CONTEST, 1=CLAIMING_GRACE, 2=CLAIMING, 3=REVERSING_GRACE, 4=REVERSING.
+        const TOTAL_MS = 300000;
+        const progress = 1 - Math.max(0, Math.min(1, (s.claimProgress ?? TOTAL_MS) / TOTAL_MS)); // 0→1 toward capture
+        const state = s.claimState ?? (s.claimContested ? 0 : 2);
         const ringR = Math.max(10, 18 * zoom);
         const companyColor = this._companyColor(s.companyId);
+
+        // Colour by state
+        let arcColor = companyColor;
+        if (state === 0)      arcColor = '#888888';            // CONTEST   = grey (stalled)
+        else if (state === 1) arcColor = '#ffd24a';            // CLAIMING_GRACE  = warm yellow
+        else if (state === 2) arcColor = companyColor;         // CLAIMING        = company colour
+        else if (state === 3) arcColor = '#ff9966';            // REVERSING_GRACE = orange
+        else if (state === 4) arcColor = '#ff3030';            // REVERSING       = red
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
@@ -5100,13 +5114,29 @@ export class RenderSystem {
         ctx.arc(0, 0, ringR, 0, Math.PI * 2);
         ctx.stroke();
 
-        // Progress arc (clockwise from top)
+        // Progress arc (clockwise from top). Pulse during reversing.
         if (progress > 0) {
-          ctx.strokeStyle = contested ? '#ff6600' : companyColor;
+          const pulse = (state === 4) ? (0.6 + 0.4 * Math.sin(Date.now() / 180)) : 1;
+          ctx.strokeStyle = arcColor;
+          ctx.globalAlpha = pulse;
           ctx.lineWidth   = Math.max(2, 3.5 * zoom);
           ctx.beginPath();
           ctx.arc(0, 0, ringR, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
           ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+
+        // Grace tick — small inner arc filling 0→1 during CLAIMING_GRACE / REVERSING_GRACE
+        if (state === 1 || state === 3) {
+          const GRACE_TOTAL = 5000;
+          const g = Math.max(0, Math.min(1, (s.claimGraceMs ?? 0) / GRACE_TOTAL));
+          if (g > 0) {
+            ctx.strokeStyle = state === 1 ? '#ffd24a' : '#ff9966';
+            ctx.lineWidth   = Math.max(1, 2 * zoom);
+            ctx.beginPath();
+            ctx.arc(0, 0, ringR * 0.55, -Math.PI / 2, -Math.PI / 2 + g * Math.PI * 2);
+            ctx.stroke();
+          }
         }
 
         // Flag pole

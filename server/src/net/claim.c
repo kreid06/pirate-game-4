@@ -328,25 +328,6 @@ bool territory_is_contested(float wx, float wy) {
 /* ── Claim flag tick ─────────────────────────────────────────────────────── */
 
 /**
- * Check whether any enemy player is within CLAIM_RADIUS_DEFAULT of (fx,fy).
- * "Enemy" = different company_id than flag_company.
- */
-static bool claim_flag_is_contested(float fx, float fy,
-                                    uint32_t flag_company,
-                                    uint8_t island_id) {
-    /* Use global players array from websocket_server_internal.h */
-    for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
-        WebSocketPlayer *p = &players[pi];
-        if (!p->active) continue;
-        if ((uint8_t)p->on_island_id != island_id) continue;
-        if (p->company_id == flag_company) continue;
-        if (dist2(fx, fy, p->x, p->y) <= CLAIM_RADIUS_DEFAULT * CLAIM_RADIUS_DEFAULT)
-            return true;
-    }
-    return false;
-}
-
-/**
  * Transfer all structures within radius of (fx,fy) from old_co → new_co.
  */
 /* ── Company Fortress build-tick ─────────────────────────────────────────
@@ -427,18 +408,21 @@ void claim_tick(uint32_t delta_ms) {
 
         float dt = (float)delta_ms;
 
-        /* Find the target structure (flag fort or company fortress) */
-        PlacedStructureType target_type = s->claim_targets_fortress
-                                         ? STRUCT_COMPANY_FORTRESS
-                                         : STRUCT_FLAG_FORT;
-        PlacedStructure *target = NULL;
+        /* Resolve source structures by id */
+        PlacedStructure *src_mine  = NULL;
+        PlacedStructure *src_enemy = NULL;
         for (uint32_t ti = 0; ti < placed_structure_count; ti++) {
             PlacedStructure *t = &placed_structures[ti];
             if (!t->active) continue;
-            if (t->type != target_type) continue;
-            if (t->id == s->claim_linked_fort) { target = t; break; }
+            if (t->id == s->claim_linked_fort)  src_mine  = t;
+            if (t->id == s->claim_source_enemy) src_enemy = t;
         }
-        if (!target) {
+        /* If either source is gone or orphaned, the contested area no longer
+         * exists — destroy the flag without effect. */
+        if (!src_mine || !src_enemy ||
+            src_mine->claim_orphaned || src_enemy->claim_orphaned ||
+            src_mine->company_id  != s->company_id ||
+            src_enemy->company_id == s->company_id) {
             s->active = false;
             char dmsg[128];
             snprintf(dmsg, sizeof(dmsg),
@@ -447,15 +431,86 @@ void claim_tick(uint32_t delta_ms) {
             continue;
         }
 
-        /* Contested = defender (target owner) inside our flag's radius */
-        s->claim_contested = claim_flag_is_contested(
-            s->x, s->y, s->company_id, s->island_id);
+        /* Detect ally / enemy presence inside the CONTESTED AREA = intersection
+         * of the two source claim circles. */
+        float ra = (src_mine->type  == STRUCT_FLAG_FORT)        ? CLAIM_RADIUS_FLAG_FORT
+                 : (src_mine->type  == STRUCT_COMPANY_FORTRESS) ? CLAIM_RADIUS_COMPANY_FORT
+                                                                 : CLAIM_RADIUS_DEFAULT;
+        float rb = (src_enemy->type == STRUCT_FLAG_FORT)        ? CLAIM_RADIUS_FLAG_FORT
+                 : (src_enemy->type == STRUCT_COMPANY_FORTRESS) ? CLAIM_RADIUS_COMPANY_FORT
+                                                                 : CLAIM_RADIUS_DEFAULT;
+        bool ally_present  = false;
+        bool enemy_present = false;
+        for (uint32_t pi = 0; pi < MAX_PLAYERS; pi++) {
+            WebSocketPlayer *p = &players[pi];
+            if (!p->active || p->player_id == 0) continue;
+            float dxa = p->x - src_mine->x,  dya = p->y - src_mine->y;
+            float dxb = p->x - src_enemy->x, dyb = p->y - src_enemy->y;
+            if (dxa*dxa + dya*dya > ra*ra) continue;
+            if (dxb*dxb + dyb*dyb > rb*rb) continue;
+            /* Player is inside the contested area. Ally = same company; non-ally =
+             * different company (incl. unaffiliated). TODO: factor in alliances. */
+            if ((uint8_t)p->company_id == s->company_id) ally_present  = true;
+            else                                          enemy_present = true;
+        }
 
-        if (s->claim_contested) {
-            s->claim_progress_ms -= dt * ISLAND_CLAIM_REVERSE;
-            if (s->claim_progress_ms < 0.0f) s->claim_progress_ms = 0.0f;
-        } else {
-            s->claim_progress_ms += dt;
+        /* Desired state from presence */
+        uint8_t desired;
+        if (enemy_present && !ally_present)      desired = CLAIM_FLAG_STATE_REVERSING;
+        else if (ally_present && !enemy_present) desired = CLAIM_FLAG_STATE_CLAIMING;
+        else                                      desired = CLAIM_FLAG_STATE_CONTEST;
+
+        /* Apply state transitions:
+         *  - going TO contest is immediate
+         *  - going TO claiming/reversing requires a 5 s grace accumulator */
+        if (desired == CLAIM_FLAG_STATE_CONTEST) {
+            s->claim_state    = CLAIM_FLAG_STATE_CONTEST;
+            s->claim_grace_ms = 0.0f;
+        } else if (desired == CLAIM_FLAG_STATE_CLAIMING) {
+            if (s->claim_state == CLAIM_FLAG_STATE_CLAIMING) {
+                /* already counting down */
+            } else if (s->claim_state == CLAIM_FLAG_STATE_CLAIMING_GRACE) {
+                s->claim_grace_ms += dt;
+                if (s->claim_grace_ms >= (float)CLAIM_FLAG_GRACE_MS) {
+                    s->claim_state    = CLAIM_FLAG_STATE_CLAIMING;
+                    s->claim_grace_ms = 0.0f;
+                }
+            } else {
+                s->claim_state    = CLAIM_FLAG_STATE_CLAIMING_GRACE;
+                s->claim_grace_ms = 0.0f;
+            }
+        } else { /* REVERSING desired */
+            if (s->claim_state == CLAIM_FLAG_STATE_REVERSING) {
+                /* already counting up */
+            } else if (s->claim_state == CLAIM_FLAG_STATE_REVERSING_GRACE) {
+                s->claim_grace_ms += dt;
+                if (s->claim_grace_ms >= (float)CLAIM_FLAG_GRACE_MS) {
+                    s->claim_state    = CLAIM_FLAG_STATE_REVERSING;
+                    s->claim_grace_ms = 0.0f;
+                }
+            } else {
+                s->claim_state    = CLAIM_FLAG_STATE_REVERSING_GRACE;
+                s->claim_grace_ms = 0.0f;
+            }
+        }
+
+        /* Convenience flag for legacy clients */
+        s->claim_contested = (s->claim_state == CLAIM_FLAG_STATE_CONTEST);
+
+        /* Apply progress based on state */
+        bool do_capture = false, do_destroy = false;
+        if (s->claim_state == CLAIM_FLAG_STATE_CLAIMING) {
+            s->claim_progress_ms -= dt;
+            if (s->claim_progress_ms <= 0.0f) {
+                s->claim_progress_ms = 0.0f;
+                do_capture = true;
+            }
+        } else if (s->claim_state == CLAIM_FLAG_STATE_REVERSING) {
+            s->claim_progress_ms += dt * FLAG_REVERSE_SPEED;
+            if (s->claim_progress_ms >= (float)FLAG_CLAIM_DURATION_MS) {
+                s->claim_progress_ms = (float)FLAG_CLAIM_DURATION_MS;
+                do_destroy = true;
+            }
         }
 
         /* Broadcast progress ~once per second */
@@ -464,64 +519,68 @@ void claim_tick(uint32_t delta_ms) {
             uint32_t now = get_time_ms();
             if (now - last_broadcast_ms >= 1000u) {
                 last_broadcast_ms = now;
-                char msg[192];
+                char msg[256];
                 snprintf(msg, sizeof(msg),
                          "{\"type\":\"claim_flag_progress\",\"id\":%u,"
                          "\"island_id\":%u,\"company_id\":%u,"
                          "\"progress\":%.0f,\"total\":%.0f,\"contested\":%s,"
-                         "\"targets_fortress\":%s}",
+                         "\"state\":%u,\"grace_ms\":%.0f,\"grace_total\":%u,"
+                         "\"targets_fortress\":false}",
                          s->id, s->island_id, s->company_id,
                          s->claim_progress_ms,
-                         (float)ISLAND_CLAIM_CAPTURE_MS,
+                         (float)FLAG_CLAIM_DURATION_MS,
                          s->claim_contested ? "true" : "false",
-                         s->claim_targets_fortress ? "true" : "false");
+                         (unsigned)s->claim_state,
+                         s->claim_grace_ms,
+                         CLAIM_FLAG_GRACE_MS);
                 websocket_server_broadcast(msg);
             }
         }
 
-        if (s->claim_progress_ms >= (float)ISLAND_CLAIM_CAPTURE_MS) {
-            /* ── Capture! ── */
-            if (s->claim_targets_fortress) {
-                /* Flip Company Fortress: winner starts rebuild from 0 */
-                uint32_t old_co = target->company_id;
-                uint8_t  isl    = target->island_id;
-                target->company_id        = s->company_id;
-                target->claim_progress_ms = 0.0f;
-                target->fortress_complete = false;
-                target->hp                = 1;
-                target->claim_contested   = false;
+        if (do_capture) {
+            /* ── Capture! Orphan the enemy source structure (B). Fort/fortress
+             *    handling is a deferred "special case" — for now they are also
+             *    just orphaned. This breaks the enemy's claim radius at the
+             *    contested area without removing the structure itself. */
+            uint32_t orphaned_id = src_enemy->id;
+            uint32_t old_co      = src_enemy->company_id;
+            uint8_t  isl         = src_enemy->island_id;
+            src_enemy->claim_orphaned = true;
 
-                /* Drop old IslandClaim */
+            /* If the orphaned structure was a Company Fortress that owned an
+             * IslandClaim, drop that claim record. */
+            if (src_enemy->type == STRUCT_COMPANY_FORTRESS && src_enemy->fortress_complete) {
                 for (int ii = 0; ii < island_claim_count; ii++) {
                     if (island_claims[ii].active
                             && island_claims[ii].island_id == isl
-                            && island_claims[ii].company_id == old_co) {
+                            && island_claims[ii].fort_structure_id == orphaned_id) {
                         island_claims[ii].active = false;
                         break;
                     }
                 }
                 broadcast_territory_update(isl, old_co, false);
-
-                char msg[256];
-                snprintf(msg, sizeof(msg),
-                         "{\"type\":\"fortress_captured\",\"structure_id\":%u"
-                         ",\"new_company_id\":%u,\"old_company_id\":%u"
-                         ",\"island_id\":%u}",
-                         target->id, s->company_id, old_co, isl);
-                websocket_server_broadcast(msg);
-                log_info("🏴 Company Fortress #%u on island %u captured by company %u from %u",
-                         target->id, isl, s->company_id, old_co);
-            } else {
-                /* Flag Fort capture: flip owner */
-                uint32_t old_co = target->company_id;
-                uint8_t  isl    = target->island_id;
-                target->company_id = s->company_id;
-                broadcast_territory_update(isl, s->company_id, true);
-                log_info("🏴 Flag Fort #%u on island %u captured by company %u from %u",
-                         target->id, isl, s->company_id, old_co);
             }
 
+            char cmsg[256];
+            snprintf(cmsg, sizeof(cmsg),
+                     "{\"type\":\"territory_flipped\",\"flag_id\":%u"
+                     ",\"orphaned_structure_id\":%u"
+                     ",\"old_company_id\":%u,\"new_company_id\":%u"
+                     ",\"island_id\":%u}",
+                     s->id, orphaned_id, old_co, s->company_id, isl);
+            websocket_server_broadcast(cmsg);
+            log_info("🏴 Claim Flag #%u captured contested area: structure #%u (company %u) orphaned by company %u",
+                     s->id, orphaned_id, old_co, s->company_id);
+
             /* Consume the claim flag */
+            s->active = false;
+            char dmsg[128];
+            snprintf(dmsg, sizeof(dmsg),
+                     "{\"type\":\"structure_demolished\",\"structure_id\":%u}", s->id);
+            websocket_server_broadcast(dmsg);
+        } else if (do_destroy) {
+            /* Reverse timer maxed — flag defeated. */
+            log_info("🏴 Claim Flag #%u destroyed (timer reversed to full)", s->id);
             s->active = false;
             char dmsg[128];
             snprintf(dmsg, sizeof(dmsg),

@@ -420,64 +420,76 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         /* Item (ITEM_FLAG_FORT) is consumed by the normal item-slot path below */
     }
 
-    /* ── Claiming Flag: must be placed in contested territory, linked to a fort ── */
-    /* ── Claiming Flag: must be placed within enemy Flag Fort radius OR enemy Company Fortress radius ── */
+    /* ── Claiming Flag: must be placed in a CONTESTED AREA ── */
+    /* Contested area = a point covered by BOTH (a) a claim radius of the placer's
+     * company AND (b) a claim radius of ANY other company. The flag is uniquely
+     * identified by the (mine_src, enemy_src) source pair — only one active flag
+     * per pair per company at a time. */
+    uint32_t cf_src_mine = 0, cf_src_enemy = 0;
     if (stype_enum == STRUCT_CLAIM_FLAG) {
-        /* Check enemy Flag Fort radius */
-        bool in_flag_fort_radius = false;
+        /* Find best "mine" source: closest active non-orphaned structure of the
+         * placer's company whose claim radius covers (px,py). */
+        float best_mine_d2 = 0.0f;
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             PlacedStructure *ex = &placed_structures[si];
             if (!ex->active) continue;
-            if (ex->type != STRUCT_FLAG_FORT) continue;
-            if (ex->island_id != target_island_id) continue;
-            if (ex->company_id == (uint8_t)player->company_id) continue;
-            float dx = px - ex->x, dy = py - ex->y;
-            if (dx*dx + dy*dy <= CLAIM_RADIUS_FLAG_FORT * CLAIM_RADIUS_FLAG_FORT) {
-                in_flag_fort_radius = true;
-                break;
-            }
-        }
-        /* Check enemy Company Fortress radius (complete or under construction) */
-        bool in_company_fort_radius = false;
-        uint32_t target_company_fort_id = 0;
-        for (uint32_t si = 0; si < placed_structure_count; si++) {
-            PlacedStructure *ex = &placed_structures[si];
-            if (!ex->active) continue;
-            if (ex->type != STRUCT_COMPANY_FORTRESS) continue;
-            if (ex->island_id != target_island_id) continue;
-            if (ex->company_id == (uint8_t)player->company_id) continue;
-            if (!ex->fortress_complete) continue; /* can only contest a completed fortress */
-            float dx = px - ex->x, dy = py - ex->y;
-            if (dx*dx + dy*dy <= CLAIM_RADIUS_COMPANY_FORT * CLAIM_RADIUS_COMPANY_FORT) {
-                in_company_fort_radius = true;
-                target_company_fort_id = ex->id;
-                break;
-            }
-        }
-        if (!in_flag_fort_radius && !in_company_fort_radius) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_fort_radius\"}");
-            goto ps_send;
-        }
-        /* Verify the player's company has an active flag fort or company fortress somewhere */
-        bool has_own_fort = false;
-        for (uint32_t si = 0; si < placed_structure_count; si++) {
-            PlacedStructure *ex = &placed_structures[si];
-            if (!ex->active) continue;
-            if (ex->type != STRUCT_FLAG_FORT && ex->type != STRUCT_COMPANY_FORTRESS) continue;
+            if (ex->claim_orphaned) continue;
             if (ex->company_id != (uint8_t)player->company_id) continue;
-            has_own_fort = true;
-            break;
+            float cr = (ex->type == STRUCT_FLAG_FORT)        ? CLAIM_RADIUS_FLAG_FORT
+                     : (ex->type == STRUCT_COMPANY_FORTRESS) ? CLAIM_RADIUS_COMPANY_FORT
+                                                              : CLAIM_RADIUS_DEFAULT;
+            float dx = px - ex->x, dy = py - ex->y;
+            float d2 = dx*dx + dy*dy;
+            if (d2 > cr * cr) continue;
+            if (cf_src_mine == 0 || d2 < best_mine_d2) {
+                cf_src_mine  = ex->id;
+                best_mine_d2 = d2;
+            }
         }
-        if (!has_own_fort) {
+        if (cf_src_mine == 0) {
             snprintf(response, sizeof(response),
-                     "{\"type\":\"place_structure_fail\",\"reason\":\"no_flag_fort\"}");
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_my_territory\"}");
             goto ps_send;
         }
-        /* Stash which kind of target this flag will contest (resolved in post-placement) */
-        (void)target_company_fort_id;
-        (void)in_company_fort_radius;
-        /* Applied in post-placement block */
+        /* Find best "enemy" source: closest active non-orphaned structure of a
+         * DIFFERENT company whose claim radius covers (px,py). */
+        float best_enemy_d2 = 0.0f;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            PlacedStructure *ex = &placed_structures[si];
+            if (!ex->active) continue;
+            if (ex->claim_orphaned) continue;
+            if (ex->company_id == COMPANY_UNCLAIMED) continue;
+            if (ex->company_id == (uint8_t)player->company_id) continue;
+            float cr = (ex->type == STRUCT_FLAG_FORT)        ? CLAIM_RADIUS_FLAG_FORT
+                     : (ex->type == STRUCT_COMPANY_FORTRESS) ? CLAIM_RADIUS_COMPANY_FORT
+                                                              : CLAIM_RADIUS_DEFAULT;
+            float dx = px - ex->x, dy = py - ex->y;
+            float d2 = dx*dx + dy*dy;
+            if (d2 > cr * cr) continue;
+            if (cf_src_enemy == 0 || d2 < best_enemy_d2) {
+                cf_src_enemy  = ex->id;
+                best_enemy_d2 = d2;
+            }
+        }
+        if (cf_src_enemy == 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_contested_area\"}");
+            goto ps_send;
+        }
+        /* Uniqueness: no other active claim flag from my company with the same
+         * (mine, enemy) source pair. */
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            PlacedStructure *ex = &placed_structures[si];
+            if (!ex->active) continue;
+            if (ex->type != STRUCT_CLAIM_FLAG) continue;
+            if (ex->company_id != (uint8_t)player->company_id) continue;
+            if (ex->claim_linked_fort   == cf_src_mine &&
+                ex->claim_source_enemy  == cf_src_enemy) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"contested_area_already_claimed\"}");
+                goto ps_send;
+            }
+        }
     }
 
     /* ── Company Fortress: must be on an island ── */
@@ -926,40 +938,16 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                  player->player_id, new_id, target_island_id);
     }
 
-    /* Claim Flag: link to target (flag fort or company fortress), start progress = 0 */
+    /* Claim Flag: link to (mine, enemy) source structures, start countdown at full */
     if (stype_enum == STRUCT_CLAIM_FLAG) {
-        /* Determine target: prefer company fortress over flag fort */
-        bool targets_cfrt = false;
-        uint32_t lf = 0;
-        for (uint32_t si = 0; si < placed_structure_count - 1; si++) {
-            PlacedStructure *ex = &placed_structures[si];
-            if (!ex->active) continue;
-            if (ex->island_id != target_island_id) continue;
-            if (ex->company_id == (uint8_t)player->company_id) continue;
-            if (ex->type == STRUCT_COMPANY_FORTRESS && ex->fortress_complete) {
-                float dx = px - ex->x, dy = py - ex->y;
-                if (dx*dx + dy*dy <= CLAIM_RADIUS_COMPANY_FORT * CLAIM_RADIUS_COMPANY_FORT) {
-                    lf = ex->id;
-                    targets_cfrt = true;
-                    break;
-                }
-            }
-        }
-        if (!targets_cfrt) {
-            /* Fall back to flag fort */
-            for (uint32_t si = 0; si < placed_structure_count - 1; si++) {
-                PlacedStructure *ex = &placed_structures[si];
-                if (!ex->active) continue;
-                if (ex->type != STRUCT_FLAG_FORT) continue;
-                if (ex->company_id == (uint8_t)player->company_id) continue;
-                lf = ex->id;
-                break;
-            }
-        }
-        placed_structures[placed_structure_count - 1].claim_linked_fort        = lf;
-        placed_structures[placed_structure_count - 1].claim_progress_ms        = 0.0f;
-        placed_structures[placed_structure_count - 1].claim_contested           = false;
-        placed_structures[placed_structure_count - 1].claim_targets_fortress   = targets_cfrt;
+        PlacedStructure *cf = &placed_structures[placed_structure_count - 1];
+        cf->claim_linked_fort       = cf_src_mine;
+        cf->claim_source_enemy      = cf_src_enemy;
+        cf->claim_progress_ms       = (float)FLAG_CLAIM_DURATION_MS; /* starts FULL, ticks down to 0 = capture */
+        cf->claim_contested         = true;                          /* placed in CONTEST state */
+        cf->claim_state             = CLAIM_FLAG_STATE_CONTEST;
+        cf->claim_grace_ms          = 0.0f;
+        cf->claim_targets_fortress  = false;                         /* legacy field — unused in new flow */
     }
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
@@ -1555,6 +1543,9 @@ void destroy_placed_structure(uint32_t structure_id) {
  * Returns true if the structure was destroyed (s is then stale).
  */
 bool apply_structure_damage(PlacedStructure *s, uint16_t dmg) {
+    /* Claim flags are immune to damage — they only "die" by completing/reversing
+     * their territory-claim timer (handled in claim.c). */
+    if (s->type == STRUCT_CLAIM_FLAG) return false;
     s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
     if (s->hp == 0) {
         uint32_t sid = s->id;

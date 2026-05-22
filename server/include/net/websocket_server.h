@@ -309,6 +309,14 @@ extern int       claim_flag_count;
 #define ISLAND_CLAIM_CAPTURE_MS 60000u   /* 60 s uncontested to capture via claim flag */
 #define ISLAND_CLAIM_REVERSE    3.0f     /* contested reversal speed multiplier        */
 #define ISLAND_CLAIM_TAX_RATE   0.10f    /* 10 % of each harvest goes to island owner  */
+/* Island-territory claim flag (STRUCT_CLAIM_FLAG) — state machine grace duration */
+#define CLAIM_FLAG_GRACE_MS     5000u    /* 5 s grace before entering CLAIMING/REVERSING */
+/* claim_state values for STRUCT_CLAIM_FLAG */
+#define CLAIM_FLAG_STATE_CONTEST         0u
+#define CLAIM_FLAG_STATE_CLAIMING_GRACE  1u
+#define CLAIM_FLAG_STATE_CLAIMING        2u
+#define CLAIM_FLAG_STATE_REVERSING_GRACE 3u
+#define CLAIM_FLAG_STATE_REVERSING       4u
 #define MAX_ISLAND_CLAIMS       16       /* max simultaneous island claim records      */
 #define COMPANY_FORTRESS_BUILD_MS 900000u /* 15 min to complete a company fortress     */
 
@@ -421,13 +429,16 @@ typedef struct {
     bool     no_ammo_flag;        /* transient: set by fire_island_cannon when ammo was lacking */
     /* ── Territory claim fields (STRUCT_FLAG_FORT / STRUCT_CLAIM_FLAG / STRUCT_COMPANY_FORTRESS) ── */
     bool     claim_orphaned;      /* fort destroyed — structure projects no claim radius        */
-    uint32_t claim_linked_fort;   /* STRUCT_CLAIM_FLAG: structure id of originating flag fort  */
-    float    claim_progress_ms;   /* STRUCT_CLAIM_FLAG: 0→ISLAND_CLAIM_CAPTURE_MS = captured   */
+    uint32_t claim_linked_fort;   /* STRUCT_CLAIM_FLAG: structure id of placer's own source struct (the "mine" side of the contested area) */
+    uint32_t claim_source_enemy;  /* STRUCT_CLAIM_FLAG: structure id of the enemy source struct (the "enemy" side of the contested area) */
+    float    claim_progress_ms;   /* STRUCT_CLAIM_FLAG: counts FLAG_CLAIM_DURATION_MS → 0 to capture (10× back up to destroy)  */
                                   /* STRUCT_COMPANY_FORTRESS: 0→COMPANY_FORTRESS_BUILD_MS = built */
-    bool     claim_contested;     /* STRUCT_CLAIM_FLAG: enemy in range — timer reverses         */
+    bool     claim_contested;     /* STRUCT_CLAIM_FLAG: convenience flag — true when state == CONTEST  */
                                   /* STRUCT_COMPANY_FORTRESS: enemy in radius — build paused    */
     bool     fortress_complete;   /* STRUCT_COMPANY_FORTRESS: build finished                    */
-    bool     claim_targets_fortress; /* STRUCT_CLAIM_FLAG: targets a Company Fortress (not Flag Fort) */
+    bool     claim_targets_fortress; /* STRUCT_CLAIM_FLAG: legacy — kept for protocol compat (currently always false in new flow) */
+    uint8_t  claim_state;         /* STRUCT_CLAIM_FLAG: CLAIM_FLAG_STATE_* */
+    float    claim_grace_ms;      /* STRUCT_CLAIM_FLAG: accumulator for the 5 s init/grace before CLAIMING or REVERSING starts */
     /* 64-byte string last (avoids breaking alignment of above) */
     char     placer_name[64];     /* display name of builder */
 } PlacedStructure;
