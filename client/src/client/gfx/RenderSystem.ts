@@ -1883,6 +1883,8 @@ export class RenderSystem {
     for (const [x, y, r] of domCircles) pushUnique(dom, { x, y, r });
     for (const [x, y, r] of subCircles) pushUnique(sub, { x, y, r });
     this._dominanceOverrides.set(key, { islandId, dominantCo, subordinateCo, domCircles: dom, subCircles: sub });
+    (this as any)._dovrDebugLogged = false;
+    console.log('[DOM-OVR] add', { islandId, dominantCo, subordinateCo, dom: dom.length, sub: sub.length, domCircles, subCircles });
     this._claimOverlayDirty = true;
   }
 
@@ -9619,6 +9621,14 @@ export class RenderSystem {
     // snapshot does NOT include structures placed after the capture, so the
     // dominator can't extend the takeover just by building more forts.
     if (this._dominanceOverrides.size > 0) {
+      if (!(this as any)._dovrDebugLogged) {
+        console.log('[DOM-OVR] Pass3 has', this._dominanceOverrides.size, 'overrides',
+          Array.from(this._dominanceOverrides.values()).map(o => ({
+            isl: o.islandId, dom: o.dominantCo, sub: o.subordinateCo,
+            d: o.domCircles.length, s: o.subCircles.length,
+          })));
+        (this as any)._dovrDebugLogged = true;
+      }
       const cvs2 = ctx.canvas;
       for (const isl of this.islands) {
         const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
@@ -9645,10 +9655,27 @@ export class RenderSystem {
               if (sr <= 0) continue;
               mc.beginPath(); mc.arc(sp.x, sp.y, sr, 0, Math.PI * 2); mc.fill();
             }
-            // Fill (semi-transparent dominator colour).
-            ctx.globalAlpha = (o.dominantCo === myCompany) ? 0.18 : 0.10;
+            // Fill (semi-transparent dominator colour). TEMP DEBUG: alpha
+            // boosted so captured region is unmistakeable.
+            ctx.globalAlpha = (o.dominantCo === myCompany) ? 0.55 : 0.40;
             ctx.drawImage(mask, 0, 0);
             ctx.globalAlpha = 1.0;
+            // TEMP DEBUG: also stroke the source circles so you can see what
+            // was snapshotted vs. what intersected.
+            ctx.save();
+            ctx.lineWidth = Math.max(2, 2 * zoom);
+            ctx.setLineDash([8, 6]);
+            ctx.strokeStyle = color;
+            for (const c of o.domCircles) {
+              const sp = camera.worldToScreen(Vec2.from(c.x + off.dx, c.y + off.dy));
+              ctx.beginPath(); ctx.arc(sp.x, sp.y, c.r * zoom, 0, Math.PI * 2); ctx.stroke();
+            }
+            ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+            for (const c of o.subCircles) {
+              const sp = camera.worldToScreen(Vec2.from(c.x + off.dx, c.y + off.dy));
+              ctx.beginPath(); ctx.arc(sp.x, sp.y, c.r * zoom, 0, Math.PI * 2); ctx.stroke();
+            }
+            ctx.restore();
           }
         }
       }

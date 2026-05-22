@@ -2735,6 +2735,7 @@ export class NetworkManager {
         break;
 
       case 'dominance_override':
+        console.log('[DOM-OVR] recv dominance_override', message);
         this.onDominanceOverride?.(
           message.island_id      ?? 0,
           message.dominant_co    ?? 0,
@@ -2745,6 +2746,7 @@ export class NetworkManager {
         break;
 
       case 'DOMINANCE_OVERRIDES': {
+        console.log('[DOM-OVR] recv DOMINANCE_OVERRIDES snapshot', message);
         const list: Array<{ islandId: number; dominantCo: number; subordinateCo: number; domCircles: Array<[number, number, number]>; subCircles: Array<[number, number, number]> }> =
           (message.overrides ?? []).map((o: any) => ({
             islandId:      o.island_id      ?? 0,

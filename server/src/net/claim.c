@@ -642,12 +642,20 @@ void claim_tick(uint32_t delta_ms) {
             OverrideCircle dom_circ[MAX_OVERRIDE_CIRCLES];
             OverrideCircle sub_circ[MAX_OVERRIDE_CIRCLES];
             int dom_n = 0, sub_n = 0;
+            /* The claim flag itself defines the dominator's "snippet" — its
+             * claim radius is exactly the area being captured. Include it
+             * (even though it'll be consumed below). */
+            if (dom_n < MAX_OVERRIDE_CIRCLES) {
+                dom_circ[dom_n].cx = s->x; dom_circ[dom_n].cy = s->y;
+                dom_circ[dom_n].r  = struct_claim_radius(s->type);
+                dom_n++;
+            }
             for (uint32_t i = 0; i < placed_structure_count; i++) {
                 PlacedStructure *ps = &placed_structures[i];
                 if (!ps->active) continue;
                 if (ps->claim_orphaned) continue;
                 if (ps->island_id != isl) continue;
-                /* Exclude the claim flag itself (it'll be consumed). */
+                /* Claim flag itself already added above. */
                 if (ps->id == s->id) continue;
                 if (ps->company_id == s->company_id) {
                     if (dom_n < MAX_OVERRIDE_CIRCLES) {
@@ -663,6 +671,8 @@ void claim_tick(uint32_t delta_ms) {
                     }
                 }
             }
+            log_info("📸 Claim snapshot: dom_circles=%d, sub_circles=%d (island %u, dom_co=%u, sub_co=%u)",
+                     dom_n, sub_n, isl, s->company_id, old_co);
 
             src_enemy->claim_orphaned = true;
 

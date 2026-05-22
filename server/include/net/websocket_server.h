@@ -285,7 +285,7 @@ typedef enum {
 } ItemKind;
 
 /* ── Ship Claiming Flag ────────────────────────────────────────────────────── */
-#define FLAG_CLAIM_DURATION_MS    300000u  /* 5 minutes to capture (300 s) */
+#define FLAG_CLAIM_DURATION_MS    30000u   /* TEMP DEBUG: 30 s to capture (was 300 s) */
 #define FLAG_REVERSE_SPEED         10.0f   /* Countdown reverses 10x speed when contested */
 #define MAX_CLAIM_FLAGS            16      /* Max simultaneous flags across all ships */
 
