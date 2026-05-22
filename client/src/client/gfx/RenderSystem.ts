@@ -9113,6 +9113,7 @@ export class RenderSystem {
            && !ps.claimOrphaned
            && ps.type !== 'flag_fort'
            && ps.type !== 'company_fortress'
+           && ps.type !== 'claim_flag'
       );
 
       // ── BFS cache (world-space, camera-independent) ─────────────────────
