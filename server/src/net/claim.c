@@ -94,6 +94,23 @@ static inline bool dominators_append(PlacedStructure *s, uint32_t id) {
     return true;
 }
 
+/** Move `id` to the LAST slot of `s->dominators[]` if it is currently in the
+ *  list above the last slot. No-op if absent or already at the bottom.
+ *  Returns true if the list order changed. */
+static inline bool dominators_demote_to_bottom(PlacedStructure *s, uint32_t id) {
+    int found = -1;
+    for (int k = 0; k < s->dominator_count; k++) {
+        if (s->dominators[k] == id) { found = k; break; }
+    }
+    if (found < 0) return false;
+    if (found == s->dominator_count - 1) return false;
+    for (int k = found; k < s->dominator_count - 1; k++) {
+        s->dominators[k] = s->dominators[k + 1];
+    }
+    s->dominators[s->dominator_count - 1] = id;
+    return true;
+}
+
 /** Broadcast `{"type":"structure_dominators","structure_id":N,"dominators":[…]}`
  *  for a single structure. */
 static void broadcast_structure_dominators(const PlacedStructure *s) {
@@ -107,6 +124,23 @@ static void broadcast_structure_dominators(const PlacedStructure *s) {
     }
     snprintf(msg + dp, sizeof(msg) - dp, "]}");
     websocket_server_broadcast(msg);
+}
+
+/** When a structure becomes inactive (orphaned by BFS disconnect or claim
+ *  capture), it should no longer carry priority in anyone else's dominators
+ *  list. Demote `orphaned_id` to the BOTTOM of every other structure's
+ *  dominators[] (preserves the entry so that if the structure reactivates
+ *  later, it remains in the list but at lowest priority). Broadcasts a
+ *  fresh dominators message per affected structure. */
+static void claim_demote_orphaned_in_all_dominators(uint32_t orphaned_id) {
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *ps = &placed_structures[i];
+        if (!ps->active) continue;
+        if (ps->id == orphaned_id) continue;
+        if (dominators_demote_to_bottom(ps, orphaned_id)) {
+            broadcast_structure_dominators(ps);
+        }
+    }
 }
 
 /** Broadcast a territory_update JSON message with optional fort position. */
@@ -169,6 +203,14 @@ static void claim_rebuild_graph(uint16_t fort_struct_id, uint32_t company_id) {
     memset(visited, 0, sizeof(visited));
     int qh = 0, qt = 0;
 
+    /* Capture pre-rebuild orphaned state so we can detect active→orphaned
+     * transitions caused by this rebuild and demote them in others'
+     * dominators lists. */
+    static bool was_orphaned[MAX_PLACED_STRUCTURES];
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        was_orphaned[i] = placed_structures[i].claim_orphaned;
+    }
+
     /* Seed: find the fort in the placed_structures array. */
     int fort_idx = -1;
     for (uint32_t i = 0; i < placed_structure_count; i++) {
@@ -182,8 +224,13 @@ static void claim_rebuild_graph(uint16_t fort_struct_id, uint32_t company_id) {
         /* Fort not found — mark all company structures orphaned. */
         for (uint32_t i = 0; i < placed_structure_count; i++) {
             if (placed_structures[i].active &&
-                placed_structures[i].company_id == company_id)
+                placed_structures[i].company_id == company_id) {
+                bool prev = placed_structures[i].claim_orphaned;
                 placed_structures[i].claim_orphaned = true;
+                if (!prev) {
+                    claim_demote_orphaned_in_all_dominators(placed_structures[i].id);
+                }
+            }
         }
         return;
     }
@@ -224,6 +271,16 @@ static void claim_rebuild_graph(uint16_t fort_struct_id, uint32_t company_id) {
         if (s->company_id != company_id) continue;
         if (s->island_id  != isl_id) continue;
         if (!visited[i]) s->claim_orphaned = true;
+    }
+
+    /* Demote any structure that transitioned active→orphaned in this rebuild
+     * to the bottom of every other structure's dominators[]. */
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *s = &placed_structures[i];
+        if (!s->active) continue;
+        if (s->claim_orphaned && !was_orphaned[i]) {
+            claim_demote_orphaned_in_all_dominators(s->id);
+        }
     }
 }
 
@@ -683,6 +740,10 @@ void claim_tick(uint32_t delta_ms) {
                      victim_n, chall_n, isl, s->company_id, old_co);
 
             src_enemy->claim_orphaned = true;
+
+            /* The newly-orphaned source loses any standing it held in
+             * other structures' dominators lists — demote to the bottom. */
+            claim_demote_orphaned_in_all_dominators(orphaned_id);
 
             /* If the orphaned structure was a Company Fortress that owned an
              * IslandClaim, drop that claim record. */
