@@ -5929,14 +5929,14 @@ export class RenderSystem {
         return (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) <= cr * cr;
       });
       if (ownsPoint) {
-        // Override-only dominance for placement bypass: my company is the
-        // dominant claimant on the cursor's island iff I have a dominance
-        // override against every other company that has a fort covering the
-        // cursor point. Without overrides, placing a higher-tier fort does
-        // NOT auto-bypass enemy territory — capture must go through a claim
-        // flag first.
-        // Collect (companyId, islandId) of forts whose claim radius covers (mx,my).
-        const others = new Set<number>();
+        // Dominance for placement bypass mirrors the overlay rule:
+        //   1. Per pair, a claim-flag override wins outright.
+        //   2. Otherwise the company with the EARLIEST fort (lowest id)
+        //      covering the cursor wins — first to claim keeps it.
+        // I'm the dominant company on this point iff I dominate every other
+        // company whose fort covers the cursor.
+        let myEarliestId = Number.MAX_SAFE_INTEGER;
+        const otherEarliestByCo = new Map<number, number>();
         let cursorIsl = 0;
         for (const s of this.placedStructures) {
           if (s.type !== 'company_fortress' && s.type !== 'flag_fort') continue;
@@ -5944,17 +5944,23 @@ export class RenderSystem {
           const cr = 600;
           if ((s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) > cr * cr) continue;
           if (cursorIsl === 0) cursorIsl = (s.islandId ?? 0) as number;
-          if (s.companyId !== myCompany) others.add(s.companyId!);
+          const sid = (s as any).id ?? Number.MAX_SAFE_INTEGER;
+          if (s.companyId === myCompany) {
+            if (sid < myEarliestId) myEarliestId = sid;
+          } else {
+            const prev = otherEarliestByCo.get(s.companyId!);
+            if (prev === undefined || sid < prev) otherEarliestByCo.set(s.companyId!, sid);
+          }
         }
-        if (cursorIsl !== 0) {
-          let dominatesAll = others.size > 0;
-          for (const oc of others) {
-            if (!this.hasDominanceOverride(cursorIsl, myCompany, oc)) { dominatesAll = false; break; }
+        if (cursorIsl !== 0 && myEarliestId !== Number.MAX_SAFE_INTEGER) {
+          let dominatesAll = true;
+          for (const [oc, oid] of otherEarliestByCo) {
+            if (this.hasDominanceOverride(cursorIsl, myCompany, oc)) continue;
+            if (this.hasDominanceOverride(cursorIsl, oc, myCompany)) { dominatesAll = false; break; }
+            if (myEarliestId < oid) continue;
+            dominatesAll = false; break;
           }
-          if (dominatesAll || others.size === 0) {
-            // others.size === 0 means only my company is present → trivially dominant.
-            inMyDominantArea = true;
-          }
+          if (dominatesAll) inMyDominantArea = true;
         }
       }
     }
@@ -9322,16 +9328,20 @@ export class RenderSystem {
 
               const otherFortId = otherClaim.fortId;
               const otherIsCF   = otherClaim.fortIsCompanyFortress;
-              // Dominance is ONLY granted by a successful claim-flag capture
-              // (an override). Without one, neither company dominates the other
-              // — both keep their own territory borders intact. Placing a
-              // higher-tier fort no longer silently takes over a neighbor.
-              // Reference locals so the compiler stays happy (kept for future use).
-              void otherFortId; void otherIsCF; void myFortId; void myIsCF;
+              void otherIsCF; void myIsCF; // CF tier no longer affects dominance
+              // Dominance rules (per-pair):
+              //   1. A claim-flag override wins outright.
+              //   2. Otherwise the EARLIER fort (lower fortId) wins — whoever
+              //      claimed the area first keeps it. Placing a higher-tier
+              //      structure next to a neighbor never silently consumes
+              //      their territory; capture requires a claim flag.
               let iDominate: boolean;
               if (this.hasDominanceOverride(isl.id, cid, otherCid))      iDominate = true;
               else if (this.hasDominanceOverride(isl.id, otherCid, cid)) iDominate = false;
-              else continue; // no dominance — skip overlay for this pair
+              else if (myFortId === 0 && otherFortId === 0) iDominate = cid < otherCid;
+              else if (myFortId === 0)    iDominate = false;
+              else if (otherFortId === 0) iDominate = true;
+              else                         iDominate = myFortId < otherFortId;
 
               const bucket = iDominate ? dominatedPts : dominantPts;
               for (const wc of otherClaim.worldCircles) {

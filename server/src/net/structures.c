@@ -170,53 +170,53 @@ static bool floor_tiles_overlap(float ax, float ay, float a_rad,
 }
 
 /* Dominant company on an island.
- *   - Dominance is ONLY granted by a successful claim-flag override.
- *   - With a single company present, that company is trivially dominant.
- *   - Otherwise, returns the company that dominates ALL other companies on the
- *     island via overrides, or 0 if no such single company exists.
- * (The previous natural CF/FlagFort/age rule has been removed so that simply
- *  placing a higher-tier fort does not silently take over a neighbor's
- *  territory — capture must go through a claim flag.) */
+ * Per-pair rule:
+ *   - A dominance override (from a successful claim flag) wins outright.
+ *   - Otherwise the company with the EARLIER fort (lower structure id) wins —
+ *     i.e. whoever claimed the area first keeps their territory when a later
+ *     company places forts/structures next door.
+ * Returns the unique company that dominates ALL others on the island, or 0
+ * if there is no fort/fortress on the island or no unique dominator. */
 static uint32_t island_dominant_company(uint32_t island_id) {
-    /* Gather forts per company on this island (best-tier/oldest id). */
-    typedef struct { uint32_t co; int tier; uint32_t id; } CoFort;
+    /* Gather forts per company on this island (oldest id per company). */
+    typedef struct { uint32_t co; uint32_t id; } CoFort;
     CoFort forts[32]; int nf = 0;
     for (uint32_t i = 0; i < placed_structure_count; i++) {
         PlacedStructure *s = &placed_structures[i];
         if (!s->active) continue;
         if (s->claim_orphaned) continue;
         if ((uint32_t)s->island_id != island_id) continue;
-        int tier;
-        if (s->type == STRUCT_COMPANY_FORTRESS && s->fortress_complete) tier = 2;
-        else if (s->type == STRUCT_FLAG_FORT)                           tier = 1;
-        else continue;
-        /* Merge into existing slot for this company (keep best tier / lowest id). */
+        if (s->type != STRUCT_COMPANY_FORTRESS && s->type != STRUCT_FLAG_FORT) continue;
+        /* Skip CF that hasn't completed yet — only completed structures count. */
+        if (s->type == STRUCT_COMPANY_FORTRESS && !s->fortress_complete) continue;
+        /* Merge into existing slot for this company (keep oldest / lowest id). */
         bool merged = false;
         for (int k = 0; k < nf; k++) {
             if (forts[k].co == s->company_id) {
-                if (tier > forts[k].tier ||
-                    (tier == forts[k].tier && s->id < forts[k].id)) {
-                    forts[k].tier = tier; forts[k].id = s->id;
-                }
+                if (s->id < forts[k].id) forts[k].id = s->id;
                 merged = true; break;
             }
         }
         if (!merged && nf < 32) {
-            forts[nf].co = s->company_id; forts[nf].tier = tier; forts[nf].id = s->id;
+            forts[nf].co = s->company_id; forts[nf].id = s->id;
             nf++;
         }
     }
     if (nf == 0) return 0;
     if (nf == 1) return forts[0].co;
-    /* Override-only dominance. A company is "the" dominant company iff it has
-     * an override against every other company on the island. */
+    /* A company is "the" dominant company iff it dominates every other. */
     for (int a = 0; a < nf; a++) {
         bool dominates_all = true;
         for (int b = 0; b < nf; b++) {
             if (a == b) continue;
-            if (!dominance_override_check((uint8_t)island_id, forts[a].co, forts[b].co)) {
+            /* Override wins outright. */
+            if (dominance_override_check((uint8_t)island_id, forts[a].co, forts[b].co)) continue;
+            if (dominance_override_check((uint8_t)island_id, forts[b].co, forts[a].co)) {
                 dominates_all = false; break;
             }
+            /* Natural rule: earlier (lower id) fort wins. */
+            if (forts[a].id < forts[b].id) continue;
+            dominates_all = false; break;
         }
         if (dominates_all) return forts[a].co;
     }
