@@ -5911,6 +5911,25 @@ export class RenderSystem {
       ctx.fill();
       ctx.stroke();
       ctx.setLineDash([]);
+    } else if (this.islandBuildKind === 'claim_flag') {
+      // Ghost shaped like a flag pole with a pennant
+      const poleH = sz / 2;
+      const poleW = Math.max(2, 4 * zoom);
+      const flagW = Math.max(6, 16 * zoom);
+      const flagH = Math.max(4, 10 * zoom);
+      ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+      // Pole (from center up to ghostH/2)
+      ctx.fillRect(msp.x - poleW / 2, msp.y - poleH, poleW, poleH);
+      ctx.strokeRect(msp.x - poleW / 2, msp.y - poleH, poleW, poleH);
+      // Pennant triangle at pole top
+      ctx.beginPath();
+      ctx.moveTo(msp.x + poleW / 2, msp.y - poleH);
+      ctx.lineTo(msp.x + poleW / 2 + flagW, msp.y - poleH + flagH / 2);
+      ctx.lineTo(msp.x + poleW / 2, msp.y - poleH + flagH);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
     } else {
       ctx.beginPath();
       ctx.rect(msp.x - ghostW / 2, msp.y - ghostH / 2, ghostW, ghostH);
@@ -5968,6 +5987,7 @@ export class RenderSystem {
                   : this.islandBuildKind === 'cannon' ? 'Cannon'
                   : this.islandBuildKind === 'flag_fort' ? 'Flag Fort'
                   : this.islandBuildKind === 'company_fortress' ? 'Company Fortress'
+                  : this.islandBuildKind === 'claim_flag' ? 'Claim Flag'
                   : 'Workbench';
       ctx.fillText(label, msp.x, labelY);
     }
