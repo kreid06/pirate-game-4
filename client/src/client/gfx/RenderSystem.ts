@@ -9454,7 +9454,7 @@ export class RenderSystem {
               hc.globalCompositeOperation = 'destination-in';
               hc.drawImage(intMask, 0, 0);
 
-              ctx.globalAlpha = 0.55;
+              ctx.globalAlpha = 0.30;
               ctx.drawImage(hatch, 0, 0);
               ctx.globalAlpha = 1.0;
             }
