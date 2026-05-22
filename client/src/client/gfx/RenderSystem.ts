@@ -5865,6 +5865,26 @@ export class RenderSystem {
       (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) < 500 * 500
     );
 
+    // Claim flag: cursor must be inside the CONTESTED AREA = intersection of
+    // (any own non-orphaned claim radius) AND (any enemy non-orphaned claim radius).
+    // Mirrors server-side rules in structures.c handle_place_structure.
+    let cfInOwnClaim = false;
+    let cfInEnemyClaim = false;
+    if (this.islandBuildKind === 'claim_flag' && myCompany > 0) {
+      for (const s of this.placedStructures) {
+        if ((s as any).claimOrphaned) continue;
+        const co = s.companyId ?? 0;
+        const cr = (s.type === 'flag_fort' || s.type === 'company_fortress') ? 600 : 400;
+        const dx = s.x - mx, dy = s.y - my;
+        if (dx * dx + dy * dy > cr * cr) continue;
+        if (co === myCompany) cfInOwnClaim = true;
+        else if (co !== 0)    cfInEnemyClaim = true;
+        if (cfInOwnClaim && cfInEnemyClaim) break;
+      }
+    }
+    const cfNotInMyTerritory   = this.islandBuildKind === 'claim_flag' && !cfInOwnClaim;
+    const cfNotInContestedArea = this.islandBuildKind === 'claim_flag' && cfInOwnClaim && !cfInEnemyClaim;
+
     // Workbench on enemy floor: a floor exists under cursor but belongs to a different company
     const wrongCompany = (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') && !noFloor &&
       !this.placedStructures.some(s => {
@@ -5879,7 +5899,7 @@ export class RenderSystem {
     // Only floors are rejected for water placement — other types need a floor tile anyway
     const waterBlocked = inWater && this.islandBuildKind === 'wooden_floor';
     this._islandGhostTooFar = tooFar || waterBlocked;
-    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied;
+    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
@@ -6007,6 +6027,12 @@ export class RenderSystem {
     } else if (noEdge) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('NEEDS FLOOR EDGE', msp.x, labelY);
+    } else if (cfNotInMyTerritory) {
+      ctx.fillStyle = '#ff3333';
+      ctx.fillText('NOT IN YOUR TERRITORY', msp.x, labelY);
+    } else if (cfNotInContestedArea) {
+      ctx.fillStyle = '#ff3333';
+      ctx.fillText('NOT IN CONTESTED AREA', msp.x, labelY);
     } else {
       ctx.fillStyle = '#aaffaa';
       const label = this.islandBuildKind === 'wooden_floor' ? 'Wooden Floor'
@@ -6017,7 +6043,7 @@ export class RenderSystem {
                   : this.islandBuildKind === 'cannon' ? 'Cannon'
                   : this.islandBuildKind === 'flag_fort' ? 'Flag Fort'
                   : this.islandBuildKind === 'company_fortress' ? 'Company Fortress'
-                  : this.islandBuildKind === 'claim_flag' ? 'Claim Flag'
+                  : this.islandBuildKind === 'claim_flag' ? 'Claim Flag — Contested Area'
                   : 'Workbench';
       ctx.fillText(label, msp.x, labelY);
     }
