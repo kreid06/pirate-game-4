@@ -9403,11 +9403,18 @@ export class RenderSystem {
             ctx.drawImage(ring, 0, 0);
             ctx.globalAlpha = 1.0;
 
-            // ── Contested area: diagonal blinking hatching ────────────────
-            // Draw yellow diagonal stripes over the intersection of own claim
-            // circles with any enemy claim circles — visually marks where a
-            // claim flag can legally be placed.
-            if (isOwn && allEnemyInnerCv) {
+            // ── Contested area: solid diagonal hatching ───────────────────
+            // Drawn only when THIS company (cid) has an active (non-orphaned)
+            // claim_flag down on this island. Hatching is rendered in the
+            // claimer's territory colour over the intersection of the
+            // claimer's claim circles with any enemy claim circles.
+            const hasActiveClaimFlag = this.placedStructures.some(
+              s => s.type === 'claim_flag'
+                && !s.claimOrphaned
+                && s.islandId === islId
+                && (s.companyId ?? 0) === cid
+            );
+            if (hasActiveClaimFlag && allEnemyInnerCv) {
               // Build intersection mask: own ∩ all_enemy
               const intMask = new OffscreenCanvas(cvs.width, cvs.height);
               const imc = intMask.getContext('2d')!;
@@ -9415,15 +9422,24 @@ export class RenderSystem {
               imc.globalCompositeOperation = 'destination-in';
               imc.drawImage(allEnemyInnerCv, 0, 0);
 
-              // Diagonal stripe pattern
+              // Solid diagonal stripe pattern in the claimer's colour.
+              // Stripes are anchored to world space (move with the camera) and
+              // slowly translate along their perpendicular axis for a "marching
+               // ants" feel without the harsh blink.
               const hatch = new OffscreenCanvas(cvs.width, cvs.height);
               const hc = hatch.getContext('2d')!;
               const stripeGap = Math.max(8, 14 * zoom);
-              hc.strokeStyle = '#ffff88';
+              hc.strokeStyle = color;
               hc.lineWidth   = Math.max(1.5, 2.5 * zoom);
-              hc.setLineDash([stripeGap * 0.65, stripeGap * 0.35]);
+              // World-anchored phase: project world origin onto stripe-perp
+              // axis (x - y). Adding camera-anchored offset makes stripes
+              // appear to stay glued to the world as the camera pans.
+              const worldOrigin = camera.worldToScreen(Vec2.from(off.dx, off.dy));
+              const animSpeedPxPerMs = 0.02; // ~20 px/sec at zoom 1
+              const phase = ((worldOrigin.x - worldOrigin.y)
+                           + performance.now() * animSpeedPxPerMs) % stripeGap;
               const diagLen = cvs.width + cvs.height;
-              for (let d = -diagLen; d < diagLen + cvs.width; d += stripeGap) {
+              for (let d = -diagLen + phase; d < diagLen + cvs.width; d += stripeGap) {
                 hc.beginPath();
                 hc.moveTo(d, 0);
                 hc.lineTo(d + cvs.height, cvs.height);
@@ -9433,9 +9449,7 @@ export class RenderSystem {
               hc.globalCompositeOperation = 'destination-in';
               hc.drawImage(intMask, 0, 0);
 
-              // Blink: sine oscillation between ~0 and ~0.55
-              const blink = 0.28 + 0.27 * Math.sin(performance.now() / 500);
-              ctx.globalAlpha = blink;
+              ctx.globalAlpha = 0.55;
               ctx.drawImage(hatch, 0, 0);
               ctx.globalAlpha = 1.0;
             }
