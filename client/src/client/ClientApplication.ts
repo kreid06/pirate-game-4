@@ -1238,7 +1238,7 @@ export class ClientApplication {
           const pid = this.networkManager.getAssignedPlayerId();
           const p   = ws?.players.find(pl => pl.id === pid);
           const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
-          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon' || kind === 'flag_fort' || kind === 'company_fortress') {
+          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon' || kind === 'flag_fort' || kind === 'company_fortress' || kind === 'claim_flag') {
             // Compute snap at click time (not from stale render state)
             const pos = kind === 'wooden_floor'
               ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
@@ -1255,7 +1255,7 @@ export class ClientApplication {
               : (kind === 'workbench' || kind === 'shipyard' || kind === 'cannon') ? this.islandBuildRotationDeg
               : kind === 'wood_ceiling' ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
               : 0;
-            this.networkManager.sendPlaceStructure(kind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress', pos.x, pos.y, rot);
+            this.networkManager.sendPlaceStructure(kind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag', pos.x, pos.y, rot);
           }
           return;
         }
