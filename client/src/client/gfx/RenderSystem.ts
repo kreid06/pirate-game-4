@@ -1842,6 +1842,15 @@ export class RenderSystem {
     }
   }
 
+  /** Mark a structure as orphaned (or not) for territory-overlay purposes. */
+  setStructureClaimOrphaned(structId: number, orphaned: boolean): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (s) {
+      s.claimOrphaned = orphaned;
+      this._claimOverlayDirty = true;
+    }
+  }
+
   updateFortressBuildProgress(structId: number, _companyId: number, _islandId: number, progressMs: number, totalMs: number, contested: boolean): void {
     const s = this.placedStructures.find(p => p.id === structId);
     if (s) {
@@ -5925,7 +5934,7 @@ export class RenderSystem {
     let cfInEnemyClaim = false;
     if (this.islandBuildKind === 'claim_flag' && myCompany > 0) {
       for (const s of this.placedStructures) {
-        if ((s as any).claimOrphaned) continue;
+        if (s.claimOrphaned) continue;
         const co = s.companyId ?? 0;
         const cr = (s.type === 'flag_fort' || s.type === 'company_fortress') ? 600 : 400;
         const dx = s.x - mx, dy = s.y - my;
@@ -9068,6 +9077,7 @@ export class RenderSystem {
           ps => ps.islandId === islId
              && (ps.type === 'flag_fort' || ps.type === 'company_fortress')
              && ps.companyId === cid
+             && !ps.claimOrphaned
         );
         if (placedFort) {
           fortX     = placedFort.x;
@@ -9100,6 +9110,7 @@ export class RenderSystem {
       const companyStructs = this.placedStructures.filter(
         ps => ps.islandId === islId
            && ps.companyId === cid
+           && !ps.claimOrphaned
            && ps.type !== 'flag_fort'
            && ps.type !== 'company_fortress'
       );
@@ -9391,6 +9402,43 @@ export class RenderSystem {
             ctx.globalAlpha = isOwn ? 0.90 : 0.50;
             ctx.drawImage(ring, 0, 0);
             ctx.globalAlpha = 1.0;
+
+            // ── Contested area: diagonal blinking hatching ────────────────
+            // Draw yellow diagonal stripes over the intersection of own claim
+            // circles with any enemy claim circles — visually marks where a
+            // claim flag can legally be placed.
+            if (isOwn && allEnemyInnerCv) {
+              // Build intersection mask: own ∩ all_enemy
+              const intMask = new OffscreenCanvas(cvs.width, cvs.height);
+              const imc = intMask.getContext('2d')!;
+              imc.drawImage(ownInnerCv, 0, 0);
+              imc.globalCompositeOperation = 'destination-in';
+              imc.drawImage(allEnemyInnerCv, 0, 0);
+
+              // Diagonal stripe pattern
+              const hatch = new OffscreenCanvas(cvs.width, cvs.height);
+              const hc = hatch.getContext('2d')!;
+              const stripeGap = Math.max(8, 14 * zoom);
+              hc.strokeStyle = '#ffff88';
+              hc.lineWidth   = Math.max(1.5, 2.5 * zoom);
+              hc.setLineDash([stripeGap * 0.65, stripeGap * 0.35]);
+              const diagLen = cvs.width + cvs.height;
+              for (let d = -diagLen; d < diagLen + cvs.width; d += stripeGap) {
+                hc.beginPath();
+                hc.moveTo(d, 0);
+                hc.lineTo(d + cvs.height, cvs.height);
+                hc.stroke();
+              }
+              // Clip stripes to the intersection mask
+              hc.globalCompositeOperation = 'destination-in';
+              hc.drawImage(intMask, 0, 0);
+
+              // Blink: sine oscillation between ~0 and ~0.55
+              const blink = 0.28 + 0.27 * Math.sin(performance.now() / 500);
+              ctx.globalAlpha = blink;
+              ctx.drawImage(hatch, 0, 0);
+              ctx.globalAlpha = 1.0;
+            }
 
             // Label at blob centroid
             let cx = 0, cy = 0;

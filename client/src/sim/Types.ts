@@ -184,6 +184,8 @@ export interface PlacedStructure {
   claimState?: number;
   /** Claiming flag: accumulated time (ms) toward leaving the current grace state */
   claimGraceMs?: number;
+  /** Forts/fortresses: true when this structure was orphaned by a successful claim flip. Orphaned structures no longer project a claim radius. */
+  claimOrphaned?: boolean;
   /** Company Fortress: 0 → COMPANY_FORTRESS_BUILD_MS (900000) build progress in ms */
   fortressBuildProgress?: number;
   /** Company Fortress: true when the 15-minute build is complete */

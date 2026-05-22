@@ -2120,7 +2120,11 @@ export class ClientApplication {
       this.networkManager.onClaimFlagProgress = (structId, progressMs, contested, targetsFortress, state, graceMs) => {
         this.renderSystem.updateClaimFlagProgress(structId, progressMs, contested, targetsFortress, state, graceMs);
       };
-      this.networkManager.onTerritoryFlipped = (_flagId, _orphanedId, oldCompanyId, newCompanyId, islandId) => {
+      this.networkManager.onTerritoryFlipped = (_flagId, orphanedId, oldCompanyId, newCompanyId, islandId) => {
+        // Immediate visual flip: mark the captured source structure as orphaned so its
+        // claim radius (and any contested-area hatching it implies) disappears right away,
+        // without waiting for the next full snapshot.
+        if (orphanedId) this.renderSystem.setStructureClaimOrphaned(orphanedId, true);
         this.renderSystem.showAnnouncement(
           `🏴 Territory flipped on island ${islandId}: company ${oldCompanyId} → ${newCompanyId}`,
           'info', 4.0,
