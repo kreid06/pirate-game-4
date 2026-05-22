@@ -742,6 +742,43 @@ void claim_tick(uint32_t delta_ms) {
                 if (changed) broadcast_structure_dominators(chall);
             }
 
+            /* ── Convert non-territorial structures inside the contested area
+             *    to the challenger's company. Any active non-orphaned victim-
+             *    company structure on this island whose position lies inside
+             *    the claim flag's radius is reassigned. Territorial anchors
+             *    (flag forts, company fortresses, other claim flags) are
+             *    excluded — those are handled by the orphan / dominator
+             *    pipeline above. */
+            {
+                float flag_r2 = flag_r * flag_r;
+                int converted_n = 0;
+                for (uint32_t i = 0; i < placed_structure_count; i++) {
+                    PlacedStructure *ps = &placed_structures[i];
+                    if (!ps->active) continue;
+                    if (ps->claim_orphaned) continue;
+                    if (ps->island_id != isl) continue;
+                    if (ps->company_id != old_co) continue;
+                    if (ps->type == STRUCT_FLAG_FORT) continue;
+                    if (ps->type == STRUCT_COMPANY_FORTRESS) continue;
+                    if (ps->type == STRUCT_CLAIM_FLAG) continue;
+                    float dx = ps->x - flag_x, dy = ps->y - flag_y;
+                    if (dx * dx + dy * dy > flag_r2) continue;
+
+                    ps->company_id = (uint8_t)s->company_id;
+                    converted_n++;
+                    char upd[128];
+                    snprintf(upd, sizeof(upd),
+                             "{\"type\":\"structure_company_updated\","
+                             "\"structure_id\":%u,\"company_id\":%u}",
+                             ps->id, (unsigned)s->company_id);
+                    websocket_server_broadcast(upd);
+                }
+                if (converted_n > 0) {
+                    log_info("🏴 Claim Flag #%u converted %d structure(s) from company %u to company %u",
+                             s->id, converted_n, old_co, s->company_id);
+                }
+            }
+
             /* Consume the claim flag */
             s->active = false;
             char dmsg2[128];

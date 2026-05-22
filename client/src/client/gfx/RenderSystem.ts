@@ -9589,9 +9589,16 @@ export class RenderSystem {
 
     // ── Pass 3: per-structure dominator carveouts ───────────────────────────
     // For each structure X with a non-empty `dominators` list, repaint the
-    // overlap (X.circle ∩ D.circle) of every active dominator D in D's
-    // company colour. Higher-priority dominators (smaller index) win where
-    // their overlaps coincide — achieved by drawing the list back-to-front.
+    // overlap (X.circle ∩ D.circle) in D's company colour at the SAME fill
+    // alpha that Pass 2 uses for the non-overlapped portion (0.12 for own,
+    // 0.06 for others). The result reads as a single uniform claimed-area
+    // surface — the only thing that distinguishes a captured overlap from
+    // a non-overlapped patch is the multi-colour border already drawn by
+    // Pass 2 (piece 1 outer ring + piece 3 enemy outer rim band) along the
+    // contested arc. Dashed subordinate borders inside the overlap remain
+    // as the "contestable area" visual cue.
+    // Higher-priority dominators (smaller index) win where their overlaps
+    // coincide — achieved by drawing the list back-to-front.
     {
       const radiusOf = (s: PlacedStructure): number => {
         if (s.type === 'flag_fort' || s.type === 'company_fortress') return 600;
@@ -9629,7 +9636,9 @@ export class RenderSystem {
               const dsr = dr * zoom;
               if (dsr <= 0) continue;
               mc.beginPath(); mc.arc(ds.x, ds.y, dsr, 0, Math.PI * 2); mc.fill();
-              ctx.globalAlpha = (D.companyId === this._localCompanyId) ? 0.45 : 0.30;
+              // Match Pass 2 fill alpha so the captured overlap reads as
+              // ordinary claimed territory of the dominating company.
+              ctx.globalAlpha = (D.companyId === this._localCompanyId) ? 0.12 : 0.06;
               ctx.drawImage(mask, 0, 0);
               ctx.globalAlpha = 1.0;
             }
