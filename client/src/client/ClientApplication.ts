@@ -2130,8 +2130,8 @@ export class ClientApplication {
           'info', 4.0,
         );
       };
-      this.networkManager.onDominanceOverride = (islandId, dominantCo, subordinateCo) => {
-        this.renderSystem.addDominanceOverride(islandId, dominantCo, subordinateCo);
+      this.networkManager.onDominanceOverride = (islandId, dominantCo, subordinateCo, domCircles, subCircles) => {
+        this.renderSystem.addDominanceOverride(islandId, dominantCo, subordinateCo, domCircles, subCircles);
       };
       this.networkManager.onDominanceOverridesList = (list) => {
         this.renderSystem.setDominanceOverrides(list);

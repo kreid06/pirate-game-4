@@ -653,9 +653,9 @@ export class NetworkManager {
   public onClaimFlagProgress: ((structId: number, progressMs: number, contested: boolean, targetsFortress: boolean, state?: number, graceMs?: number, graceTotal?: number, total?: number) => void) | null = null;
   public onTerritoryFlipped: ((flagId: number, orphanedStructureId: number, oldCompanyId: number, newCompanyId: number, islandId: number) => void) | null = null;
   /** Fired when the server records or refreshes a dominance override (claim flag captured an area). */
-  public onDominanceOverride: ((islandId: number, dominantCo: number, subordinateCo: number) => void) | null = null;
+  public onDominanceOverride: ((islandId: number, dominantCo: number, subordinateCo: number, domCircles: Array<[number, number, number]>, subCircles: Array<[number, number, number]>) => void) | null = null;
   /** Fired with the full list of active dominance overrides on join. */
-  public onDominanceOverridesList: ((overrides: Array<{ islandId: number; dominantCo: number; subordinateCo: number }>) => void) | null = null;
+  public onDominanceOverridesList: ((overrides: Array<{ islandId: number; dominantCo: number; subordinateCo: number; domCircles: Array<[number, number, number]>; subCircles: Array<[number, number, number]> }>) => void) | null = null;
   /** Fired when a claiming flag finishes capturing territory. */
   public onTerritoryCaptured: ((islandId: number, newCompanyId: number) => void) | null = null;
   /** Fired when a Company Fortress build timer updates (≈1/s). */
@@ -2739,15 +2739,19 @@ export class NetworkManager {
           message.island_id      ?? 0,
           message.dominant_co    ?? 0,
           message.subordinate_co ?? 0,
+          (message.dom_circles ?? []) as Array<[number, number, number]>,
+          (message.sub_circles ?? []) as Array<[number, number, number]>,
         );
         break;
 
       case 'DOMINANCE_OVERRIDES': {
-        const list: Array<{ islandId: number; dominantCo: number; subordinateCo: number }> =
+        const list: Array<{ islandId: number; dominantCo: number; subordinateCo: number; domCircles: Array<[number, number, number]>; subCircles: Array<[number, number, number]> }> =
           (message.overrides ?? []).map((o: any) => ({
             islandId:      o.island_id      ?? 0,
             dominantCo:    o.dominant_co    ?? 0,
             subordinateCo: o.subordinate_co ?? 0,
+            domCircles:    (o.dom_circles ?? []) as Array<[number, number, number]>,
+            subCircles:    (o.sub_circles ?? []) as Array<[number, number, number]>,
           }));
         this.onDominanceOverridesList?.(list);
         break;

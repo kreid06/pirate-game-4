@@ -372,17 +372,27 @@ bool claim_register_fort(uint8_t island_id, uint32_t company_id,
 /* ── Dominance overrides ──────────────────────────────────────────────────
  * When a Claim Flag successfully captures a contested area, the claimer's
  * company gains a permanent dominance override on that island against the
- * defender's company. While the override is active, the natural per-pair
- * dominance rule (Company Fortress > Flag Fort > older fort id) is replaced
- * with "claimer dominates defender" for that island/company-pair.
- * Overrides are dropped if either company loses all its forts on the island.
+ * defender's company. The captured region is stored as two arrays of circles:
+ *   dom_circles  — dominator's claim source circles at claim time
+ *   sub_circles  — subordinate's claim source circles at claim time
+ * The actual captured area = (union of dom_circles) ∩ (union of sub_circles).
+ * Inside that area the dominator wins regardless of natural rule; outside,
+ * natural rule (earliest fort wins) applies, so the dominator's NEW
+ * structures placed after the claim do NOT extend the captured area.
+ * Subsequent captures by the same dominator append circles (capped).
  */
 #define MAX_DOMINANCE_OVERRIDES 64
+#define MAX_OVERRIDE_CIRCLES    32
+typedef struct { float cx, cy, r; } OverrideCircle;
 typedef struct {
     bool     active;
     uint8_t  island_id;
     uint32_t dominant_co;
     uint32_t subordinate_co;
+    OverrideCircle dom_circles[MAX_OVERRIDE_CIRCLES];
+    int            dom_circle_count;
+    OverrideCircle sub_circles[MAX_OVERRIDE_CIRCLES];
+    int            sub_circle_count;
 } DominanceOverride;
 extern DominanceOverride dominance_overrides[MAX_DOMINANCE_OVERRIDES];
 extern int               dominance_override_count;
@@ -390,8 +400,15 @@ extern int               dominance_override_count;
 /** Returns true if `a` dominates `b` on the given island by override. */
 bool dominance_override_check(uint8_t island_id, uint32_t a_co, uint32_t b_co);
 
-/** Records (or refreshes) "dominant_co dominates subordinate_co" on island_id. */
-void dominance_override_add(uint8_t island_id, uint32_t dominant_co, uint32_t subordinate_co);
+/** Records (or appends to) "dominant_co dominates subordinate_co" on island_id.
+ *  Pass NULL/0 for circle arrays to record without geometry (legacy). */
+void dominance_override_add(uint8_t island_id, uint32_t dominant_co, uint32_t subordinate_co,
+                            const OverrideCircle *dom_circ, int dom_n,
+                            const OverrideCircle *sub_circ, int sub_n);
+
+/** Serialize one DominanceOverride as a JSON object (no surrounding array).
+ *  Returns number of bytes written (excluding NUL). */
+int dominance_override_serialize_json(const DominanceOverride *o, char *buf, int cap);
 
 /* ── Island structures ────────────────────────────────────────────────────── */
 typedef enum {

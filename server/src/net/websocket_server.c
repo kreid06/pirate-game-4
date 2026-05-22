@@ -2396,21 +2396,19 @@ int websocket_server_update(struct Sim* sim) {
 
                                     // Send any active dominance overrides
                                     {
-                                        char hs_dov_buf[2048];
+                                        static char hs_dov_buf[131072];
                                         int  hs_dvp = snprintf(hs_dov_buf, sizeof(hs_dov_buf),
                                             "{\"type\":\"DOMINANCE_OVERRIDES\",\"overrides\":[");
                                         bool hs_dvf = true;
                                         for (int oi = 0; oi < dominance_override_count; oi++) {
                                             DominanceOverride *o = &dominance_overrides[oi];
                                             if (!o->active) continue;
-                                            hs_dvp += snprintf(hs_dov_buf + hs_dvp, sizeof(hs_dov_buf) - hs_dvp,
-                                                "%s{\"island_id\":%u,\"dominant_co\":%u,\"subordinate_co\":%u}",
-                                                hs_dvf ? "" : ",",
-                                                o->island_id, o->dominant_co, o->subordinate_co);
+                                            if (!hs_dvf) hs_dvp += snprintf(hs_dov_buf + hs_dvp, sizeof(hs_dov_buf) - hs_dvp, ",");
+                                            hs_dvp += dominance_override_serialize_json(o, hs_dov_buf + hs_dvp, sizeof(hs_dov_buf) - hs_dvp);
                                             hs_dvf = false;
                                         }
                                         hs_dvp += snprintf(hs_dov_buf + hs_dvp, sizeof(hs_dov_buf) - hs_dvp, "]}");
-                                        char hs_dovf[2304];
+                                        static char hs_dovf[133120];
                                         size_t hs_dovflen = websocket_create_frame(
                                             WS_OPCODE_TEXT, hs_dov_buf, (size_t)hs_dvp,
                                             hs_dovf, sizeof(hs_dovf));
@@ -6781,21 +6779,19 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 /* Send any active dominance overrides */
                                 {
-                                    char j_dov_buf[2048];
+                                    static char j_dov_buf[131072];
                                     int  j_dvp = snprintf(j_dov_buf, sizeof(j_dov_buf),
                                         "{\"type\":\"DOMINANCE_OVERRIDES\",\"overrides\":[");
                                     bool j_dvf = true;
                                     for (int oi = 0; oi < dominance_override_count; oi++) {
                                         DominanceOverride *o = &dominance_overrides[oi];
                                         if (!o->active) continue;
-                                        j_dvp += snprintf(j_dov_buf + j_dvp, sizeof(j_dov_buf) - j_dvp,
-                                            "%s{\"island_id\":%u,\"dominant_co\":%u,\"subordinate_co\":%u}",
-                                            j_dvf ? "" : ",",
-                                            o->island_id, o->dominant_co, o->subordinate_co);
+                                        if (!j_dvf) j_dvp += snprintf(j_dov_buf + j_dvp, sizeof(j_dov_buf) - j_dvp, ",");
+                                        j_dvp += dominance_override_serialize_json(o, j_dov_buf + j_dvp, sizeof(j_dov_buf) - j_dvp);
                                         j_dvf = false;
                                     }
                                     j_dvp += snprintf(j_dov_buf + j_dvp, sizeof(j_dov_buf) - j_dvp, "]}");
-                                    char j_dovf[2304];
+                                    static char j_dovf[133120];
                                     size_t j_dovflen = websocket_create_frame(
                                         WS_OPCODE_TEXT, j_dov_buf, (size_t)j_dvp,
                                         j_dovf, sizeof(j_dovf));
@@ -6916,21 +6912,19 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             /* Send any active dominance overrides */
                             {
-                                char gs_dov_buf[2048];
+                                static char gs_dov_buf[131072];
                                 int  gs_dvp = snprintf(gs_dov_buf, sizeof(gs_dov_buf),
                                     "{\"type\":\"DOMINANCE_OVERRIDES\",\"overrides\":[");
                                 bool gs_dvf = true;
                                 for (int oi = 0; oi < dominance_override_count; oi++) {
                                     DominanceOverride *o = &dominance_overrides[oi];
                                     if (!o->active) continue;
-                                    gs_dvp += snprintf(gs_dov_buf + gs_dvp, sizeof(gs_dov_buf) - gs_dvp,
-                                        "%s{\"island_id\":%u,\"dominant_co\":%u,\"subordinate_co\":%u}",
-                                        gs_dvf ? "" : ",",
-                                        o->island_id, o->dominant_co, o->subordinate_co);
+                                    if (!gs_dvf) gs_dvp += snprintf(gs_dov_buf + gs_dvp, sizeof(gs_dov_buf) - gs_dvp, ",");
+                                    gs_dvp += dominance_override_serialize_json(o, gs_dov_buf + gs_dvp, sizeof(gs_dov_buf) - gs_dvp);
                                     gs_dvf = false;
                                 }
                                 gs_dvp += snprintf(gs_dov_buf + gs_dvp, sizeof(gs_dov_buf) - gs_dvp, "]}");
-                                char gs_dovf[2304];
+                                static char gs_dovf[133120];
                                 size_t gs_dovflen = websocket_create_frame(
                                     WS_OPCODE_TEXT, gs_dov_buf, (size_t)gs_dvp,
                                     gs_dovf, sizeof(gs_dovf));

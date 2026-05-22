@@ -175,7 +175,7 @@ export class RenderSystem {
    * dominantCo wins the per-pair dominance rule against subordinateCo on that
    * island, regardless of CF/FlagFort/age.
    */
-  private _dominanceOverrides: Set<string> = new Set();
+  private _dominanceOverrides: Map<string, { islandId: number; dominantCo: number; subordinateCo: number; domCircles: Array<{ x: number; y: number; r: number }>; subCircles: Array<{ x: number; y: number; r: number }> }> = new Map();
   /**
    * Pre-computed wall segments — rebuilt whenever placedStructures changes.
    * Each entry: [x1, y1, x2, y2] in world space.  Used for O(1)-per-frame
@@ -1859,27 +1859,74 @@ export class RenderSystem {
   }
 
   /** Record a dominance override (claim flag captured a contested area). */
-  addDominanceOverride(islandId: number, dominantCo: number, subordinateCo: number): void {
+  addDominanceOverride(
+    islandId: number,
+    dominantCo: number,
+    subordinateCo: number,
+    domCircles: Array<[number, number, number]> = [],
+    subCircles: Array<[number, number, number]> = [],
+  ): void {
     if (!dominantCo || !subordinateCo || dominantCo === subordinateCo) return;
     // Remove the reverse override if present (dominance just flipped back).
     this._dominanceOverrides.delete(`${islandId}_${subordinateCo}_${dominantCo}`);
-    this._dominanceOverrides.add(`${islandId}_${dominantCo}_${subordinateCo}`);
+    const key = `${islandId}_${dominantCo}_${subordinateCo}`;
+    const existing = this._dominanceOverrides.get(key);
+    const dom = (existing?.domCircles ?? []).slice();
+    const sub = (existing?.subCircles ?? []).slice();
+    const eps = 0.5;
+    const pushUnique = (arr: Array<{ x: number; y: number; r: number }>, c: { x: number; y: number; r: number }) => {
+      for (const e of arr) {
+        if (Math.abs(e.x - c.x) < eps && Math.abs(e.y - c.y) < eps && Math.abs(e.r - c.r) < eps) return;
+      }
+      arr.push(c);
+    };
+    for (const [x, y, r] of domCircles) pushUnique(dom, { x, y, r });
+    for (const [x, y, r] of subCircles) pushUnique(sub, { x, y, r });
+    this._dominanceOverrides.set(key, { islandId, dominantCo, subordinateCo, domCircles: dom, subCircles: sub });
     this._claimOverlayDirty = true;
   }
 
   /** Replace the full set of dominance overrides (used on join snapshot). */
-  setDominanceOverrides(list: Array<{ islandId: number; dominantCo: number; subordinateCo: number }>): void {
+  setDominanceOverrides(
+    list: Array<{
+      islandId: number; dominantCo: number; subordinateCo: number;
+      domCircles: Array<[number, number, number]>;
+      subCircles: Array<[number, number, number]>;
+    }>,
+  ): void {
     this._dominanceOverrides.clear();
     for (const o of list) {
       if (!o.dominantCo || !o.subordinateCo || o.dominantCo === o.subordinateCo) continue;
-      this._dominanceOverrides.add(`${o.islandId}_${o.dominantCo}_${o.subordinateCo}`);
+      const key = `${o.islandId}_${o.dominantCo}_${o.subordinateCo}`;
+      this._dominanceOverrides.set(key, {
+        islandId:      o.islandId,
+        dominantCo:    o.dominantCo,
+        subordinateCo: o.subordinateCo,
+        domCircles:    (o.domCircles ?? []).map(([x, y, r]) => ({ x, y, r })),
+        subCircles:    (o.subCircles ?? []).map(([x, y, r]) => ({ x, y, r })),
+      });
     }
     this._claimOverlayDirty = true;
   }
 
-  /** True if `a` dominates `b` on this island by an override. */
-  private hasDominanceOverride(islandId: number, a: number, b: number): boolean {
-    return this._dominanceOverrides.has(`${islandId}_${a}_${b}`);
+  /** True if the point (px, py) lies inside the captured region of an active
+   *  override on `islandId` where `dominantCo` is the dominator. */
+  private pointInOverrideCapture(islandId: number, dominantCo: number, px: number, py: number): boolean {
+    for (const o of this._dominanceOverrides.values()) {
+      if (o.islandId !== islandId) continue;
+      if (o.dominantCo !== dominantCo) continue;
+      let inDom = false;
+      for (const c of o.domCircles) {
+        const dx = px - c.x, dy = py - c.y;
+        if (dx * dx + dy * dy <= c.r * c.r) { inDom = true; break; }
+      }
+      if (!inDom) continue;
+      for (const c of o.subCircles) {
+        const dx = px - c.x, dy = py - c.y;
+        if (dx * dx + dy * dy <= c.r * c.r) return true;
+      }
+    }
+    return false;
   }
 
   updateFortressBuildProgress(structId: number, _companyId: number, _islandId: number, progressMs: number, totalMs: number, contested: boolean): void {
@@ -5954,13 +6001,18 @@ export class RenderSystem {
         }
         if (cursorIsl !== 0 && myEarliestId !== Number.MAX_SAFE_INTEGER) {
           let dominatesAll = true;
-          for (const [oc, oid] of otherEarliestByCo) {
-            if (this.hasDominanceOverride(cursorIsl, myCompany, oc)) continue;
-            if (this.hasDominanceOverride(cursorIsl, oc, myCompany)) { dominatesAll = false; break; }
+          for (const [, oid] of otherEarliestByCo) {
             if (myEarliestId < oid) continue;
             dominatesAll = false; break;
           }
           if (dominatesAll) inMyDominantArea = true;
+        }
+        // Region-based override: cursor inside a captured area where I'm
+        // the dominator counts as my territory, regardless of fort order.
+        if (!inMyDominantArea && cursorIsl !== 0 && myCompany) {
+          if (this.pointInOverrideCapture(cursorIsl, myCompany, mx, my)) {
+            inMyDominantArea = true;
+          }
         }
       }
     }
@@ -9330,15 +9382,14 @@ export class RenderSystem {
               const otherIsCF   = otherClaim.fortIsCompanyFortress;
               void otherIsCF; void myIsCF; // CF tier no longer affects dominance
               // Dominance rules (per-pair):
-              //   1. A claim-flag override wins outright.
-              //   2. Otherwise the EARLIER fort (lower fortId) wins — whoever
+              //   1. Otherwise the EARLIER fort (lower fortId) wins — whoever
               //      claimed the area first keeps it. Placing a higher-tier
               //      structure next to a neighbor never silently consumes
-              //      their territory; capture requires a claim flag.
+              //      their territory; capture requires a claim flag (which
+              //      then produces a region-based override applied in a
+              //      separate overlay pass — see end of drawTerritoryOverlay).
               let iDominate: boolean;
-              if (this.hasDominanceOverride(isl.id, cid, otherCid))      iDominate = true;
-              else if (this.hasDominanceOverride(isl.id, otherCid, cid)) iDominate = false;
-              else if (myFortId === 0 && otherFortId === 0) iDominate = cid < otherCid;
+              if (myFortId === 0 && otherFortId === 0) iDominate = cid < otherCid;
               else if (myFortId === 0)    iDominate = false;
               else if (otherFortId === 0) iDominate = true;
               else                         iDominate = myFortId < otherFortId;
@@ -9556,6 +9607,49 @@ export class RenderSystem {
           }
 
           ctx.restore();
+        }
+      }
+    }
+
+    // ── Pass 3: dominance-override captured regions ─────────────────────────
+    // Each override carries a frozen snapshot of (dominator-claim-union) ∩
+    // (subordinate-claim-union) at claim time. We paint that captured region
+    // in the dominator's colour ON TOP of the per-company blobs from Pass 2,
+    // so a captured area visually transfers to the dominator. Crucially the
+    // snapshot does NOT include structures placed after the capture, so the
+    // dominator can't extend the takeover just by building more forts.
+    if (this._dominanceOverrides.size > 0) {
+      const cvs2 = ctx.canvas;
+      for (const isl of this.islands) {
+        const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
+        for (const o of this._dominanceOverrides.values()) {
+          if (o.islandId !== isl.id) continue;
+          if (o.domCircles.length === 0 || o.subCircles.length === 0) continue;
+          const color = this._companyColor(o.dominantCo);
+          for (const off of wrapOffsets) {
+            // Build dom-union mask, then intersect with sub-union via
+            // destination-in to get the captured region.
+            const mask = new OffscreenCanvas(cvs2.width, cvs2.height);
+            const mc = mask.getContext('2d')!;
+            mc.fillStyle = color;
+            for (const c of o.domCircles) {
+              const sp = camera.worldToScreen(Vec2.from(c.x + off.dx, c.y + off.dy));
+              const sr = c.r * zoom;
+              if (sr <= 0) continue;
+              mc.beginPath(); mc.arc(sp.x, sp.y, sr, 0, Math.PI * 2); mc.fill();
+            }
+            mc.globalCompositeOperation = 'destination-in';
+            for (const c of o.subCircles) {
+              const sp = camera.worldToScreen(Vec2.from(c.x + off.dx, c.y + off.dy));
+              const sr = c.r * zoom;
+              if (sr <= 0) continue;
+              mc.beginPath(); mc.arc(sp.x, sp.y, sr, 0, Math.PI * 2); mc.fill();
+            }
+            // Fill (semi-transparent dominator colour).
+            ctx.globalAlpha = (o.dominantCo === myCompany) ? 0.18 : 0.10;
+            ctx.drawImage(mask, 0, 0);
+            ctx.globalAlpha = 1.0;
+          }
         }
       }
     }
