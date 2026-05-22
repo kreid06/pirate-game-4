@@ -169,14 +169,14 @@ static bool floor_tiles_overlap(float ax, float ay, float a_rad,
     return true;
 }
 
-/* Dominant company on an island, matching the client's territory-overlay
- * dominance rule:
- *   - Completed Company Fortress  > Flag Fort > none
- *   - Within the same tier, the lower structure id (earlier placement) wins
- *   - A dominance override (from a successful claim flag) replaces the
- *     natural rule for the (overridden) company pair.
- * Returns 0 if no company has a fort/fortress on the island, or if no
- * single company dominates ALL others. */
+/* Dominant company on an island.
+ *   - Dominance is ONLY granted by a successful claim-flag override.
+ *   - With a single company present, that company is trivially dominant.
+ *   - Otherwise, returns the company that dominates ALL other companies on the
+ *     island via overrides, or 0 if no such single company exists.
+ * (The previous natural CF/FlagFort/age rule has been removed so that simply
+ *  placing a higher-tier fort does not silently take over a neighbor's
+ *  territory — capture must go through a claim flag.) */
 static uint32_t island_dominant_company(uint32_t island_id) {
     /* Gather forts per company on this island (best-tier/oldest id). */
     typedef struct { uint32_t co; int tier; uint32_t id; } CoFort;
@@ -208,22 +208,15 @@ static uint32_t island_dominant_company(uint32_t island_id) {
     }
     if (nf == 0) return 0;
     if (nf == 1) return forts[0].co;
-    /* Per-pair dominance with overrides. A company is "the" dominant company
-     * iff it dominates every other company on the island. */
+    /* Override-only dominance. A company is "the" dominant company iff it has
+     * an override against every other company on the island. */
     for (int a = 0; a < nf; a++) {
         bool dominates_all = true;
         for (int b = 0; b < nf; b++) {
             if (a == b) continue;
-            /* Override wins outright. */
-            if (dominance_override_check((uint8_t)island_id, forts[a].co, forts[b].co)) continue;
-            if (dominance_override_check((uint8_t)island_id, forts[b].co, forts[a].co)) {
+            if (!dominance_override_check((uint8_t)island_id, forts[a].co, forts[b].co)) {
                 dominates_all = false; break;
             }
-            /* Natural rule: higher tier wins; tie → lower fort id wins. */
-            if (forts[a].tier > forts[b].tier) continue;
-            if (forts[a].tier < forts[b].tier) { dominates_all = false; break; }
-            if (forts[a].id   < forts[b].id)   continue;
-            dominates_all = false; break;
         }
         if (dominates_all) return forts[a].co;
     }
