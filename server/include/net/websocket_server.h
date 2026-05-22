@@ -369,46 +369,11 @@ void claim_tick(uint32_t delta_ms);
 bool claim_register_fort(uint8_t island_id, uint32_t company_id,
                          uint32_t fort_struct_id, uint32_t placer_id);
 
-/* ── Dominance overrides ──────────────────────────────────────────────────
- * When a Claim Flag successfully captures a contested area, the claimer's
- * company gains a permanent dominance override on that island against the
- * defender's company. The captured region is stored as two arrays of circles:
- *   dom_circles  — dominator's claim source circles at claim time
- *   sub_circles  — subordinate's claim source circles at claim time
- * The actual captured area = (union of dom_circles) ∩ (union of sub_circles).
- * Inside that area the dominator wins regardless of natural rule; outside,
- * natural rule (earliest fort wins) applies, so the dominator's NEW
- * structures placed after the claim do NOT extend the captured area.
- * Subsequent captures by the same dominator append circles (capped).
+/* ── Per-structure dominance ──────────────────────────────────────────────
+ * Successful claim flag captures push the challenger structure IDs onto
+ * each victim structure's `dominators` array (see PlacedStructure below).
+ * Rendering reads those lists directly; no global override table is needed.
  */
-#define MAX_DOMINANCE_OVERRIDES 64
-#define MAX_OVERRIDE_CIRCLES    32
-typedef struct { float cx, cy, r; } OverrideCircle;
-typedef struct {
-    bool     active;
-    uint8_t  island_id;
-    uint32_t dominant_co;
-    uint32_t subordinate_co;
-    OverrideCircle dom_circles[MAX_OVERRIDE_CIRCLES];
-    int            dom_circle_count;
-    OverrideCircle sub_circles[MAX_OVERRIDE_CIRCLES];
-    int            sub_circle_count;
-} DominanceOverride;
-extern DominanceOverride dominance_overrides[MAX_DOMINANCE_OVERRIDES];
-extern int               dominance_override_count;
-
-/** Returns true if `a` dominates `b` on the given island by override. */
-bool dominance_override_check(uint8_t island_id, uint32_t a_co, uint32_t b_co);
-
-/** Records (or appends to) "dominant_co dominates subordinate_co" on island_id.
- *  Pass NULL/0 for circle arrays to record without geometry (legacy). */
-void dominance_override_add(uint8_t island_id, uint32_t dominant_co, uint32_t subordinate_co,
-                            const OverrideCircle *dom_circ, int dom_n,
-                            const OverrideCircle *sub_circ, int sub_n);
-
-/** Serialize one DominanceOverride as a JSON object (no surrounding array).
- *  Returns number of bytes written (excluding NUL). */
-int dominance_override_serialize_json(const DominanceOverride *o, char *buf, int cap);
 
 /* ── Island structures ────────────────────────────────────────────────────── */
 typedef enum {
@@ -480,6 +445,15 @@ typedef struct {
     bool     claim_targets_fortress; /* STRUCT_CLAIM_FLAG: legacy — kept for protocol compat (currently always false in new flow) */
     uint8_t  claim_state;         /* STRUCT_CLAIM_FLAG: CLAIM_FLAG_STATE_* */
     float    claim_grace_ms;      /* STRUCT_CLAIM_FLAG: accumulator for the 5 s init/grace before CLAIMING or REVERSING starts */
+    /* ── Per-structure dominance list ──────────────────────────────────────
+     * Ordered list of OTHER-company structure IDs that dominate this
+     * structure on the overlap area of their claim radii. Index 0 = top
+     * (strongest dominator). Pushed by successful claim flag captures:
+     * each victim gets the captor's "challenger" structure IDs prepended.
+     * Newly placed structures start with an empty list. */
+#define MAX_DOMINATORS 32
+    uint32_t dominators[MAX_DOMINATORS];
+    uint8_t  dominator_count;
     /* 64-byte string last (avoids breaking alignment of above) */
     char     placer_name[64];     /* display name of builder */
 } PlacedStructure;

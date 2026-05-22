@@ -209,12 +209,9 @@ static uint32_t island_dominant_company(uint32_t island_id) {
         bool dominates_all = true;
         for (int b = 0; b < nf; b++) {
             if (a == b) continue;
-            /* Override wins outright. */
-            if (dominance_override_check((uint8_t)island_id, forts[a].co, forts[b].co)) continue;
-            if (dominance_override_check((uint8_t)island_id, forts[b].co, forts[a].co)) {
-                dominates_all = false; break;
-            }
-            /* Natural rule: earlier (lower id) fort wins. */
+            /* Natural rule: earlier (lower id) fort wins. Per-structure
+             * dominator promotions from claim captures are evaluated in
+             * the client renderer (territory carving), not here. */
             if (forts[a].id < forts[b].id) continue;
             dominates_all = false; break;
         }

@@ -652,10 +652,10 @@ export class NetworkManager {
   /** Fired when a claiming flag's progress changes. */
   public onClaimFlagProgress: ((structId: number, progressMs: number, contested: boolean, targetsFortress: boolean, state?: number, graceMs?: number, graceTotal?: number, total?: number) => void) | null = null;
   public onTerritoryFlipped: ((flagId: number, orphanedStructureId: number, oldCompanyId: number, newCompanyId: number, islandId: number) => void) | null = null;
-  /** Fired when the server records or refreshes a dominance override (claim flag captured an area). */
-  public onDominanceOverride: ((islandId: number, dominantCo: number, subordinateCo: number, domCircles: Array<[number, number, number]>, subCircles: Array<[number, number, number]>) => void) | null = null;
-  /** Fired with the full list of active dominance overrides on join. */
-  public onDominanceOverridesList: ((overrides: Array<{ islandId: number; dominantCo: number; subordinateCo: number; domCircles: Array<[number, number, number]>; subCircles: Array<[number, number, number]> }>) => void) | null = null;
+  /** Fired when the server updates a structure's per-structure dominance list
+   * (after a successful claim flag capture). Replaces the previous dominators
+   * array for the named structure id. */
+  public onStructureDominators: ((structureId: number, dominators: number[]) => void) | null = null;
   /** Fired when a claiming flag finishes capturing territory. */
   public onTerritoryCaptured: ((islandId: number, newCompanyId: number) => void) | null = null;
   /** Fired when a Company Fortress build timer updates (≈1/s). */
@@ -2625,6 +2625,7 @@ export class NetworkManager {
           claimState:            typeof s.claim_state === 'number' ? s.claim_state : undefined,
           claimGraceMs:          typeof s.claim_grace_ms === 'number' ? s.claim_grace_ms : undefined,
           claimOrphaned:         s.claim_orphaned        === true,
+          dominators:            Array.isArray(s.dominators) ? (s.dominators as number[]) : [],
           fortressBuildProgress: typeof s.fortress_build_progress === 'number' ? s.fortress_build_progress : undefined,
           fortressComplete:      s.fortress_complete       === true,
           fortressContested:     s.fortress_contested      === true,
@@ -2734,28 +2735,10 @@ export class NetworkManager {
         );
         break;
 
-      case 'dominance_override':
-        console.log('[DOM-OVR] recv dominance_override', message);
-        this.onDominanceOverride?.(
-          message.island_id      ?? 0,
-          message.dominant_co    ?? 0,
-          message.subordinate_co ?? 0,
-          (message.dom_circles ?? []) as Array<[number, number, number]>,
-          (message.sub_circles ?? []) as Array<[number, number, number]>,
-        );
-        break;
-
-      case 'DOMINANCE_OVERRIDES': {
-        console.log('[DOM-OVR] recv DOMINANCE_OVERRIDES snapshot', message);
-        const list: Array<{ islandId: number; dominantCo: number; subordinateCo: number; domCircles: Array<[number, number, number]>; subCircles: Array<[number, number, number]> }> =
-          (message.overrides ?? []).map((o: any) => ({
-            islandId:      o.island_id      ?? 0,
-            dominantCo:    o.dominant_co    ?? 0,
-            subordinateCo: o.subordinate_co ?? 0,
-            domCircles:    (o.dom_circles ?? []) as Array<[number, number, number]>,
-            subCircles:    (o.sub_circles ?? []) as Array<[number, number, number]>,
-          }));
-        this.onDominanceOverridesList?.(list);
+      case 'structure_dominators': {
+        const sid = (message.structure_id ?? 0) as number;
+        const list = (message.dominators ?? []) as number[];
+        this.onStructureDominators?.(sid, list);
         break;
       }
 

@@ -170,13 +170,6 @@ export class RenderSystem {
   private _claimOverlayCache: Map<string, { connectedIds: Set<number>; inactiveIds: Set<number> }> = new Map();
   private _claimOverlayDirty = true;
   /**
-   * Dominance overrides from successful claim flag captures.
-   * Key: `${islandId}_${dominantCo}_${subordinateCo}`. While present, the
-   * dominantCo wins the per-pair dominance rule against subordinateCo on that
-   * island, regardless of CF/FlagFort/age.
-   */
-  private _dominanceOverrides: Map<string, { islandId: number; dominantCo: number; subordinateCo: number; domCircles: Array<{ x: number; y: number; r: number }>; subCircles: Array<{ x: number; y: number; r: number }> }> = new Map();
-  /**
    * Pre-computed wall segments — rebuilt whenever placedStructures changes.
    * Each entry: [x1, y1, x2, y2] in world space.  Used for O(1)-per-frame
    * ceiling-transparency ray tests instead of recomputing each draw call.
@@ -1858,74 +1851,40 @@ export class RenderSystem {
     }
   }
 
-  /** Record a dominance override (claim flag captured a contested area). */
-  addDominanceOverride(
-    islandId: number,
-    dominantCo: number,
-    subordinateCo: number,
-    domCircles: Array<[number, number, number]> = [],
-    subCircles: Array<[number, number, number]> = [],
-  ): void {
-    if (!dominantCo || !subordinateCo || dominantCo === subordinateCo) return;
-    // Remove the reverse override if present (dominance just flipped back).
-    this._dominanceOverrides.delete(`${islandId}_${subordinateCo}_${dominantCo}`);
-    const key = `${islandId}_${dominantCo}_${subordinateCo}`;
-    const existing = this._dominanceOverrides.get(key);
-    const dom = (existing?.domCircles ?? []).slice();
-    const sub = (existing?.subCircles ?? []).slice();
-    const eps = 0.5;
-    const pushUnique = (arr: Array<{ x: number; y: number; r: number }>, c: { x: number; y: number; r: number }) => {
-      for (const e of arr) {
-        if (Math.abs(e.x - c.x) < eps && Math.abs(e.y - c.y) < eps && Math.abs(e.r - c.r) < eps) return;
-      }
-      arr.push(c);
+  /** Update a structure's dominators list after a successful claim flag capture. */
+  setStructureDominators(structureId: number, dominators: number[]): void {
+    const s = this.placedStructures.find(p => p.id === structureId);
+    if (!s) return;
+    s.dominators = dominators.slice();
+    this._claimOverlayDirty = true;
+  }
+
+  /** True if the point (px, py) lies inside the overlap of one of my own
+   * structures' claim radii with a structure that has me as a dominator
+   * (i.e. my company has carved that overlap out of an enemy structure). */
+  private pointInMyDominatedArea(islandId: number, myCompany: number, px: number, py: number): boolean {
+    if (!myCompany) return false;
+    const radiusOf = (s: PlacedStructure): number => {
+      if (s.type === 'flag_fort' || s.type === 'company_fortress') return 600;
+      return 400;
     };
-    for (const [x, y, r] of domCircles) pushUnique(dom, { x, y, r });
-    for (const [x, y, r] of subCircles) pushUnique(sub, { x, y, r });
-    this._dominanceOverrides.set(key, { islandId, dominantCo, subordinateCo, domCircles: dom, subCircles: sub });
-    (this as any)._dovrDebugLogged = false;
-    console.log('[DOM-OVR] add', { islandId, dominantCo, subordinateCo, dom: dom.length, sub: sub.length, domCircles, subCircles });
-    this._claimOverlayDirty = true;
-  }
-
-  /** Replace the full set of dominance overrides (used on join snapshot). */
-  setDominanceOverrides(
-    list: Array<{
-      islandId: number; dominantCo: number; subordinateCo: number;
-      domCircles: Array<[number, number, number]>;
-      subCircles: Array<[number, number, number]>;
-    }>,
-  ): void {
-    this._dominanceOverrides.clear();
-    for (const o of list) {
-      if (!o.dominantCo || !o.subordinateCo || o.dominantCo === o.subordinateCo) continue;
-      const key = `${o.islandId}_${o.dominantCo}_${o.subordinateCo}`;
-      this._dominanceOverrides.set(key, {
-        islandId:      o.islandId,
-        dominantCo:    o.dominantCo,
-        subordinateCo: o.subordinateCo,
-        domCircles:    (o.domCircles ?? []).map(([x, y, r]) => ({ x, y, r })),
-        subCircles:    (o.subCircles ?? []).map(([x, y, r]) => ({ x, y, r })),
-      });
-    }
-    this._claimOverlayDirty = true;
-  }
-
-  /** True if the point (px, py) lies inside the captured region of an active
-   *  override on `islandId` where `dominantCo` is the dominator. */
-  private pointInOverrideCapture(islandId: number, dominantCo: number, px: number, py: number): boolean {
-    for (const o of this._dominanceOverrides.values()) {
-      if (o.islandId !== islandId) continue;
-      if (o.dominantCo !== dominantCo) continue;
-      let inDom = false;
-      for (const c of o.domCircles) {
-        const dx = px - c.x, dy = py - c.y;
-        if (dx * dx + dy * dy <= c.r * c.r) { inDom = true; break; }
-      }
-      if (!inDom) continue;
-      for (const c of o.subCircles) {
-        const dx = px - c.x, dy = py - c.y;
-        if (dx * dx + dy * dy <= c.r * c.r) return true;
+    for (const victim of this.placedStructures) {
+      if (!victim.dominators || victim.dominators.length === 0) continue;
+      if (victim.islandId !== islandId) continue;
+      if (victim.companyId === myCompany) continue;
+      if (victim.claimOrphaned) continue;
+      const vr = radiusOf(victim);
+      const dvx = px - victim.x, dvy = py - victim.y;
+      if (dvx * dvx + dvy * dvy > vr * vr) continue;
+      for (const dId of victim.dominators) {
+        const d = this.placedStructures.find(p => p.id === dId);
+        if (!d) continue;
+        if (d.companyId !== myCompany) continue;
+        if (d.claimOrphaned) continue;
+        if (d.islandId !== islandId) continue;
+        const dr = radiusOf(d);
+        const ddx = px - d.x, ddy = py - d.y;
+        if (ddx * ddx + ddy * ddy <= dr * dr) return true;
       }
     }
     return false;
@@ -6012,7 +5971,7 @@ export class RenderSystem {
         // Region-based override: cursor inside a captured area where I'm
         // the dominator counts as my territory, regardless of fort order.
         if (!inMyDominantArea && cursorIsl !== 0 && myCompany) {
-          if (this.pointInOverrideCapture(cursorIsl, myCompany, mx, my)) {
+          if (this.pointInMyDominatedArea(cursorIsl, myCompany, mx, my)) {
             inMyDominantArea = true;
           }
         }
@@ -9613,69 +9572,52 @@ export class RenderSystem {
       }
     }
 
-    // ── Pass 3: dominance-override captured regions ─────────────────────────
-    // Each override carries a frozen snapshot of (dominator-claim-union) ∩
-    // (subordinate-claim-union) at claim time. We paint that captured region
-    // in the dominator's colour ON TOP of the per-company blobs from Pass 2,
-    // so a captured area visually transfers to the dominator. Crucially the
-    // snapshot does NOT include structures placed after the capture, so the
-    // dominator can't extend the takeover just by building more forts.
-    if (this._dominanceOverrides.size > 0) {
-      if (!(this as any)._dovrDebugLogged) {
-        console.log('[DOM-OVR] Pass3 has', this._dominanceOverrides.size, 'overrides',
-          Array.from(this._dominanceOverrides.values()).map(o => ({
-            isl: o.islandId, dom: o.dominantCo, sub: o.subordinateCo,
-            d: o.domCircles.length, s: o.subCircles.length,
-          })));
-        (this as any)._dovrDebugLogged = true;
-      }
+    // ── Pass 3: per-structure dominator carveouts ───────────────────────────
+    // For each structure X with a non-empty `dominators` list, repaint the
+    // overlap (X.circle ∩ D.circle) of every active dominator D in D's
+    // company colour. Higher-priority dominators (smaller index) win where
+    // their overlaps coincide — achieved by drawing the list back-to-front.
+    {
+      const radiusOf = (s: PlacedStructure): number => {
+        if (s.type === 'flag_fort' || s.type === 'company_fortress') return 600;
+        return 400;
+      };
       const cvs2 = ctx.canvas;
       for (const isl of this.islands) {
         const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
-        for (const o of this._dominanceOverrides.values()) {
-          if (o.islandId !== isl.id) continue;
-          if (o.domCircles.length === 0 || o.subCircles.length === 0) continue;
-          const color = this._companyColor(o.dominantCo);
-          for (const off of wrapOffsets) {
-            // Build dom-union mask, then intersect with sub-union via
-            // destination-in to get the captured region.
-            const mask = new OffscreenCanvas(cvs2.width, cvs2.height);
-            const mc = mask.getContext('2d')!;
-            mc.fillStyle = color;
-            for (const c of o.domCircles) {
-              const sp = camera.worldToScreen(Vec2.from(c.x + off.dx, c.y + off.dy));
-              const sr = c.r * zoom;
-              if (sr <= 0) continue;
-              mc.beginPath(); mc.arc(sp.x, sp.y, sr, 0, Math.PI * 2); mc.fill();
+        for (const X of this.placedStructures) {
+          if (!X.dominators || X.dominators.length === 0) continue;
+          if (X.islandId !== isl.id) continue;
+          if (X.claimOrphaned) continue;
+          const xr = radiusOf(X);
+          // Back-to-front so index 0 (top) overpaints the rest.
+          for (let k = X.dominators.length - 1; k >= 0; k--) {
+            const D = this.placedStructures.find(p => p.id === X.dominators![k]);
+            if (!D) continue;
+            if (D.companyId === X.companyId) continue;
+            if (D.claimOrphaned) continue;
+            if (D.islandId !== X.islandId) continue;
+            const dr = radiusOf(D);
+            const color = this._companyColor(D.companyId);
+            for (const off of wrapOffsets) {
+              const mask = new OffscreenCanvas(cvs2.width, cvs2.height);
+              const mc = mask.getContext('2d')!;
+              // X circle in dominator colour
+              mc.fillStyle = color;
+              const xs = camera.worldToScreen(Vec2.from(X.x + off.dx, X.y + off.dy));
+              const xsr = xr * zoom;
+              if (xsr <= 0) continue;
+              mc.beginPath(); mc.arc(xs.x, xs.y, xsr, 0, Math.PI * 2); mc.fill();
+              // Intersect with D circle
+              mc.globalCompositeOperation = 'destination-in';
+              const ds = camera.worldToScreen(Vec2.from(D.x + off.dx, D.y + off.dy));
+              const dsr = dr * zoom;
+              if (dsr <= 0) continue;
+              mc.beginPath(); mc.arc(ds.x, ds.y, dsr, 0, Math.PI * 2); mc.fill();
+              ctx.globalAlpha = (D.companyId === this._localCompanyId) ? 0.45 : 0.30;
+              ctx.drawImage(mask, 0, 0);
+              ctx.globalAlpha = 1.0;
             }
-            mc.globalCompositeOperation = 'destination-in';
-            for (const c of o.subCircles) {
-              const sp = camera.worldToScreen(Vec2.from(c.x + off.dx, c.y + off.dy));
-              const sr = c.r * zoom;
-              if (sr <= 0) continue;
-              mc.beginPath(); mc.arc(sp.x, sp.y, sr, 0, Math.PI * 2); mc.fill();
-            }
-            // Fill (semi-transparent dominator colour). TEMP DEBUG: alpha
-            // boosted so captured region is unmistakeable.
-            ctx.globalAlpha = (o.dominantCo === myCompany) ? 0.55 : 0.40;
-            ctx.drawImage(mask, 0, 0);
-            ctx.globalAlpha = 1.0;
-            // TEMP DEBUG: also stroke the source circles so you can see what
-            // was snapshotted vs. what intersected.
-            ctx.save();
-            ctx.lineWidth = Math.max(2, 2 * zoom);
-            ctx.setLineDash([8, 6]);
-            ctx.strokeStyle = color;
-            for (const c of o.domCircles) {
-              const sp = camera.worldToScreen(Vec2.from(c.x + off.dx, c.y + off.dy));
-              ctx.beginPath(); ctx.arc(sp.x, sp.y, c.r * zoom, 0, Math.PI * 2); ctx.stroke();
-            }
-            ctx.strokeStyle = 'rgba(255,255,255,0.7)';
-            for (const c of o.subCircles) {
-              const sp = camera.worldToScreen(Vec2.from(c.x + off.dx, c.y + off.dy));
-              ctx.beginPath(); ctx.arc(sp.x, sp.y, c.r * zoom, 0, Math.PI * 2); ctx.stroke();
-            }
-            ctx.restore();
           }
         }
       }

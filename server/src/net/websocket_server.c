@@ -37,6 +37,19 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/* Format a PlacedStructure's dominators list as a JSON fragment, e.g.
+ * `,"dominators":[12,7,3]`. Writes empty string if the list is empty (so
+ * the field is omitted from the JSON object). Returns bytes written. */
+static int format_dominators_extra(const PlacedStructure *s, char *buf, int cap) {
+    if (!s || s->dominator_count == 0) { if (cap > 0) buf[0] = '\0'; return 0; }
+    int n = snprintf(buf, cap, ",\"dominators\":[");
+    for (int i = 0; i < s->dominator_count && n < cap - 16; i++) {
+        n += snprintf(buf + n, cap - n, "%s%u", i ? "," : "", s->dominators[i]);
+    }
+    n += snprintf(buf + n, cap - n, "]");
+    return n;
+}
+
 // WebSocket magic key for handshake
 #define WS_MAGIC_KEY "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 #define WS_MAX_CLIENTS 100
@@ -2315,6 +2328,8 @@ int websocket_server_update(struct Sim* sim) {
                                         char hs_sy_extra[256] = "";
                                         char hs_cannon_extra[64] = "";
                                         char hs_claim_extra[192] = "";
+                                        char hs_dom_extra[512] = "";
+                                        format_dominators_extra(&placed_structures[si], hs_dom_extra, sizeof(hs_dom_extra));
                                         if (hs_is_sy) {
                                             char hs_mj[128] = "[]";
                                             if (placed_structures[si].modules_placed) {
@@ -2367,7 +2382,7 @@ int websocket_server_update(struct Sim* sim) {
                                                           "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                           "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                           "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-                                                          ",\"rotation\":%.2f%s%s%s%s}",
+                                                          ",\"rotation\":%.2f%s%s%s%s%s}",
                                                           hs_sfirst ? "" : ",",
                                                           placed_structures[si].id, hs_stype,
                                                           placed_structures[si].island_id,
@@ -2380,7 +2395,8 @@ int websocket_server_update(struct Sim* sim) {
                                                           hs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
                                                           hs_sy_extra,
                                                           hs_cannon_extra,
-                                                          hs_claim_extra);
+                                                          hs_claim_extra,
+                                                          hs_dom_extra);
                                             hs_sfirst = false;
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp, "]}");
@@ -2392,28 +2408,6 @@ int websocket_server_update(struct Sim* sim) {
                                             send(client->fd, hs_sf, hs_sflen, 0);
                                         log_info("📦 Sent STRUCTURES (%u) to JSON-handshake player %u",
                                                  placed_structure_count, client->player_id);
-                                    }
-
-                                    // Send any active dominance overrides
-                                    {
-                                        static char hs_dov_buf[131072];
-                                        int  hs_dvp = snprintf(hs_dov_buf, sizeof(hs_dov_buf),
-                                            "{\"type\":\"DOMINANCE_OVERRIDES\",\"overrides\":[");
-                                        bool hs_dvf = true;
-                                        for (int oi = 0; oi < dominance_override_count; oi++) {
-                                            DominanceOverride *o = &dominance_overrides[oi];
-                                            if (!o->active) continue;
-                                            if (!hs_dvf) hs_dvp += snprintf(hs_dov_buf + hs_dvp, sizeof(hs_dov_buf) - hs_dvp, ",");
-                                            hs_dvp += dominance_override_serialize_json(o, hs_dov_buf + hs_dvp, sizeof(hs_dov_buf) - hs_dvp);
-                                            hs_dvf = false;
-                                        }
-                                        hs_dvp += snprintf(hs_dov_buf + hs_dvp, sizeof(hs_dov_buf) - hs_dvp, "]}");
-                                        static char hs_dovf[133120];
-                                        size_t hs_dovflen = websocket_create_frame(
-                                            WS_OPCODE_TEXT, hs_dov_buf, (size_t)hs_dvp,
-                                            hs_dovf, sizeof(hs_dovf));
-                                        if (hs_dovflen > 0 && hs_dovflen < sizeof(hs_dovf))
-                                            send(client->fd, hs_dovf, hs_dovflen, 0);
                                     }
 
                                     // Skip normal response sending since we already sent
@@ -6700,6 +6694,8 @@ int websocket_server_update(struct Sim* sim) {
                                         char sy_extra_s[256] = "";
                                         char cannon_extra_s[64] = "";
                                         char claim_extra_s[192] = "";
+                                        char dom_extra_s[512] = "";
+                                        format_dominators_extra(&placed_structures[si], dom_extra_s, sizeof(dom_extra_s));
                                         if (is_sy_s) {
                                             char smj[128] = "[]";
                                             if (placed_structures[si].modules_placed) {
@@ -6752,7 +6748,7 @@ int websocket_server_update(struct Sim* sim) {
                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                          "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-                                                         ",\"rotation\":%.2f%s%s%s%s}",
+                                                         ",\"rotation\":%.2f%s%s%s%s%s}",
                                                          sfirst ? "" : ",",
                                                          placed_structures[si].id,
                                                          stype_str,
@@ -6767,7 +6763,8 @@ int websocket_server_update(struct Sim* sim) {
                                                          is_door_s ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
                                                          sy_extra_s,
                                                          cannon_extra_s,
-                                                         claim_extra_s);
+                                                         claim_extra_s,
+                                                         dom_extra_s);
                                         sfirst = false;
                                     }
                                     spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos, "]}");
@@ -6776,27 +6773,6 @@ int websocket_server_update(struct Sim* sim) {
                                         WS_OPCODE_TEXT, structs_buf, (size_t)spos, sf, sizeof(sf));
                                     if (sflen > 0 && sflen < sizeof(sf))
                                         send(client->fd, sf, sflen, 0);
-                                }
-                                /* Send any active dominance overrides */
-                                {
-                                    static char j_dov_buf[131072];
-                                    int  j_dvp = snprintf(j_dov_buf, sizeof(j_dov_buf),
-                                        "{\"type\":\"DOMINANCE_OVERRIDES\",\"overrides\":[");
-                                    bool j_dvf = true;
-                                    for (int oi = 0; oi < dominance_override_count; oi++) {
-                                        DominanceOverride *o = &dominance_overrides[oi];
-                                        if (!o->active) continue;
-                                        if (!j_dvf) j_dvp += snprintf(j_dov_buf + j_dvp, sizeof(j_dov_buf) - j_dvp, ",");
-                                        j_dvp += dominance_override_serialize_json(o, j_dov_buf + j_dvp, sizeof(j_dov_buf) - j_dvp);
-                                        j_dvf = false;
-                                    }
-                                    j_dvp += snprintf(j_dov_buf + j_dvp, sizeof(j_dov_buf) - j_dvp, "]}");
-                                    static char j_dovf[133120];
-                                    size_t j_dovflen = websocket_create_frame(
-                                        WS_OPCODE_TEXT, j_dov_buf, (size_t)j_dvp,
-                                        j_dovf, sizeof(j_dovf));
-                                    if (j_dovflen > 0 && j_dovflen < sizeof(j_dovf))
-                                        send(client->fd, j_dovf, j_dovflen, 0);
                                 }
                             }
                             handled = true;
@@ -6833,6 +6809,8 @@ int websocket_server_update(struct Sim* sim) {
                                     char gs_sy_extra[256] = "";
                                     char gs_cannon_extra[64] = "";
                                     char gs_claim_extra[192] = "";
+                                    char gs_dom_extra[512] = "";
+                                    format_dominators_extra(&placed_structures[si], gs_dom_extra, sizeof(gs_dom_extra));
                                     if (gs_is_sy) {
                                         char gmj[128] = "[]";
                                         if (placed_structures[si].modules_placed) {
@@ -6885,7 +6863,7 @@ int websocket_server_update(struct Sim* sim) {
                                                    "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                    "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                    "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-                                                                                                     ",\"rotation\":%.2f%s%s%s%s}",
+                                                                                                     ",\"rotation\":%.2f%s%s%s%s%s}",
                                                    gfirst ? "" : ",",
                                                    placed_structures[si].id, gs_type,
                                                    placed_structures[si].island_id,
@@ -6898,7 +6876,8 @@ int websocket_server_update(struct Sim* sim) {
                                                    gs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
                                                                                                      gs_sy_extra,
                                                                                                      gs_cannon_extra,
-                                                                                                     gs_claim_extra);
+                                                                                                     gs_claim_extra,
+                                                                                                     gs_dom_extra);
                                     gfirst = false;
                                 }
                                 gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp, "]}");
@@ -6909,27 +6888,6 @@ int websocket_server_update(struct Sim* sim) {
                                     send(client->fd, gf, gflen, 0);
                                 log_info("📦 Sent STRUCTURES (%u) on GET_STRUCTURES to player %u",
                                          placed_structure_count, client->player_id);
-                            }
-                            /* Send any active dominance overrides */
-                            {
-                                static char gs_dov_buf[131072];
-                                int  gs_dvp = snprintf(gs_dov_buf, sizeof(gs_dov_buf),
-                                    "{\"type\":\"DOMINANCE_OVERRIDES\",\"overrides\":[");
-                                bool gs_dvf = true;
-                                for (int oi = 0; oi < dominance_override_count; oi++) {
-                                    DominanceOverride *o = &dominance_overrides[oi];
-                                    if (!o->active) continue;
-                                    if (!gs_dvf) gs_dvp += snprintf(gs_dov_buf + gs_dvp, sizeof(gs_dov_buf) - gs_dvp, ",");
-                                    gs_dvp += dominance_override_serialize_json(o, gs_dov_buf + gs_dvp, sizeof(gs_dov_buf) - gs_dvp);
-                                    gs_dvf = false;
-                                }
-                                gs_dvp += snprintf(gs_dov_buf + gs_dvp, sizeof(gs_dov_buf) - gs_dvp, "]}");
-                                static char gs_dovf[133120];
-                                size_t gs_dovflen = websocket_create_frame(
-                                    WS_OPCODE_TEXT, gs_dov_buf, (size_t)gs_dvp,
-                                    gs_dovf, sizeof(gs_dovf));
-                                if (gs_dovflen > 0 && gs_dovflen < sizeof(gs_dovf))
-                                    send(client->fd, gs_dovf, gs_dovflen, 0);
                             }
                             strcpy(response, "{\"type\":\"ack\"}");
                             handled = true;

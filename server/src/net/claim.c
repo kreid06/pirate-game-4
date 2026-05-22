@@ -43,102 +43,6 @@
 IslandClaim island_claims[MAX_ISLAND_CLAIMS];
 int         island_claim_count = 0;
 
-/* ── Dominance overrides ─────────────────────────────────────────────────── */
-
-DominanceOverride dominance_overrides[MAX_DOMINANCE_OVERRIDES];
-int               dominance_override_count = 0;
-
-bool dominance_override_check(uint8_t island_id, uint32_t a_co, uint32_t b_co) {
-    for (int i = 0; i < dominance_override_count; i++) {
-        DominanceOverride *o = &dominance_overrides[i];
-        if (!o->active) continue;
-        if (o->island_id == island_id &&
-            o->dominant_co == a_co &&
-            o->subordinate_co == b_co) return true;
-    }
-    return false;
-}
-
-int dominance_override_serialize_json(const DominanceOverride *o, char *buf, int cap) {
-    int n = 0;
-    n += snprintf(buf + n, cap - n,
-                  "{\"island_id\":%u,\"dominant_co\":%u,\"subordinate_co\":%u,"
-                  "\"dom_circles\":[",
-                  o->island_id, o->dominant_co, o->subordinate_co);
-    for (int i = 0; i < o->dom_circle_count && n < cap - 64; i++) {
-        n += snprintf(buf + n, cap - n, "%s[%.1f,%.1f,%.1f]",
-                      i ? "," : "",
-                      o->dom_circles[i].cx, o->dom_circles[i].cy, o->dom_circles[i].r);
-    }
-    n += snprintf(buf + n, cap - n, "],\"sub_circles\":[");
-    for (int i = 0; i < o->sub_circle_count && n < cap - 64; i++) {
-        n += snprintf(buf + n, cap - n, "%s[%.1f,%.1f,%.1f]",
-                      i ? "," : "",
-                      o->sub_circles[i].cx, o->sub_circles[i].cy, o->sub_circles[i].r);
-    }
-    n += snprintf(buf + n, cap - n, "]}");
-    return n;
-}
-
-void dominance_override_add(uint8_t island_id, uint32_t dominant_co, uint32_t subordinate_co,
-                            const OverrideCircle *dom_circ, int dom_n,
-                            const OverrideCircle *sub_circ, int sub_n) {
-    if (dominant_co == 0 || subordinate_co == 0 || dominant_co == subordinate_co) return;
-    /* If the reverse override exists, remove it (dominance just flipped back). */
-    for (int i = 0; i < dominance_override_count; i++) {
-        DominanceOverride *o = &dominance_overrides[i];
-        if (o->active && o->island_id == island_id &&
-            o->dominant_co == subordinate_co && o->subordinate_co == dominant_co) {
-            o->active = false;
-        }
-    }
-    /* Find existing record (append circles) or a free slot. */
-    DominanceOverride *slot = NULL;
-    for (int i = 0; i < dominance_override_count; i++) {
-        DominanceOverride *o = &dominance_overrides[i];
-        if (o->active && o->island_id == island_id &&
-            o->dominant_co == dominant_co && o->subordinate_co == subordinate_co) {
-            slot = o; break;
-        }
-    }
-    if (!slot) {
-        for (int i = 0; i < dominance_override_count; i++) {
-            if (!dominance_overrides[i].active) { slot = &dominance_overrides[i]; break; }
-        }
-        if (!slot) {
-            if (dominance_override_count >= MAX_DOMINANCE_OVERRIDES) return;
-            slot = &dominance_overrides[dominance_override_count++];
-        }
-        slot->active         = true;
-        slot->island_id      = island_id;
-        slot->dominant_co    = dominant_co;
-        slot->subordinate_co = subordinate_co;
-        slot->dom_circle_count = 0;
-        slot->sub_circle_count = 0;
-    }
-    /* Append circles, deduping on (cx, cy, r). */
-    for (int i = 0; i < dom_n && slot->dom_circle_count < MAX_OVERRIDE_CIRCLES; i++) {
-        bool dup = false;
-        for (int k = 0; k < slot->dom_circle_count; k++) {
-            OverrideCircle *e = &slot->dom_circles[k];
-            if (e->cx == dom_circ[i].cx && e->cy == dom_circ[i].cy && e->r == dom_circ[i].r) {
-                dup = true; break;
-            }
-        }
-        if (!dup) slot->dom_circles[slot->dom_circle_count++] = dom_circ[i];
-    }
-    for (int i = 0; i < sub_n && slot->sub_circle_count < MAX_OVERRIDE_CIRCLES; i++) {
-        bool dup = false;
-        for (int k = 0; k < slot->sub_circle_count; k++) {
-            OverrideCircle *e = &slot->sub_circles[k];
-            if (e->cx == sub_circ[i].cx && e->cy == sub_circ[i].cy && e->r == sub_circ[i].r) {
-                dup = true; break;
-            }
-        }
-        if (!dup) slot->sub_circles[slot->sub_circle_count++] = sub_circ[i];
-    }
-}
-
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
 static inline float dist2(float ax, float ay, float bx, float by) {
@@ -633,46 +537,41 @@ void claim_tick(uint32_t delta_ms) {
             uint32_t old_co      = src_enemy->company_id;
             uint8_t  isl         = src_enemy->island_id;
 
-            /* Snapshot the dominator's and subordinate's claim source circles
-             * on this island BEFORE orphaning anything. The captured region —
-             * used by the client to render territory transfer — is the
-             * intersection of these two unions. Newly placed structures (by
-             * either side) after the claim are NOT included, so the dominator
-             * cannot extend the takeover by placing more forts. */
-            OverrideCircle dom_circ[MAX_OVERRIDE_CIRCLES];
-            OverrideCircle sub_circ[MAX_OVERRIDE_CIRCLES];
-            int dom_n = 0, sub_n = 0;
-            /* The claim flag itself defines the dominator's "snippet" — its
-             * claim radius is exactly the area being captured. Include it
-             * (even though it'll be consumed below). */
-            if (dom_n < MAX_OVERRIDE_CIRCLES) {
-                dom_circ[dom_n].cx = s->x; dom_circ[dom_n].cy = s->y;
-                dom_circ[dom_n].r  = struct_claim_radius(s->type);
-                dom_n++;
-            }
+            /* ── Compute victims & challengers BEFORE orphaning ─────────────
+             * victims:    non-orphaned enemy structures on this island whose
+             *             claim radius intersects the claim flag's radius
+             *             (= the structures being challenged).
+             * challengers: non-orphaned own-company structures on this island
+             *             (other than the claim flag itself) whose claim
+             *             radius intersects the claim flag's radius
+             *             (= the structures championing the capture).
+             * On success, prepend each challenger ID to each victim's
+             * `dominators` list. This is what makes the visual capture
+             * persistent without letting the captor extend it via new
+             * placements (new structures aren't in any victim's list). */
+            float flag_x = s->x, flag_y = s->y;
+            float flag_r = struct_claim_radius(s->type);
+            uint32_t victim_ids[MAX_PLACED_STRUCTURES];
+            uint32_t chall_ids[MAX_PLACED_STRUCTURES];
+            int victim_n = 0, chall_n = 0;
             for (uint32_t i = 0; i < placed_structure_count; i++) {
                 PlacedStructure *ps = &placed_structures[i];
                 if (!ps->active) continue;
                 if (ps->claim_orphaned) continue;
                 if (ps->island_id != isl) continue;
-                /* Claim flag itself already added above. */
                 if (ps->id == s->id) continue;
-                if (ps->company_id == s->company_id) {
-                    if (dom_n < MAX_OVERRIDE_CIRCLES) {
-                        dom_circ[dom_n].cx = ps->x; dom_circ[dom_n].cy = ps->y;
-                        dom_circ[dom_n].r  = struct_claim_radius(ps->type);
-                        dom_n++;
-                    }
-                } else if (ps->company_id == old_co) {
-                    if (sub_n < MAX_OVERRIDE_CIRCLES) {
-                        sub_circ[sub_n].cx = ps->x; sub_circ[sub_n].cy = ps->y;
-                        sub_circ[sub_n].r  = struct_claim_radius(ps->type);
-                        sub_n++;
-                    }
+                float pr = struct_claim_radius(ps->type);
+                float dx = ps->x - flag_x, dy = ps->y - flag_y;
+                float thresh = flag_r + pr;
+                if (dx * dx + dy * dy > thresh * thresh) continue;
+                if (ps->company_id == old_co) {
+                    if (victim_n < MAX_PLACED_STRUCTURES) victim_ids[victim_n++] = ps->id;
+                } else if (ps->company_id == s->company_id) {
+                    if (chall_n < MAX_PLACED_STRUCTURES) chall_ids[chall_n++] = ps->id;
                 }
             }
-            log_info("📸 Claim snapshot: dom_circles=%d, sub_circles=%d (island %u, dom_co=%u, sub_co=%u)",
-                     dom_n, sub_n, isl, s->company_id, old_co);
+            log_info("📸 Claim capture: %d victim(s), %d challenger(s) on island %u (dom_co=%u → sub_co=%u)",
+                     victim_n, chall_n, isl, s->company_id, old_co);
 
             src_enemy->claim_orphaned = true;
 
@@ -701,36 +600,64 @@ void claim_tick(uint32_t delta_ms) {
             log_info("🏴 Claim Flag #%u captured contested area: structure #%u (company %u) orphaned by company %u",
                      s->id, orphaned_id, old_co, s->company_id);
 
-            /* Record dominance override (with captured snapshot) */
-            dominance_override_add(isl, s->company_id, old_co,
-                                   dom_circ, dom_n, sub_circ, sub_n);
-            {
-                /* Find the override we just stored/appended-to and broadcast it. */
-                for (int oi = 0; oi < dominance_override_count; oi++) {
-                    DominanceOverride *o = &dominance_overrides[oi];
-                    if (!o->active) continue;
-                    if (o->island_id != isl) continue;
-                    if (o->dominant_co != s->company_id) continue;
-                    if (o->subordinate_co != old_co) continue;
-                    char omsg[16384];
-                    int  on = snprintf(omsg, sizeof(omsg), "{\"type\":\"dominance_override\",");
-                    /* Strip the leading '{' of the serialized object and merge. */
-                    char inner[16000];
-                    int  inlen = dominance_override_serialize_json(o, inner, sizeof(inner));
-                    (void)inlen;
-                    /* inner starts with '{' — skip it. */
-                    on += snprintf(omsg + on, sizeof(omsg) - on, "%s", inner + 1);
-                    websocket_server_broadcast(omsg);
-                    break;
+            /* ── Promote each challenger above every victim in the victim's
+             *    `dominators` list (dedupe), then broadcast updates. */
+            for (int vi = 0; vi < victim_n; vi++) {
+                PlacedStructure *victim = NULL;
+                for (uint32_t k = 0; k < placed_structure_count; k++) {
+                    if (placed_structures[k].id == victim_ids[vi]) { victim = &placed_structures[k]; break; }
+                }
+                if (!victim) continue;
+
+                bool changed = false;
+                /* Prepend each challenger to the front of the dominators
+                 * list. Dedupe by removing the existing entry first; then
+                 * shift everything down and write at index 0. */
+                for (int ci = 0; ci < chall_n; ci++) {
+                    uint32_t cid = chall_ids[ci];
+                    /* Remove existing occurrence, if any. */
+                    int found = -1;
+                    for (int k = 0; k < victim->dominator_count; k++) {
+                        if (victim->dominators[k] == cid) { found = k; break; }
+                    }
+                    if (found >= 0) {
+                        for (int k = found; k < victim->dominator_count - 1; k++) {
+                            victim->dominators[k] = victim->dominators[k + 1];
+                        }
+                        victim->dominator_count--;
+                    }
+                    /* Make room at index 0 (drop tail if at capacity). */
+                    int cap = victim->dominator_count;
+                    if (cap >= MAX_DOMINATORS) cap = MAX_DOMINATORS - 1;
+                    for (int k = cap; k > 0; k--) {
+                        victim->dominators[k] = victim->dominators[k - 1];
+                    }
+                    victim->dominators[0] = cid;
+                    if (victim->dominator_count < MAX_DOMINATORS) victim->dominator_count++;
+                    changed = true;
+                }
+
+                if (changed) {
+                    /* Broadcast the victim's new dominators list. */
+                    char dmsg[1024];
+                    int dp = snprintf(dmsg, sizeof(dmsg),
+                        "{\"type\":\"structure_dominators\",\"structure_id\":%u,\"dominators\":[",
+                        victim->id);
+                    for (int k = 0; k < victim->dominator_count; k++) {
+                        dp += snprintf(dmsg + dp, sizeof(dmsg) - dp,
+                                       "%s%u", k ? "," : "", victim->dominators[k]);
+                    }
+                    snprintf(dmsg + dp, sizeof(dmsg) - dp, "]}");
+                    websocket_server_broadcast(dmsg);
                 }
             }
 
             /* Consume the claim flag */
             s->active = false;
-            char dmsg[128];
-            snprintf(dmsg, sizeof(dmsg),
+            char dmsg2[128];
+            snprintf(dmsg2, sizeof(dmsg2),
                      "{\"type\":\"structure_demolished\",\"structure_id\":%u}", s->id);
-            websocket_server_broadcast(dmsg);
+            websocket_server_broadcast(dmsg2);
         } else if (do_destroy) {
             /* Reverse timer maxed — flag defeated. */
             log_info("🏴 Claim Flag #%u destroyed (timer reversed to full)", s->id);

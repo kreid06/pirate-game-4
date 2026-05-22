@@ -2130,11 +2130,8 @@ export class ClientApplication {
           'info', 4.0,
         );
       };
-      this.networkManager.onDominanceOverride = (islandId, dominantCo, subordinateCo, domCircles, subCircles) => {
-        this.renderSystem.addDominanceOverride(islandId, dominantCo, subordinateCo, domCircles, subCircles);
-      };
-      this.networkManager.onDominanceOverridesList = (list) => {
-        this.renderSystem.setDominanceOverrides(list);
+      this.networkManager.onStructureDominators = (structureId, dominators) => {
+        this.renderSystem.setStructureDominators(structureId, dominators);
       };
       this.networkManager.onFortressBuildProgress = (structId, companyId, islandId, progressMs, totalMs, contested) => {
         this.renderSystem.updateFortressBuildProgress(structId, companyId, islandId, progressMs, totalMs, contested);
