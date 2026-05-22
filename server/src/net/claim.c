@@ -465,7 +465,8 @@ void claim_tick(uint32_t delta_ms) {
 
         /* Apply state transitions:
          *  - going TO contest is immediate
-         *  - going TO claiming/reversing requires a 5 s grace accumulator */
+         *  - going TO claiming requires a 5 s grace accumulator
+         *  - REVERSING state is not used (enemy presence just stalls, not reverses) */
         if (desired == CLAIM_FLAG_STATE_CONTEST) {
             s->claim_state    = CLAIM_FLAG_STATE_CONTEST;
             s->claim_grace_ms = 0.0f;
@@ -480,19 +481,6 @@ void claim_tick(uint32_t delta_ms) {
                 }
             } else {
                 s->claim_state    = CLAIM_FLAG_STATE_CLAIMING_GRACE;
-                s->claim_grace_ms = 0.0f;
-            }
-        } else { /* REVERSING desired */
-            if (s->claim_state == CLAIM_FLAG_STATE_REVERSING) {
-                /* already counting up */
-            } else if (s->claim_state == CLAIM_FLAG_STATE_REVERSING_GRACE) {
-                s->claim_grace_ms += dt;
-                if (s->claim_grace_ms >= (float)CLAIM_FLAG_GRACE_MS) {
-                    s->claim_state    = CLAIM_FLAG_STATE_REVERSING;
-                    s->claim_grace_ms = 0.0f;
-                }
-            } else {
-                s->claim_state    = CLAIM_FLAG_STATE_REVERSING_GRACE;
                 s->claim_grace_ms = 0.0f;
             }
         }
