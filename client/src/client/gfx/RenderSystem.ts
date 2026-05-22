@@ -9469,6 +9469,13 @@ export class RenderSystem {
             // sits inside an enemy that dominates me). 1× width, own colour,
             // clipped to the dominant enemy's interior so only the contested
             // segment of my circle is drawn.
+            //
+            // To avoid stacking concentric dashed arcs when several of MY
+            // circles overlap inside the same contested region, we also
+            // subtract a slightly-inset union of own interiors. That erases
+            // dashed pixels that lie DEEP inside any other own circle and
+            // keeps only the OUTERMOST contour of my territory through the
+            // overlap — one clean dashed loop per contested region.
             if (dominantInnCv) {
               const d = new OffscreenCanvas(cvs.width, cvs.height);
               const dc = d.getContext('2d')!;
@@ -9478,6 +9485,20 @@ export class RenderSystem {
               for (const { x, y, r } of screenPts) {
                 dc.beginPath(); dc.arc(x, y, r, 0, Math.PI * 2); dc.stroke();
               }
+              // Inset eraser: union of own circles shrunk by (borderWidth/2 + 1)
+              // — preserves each circle's own stroke band [r-bw/2, r+bw/2]
+              // but removes strokes that lie inside any OTHER own circle.
+              const ownShrunk = new OffscreenCanvas(cvs.width, cvs.height);
+              const osc = ownShrunk.getContext('2d')!;
+              osc.fillStyle = color;
+              const inset = borderWidth / 2 + 1;
+              for (const { x, y, r } of screenPts) {
+                const rr = r - inset;
+                if (rr <= 0) continue;
+                osc.beginPath(); osc.arc(x, y, rr, 0, Math.PI * 2); osc.fill();
+              }
+              dc.globalCompositeOperation = 'destination-out';
+              dc.drawImage(ownShrunk, 0, 0);
               dc.globalCompositeOperation = 'destination-in';
               dc.drawImage(dominantInnCv, 0, 0);
               rc.drawImage(d, 0, 0);
