@@ -27,3 +27,20 @@ void claim_tick(uint32_t delta_ms);
  */
 int claim_apply_harvest_tax(WebSocketPlayer *player, float wx, float wy,
                             int gross_qty, ItemKind item);
+
+/**
+ * Called from handle_place_structure after a non-flag structure is added to
+ * the world. Scans every other-company active non-orphaned structure whose
+ * claim circle overlaps the new structure's claim circle, and appends each
+ * such enemy ID to the new structure's `dominators[]` (oldest enemy first,
+ * since the scan walks placed_structures in placement order).
+ *
+ * The enemy structures are NOT modified — only the newcomer takes on
+ * dominators. Render-rule X then carves (new ∩ enemy) out of the new
+ * structure's visible territory in the enemy's company color.
+ *
+ * Broadcasts a single `structure_dominators` message for the newcomer if
+ * any dominators were registered. Safe to call for any structure type;
+ * exits silently if the structure id is unknown.
+ */
+void claim_register_placement_dominators(uint16_t new_structure_id);

@@ -281,6 +281,17 @@ int world_save(const char *path) {
 
         if (!first_struct) fprintf(f, ",");
         first_struct = false;
+        /* Build "dominators":[…] list (omitted when empty). */
+        char dom_buf[512]; dom_buf[0] = '\0';
+        if (ps->dominator_count > 0) {
+            int dp = 0;
+            dp += snprintf(dom_buf + dp, sizeof(dom_buf) - dp, ",\n      \"dominators\": [");
+            for (uint8_t di = 0; di < ps->dominator_count && dp < (int)sizeof(dom_buf) - 16; di++) {
+                dp += snprintf(dom_buf + dp, sizeof(dom_buf) - dp,
+                               "%s%u", di == 0 ? "" : ",", (unsigned)ps->dominators[di]);
+            }
+            snprintf(dom_buf + dp, sizeof(dom_buf) - dp, "]");
+        }
         fprintf(f,
             "\n    {\n"
             "      \"id\": %u,\n"
@@ -298,7 +309,7 @@ int world_save(const char *path) {
             "      \"construction_phase\": %u,\n"
             "      \"construction_company\": %u,\n"
             "      \"modules_placed\": %u,\n"
-            "      \"scaffolded_ship_id\": %u\n"
+            "      \"scaffolded_ship_id\": %u%s\n"
             "    }",
             (unsigned)ps->id,
             (unsigned)ps->type,
@@ -315,7 +326,8 @@ int world_save(const char *path) {
             (unsigned)ps->construction_phase,
             (unsigned)ps->construction_company,
             (unsigned)ps->modules_placed,
-            (unsigned)ps->scaffolded_ship_id
+            (unsigned)ps->scaffolded_ship_id,
+            dom_buf
         );
     }
     fprintf(f, "\n  ],\n");
@@ -763,6 +775,27 @@ int world_load(const char *path) {
                 ws_json_uint(obj,  "construction_company", &construction_company);
                 ws_json_uint(obj,  "modules_placed",       &modules_placed_saved);
                 ws_json_uint(obj,  "scaffolded_ship_id",   &scaffolded_ship_id);
+
+                /* dominators: [ id, id, … ] — restore dominance order list. */
+                {
+                    const char *dkey = strstr(obj, "\"dominators\"");
+                    if (dkey) {
+                        const char *lb = strchr(dkey, '[');
+                        const char *rb = lb ? strchr(lb, ']') : NULL;
+                        if (lb && rb && rb > lb) {
+                            const char *p = lb + 1;
+                            while (p < rb && ps->dominator_count < MAX_DOMINATORS) {
+                                while (p < rb && (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+                                if (p >= rb) break;
+                                char *endp = NULL;
+                                unsigned long v = strtoul(p, &endp, 10);
+                                if (endp == p) break;
+                                ps->dominators[ps->dominator_count++] = (uint32_t)v;
+                                p = endp;
+                            }
+                        }
+                    }
+                }
 
                 ps->id         = id ? (uint16_t)id : next_structure_id;
                 ps->type       = (PlacedStructureType)type;

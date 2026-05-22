@@ -57,6 +57,58 @@ static inline float struct_claim_radius(PlacedStructureType t) {
     return CLAIM_RADIUS_DEFAULT;
 }
 
+/** Remove `id` from `s->dominators[]` if present. Returns true if removed. */
+static inline bool dominators_remove(PlacedStructure *s, uint32_t id) {
+    int found = -1;
+    for (int k = 0; k < s->dominator_count; k++) {
+        if (s->dominators[k] == id) { found = k; break; }
+    }
+    if (found < 0) return false;
+    for (int k = found; k < s->dominator_count - 1; k++) {
+        s->dominators[k] = s->dominators[k + 1];
+    }
+    s->dominator_count--;
+    return true;
+}
+
+/** Prepend `id` to `s->dominators[]` at index 0, deduping first. Returns true
+ *  if the list was changed. Drops the tail when at capacity. */
+static inline bool dominators_prepend(PlacedStructure *s, uint32_t id) {
+    dominators_remove(s, id);
+    int cap = s->dominator_count;
+    if (cap >= MAX_DOMINATORS) cap = MAX_DOMINATORS - 1;
+    for (int k = cap; k > 0; k--) s->dominators[k] = s->dominators[k - 1];
+    s->dominators[0] = id;
+    if (s->dominator_count < MAX_DOMINATORS) s->dominator_count++;
+    return true;
+}
+
+/** Append `id` at the tail of `s->dominators[]` (no-op if already present
+ *  or at capacity). Returns true if the list was changed. */
+static inline bool dominators_append(PlacedStructure *s, uint32_t id) {
+    for (int k = 0; k < s->dominator_count; k++) {
+        if (s->dominators[k] == id) return false;
+    }
+    if (s->dominator_count >= MAX_DOMINATORS) return false;
+    s->dominators[s->dominator_count++] = id;
+    return true;
+}
+
+/** Broadcast `{"type":"structure_dominators","structure_id":N,"dominators":[…]}`
+ *  for a single structure. */
+static void broadcast_structure_dominators(const PlacedStructure *s) {
+    char msg[1024];
+    int dp = snprintf(msg, sizeof(msg),
+        "{\"type\":\"structure_dominators\",\"structure_id\":%u,\"dominators\":[",
+        s->id);
+    for (int k = 0; k < s->dominator_count; k++) {
+        dp += snprintf(msg + dp, sizeof(msg) - dp,
+                       "%s%u", k ? "," : "", s->dominators[k]);
+    }
+    snprintf(msg + dp, sizeof(msg) - dp, "]}");
+    websocket_server_broadcast(msg);
+}
+
 /** Broadcast a territory_update JSON message with optional fort position. */
 static void broadcast_territory_update(uint8_t island_id, uint32_t company_id,
                                        bool claimed) {
@@ -601,7 +653,10 @@ void claim_tick(uint32_t delta_ms) {
                      s->id, orphaned_id, old_co, s->company_id);
 
             /* ── Promote each challenger above every victim in the victim's
-             *    `dominators` list (dedupe), then broadcast updates. */
+             *    `dominators` list (dedupe). Symmetrically, remove every
+             *    victim from each challenger's own `dominators` list — the
+             *    challenger no longer yields to that victim. Broadcast a
+             *    fresh dominators message per touched structure. */
             for (int vi = 0; vi < victim_n; vi++) {
                 PlacedStructure *victim = NULL;
                 for (uint32_t k = 0; k < placed_structure_count; k++) {
@@ -610,46 +665,24 @@ void claim_tick(uint32_t delta_ms) {
                 if (!victim) continue;
 
                 bool changed = false;
-                /* Prepend each challenger to the front of the dominators
-                 * list. Dedupe by removing the existing entry first; then
-                 * shift everything down and write at index 0. */
                 for (int ci = 0; ci < chall_n; ci++) {
-                    uint32_t cid = chall_ids[ci];
-                    /* Remove existing occurrence, if any. */
-                    int found = -1;
-                    for (int k = 0; k < victim->dominator_count; k++) {
-                        if (victim->dominators[k] == cid) { found = k; break; }
-                    }
-                    if (found >= 0) {
-                        for (int k = found; k < victim->dominator_count - 1; k++) {
-                            victim->dominators[k] = victim->dominators[k + 1];
-                        }
-                        victim->dominator_count--;
-                    }
-                    /* Make room at index 0 (drop tail if at capacity). */
-                    int cap = victim->dominator_count;
-                    if (cap >= MAX_DOMINATORS) cap = MAX_DOMINATORS - 1;
-                    for (int k = cap; k > 0; k--) {
-                        victim->dominators[k] = victim->dominators[k - 1];
-                    }
-                    victim->dominators[0] = cid;
-                    if (victim->dominator_count < MAX_DOMINATORS) victim->dominator_count++;
-                    changed = true;
+                    if (dominators_prepend(victim, chall_ids[ci])) changed = true;
                 }
+                if (changed) broadcast_structure_dominators(victim);
+            }
 
-                if (changed) {
-                    /* Broadcast the victim's new dominators list. */
-                    char dmsg[1024];
-                    int dp = snprintf(dmsg, sizeof(dmsg),
-                        "{\"type\":\"structure_dominators\",\"structure_id\":%u,\"dominators\":[",
-                        victim->id);
-                    for (int k = 0; k < victim->dominator_count; k++) {
-                        dp += snprintf(dmsg + dp, sizeof(dmsg) - dp,
-                                       "%s%u", k ? "," : "", victim->dominators[k]);
-                    }
-                    snprintf(dmsg + dp, sizeof(dmsg) - dp, "]}");
-                    websocket_server_broadcast(dmsg);
+            for (int ci = 0; ci < chall_n; ci++) {
+                PlacedStructure *chall = NULL;
+                for (uint32_t k = 0; k < placed_structure_count; k++) {
+                    if (placed_structures[k].id == chall_ids[ci]) { chall = &placed_structures[k]; break; }
                 }
+                if (!chall) continue;
+
+                bool changed = false;
+                for (int vi = 0; vi < victim_n; vi++) {
+                    if (dominators_remove(chall, victim_ids[vi])) changed = true;
+                }
+                if (changed) broadcast_structure_dominators(chall);
             }
 
             /* Consume the claim flag */
@@ -729,4 +762,42 @@ int claim_apply_harvest_tax(WebSocketPlayer *player, float wx, float wy,
 
     (void)wx; (void)wy;
     return net;
+}
+
+/* ── Placement-time dominators population ───────────────────────────────────
+ * Called from handle_place_structure right after a non-claim-flag structure
+ * is added to placed_structures[]. Implements Render-Rule-X: a newly placed
+ * structure starts at the BOTTOM of dominance vs. every existing enemy
+ * structure that overlaps it, so the enemy keeps the overlap region until a
+ * claim flag flips the priority. The enemy structures themselves are not
+ * touched. */
+void claim_register_placement_dominators(uint16_t new_structure_id) {
+    PlacedStructure *me = NULL;
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        if (placed_structures[i].id == new_structure_id) {
+            me = &placed_structures[i];
+            break;
+        }
+    }
+    if (!me || !me->active) return;
+
+    float mx = me->x, my = me->y;
+    float mr = struct_claim_radius(me->type);
+    bool changed = false;
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *other = &placed_structures[i];
+        if (other == me) continue;
+        if (!other->active) continue;
+        if (other->claim_orphaned) continue;
+        if (other->company_id == me->company_id) continue;
+        if (other->company_id == 0) continue;
+        /* Transient flags don't grant dominance to anyone. */
+        if (other->type == STRUCT_CLAIM_FLAG) continue;
+        float pr = struct_claim_radius(other->type);
+        float dx = other->x - mx, dy = other->y - my;
+        float thresh = mr + pr;
+        if (dx * dx + dy * dy > thresh * thresh) continue;
+        if (dominators_append(me, other->id)) changed = true;
+    }
+    if (changed) broadcast_structure_dominators(me);
 }
