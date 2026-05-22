@@ -5147,7 +5147,7 @@ export class RenderSystem {
         ctx.lineTo(0, -ringR - 14 * zoom);
         ctx.stroke();
 
-        // Flag
+        // Flag pennant
         ctx.fillStyle = companyColor;
         ctx.beginPath();
         ctx.moveTo(0,           -ringR - 14 * zoom);
@@ -5155,6 +5155,59 @@ export class RenderSystem {
         ctx.lineTo(0,           -ringR + 4 * zoom);
         ctx.closePath();
         ctx.fill();
+
+        // Timer text — show time remaining / reversing / stalled
+        {
+          const fontSize = Math.max(9, Math.round(11 * zoom));
+          ctx.font = `bold ${fontSize}px Georgia, serif`;
+          ctx.textAlign    = 'center';
+          ctx.textBaseline = 'top';
+
+          let timerLabel = '';
+          let timerColor = '#ffffff';
+
+          if (state === 0) {
+            // CONTEST — stalled
+            const secsLeft = Math.ceil((s.claimProgress ?? TOTAL_MS) / 1000);
+            const m = Math.floor(secsLeft / 60), sc = secsLeft % 60;
+            timerLabel = `⏸ ${m}:${sc.toString().padStart(2, '0')}`;
+            timerColor = '#cccccc';
+          } else if (state === 1) {
+            // CLAIMING_GRACE — warming up
+            const secsLeft = Math.ceil((s.claimProgress ?? TOTAL_MS) / 1000);
+            const m = Math.floor(secsLeft / 60), sc = secsLeft % 60;
+            timerLabel = `▶ ${m}:${sc.toString().padStart(2, '0')}`;
+            timerColor = '#ffd24a';
+          } else if (state === 2) {
+            // CLAIMING — counting down to capture
+            const secsLeft = Math.ceil((s.claimProgress ?? TOTAL_MS) / 1000);
+            const m = Math.floor(secsLeft / 60), sc = secsLeft % 60;
+            timerLabel = `${m}:${sc.toString().padStart(2, '0')}`;
+            timerColor = arcColor;
+          } else if (state === 3) {
+            // REVERSING_GRACE — enemy warming up to reverse
+            const secsLeft = Math.ceil((s.claimProgress ?? 0) / 1000);
+            const m = Math.floor(secsLeft / 60), sc = secsLeft % 60;
+            timerLabel = `◀ ${m}:${sc.toString().padStart(2, '0')}`;
+            timerColor = '#ff9966';
+          } else if (state === 4) {
+            // REVERSING — enemy pushing progress back
+            const secsLeft = Math.ceil((s.claimProgress ?? 0) / 1000);
+            const m = Math.floor(secsLeft / 60), sc = secsLeft % 60;
+            timerLabel = `↺ ${m}:${sc.toString().padStart(2, '0')}`;
+            timerColor = '#ff3030';
+          }
+
+          if (timerLabel) {
+            const textY = ringR + Math.max(3, 4 * zoom);
+            // Shadow
+            ctx.fillStyle = 'rgba(0,0,0,0.7)';
+            ctx.fillText(timerLabel, 1, textY + 1);
+            // Label
+            ctx.fillStyle = timerColor;
+            ctx.fillText(timerLabel, 0, textY);
+          }
+        }
 
         ctx.restore();
       }
