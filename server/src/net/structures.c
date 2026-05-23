@@ -2183,6 +2183,7 @@ void handle_repair_structure(WebSocketPlayer* player, struct WebSocketClient* cl
         s->repair_player_id   = player->player_id;
         s->repair_progress_ms = 0.0f;
         s->repair_start_hp    = s->hp;
+        s->repair_broadcast_acc_ms = 0;
 
         /* Broadcast started */
         char smsg[256];
@@ -2231,23 +2232,30 @@ void structure_repair_tick(uint32_t delta_ms) {
         }
 
         s->repair_progress_ms += (float)delta_ms;
+        s->repair_broadcast_acc_ms += delta_ms;
         /* HP gained = max_hp * delta / STRUCTURE_REPAIR_FULL_MS, accumulated */
         float hp_gained_f = (float)s->max_hp * s->repair_progress_ms / (float)STRUCTURE_REPAIR_FULL_MS;
         uint16_t hp_gain_int = (uint16_t)hp_gained_f;
-        if (hp_gain_int == 0) continue; /* sub-integer accumulator */
+        if (hp_gain_int > 0) {
+            /* Reset accumulator carry for next tick */
+            float consumed_ms = (float)hp_gain_int * (float)STRUCTURE_REPAIR_FULL_MS / (float)s->max_hp;
+            s->repair_progress_ms -= consumed_ms;
+            if (s->repair_progress_ms < 0.0f) s->repair_progress_ms = 0.0f;
 
-        /* Reset accumulator carry for next tick */
-        float consumed_ms = (float)hp_gain_int * (float)STRUCTURE_REPAIR_FULL_MS / (float)s->max_hp;
-        s->repair_progress_ms -= consumed_ms;
-        if (s->repair_progress_ms < 0.0f) s->repair_progress_ms = 0.0f;
+            uint16_t cap = s->max_hp;
+            uint32_t new_hp        = (uint32_t)s->hp + (uint32_t)hp_gain_int;
+            uint32_t new_target_hp = (uint32_t)s->target_hp + (uint32_t)hp_gain_int;
+            if (new_hp        > cap) new_hp        = cap;
+            if (new_target_hp > cap) new_target_hp = cap;
+            s->hp        = (uint16_t)new_hp;
+            s->target_hp = (uint16_t)new_target_hp;
+        }
 
-        uint16_t cap = s->max_hp;
-        uint32_t new_hp        = (uint32_t)s->hp + (uint32_t)hp_gain_int;
-        uint32_t new_target_hp = (uint32_t)s->target_hp + (uint32_t)hp_gain_int;
-        if (new_hp        > cap) new_hp        = cap;
-        if (new_target_hp > cap) new_target_hp = cap;
-        s->hp        = (uint16_t)new_hp;
-        s->target_hp = (uint16_t)new_target_hp;
+        /* Throttle hp_changed broadcasts to ~1Hz so clients see steady
+         * progress without flooding. Always broadcast on completion. */
+        int complete = (s->target_hp >= s->max_hp) ? 1 : 0;
+        if (s->repair_broadcast_acc_ms < 1000u && !complete) continue;
+        s->repair_broadcast_acc_ms = 0;
 
         /* Broadcast hp change */
         char msg[224];
@@ -2259,10 +2267,11 @@ void structure_repair_tick(uint32_t delta_ms) {
         websocket_server_broadcast(msg);
 
         /* Completion */
-        if (s->target_hp >= s->max_hp) {
+        if (complete) {
             uint32_t pid = s->repair_player_id;
             s->repair_player_id   = 0;
             s->repair_progress_ms = 0.0f;
+            s->repair_broadcast_acc_ms = 0;
             char cmsg[160];
             snprintf(cmsg, sizeof(cmsg),
                      "{\"type\":\"repair_complete\",\"structure_id\":%u,\"player_id\":%u}",

@@ -2074,13 +2074,15 @@ export class RenderSystem {
     if (s) s.companyId = companyId;
   }
 
-  updateStructureHp(id: number, hp: number, maxHp: number, targetHp?: number): void {
+  updateStructureHp(id: number, hp: number, maxHp: number, targetHp?: number): { prevHp: number; prevTargetHp: number } | null {
     const s = this.placedStructures.find(p => p.id === id);
-    if (s) {
-      s.hp = hp;
-      s.maxHp = maxHp;
-      if (typeof targetHp === 'number') s.targetHp = targetHp;
-    }
+    if (!s) return null;
+    const prevHp = s.hp ?? 0;
+    const prevTargetHp = s.targetHp ?? prevHp;
+    s.hp = hp;
+    s.maxHp = maxHp;
+    if (typeof targetHp === 'number') s.targetHp = targetHp;
+    return { prevHp, prevTargetHp };
   }
 
   /** Update door open/closed state after a door_toggled broadcast. */

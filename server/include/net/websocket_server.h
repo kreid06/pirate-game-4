@@ -480,6 +480,7 @@ typedef struct {
     uint32_t repair_player_id;    /* player_id currently repairing this structure (0 = none) */
     float    repair_progress_ms;  /* ms elapsed since repair started; total = STRUCTURE_REPAIR_FULL_MS */
     uint16_t repair_start_hp;     /* hp at repair start (for rate computation) */
+    uint32_t repair_broadcast_acc_ms; /* ms accumulated since last hp broadcast (throttle to ~1Hz) */
     /* ── Per-structure dominance list ──────────────────────────────────────
      * Ordered list of OTHER-company structure IDs that dominate this
      * structure on the overlap area of their claim radii. Index 0 = top

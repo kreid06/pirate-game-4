@@ -26,7 +26,7 @@ import { PhysicsConfig } from '../sim/Types.js';
 // UI System
 import { UIManager } from './ui/UIManager.js';
 import { MENU_ID } from './ui/UIManager.js';
-import { RadialMenu } from './ui/RadialMenu.js';
+import { RadialMenu, type RadialOption } from './ui/RadialMenu.js';
 import { CraftingMenu } from './ui/CraftingMenu.js';
 import { ShipyardMenu } from './ui/ShipyardMenu.js';
 import { ShipRenameDialog } from './ui/ShipRenameDialog.js';
@@ -2087,7 +2087,11 @@ export class ClientApplication {
         this.renderSystem.updateStructureCompany(id, companyId);
       };
       this.networkManager.onStructureHpChanged = (id, hp, maxHp, x, y, targetHp) => {
-        this.renderSystem.updateStructureHp(id, hp, maxHp, targetHp);
+        const prev = this.renderSystem.updateStructureHp(id, hp, maxHp, targetHp);
+        // Suppress damage FX (explosion + red damage number) when HP is going
+        // up — this fires during repair ticks and shouldn't look like damage.
+        const isRepairTick = prev !== null && hp >= prev.prevHp && (targetHp === undefined || targetHp >= prev.prevTargetHp);
+        if (isRepairTick) return;
         this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.6);
         const _shComp = this._structureCompanyMap.get(id) ?? -1;
         const _shMyId = this.networkManager.getAssignedPlayerId();
@@ -3941,6 +3945,56 @@ export class ClientApplication {
                 return tHp < maxHp;
               };
 
+              // Repair recipes — must mirror server `repair_recipe_for_struct`
+              // in server/src/net/structures.c exactly. Cost per ingredient is
+              // ceil(qty * missing_hp / max_hp), min 1 (mirrors `compute_repair_cost`).
+              const REPAIR_RECIPES: Record<string, { item: string; qty: number }[]> = {
+                wooden_floor:     [{ item: 'wood',  qty: 2   }],
+                wood_ceiling:     [{ item: 'wood',  qty: 15  }],
+                workbench:        [{ item: 'wood',  qty: 10  }],
+                wall:             [{ item: 'wood',  qty: 3   }],
+                door_frame:       [{ item: 'wood',  qty: 6   }],
+                door:             [{ item: 'wood',  qty: 4   }],
+                shipyard:         [{ item: 'wood',  qty: 30  }, { item: 'plank', qty: 10 }],
+                cannon:           [{ item: 'wood',  qty: 8   }, { item: 'metal', qty: 20 }],
+                flag_fort:        [{ item: 'wood',  qty: 40  }, { item: 'stone', qty: 40 }],
+                company_fortress: [{ item: 'wood',  qty: 100 }, { item: 'stone', qty: 100 }, { item: 'metal', qty: 20 }],
+              };
+              const ITEM_PRETTY: Record<string, string> = {
+                wood: 'Wood', plank: 'Plank', stone: 'Stone', metal: 'Metal',
+              };
+              const _have = (item: string): number => {
+                const slots = (meE as any).inventory?.slots ?? [];
+                let total = 0;
+                for (const sl of slots) {
+                  if (sl && sl.item === item) total += sl.quantity ?? 0;
+                }
+                return total;
+              };
+              const _buildRepairOption = (s: typeof struct): RadialOption | null => {
+                if (!_structIsDamaged(s)) return null;
+                const recipe = REPAIR_RECIPES[s.type];
+                if (!recipe) return null;
+                const maxHp = s.maxHp ?? 0;
+                const tHp = (typeof (s as any).targetHp === 'number') ? (s as any).targetHp as number : maxHp;
+                const missing = Math.max(0, maxHp - tHp);
+                if (missing <= 0 || maxHp <= 0) return null;
+                const tip: string[] = ['Repair cost:'];
+                let affordable = true;
+                for (const ing of recipe) {
+                  const cost = Math.max(1, Math.ceil(ing.qty * missing / maxHp));
+                  const h    = _have(ing.item);
+                  const ok   = h >= cost;
+                  if (!ok) affordable = false;
+                  const name = ITEM_PRETTY[ing.item] ?? ing.item;
+                  const line = `  ${name}: ${h}/${cost}`;
+                  // Lines that start with '!' are rendered red by RadialMenu.
+                  tip.push(ok ? line : '!' + line);
+                }
+                if (!affordable) tip.push('!Not enough resources');
+                return { id: 'repair', label: 'Repair', disabled: !affordable, tooltip: tip };
+              };
+
               // Can't interact at all with another company's floor (no use, no demolish)
               if (!isOwnCompany && struct.type === 'wooden_floor') {
                 this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
@@ -3959,9 +4013,9 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  const opts: { id: string; label: string }[] = [{ id: 'use', label: 'Open Workbench' }];
+                  const opts: RadialOption[] = [{ id: 'use', label: 'Open Workbench' }];
                   if (isOwnCompany) opts.push({ id: 'demolish', label: 'Demolish' });
-                  if (isOwnCompany && _structIsDamaged(struct)) opts.push({ id: 'repair', label: 'Repair' });
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) opts.push(r); }
                   this._radialMenu.open(mp2.x, mp2.y, opts);
                 }, 400);
               } else if (struct.type === 'wall') {
@@ -3970,8 +4024,8 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  const wallOpts: { id: string; label: string }[] = [{ id: 'demolish', label: 'Demolish Wall' }];
-                  if (isOwnCompany && _structIsDamaged(struct)) wallOpts.push({ id: 'repair', label: 'Repair' });
+                  const wallOpts: RadialOption[] = [{ id: 'demolish', label: 'Demolish Wall' }];
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) wallOpts.push(r); }
                   this._radialMenu.open(mp2.x, mp2.y, wallOpts);
                 }, 600);
               } else if (struct.type === 'door_frame') {
@@ -3980,8 +4034,8 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  const dfOpts: { id: string; label: string }[] = [{ id: 'demolish', label: 'Demolish Door Frame' }];
-                  if (isOwnCompany && _structIsDamaged(struct)) dfOpts.push({ id: 'repair', label: 'Repair' });
+                  const dfOpts: RadialOption[] = [{ id: 'demolish', label: 'Demolish Door Frame' }];
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) dfOpts.push(r); }
                   this._radialMenu.open(mp2.x, mp2.y, dfOpts);
                 }, 600);
               } else if (struct.type === 'door') {
@@ -3990,11 +4044,11 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  const doorOpts: { id: string; label: string }[] = [
+                  const doorOpts: RadialOption[] = [
                     { id: 'use', label: struct.doorOpen ? 'Close Door' : 'Open Door' },
                   ];
                   if (isOwnCompany) doorOpts.push({ id: 'demolish', label: 'Demolish' });
-                  if (isOwnCompany && _structIsDamaged(struct)) doorOpts.push({ id: 'repair', label: 'Repair' });
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) doorOpts.push(r); }
                   this._radialMenu.open(mp2.x, mp2.y, doorOpts);
                 }, 400);
               } else if (struct.type === 'shipyard') {
@@ -4003,13 +4057,13 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  const opts: { id: string; label: string }[] = [];
+                  const opts: RadialOption[] = [];
                   if (struct.construction?.phase === 'building') {
                     // Ship can be released at any time — it's a real entity
                     opts.push({ id: 'release', label: '⚓ Release Ship' });
                   }
                   if (isOwnCompany) opts.push({ id: 'demolish', label: 'Demolish Shipyard' });
-                  if (isOwnCompany && _structIsDamaged(struct)) opts.push({ id: 'repair', label: 'Repair' });
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) opts.push(r); }
                   if (opts.length > 0) {
                     this._radialMenu.open(mp2.x, mp2.y, opts);
                   }
@@ -4028,11 +4082,11 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  const cannonOpts: { id: string; label: string }[] = [
+                  const cannonOpts: RadialOption[] = [
                     { id: 'use', label: 'Mount Cannon' },
                   ];
                   if (isOwnCompany) cannonOpts.push({ id: 'demolish', label: 'Demolish Cannon' });
-                  if (isOwnCompany && _structIsDamaged(struct)) cannonOpts.push({ id: 'repair', label: 'Repair' });
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) cannonOpts.push(r); }
                   this._radialMenu.open(mp2.x, mp2.y, cannonOpts);
                 }, 300);
               } else {
@@ -4048,10 +4102,10 @@ export class ClientApplication {
                     : struct.type === 'workbench'   ? 'Demolish Workbench'
                     : struct.type === 'shipyard'    ? 'Demolish Shipyard'
                     : 'Demolish Floor';
-                  const defOpts: { id: string; label: string }[] = [
+                  const defOpts: RadialOption[] = [
                     { id: 'demolish', label: _demolishLabel },
                   ];
-                  if (isOwnCompany && _structIsDamaged(struct)) defOpts.push({ id: 'repair', label: 'Repair' });
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) defOpts.push(r); }
                   this._radialMenu.open(mp2.x, mp2.y, defOpts);
                 }, 600);
               }
