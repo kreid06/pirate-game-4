@@ -666,6 +666,8 @@ export class NetworkManager {
   public onFortressCaptured: ((structId: number, newCompanyId: number, oldCompanyId: number, islandId: number) => void) | null = null;
   /** Fired when a Flag Fort crosses (in either direction) the 30%-HP active gate. */
   public onFlagFortActive: ((structId: number, companyId: number, islandId: number, active: boolean) => void) | null = null;
+  /** Fired ≈1/s for each flag fort to resync its heal/contested state. */
+  public onFlagFortBuildProgress: ((structId: number, hp: number, maxHp: number, contested: boolean, active: boolean) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
   public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number) => void) | null = null;
   /** Fired when the server rejects a structure placement with a reason string. */
@@ -2764,30 +2766,17 @@ export class NetworkManager {
         break;
 
       case 'flag_fort_build_progress':
-        // Reuse the company-fortress build callback; the renderer keys on
-        // structure_id, not on type. progress is encoded as hp/max_hp * total.
-        this.onFortressBuildProgress?.(
+        // Periodic flag-fort heal resync. We deliberately do NOT route this
+        // through the Company-Fortress callbacks — the active gate is at 30%
+        // HP (not 100%), and the announcement copy is different. The render
+        // system has a dedicated handler that updates hp/contested only.
+        this.onFlagFortBuildProgress?.(
           message.structure_id  ?? 0,
-          message.company_id    ?? 0,
-          message.island_id     ?? 0,
-          // synthesize progress_ms from hp ratio
-          (typeof message.hp === 'number' && typeof message.max_hp === 'number' && message.max_hp > 0)
-            ? (message.hp / message.max_hp) * 300000
-            : 0,
-          300000,
+          typeof message.hp     === 'number' ? message.hp     : 0,
+          typeof message.max_hp === 'number' ? message.max_hp : 500,
           message.contested     === true,
+          message.fortress_complete === true,
         );
-        // Reflect active-state change as a fortress_complete event when the
-        // server's gate is currently satisfied. The server also sends a
-        // dedicated flag_fort_active event for transitions; this is a
-        // periodic resync.
-        if (message.fortress_complete === true) {
-          this.onFortressComplete?.(
-            message.structure_id  ?? 0,
-            message.company_id    ?? 0,
-            message.island_id     ?? 0,
-          );
-        }
         break;
 
       case 'flag_fort_active':

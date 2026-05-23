@@ -2137,6 +2137,11 @@ export class ClientApplication {
         this.renderSystem.updateFortressBuildProgress(structId, companyId, islandId, progressMs, totalMs, contested);
       };
       this.networkManager.onFortressComplete = (structId, companyId, islandId) => {
+        // Defensive: ignore if this id is actually a flag fort (server should
+        // never emit `fortress_complete` for flag forts — they use the
+        // dedicated `flag_fort_active` event — but guard anyway).
+        const ps = this.renderSystem.getPlacedStructureById?.(structId);
+        if (ps && ps.type === 'flag_fort') return;
         this.renderSystem.onFortressComplete(structId, companyId, islandId);
         this.renderSystem.showAnnouncement(`🏰 Company Fortress complete! Island ${islandId} claimed!`, 'info', 5.0);
       };
@@ -2151,6 +2156,9 @@ export class ClientApplication {
         } else {
           this.renderSystem.showAnnouncement(`🚩 Flag Fort deactivated on island ${islandId}`, 'info', 3.0);
         }
+      };
+      this.networkManager.onFlagFortBuildProgress = (structId, hp, maxHp, contested, active) => {
+        this.renderSystem.updateFlagFortBuildProgress(structId, hp, maxHp, contested, active);
       };
       this.networkManager.onPlacementFailed = (reason, _x, _y, _structureType, blockerId) => {
         const REASONS: Record<string, string> = {
