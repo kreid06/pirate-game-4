@@ -1974,6 +1974,28 @@ export class RenderSystem {
     }
   }
 
+  /** Periodic flag-fort heal resync (does NOT toggle active gate — that
+   *  arrives via the dedicated flag_fort_active event). */
+  updateFlagFortBuildProgress(structId: number, hp: number, maxHp: number, contested: boolean, active: boolean): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (!s) return;
+    s.hp = hp;
+    s.maxHp = maxHp;
+    s.fortressContested = contested;
+    // Build progress mapped onto a 0..max=FLAG_FORT_BUILD_MS scale so the
+    // existing progress-bar reuses it (renderer divides by max_hp anyway).
+    s.fortressBuildProgress = maxHp > 0 ? (hp / maxHp) * 300000 : 0;
+    if (s.fortressComplete !== active) {
+      s.fortressComplete = active;
+      this._claimOverlayDirty = true;
+    }
+  }
+
+  /** Look up a placed structure by id (read-only). */
+  getPlacedStructureById(structId: number): PlacedStructure | undefined {
+    return this.placedStructures.find(p => p.id === structId);
+  }
+
   /** Replace the full placed-structure list (e.g. on join). */
   setPlacedStructures(arr: PlacedStructure[]): void {
     this.placedStructures = [...arr];
