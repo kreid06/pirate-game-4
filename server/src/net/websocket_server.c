@@ -2760,6 +2760,14 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "repair_structure") == 0) {
+                            // Radial repair option: start/cancel a player-funded repair
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_repair_structure(player, client, payload);
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "demolish_module") == 0) {
                             // Axe + E: remove a ship module permanently
                             if (client->player_id != 0) {

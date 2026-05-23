@@ -771,6 +771,8 @@ void claim_tick(uint32_t delta_ms) {
     fortress_tick(delta_ms);
     /* Advance Flag Fort heal/activation gate */
     flag_fort_tick(delta_ms);
+    /* Advance any in-progress player-initiated structure repairs */
+    structure_repair_tick(delta_ms);
 
     /* ── Claim-flag progress ──────────────────────────────────────────── */
     for (uint32_t si = 0; si < placed_structure_count; si++) {

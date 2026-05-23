@@ -23,3 +23,21 @@ void destroy_placed_structure(uint32_t structure_id);
  * The pointer s may be invalidated after this call returns true.
  */
 bool apply_structure_damage(PlacedStructure *s, uint16_t dmg);
+
+/**
+ * handle_repair_structure: player initiates a constant-rate repair on a
+ * damaged structure they own (target_hp < max_hp). Computes the resource cost
+ * proportional to (max_hp - target_hp) / max_hp from the structure's recipe,
+ * consumes the items up-front, and sets repair state on the structure. A
+ * second call by the same player cancels the active repair (no refund).
+ * Excludes claim flags and flag forts still in the CLAIMING phase.
+ */
+void handle_repair_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload);
+
+/**
+ * Per-tick advance of any in-progress structure repairs. Raises hp and
+ * target_hp at a constant rate (STRUCTURE_REPAIR_FULL_MS for one max_hp of
+ * damage) and broadcasts structure_hp_changed when integer values change.
+ * Emits repair_complete when target_hp reaches max_hp.
+ */
+void structure_repair_tick(uint32_t delta_ms);

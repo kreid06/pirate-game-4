@@ -329,6 +329,11 @@ extern int       claim_flag_count;
 #define FLAG_FORT_PHASE_BUILDING 1u  /* heal 10%→30% HP; damageable; flashing claim border on client    */
 #define FLAG_FORT_PHASE_ACTIVE   2u  /* hp ≥ 30%; full territory participation; mirrors fortress_complete */
 
+/* Structure repair (any damaged structure with target_hp < max_hp).
+ * Full-restore (target_hp == 0 → max_hp) takes STRUCTURE_REPAIR_FULL_MS;
+ * partial repairs scale linearly so the rate is constant. */
+#define STRUCTURE_REPAIR_FULL_MS  30000u  /* 30 s to repair max_hp worth of damage */
+
 /**
  * IslandClaim — records a COMPLETED Company Fortress on an island.
  * While active, the fortress company claims the whole island (minus enemy Flag Fort radii).
@@ -468,6 +473,13 @@ typedef struct {
     uint8_t  claim_state;         /* STRUCT_CLAIM_FLAG: CLAIM_FLAG_STATE_*  |  STRUCT_FLAG_FORT (claim phase): CLAIM_FLAG_STATE_CONTEST / CLAIMING_GRACE / CLAIMING */
     float    claim_grace_ms;      /* STRUCT_CLAIM_FLAG: accumulator for the 5 s init/grace before CLAIMING or REVERSING starts  |  STRUCT_FLAG_FORT (claim phase): same purpose */
     uint8_t  claim_phase;         /* STRUCT_FLAG_FORT only: FLAG_FORT_PHASE_* (claim/build/active). Unused for other types. */
+    /* ── Repair state (any structure with target_hp < max_hp) ──
+     * Set when a player initiates a repair after paying the upfront cost.
+     * Repair completes when hp reaches max_hp; cancelled (no refund) if the
+     * structure is destroyed mid-repair or the player re-interacts. */
+    uint32_t repair_player_id;    /* player_id currently repairing this structure (0 = none) */
+    float    repair_progress_ms;  /* ms elapsed since repair started; total = STRUCTURE_REPAIR_FULL_MS */
+    uint16_t repair_start_hp;     /* hp at repair start (for rate computation) */
     /* ── Per-structure dominance list ──────────────────────────────────────
      * Ordered list of OTHER-company structure IDs that dominate this
      * structure on the overlap area of their claim radii. Index 0 = top

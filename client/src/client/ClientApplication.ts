@@ -2242,6 +2242,30 @@ export class ClientApplication {
         }
       };
 
+      // ── Structure repair feedback ─────────────────────────────────────
+      this.networkManager.onRepairStarted = (_id, _pid, _hp, _maxHp, _tHp) => {
+        this.renderSystem.showAnnouncement('\ud83d\udd27 Repair started', 'info', 1.5);
+      };
+      this.networkManager.onRepairCancelled = (_id, _pid) => {
+        this.renderSystem.showAnnouncement('\ud83d\udd27 Repair cancelled', 'info', 1.5);
+      };
+      this.networkManager.onRepairComplete = (_id, _pid) => {
+        this.renderSystem.showAnnouncement('\ud83d\udd27 Repair complete', 'info', 1.5);
+      };
+      this.networkManager.onRepairFail = (_id, reason) => {
+        const msg: Record<string, string> = {
+          insufficient_resources: 'Not enough materials to repair',
+          already_full:           'Structure is already fully repaired',
+          in_progress:            'Repair already in progress',
+          too_far:                'Too far to repair',
+          wrong_company:          'Cannot repair another company\u2019s structure',
+          not_repairable:         'This structure cannot be repaired',
+          claiming:               'Cannot repair during claim phase',
+          not_found:              'Structure not found',
+        };
+        this.renderSystem.showAnnouncement(`\ud83d\udd27 ${msg[reason] ?? 'Repair failed'}`, 'info', 2.0);
+      };
+
       // Handle FLAME_CONE_FIRE / FLAME_WAVE_UPDATE: advancing/retreating cone visual
       this.networkManager.onFlameWaveUpdate = (cannonId, shipId, x, y, angle, halfCone, waveDist, retreating, retreatDist, dead) => {
         this.renderSystem.updateFlameWave(cannonId, shipId, x, y, angle, halfCone, waveDist, retreating, retreatDist, dead);
@@ -3904,6 +3928,18 @@ export class ClientApplication {
             if (struct) {
               const myCompanyE = meE.companyId ?? 0;
               const isOwnCompany = struct.companyId === myCompanyE;
+              // Repair option is shown when the structure has been damaged
+              // (target_hp < max_hp). Claim flags, wrecks, and forts still in
+              // their CLAIMING phase are never repairable on the server side,
+              // so we suppress the option for those types client-side too.
+              const _structIsDamaged = (s: typeof struct): boolean => {
+                if (s.type === 'claim_flag' || s.type === 'wreck') return false;
+                if (s.type === 'flag_fort' && (s as any).claimPhase === 0) return false;
+                const maxHp = s.maxHp ?? 0;
+                if (maxHp <= 0) return false;
+                const tHp = (typeof (s as any).targetHp === 'number') ? (s as any).targetHp as number : maxHp;
+                return tHp < maxHp;
+              };
 
               // Can't interact at all with another company's floor (no use, no demolish)
               if (!isOwnCompany && struct.type === 'wooden_floor') {
@@ -3925,6 +3961,7 @@ export class ClientApplication {
                   const mp2 = this.inputManager.getMouseScreenPosition();
                   const opts: { id: string; label: string }[] = [{ id: 'use', label: 'Open Workbench' }];
                   if (isOwnCompany) opts.push({ id: 'demolish', label: 'Demolish' });
+                  if (isOwnCompany && _structIsDamaged(struct)) opts.push({ id: 'repair', label: 'Repair' });
                   this._radialMenu.open(mp2.x, mp2.y, opts);
                 }, 400);
               } else if (struct.type === 'wall') {
@@ -3933,9 +3970,9 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  this._radialMenu.open(mp2.x, mp2.y, [
-                    { id: 'demolish', label: 'Demolish Wall' },
-                  ]);
+                  const wallOpts: { id: string; label: string }[] = [{ id: 'demolish', label: 'Demolish Wall' }];
+                  if (isOwnCompany && _structIsDamaged(struct)) wallOpts.push({ id: 'repair', label: 'Repair' });
+                  this._radialMenu.open(mp2.x, mp2.y, wallOpts);
                 }, 600);
               } else if (struct.type === 'door_frame') {
                 // Door Frame: hold E = radial with Demolish (removing the frame also removes the panel)
@@ -3943,9 +3980,9 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  this._radialMenu.open(mp2.x, mp2.y, [
-                    { id: 'demolish', label: 'Demolish Door Frame' },
-                  ]);
+                  const dfOpts: { id: string; label: string }[] = [{ id: 'demolish', label: 'Demolish Door Frame' }];
+                  if (isOwnCompany && _structIsDamaged(struct)) dfOpts.push({ id: 'repair', label: 'Repair' });
+                  this._radialMenu.open(mp2.x, mp2.y, dfOpts);
                 }, 600);
               } else if (struct.type === 'door') {
                 // Door: tap E = toggle open/closed; hold E = radial with Demolish
@@ -3957,6 +3994,7 @@ export class ClientApplication {
                     { id: 'use', label: struct.doorOpen ? 'Close Door' : 'Open Door' },
                   ];
                   if (isOwnCompany) doorOpts.push({ id: 'demolish', label: 'Demolish' });
+                  if (isOwnCompany && _structIsDamaged(struct)) doorOpts.push({ id: 'repair', label: 'Repair' });
                   this._radialMenu.open(mp2.x, mp2.y, doorOpts);
                 }, 400);
               } else if (struct.type === 'shipyard') {
@@ -3971,6 +4009,7 @@ export class ClientApplication {
                     opts.push({ id: 'release', label: '⚓ Release Ship' });
                   }
                   if (isOwnCompany) opts.push({ id: 'demolish', label: 'Demolish Shipyard' });
+                  if (isOwnCompany && _structIsDamaged(struct)) opts.push({ id: 'repair', label: 'Repair' });
                   if (opts.length > 0) {
                     this._radialMenu.open(mp2.x, mp2.y, opts);
                   }
@@ -3993,6 +4032,7 @@ export class ClientApplication {
                     { id: 'use', label: 'Mount Cannon' },
                   ];
                   if (isOwnCompany) cannonOpts.push({ id: 'demolish', label: 'Demolish Cannon' });
+                  if (isOwnCompany && _structIsDamaged(struct)) cannonOpts.push({ id: 'repair', label: 'Repair' });
                   this._radialMenu.open(mp2.x, mp2.y, cannonOpts);
                 }, 300);
               } else {
@@ -4008,9 +4048,11 @@ export class ClientApplication {
                     : struct.type === 'workbench'   ? 'Demolish Workbench'
                     : struct.type === 'shipyard'    ? 'Demolish Shipyard'
                     : 'Demolish Floor';
-                  this._radialMenu.open(mp2.x, mp2.y, [
+                  const defOpts: { id: string; label: string }[] = [
                     { id: 'demolish', label: _demolishLabel },
-                  ]);
+                  ];
+                  if (isOwnCompany && _structIsDamaged(struct)) defOpts.push({ id: 'repair', label: 'Repair' });
+                  this._radialMenu.open(mp2.x, mp2.y, defOpts);
                 }, 600);
               }
               break;
@@ -4307,6 +4349,12 @@ export class ClientApplication {
           this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
           console.log(`🔨 [STRUCTURE] Demolish ${structType} ${structId}`);
         };
+        const doRepair = () => {
+          if (structId === null) return;
+          this.networkManager.sendRepairStructure(structId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          console.log(`🔧 [STRUCTURE] Repair ${structType} ${structId}`);
+        };
 
         if (this._ladderHoldTimer !== null) {
           // Tap (released before radial opened)
@@ -4341,6 +4389,7 @@ export class ClientApplication {
           this._radialMenu.close();
           if (selected === 'use')           doUse();
           else if (selected === 'demolish') doDemolish();
+          else if (selected === 'repair')   doRepair();
           else if (selected === 'release' && structId !== null) {
             this.networkManager.sendShipyardAction(structId, 'release_ship');
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());

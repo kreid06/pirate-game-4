@@ -128,6 +128,7 @@ export enum MessageType {
   STRUCTURE_DEMOLISHED = 'structure_demolished',
   DEMOLISH_STRUCTURE = 'demolish_structure',
   DEMOLISH_MODULE = 'demolish_module',
+  REPAIR_STRUCTURE = 'repair_structure',
   CRAFTING_OPEN  = 'crafting_open',
   STRUCTURES_LIST = 'STRUCTURES',
 
@@ -647,6 +648,14 @@ export class NetworkManager {
   public onCraftingOpen: ((structureId: number, structureType: string) => void) | null = null;
   /** Fired when the server confirms a craft_item request. */
   public onCraftResult: ((success: boolean, recipeId: string, reason?: string) => void) | null = null;
+  /** Fired when a player-funded structure repair starts. */
+  public onRepairStarted: ((structureId: number, playerId: number, hp: number, maxHp: number, targetHp: number) => void) | null = null;
+  /** Fired when an in-progress repair is cancelled (by the same player re-interacting). */
+  public onRepairCancelled: ((structureId: number, playerId: number) => void) | null = null;
+  /** Fired when a repair finishes (target_hp == max_hp). */
+  public onRepairComplete: ((structureId: number, playerId: number) => void) | null = null;
+  /** Fired when the server rejects a repair_structure request. */
+  public onRepairFail: ((structureId: number, reason: string) => void) | null = null;
   /** Fired when an island territory changes ownership (flag fort placed or destroyed). */
   public onTerritoryUpdate: ((islandId: number, companyId: number, claimed: boolean, fortX: number, fortY: number, fortRadius: number, isCompanyFortress: boolean) => void) | null = null;
   /** Fired when a claiming flag's progress changes. */
@@ -1420,6 +1429,12 @@ export class NetworkManager {
   sendDemolishStructure(structureId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: 'demolish_structure', timestamp: Date.now(), structure_id: structureId }));
+  }
+
+  /** Initiate (or, if already in progress by this player, cancel) a structure repair. */
+  sendRepairStructure(structureId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'repair_structure', timestamp: Date.now(), structure_id: structureId }));
   }
 
   /** Send a raw crafting request to the server for the given recipe ID. */
@@ -2863,6 +2878,28 @@ export class NetworkManager {
           message.recipe_id ?? '',
           message.reason,
         );
+        break;
+
+      case 'repair_started':
+        this.onRepairStarted?.(
+          message.structure_id ?? 0,
+          message.player_id ?? 0,
+          message.hp ?? 0,
+          message.max_hp ?? 0,
+          message.target_hp ?? 0,
+        );
+        break;
+
+      case 'repair_cancelled':
+        this.onRepairCancelled?.(message.structure_id ?? 0, message.player_id ?? 0);
+        break;
+
+      case 'repair_complete':
+        this.onRepairComplete?.(message.structure_id ?? 0, message.player_id ?? 0);
+        break;
+
+      case 'repair_fail':
+        this.onRepairFail?.(message.structure_id ?? 0, message.reason ?? 'unknown');
         break;
 
       case MessageType.COMMAND_RESPONSE:

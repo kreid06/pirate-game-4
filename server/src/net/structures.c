@@ -2031,3 +2031,244 @@ sv_send:;
     if (sv_flen > 0 && sv_flen < sizeof(sv_frame))
         send(client->fd, sv_frame, sv_flen, 0);
 }
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Repair system (any structure with target_hp < max_hp)
+ * ────────────────────────────────────────────────────────────────────────────
+ * Full restore (target_hp = 0 → max_hp) costs the structure's full recipe and
+ * takes STRUCTURE_REPAIR_FULL_MS. Partial repairs scale linearly: the cost is
+ * ceil(recipe_qty * missing / max_hp), and the duration shrinks proportionally
+ * so the per-tick HP gain is constant across full and partial repairs.
+ */
+
+typedef struct {
+    ItemKind item;
+    uint16_t qty;
+} RepairIng;
+
+/* Canonical full-build recipe per structure type (one tile/unit worth).
+ * Sourced from server/src/net/crafting.c — see "craft_*" recipes. */
+static int repair_recipe_for_struct(PlacedStructureType type,
+                                    RepairIng out[4]) {
+    switch (type) {
+        case STRUCT_WOODEN_FLOOR:     out[0] = (RepairIng){ ITEM_WOOD,  2 }; return 1; /* craft yields 2 per 4 wood */
+        case STRUCT_CEILING:          out[0] = (RepairIng){ ITEM_WOOD, 15 }; return 1;
+        case STRUCT_WORKBENCH:        out[0] = (RepairIng){ ITEM_WOOD, 10 }; return 1;
+        case STRUCT_WALL:             out[0] = (RepairIng){ ITEM_WOOD,  3 }; return 1; /* craft yields 4 per 10 wood ≈ 2.5; round up */
+        case STRUCT_DOOR_FRAME:       out[0] = (RepairIng){ ITEM_WOOD,  6 }; return 1;
+        case STRUCT_DOOR:             out[0] = (RepairIng){ ITEM_WOOD,  4 }; return 1;
+        case STRUCT_SHIPYARD:
+            out[0] = (RepairIng){ ITEM_WOOD,  30 };
+            out[1] = (RepairIng){ ITEM_PLANK, 10 };
+            return 2;
+        case STRUCT_CANNON:
+            out[0] = (RepairIng){ ITEM_WOOD,   8 };
+            out[1] = (RepairIng){ ITEM_METAL, 20 };
+            return 2;
+        case STRUCT_FLAG_FORT:
+            out[0] = (RepairIng){ ITEM_WOOD,  40 };
+            out[1] = (RepairIng){ ITEM_STONE, 40 };
+            return 2;
+        case STRUCT_COMPANY_FORTRESS:
+            out[0] = (RepairIng){ ITEM_WOOD,  100 };
+            out[1] = (RepairIng){ ITEM_STONE, 100 };
+            out[2] = (RepairIng){ ITEM_METAL,  20 };
+            return 3;
+        default: return 0; /* claim_flag, wreck — not repairable */
+    }
+}
+
+/* Compute prorated repair cost: ceil(recipe_qty * missing_hp / max_hp), min 1
+ * per ingredient. Returns the ingredient count. */
+static int compute_repair_cost(PlacedStructureType type,
+                               uint16_t missing_hp, uint16_t max_hp,
+                               RepairIng out[4]) {
+    RepairIng base[4];
+    int n = repair_recipe_for_struct(type, base);
+    if (n <= 0 || missing_hp == 0 || max_hp == 0) return 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t scaled = ((uint32_t)base[i].qty * (uint32_t)missing_hp + (uint32_t)max_hp - 1u) / (uint32_t)max_hp;
+        if (scaled < 1u) scaled = 1u;
+        out[i].item = base[i].item;
+        out[i].qty  = (uint16_t)scaled;
+    }
+    return n;
+}
+
+void handle_repair_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[256];
+
+    uint32_t sid = 0;
+    const char* sp = strstr(payload, "\"structure_id\":");
+    if (sp) sscanf(sp + 15, "%u", &sid);
+
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *s = &placed_structures[i];
+        if (!s->active || s->id != sid) continue;
+
+        /* Range */
+        float dx = player->x - s->x;
+        float dy = player->y - s->y;
+        if (dx*dx + dy*dy > STRUCT_INTERACT_R * STRUCT_INTERACT_R) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"too_far\"}", sid);
+            goto rs_send;
+        }
+        /* Company */
+        if (s->company_id != (uint8_t)player->company_id) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"wrong_company\"}", sid);
+            goto rs_send;
+        }
+        /* Excluded types */
+        if (s->type == STRUCT_CLAIM_FLAG || s->type == STRUCT_WRECK) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"not_repairable\"}", sid);
+            goto rs_send;
+        }
+        if (s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"claiming\"}", sid);
+            goto rs_send;
+        }
+
+        /* Toggle-cancel: same player re-interacts → cancel (no refund) */
+        if (s->repair_player_id == player->player_id) {
+            s->repair_player_id   = 0;
+            s->repair_progress_ms = 0.0f;
+            s->repair_start_hp    = 0;
+            char cmsg[160];
+            snprintf(cmsg, sizeof(cmsg),
+                     "{\"type\":\"repair_cancelled\",\"structure_id\":%u,\"player_id\":%u}",
+                     sid, player->player_id);
+            websocket_server_broadcast(cmsg);
+            return;
+        }
+        if (s->repair_player_id != 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"in_progress\"}", sid);
+            goto rs_send;
+        }
+
+        /* Already at full ceiling? Nothing to repair. */
+        if (s->target_hp >= s->max_hp) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"already_full\"}", sid);
+            goto rs_send;
+        }
+
+        /* Compute cost */
+        uint16_t missing = (uint16_t)(s->max_hp - s->target_hp);
+        RepairIng cost[4];
+        int nc = compute_repair_cost(s->type, missing, s->max_hp, cost);
+        if (nc <= 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"not_repairable\"}", sid);
+            goto rs_send;
+        }
+        /* Check resources */
+        for (int k = 0; k < nc; k++) {
+            if (craft_count_item(player, cost[k].item) < (int)cost[k].qty) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"insufficient_resources\"}", sid);
+                goto rs_send;
+            }
+        }
+        /* Consume */
+        for (int k = 0; k < nc; k++) {
+            craft_consume(player, cost[k].item, (int)cost[k].qty);
+        }
+
+        /* Start repair */
+        s->repair_player_id   = player->player_id;
+        s->repair_progress_ms = 0.0f;
+        s->repair_start_hp    = s->hp;
+
+        /* Broadcast started */
+        char smsg[256];
+        snprintf(smsg, sizeof(smsg),
+                 "{\"type\":\"repair_started\",\"structure_id\":%u,\"player_id\":%u,"
+                 "\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u}",
+                 sid, player->player_id,
+                 (unsigned)s->hp, (unsigned)s->max_hp, (unsigned)s->target_hp);
+        websocket_server_broadcast(smsg);
+        log_info("🔧 Player %u started repair on structure %u (missing %u hp)",
+                 player->player_id, sid, (unsigned)missing);
+        return;
+    }
+
+    snprintf(response, sizeof(response),
+             "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"not_found\"}", sid);
+
+rs_send:;
+    char frm[256];
+    size_t flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frm, sizeof(frm));
+    if (flen > 0 && flen < sizeof(frm)) send(client->fd, frm, flen, 0);
+}
+
+void structure_repair_tick(uint32_t delta_ms) {
+    if (delta_ms == 0) return;
+    /* Rate: STRUCTURE_REPAIR_FULL_MS restores max_hp worth of HP. */
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *s = &placed_structures[i];
+        if (!s->active) continue;
+        if (s->repair_player_id == 0) continue;
+
+        /* If structure was destroyed mid-repair, repair_player_id was cleared
+         * by destroy_placed_structure (active=false). Skip stale state. */
+        if (s->target_hp >= s->max_hp || s->max_hp == 0) {
+            /* Nothing more to repair */
+            s->repair_player_id   = 0;
+            s->repair_progress_ms = 0.0f;
+            continue;
+        }
+        /* Flag fort entering CLAIMING is impossible mid-repair, but defensive: */
+        if (s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) {
+            s->repair_player_id   = 0;
+            s->repair_progress_ms = 0.0f;
+            continue;
+        }
+
+        s->repair_progress_ms += (float)delta_ms;
+        /* HP gained = max_hp * delta / STRUCTURE_REPAIR_FULL_MS, accumulated */
+        float hp_gained_f = (float)s->max_hp * s->repair_progress_ms / (float)STRUCTURE_REPAIR_FULL_MS;
+        uint16_t hp_gain_int = (uint16_t)hp_gained_f;
+        if (hp_gain_int == 0) continue; /* sub-integer accumulator */
+
+        /* Reset accumulator carry for next tick */
+        float consumed_ms = (float)hp_gain_int * (float)STRUCTURE_REPAIR_FULL_MS / (float)s->max_hp;
+        s->repair_progress_ms -= consumed_ms;
+        if (s->repair_progress_ms < 0.0f) s->repair_progress_ms = 0.0f;
+
+        uint16_t cap = s->max_hp;
+        uint32_t new_hp        = (uint32_t)s->hp + (uint32_t)hp_gain_int;
+        uint32_t new_target_hp = (uint32_t)s->target_hp + (uint32_t)hp_gain_int;
+        if (new_hp        > cap) new_hp        = cap;
+        if (new_target_hp > cap) new_target_hp = cap;
+        s->hp        = (uint16_t)new_hp;
+        s->target_hp = (uint16_t)new_target_hp;
+
+        /* Broadcast hp change */
+        char msg[224];
+        snprintf(msg, sizeof(msg),
+                 "{\"type\":\"structure_hp_changed\","
+                 "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u"
+                 ",\"x\":%.1f,\"y\":%.1f}",
+                 s->id, (unsigned)s->hp, (unsigned)s->max_hp, (unsigned)s->target_hp, s->x, s->y);
+        websocket_server_broadcast(msg);
+
+        /* Completion */
+        if (s->target_hp >= s->max_hp) {
+            uint32_t pid = s->repair_player_id;
+            s->repair_player_id   = 0;
+            s->repair_progress_ms = 0.0f;
+            char cmsg[160];
+            snprintf(cmsg, sizeof(cmsg),
+                     "{\"type\":\"repair_complete\",\"structure_id\":%u,\"player_id\":%u}",
+                     s->id, pid);
+            websocket_server_broadcast(cmsg);
+            log_info("🔧 Repair complete on structure %u (player %u)", s->id, pid);
+        }
+    }
+}
