@@ -9231,26 +9231,32 @@ export class RenderSystem {
     };
     type IslandClaimEntry = ReturnType<typeof this._islandClaims.get>;
     const resolveCompanyClaim = (islId: number, cid: number, claim: IslandClaimEntry): CompanyClaim => {
-      // ── Resolve fort position (territory_update map is authoritative) ─────
-      let fortX = 0, fortY = 0, fortSeedR = CLAIM_RADIUS_FORT;
-      if (claim?.companyId === cid && (claim.fortX !== 0 || claim.fortY !== 0)) {
-        fortX     = claim.fortX;
-        fortY     = claim.fortY;
-        fortSeedR = claim.fortRadius;
-      } else {
-        const placedFort = this.placedStructures.find(
-          ps => ps.islandId === islId
-             && (ps.type === 'flag_fort' || ps.type === 'company_fortress')
-             && ps.companyId === cid
-             && !ps.claimOrphaned
-        );
-        if (placedFort) {
-          fortX     = placedFort.x;
-          fortY     = placedFort.y;
-          fortSeedR = claim?.fortRadius ?? CLAIM_RADIUS_FORT;
-        }
+      // ── Collect ALL forts (flag forts + company fortresses) for this
+      // company on this island. Each projects its own claim circle and acts
+      // as a BFS seed for connecting non-fort structures. The territory_update
+      // map only records the primary fort position for company fortresses; we
+      // walk placedStructures directly so multiple flag forts per island are
+      // each rendered with their own claim radius.
+      const fortCircles: Array<{ x: number; y: number; r: number }> = [];
+      const fortStructs = this.placedStructures.filter(
+        ps => ps.islandId === islId
+           && ps.companyId === cid
+           && !ps.claimOrphaned
+           && (ps.type === 'flag_fort' || ps.type === 'company_fortress')
+      );
+      for (const f of fortStructs) {
+        fortCircles.push({ x: f.x, y: f.y, r: CLAIM_RADIUS_FORT });
       }
-      const hasFort = fortX !== 0 || fortY !== 0;
+      // territory_update fallback: if no flag/company fort was found in
+      // placedStructures but the island_claims map has one for this company,
+      // synthesise a single anchor circle from it (handles edge cases where
+      // structure_placed hasn't arrived yet but territory_update has).
+      if (fortCircles.length === 0
+          && claim?.companyId === cid
+          && (claim.fortX !== 0 || claim.fortY !== 0)) {
+        fortCircles.push({ x: claim.fortX, y: claim.fortY, r: claim.fortRadius });
+      }
+      const hasFort = fortCircles.length > 0;
 
       // Locate this company's anchor fort in placedStructures for dominance.
       // Prefer Company Fortress over Flag Fort if both exist (shouldn't happen
@@ -9289,13 +9295,14 @@ export class RenderSystem {
       if (!this._claimOverlayCache.has(cacheKey)) {
         const connectedIds = new Set<number>();
         const bfsQueue: PlacedStructure[] = [];
-        if (hasFort) {
-          // Seed from the fort: any structure whose own circle (radius
-          // CLAIM_RADIUS_DEFAULT) overlaps the fort circle.
-          const seedR = fortSeedR + CLAIM_RADIUS_DEFAULT;
+        // Seed from EVERY fort: any non-fort structure whose circle (radius
+        // CLAIM_RADIUS_DEFAULT) overlaps that fort's circle joins the BFS.
+        for (const fc of fortCircles) {
+          const seedR = fc.r + CLAIM_RADIUS_DEFAULT;
           const seedR2 = seedR * seedR;
           for (const ps of companyStructs) {
-            const dx = ps.x - fortX, dy = ps.y - fortY;
+            if (connectedIds.has(ps.id)) continue;
+            const dx = ps.x - fc.x, dy = ps.y - fc.y;
             if (dx * dx + dy * dy <= seedR2) {
               connectedIds.add(ps.id);
               bfsQueue.push(ps);
@@ -9329,7 +9336,7 @@ export class RenderSystem {
       const inactiveList  = companyStructs.filter(ps => bfs.inactiveIds.has(ps.id));
 
       const worldCircles: Array<{ x: number; y: number; r: number }> = [];
-      if (hasFort) worldCircles.push({ x: fortX, y: fortY, r: fortSeedR });
+      for (const fc of fortCircles) worldCircles.push(fc);
       for (const ps of connectedList) worldCircles.push({ x: ps.x, y: ps.y, r: CLAIM_RADIUS_DEFAULT });
       return { worldCircles, inactiveList, hasFort, fortId, fortIsCompanyFortress };
     };
