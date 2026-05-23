@@ -105,6 +105,10 @@ export class ClientApplication {
   private pendingActiveSlot: number | null = null;
   /** companyId keyed by structure id — for team-colouring damage numbers on structure hits. */
   private _structureCompanyMap = new Map<number, number>();
+  /** performance.now() timestamp of the most recent combat damage seen for a
+   *  given structure id. Used to grey out the Repair option during the 30s
+   *  post-damage cooldown enforced by the server. */
+  private _structureLastDamagedAt = new Map<number, number>();
   // Optimistic mount state — held from module_interact_success until the server's
   // world-state echo confirms isMounted=true for the same module.
   private pendingMount: { moduleId: number; moduleKind: string; mountOffset?: Vec2; mountWorldPos?: Vec2 } | null = null;
@@ -2070,6 +2074,7 @@ export class ClientApplication {
       this.networkManager.onStructureDemolished = (id, x, y) => {
         const _sdComp = this._structureCompanyMap.get(id) ?? -1;
         this._structureCompanyMap.delete(id);
+        this._structureLastDamagedAt.delete(id);
         this.renderSystem.removePlacedStructure(id);
         if (x !== undefined && y !== undefined) {
           // Cannonball kill — big explosion
@@ -2092,6 +2097,9 @@ export class ClientApplication {
         // up — this fires during repair ticks and shouldn't look like damage.
         const isRepairTick = prev !== null && hp >= prev.prevHp && (targetHp === undefined || targetHp >= prev.prevTargetHp);
         if (isRepairTick) return;
+        // Real damage — stamp the time so the Repair radial option can apply
+        // the 30s cooldown that the server enforces.
+        this._structureLastDamagedAt.set(id, performance.now());
         this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.6);
         const _shComp = this._structureCompanyMap.get(id) ?? -1;
         const _shMyId = this.networkManager.getAssignedPlayerId();
@@ -2265,6 +2273,7 @@ export class ClientApplication {
           wrong_company:          'Cannot repair another company\u2019s structure',
           not_repairable:         'This structure cannot be repaired',
           claiming:               'Cannot repair during claim phase',
+          recently_damaged:       'Recently damaged \u2014 wait before repairing',
           not_found:              'Structure not found',
         };
         this.renderSystem.showAnnouncement(`\ud83d\udd27 ${msg[reason] ?? 'Repair failed'}`, 'info', 2.0);
@@ -3979,6 +3988,10 @@ export class ClientApplication {
                 const tHp = (typeof (s as any).targetHp === 'number') ? (s as any).targetHp as number : maxHp;
                 const missing = Math.max(0, maxHp - tHp);
                 if (missing <= 0 || maxHp <= 0) return null;
+                // 30s post-damage cooldown (mirrors server enforcement).
+                const lastDmgAt = this._structureLastDamagedAt.get(s.id) ?? 0;
+                const sinceDmg  = lastDmgAt > 0 ? (performance.now() - lastDmgAt) : Infinity;
+                const cooldownRemainingMs = sinceDmg < 30000 ? (30000 - sinceDmg) : 0;
                 const tip: string[] = ['Repair cost:'];
                 let affordable = true;
                 for (const ing of recipe) {
@@ -3991,8 +4004,13 @@ export class ClientApplication {
                   // Lines that start with '!' are rendered red by RadialMenu.
                   tip.push(ok ? line : '!' + line);
                 }
-                if (!affordable) tip.push('!Not enough resources');
-                return { id: 'repair', label: 'Repair', disabled: !affordable, tooltip: tip };
+                if (cooldownRemainingMs > 0) {
+                  tip.push(`!Recently damaged — wait ${Math.ceil(cooldownRemainingMs / 1000)}s`);
+                } else if (!affordable) {
+                  tip.push('!Not enough resources');
+                }
+                const disabled = !affordable || cooldownRemainingMs > 0;
+                return { id: 'repair', label: 'Repair', disabled, tooltip: tip };
               };
 
               // Can't interact at all with another company's floor (no use, no demolish)

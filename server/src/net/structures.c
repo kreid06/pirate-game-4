@@ -15,6 +15,7 @@
 #include "net/crafting.h"
 #include "net/claim.h"
 #include "sim/island.h"
+#include "util/time.h"
 
 /* ── Spatial hash for ceiling-connectivity flood-fill (O(N) cascade) ─────────
  * Tiles sit on a 50-px grid; walls sit at edge midpoints (25-px offset). We key
@@ -1672,6 +1673,9 @@ bool apply_structure_damage(PlacedStructure *s, uint16_t dmg) {
      * lowers. For most types there is no auto-repair (so target_hp just
      * mirrors hp), but flag forts use it to cap their heal-back. */
     s->target_hp = (s->target_hp > dmg) ? (uint16_t)(s->target_hp - dmg) : 0u;
+    /* Stamp the damage time so player-funded repairs can enforce a cooldown
+     * (no repairing structures that took combat damage in the last 30s). */
+    s->last_damaged_ms = get_time_ms();
     if (s->hp == 0) {
         uint32_t sid = s->id;
         destroy_placed_structure(sid);
@@ -2155,6 +2159,20 @@ void handle_repair_structure(WebSocketPlayer* player, struct WebSocketClient* cl
             snprintf(response, sizeof(response),
                      "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"already_full\"}", sid);
             goto rs_send;
+        }
+
+        /* Combat-damage cooldown: cannot start a repair within 30s of the
+         * last combat hit. Prevents instant-heal under fire. */
+        {
+            uint32_t now_ms = get_time_ms();
+            uint32_t since  = now_ms - s->last_damaged_ms;
+            if (s->last_damaged_ms != 0 && since < 30000u) {
+                uint32_t remaining = 30000u - since;
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"recently_damaged\",\"cooldown_ms\":%u}",
+                         sid, remaining);
+                goto rs_send;
+            }
         }
 
         /* Compute cost */
