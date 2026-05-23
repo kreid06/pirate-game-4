@@ -602,15 +602,25 @@ static void flag_fort_tick(uint32_t delta_ms) {
         }
         s->claim_contested = contested;
 
+        /* hp is uint16_t and per-tick heal is sub-1 (≈0.027 hp at 16ms), so
+         * naïve integer accumulation truncates to zero every tick. We carry
+         * a float accumulator in claim_progress_ms (repurposed for flag forts:
+         * "fractional current hp" in [0, max_hp]) and re-derive integer hp
+         * by truncation each tick. The float is normally `hp + fractional`
+         * (0 ≤ fractional < 1). External writes to s->hp (combat damage or
+         * repair) will set hp to a value that is NOT equal to truncate(float)
+         * — detect that and resync the float to hp so healing resumes from
+         * the new integer value. */
+        if ((uint16_t)s->claim_progress_ms != s->hp) {
+            s->claim_progress_ms = (float)s->hp;
+        }
+
         /* Heal toward max_hp while uncontested. */
-        if (!contested && s->hp < s->max_hp) {
-            float heal_per_ms = (float)s->max_hp / (float)FLAG_FORT_BUILD_MS;
-            float new_hp = (float)s->hp + heal_per_ms * (float)delta_ms;
-            if (new_hp > (float)s->max_hp) new_hp = (float)s->max_hp;
-            s->hp = (uint16_t)new_hp;
-            /* Mirror current healed value into claim_progress_ms so clients
-             * have a smooth build bar to render (0..FLAG_FORT_BUILD_MS). */
-            s->claim_progress_ms = ((float)s->hp / (float)s->max_hp) * (float)FLAG_FORT_BUILD_MS;
+        if (!contested && s->claim_progress_ms < (float)s->max_hp) {
+            float heal = (float)s->max_hp * (float)delta_ms / (float)FLAG_FORT_BUILD_MS;
+            s->claim_progress_ms += heal;
+            if (s->claim_progress_ms > (float)s->max_hp) s->claim_progress_ms = (float)s->max_hp;
+            s->hp = (uint16_t)s->claim_progress_ms;
         }
 
         /* Activation / deactivation gate. */

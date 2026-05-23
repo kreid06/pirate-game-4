@@ -2374,6 +2374,9 @@ int websocket_server_update(struct Sim* sim) {
                                                      placed_structures[si].claim_grace_ms,
                                                      placed_structures[si].claim_targets_fortress  ? "true" : "false");
                                         } else if (placed_structures[si].type == STRUCT_FLAG_FORT) {
+                                            float ff_prog = (placed_structures[si].max_hp > 0)
+                                                ? ((float)placed_structures[si].hp / (float)placed_structures[si].max_hp) * (float)FLAG_FORT_BUILD_MS
+                                                : 0.0f;
                                             snprintf(hs_claim_extra, sizeof(hs_claim_extra),
                                                      ",\"claim_orphaned\":%s"
                                                      ",\"fortress_complete\":%s"
@@ -2381,7 +2384,7 @@ int websocket_server_update(struct Sim* sim) {
                                                      ",\"fortress_contested\":%s",
                                                      placed_structures[si].claim_orphaned   ? "true" : "false",
                                                      placed_structures[si].fortress_complete ? "true" : "false",
-                                                     placed_structures[si].claim_progress_ms,
+                                                     ff_prog,
                                                      placed_structures[si].claim_contested  ? "true" : "false");
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
@@ -6746,6 +6749,9 @@ int websocket_server_update(struct Sim* sim) {
                                                      placed_structures[si].claim_grace_ms,
                                                      placed_structures[si].claim_targets_fortress ? "true" : "false");
                                         } else if (placed_structures[si].type == STRUCT_FLAG_FORT) {
+                                            float ff_prog = (placed_structures[si].max_hp > 0)
+                                                ? ((float)placed_structures[si].hp / (float)placed_structures[si].max_hp) * (float)FLAG_FORT_BUILD_MS
+                                                : 0.0f;
                                             snprintf(claim_extra_s, sizeof(claim_extra_s),
                                                      ",\"claim_orphaned\":%s"
                                                      ",\"fortress_complete\":%s"
@@ -6753,7 +6759,7 @@ int websocket_server_update(struct Sim* sim) {
                                                      ",\"fortress_contested\":%s",
                                                      placed_structures[si].claim_orphaned   ? "true" : "false",
                                                      placed_structures[si].fortress_complete ? "true" : "false",
-                                                     placed_structures[si].claim_progress_ms,
+                                                     ff_prog,
                                                      placed_structures[si].claim_contested  ? "true" : "false");
                                         }
                                         spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
@@ -6867,6 +6873,9 @@ int websocket_server_update(struct Sim* sim) {
                                                  placed_structures[si].claim_grace_ms,
                                                  placed_structures[si].claim_targets_fortress ? "true" : "false");
                                     } else if (placed_structures[si].type == STRUCT_FLAG_FORT) {
+                                        float ff_prog = (placed_structures[si].max_hp > 0)
+                                            ? ((float)placed_structures[si].hp / (float)placed_structures[si].max_hp) * (float)FLAG_FORT_BUILD_MS
+                                            : 0.0f;
                                         snprintf(gs_claim_extra, sizeof(gs_claim_extra),
                                                  ",\"claim_orphaned\":%s"
                                                  ",\"fortress_complete\":%s"
@@ -6874,7 +6883,7 @@ int websocket_server_update(struct Sim* sim) {
                                                  ",\"fortress_contested\":%s",
                                                  placed_structures[si].claim_orphaned   ? "true" : "false",
                                                  placed_structures[si].fortress_complete ? "true" : "false",
-                                                 placed_structures[si].claim_progress_ms,
+                                                 ff_prog,
                                                  placed_structures[si].claim_contested  ? "true" : "false");
                                     }
                                     gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,

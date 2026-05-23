@@ -977,7 +977,9 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         placed_structures[placed_structure_count - 1].max_hp            = 500;
         placed_structures[placed_structure_count - 1].hp                = (uint16_t)(500 * FLAG_FORT_INITIAL_HP_PCT);
         placed_structures[placed_structure_count - 1].fortress_complete = false;
-        placed_structures[placed_structure_count - 1].claim_progress_ms = (float)FLAG_FORT_BUILD_MS * FLAG_FORT_INITIAL_HP_PCT;
+        /* claim_progress_ms is repurposed on flag forts as a float accumulator
+         * for "fractional current hp" — see flag_fort_tick. */
+        placed_structures[placed_structure_count - 1].claim_progress_ms = (float)placed_structures[placed_structure_count - 1].hp;
         placed_structures[placed_structure_count - 1].claim_contested   = false;
         claim_register_fort((uint8_t)target_island_id,
                             (uint32_t)player->company_id,
