@@ -2205,6 +2205,7 @@ export class ClientApplication {
         this.renderSystem.updateStructureDoorOpen(id, open);
       };
       this.networkManager.onCraftingOpen = (structureId, structureType) => {
+        console.log(`⚒ [DIAG] onCraftingOpen received: structure=${structureId} type=${structureType}`);
         if (structureType === 'shipyard') {
           // Fallback if server still sends crafting_open for shipyard (pre-update)
           this.shipyardMenu.open(structureId, 'empty', []);
@@ -2212,6 +2213,7 @@ export class ClientApplication {
         } else {
           this.craftingMenu.open(structureId);
           this.uiManager.setActiveMenuId(MENU_ID.CRAFTING);
+          console.log(`⚒ [DIAG] craftingMenu.open(${structureId}) done, activeMenuId=${(this.uiManager as any).activeMenuId ?? '?'}`);
         }
       };
 

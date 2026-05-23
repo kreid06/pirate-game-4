@@ -2919,6 +2919,7 @@ export class NetworkManager {
         break;
 
       case 'crafting_open':
+        console.log(`⚒ [DIAG] WS crafting_open msg:`, message);
         this.onCraftingOpen?.(message.structure_id ?? 0, message.structure_type ?? 'workbench');
         break;
 
@@ -3123,6 +3124,9 @@ export class NetworkManager {
         break;
 
       default:
+        if (message.type === 'structure_interact_fail') {
+          console.warn(`⚒ [DIAG] structure_interact_fail:`, message);
+        }
         break;
     }
   }
