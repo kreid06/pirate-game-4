@@ -5129,36 +5129,8 @@ export class RenderSystem {
         ctx.closePath();
         ctx.fill();
 
-        // ── Always-on claim-radius ring (state-coloured) ────────────
-        // Drawn at full claim radius around every flag fort so the player can
-        // see its territory at-a-glance without needing to hold Alt.
-        //   • Active + uncontested  → solid company colour, low alpha
-        //   • Active + contested    → solid red, low alpha
-        //   • Inactive + uncontested → dashed amber
-        //   • Inactive + contested   → dashed red
-        const flagFortActive = s.fortressComplete !== false; // default-active for legacy data
-        {
-          const claimRpx = 600 * zoom;
-          if (claimRpx > 4) {
-            ctx.save();
-            if (!flagFortActive) {
-              ctx.strokeStyle = s.fortressContested ? '#ff7050' : '#ffc848';
-              ctx.lineWidth = Math.max(1, 2 * zoom);
-              ctx.setLineDash([8 * zoom, 6 * zoom]);
-              ctx.globalAlpha = 0.65;
-            } else {
-              ctx.strokeStyle = s.fortressContested ? '#ff4040' : companyColor;
-              ctx.lineWidth = Math.max(1, 2.5 * zoom);
-              ctx.globalAlpha = s.fortressContested ? 0.55 : 0.35;
-            }
-            ctx.beginPath();
-            ctx.arc(0, 0, claimRpx, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.restore();
-          }
-        }
-
         // ── Contested tint (any state) ───────────────────────────────
+        const flagFortActive = s.fortressComplete !== false; // default-active for legacy data
         if (s.fortressContested) {
           ctx.save();
           ctx.fillStyle = 'rgba(255,60,60,0.25)';
