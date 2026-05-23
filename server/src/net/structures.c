@@ -452,13 +452,16 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     uint32_t cf_src_mine = 0, cf_src_enemy = 0;
     if (stype_enum == STRUCT_CLAIM_FLAG) {
         /* Find best "mine" source: closest active non-orphaned structure of the
-         * placer's company whose claim radius covers (px,py). */
+         * placer's company whose claim radius covers (px,py).
+         * INACTIVE flag forts (HP below 30%) are excluded — a fresh or
+         * heavily-damaged flag fort cannot champion a claim flag. */
         float best_mine_d2 = 0.0f;
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             PlacedStructure *ex = &placed_structures[si];
             if (!ex->active) continue;
             if (ex->claim_orphaned) continue;
             if (ex->company_id != (uint8_t)player->company_id) continue;
+            if (ex->type == STRUCT_FLAG_FORT && !ex->fortress_complete) continue;
             float cr = (ex->type == STRUCT_FLAG_FORT)        ? CLAIM_RADIUS_FLAG_FORT
                      : (ex->type == STRUCT_COMPANY_FORTRESS) ? CLAIM_RADIUS_COMPANY_FORT
                                                               : CLAIM_RADIUS_DEFAULT;
@@ -963,8 +966,19 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
 
     /* Flag Fort: override HP and register the island claim */
     if (stype_enum == STRUCT_FLAG_FORT) {
-        placed_structures[placed_structure_count - 1].max_hp = 500;
-        placed_structures[placed_structure_count - 1].hp     = 500;
+        /* Flag forts start INACTIVE at 10% HP. They heal back toward max_hp
+         * at a fixed rate while uncontested (FLAG_FORT_BUILD_MS = 5 min for
+         * a full 0→max heal). They become "active" the moment HP crosses
+         * 30%, and revert to inactive if combat damage drops HP below 30%.
+         * While inactive a flag fort STILL projects its claim radius and
+         * participates in dominators — it just cannot be used as the "mine"
+         * source for a claim flag (so you can't immediately contest enemy
+         * territory with a freshly-dropped fort). */
+        placed_structures[placed_structure_count - 1].max_hp            = 500;
+        placed_structures[placed_structure_count - 1].hp                = (uint16_t)(500 * FLAG_FORT_INITIAL_HP_PCT);
+        placed_structures[placed_structure_count - 1].fortress_complete = false;
+        placed_structures[placed_structure_count - 1].claim_progress_ms = (float)FLAG_FORT_BUILD_MS * FLAG_FORT_INITIAL_HP_PCT;
+        placed_structures[placed_structure_count - 1].claim_contested   = false;
         claim_register_fort((uint8_t)target_island_id,
                             (uint32_t)player->company_id,
                             (uint32_t)new_id,

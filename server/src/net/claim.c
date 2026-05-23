@@ -34,6 +34,7 @@
 
 #include "net/websocket_server_internal.h"
 #include "net/websocket_protocol.h"
+#include "net/structures.h"
 #include "sim/island.h"
 #include "util/log.h"
 #include "util/time.h"
@@ -562,9 +563,93 @@ static void fortress_tick(uint32_t delta_ms) {
     }
 }
 
+/* ── Flag-Fort heal/activation tick ──────────────────────────────────────
+ * Flag forts start at FLAG_FORT_INITIAL_HP_PCT of max_hp and heal back
+ * toward max_hp at a constant rate (max_hp / FLAG_FORT_BUILD_MS per ms)
+ * while no enemy player is inside their claim radius. Crossing the
+ * FLAG_FORT_ACTIVE_HP_PCT threshold flips `fortress_complete`; the same
+ * threshold is used in reverse (combat damage that drops HP below 30%
+ * sets fortress_complete=false until it heals back). */
+static uint32_t flag_fort_broadcast_acc_ms = 0;
+static void flag_fort_tick(uint32_t delta_ms) {
+    flag_fort_broadcast_acc_ms += delta_ms;
+    bool do_broadcast = (flag_fort_broadcast_acc_ms >= 1000u);
+    if (do_broadcast) flag_fort_broadcast_acc_ms = 0;
+
+    for (uint32_t si = 0; si < placed_structure_count; si++) {
+        PlacedStructure *s = &placed_structures[si];
+        if (!s->active) continue;
+        if (s->type != STRUCT_FLAG_FORT) continue;
+        if (s->claim_orphaned) continue;
+
+        float    fx  = s->x, fy = s->y;
+        uint8_t  isl = s->island_id;
+        uint8_t  co  = s->company_id;
+
+        /* Detect any enemy player within the fort's claim radius — heal is
+         * paused while contested (mirrors Company Fortress behaviour). */
+        bool contested = false;
+        for (uint32_t pi = 0; pi < MAX_PLAYERS; pi++) {
+            WebSocketPlayer *p = &players[pi];
+            if (!p->active || p->player_id == 0) continue;
+            if ((uint8_t)p->company_id == co) continue;
+            if ((uint8_t)p->on_island_id != isl) continue;
+            float dx = p->x - fx, dy = p->y - fy;
+            if (dx*dx + dy*dy <= CLAIM_RADIUS_FLAG_FORT * CLAIM_RADIUS_FLAG_FORT) {
+                contested = true;
+                break;
+            }
+        }
+        s->claim_contested = contested;
+
+        /* Heal toward max_hp while uncontested. */
+        if (!contested && s->hp < s->max_hp) {
+            float heal_per_ms = (float)s->max_hp / (float)FLAG_FORT_BUILD_MS;
+            float new_hp = (float)s->hp + heal_per_ms * (float)delta_ms;
+            if (new_hp > (float)s->max_hp) new_hp = (float)s->max_hp;
+            s->hp = (uint16_t)new_hp;
+            /* Mirror current healed value into claim_progress_ms so clients
+             * have a smooth build bar to render (0..FLAG_FORT_BUILD_MS). */
+            s->claim_progress_ms = ((float)s->hp / (float)s->max_hp) * (float)FLAG_FORT_BUILD_MS;
+        }
+
+        /* Activation / deactivation gate. */
+        bool should_be_active = ((float)s->hp >= FLAG_FORT_ACTIVE_HP_PCT * (float)s->max_hp);
+        if (should_be_active != s->fortress_complete) {
+            s->fortress_complete = should_be_active;
+            char amsg[192];
+            snprintf(amsg, sizeof(amsg),
+                     "{\"type\":\"flag_fort_active\",\"structure_id\":%u"
+                     ",\"company_id\":%u,\"island_id\":%u,\"active\":%s}",
+                     s->id, co, isl, should_be_active ? "true" : "false");
+            websocket_server_broadcast(amsg);
+            log_info("🚩 Flag Fort #%u (company %u, island %u) %s (hp=%u/%u)",
+                     s->id, co, isl,
+                     should_be_active ? "ACTIVATED" : "deactivated",
+                     s->hp, s->max_hp);
+        }
+
+        if (do_broadcast) {
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "{\"type\":\"flag_fort_build_progress\",\"structure_id\":%u"
+                     ",\"company_id\":%u,\"island_id\":%u"
+                     ",\"hp\":%u,\"max_hp\":%u,\"fortress_complete\":%s"
+                     ",\"contested\":%s}",
+                     s->id, co, isl,
+                     s->hp, s->max_hp,
+                     s->fortress_complete ? "true" : "false",
+                     contested ? "true" : "false");
+            websocket_server_broadcast(msg);
+        }
+    }
+}
+
 void claim_tick(uint32_t delta_ms) {
     /* Advance Company Fortress build timers */
     fortress_tick(delta_ms);
+    /* Advance Flag Fort heal/activation gate */
+    flag_fort_tick(delta_ms);
 
     /* ── Claim-flag progress ──────────────────────────────────────────── */
     for (uint32_t si = 0; si < placed_structure_count; si++) {
@@ -745,6 +830,15 @@ void claim_tick(uint32_t delta_ms) {
              * other structures' dominators lists — demote to the bottom. */
             claim_demote_orphaned_in_all_dominators(orphaned_id);
 
+            /* Capture rule: a captured FLAG FORT is destroyed outright (it
+             * is a fragile anchor, not a permanent structure like a Company
+             * Fortress). The dominators bookkeeping below still runs on the
+             * remaining victims; destroying the fort cascades through
+             * destroy_placed_structure and unwinds its IslandClaim record.
+             * Deferred until AFTER the territory_flipped broadcast so
+             * clients see the flip event before the demolish event. */
+            bool src_enemy_was_flag_fort = (src_enemy->type == STRUCT_FLAG_FORT);
+
             /* If the orphaned structure was a Company Fortress that owned an
              * IslandClaim, drop that claim record. */
             if (src_enemy->type == STRUCT_COMPANY_FORTRESS && src_enemy->fortress_complete) {
@@ -846,6 +940,12 @@ void claim_tick(uint32_t delta_ms) {
             snprintf(dmsg2, sizeof(dmsg2),
                      "{\"type\":\"structure_demolished\",\"structure_id\":%u}", s->id);
             websocket_server_broadcast(dmsg2);
+
+            /* Destroy a captured flag fort (deferred from the orphan step so
+             * the territory_flipped event lands before the demolish). */
+            if (src_enemy_was_flag_fort) {
+                destroy_placed_structure(orphaned_id);
+            }
         } else if (do_destroy) {
             /* Reverse timer maxed — flag defeated. */
             log_info("🏴 Claim Flag #%u destroyed (timer reversed to full)", s->id);

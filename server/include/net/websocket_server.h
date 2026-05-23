@@ -319,6 +319,9 @@ extern int       claim_flag_count;
 #define CLAIM_FLAG_STATE_REVERSING       4u
 #define MAX_ISLAND_CLAIMS       16       /* max simultaneous island claim records      */
 #define COMPANY_FORTRESS_BUILD_MS 900000u /* 15 min to complete a company fortress     */
+#define FLAG_FORT_BUILD_MS        300000u /* 5 min for full flag-fort heal 0→max_hp    */
+#define FLAG_FORT_INITIAL_HP_PCT  0.10f   /* HP fraction at placement                  */
+#define FLAG_FORT_ACTIVE_HP_PCT   0.30f   /* HP fraction required to be "active"       */
 
 /**
  * IslandClaim — records a COMPLETED Company Fortress on an island.

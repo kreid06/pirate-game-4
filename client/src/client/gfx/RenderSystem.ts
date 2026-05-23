@@ -1965,6 +1965,15 @@ export class RenderSystem {
     }
   }
 
+  /** Flip a Flag Fort's active state (crosses 30%-HP gate). */
+  onFlagFortActive(structId: number, active: boolean): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (s) {
+      s.fortressComplete = active;
+      this._claimOverlayDirty = true;
+    }
+  }
+
   /** Replace the full placed-structure list (e.g. on join). */
   setPlacedStructures(arr: PlacedStructure[]): void {
     this.placedStructures = [...arr];
@@ -5097,6 +5106,54 @@ export class RenderSystem {
         ctx.lineTo(ts * 0.08, -ts * 0.45 - ts * 0.35);
         ctx.closePath();
         ctx.fill();
+
+        // ── Inactive (HP < 30%) build/heal indicator ─────────────────
+        const flagFortActive = s.fortressComplete !== false; // default-active for legacy data
+        if (!flagFortActive) {
+          // Diagonal-hatch "under construction" overlay on the tower face
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
+          ctx.clip();
+          ctx.strokeStyle = 'rgba(255,200,80,0.55)';
+          ctx.lineWidth = Math.max(1, 1.2 * zoom);
+          const hatchStep = Math.max(4, 6 * zoom);
+          for (let h = -ts; h < ts; h += hatchStep) {
+            ctx.beginPath();
+            ctx.moveTo(h - ts * 0.45, -ts * 0.45);
+            ctx.lineTo(h + ts * 0.45, ts * 0.45);
+            ctx.stroke();
+          }
+          ctx.restore();
+
+          // Build/heal progress bar above the merlons
+          const barW = ts * 1.1;
+          const barH = Math.max(3, 5 * zoom);
+          const barY = -ts * 0.45 - ts * 0.95;
+          ctx.fillStyle = 'rgba(0,0,0,0.65)';
+          ctx.fillRect(-barW / 2, barY, barW, barH);
+          // Fill represents HP fraction (0→0.30 = inactive band)
+          const fillFrac = Math.min(1, Math.max(0, hpFrac / 0.30));
+          ctx.fillStyle = s.fortressContested ? '#e04848' : '#ffc848';
+          ctx.fillRect(-barW / 2, barY, barW * fillFrac, barH);
+          // 30% threshold tick (always at right edge since bar maps 0..0.30)
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = Math.max(1, 1 * zoom);
+          ctx.strokeRect(-barW / 2, barY, barW, barH);
+
+          // "BUILDING" label (only when zoomed in enough to read)
+          if (zoom >= 0.5) {
+            const fontPx = Math.max(8, Math.round(9 * zoom));
+            ctx.font = `bold ${fontPx}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            const label = s.fortressContested ? 'CONTESTED' : 'BUILDING';
+            ctx.fillStyle = '#000';
+            ctx.fillText(label, 1, barY - 1);
+            ctx.fillStyle = s.fortressContested ? '#ff8080' : '#ffe080';
+            ctx.fillText(label, 0, barY - 2);
+          }
+        }
 
         ctx.restore();
       } else if (s.type === 'company_fortress') {
@@ -9665,6 +9722,34 @@ export class RenderSystem {
             }
           }
         }
+      }
+    }
+
+    // ── Pass 4: inactive Flag Fort indicator ─────────────────────────────
+    // Draws a dashed amber outline around the claim radius of any flag fort
+    // that hasn't yet healed to its 30%-HP active gate. This is a passive
+    // visual cue — territory dominance is unchanged for inactive forts, but
+    // the player should be able to see at-a-glance which anchors are still
+    // building up (or have been beaten below the active threshold).
+    for (const ps of this.placedStructures) {
+      if (ps.type !== 'flag_fort') continue;
+      if (ps.fortressComplete !== false) continue; // active or unknown → no overlay
+      if (ps.claimOrphaned) continue;
+      const color = ps.fortressContested ? '#ff7050' : '#ffc848';
+      const wrapOffsetsAll = this.getWrapRenderOffsets(Vec2.from(ps.x, ps.y), camera, CLAIM_RADIUS_FORT + 50);
+      for (const off of wrapOffsetsAll) {
+        const sc = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
+        const sr = CLAIM_RADIUS_FORT * zoom;
+        if (sr <= 0) continue;
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = Math.max(1, 2 * zoom);
+        ctx.setLineDash([8 * zoom, 6 * zoom]);
+        ctx.globalAlpha = 0.65;
+        ctx.beginPath();
+        ctx.arc(sc.x, sc.y, sr, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
       }
     }
   }

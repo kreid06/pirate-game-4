@@ -664,6 +664,8 @@ export class NetworkManager {
   public onFortressComplete: ((structId: number, companyId: number, islandId: number) => void) | null = null;
   /** Fired when a Company Fortress is captured by an enemy claim flag. */
   public onFortressCaptured: ((structId: number, newCompanyId: number, oldCompanyId: number, islandId: number) => void) | null = null;
+  /** Fired when a Flag Fort crosses (in either direction) the 30%-HP active gate. */
+  public onFlagFortActive: ((structId: number, companyId: number, islandId: number, active: boolean) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
   public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number) => void) | null = null;
   /** Fired when the server rejects a structure placement with a reason string. */
@@ -2758,6 +2760,45 @@ export class NetworkManager {
           message.structure_id  ?? 0,
           message.company_id    ?? 0,
           message.island_id     ?? 0,
+        );
+        break;
+
+      case 'flag_fort_build_progress':
+        // Reuse the company-fortress build callback; the renderer keys on
+        // structure_id, not on type. progress is encoded as hp/max_hp * total.
+        this.onFortressBuildProgress?.(
+          message.structure_id  ?? 0,
+          message.company_id    ?? 0,
+          message.island_id     ?? 0,
+          // synthesize progress_ms from hp ratio
+          (typeof message.hp === 'number' && typeof message.max_hp === 'number' && message.max_hp > 0)
+            ? (message.hp / message.max_hp) * 300000
+            : 0,
+          300000,
+          message.contested     === true,
+        );
+        // Reflect active-state change as a fortress_complete event when the
+        // server's gate is currently satisfied. The server also sends a
+        // dedicated flag_fort_active event for transitions; this is a
+        // periodic resync.
+        if (message.fortress_complete === true) {
+          this.onFortressComplete?.(
+            message.structure_id  ?? 0,
+            message.company_id    ?? 0,
+            message.island_id     ?? 0,
+          );
+        }
+        break;
+
+      case 'flag_fort_active':
+        // Activation/deactivation transition for a flag fort. We pipe both
+        // directions through the existing fortress_complete callback by
+        // toggling fortressComplete on the cached structure.
+        this.onFlagFortActive?.(
+          message.structure_id  ?? 0,
+          message.company_id    ?? 0,
+          message.island_id     ?? 0,
+          message.active        === true,
         );
         break;
 

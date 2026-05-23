@@ -2144,6 +2144,14 @@ export class ClientApplication {
         this.renderSystem.onFortressCaptured(structId, newCompanyId, islandId);
         this.renderSystem.showAnnouncement(`⚔️ Company Fortress captured! Island ${islandId} changing hands…`, 'info', 5.0);
       };
+      this.networkManager.onFlagFortActive = (structId, _companyId, islandId, active) => {
+        this.renderSystem.onFlagFortActive(structId, active);
+        if (active) {
+          this.renderSystem.showAnnouncement(`🚩 Flag Fort active on island ${islandId}`, 'info', 3.0);
+        } else {
+          this.renderSystem.showAnnouncement(`🚩 Flag Fort deactivated on island ${islandId}`, 'info', 3.0);
+        }
+      };
       this.networkManager.onPlacementFailed = (reason, _x, _y, _structureType, blockerId) => {
         const REASONS: Record<string, string> = {
           occupied:          'Space already occupied',
