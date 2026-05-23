@@ -2614,6 +2614,7 @@ export class NetworkManager {
       }
 
       case 'STRUCTURES': {
+        console.log(`📦 [DIAG] Received STRUCTURES, count=${(message.structures ?? []).length}`, message.structures);
         const structs: PlacedStructure[] = (message.structures ?? []).map((s: any): PlacedStructure => ({
           id:        s.id       ?? 0,
           type:      s.structure_type === 'workbench'    ? 'workbench'

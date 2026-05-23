@@ -1319,6 +1319,20 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
         goto si_send;
     }
 
+    /* DIAG: dump active structures for the requested id */
+    {
+        log_info("⚒ [DIAG] structure_interact not_found: sid=%u player=%u on_island=%u count=%u",
+                 sid, player->player_id, player->on_island_id, placed_structure_count);
+        unsigned shown = 0;
+        for (uint32_t i = 0; i < placed_structure_count && shown < 12; i++) {
+            log_info("    [%u] id=%u type=%u active=%d x=%.0f y=%.0f island=%u",
+                     i, placed_structures[i].id, placed_structures[i].type,
+                     placed_structures[i].active ? 1 : 0,
+                     placed_structures[i].x, placed_structures[i].y,
+                     placed_structures[i].island_id);
+            shown++;
+        }
+    }
     snprintf(response, sizeof(response),
              "{\"type\":\"structure_interact_fail\",\"reason\":\"not_found\"}");
 
