@@ -966,21 +966,58 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
 
     /* Flag Fort: override HP and register the island claim */
     if (stype_enum == STRUCT_FLAG_FORT) {
-        /* Flag forts start INACTIVE at 10% HP. They heal back toward max_hp
-         * at a fixed rate while uncontested (FLAG_FORT_BUILD_MS = 5 min for
-         * a full 0→max heal). They become "active" the moment HP crosses
-         * 30%, and revert to inactive if combat damage drops HP below 30%.
-         * While inactive a flag fort STILL projects its claim radius and
-         * participates in dominators — it just cannot be used as the "mine"
-         * source for a claim flag (so you can't immediately contest enemy
-         * territory with a freshly-dropped fort). */
-        placed_structures[placed_structure_count - 1].max_hp            = 500;
-        placed_structures[placed_structure_count - 1].hp                = (uint16_t)(500 * FLAG_FORT_INITIAL_HP_PCT);
-        placed_structures[placed_structure_count - 1].fortress_complete = false;
-        /* claim_progress_ms is repurposed on flag forts as a float accumulator
-         * for "fractional current hp" — see flag_fort_tick. */
-        placed_structures[placed_structure_count - 1].claim_progress_ms = (float)placed_structures[placed_structure_count - 1].hp;
-        placed_structures[placed_structure_count - 1].claim_contested   = false;
+        /* Flag forts go through 3 phases:
+         *   CLAIMING (1 min, claim_flag-style contest) — semi-transparent,
+         *     non-damageable, no HP bar. SKIPPED if the placement point lies
+         *     inside this company's existing ACTIVE territory on this island
+         *     (i.e., within an active flag fort / company fortress radius).
+         *   BUILDING (heals 10%→30% HP over 5 min) — damageable, normal HP
+         *     bar, flashing claim border on client. Mechanics identical to
+         *     previous "first phase".
+         *   ACTIVE (≥30% HP) — full territory participation.
+         * While CLAIMING or BUILDING a flag fort does NOT push dominance
+         * onto enemy territory (it cannot be used as the "mine" source for
+         * a claim flag); the client also renders it as its own non-merging
+         * blob in the overlay. */
+        PlacedStructure *ff = &placed_structures[placed_structure_count - 1];
+        ff->max_hp            = 500;
+        ff->hp                = (uint16_t)(500 * FLAG_FORT_INITIAL_HP_PCT);
+        ff->fortress_complete = false;
+        ff->claim_contested   = false;
+        ff->claim_state       = CLAIM_FLAG_STATE_CONTEST;
+        ff->claim_grace_ms    = 0.0f;
+
+        /* Detect "placed in already-active friendly territory" — search for
+         * any active (non-orphaned, fortress_complete) flag fort or company
+         * fortress belonging to the SAME company on the SAME island whose
+         * claim radius contains the placement point. */
+        bool in_friendly_active = false;
+        for (uint32_t qi = 0; qi < placed_structure_count - 1; qi++) {
+            PlacedStructure *q = &placed_structures[qi];
+            if (!q->active) continue;
+            if (q->claim_orphaned) continue;
+            if (!q->fortress_complete) continue;
+            if (q->company_id != ff->company_id) continue;
+            if (q->island_id  != ff->island_id)  continue;
+            if (q->type != STRUCT_FLAG_FORT && q->type != STRUCT_COMPANY_FORTRESS) continue;
+            float qr = (q->type == STRUCT_COMPANY_FORTRESS) ? CLAIM_RADIUS_COMPANY_FORT : CLAIM_RADIUS_FLAG_FORT;
+            float dx = ff->x - q->x, dy = ff->y - q->y;
+            if (dx*dx + dy*dy <= qr*qr) { in_friendly_active = true; break; }
+        }
+
+        if (in_friendly_active) {
+            /* Skip claim phase entirely; jump straight to BUILDING.
+             * claim_progress_ms is now the float HP accumulator (see flag_fort_tick). */
+            ff->claim_phase       = FLAG_FORT_PHASE_BUILDING;
+            ff->claim_progress_ms = (float)ff->hp;
+        } else {
+            /* Enter CLAIMING phase. claim_progress_ms counts FLAG_FORT_CLAIM_MS → 0
+             * (mirrors claim_flag). Transition to BUILDING re-purposes it as the
+             * fractional-HP accumulator. */
+            ff->claim_phase       = FLAG_FORT_PHASE_CLAIMING;
+            ff->claim_progress_ms = (float)FLAG_FORT_CLAIM_MS;
+        }
+
         claim_register_fort((uint8_t)target_island_id,
                             (uint32_t)player->company_id,
                             (uint32_t)new_id,
@@ -1033,16 +1070,24 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
     uint16_t bcast_hp     = placed_structures[placed_structure_count - 1].hp;
     uint16_t bcast_max_hp = placed_structures[placed_structure_count - 1].max_hp;
+    /* Flag-fort phase initial broadcast (claim/build/active). Other types: 0. */
+    uint8_t bcast_phase = (stype_enum == STRUCT_FLAG_FORT)
+        ? placed_structures[placed_structure_count - 1].claim_phase : 0u;
+    char phase_extra[48] = "";
+    if (stype_enum == STRUCT_FLAG_FORT) {
+        snprintf(phase_extra, sizeof(phase_extra), ",\"claim_phase\":%u", (unsigned)bcast_phase);
+    }
     snprintf(bcast, sizeof(bcast),
              "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
              "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-             ",\"rotation\":%.2f%s%s}",
+             ",\"rotation\":%.2f%s%s%s}",
              new_id, stype, target_island_id, px, py,
              (unsigned)player->company_id, (unsigned)bcast_hp, (unsigned)bcast_max_hp, player->name,
              bcast_rot,
              new_is_door ? ",\"open\":false" : "",
-             cannon_extra);
+             cannon_extra,
+             phase_extra);
     websocket_server_broadcast(bcast);
     return; /* already sent via broadcast */
 
@@ -1613,6 +1658,10 @@ bool apply_structure_damage(PlacedStructure *s, uint16_t dmg) {
     /* Claim flags are immune to damage — they only "die" by completing/reversing
      * their territory-claim timer (handled in claim.c). */
     if (s->type == STRUCT_CLAIM_FLAG) return false;
+    /* Flag forts are non-damageable during the CLAIMING phase — they only
+     * become vulnerable once the 1-min ground claim succeeds and they enter
+     * BUILDING. */
+    if (s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) return false;
     s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
     if (s->hp == 0) {
         uint32_t sid = s->id;

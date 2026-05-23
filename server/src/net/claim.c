@@ -585,8 +585,110 @@ static void flag_fort_tick(uint32_t delta_ms) {
         float    fx  = s->x, fy = s->y;
         uint8_t  isl = s->island_id;
         uint8_t  co  = s->company_id;
+        float    dt  = (float)delta_ms;
 
-        /* Detect any enemy player within the fort's claim radius — heal is
+        /* ── Save migration / sanity: if claim_phase is uninitialised (0) on
+         * a structure whose HP already indicates a later phase, snap it. This
+         * covers world saves written before claim_phase existed. */
+        if (s->claim_phase == FLAG_FORT_PHASE_CLAIMING) {
+            float hp_pct = (s->max_hp > 0) ? ((float)s->hp / (float)s->max_hp) : 0.0f;
+            if (hp_pct >= FLAG_FORT_ACTIVE_HP_PCT) {
+                s->claim_phase       = FLAG_FORT_PHASE_ACTIVE;
+                s->fortress_complete = true;
+                s->claim_progress_ms = (float)s->hp;
+            } else if (hp_pct > FLAG_FORT_INITIAL_HP_PCT + 0.001f) {
+                /* Already past initial HP — must be mid-build. */
+                s->claim_phase       = FLAG_FORT_PHASE_BUILDING;
+                s->claim_progress_ms = (float)s->hp;
+            }
+        }
+
+        /* ════════════════════════════════════════════════════════════════
+         * PHASE: CLAIMING (1 min ground-claim, mirrors claim_flag rules)
+         *   - non-damageable (handled at damage source)
+         *   - HP pinned at 10% (we leave it where placement put it)
+         *   - claim_progress_ms counts FLAG_FORT_CLAIM_MS → 0
+         *   - enemy player in radius → CONTEST (stall, no progress)
+         *   - allies-only → CLAIMING (after 5 s grace)
+         *   - empty → CONTEST (stall)
+         * On reaching 0 → transition to BUILDING phase. */
+        if (s->claim_phase == FLAG_FORT_PHASE_CLAIMING) {
+            bool ally_present  = false;
+            bool enemy_present = false;
+            for (uint32_t pi = 0; pi < MAX_PLAYERS; pi++) {
+                WebSocketPlayer *p = &players[pi];
+                if (!p->active || p->player_id == 0) continue;
+                if ((uint8_t)p->on_island_id != isl) continue;
+                float dx = p->x - fx, dy = p->y - fy;
+                if (dx*dx + dy*dy > CLAIM_RADIUS_FLAG_FORT * CLAIM_RADIUS_FLAG_FORT) continue;
+                if ((uint8_t)p->company_id == co) ally_present = true;
+                else                              enemy_present = true;
+            }
+
+            uint8_t desired;
+            if (enemy_present)    desired = CLAIM_FLAG_STATE_CONTEST;
+            else if (ally_present) desired = CLAIM_FLAG_STATE_CLAIMING;
+            else                   desired = CLAIM_FLAG_STATE_CONTEST;
+
+            if (desired == CLAIM_FLAG_STATE_CONTEST) {
+                s->claim_state    = CLAIM_FLAG_STATE_CONTEST;
+                s->claim_grace_ms = 0.0f;
+            } else { /* CLAIMING */
+                if (s->claim_state == CLAIM_FLAG_STATE_CLAIMING) {
+                    /* already counting down */
+                } else if (s->claim_state == CLAIM_FLAG_STATE_CLAIMING_GRACE) {
+                    s->claim_grace_ms += dt;
+                    if (s->claim_grace_ms >= (float)FLAG_FORT_CLAIM_GRACE_MS) {
+                        s->claim_state    = CLAIM_FLAG_STATE_CLAIMING;
+                        s->claim_grace_ms = 0.0f;
+                    }
+                } else {
+                    s->claim_state    = CLAIM_FLAG_STATE_CLAIMING_GRACE;
+                    s->claim_grace_ms = 0.0f;
+                }
+            }
+            s->claim_contested = (s->claim_state == CLAIM_FLAG_STATE_CONTEST);
+
+            if (s->claim_state == CLAIM_FLAG_STATE_CLAIMING) {
+                s->claim_progress_ms -= dt;
+                if (s->claim_progress_ms <= 0.0f) {
+                    /* Claim phase complete → enter BUILDING.
+                     * Re-purpose claim_progress_ms as the float-HP accumulator. */
+                    s->claim_phase       = FLAG_FORT_PHASE_BUILDING;
+                    s->claim_progress_ms = (float)s->hp;
+                    s->claim_state       = CLAIM_FLAG_STATE_CONTEST;
+                    s->claim_grace_ms    = 0.0f;
+                    s->claim_contested   = false;
+                    log_info("🚩 Flag Fort #%u (company %u, island %u) claim phase complete → BUILDING",
+                             s->id, co, isl);
+                }
+            }
+
+            if (do_broadcast) {
+                char msg[320];
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"flag_fort_build_progress\",\"structure_id\":%u"
+                         ",\"company_id\":%u,\"island_id\":%u"
+                         ",\"hp\":%u,\"max_hp\":%u,\"fortress_complete\":false"
+                         ",\"contested\":%s,\"claim_phase\":%u"
+                         ",\"claim_progress_ms\":%.0f,\"claim_total_ms\":%u"
+                         ",\"claim_state\":%u,\"claim_grace_ms\":%.0f}",
+                         s->id, co, isl,
+                         s->hp, s->max_hp,
+                         s->claim_contested ? "true" : "false",
+                         (unsigned)s->claim_phase,
+                         s->claim_progress_ms,
+                         FLAG_FORT_CLAIM_MS,
+                         (unsigned)s->claim_state,
+                         s->claim_grace_ms);
+                websocket_server_broadcast(msg);
+            }
+            continue;
+        }
+
+        /* ════════════════════════════════════════════════════════════════
+         * PHASE: BUILDING / ACTIVE (existing heal + activation gate)
+         * Detect any enemy player within the fort's claim radius — heal is
          * paused while contested (mirrors Company Fortress behaviour). */
         bool contested = false;
         for (uint32_t pi = 0; pi < MAX_PLAYERS; pi++) {
@@ -623,15 +725,19 @@ static void flag_fort_tick(uint32_t delta_ms) {
             s->hp = (uint16_t)s->claim_progress_ms;
         }
 
-        /* Activation / deactivation gate. */
+        /* Activation / deactivation gate (BUILDING ↔ ACTIVE). */
         bool should_be_active = ((float)s->hp >= FLAG_FORT_ACTIVE_HP_PCT * (float)s->max_hp);
-        if (should_be_active != s->fortress_complete) {
+        uint8_t new_phase = should_be_active ? FLAG_FORT_PHASE_ACTIVE : FLAG_FORT_PHASE_BUILDING;
+        if (new_phase != s->claim_phase || should_be_active != s->fortress_complete) {
+            s->claim_phase       = new_phase;
             s->fortress_complete = should_be_active;
-            char amsg[192];
+            char amsg[224];
             snprintf(amsg, sizeof(amsg),
                      "{\"type\":\"flag_fort_active\",\"structure_id\":%u"
-                     ",\"company_id\":%u,\"island_id\":%u,\"active\":%s}",
-                     s->id, co, isl, should_be_active ? "true" : "false");
+                     ",\"company_id\":%u,\"island_id\":%u,\"active\":%s"
+                     ",\"claim_phase\":%u}",
+                     s->id, co, isl, should_be_active ? "true" : "false",
+                     (unsigned)new_phase);
             websocket_server_broadcast(amsg);
             log_info("🚩 Flag Fort #%u (company %u, island %u) %s (hp=%u/%u)",
                      s->id, co, isl,
@@ -640,16 +746,17 @@ static void flag_fort_tick(uint32_t delta_ms) {
         }
 
         if (do_broadcast) {
-            char msg[256];
+            char msg[320];
             snprintf(msg, sizeof(msg),
                      "{\"type\":\"flag_fort_build_progress\",\"structure_id\":%u"
                      ",\"company_id\":%u,\"island_id\":%u"
                      ",\"hp\":%u,\"max_hp\":%u,\"fortress_complete\":%s"
-                     ",\"contested\":%s}",
+                     ",\"contested\":%s,\"claim_phase\":%u}",
                      s->id, co, isl,
                      s->hp, s->max_hp,
                      s->fortress_complete ? "true" : "false",
-                     contested ? "true" : "false");
+                     contested ? "true" : "false",
+                     (unsigned)s->claim_phase);
             websocket_server_broadcast(msg);
         }
     }

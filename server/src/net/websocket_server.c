@@ -2327,7 +2327,7 @@ int websocket_server_update(struct Sim* sim) {
                                         /* Build extra fields for shipyard construction state */
                                         char hs_sy_extra[256] = "";
                                         char hs_cannon_extra[64] = "";
-                                        char hs_claim_extra[192] = "";
+                                        char hs_claim_extra[320] = "";
                                         char hs_dom_extra[512] = "";
                                         format_dominators_extra(&placed_structures[si], hs_dom_extra, sizeof(hs_dom_extra));
                                         if (hs_is_sy) {
@@ -2381,11 +2381,19 @@ int websocket_server_update(struct Sim* sim) {
                                                      ",\"claim_orphaned\":%s"
                                                      ",\"fortress_complete\":%s"
                                                      ",\"fortress_build_progress\":%.0f"
-                                                     ",\"fortress_contested\":%s",
+                                                     ",\"fortress_contested\":%s"
+                                                     ",\"claim_phase\":%u"
+                                                     ",\"claim_progress_ms\":%.0f,\"claim_total_ms\":%u"
+                                                     ",\"claim_state\":%u,\"claim_grace_ms\":%.0f",
                                                      placed_structures[si].claim_orphaned   ? "true" : "false",
                                                      placed_structures[si].fortress_complete ? "true" : "false",
                                                      ff_prog,
-                                                     placed_structures[si].claim_contested  ? "true" : "false");
+                                                     placed_structures[si].claim_contested  ? "true" : "false",
+                                                     (unsigned)placed_structures[si].claim_phase,
+                                                     (placed_structures[si].claim_phase == FLAG_FORT_PHASE_CLAIMING) ? placed_structures[si].claim_progress_ms : 0.0f,
+                                                     (unsigned)FLAG_FORT_CLAIM_MS,
+                                                     (unsigned)placed_structures[si].claim_state,
+                                                     placed_structures[si].claim_grace_ms);
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
                                                           "%s{\"id\":%u,\"structure_type\":\"%s\","
@@ -6702,7 +6710,7 @@ int websocket_server_update(struct Sim* sim) {
                                         bool is_cflag_s  = (placed_structures[si].type == STRUCT_CLAIM_FLAG);
                                         char sy_extra_s[256] = "";
                                         char cannon_extra_s[64] = "";
-                                        char claim_extra_s[192] = "";
+                                        char claim_extra_s[320] = "";
                                         char dom_extra_s[512] = "";
                                         format_dominators_extra(&placed_structures[si], dom_extra_s, sizeof(dom_extra_s));
                                         if (is_sy_s) {
@@ -6756,11 +6764,19 @@ int websocket_server_update(struct Sim* sim) {
                                                      ",\"claim_orphaned\":%s"
                                                      ",\"fortress_complete\":%s"
                                                      ",\"fortress_build_progress\":%.0f"
-                                                     ",\"fortress_contested\":%s",
+                                                     ",\"fortress_contested\":%s"
+                                                     ",\"claim_phase\":%u"
+                                                     ",\"claim_progress_ms\":%.0f,\"claim_total_ms\":%u"
+                                                     ",\"claim_state\":%u,\"claim_grace_ms\":%.0f",
                                                      placed_structures[si].claim_orphaned   ? "true" : "false",
                                                      placed_structures[si].fortress_complete ? "true" : "false",
                                                      ff_prog,
-                                                     placed_structures[si].claim_contested  ? "true" : "false");
+                                                     placed_structures[si].claim_contested  ? "true" : "false",
+                                                     (unsigned)placed_structures[si].claim_phase,
+                                                     (placed_structures[si].claim_phase == FLAG_FORT_PHASE_CLAIMING) ? placed_structures[si].claim_progress_ms : 0.0f,
+                                                     (unsigned)FLAG_FORT_CLAIM_MS,
+                                                     (unsigned)placed_structures[si].claim_state,
+                                                     placed_structures[si].claim_grace_ms);
                                         }
                                         spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
@@ -6826,7 +6842,7 @@ int websocket_server_update(struct Sim* sim) {
                                     bool gs_is_cflag  = (placed_structures[si].type == STRUCT_CLAIM_FLAG);
                                     char gs_sy_extra[256] = "";
                                     char gs_cannon_extra[64] = "";
-                                    char gs_claim_extra[192] = "";
+                                    char gs_claim_extra[320] = "";
                                     char gs_dom_extra[512] = "";
                                     format_dominators_extra(&placed_structures[si], gs_dom_extra, sizeof(gs_dom_extra));
                                     if (gs_is_sy) {
@@ -6880,11 +6896,19 @@ int websocket_server_update(struct Sim* sim) {
                                                  ",\"claim_orphaned\":%s"
                                                  ",\"fortress_complete\":%s"
                                                  ",\"fortress_build_progress\":%.0f"
-                                                 ",\"fortress_contested\":%s",
+                                                 ",\"fortress_contested\":%s"
+                                                 ",\"claim_phase\":%u"
+                                                 ",\"claim_progress_ms\":%.0f,\"claim_total_ms\":%u"
+                                                 ",\"claim_state\":%u,\"claim_grace_ms\":%.0f",
                                                  placed_structures[si].claim_orphaned   ? "true" : "false",
                                                  placed_structures[si].fortress_complete ? "true" : "false",
                                                  ff_prog,
-                                                 placed_structures[si].claim_contested  ? "true" : "false");
+                                                 placed_structures[si].claim_contested  ? "true" : "false",
+                                                 (unsigned)placed_structures[si].claim_phase,
+                                                 (placed_structures[si].claim_phase == FLAG_FORT_PHASE_CLAIMING) ? placed_structures[si].claim_progress_ms : 0.0f,
+                                                 (unsigned)FLAG_FORT_CLAIM_MS,
+                                                 (unsigned)placed_structures[si].claim_state,
+                                                 placed_structures[si].claim_grace_ms);
                                     }
                                     gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
                                                    "%s{\"id\":%u,\"structure_type\":\"%s\","

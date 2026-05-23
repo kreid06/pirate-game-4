@@ -665,9 +665,9 @@ export class NetworkManager {
   /** Fired when a Company Fortress is captured by an enemy claim flag. */
   public onFortressCaptured: ((structId: number, newCompanyId: number, oldCompanyId: number, islandId: number) => void) | null = null;
   /** Fired when a Flag Fort crosses (in either direction) the 30%-HP active gate. */
-  public onFlagFortActive: ((structId: number, companyId: number, islandId: number, active: boolean) => void) | null = null;
+  public onFlagFortActive: ((structId: number, companyId: number, islandId: number, active: boolean, claimPhase: number) => void) | null = null;
   /** Fired ≈1/s for each flag fort to resync its heal/contested state. */
-  public onFlagFortBuildProgress: ((structId: number, hp: number, maxHp: number, contested: boolean, active: boolean) => void) | null = null;
+  public onFlagFortBuildProgress: ((structId: number, hp: number, maxHp: number, contested: boolean, active: boolean, claimPhase: number, claimProgressMs: number, claimTotalMs: number, claimState: number, claimGraceMs: number) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
   public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number) => void) | null = null;
   /** Fired when the server rejects a structure placement with a reason string. */
@@ -2633,6 +2633,9 @@ export class NetworkManager {
           fortressBuildProgress: typeof s.fortress_build_progress === 'number' ? s.fortress_build_progress : undefined,
           fortressComplete:      s.fortress_complete       === true,
           fortressContested:     s.fortress_contested      === true,
+          claimPhase:            typeof s.claim_phase === 'number' ? s.claim_phase : undefined,
+          claimPhaseProgressMs:  typeof s.claim_progress_ms === 'number' && s.claim_phase === 0 ? s.claim_progress_ms : undefined,
+          claimPhaseTotalMs:     typeof s.claim_total_ms === 'number' ? s.claim_total_ms : undefined,
           construction: s.structure_type === 'shipyard' ? {
             phase: (s.construction_phase === 'building' ? 'building' : 'empty') as ConstructionPhase,
             modulesPlaced: Array.isArray(s.modules_placed) ? s.modules_placed : [],
@@ -2677,6 +2680,9 @@ export class NetworkManager {
           fortressBuildProgress: typeof message.fortress_build_progress === 'number' ? message.fortress_build_progress : undefined,
           fortressComplete:     message.fortress_complete       === true,
           fortressContested:    message.fortress_contested      === true,
+          claimPhase:           typeof message.claim_phase === 'number' ? message.claim_phase : undefined,
+          claimPhaseProgressMs: typeof message.claim_progress_ms === 'number' && message.claim_phase === 0 ? message.claim_progress_ms : undefined,
+          claimPhaseTotalMs:    typeof message.claim_total_ms === 'number' ? message.claim_total_ms : undefined,
         };
         this.onStructurePlaced?.(sp);
         break;
@@ -2776,6 +2782,11 @@ export class NetworkManager {
           typeof message.max_hp === 'number' ? message.max_hp : 500,
           message.contested     === true,
           message.fortress_complete === true,
+          typeof message.claim_phase === 'number' ? message.claim_phase : 2,
+          typeof message.claim_progress_ms === 'number' ? message.claim_progress_ms : 0,
+          typeof message.claim_total_ms === 'number' ? message.claim_total_ms : 60000,
+          typeof message.claim_state === 'number' ? message.claim_state : 0,
+          typeof message.claim_grace_ms === 'number' ? message.claim_grace_ms : 0,
         );
         break;
 
@@ -2788,6 +2799,7 @@ export class NetworkManager {
           message.company_id    ?? 0,
           message.island_id     ?? 0,
           message.active        === true,
+          typeof message.claim_phase === 'number' ? message.claim_phase : (message.active ? 2 : 1),
         );
         break;
 

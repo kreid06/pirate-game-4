@@ -2149,16 +2149,16 @@ export class ClientApplication {
         this.renderSystem.onFortressCaptured(structId, newCompanyId, islandId);
         this.renderSystem.showAnnouncement(`⚔️ Company Fortress captured! Island ${islandId} changing hands…`, 'info', 5.0);
       };
-      this.networkManager.onFlagFortActive = (structId, _companyId, islandId, active) => {
-        this.renderSystem.onFlagFortActive(structId, active);
+      this.networkManager.onFlagFortActive = (structId, _companyId, islandId, active, claimPhase) => {
+        this.renderSystem.onFlagFortActive(structId, active, claimPhase);
         if (active) {
           this.renderSystem.showAnnouncement(`🚩 Flag Fort active on island ${islandId}`, 'info', 3.0);
         } else {
           this.renderSystem.showAnnouncement(`🚩 Flag Fort deactivated on island ${islandId}`, 'info', 3.0);
         }
       };
-      this.networkManager.onFlagFortBuildProgress = (structId, hp, maxHp, contested, active) => {
-        this.renderSystem.updateFlagFortBuildProgress(structId, hp, maxHp, contested, active);
+      this.networkManager.onFlagFortBuildProgress = (structId, hp, maxHp, contested, active, claimPhase, claimProgressMs, claimTotalMs, claimState, claimGraceMs) => {
+        this.renderSystem.updateFlagFortBuildProgress(structId, hp, maxHp, contested, active, claimPhase, claimProgressMs, claimTotalMs, claimState, claimGraceMs);
       };
       this.networkManager.onPlacementFailed = (reason, _x, _y, _structureType, blockerId) => {
         const REASONS: Record<string, string> = {

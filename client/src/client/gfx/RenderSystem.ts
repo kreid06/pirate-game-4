@@ -1965,18 +1965,21 @@ export class RenderSystem {
     }
   }
 
-  /** Flip a Flag Fort's active state (crosses 30%-HP gate). */
-  onFlagFortActive(structId: number, active: boolean): void {
+  /** Flip a Flag Fort's active state (crosses 30%-HP gate) or transition from CLAIMING→BUILDING. */
+  onFlagFortActive(structId: number, active: boolean, claimPhase?: number): void {
     const s = this.placedStructures.find(p => p.id === structId);
     if (s) {
       s.fortressComplete = active;
+      if (typeof claimPhase === 'number') s.claimPhase = claimPhase;
       this._claimOverlayDirty = true;
     }
   }
 
-  /** Periodic flag-fort heal resync (does NOT toggle active gate — that
-   *  arrives via the dedicated flag_fort_active event). */
-  updateFlagFortBuildProgress(structId: number, hp: number, maxHp: number, contested: boolean, active: boolean): void {
+  /** Periodic flag-fort heal / claim-phase progress resync (does NOT toggle
+   *  active gate — that arrives via the dedicated flag_fort_active event). */
+  updateFlagFortBuildProgress(structId: number, hp: number, maxHp: number, contested: boolean, active: boolean,
+                              claimPhase?: number, claimProgressMs?: number, claimTotalMs?: number,
+                              claimState?: number, claimGraceMs?: number): void {
     const s = this.placedStructures.find(p => p.id === structId);
     if (!s) return;
     s.hp = hp;
@@ -1985,6 +1988,21 @@ export class RenderSystem {
     // Build progress mapped onto a 0..max=FLAG_FORT_BUILD_MS scale so the
     // existing progress-bar reuses it (renderer divides by max_hp anyway).
     s.fortressBuildProgress = maxHp > 0 ? (hp / maxHp) * 300000 : 0;
+    if (typeof claimPhase === 'number') {
+      const prevPhase = s.claimPhase;
+      s.claimPhase = claimPhase;
+      if (prevPhase !== claimPhase) this._claimOverlayDirty = true;
+      if (claimPhase === 0) {
+        // CLAIMING phase — store the ground-claim countdown + contest state.
+        s.claimPhaseProgressMs = claimProgressMs;
+        s.claimPhaseTotalMs    = claimTotalMs;
+        s.claimState           = claimState;
+        s.claimGraceMs         = claimGraceMs;
+        s.claimContested       = contested;
+      } else {
+        s.claimPhaseProgressMs = undefined;
+      }
+    }
     if (s.fortressComplete !== active) {
       s.fortressComplete = active;
       this._claimOverlayDirty = true;
@@ -5131,15 +5149,72 @@ export class RenderSystem {
 
         // ── Contested tint (any state) ───────────────────────────────
         const flagFortActive = s.fortressComplete !== false; // default-active for legacy data
-        if (s.fortressContested) {
+        const flagFortPhase = (typeof s.claimPhase === 'number') ? s.claimPhase
+                            : (flagFortActive ? 2 : 1); // legacy: derive from active flag
+        if (s.fortressContested && flagFortPhase !== 0) {
           ctx.save();
           ctx.fillStyle = 'rgba(255,60,60,0.25)';
           ctx.fillRect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
           ctx.restore();
         }
 
-        // ── Inactive (HP < 30%) build/heal indicator ─────────────────
-        if (!flagFortActive) {
+        if (flagFortPhase === 0) {
+          // ── CLAIMING phase — semi-transparent "ghost" tower, claim-flag-style
+          //    contest stripes when an enemy is in radius, claim-countdown bar.
+          //    HP bar deliberately hidden — fort is non-damageable here.
+          ctx.save();
+          // Translucent white wash over the whole sprite to convey "not yet built".
+          ctx.fillStyle = 'rgba(255,255,255,0.45)';
+          ctx.fillRect(-ts * 0.55, -ts * 1.4, ts * 1.1, ts * 1.9);
+
+          // Contested stripes (red diagonal hatch) when an enemy is in the radius.
+          if (s.claimContested || s.fortressContested) {
+            ctx.beginPath();
+            ctx.rect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
+            ctx.clip();
+            ctx.strokeStyle = 'rgba(255,60,60,0.65)';
+            ctx.lineWidth = Math.max(1, 1.4 * zoom);
+            const stripeStep = Math.max(4, 7 * zoom);
+            for (let h = -ts; h < ts; h += stripeStep) {
+              ctx.beginPath();
+              ctx.moveTo(h - ts * 0.45, -ts * 0.45);
+              ctx.lineTo(h + ts * 0.45, ts * 0.45);
+              ctx.stroke();
+            }
+          }
+          ctx.restore();
+
+          // Claim-phase countdown bar above the merlons.
+          const totalMs = (typeof s.claimPhaseTotalMs === 'number' && s.claimPhaseTotalMs > 0)
+                        ? s.claimPhaseTotalMs : 60000;
+          const remMs   = (typeof s.claimPhaseProgressMs === 'number') ? s.claimPhaseProgressMs : totalMs;
+          // Bar fills LEFT→RIGHT as the countdown progresses (1 - rem/total).
+          const claimFillFrac = Math.min(1, Math.max(0, 1 - (remMs / totalMs)));
+          const barW = ts * 1.1;
+          const barH = Math.max(3, 5 * zoom);
+          const barY = -ts * 0.45 - ts * 0.95;
+          ctx.fillStyle = 'rgba(0,0,0,0.65)';
+          ctx.fillRect(-barW / 2, barY, barW, barH);
+          ctx.fillStyle = (s.claimContested || s.fortressContested) ? '#e04848' : '#cccccc';
+          ctx.fillRect(-barW / 2, barY, barW * claimFillFrac, barH);
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = Math.max(1, 1 * zoom);
+          ctx.strokeRect(-barW / 2, barY, barW, barH);
+
+          // Label
+          if (zoom >= 0.5) {
+            const fontPx = Math.max(8, Math.round(9 * zoom));
+            ctx.font = `bold ${fontPx}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            const label = (s.claimContested || s.fortressContested) ? 'CONTESTED' : 'CLAIMING';
+            ctx.fillStyle = '#000';
+            ctx.fillText(label, 1, barY - 1);
+            ctx.fillStyle = (s.claimContested || s.fortressContested) ? '#ff8080' : '#dddddd';
+            ctx.fillText(label, 0, barY - 2);
+          }
+        } else if (flagFortPhase === 1) {
+          // ── BUILDING phase (existing visual) — hatch + 0%→30% progress bar.
           // Diagonal-hatch "under construction" overlay on the tower face
           ctx.save();
           ctx.beginPath();
@@ -9228,22 +9303,39 @@ export class RenderSystem {
       // border vs the thin dashed line.
       fortId: number;
       fortIsCompanyFortress: boolean;
+      // Forts that are NOT in the ACTIVE phase yet (CLAIMING or BUILDING).
+      // They render as separate per-fort blobs (NOT merged into the company's
+      // main active blob) so the claim overlay visually distinguishes
+      // pending territory from established territory.
+      nonActiveForts: PlacedStructure[];
     };
     type IslandClaimEntry = ReturnType<typeof this._islandClaims.get>;
+    const isFortActive = (ps: PlacedStructure): boolean => {
+      if (ps.type === 'company_fortress') return ps.fortressComplete === true;
+      if (ps.type === 'flag_fort') {
+        // Phase-aware: only ACTIVE phase (2) projects territory. CLAIMING (0)
+        // and BUILDING (1) render as standalone per-fort blobs. Legacy data
+        // (claimPhase === undefined) falls back to the old fortressComplete
+        // gate so older saves keep working.
+        if (typeof ps.claimPhase === 'number') return ps.claimPhase === 2;
+        return ps.fortressComplete !== false;
+      }
+      return false;
+    };
     const resolveCompanyClaim = (islId: number, cid: number, claim: IslandClaimEntry): CompanyClaim => {
       // ── Collect ALL forts (flag forts + company fortresses) for this
-      // company on this island. Each projects its own claim circle and acts
-      // as a BFS seed for connecting non-fort structures. The territory_update
-      // map only records the primary fort position for company fortresses; we
-      // walk placedStructures directly so multiple flag forts per island are
-      // each rendered with their own claim radius.
+      // company on this island. ACTIVE forts seed the main territory blob;
+      // non-active forts (CLAIMING / BUILDING) are returned separately and
+      // drawn as standalone per-fort blobs by the caller.
       const fortCircles: Array<{ x: number; y: number; r: number }> = [];
-      const fortStructs = this.placedStructures.filter(
+      const allFortStructs = this.placedStructures.filter(
         ps => ps.islandId === islId
            && ps.companyId === cid
            && !ps.claimOrphaned
            && (ps.type === 'flag_fort' || ps.type === 'company_fortress')
       );
+      const fortStructs    = allFortStructs.filter(isFortActive);
+      const nonActiveForts = allFortStructs.filter(ps => ps.type === 'flag_fort' && !isFortActive(ps));
       for (const f of fortStructs) {
         fortCircles.push({ x: f.x, y: f.y, r: CLAIM_RADIUS_FORT });
       }
@@ -9338,7 +9430,7 @@ export class RenderSystem {
       const worldCircles: Array<{ x: number; y: number; r: number }> = [];
       for (const fc of fortCircles) worldCircles.push(fc);
       for (const ps of connectedList) worldCircles.push({ x: ps.x, y: ps.y, r: CLAIM_RADIUS_DEFAULT });
-      return { worldCircles, inactiveList, hasFort, fortId, fortIsCompanyFortress };
+      return { worldCircles, inactiveList, hasFort, fortId, fortIsCompanyFortress, nonActiveForts };
     };
 
     for (const isl of this.islands) {
@@ -9355,9 +9447,9 @@ export class RenderSystem {
       for (const cid of allCompanyIds) {
         const isOwn = cid === myCompany;
         const myClaim = islandClaimsByCo.get(cid)!;
-        const { worldCircles, inactiveList, hasFort } = myClaim;
+        const { worldCircles, inactiveList, hasFort, nonActiveForts } = myClaim;
 
-        if (worldCircles.length === 0 && inactiveList.length === 0) continue;
+        if (worldCircles.length === 0 && inactiveList.length === 0 && nonActiveForts.length === 0) continue;
 
         const psR = CLAIM_RADIUS_DEFAULT * zoom;
 
@@ -9695,6 +9787,90 @@ export class RenderSystem {
             ctx.fillStyle = '#ffffff';
             ctx.strokeText(companyName, cx, cy);
             ctx.fillText(companyName, cx, cy);
+          }
+
+          // ── Per-fort claim-phase blobs (CLAIMING / BUILDING) ─────────────
+          // Each non-active flag fort renders its own standalone circle so
+          // pending territory is visually distinct from established blobs.
+          // We render these for every company (own and others) at all times
+          // — players need to see incoming claims even on enemy turf.
+          if (nonActiveForts.length > 0) {
+            const borderWidth = Math.max(8, 10 * zoom);
+            const r = CLAIM_RADIUS_FORT * zoom;
+            // 1Hz flashing alpha for BUILDING phase (sine wave 0.35–0.85).
+            const flashT     = performance.now() * 0.006; // ≈1 Hz
+            const flashAlpha = 0.60 + 0.25 * Math.sin(flashT);
+
+            for (const fort of nonActiveForts) {
+              const sp = camera.worldToScreen(Vec2.from(fort.x + off.dx, fort.y + off.dy));
+              const phase = (typeof fort.claimPhase === 'number') ? fort.claimPhase : 1;
+              const contested = fort.fortressContested || fort.claimContested;
+
+              // Colour scheme: CLAIMING is grey (territory not yet claimed),
+              // BUILDING uses the company colour but flashes (territory
+              // claimed but fortifications not yet established).
+              const isClaiming = phase === 0;
+              const fillCol = isClaiming ? '#888888' : color;
+              const ringCol = isClaiming ? '#666666' : color;
+
+              // Build fill mask.
+              const ftmp = new OffscreenCanvas(cvs.width, cvs.height);
+              const ftc  = ftmp.getContext('2d')!;
+              ftc.fillStyle = fillCol;
+              ftc.beginPath(); ftc.arc(sp.x, sp.y, r, 0, Math.PI * 2); ftc.fill();
+
+              // Build ring mask (outer dilated − inner).
+              const fring = new OffscreenCanvas(cvs.width, cvs.height);
+              const frc   = fring.getContext('2d')!;
+              frc.fillStyle = ringCol;
+              frc.beginPath(); frc.arc(sp.x, sp.y, r + borderWidth, 0, Math.PI * 2); frc.fill();
+              frc.globalCompositeOperation = 'destination-out';
+              frc.drawImage(ftmp, 0, 0);
+
+              // Faint fill, dashed-style border for CLAIMING; flashing solid
+              // border + faint fill for BUILDING.
+              ctx.globalAlpha = isClaiming ? 0.06 : (flashAlpha * 0.18);
+              ctx.drawImage(ftmp, 0, 0);
+
+              // Contest stripes (CLAIMING + enemy in radius): diagonal red.
+              if (isClaiming && contested) {
+                const hatch = new OffscreenCanvas(cvs.width, cvs.height);
+                const hc = hatch.getContext('2d')!;
+                const stripeGap = Math.max(12, 22 * zoom);
+                hc.strokeStyle = '#e04848';
+                hc.lineWidth   = stripeGap / (2 * Math.SQRT2);
+                const diagLen = cvs.width + cvs.height;
+                const phaseT = (performance.now() * 0.006) % stripeGap;
+                for (let d = -diagLen + phaseT; d < diagLen + cvs.width; d += stripeGap) {
+                  hc.beginPath();
+                  hc.moveTo(d, 0);
+                  hc.lineTo(d + cvs.height, cvs.height);
+                  hc.stroke();
+                }
+                hc.globalCompositeOperation = 'destination-in';
+                hc.drawImage(ftmp, 0, 0);
+                ctx.globalAlpha = 0.30;
+                ctx.drawImage(hatch, 0, 0);
+              }
+
+              ctx.globalAlpha = isClaiming ? 0.55 : flashAlpha;
+              ctx.drawImage(fring, 0, 0);
+              ctx.globalAlpha = 1.0;
+
+              // Label inside the blob: phase + (CONTESTED tag).
+              const fontSize = Math.max(11, Math.round(12 * zoom));
+              ctx.font = `bold ${fontSize}px Georgia, serif`;
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.lineWidth = Math.max(2, 3 * zoom);
+              ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+              const label = isClaiming
+                ? (contested ? `${companyName} — CLAIMING (contested)` : `${companyName} — CLAIMING`)
+                : (contested ? `${companyName} — BUILDING (contested)` : `${companyName} — BUILDING`);
+              ctx.fillStyle = isClaiming ? '#dddddd' : '#ffffff';
+              ctx.strokeText(label, sp.x, sp.y);
+              ctx.fillText(label, sp.x, sp.y);
+            }
           }
 
           ctx.restore();

@@ -322,6 +322,12 @@ extern int       claim_flag_count;
 #define FLAG_FORT_BUILD_MS        300000u /* 5 min for full flag-fort heal 0→max_hp    */
 #define FLAG_FORT_INITIAL_HP_PCT  0.10f   /* HP fraction at placement                  */
 #define FLAG_FORT_ACTIVE_HP_PCT   0.30f   /* HP fraction required to be "active"       */
+#define FLAG_FORT_CLAIM_MS         60000u /* 1 min ground-claim phase (skipped if placed in friendly active territory) */
+#define FLAG_FORT_CLAIM_GRACE_MS    5000u /* 5 s grace before CLAIMING starts (mirrors claim_flag) */
+/* claim_phase values for STRUCT_FLAG_FORT */
+#define FLAG_FORT_PHASE_CLAIMING 0u  /* 1-min ground claim; semi-transparent, non-damageable, no HP bar */
+#define FLAG_FORT_PHASE_BUILDING 1u  /* heal 10%→30% HP; damageable; flashing claim border on client    */
+#define FLAG_FORT_PHASE_ACTIVE   2u  /* hp ≥ 30%; full territory participation; mirrors fortress_complete */
 
 /**
  * IslandClaim — records a COMPLETED Company Fortress on an island.
@@ -458,8 +464,9 @@ typedef struct {
                                   /* STRUCT_COMPANY_FORTRESS: enemy in radius — build paused    */
     bool     fortress_complete;   /* STRUCT_COMPANY_FORTRESS: build finished                    */
     bool     claim_targets_fortress; /* STRUCT_CLAIM_FLAG: legacy — kept for protocol compat (currently always false in new flow) */
-    uint8_t  claim_state;         /* STRUCT_CLAIM_FLAG: CLAIM_FLAG_STATE_* */
-    float    claim_grace_ms;      /* STRUCT_CLAIM_FLAG: accumulator for the 5 s init/grace before CLAIMING or REVERSING starts */
+    uint8_t  claim_state;         /* STRUCT_CLAIM_FLAG: CLAIM_FLAG_STATE_*  |  STRUCT_FLAG_FORT (claim phase): CLAIM_FLAG_STATE_CONTEST / CLAIMING_GRACE / CLAIMING */
+    float    claim_grace_ms;      /* STRUCT_CLAIM_FLAG: accumulator for the 5 s init/grace before CLAIMING or REVERSING starts  |  STRUCT_FLAG_FORT (claim phase): same purpose */
+    uint8_t  claim_phase;         /* STRUCT_FLAG_FORT only: FLAG_FORT_PHASE_* (claim/build/active). Unused for other types. */
     /* ── Per-structure dominance list ──────────────────────────────────────
      * Ordered list of OTHER-company structure IDs that dominate this
      * structure on the overlap area of their claim radii. Index 0 = top

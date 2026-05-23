@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": 1779559215,
+    "timestamp": 1779562328,
     "ship_count": 3,
     "npc_count": 28,
-    "structure_count": 8
+    "structure_count": 5
   },
   "ships": [
     {
@@ -827,63 +827,6 @@
       "scaffolded_ship_id": 0
     },
     {
-      "id": 153,
-      "type": 9,
-      "x": 18022.000,
-      "y": 14258.200,
-      "rot": 0.000,
-      "island_id": 4,
-      "company": 1,
-      "hp": 500,
-      "max_hp": 500,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false,
-      "construction_phase": 0,
-      "construction_company": 0,
-      "modules_placed": 0,
-      "scaffolded_ship_id": 0,
-      "dominators": [169,160,141,139,138,167,157,168]
-    },
-    {
-      "id": 172,
-      "type": 9,
-      "x": 18124.900,
-      "y": 13951.700,
-      "rot": 0.000,
-      "island_id": 4,
-      "company": 1,
-      "hp": 500,
-      "max_hp": 500,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false,
-      "construction_phase": 0,
-      "construction_company": 0,
-      "modules_placed": 0,
-      "scaffolded_ship_id": 0,
-      "dominators": [183,182,181,180,169,141,139,138,152,178]
-    },
-    {
-      "id": 178,
-      "type": 9,
-      "x": 17379.900,
-      "y": 14103.100,
-      "rot": 0.000,
-      "island_id": 4,
-      "company": 2,
-      "hp": 500,
-      "max_hp": 500,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false,
-      "construction_phase": 0,
-      "construction_company": 0,
-      "modules_placed": 0,
-      "scaffolded_ship_id": 0,
-      "dominators": [185,184]
-    },
-    {
       "id": 184,
       "type": 9,
       "x": 17891.600,
@@ -918,8 +861,7 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0,
-      "dominators": [153,178]
+      "scaffolded_ship_id": 0
     },
     {
       "id": 186,
@@ -937,18 +879,17 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0,
-      "dominators": [153,178]
+      "scaffolded_ship_id": 0
     },
     {
-      "id": 189,
+      "id": 193,
       "type": 9,
-      "x": 17489.000,
-      "y": 15246.300,
+      "x": 17546.600,
+      "y": 15318.800,
       "rot": 0.000,
       "island_id": 4,
       "company": 3,
-      "hp": 58,
+      "hp": 500,
       "max_hp": 500,
       "placer_id": 1000,
       "placer_name": "test",
@@ -956,8 +897,7 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0,
-      "dominators": [153,178]
+      "scaffolded_ship_id": 0
     }
   ],
   "island_resources": [
@@ -7640,7 +7580,7 @@
         {"idx":582,"health":100,"alive":true,"respawn_at":0},
         {"idx":583,"health":100,"alive":true,"respawn_at":0},
         {"idx":584,"health":40,"alive":true,"respawn_at":0},
-        {"idx":585,"health":0,"alive":false,"respawn_at":218730},
+        {"idx":585,"health":100,"alive":true,"respawn_at":0},
         {"idx":586,"health":100,"alive":true,"respawn_at":0},
         {"idx":587,"health":100,"alive":true,"respawn_at":0},
         {"idx":588,"health":100,"alive":true,"respawn_at":0},
@@ -7667,8 +7607,8 @@
         {"idx":609,"health":100,"alive":true,"respawn_at":0},
         {"idx":610,"health":100,"alive":true,"respawn_at":0},
         {"idx":611,"health":10,"alive":true,"respawn_at":0},
-        {"idx":612,"health":0,"alive":false,"respawn_at":224143},
-        {"idx":613,"health":0,"alive":false,"respawn_at":228465},
+        {"idx":612,"health":100,"alive":true,"respawn_at":0},
+        {"idx":613,"health":100,"alive":true,"respawn_at":0},
         {"idx":614,"health":100,"alive":true,"respawn_at":0},
         {"idx":615,"health":100,"alive":true,"respawn_at":0},
         {"idx":616,"health":100,"alive":true,"respawn_at":0},
@@ -7742,7 +7682,7 @@
         {"idx":684,"health":100,"alive":true,"respawn_at":0},
         {"idx":685,"health":40,"alive":true,"respawn_at":0},
         {"idx":686,"health":100,"alive":true,"respawn_at":0},
-        {"idx":687,"health":0,"alive":false,"respawn_at":161929},
+        {"idx":687,"health":100,"alive":true,"respawn_at":0},
         {"idx":688,"health":10,"alive":true,"respawn_at":0},
         {"idx":689,"health":10,"alive":true,"respawn_at":0},
         {"idx":690,"health":40,"alive":true,"respawn_at":0},

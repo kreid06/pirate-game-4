@@ -196,6 +196,14 @@ export interface PlacedStructure {
   fortressComplete?: boolean;
   /** Company Fortress: true when an enemy is inside the radius, pausing the build */
   fortressContested?: boolean;
+  /** Flag Fort: lifecycle phase. 0=CLAIMING (1-min ground claim, semi-transparent,
+   *  non-damageable, no HP bar), 1=BUILDING (heals 10%→30% HP, damageable, flashing
+   *  claim border), 2=ACTIVE (mirrors fortressComplete). Absent on non-flag-fort types. */
+  claimPhase?: number;
+  /** Flag Fort (CLAIMING phase only): countdown progress in ms toward 0 = phase complete. */
+  claimPhaseProgressMs?: number;
+  /** Flag Fort (CLAIMING phase only): total claim duration in ms (FLAG_FORT_CLAIM_MS). */
+  claimPhaseTotalMs?: number;
 }
 
 // Company identifiers (mirror server COMPANY_* constants)
