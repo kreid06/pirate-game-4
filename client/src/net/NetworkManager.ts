@@ -634,7 +634,7 @@ export class NetworkManager {
   /** Fired when a structure's company ownership is promoted (one-way, neutral → non-neutral). */
   public onStructureCompanyUpdated: ((id: number, companyId: number) => void) | null = null;
   /** Fired when a structure takes damage from a cannonball hit. Includes world position for FX. */
-  public onStructureHpChanged: ((id: number, hp: number, maxHp: number, x: number, y: number) => void) | null = null;
+  public onStructureHpChanged: ((id: number, hp: number, maxHp: number, x: number, y: number, targetHp?: number) => void) | null = null;
   /** Fired when a cannonball hits a tree (trees are indestructible). */
   public onTreeHit: ((x: number, y: number) => void) | null = null;
   /** Fired when the server sends the full list of existing placed structures on join. */
@@ -667,7 +667,7 @@ export class NetworkManager {
   /** Fired when a Flag Fort crosses (in either direction) the 30%-HP active gate. */
   public onFlagFortActive: ((structId: number, companyId: number, islandId: number, active: boolean, claimPhase: number) => void) | null = null;
   /** Fired ≈1/s for each flag fort to resync its heal/contested state. */
-  public onFlagFortBuildProgress: ((structId: number, hp: number, maxHp: number, contested: boolean, active: boolean, claimPhase: number, claimProgressMs: number, claimTotalMs: number, claimState: number, claimGraceMs: number) => void) | null = null;
+  public onFlagFortBuildProgress: ((structId: number, hp: number, maxHp: number, contested: boolean, active: boolean, claimPhase: number, claimProgressMs: number, claimTotalMs: number, claimState: number, claimGraceMs: number, targetHp?: number) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
   public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number) => void) | null = null;
   /** Fired when the server rejects a structure placement with a reason string. */
@@ -2636,6 +2636,7 @@ export class NetworkManager {
           claimPhase:            typeof s.claim_phase === 'number' ? s.claim_phase : undefined,
           claimPhaseProgressMs:  typeof s.claim_progress_ms === 'number' && s.claim_phase === 0 ? s.claim_progress_ms : undefined,
           claimPhaseTotalMs:     typeof s.claim_total_ms === 'number' ? s.claim_total_ms : undefined,
+          targetHp:              typeof s.target_hp === 'number' ? s.target_hp : undefined,
           construction: s.structure_type === 'shipyard' ? {
             phase: (s.construction_phase === 'building' ? 'building' : 'empty') as ConstructionPhase,
             modulesPlaced: Array.isArray(s.modules_placed) ? s.modules_placed : [],
@@ -2683,6 +2684,7 @@ export class NetworkManager {
           claimPhase:           typeof message.claim_phase === 'number' ? message.claim_phase : undefined,
           claimPhaseProgressMs: typeof message.claim_progress_ms === 'number' && message.claim_phase === 0 ? message.claim_progress_ms : undefined,
           claimPhaseTotalMs:    typeof message.claim_total_ms === 'number' ? message.claim_total_ms : undefined,
+          targetHp:             typeof message.target_hp === 'number' ? message.target_hp : undefined,
         };
         this.onStructurePlaced?.(sp);
         break;
@@ -2787,6 +2789,7 @@ export class NetworkManager {
           typeof message.claim_total_ms === 'number' ? message.claim_total_ms : 60000,
           typeof message.claim_state === 'number' ? message.claim_state : 0,
           typeof message.claim_grace_ms === 'number' ? message.claim_grace_ms : 0,
+          typeof message.target_hp === 'number' ? message.target_hp : undefined,
         );
         break;
 
@@ -2846,6 +2849,7 @@ export class NetworkManager {
           message.max_hp ?? 100,
           message.x ?? 0,
           message.y ?? 0,
+          typeof message.target_hp === 'number' ? message.target_hp : undefined,
         );
         break;
 

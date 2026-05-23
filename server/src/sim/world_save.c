@@ -303,6 +303,7 @@ int world_save(const char *path) {
             "      \"company\": %u,\n"
             "      \"hp\": %u,\n"
             "      \"max_hp\": %u,\n"
+            "      \"target_hp\": %u,\n"
             "      \"placer_id\": %u,\n"
             "      \"placer_name\": \"%s\",\n"
             "      \"open\": %s,\n"
@@ -320,6 +321,7 @@ int world_save(const char *path) {
             (unsigned)ps->company_id,
             (unsigned)ps->hp,
             (unsigned)ps->max_hp,
+            (unsigned)ps->target_hp,
             (unsigned)ps->placer_id,
             ps->placer_name,
             ps->open ? "true" : "false",
@@ -752,7 +754,7 @@ int world_load(const char *path) {
                 memset(ps, 0, sizeof(*ps));
 
                 unsigned id = 0, type = 0, island_id = 0, company = 0;
-                unsigned hp = 100, max_hp = 100, placer_id = 0;
+                unsigned hp = 100, max_hp = 100, target_hp = 0, placer_id = 0;
                 unsigned construction_phase = 0, construction_company = 0, scaffolded_ship_id = 0;
                 unsigned modules_placed_saved = 0;
                 float x = 0, y = 0, rot = 0;
@@ -767,6 +769,7 @@ int world_load(const char *path) {
                 ws_json_uint(obj,  "company",              &company);
                 ws_json_uint(obj,  "hp",                   &hp);
                 ws_json_uint(obj,  "max_hp",               &max_hp);
+                ws_json_uint(obj,  "target_hp",            &target_hp);
                 ws_json_uint(obj,  "placer_id",            &placer_id);
                 ws_json_str (obj,  "placer_name",          ps->placer_name,
                              sizeof(ps->placer_name));
@@ -806,6 +809,8 @@ int world_load(const char *path) {
                 ps->company_id = (uint8_t)company;
                 ps->hp         = (uint16_t)hp;
                 ps->max_hp     = (uint16_t)max_hp;
+                /* Saves prior to target_hp default it to max_hp (no past damage). */
+                ps->target_hp  = target_hp ? (uint16_t)target_hp : (uint16_t)max_hp;
                 ps->placer_id  = placer_id;
                 ps->open       = open;
                 ps->active     = true;

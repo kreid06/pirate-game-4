@@ -204,6 +204,10 @@ export interface PlacedStructure {
   claimPhaseProgressMs?: number;
   /** Flag Fort (CLAIMING phase only): total claim duration in ms (FLAG_FORT_CLAIM_MS). */
   claimPhaseTotalMs?: number;
+  /** Flag Fort only: heal ceiling. Drops with each combat hit (target_hp -= damage)
+   *  and never recovers; the auto-repair heals current `hp` up to `targetHp` (not maxHp).
+   *  Render "REPAIRING" label whenever `hp < targetHp`. Defaults to maxHp when absent. */
+  targetHp?: number;
 }
 
 // Company identifiers (mirror server COMPANY_* constants)

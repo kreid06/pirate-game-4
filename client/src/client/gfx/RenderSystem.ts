@@ -1979,11 +1979,12 @@ export class RenderSystem {
    *  active gate — that arrives via the dedicated flag_fort_active event). */
   updateFlagFortBuildProgress(structId: number, hp: number, maxHp: number, contested: boolean, active: boolean,
                               claimPhase?: number, claimProgressMs?: number, claimTotalMs?: number,
-                              claimState?: number, claimGraceMs?: number): void {
+                              claimState?: number, claimGraceMs?: number, targetHp?: number): void {
     const s = this.placedStructures.find(p => p.id === structId);
     if (!s) return;
     s.hp = hp;
     s.maxHp = maxHp;
+    if (typeof targetHp === 'number') s.targetHp = targetHp;
     s.fortressContested = contested;
     // Build progress mapped onto a 0..max=FLAG_FORT_BUILD_MS scale so the
     // existing progress-bar reuses it (renderer divides by max_hp anyway).
@@ -2073,9 +2074,13 @@ export class RenderSystem {
     if (s) s.companyId = companyId;
   }
 
-  updateStructureHp(id: number, hp: number, maxHp: number): void {
+  updateStructureHp(id: number, hp: number, maxHp: number, targetHp?: number): void {
     const s = this.placedStructures.find(p => p.id === id);
-    if (s) { s.hp = hp; s.maxHp = maxHp; }
+    if (s) {
+      s.hp = hp;
+      s.maxHp = maxHp;
+      if (typeof targetHp === 'number') s.targetHp = targetHp;
+    }
   }
 
   /** Update door open/closed state after a door_toggled broadcast. */
@@ -5257,6 +5262,51 @@ export class RenderSystem {
             ctx.fillText(label, 1, barY - 1);
             ctx.fillStyle = s.fortressContested ? '#ff8080' : '#ffe080';
             ctx.fillText(label, 0, barY - 2);
+          }
+        } else if (flagFortPhase === 2) {
+          // ── ACTIVE phase — fort is built. While hp < target_hp it is auto-
+          //    repairing toward target_hp (combat damage permanently lowers
+          //    target_hp so the fort can never repair to full again). Show a
+          //    "REPAIRING" label + a slim repair-progress bar in that gap.
+          const targetHp = (typeof s.targetHp === 'number') ? s.targetHp : s.maxHp;
+          const isRepairing = s.hp < targetHp && targetHp > 0;
+          if (isRepairing) {
+            const barW = ts * 1.1;
+            const barH = Math.max(2, 3 * zoom);
+            const barY = -ts * 0.45 - ts * 0.95;
+            // Background = full max-hp scale; ceiling tick at targetHp/maxHp,
+            // fill grows from 0 → hp/maxHp.
+            const ceilingFrac = Math.min(1, Math.max(0, targetHp / s.maxHp));
+            const fillFrac    = Math.min(1, Math.max(0, s.hp / s.maxHp));
+            ctx.fillStyle = 'rgba(0,0,0,0.65)';
+            ctx.fillRect(-barW / 2, barY, barW, barH);
+            // "Lost ceiling" zone (target_hp → max_hp) drawn dim red.
+            if (ceilingFrac < 1) {
+              ctx.fillStyle = 'rgba(120,40,40,0.5)';
+              ctx.fillRect(-barW / 2 + barW * ceilingFrac, barY,
+                           barW * (1 - ceilingFrac), barH);
+            }
+            // Current HP — pulses softly while repairing.
+            const pulse = 0.7 + 0.3 * Math.sin(Date.now() / 220);
+            ctx.fillStyle = s.fortressContested
+              ? `rgba(224,72,72,${pulse})`
+              : `rgba(120,200,255,${pulse})`;
+            ctx.fillRect(-barW / 2, barY, barW * fillFrac, barH);
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = Math.max(1, 1 * zoom);
+            ctx.strokeRect(-barW / 2, barY, barW, barH);
+
+            if (zoom >= 0.5) {
+              const fontPx = Math.max(8, Math.round(9 * zoom));
+              ctx.font = `bold ${fontPx}px sans-serif`;
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'bottom';
+              const label = s.fortressContested ? 'CONTESTED' : 'REPAIRING';
+              ctx.fillStyle = '#000';
+              ctx.fillText(label, 1, barY - 1);
+              ctx.fillStyle = s.fortressContested ? '#ff8080' : '#9fd6ff';
+              ctx.fillText(label, 0, barY - 2);
+            }
           }
         }
 

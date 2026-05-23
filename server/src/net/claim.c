@@ -717,11 +717,15 @@ static void flag_fort_tick(uint32_t delta_ms) {
             s->claim_progress_ms = (float)s->hp;
         }
 
-        /* Heal toward max_hp while uncontested. */
-        if (!contested && s->claim_progress_ms < (float)s->max_hp) {
+        /* Save migration: target_hp is the heal ceiling. Forts saved before this
+         * field existed read back as 0 — default to max_hp so they can repair. */
+        if (s->target_hp == 0 || s->target_hp > s->max_hp) s->target_hp = s->max_hp;
+        /* Heal toward target_hp while uncontested (target_hp ≤ max_hp; combat
+         * damage permanently lowers target_hp via apply_structure_damage). */
+        if (!contested && s->claim_progress_ms < (float)s->target_hp) {
             float heal = (float)s->max_hp * (float)delta_ms / (float)FLAG_FORT_BUILD_MS;
             s->claim_progress_ms += heal;
-            if (s->claim_progress_ms > (float)s->max_hp) s->claim_progress_ms = (float)s->max_hp;
+            if (s->claim_progress_ms > (float)s->target_hp) s->claim_progress_ms = (float)s->target_hp;
             s->hp = (uint16_t)s->claim_progress_ms;
         }
 
@@ -746,14 +750,14 @@ static void flag_fort_tick(uint32_t delta_ms) {
         }
 
         if (do_broadcast) {
-            char msg[320];
+            char msg[352];
             snprintf(msg, sizeof(msg),
                      "{\"type\":\"flag_fort_build_progress\",\"structure_id\":%u"
                      ",\"company_id\":%u,\"island_id\":%u"
-                     ",\"hp\":%u,\"max_hp\":%u,\"fortress_complete\":%s"
+                     ",\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"fortress_complete\":%s"
                      ",\"contested\":%s,\"claim_phase\":%u}",
                      s->id, co, isl,
-                     s->hp, s->max_hp,
+                     s->hp, s->max_hp, s->target_hp,
                      s->fortress_complete ? "true" : "false",
                      contested ? "true" : "false",
                      (unsigned)s->claim_phase);

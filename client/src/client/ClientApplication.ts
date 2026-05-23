@@ -2086,8 +2086,8 @@ export class ClientApplication {
         this._structureCompanyMap.set(id, companyId);
         this.renderSystem.updateStructureCompany(id, companyId);
       };
-      this.networkManager.onStructureHpChanged = (id, hp, maxHp, x, y) => {
-        this.renderSystem.updateStructureHp(id, hp, maxHp);
+      this.networkManager.onStructureHpChanged = (id, hp, maxHp, x, y, targetHp) => {
+        this.renderSystem.updateStructureHp(id, hp, maxHp, targetHp);
         this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.6);
         const _shComp = this._structureCompanyMap.get(id) ?? -1;
         const _shMyId = this.networkManager.getAssignedPlayerId();
@@ -2157,8 +2157,8 @@ export class ClientApplication {
           this.renderSystem.showAnnouncement(`🚩 Flag Fort deactivated on island ${islandId}`, 'info', 3.0);
         }
       };
-      this.networkManager.onFlagFortBuildProgress = (structId, hp, maxHp, contested, active, claimPhase, claimProgressMs, claimTotalMs, claimState, claimGraceMs) => {
-        this.renderSystem.updateFlagFortBuildProgress(structId, hp, maxHp, contested, active, claimPhase, claimProgressMs, claimTotalMs, claimState, claimGraceMs);
+      this.networkManager.onFlagFortBuildProgress = (structId, hp, maxHp, contested, active, claimPhase, claimProgressMs, claimTotalMs, claimState, claimGraceMs, targetHp) => {
+        this.renderSystem.updateFlagFortBuildProgress(structId, hp, maxHp, contested, active, claimPhase, claimProgressMs, claimTotalMs, claimState, claimGraceMs, targetHp);
       };
       this.networkManager.onPlacementFailed = (reason, _x, _y, _structureType, blockerId) => {
         const REASONS: Record<string, string> = {

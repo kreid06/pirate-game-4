@@ -942,6 +942,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     placed_structures[placed_structure_count].company_id = (uint8_t)player->company_id;
     placed_structures[placed_structure_count].max_hp     = 100;
     placed_structures[placed_structure_count].hp         = 100;
+    placed_structures[placed_structure_count].target_hp  = 100;
     placed_structures[placed_structure_count].placer_id  = player->player_id;
     strncpy(placed_structures[placed_structure_count].placer_name, player->name,
             sizeof(placed_structures[placed_structure_count].placer_name) - 1);
@@ -982,6 +983,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         PlacedStructure *ff = &placed_structures[placed_structure_count - 1];
         ff->max_hp            = 500;
         ff->hp                = (uint16_t)(500 * FLAG_FORT_INITIAL_HP_PCT);
+        ff->target_hp         = ff->max_hp; /* heal ceiling; permanently reduced by combat damage */
         ff->fortress_complete = false;
         ff->claim_contested   = false;
         ff->claim_state       = CLAIM_FLAG_STATE_CONTEST;
@@ -1028,6 +1030,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     if (stype_enum == STRUCT_COMPANY_FORTRESS) {
         placed_structures[placed_structure_count - 1].max_hp            = 1000;
         placed_structures[placed_structure_count - 1].hp                = 1;   /* incomplete */
+        placed_structures[placed_structure_count - 1].target_hp         = 1000;
         placed_structures[placed_structure_count - 1].claim_progress_ms = 0.0f;
         placed_structures[placed_structure_count - 1].fortress_complete  = false;
         placed_structures[placed_structure_count - 1].claim_contested    = false;
@@ -1070,6 +1073,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
     uint16_t bcast_hp     = placed_structures[placed_structure_count - 1].hp;
     uint16_t bcast_max_hp = placed_structures[placed_structure_count - 1].max_hp;
+    uint16_t bcast_target = placed_structures[placed_structure_count - 1].target_hp;
     /* Flag-fort phase initial broadcast (claim/build/active). Other types: 0. */
     uint8_t bcast_phase = (stype_enum == STRUCT_FLAG_FORT)
         ? placed_structures[placed_structure_count - 1].claim_phase : 0u;
@@ -1080,10 +1084,11 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     snprintf(bcast, sizeof(bcast),
              "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-             "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
+             "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
              ",\"rotation\":%.2f%s%s%s}",
              new_id, stype, target_island_id, px, py,
-             (unsigned)player->company_id, (unsigned)bcast_hp, (unsigned)bcast_max_hp, player->name,
+             (unsigned)player->company_id, (unsigned)bcast_hp, (unsigned)bcast_max_hp,
+             (unsigned)bcast_target, player->name,
              bcast_rot,
              new_is_door ? ",\"open\":false" : "",
              cannon_extra,
@@ -1663,17 +1668,21 @@ bool apply_structure_damage(PlacedStructure *s, uint16_t dmg) {
      * BUILDING. */
     if (s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) return false;
     s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
+    /* All structures track a heal ceiling that combat damage permanently
+     * lowers. For most types there is no auto-repair (so target_hp just
+     * mirrors hp), but flag forts use it to cap their heal-back. */
+    s->target_hp = (s->target_hp > dmg) ? (uint16_t)(s->target_hp - dmg) : 0u;
     if (s->hp == 0) {
         uint32_t sid = s->id;
         destroy_placed_structure(sid);
         return true;
     }
-    char msg[192];
+    char msg[224];
     snprintf(msg, sizeof(msg),
              "{\"type\":\"structure_hp_changed\","
-             "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
+             "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u"
              ",\"x\":%.1f,\"y\":%.1f}",
-             s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
+             s->id, (unsigned)s->hp, (unsigned)s->max_hp, (unsigned)s->target_hp, s->x, s->y);
     websocket_server_broadcast(msg);
     return false;
 }

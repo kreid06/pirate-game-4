@@ -2398,7 +2398,7 @@ int websocket_server_update(struct Sim* sim) {
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
                                                           "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                           "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
+                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
                                                           ",\"rotation\":%.2f%s%s%s%s%s}",
                                                           hs_sfirst ? "" : ",",
                                                           placed_structures[si].id, hs_stype,
@@ -2407,6 +2407,7 @@ int websocket_server_update(struct Sim* sim) {
                                                           (unsigned)placed_structures[si].company_id,
                                                           (unsigned)placed_structures[si].hp,
                                                           (unsigned)placed_structures[si].max_hp,
+                                                          (unsigned)placed_structures[si].target_hp,
                                                           placed_structures[si].placer_name,
                                                           placed_structures[si].rotation,
                                                           hs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
@@ -6781,7 +6782,7 @@ int websocket_server_update(struct Sim* sim) {
                                         spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                          "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                         "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
+                                                         "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
                                                          ",\"rotation\":%.2f%s%s%s%s%s}",
                                                          sfirst ? "" : ",",
                                                          placed_structures[si].id,
@@ -6792,6 +6793,7 @@ int websocket_server_update(struct Sim* sim) {
                                                          (unsigned)placed_structures[si].company_id,
                                                          (unsigned)placed_structures[si].hp,
                                                          (unsigned)placed_structures[si].max_hp,
+                                                         (unsigned)placed_structures[si].target_hp,
                                                          placed_structures[si].placer_name,
                                                          placed_structures[si].rotation,
                                                          is_door_s ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
@@ -6913,7 +6915,7 @@ int websocket_server_update(struct Sim* sim) {
                                     gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
                                                    "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                    "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                   "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
+                                                   "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
                                                                                                      ",\"rotation\":%.2f%s%s%s%s%s}",
                                                    gfirst ? "" : ",",
                                                    placed_structures[si].id, gs_type,
@@ -6922,6 +6924,7 @@ int websocket_server_update(struct Sim* sim) {
                                                    (unsigned)placed_structures[si].company_id,
                                                    (unsigned)placed_structures[si].hp,
                                                    (unsigned)placed_structures[si].max_hp,
+                                                   (unsigned)placed_structures[si].target_hp,
                                                    placed_structures[si].placer_name,
                                                    placed_structures[si].rotation,
                                                    gs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
