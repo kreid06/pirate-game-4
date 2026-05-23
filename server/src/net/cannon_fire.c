@@ -1857,6 +1857,29 @@ void check_projectile_static_collisions(struct Sim* sim) {
         #undef SY_ARM_T
         #undef SY_BACK_T
 
+        /* Pass 5: flag forts & company fortresses — radial hit-box.
+         * Hit radii match the rendered tower footprint (≈44px / 60px tile).
+         * apply_structure_damage gates the CLAIMING phase internally, so it's
+         * safe to hit-test unconditionally here. */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active) continue;
+            float hit_r;
+            if (s->type == STRUCT_FLAG_FORT)            hit_r = 22.0f;
+            else if (s->type == STRUCT_COMPANY_FORTRESS) hit_r = 30.0f;
+            else continue;
+            float dx = px - s->x;
+            float dy = py - s->y;
+            if (dx * dx + dy * dy > hit_r * hit_r) continue;
+            /* Hit fort */
+            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+
         /* ── Test vs. island trees (spatial grid lookup) ────────────────── */
         if (!removed) {
             for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {
