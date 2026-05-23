@@ -9794,12 +9794,36 @@ export class RenderSystem {
           // pending territory is visually distinct from established blobs.
           // We render these for every company (own and others) at all times
           // — players need to see incoming claims even on enemy turf.
+          //
+          // SUBORDINATE-TO-ACTIVE rule: any pixel inside ANY company's
+          // active territory (own or enemy) carves the non-active blob
+          // (fill + ring). Along that cut arc we draw a 1× dashed border
+          // in the non-active company's colour, mirroring the dashed
+          // subordinate-arc treatment used between two active companies
+          // in a dominance pair.
           if (nonActiveForts.length > 0) {
             const borderWidth = Math.max(8, 10 * zoom);
             const r = CLAIM_RADIUS_FORT * zoom;
             // 1Hz flashing alpha for BUILDING phase (sine wave 0.35–0.85).
             const flashT     = performance.now() * 0.006; // ≈1 Hz
             const flashAlpha = 0.60 + 0.25 * Math.sin(flashT);
+
+            // Union of all ACTIVE interiors on this island (every company,
+            // own + enemy). Used to carve each non-active fort blob so
+            // active territory always wins overlapping pixels.
+            const activeUnion = new OffscreenCanvas(cvs.width, cvs.height);
+            const auc = activeUnion.getContext('2d')!;
+            auc.fillStyle = '#000';
+            let activeUnionHasAny = false;
+            for (const [, otherClaim] of islandClaimsByCo) {
+              for (const wc of otherClaim.worldCircles) {
+                const sp2 = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
+                const rr  = wc.r * zoom;
+                if (rr <= 0) continue;
+                auc.beginPath(); auc.arc(sp2.x, sp2.y, rr, 0, Math.PI * 2); auc.fill();
+                activeUnionHasAny = true;
+              }
+            }
 
             for (const fort of nonActiveForts) {
               const sp = camera.worldToScreen(Vec2.from(fort.x + off.dx, fort.y + off.dy));
@@ -9813,35 +9837,55 @@ export class RenderSystem {
               const fillCol = isClaiming ? '#888888' : color;
               const ringCol = isClaiming ? '#666666' : color;
 
-              // Build fill mask.
+              // Build fill mask, then carve by active union so active
+              // territory wins overlapping pixels.
               const ftmp = new OffscreenCanvas(cvs.width, cvs.height);
               const ftc  = ftmp.getContext('2d')!;
               ftc.fillStyle = fillCol;
               ftc.beginPath(); ftc.arc(sp.x, sp.y, r, 0, Math.PI * 2); ftc.fill();
+              if (activeUnionHasAny) {
+                ftc.globalCompositeOperation = 'destination-out';
+                ftc.drawImage(activeUnion, 0, 0);
+                ftc.globalCompositeOperation = 'source-over';
+              }
 
-              // Build ring mask (outer dilated − inner).
+              // Build ring mask (outer dilated − inner circle), then also
+              // carve by active union so the ring stops at active edges.
               const fring = new OffscreenCanvas(cvs.width, cvs.height);
               const frc   = fring.getContext('2d')!;
               frc.fillStyle = ringCol;
               frc.beginPath(); frc.arc(sp.x, sp.y, r + borderWidth, 0, Math.PI * 2); frc.fill();
               frc.globalCompositeOperation = 'destination-out';
-              frc.drawImage(ftmp, 0, 0);
+              frc.beginPath(); frc.arc(sp.x, sp.y, r, 0, Math.PI * 2); frc.fill();
+              if (activeUnionHasAny) {
+                frc.drawImage(activeUnion, 0, 0);
+              }
+              frc.globalCompositeOperation = 'source-over';
 
               // Faint fill, dashed-style border for CLAIMING; flashing solid
               // border + faint fill for BUILDING.
               ctx.globalAlpha = isClaiming ? 0.06 : (flashAlpha * 0.18);
               ctx.drawImage(ftmp, 0, 0);
 
-              // Contest stripes (CLAIMING + enemy in radius): diagonal red.
-              if (isClaiming && contested) {
+              // Contest stripes (CLAIMING phase only): the whole CLAIMING
+              // phase is an in-progress capture, so we show the same
+              // company-coloured "marching ants" hatching that the claim_flag
+              // capture system uses, with the same sine-flicker when the
+              // claim is in the CONTEST state (claimState === 0).
+              if (isClaiming) {
                 const hatch = new OffscreenCanvas(cvs.width, cvs.height);
                 const hc = hatch.getContext('2d')!;
-                const stripeGap = Math.max(12, 22 * zoom);
-                hc.strokeStyle = '#e04848';
+                const stripeGap = Math.max(16, 28 * zoom);
+                hc.strokeStyle = color;
                 hc.lineWidth   = stripeGap / (2 * Math.SQRT2);
+                // World-anchored phase: project world origin onto stripe-perp
+                // axis (x - y) + slow time march. Matches capture-overlay.
+                const worldOrigin = camera.worldToScreen(Vec2.from(off.dx, off.dy));
+                const animSpeedPxPerMs = 0.006;
+                const stripePhase = ((worldOrigin.x - worldOrigin.y)
+                                  + performance.now() * animSpeedPxPerMs) % stripeGap;
                 const diagLen = cvs.width + cvs.height;
-                const phaseT = (performance.now() * 0.006) % stripeGap;
-                for (let d = -diagLen + phaseT; d < diagLen + cvs.width; d += stripeGap) {
+                for (let d = -diagLen + stripePhase; d < diagLen + cvs.width; d += stripeGap) {
                   hc.beginPath();
                   hc.moveTo(d, 0);
                   hc.lineTo(d + cvs.height, cvs.height);
@@ -9849,13 +9893,37 @@ export class RenderSystem {
                 }
                 hc.globalCompositeOperation = 'destination-in';
                 hc.drawImage(ftmp, 0, 0);
-                ctx.globalAlpha = 0.30;
+
+                // Flicker when CONTEST (enemy in radius stalling the claim).
+                const isContestState = (fort.claimState ?? 0) === 0 && contested;
+                ctx.globalAlpha = isContestState
+                  ? 0.30 + 0.20 * Math.sin(performance.now() * 0.009)
+                  : 0.30;
                 ctx.drawImage(hatch, 0, 0);
               }
 
               ctx.globalAlpha = isClaiming ? 0.55 : flashAlpha;
               ctx.drawImage(fring, 0, 0);
               ctx.globalAlpha = 1.0;
+
+              // ── Subordinate dashed border ────────────────────────────
+              // Along this non-active fort's perimeter where it sits INSIDE
+              // any active territory, draw a 1× dashed line in the
+              // non-active company's colour. Mirrors the dashed subordinate
+              // arc drawn between two active companies in a dominance pair.
+              if (activeUnionHasAny) {
+                const dash = new OffscreenCanvas(cvs.width, cvs.height);
+                const ddc  = dash.getContext('2d')!;
+                ddc.strokeStyle = ringCol;
+                ddc.lineWidth   = borderWidth;
+                ddc.setLineDash([borderWidth * 1.5, borderWidth * 1.5]);
+                ddc.beginPath(); ddc.arc(sp.x, sp.y, r, 0, Math.PI * 2); ddc.stroke();
+                ddc.globalCompositeOperation = 'destination-in';
+                ddc.drawImage(activeUnion, 0, 0);
+                ctx.globalAlpha = isClaiming ? 0.55 : flashAlpha;
+                ctx.drawImage(dash, 0, 0);
+                ctx.globalAlpha = 1.0;
+              }
 
               // Label inside the blob: phase + (CONTESTED tag).
               const fontSize = Math.max(11, Math.round(12 * zoom));
