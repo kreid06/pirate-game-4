@@ -9739,23 +9739,14 @@ export class RenderSystem {
             const rc   = ring.getContext('2d')!;
             rc.fillStyle = color;
 
-            // Piece (1) standard outer rim, carved by ALL enemy interiors
-            //   (own_dilated ∖ own_inner) ∖ all_enemy_inner
-            for (const { x, y, r } of screenPts) {
-              rc.beginPath(); rc.arc(x, y, r + borderWidth, 0, Math.PI * 2); rc.fill();
-            }
-            rc.globalCompositeOperation = 'destination-out';
-            rc.drawImage(ownInnerCv, 0, 0);
-            if (allEnemyInnerCv) rc.drawImage(allEnemyInnerCv, 0, 0);
-            rc.globalCompositeOperation = 'source-over';
-
-            // Inset eraser used by piece 2 and the dashed pass to collapse
-            // concentric sibling contours into a single outermost contour:
-            // a pixel inside any of MY circles shrunk by (bw/2 + 1) lies
-            // DEEP inside that circle, so any other circle's stroke /
-            // inner-rim band passing through that point is interior to the
-            // union and should be erased. Preserves each circle's own
-            // band [r-bw/2, r+bw/2] since r-bw/2 > r-(bw/2+1).
+            // Inset eraser used by pieces 1 & 2 and the dashed pass to
+            // collapse concentric sibling contours into a single outermost
+            // contour: a pixel inside any of MY circles shrunk by
+            // (bw/2 + 1) lies DEEP inside that circle, so any other
+            // circle's stroke / inner-rim band passing through that point
+            // is interior to the union and should be erased. Preserves
+            // each circle's own band [r-bw/2, r+bw/2] since
+            // r-bw/2 > r-(bw/2+1).
             const ownShrunk = this._getScratch('ovShrunk', cvs.width, cvs.height);
             {
               const osc = ownShrunk.getContext('2d')!;
@@ -9767,6 +9758,20 @@ export class RenderSystem {
                 osc.beginPath(); osc.arc(x, y, rr, 0, Math.PI * 2); osc.fill();
               }
             }
+
+            // Piece (1) standard outer rim, centered on the circle boundary
+            // so its center aligns with the doubled-border center along
+            // contested arcs. Band spans [r - bw/2, r + bw/2]. Carved by
+            // ALL enemy interiors so it disappears wherever a contested
+            // doubled band (pieces 2 + 3) takes over.
+            //   (own_dilated_by_bw/2 ∖ own_shrunk_by_bw/2) ∖ all_enemy_inner
+            for (const { x, y, r } of screenPts) {
+              rc.beginPath(); rc.arc(x, y, r + borderWidth / 2, 0, Math.PI * 2); rc.fill();
+            }
+            rc.globalCompositeOperation = 'destination-out';
+            rc.drawImage(ownShrunk, 0, 0);
+            if (allEnemyInnerCv) rc.drawImage(allEnemyInnerCv, 0, 0);
+            rc.globalCompositeOperation = 'source-over';
 
             // ownShrunkDominant: same as ownShrunk but ONLY includes own
             // circles that are themselves dominant against at least one
@@ -9798,6 +9803,12 @@ export class RenderSystem {
             // combined outline, but does NOT erase by subord-only siblings
             // (preserving the established dominant border where a new
             // contestable structure overlaps it).
+            //
+            // Band thickness is borderWidth/2 (half of a single line). The
+            // matching piece (3) drawn by the dominating enemy's pass
+            // contributes the other half, so the combined doubled border
+            // along Mi's contested arc visually equals one full-width line
+            // — split half own-colour / half enemy-colour.
             for (const info of miInfos) {
               if (info.dominated.length === 0) continue;
               if (info.mi.r <= 0) continue;
@@ -9805,7 +9816,7 @@ export class RenderSystem {
               const p2c = p2.getContext('2d')!;
               p2c.fillStyle = color;
               p2c.beginPath(); p2c.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); p2c.fill();
-              const rr = info.mi.r - borderWidth;
+              const rr = info.mi.r - borderWidth / 2;
               if (rr > 0) {
                 p2c.globalCompositeOperation = 'destination-out';
                 p2c.beginPath(); p2c.arc(info.mi.x, info.mi.y, rr, 0, Math.PI * 2); p2c.fill();
@@ -9831,6 +9842,10 @@ export class RenderSystem {
             // doubled border along Mi's contested arc. Using the union (vs
             // per-enemy bands) prevents a band from being drawn through the
             // interior of an adjacent dominant enemy when several overlap.
+            //
+            // Band thickness is borderWidth/2; pairs with the dominating
+            // enemy's piece (2) inset band (also borderWidth/2) so the two
+            // colours stack into a single-line-equivalent doubled border.
             for (const info of miInfos) {
               if (info.subord.length === 0) continue;
               if (info.mi.r <= 0) continue;
@@ -9839,7 +9854,7 @@ export class RenderSystem {
               p3c.fillStyle = color;
               // dilated union of subord enemies
               for (const e of info.subord) {
-                p3c.beginPath(); p3c.arc(e.x, e.y, e.r + borderWidth, 0, Math.PI * 2); p3c.fill();
+                p3c.beginPath(); p3c.arc(e.x, e.y, e.r + borderWidth / 2, 0, Math.PI * 2); p3c.fill();
               }
               // subtract un-dilated union → band along ∂(union)
               p3c.globalCompositeOperation = 'destination-out';
