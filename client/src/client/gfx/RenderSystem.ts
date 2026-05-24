@@ -3251,11 +3251,6 @@ export class RenderSystem {
     // Execute render queue in layer order
     this.executeRenderQueue();
 
-    // ── Territory claim overlay (drawn when Alt is held) ─────────────────────
-    if (this._showTerritoryOverlay) {
-      this.drawTerritoryOverlay(camera);
-    }
-
     // ── Fiber bushes — above players, below tree leaves ──────────────────────
     const zoom = camera.getState().zoom;
     for (const b of this._pendingBushes) {
@@ -3266,6 +3261,13 @@ export class RenderSystem {
     for (const e of this._pendingAllRes) {
       if (e.res.type !== 'wood') continue;
       this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha, e.wx, e.wy);
+    }
+
+    // ── Territory claim overlay (drawn when Alt is held) ─────────────────────
+    // Rendered after resource nodes (bushes, tree leaves, rocks, boulders) so
+    // the claim borders/hatching sit above them rather than being occluded.
+    if (this._showTerritoryOverlay) {
+      this.drawTerritoryOverlay(camera);
     }
 
     // ── Hover prompts + health bars (always on top) ───────────────────────────
