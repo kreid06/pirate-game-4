@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": 1779627846,
+    "timestamp": 1779630306,
     "ship_count": 3,
     "npc_count": 28,
-    "structure_count": 11
+    "structure_count": 10
   },
   "ships": [
     {
@@ -963,25 +963,6 @@
       "dominators": [207,204,203,202,201,193,184,196,185]
     },
     {
-      "id": 207,
-      "type": 0,
-      "x": 17671.900,
-      "y": 15215.500,
-      "rot": 0.000,
-      "island_id": 4,
-      "company": 3,
-      "hp": 100,
-      "max_hp": 100,
-      "target_hp": 100,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false,
-      "construction_phase": 0,
-      "construction_company": 0,
-      "modules_placed": 0,
-      "scaffolded_ship_id": 0
-    },
-    {
       "id": 210,
       "type": 9,
       "x": 18205.801,
@@ -989,7 +970,7 @@
       "rot": 0.000,
       "island_id": 4,
       "company": 100,
-      "hp": 346,
+      "hp": 500,
       "max_hp": 500,
       "target_hp": 500,
       "placer_id": 1000,
@@ -1002,10 +983,10 @@
       "dominators": [184,185,193,195,196,207]
     },
     {
-      "id": 212,
+      "id": 218,
       "type": 0,
-      "x": 18058.600,
-      "y": 15386.100,
+      "x": 18067.400,
+      "y": 15411.200,
       "rot": 0.000,
       "island_id": 4,
       "company": 3,
@@ -1019,7 +1000,7 @@
       "construction_company": 0,
       "modules_placed": 0,
       "scaffolded_ship_id": 0,
-      "dominators": [210]
+      "dominators": [184,185,193,195,196,207,210]
     }
   ],
   "island_resources": [

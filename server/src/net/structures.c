@@ -1051,13 +1051,6 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         cf->claim_targets_fortress  = false;                         /* legacy field — unused in new flow */
     }
 
-    /* Render-Rule-X: populate dominators for the newcomer.
-     * Skipped for claim flags (transient) — their effect is the capture
-     * itself, not standing dominance. */
-    if (stype_enum != STRUCT_CLAIM_FLAG) {
-        claim_register_placement_dominators(new_id);
-    }
-
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
              player->player_id, stype, new_id, px, py, target_island_id);
 
@@ -1095,6 +1088,13 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
              cannon_extra,
              phase_extra);
     websocket_server_broadcast(bcast);
+    /* Render-Rule-X: populate dominators for the newcomer AFTER the
+     * `structure_placed` broadcast so clients have the structure in their
+     * local placedStructures[] before the follow-up `structure_dominators`
+     * message arrives. Skipped for claim flags (transient). */
+    if (stype_enum != STRUCT_CLAIM_FLAG) {
+        claim_register_placement_dominators(new_id);
+    }
     return; /* already sent via broadcast */
 
 ps_send:;

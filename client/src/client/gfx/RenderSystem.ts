@@ -9709,12 +9709,36 @@ export class RenderSystem {
               }
             }
 
+            // ownShrunkDominant: same as ownShrunk but ONLY includes own
+            // circles that are themselves dominant against at least one
+            // enemy (non-empty dominated set). Used by piece (2) so that a
+            // newly-placed subordinate sibling (e.g. A.new pushing into B)
+            // does NOT erase the EXISTING dominant sibling's solid border
+            // (e.g. A.fort's border with B) where it passes through the
+            // newcomer's disc. The "true claim area" of the established
+            // dominant structure must remain visible even when a contestable
+            // newcomer overlaps it.
+            const ownShrunkDominant = new OffscreenCanvas(cvs.width, cvs.height);
+            {
+              const osc = ownShrunkDominant.getContext('2d')!;
+              osc.fillStyle = color;
+              const inset = borderWidth / 2 + 1;
+              for (const info of miInfos) {
+                if (info.dominated.length === 0) continue;
+                const rr = info.mi.r - inset;
+                if (rr <= 0) continue;
+                osc.beginPath(); osc.arc(info.mi.x, info.mi.y, rr, 0, Math.PI * 2); osc.fill();
+              }
+            }
+
             // Piece (2) per-Mi inner rim — only along arcs inside enemies
             // that THIS Mi dominates. Per-Mi ensures a new structure placed
             // in dominant territory does NOT inherit the fort's doubled
-            // border treatment vs. the same enemy. ownShrunk erase folds
-            // concentric sibling rings into a single combined outline of
-            // own-union inside the contested area.
+            // border treatment vs. the same enemy. ownShrunkDominant erase
+            // folds concentric DOMINANT sibling rings into a single
+            // combined outline, but does NOT erase by subord-only siblings
+            // (preserving the established dominant border where a new
+            // contestable structure overlaps it).
             for (const info of miInfos) {
               if (info.dominated.length === 0) continue;
               if (info.mi.r <= 0) continue;
@@ -9728,9 +9752,9 @@ export class RenderSystem {
                 p2c.beginPath(); p2c.arc(info.mi.x, info.mi.y, rr, 0, Math.PI * 2); p2c.fill();
               }
               // Erase deep-interior segments so only the outermost contour
-              // of own-union shows inside the contested area.
+              // of own-dominant-union shows inside the contested area.
               p2c.globalCompositeOperation = 'destination-out';
-              p2c.drawImage(ownShrunk, 0, 0);
+              p2c.drawImage(ownShrunkDominant, 0, 0);
               // Clip to union of dominated enemies of THIS Mi.
               p2c.globalCompositeOperation = 'destination-in';
               const domMask = new OffscreenCanvas(cvs.width, cvs.height);
