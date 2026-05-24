@@ -9690,10 +9690,31 @@ export class RenderSystem {
             if (allEnemyInnerCv) rc.drawImage(allEnemyInnerCv, 0, 0);
             rc.globalCompositeOperation = 'source-over';
 
+            // Inset eraser used by piece 2 and the dashed pass to collapse
+            // concentric sibling contours into a single outermost contour:
+            // a pixel inside any of MY circles shrunk by (bw/2 + 1) lies
+            // DEEP inside that circle, so any other circle's stroke /
+            // inner-rim band passing through that point is interior to the
+            // union and should be erased. Preserves each circle's own
+            // band [r-bw/2, r+bw/2] since r-bw/2 > r-(bw/2+1).
+            const ownShrunk = new OffscreenCanvas(cvs.width, cvs.height);
+            {
+              const osc = ownShrunk.getContext('2d')!;
+              osc.fillStyle = color;
+              const inset = borderWidth / 2 + 1;
+              for (const { x, y, r } of screenPts) {
+                const rr = r - inset;
+                if (rr <= 0) continue;
+                osc.beginPath(); osc.arc(x, y, rr, 0, Math.PI * 2); osc.fill();
+              }
+            }
+
             // Piece (2) per-Mi inner rim — only along arcs inside enemies
             // that THIS Mi dominates. Per-Mi ensures a new structure placed
             // in dominant territory does NOT inherit the fort's doubled
-            // border treatment vs. the same enemy.
+            // border treatment vs. the same enemy. ownShrunk erase folds
+            // concentric sibling rings into a single combined outline of
+            // own-union inside the contested area.
             for (const info of miInfos) {
               if (info.dominated.length === 0) continue;
               if (info.mi.r <= 0) continue;
@@ -9706,6 +9727,11 @@ export class RenderSystem {
                 p2c.globalCompositeOperation = 'destination-out';
                 p2c.beginPath(); p2c.arc(info.mi.x, info.mi.y, rr, 0, Math.PI * 2); p2c.fill();
               }
+              // Erase deep-interior segments so only the outermost contour
+              // of own-union shows inside the contested area.
+              p2c.globalCompositeOperation = 'destination-out';
+              p2c.drawImage(ownShrunk, 0, 0);
+              // Clip to union of dominated enemies of THIS Mi.
               p2c.globalCompositeOperation = 'destination-in';
               const domMask = new OffscreenCanvas(cvs.width, cvs.height);
               const dmc2 = domMask.getContext('2d')!;
@@ -9717,40 +9743,35 @@ export class RenderSystem {
               rc.drawImage(p2, 0, 0);
             }
 
-            // Piece (3) per-Mi: outer-rim band of each enemy E that
-            // dominates Mi, clipped to Mi.disc — the E-outer half of the
-            // doubled border along Mi's contested arc with that E.
+            // Piece (3) per-Mi: outer-rim band of the UNION of enemies that
+            // dominate Mi, clipped to Mi.disc — the E-outer half of the
+            // doubled border along Mi's contested arc. Using the union (vs
+            // per-enemy bands) prevents a band from being drawn through the
+            // interior of an adjacent dominant enemy when several overlap.
             for (const info of miInfos) {
               if (info.subord.length === 0) continue;
               if (info.mi.r <= 0) continue;
               const p3 = new OffscreenCanvas(cvs.width, cvs.height);
               const p3c = p3.getContext('2d')!;
               p3c.fillStyle = color;
+              // dilated union of subord enemies
               for (const e of info.subord) {
                 p3c.beginPath(); p3c.arc(e.x, e.y, e.r + borderWidth, 0, Math.PI * 2); p3c.fill();
               }
+              // subtract un-dilated union → band along ∂(union)
               p3c.globalCompositeOperation = 'destination-out';
               for (const e of info.subord) {
                 p3c.beginPath(); p3c.arc(e.x, e.y, e.r, 0, Math.PI * 2); p3c.fill();
               }
+              // Clip to Mi.disc.
               p3c.globalCompositeOperation = 'destination-in';
               p3c.beginPath(); p3c.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); p3c.fill();
               rc.drawImage(p3, 0, 0);
             }
 
-            // Dashed pass: per-Mi. Stroke Mi clipped to its subord union.
-            // Inset eraser (ownShrunk) keeps only the OUTERMOST contour
-            // when several of MY circles overlap inside the same contested
-            // region — one clean dashed loop per contested area.
-            const ownShrunk = new OffscreenCanvas(cvs.width, cvs.height);
-            const osc = ownShrunk.getContext('2d')!;
-            osc.fillStyle = color;
-            const inset = borderWidth / 2 + 1;
-            for (const { x, y, r } of screenPts) {
-              const rr = r - inset;
-              if (rr <= 0) continue;
-              osc.beginPath(); osc.arc(x, y, rr, 0, Math.PI * 2); osc.fill();
-            }
+            // Dashed pass: per-Mi. Stroke Mi clipped to its subord union;
+            // ownShrunk erase folds concentric sibling arcs into one clean
+            // dashed loop per contested region.
             for (const info of miInfos) {
               if (info.subord.length === 0) continue;
               if (info.mi.r <= 0) continue;
