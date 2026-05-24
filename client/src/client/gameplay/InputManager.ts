@@ -165,6 +165,12 @@ export class InputManager {
   // HYBRID PROTOCOL: State tracking for change detection
   private previousMovementState: Vec2 = Vec2.zero();
   private previousSprintState: boolean = false;
+  /**
+   * True after the player has run out of stamina while sprinting. Sprint is
+   * suppressed until Shift is released and re-pressed, so the stamina bar can
+   * refill without instantly draining again.
+   */
+  private sprintLocked: boolean = false;
   private lastSentRotation: number = 0;
   private readonly ROTATION_THRESHOLD = 0.0524; // 3 degrees in radians
   
@@ -342,7 +348,11 @@ export class InputManager {
     
     // HYBRID PROTOCOL: Detect movement state changes
     const currentMovement = this.currentInputFrame.movement;
-    const isSprinting = this.isShiftHeld() && this.isActionActive('move_forward');
+    const shiftHeld = this.isShiftHeld();
+    // Auto-clear the sprint lock as soon as Shift is released, so the next
+    // Shift press can sprint again (assuming there is stamina available).
+    if (!shiftHeld && this.sprintLocked) this.sprintLocked = false;
+    const isSprinting = shiftHeld && this.isActionActive('move_forward') && !this.sprintLocked;
     const movementChanged = !currentMovement.equals(this.previousMovementState);
     const sprintChanged = isSprinting !== this.previousSprintState;
     if (movementChanged || sprintChanged) {
@@ -425,6 +435,17 @@ export class InputManager {
    */
   setPlayerVelocity(velocity: Vec2): void {
     this.playerVelocity = velocity.clone();
+  }
+
+  /**
+   * Notify the input manager of the player's current stamina. When stamina
+   * reaches zero, sprint is locked out until Shift is released and re-pressed
+   * so the bar can refill without instantly draining again.
+   */
+  setPlayerStamina(stamina: number): void {
+    if (stamina <= 0 && this.isShiftHeld()) {
+      this.sprintLocked = true;
+    }
   }
   
   /**
@@ -1044,8 +1065,9 @@ export class InputManager {
       actions |= PlayerActions.DESTROY_PLANK;
     }
     
-    // Sprint action (Shift + forward key)
-    if (this.isShiftHeld() && this.isActionActive('move_forward')) {
+    // Sprint action (Shift + forward key) — suppressed when out of stamina
+    // until Shift is released and re-pressed.
+    if (this.isShiftHeld() && this.isActionActive('move_forward') && !this.sprintLocked) {
       actions |= PlayerActions.SPRINT;
     }
     

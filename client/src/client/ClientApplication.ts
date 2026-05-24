@@ -626,7 +626,7 @@ export class ClientApplication {
         if (success) {
           if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, `+${wood} wood`, '#c8a060');
         } else if (reason === 'no_stamina') {
-          if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, 'No stamina!', '#e05050');
+          if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, 'Out of stamina!', '#e05050');
         }
       };
 
@@ -640,7 +640,7 @@ export class ClientApplication {
             if (wood) this.renderSystem.spawnResourcePickup(_me1.position.add(Vec2.from(0, -20)), `+${wood} wood`, '#c8a060');
           }
         } else if (reason === 'no_stamina') {
-          if (_me1) this.renderSystem.spawnResourcePickup(_me1.position, 'No stamina!', '#e05050');
+          if (_me1) this.renderSystem.spawnResourcePickup(_me1.position, 'Out of stamina!', '#e05050');
         }
       };
 
@@ -651,7 +651,7 @@ export class ClientApplication {
         if (success) {
           if (me) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
         } else if (reason === 'no_stamina') {
-          if (me) this.renderSystem.spawnResourcePickup(me.position, 'No stamina!', '#e05050');
+          if (me) this.renderSystem.spawnResourcePickup(me.position, 'Out of stamina!', '#e05050');
         }
       };
 
@@ -662,7 +662,7 @@ export class ClientApplication {
         if (success) {
           if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, `+${stone} stone`, '#b0b8c0');
         } else if (reason === 'no_stamina') {
-          if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, 'No stamina!', '#e05050');
+          if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, 'Out of stamina!', '#e05050');
         }
       };
 
@@ -674,7 +674,7 @@ export class ClientApplication {
           if (me && metal > 0) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
           if (me && stone > 0) this.renderSystem.spawnResourcePickup(me.position, `+${stone} stone`, '#c8b89a');
         } else if (reason === 'no_stamina') {
-          if (me) this.renderSystem.spawnResourcePickup(me.position, 'No stamina!', '#e05050');
+          if (me) this.renderSystem.spawnResourcePickup(me.position, 'Out of stamina!', '#e05050');
         }
       };
 
@@ -682,7 +682,7 @@ export class ClientApplication {
         const _wsS = this.authoritativeWorldState ?? this.predictedWorldState;
         const _idS = this.networkManager.getAssignedPlayerId();
         const _meS = _idS !== null && _wsS ? _wsS.players.find(p => p.id === _idS) : null;
-        if (_meS) this.renderSystem.spawnResourcePickup(_meS.position, 'No stamina!', '#e05050');
+        if (_meS) this.renderSystem.spawnResourcePickup(_meS.position, 'Out of stamina!', '#e05050');
       };
 
       // Authoritative per-ship weapon group state from server
@@ -2205,7 +2205,6 @@ export class ClientApplication {
         this.renderSystem.updateStructureDoorOpen(id, open);
       };
       this.networkManager.onCraftingOpen = (structureId, structureType) => {
-        console.log(`⚒ [DIAG] onCraftingOpen received: structure=${structureId} type=${structureType}`);
         if (structureType === 'shipyard') {
           // Fallback if server still sends crafting_open for shipyard (pre-update)
           this.shipyardMenu.open(structureId, 'empty', []);
@@ -2213,7 +2212,6 @@ export class ClientApplication {
         } else {
           this.craftingMenu.open(structureId);
           this.uiManager.setActiveMenuId(MENU_ID.CRAFTING);
-          console.log(`⚒ [DIAG] craftingMenu.open(${structureId}) done, activeMenuId=${(this.uiManager as any).activeMenuId ?? '?'}`);
         }
       };
 
@@ -2581,6 +2579,7 @@ export class ClientApplication {
         if (player) {
           this.inputManager.setPlayerPosition(player.position);
           this.inputManager.setPlayerVelocity(player.velocity); // For stop detection
+          this.inputManager.setPlayerStamina(player.stamina ?? player.maxStamina ?? 100);
           this.renderSystem.playerInteractInfo = {
             worldPos: player.position,
             localPos: player.localPosition ?? null,

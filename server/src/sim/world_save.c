@@ -840,15 +840,9 @@ int world_load(const char *path) {
                 }
 
                 if (ps->id >= next_structure_id) next_structure_id = ps->id + 1;
-                log_info("📦 [DIAG-LOAD] structure[%u] id=%u type=%u active=%d x=%.0f y=%.0f island=%u",
-                         placed_structure_count, ps->id, ps->type, ps->active ? 1 : 0,
-                         ps->x, ps->y, ps->island_id);
                 placed_structure_count++;
                 free(obj);
             }
-            log_info("📦 [DIAG-LOAD] total placed_structure_count after load = %u", placed_structure_count);
-        } else {
-            log_info("📦 [DIAG-LOAD] placed_structures array NOT FOUND in save");
         }
     }
 
