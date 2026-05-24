@@ -118,6 +118,7 @@ const HAND_RECIPES: HandRecipe[] = [
   // Tools
   { output: 'axe',           outputQty: 1, cost: [{ item: 'wood',  qty: 3  }, { item: 'stone', qty: 2 }],         category: 'TOOLS'        },
   { output: 'pickaxe',       outputQty: 1, cost: [{ item: 'wood',  qty: 2  }, { item: 'stone', qty: 4 }],         category: 'TOOLS'        },
+  { output: 'claim_flag',    outputQty: 1, cost: [{ item: 'wood',  qty: 5  }],                                    category: 'TOOLS'        },
   // Construction
   { output: 'wooden_floor',  outputQty: 2, cost: [{ item: 'wood',  qty: 4  }],                                    category: 'CONSTRUCTION' },
   { output: 'workbench',     outputQty: 1, cost: [{ item: 'wood',  qty: 10 }],                                    category: 'CONSTRUCTION' },

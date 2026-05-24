@@ -4313,6 +4313,15 @@ export class ClientApplication {
       }
     });
 
+    // Close radial menu when the tab/window loses focus so it doesn't stay
+    // permanently open if the player tabs out while the wheel is visible.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this._radialMenu.close();
+    });
+    window.addEventListener('blur', () => {
+      this._radialMenu.close();
+    });
+
     // L key — mass-toggle all company ladders, wired via InputManager.onToggleAllLadders
     // so it fires correctly while moving (same pattern as build mode toggle).
     this.inputManager.onToggleAllLadders = () => {

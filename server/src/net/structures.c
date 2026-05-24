@@ -393,18 +393,26 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         in_my_dominant_area = true;
     }
 
-    /* Cannot place within 500 px of an enemy-company structure
+    /* Cannot place within an enemy structure's claim radius
        — bypassed when the player is inside their own dominant claim area.
        Also bypassed for claim flags: they are intentionally placed where
-       enemy structures are present (the contested area). */
+       enemy structures are present (the contested area).
+       Orphaned structures (fort destroyed / BFS disconnected) do not block
+       placement; their claim_orphaned flag marks them as dead territory. */
     if (stype_enum != STRUCT_CLAIM_FLAG && !in_my_dominant_area) {
         bool enemy_block = false;
         for (uint32_t si = 0; si < placed_structure_count && !enemy_block; si++) {
-            if (!placed_structures[si].active) continue;
-            if (placed_structures[si].company_id == (uint8_t)player->company_id) continue; /* own */
-            float dx = placed_structures[si].x - px;
-            float dy = placed_structures[si].y - py;
-            if (dx*dx + dy*dy < 500.0f * 500.0f) enemy_block = true;
+            PlacedStructure *es = &placed_structures[si];
+            if (!es->active) continue;
+            if (es->company_id == 0) continue;                           /* neutral  */
+            if (es->company_id == (uint8_t)player->company_id) continue; /* own      */
+            if (es->claim_orphaned) continue;                            /* dead fort */
+            float cr = (es->type == STRUCT_FLAG_FORT || es->type == STRUCT_COMPANY_FORTRESS)
+                       ? CLAIM_RADIUS_FLAG_FORT
+                       : CLAIM_RADIUS_DEFAULT;
+            float dx = es->x - px;
+            float dy = es->y - py;
+            if (dx*dx + dy*dy <= cr * cr) enemy_block = true;
         }
         if (enemy_block) {
             snprintf(response, sizeof(response),

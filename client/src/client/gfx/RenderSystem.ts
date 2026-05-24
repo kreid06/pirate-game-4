@@ -4003,8 +4003,12 @@ export class RenderSystem {
         let isHovered = false;
         let inRange   = false;
         let playerNear = false;
-        const pdx = localPlayer ? localPlayer.position.x - wx : 0;
-        const pdy = localPlayer ? localPlayer.position.y - wy : 0;
+        // Use canonical (non-wrap-offset) world coords for player distance so
+        // the range check is correct even during wrap-render passes (off.dx ≠ 0).
+        const wxCanon = wx - off.dx;
+        const wyCanon = wy - off.dy;
+        const pdx = localPlayer ? localPlayer.position.x - wxCanon : 0;
+        const pdy = localPlayer ? localPlayer.position.y - wyCanon : 0;
         const pdSq = localPlayer ? (pdx * pdx + pdy * pdy) : Infinity;
         const playerDist = localPlayer ? Math.sqrt(pdSq) : Infinity;
         const mayHover = !!(hoverCandidateSet && hoverCandidateSet.has(ri));
@@ -4015,23 +4019,23 @@ export class RenderSystem {
           const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
           inRange    = !!(axeEquipped && localPlayer && pdSq <= effR * effR);
           playerNear = !!(localPlayer && playerDist < LEAF_FADE_OUTER);
-          if (isHovered) this._hoveredTree = { wx, wy };
+          if (isHovered) this._hoveredTree = { wx: wxCanon, wy: wyCanon };
         } else if (res.type === 'fiber') {
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= PLANT_HOVER_SQ; }
           const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
           inRange = !!(localPlayer && localPlayer.carrierId === 0 && pdSq <= effR * effR);
-          if (isHovered) this._hoveredFiberPlant = { wx, wy };
+          if (isHovered) this._hoveredFiberPlant = { wx: wxCanon, wy: wyCanon };
         } else if (res.type === 'rock') {
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= ROCK_HOVER_SQ * (res.size ?? 1.0); }
           const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
-          inRange = !!(localPlayer && pdSq <= effR * effR);
-          if (isHovered) this._hoveredRock = { wx, wy };
+          inRange = !!(localPlayer && localPlayer.carrierId === 0 && pdSq <= effR * effR);
+          if (isHovered) this._hoveredRock = { wx: wxCanon, wy: wyCanon };
         } else if (res.type === 'boulder') {
           const bHoverR = 44 * (res.size ?? 1.0) * zoom;
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= bHoverR * bHoverR; }
           const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
-          inRange = !!(pickaxeEquipped && localPlayer && pdSq <= effR * effR);
-          if (isHovered) this._hoveredBoulder = { wx, wy };
+          inRange = !!(pickaxeEquipped && localPlayer && localPlayer.carrierId === 0 && pdSq <= effR * effR);
+          if (isHovered) this._hoveredBoulder = { wx: wxCanon, wy: wyCanon };
         }
         // Smooth leaf-fade alpha: 1.0 (far) → MIN_LEAF_ALPHA (inside LEAF_FADE_INNER)
         const leafAlpha = res.type === 'wood' && localPlayer
@@ -4241,7 +4245,9 @@ export class RenderSystem {
     const ctx      = this.ctx;
     const R        = RenderSystem.BOULDER_SPRITE_R;
     const SIZE     = RenderSystem.BOULDER_SPRITE_SIZE;
-    const r        = 40 * zoom * size;
+    // Radius matches server BOULDER_BASE_R = 38 so the visual boundary aligns
+    // with the server-side ellipse collision pushout.
+    const r        = 38 * zoom * size;
     const drawSize = SIZE * (r / R);
     const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
     const toneCount = 3; // 3 variants within stone or metal range
@@ -6268,10 +6274,16 @@ export class RenderSystem {
         inMyDominantArea = this.pointInMyEffectiveTerritory(cursorIsl, myCompany, mx, my);
       }
     }
-    const enemyTerritory = !inMyDominantArea && this.islandBuildKind !== 'claim_flag' && this.placedStructures.some(s =>
-      s.companyId !== myCompany &&
-      (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) < 500 * 500
-    );
+    const enemyTerritory = !inMyDominantArea && this.islandBuildKind !== 'claim_flag' && this.placedStructures.some(s => {
+      const co = s.companyId ?? 0;
+      if (co === 0 || co === myCompany) return false;
+      if (s.claimOrphaned) return false;
+      // Use the actual claim radius (400 for standard, 600 for forts) so the
+      // placement ghost correctly mirrors the server boundary rather than an
+      // arbitrary magic number.
+      const cr = (s.type === 'flag_fort' || s.type === 'company_fortress') ? 600 : 400;
+      return (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) <= cr * cr;
+    });
 
     // Claim flag: cursor must be inside the CONTESTED AREA = intersection of
     // (any own non-orphaned claim radius) AND (any enemy non-orphaned claim radius).
